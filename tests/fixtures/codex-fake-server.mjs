@@ -50,6 +50,13 @@ async function handleMessage(message) {
       realpathSync(message.params.cwd),
       "spawn cwd must equal request cwd",
     );
+    if (scenario === "linear-tool") {
+      assertEqual(
+        message.params.tools?.[0]?.name,
+        "linear_graphql",
+        "thread/start must advertise linear_graphql",
+      );
+    }
     writeJson({
       id: message.id,
       result: {
@@ -162,7 +169,17 @@ async function handleMessage(message) {
         id: "tool-1",
         method: "item/tool/call",
         params: {
-          toolName: "not_supported",
+          toolName:
+            scenario === "linear-tool" ? "linear_graphql" : "not_supported",
+          input:
+            scenario === "linear-tool"
+              ? {
+                  query: "query Viewer { viewer { id name } }",
+                  variables: {
+                    includeArchived: false,
+                  },
+                }
+              : undefined,
         },
       });
     }, 10);
@@ -170,11 +187,24 @@ async function handleMessage(message) {
   }
 
   if (message.id === "tool-1") {
-    assertEqual(
-      message.result?.success,
-      false,
-      "unsupported tool calls must return success=false",
-    );
+    if (scenario === "linear-tool") {
+      assertEqual(
+        message.result?.success,
+        true,
+        "supported linear_graphql tool call must succeed",
+      );
+      assertEqual(
+        message.result?.response?.body?.data?.viewer?.id,
+        "viewer-1",
+        "linear_graphql tool must return the GraphQL response body",
+      );
+    } else {
+      assertEqual(
+        message.result?.success,
+        false,
+        "unsupported tool calls must return success=false",
+      );
+    }
 
     setTimeout(() => {
       writeJson({
