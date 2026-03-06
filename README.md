@@ -21,7 +21,7 @@ moving from managing coding agents to managing work that needs to get done.
 > [!WARNING]
 > Symphony is intended for trusted environments.
 
-<!-- Demo preview goes here -->
+![Symphony demo showing Linear issue tracking alongside the Symphony observability dashboard](.github/media/demo.png)
 
 ## Running Symphony
 
