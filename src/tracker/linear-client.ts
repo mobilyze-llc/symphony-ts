@@ -31,6 +31,11 @@ interface LinearGraphqlResponse<TData> {
   errors?: unknown;
 }
 
+export interface LinearRawGraphqlResponse {
+  status: number;
+  body: unknown;
+}
+
 interface LinearCandidateData {
   issues?: LinearGraphqlConnection<unknown>;
 }
@@ -117,6 +122,20 @@ export class LinearTrackerClient implements IssueTracker {
     }
 
     return nodes.map((node) => normalizeLinearIssueState(node));
+  }
+
+  async executeRawGraphql(
+    query: string,
+    variables: Record<string, unknown> = {},
+  ): Promise<LinearRawGraphqlResponse> {
+    const apiKey = this.requireApiKey();
+    const response = await this.fetchWithTimeout(query, variables, apiKey);
+    const body = await parseGraphqlResponseBody(response);
+
+    return {
+      status: response.status,
+      body,
+    };
   }
 
   private async fetchIssuePages(
@@ -273,5 +292,20 @@ export class LinearTrackerClient implements IssueTracker {
     }
 
     return this.projectSlug;
+  }
+}
+
+async function parseGraphqlResponseBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (text.trim().length === 0) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return {
+      raw: text,
+    };
   }
 }

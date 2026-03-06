@@ -3,13 +3,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CodexAppServerClient,
   type CodexAppServerClientError,
   type CodexClientEvent,
 } from "../../src/codex/app-server-client.js";
+import { createLinearGraphqlDynamicTool } from "../../src/codex/linear-graphql-tool.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 
 const roots: string[] = [];
@@ -135,6 +136,43 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
+  it("advertises and executes the linear_graphql dynamic tool", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          viewer: {
+            id: "viewer-1",
+            name: "Example User",
+          },
+        },
+      }),
+    );
+    const client = createClient("linear-tool", workspace, events, {
+      dynamicTools: [
+        createLinearGraphqlDynamicTool({
+          endpoint: "https://api.linear.app/graphql",
+          apiKey: "linear-token",
+          fetchFn,
+        }),
+      ],
+    });
+
+    const result = await client.startSession({
+      prompt: "Use the tracker tool",
+      title: "ABC-123: Example",
+    });
+
+    expect(result.status).toBe("completed");
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(events.map((event) => event.event)).not.toContain(
+      "unsupported_tool_call",
+    );
+
+    await client.close();
+  });
+
   it("enforces read timeouts during the startup handshake", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];
@@ -196,6 +234,9 @@ function createClient(
     readTimeoutMs: number;
     turnTimeoutMs: number;
     stallTimeoutMs: number;
+    dynamicTools: NonNullable<
+      ConstructorParameters<typeof CodexAppServerClient>[0]["dynamicTools"]
+    >;
   }>,
 ): CodexAppServerClient {
   return new CodexAppServerClient({
@@ -209,8 +250,20 @@ function createClient(
     readTimeoutMs: overrides?.readTimeoutMs ?? 750,
     turnTimeoutMs: overrides?.turnTimeoutMs ?? 500,
     stallTimeoutMs: overrides?.stallTimeoutMs ?? 1_000,
+    ...(overrides?.dynamicTools === undefined
+      ? {}
+      : { dynamicTools: overrides.dynamicTools }),
     onEvent: (event) => {
       events.push(event);
+    },
+  });
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json",
     },
   });
 }

@@ -53,6 +53,10 @@ export interface CodexDynamicToolDefinition {
   inputSchema?: Record<string, unknown>;
 }
 
+export interface CodexDynamicTool extends CodexDynamicToolDefinition {
+  execute: (input: unknown) => Promise<object>;
+}
+
 export interface CodexAppServerClientOptions {
   command: string;
   cwd: string;
@@ -68,6 +72,7 @@ export interface CodexAppServerClientOptions {
   };
   capabilities?: Record<string, unknown>;
   tools?: CodexDynamicToolDefinition[];
+  dynamicTools?: CodexDynamicTool[];
   maxLineBytes?: number;
   onEvent?: (event: CodexClientEvent) => void;
 }
@@ -303,7 +308,7 @@ export class CodexAppServerClient {
         approvalPolicy: this.options.approvalPolicy,
         sandbox: this.options.threadSandbox,
         cwd: this.options.cwd,
-        tools: this.options.tools ?? [],
+        tools: this.getAdvertisedTools(),
       });
 
       const threadId = extractNestedString(threadResult, [
@@ -498,6 +503,12 @@ export class CodexAppServerClient {
 
     if (isToolCallRequest(parsed, method)) {
       const toolName = extractToolName(parsed);
+      const tool = toolName === null ? null : this.findDynamicTool(toolName);
+      if (tool !== null && responseId !== null) {
+        void this.handleDynamicToolCall(responseId, tool, parsed);
+        return;
+      }
+
       if (responseId !== null) {
         this.send({
           id: parsed.id,
@@ -781,6 +792,59 @@ export class CodexAppServerClient {
   private get maxLineBytes(): number {
     return this.options.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES;
   }
+
+  private getAdvertisedTools(): CodexDynamicToolDefinition[] {
+    const advertised = new Map<string, CodexDynamicToolDefinition>();
+
+    for (const tool of this.options.tools ?? []) {
+      advertised.set(tool.name, tool);
+    }
+
+    for (const tool of this.options.dynamicTools ?? []) {
+      advertised.set(tool.name, {
+        name: tool.name,
+        ...(tool.description === undefined
+          ? {}
+          : { description: tool.description }),
+        ...(tool.inputSchema === undefined
+          ? {}
+          : { inputSchema: tool.inputSchema }),
+      });
+    }
+
+    return [...advertised.values()];
+  }
+
+  private findDynamicTool(name: string): CodexDynamicTool | null {
+    return (
+      this.options.dynamicTools?.find((tool) => tool.name === name) ?? null
+    );
+  }
+
+  private async handleDynamicToolCall(
+    requestId: JsonRpcId,
+    tool: CodexDynamicTool,
+    message: JsonObject,
+  ): Promise<void> {
+    try {
+      const result = await tool.execute(extractToolInput(message));
+      this.send({
+        id: requestId,
+        result,
+      });
+    } catch (error) {
+      this.send({
+        id: requestId,
+        result: {
+          success: false,
+          error: {
+            code: ERROR_CODES.codexDynamicToolRejected,
+            message: `Dynamic tool ${tool.name} failed: ${toErrorMessage(error)}`,
+          },
+        },
+      });
+    }
+  }
 }
 
 function parseJsonLine(line: string): JsonObject | null {
@@ -871,6 +935,35 @@ function extractToolName(message: JsonObject): string | null {
   ];
 
   return directNames.find((value) => value !== null) ?? null;
+}
+
+function extractToolInput(message: JsonObject): unknown {
+  const params =
+    message.params !== null &&
+    typeof message.params === "object" &&
+    !Array.isArray(message.params)
+      ? (message.params as JsonObject)
+      : null;
+
+  if (params === null) {
+    return undefined;
+  }
+
+  const candidates = [
+    params.input,
+    params.arguments,
+    params.args,
+    params.payload,
+    params.toolInput,
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate !== undefined) {
+      return candidate;
+    }
+  }
+
+  return undefined;
 }
 
 function extractUsage(message: JsonObject): CodexUsage | null {
