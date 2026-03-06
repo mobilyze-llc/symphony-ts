@@ -2,10 +2,12 @@
 
 **Symphony turns project work into isolated, autonomous implementation runs, so teams can manage work instead of supervising coding agents.**
 
-Symphony is a TypeScript orchestration service for agent-driven software delivery.
-It reads work from your tracker, creates a dedicated workspace for each issue, runs a coding
-agent inside that boundary, and gives operators a clean surface for runtime visibility, retries,
-and control.
+`symphony-ts` is a TypeScript implementation of the original
+[openai/symphony](https://github.com/openai/symphony) project.
+
+It is an orchestration service for agent-driven software delivery: it reads work from your tracker,
+creates a dedicated workspace for each issue, runs a coding agent inside that boundary, and gives
+operators a clean surface for runtime visibility, retries, and control.
 
 It works best in codebases that have adopted
 [harness engineering](https://openai.com/index/harness-engineering/). Symphony is the next step:
@@ -14,20 +16,7 @@ moving from managing coding agents to managing work that needs to get done.
 > [!WARNING]
 > Symphony is intended for trusted environments.
 
-## What Symphony Does
-
-Symphony is a long-running service that:
-
-- monitors your tracker for eligible work
-- creates deterministic, per-issue workspaces
-- renders repository-owned workflow prompts from `WORKFLOW.md`
-- runs coding agents in isolated execution contexts
-- handles retries, reconciliation, and cleanup
-- exposes structured logs and an operator-facing status surface
-
-In a typical setup, Symphony watches a Linear board, dispatches agent runs for ready tickets, and
-lets the agents produce proof of work such as CI status, review feedback, and pull requests. Human
-operators stay focused on the work itself instead of supervising every agent turn.
+<!-- Demo preview goes here -->
 
 ## Running Symphony
 
@@ -53,6 +42,21 @@ pnpm test
 pnpm lint
 pnpm format
 ```
+
+## What Symphony Does
+
+Symphony is a long-running service that:
+
+- monitors your tracker for eligible work
+- creates deterministic, per-issue workspaces
+- renders repository-owned workflow prompts from `WORKFLOW.md`
+- runs coding agents in isolated execution contexts
+- handles retries, reconciliation, and cleanup
+- exposes structured logs and an operator-facing status surface
+
+In a typical setup, Symphony watches a Linear board, dispatches agent runs for ready tickets, and
+lets the agents produce proof of work such as CI status, review feedback, and pull requests. Human
+operators stay focused on the work itself instead of supervising every agent turn.
 
 ### Configure your repository
 
@@ -88,6 +92,6 @@ Implement the task, validate the result, and stop at the required handoff state.
 
 ## Contributing
 
-If you are extending Symphony in this repository, keep changes aligned with the product model in
-[`SPEC.upstream.md`](/Users/wangruobing/Personal/symwork/symphony/SPEC.upstream.md) and follow the
-repository workflow documented in [`AGENTS.md`](/Users/wangruobing/Personal/symwork/symphony/AGENTS.md).
+If you are extending this TypeScript implementation, keep changes aligned with the upstream product
+model in [`SPEC.upstream.md`](/Users/wangruobing/Personal/symwork/symphony/SPEC.upstream.md) and
+follow the repository workflow documented in [`AGENTS.md`](/Users/wangruobing/Personal/symwork/symphony/AGENTS.md).
