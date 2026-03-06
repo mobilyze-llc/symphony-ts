@@ -69,3 +69,30 @@ export type DispatchValidationResult =
       ok: false;
       error: DispatchValidationFailure;
     };
+
+export interface WorkflowSnapshot {
+  definition: {
+    workflowPath: string;
+    config: Record<string, unknown>;
+    promptTemplate: string;
+  };
+  config: ResolvedWorkflowConfig;
+  dispatchValidation: DispatchValidationResult;
+  loadedAt: string;
+}
+
+export type WorkflowReloadReason = "manual" | "filesystem_event";
+
+export type WorkflowReloadResult =
+  | {
+      ok: true;
+      reason: WorkflowReloadReason;
+      previousSnapshot: WorkflowSnapshot;
+      snapshot: WorkflowSnapshot;
+    }
+  | {
+      ok: false;
+      reason: WorkflowReloadReason;
+      currentSnapshot: WorkflowSnapshot;
+      error: unknown;
+    };
