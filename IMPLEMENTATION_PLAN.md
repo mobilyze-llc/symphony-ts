@@ -2,6 +2,133 @@
 
 Last updated: 2026-03-06
 
+## 0. Task List and Execution Order
+
+### 0.1 Ordered Execution Sequence
+
+1. Project scaffolding and engineering constraints
+2. Core domain model
+3. Workflow/config parsing and validation
+4. Prompt rendering
+5. Workflow watch and dynamic reload
+6. Workspace management and safety
+7. Workspace hooks runner
+8. Linear tracker adapter
+9. Codex app-server protocol client
+10. `linear_graphql` dynamic tool
+11. Agent runner
+12. Orchestrator core
+13. Orchestrator and agent integration
+14. Structured logging and runtime snapshot
+15. HTTP observability server and dashboard
+16. CLI completion
+17. Conformance test matrix
+18. End-to-end integration and hardening pass
+
+### 0.2 Task Breakdown
+
+1. Project scaffolding and engineering constraints
+- Create `package.json`, `tsconfig.json`, `vitest`, lint/format, and base folder layout.
+- Freeze spec defaults, shared error codes, and stable logging field names.
+- Parallelizable: yes
+
+2. Core domain model
+- Define `Issue`, `RunAttempt`, `LiveSession`, `RetryEntry`, `OrchestratorState`, and state/event enums.
+- Parallelizable: yes
+
+3. Workflow/config parsing and validation
+- Parse `WORKFLOW.md`, YAML front matter, env/path/default coercion, and dispatch preflight validation.
+- Parallelizable: yes
+
+4. Prompt rendering
+- Implement strict Liquid rendering with `issue` and `attempt`.
+- Parallelizable: yes
+
+5. Workflow watch and dynamic reload
+- Watch `WORKFLOW.md`, reload config, and preserve last-known-good config on invalid changes.
+- Parallelizable: partial
+
+6. Workspace management and safety
+- Implement sanitize/root-containment rules, deterministic workspace paths, create/reuse behavior.
+- Parallelizable: yes
+
+7. Workspace hooks runner
+- Implement `after_create`, `before_run`, `after_run`, `before_remove`, with timeout and logging rules.
+- Parallelizable: yes
+
+8. Linear tracker adapter
+- Implement candidate fetch, terminal-state fetch, state refresh, pagination, and normalization.
+- Parallelizable: yes
+
+9. Codex app-server protocol client
+- Implement process launch, startup handshake, line-buffered stdout parsing, stderr handling, timeouts, token/rate-limit extraction.
+- Parallelizable: yes
+
+10. `linear_graphql` dynamic tool
+- Advertise tool capability, validate single GraphQL operation input, and return structured success/failure outputs.
+- Parallelizable: partial
+
+11. Agent runner
+- Compose workspace, hooks, prompt building, Codex session lifecycle, continuation turns, and post-turn state refresh.
+- Parallelizable: partial
+
+12. Orchestrator core
+- Implement poll tick, dispatch sort/claim, retry queue, continuation retry, backoff, stall detection, and reconciliation.
+- Parallelizable: partial
+
+13. Orchestrator and agent integration
+- Feed worker events back into orchestrator state and connect exit reasons to retry/release logic.
+- Parallelizable: no
+
+14. Structured logging and runtime snapshot
+- Implement required structured logs, aggregate token/runtime counters, and snapshot assembly.
+- Parallelizable: yes
+
+15. HTTP observability server and dashboard
+- Implement `/`, `GET /api/v1/state`, `GET /api/v1/:issue_identifier`, and `POST /api/v1/refresh`.
+- Parallelizable: yes
+
+16. CLI completion
+- Implement workflow path argument, `--logs-root`, `--port`, acknowledgement flag, startup/exit behavior.
+- Parallelizable: yes
+
+17. Conformance test matrix
+- Add spec-aligned tests for config, workspace, tracker, codex client, orchestrator, observability, and CLI.
+- Parallelizable: yes, and should run continuously through all phases
+
+18. End-to-end integration and hardening pass
+- Run local fake-tracker/fake-codex orchestration flow, fix gaps, and verify full Section 18.1 coverage plus selected extensions.
+- Parallelizable: no
+
+### 0.3 Parallel Work Groups
+
+- Group A: `1`, `2`, `3`, `4`, `6`
+- Group B: `7`, `8`, `9`
+- Group C: `10`, `11`, `12`
+- Group D: `14`, `15`, `16`, `17`
+- Group E: `13`, `18`
+
+### 0.4 Critical Dependency Chain
+
+1. `1` -> `3`
+2. `2` -> `11`, `12`, `14`
+3. `3` -> `5`, `11`, `12`, `16`
+4. `4` -> `11`
+5. `6` -> `7`, `11`, `12`
+6. `8` -> `10`, `11`, `12`
+7. `9` -> `10`, `11`
+8. `11` + `12` -> `13`
+9. `14` -> `15`
+10. `13` + `15` + `17` -> `18`
+
+### 0.5 Recommended Practical Wave Order
+
+- Wave 1: `1`, `2`, `3`, `4`, `6`
+- Wave 2: `5`, `7`, `8`, `9`, `17`
+- Wave 3: `10`, `11`, `12`, `14`, `16`
+- Wave 4: `13`, `15`, `17`
+- Wave 5: `18`
+
 ## 1. Goal
 
 Build a TypeScript implementation of Symphony that targets full spec conformance against `openai/symphony` `main` as of 2026-03-06, not an MVP.
