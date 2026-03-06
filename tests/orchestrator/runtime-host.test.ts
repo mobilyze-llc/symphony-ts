@@ -6,6 +6,10 @@ import type {
 } from "../../src/agent/runner.js";
 import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
 import type { Issue } from "../../src/domain/model.js";
+import {
+  type StructuredLogEntry,
+  StructuredLogger,
+} from "../../src/logging/structured-logger.js";
 import { OrchestratorRuntimeHost } from "../../src/orchestrator/runtime-host.js";
 import type {
   IssueStateSnapshot,
@@ -194,6 +198,56 @@ describe("OrchestratorRuntimeHost", () => {
       coalesced: true,
     });
     expect(tracker.fetchCandidateIssues).toHaveBeenCalledTimes(1);
+  });
+
+  it("emits issue and session context for agent lifecycle logs", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.emit("1", {
+      event: "session_started",
+      timestamp: "2026-03-06T00:00:01.000Z",
+      codexAppServerPid: "1001",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+    await host.flushEvents();
+
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_spawned",
+        issue_id: "1",
+        issue_identifier: "ISSUE-1",
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "session_started",
+        issue_id: "1",
+        issue_identifier: "ISSUE-1",
+        session_id: "thread-1-turn-1",
+      }),
+    );
   });
 });
 

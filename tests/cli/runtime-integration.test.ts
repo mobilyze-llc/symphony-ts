@@ -437,6 +437,11 @@ Implement {{ issue.identifier }} attempt={{ attempt }}
 
     const logFile = await readFile(join(logsRoot, "symphony.jsonl"), "utf8");
     expect(logFile).toContain('"event":"runtime_starting"');
+    expect(logFile).toContain('"event":"workspace_hook_started"');
+    expect(logFile).toContain('"event":"workspace_hook_completed"');
+    expect(logFile).toContain('"event":"worker_spawned"');
+    expect(logFile).toContain('"issue_id":"issue-1"');
+    expect(logFile).toContain('"issue_identifier":"ISSUE-1"');
     expect(tracker.fetchCandidateIssues).toHaveBeenCalled();
     expect(tracker.fetchIssueStatesByIds).toHaveBeenCalled();
   });

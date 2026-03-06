@@ -128,7 +128,7 @@ describe("AgentRunner", () => {
     expect(prompts[1]).not.toContain("Initial prompt for ABC-123 attempt=2");
   });
 
-  it("fails immediately when before_run fails and does not invoke after_run", async () => {
+  it("fails immediately when before_run fails and still invokes after_run best-effort", async () => {
     const root = await createRoot();
     const hooks = {
       run: vi.fn(async ({ name }: { name: string }) => {
@@ -167,7 +167,10 @@ describe("AgentRunner", () => {
     } satisfies Partial<AgentRunnerError>);
 
     expect(createCodexClient).not.toHaveBeenCalled();
-    expect(hooks.runBestEffort).not.toHaveBeenCalled();
+    expect(hooks.runBestEffort).toHaveBeenCalledWith({
+      name: "afterRun",
+      workspacePath: join(root, "ABC-123"),
+    });
   });
 
   it("removes temporary workspace artifacts before each attempt starts", async () => {

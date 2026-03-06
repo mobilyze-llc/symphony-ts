@@ -158,7 +158,6 @@ export class AgentRunner {
     let issue = cloneIssue(input.issue);
     let workspace: Workspace | null = null;
     let client: AgentRunnerCodexClient | null = null;
-    let shouldRunAfterHook = false;
     let lastTurn: CodexTurnResult | null = null;
     let rateLimits: Record<string, unknown> | null = null;
     const liveSession = createEmptyLiveSession();
@@ -193,7 +192,6 @@ export class AgentRunner {
         name: "beforeRun",
         workspacePath: workspace.path,
       });
-      shouldRunAfterHook = true;
 
       runAttempt.status = "launching_agent_process";
       client = this.createCodexClient({
@@ -307,7 +305,7 @@ export class AgentRunner {
         await closeBestEffort(client);
       }
 
-      if (shouldRunAfterHook && workspace !== null) {
+      if (workspace !== null) {
         await this.hooks.runBestEffort({
           name: "afterRun",
           workspacePath: workspace.path,

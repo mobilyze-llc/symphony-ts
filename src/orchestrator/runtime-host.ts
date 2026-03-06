@@ -51,6 +51,7 @@ export interface RuntimeHostOptions {
   createAgentRunner?: (input: {
     onEvent: (event: AgentRunnerEvent) => void;
   }) => AgentRunnerLike;
+  logger?: StructuredLogger;
   workspaceManager?: WorkspaceManager;
   now?: () => Date;
 }
@@ -105,6 +106,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   private readonly now: () => Date;
 
+  private readonly logger: StructuredLogger | null;
+
   private readonly workers = new Map<string, WorkerExecution>();
 
   private readonly orchestrator: OrchestratorCore;
@@ -121,15 +124,17 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.config = options.config;
     this.tracker = options.tracker;
     this.now = options.now ?? (() => new Date());
+    this.logger = options.logger ?? null;
     this.workspaceManager =
       options.workspaceManager ??
-      createWorkspaceManagerFromConfig(options.config);
+      createWorkspaceManagerFromConfig(options.config, this.logger);
     this.agentEventSink = (event) => {
       void this.enqueue(async () => {
         this.orchestrator.onCodexEvent({
           issueId: event.issueId,
           event,
         });
+        await logAgentEvent(this.logger, event);
       });
     };
     this.managesAgentRunner =
@@ -289,6 +294,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     workerHandle: WorkerExecution;
     monitorHandle: Promise<void>;
   }> {
+    await this.logger?.info("worker_spawned", "Worker spawned for issue.", {
+      outcome: "started",
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      attempt,
+      state: issue.state,
+    });
+
     const controller = new AbortController();
     const execution: WorkerExecution = {
       issueId: issue.id,
@@ -358,6 +371,23 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   ): Promise<void> {
     this.workers.delete(execution.issueId);
 
+    await this.logger?.log(
+      input.outcome === "normal" ? "info" : "error",
+      input.outcome === "normal"
+        ? "worker_exit_normal"
+        : "worker_exit_abnormal",
+      input.outcome === "normal"
+        ? "Worker completed normally."
+        : "Worker completed abnormally.",
+      {
+        outcome: input.outcome === "normal" ? "completed" : "failed",
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+        issue_id: execution.issueId,
+        issue_identifier: execution.issueIdentifier,
+        session_id: execution.lastResult?.liveSession.sessionId ?? null,
+      },
+    );
+
     if (execution.stopRequest?.cleanupWorkspace === true) {
       await this.workspaceManager.removeForIssue(execution.issueIdentifier);
     }
@@ -404,21 +434,23 @@ export async function startRuntimeService(
     );
   }
 
-  let currentConfig = options.config;
-  let tracker = options.tracker ?? createLinearTrackerFromConfig(currentConfig);
-  let workspaceManager =
-    options.workspaceManager ?? createWorkspaceManagerFromConfig(currentConfig);
   const logger =
     options.logger ??
     (await createRuntimeLogger({
       logsRoot: options.logsRoot ?? null,
       ...(options.stdout === undefined ? {} : { stdout: options.stdout }),
     }));
+  let currentConfig = options.config;
+  let tracker = options.tracker ?? createLinearTrackerFromConfig(currentConfig);
+  let workspaceManager =
+    options.workspaceManager ??
+    createWorkspaceManagerFromConfig(currentConfig, logger);
   const runtimeHost =
     options.runtimeHost ??
     new OrchestratorRuntimeHost({
       config: currentConfig,
       tracker,
+      logger,
       workspaceManager,
       ...(options.now === undefined ? {} : { now: options.now }),
     });
@@ -492,7 +524,10 @@ export async function startRuntimeService(
             }
 
             if (usesManagedWorkspaceManager) {
-              workspaceManager = createWorkspaceManagerFromConfig(nextConfig);
+              workspaceManager = createWorkspaceManagerFromConfig(
+                nextConfig,
+                logger,
+              );
             }
 
             runtimeHost.updateConfig({
@@ -696,11 +731,17 @@ function createLinearTrackerFromConfig(
 
 function createWorkspaceManagerFromConfig(
   config: ResolvedWorkflowConfig,
+  logger?: StructuredLogger | null,
 ): WorkspaceManager {
   return new WorkspaceManager({
     root: config.workspace.root,
     hooks: new WorkspaceHookRunner({
       config: config.hooks,
+      ...(logger === undefined || logger === null
+        ? {}
+        : {
+            log: createWorkspaceHookLogger(logger),
+          }),
     }),
   });
 }
@@ -740,6 +781,120 @@ function createQueuedTimerScheduler(input: {
       }
     },
   };
+}
+
+function createWorkspaceHookLogger(logger: StructuredLogger): (entry: {
+  level: "info" | "warn" | "error";
+  event:
+    | "workspace_hook_started"
+    | "workspace_hook_completed"
+    | "workspace_hook_failed"
+    | "workspace_hook_timed_out";
+  hook: string;
+  workspacePath: string;
+  durationMs?: number;
+  exitCode?: number | null;
+  errorCode?: string;
+  stdout?: string;
+  stderr?: string;
+}) => void {
+  return (entry) => {
+    void logger.log(
+      entry.level,
+      entry.event,
+      `Workspace hook ${entry.hook} ${toHookMessageSuffix(entry.event)}.`,
+      {
+        ...(entry.event === "workspace_hook_completed"
+          ? { outcome: "completed" }
+          : entry.event === "workspace_hook_started"
+            ? { outcome: "started" }
+            : { outcome: "failed" }),
+        hook: entry.hook,
+        workspace_path: entry.workspacePath,
+        ...(entry.durationMs === undefined
+          ? {}
+          : { duration_ms: entry.durationMs }),
+        ...(entry.exitCode === undefined ? {} : { exit_code: entry.exitCode }),
+        ...(entry.errorCode === undefined
+          ? {}
+          : { error_code: entry.errorCode }),
+      },
+    );
+  };
+}
+
+async function logAgentEvent(
+  logger: StructuredLogger | null,
+  event: AgentRunnerEvent,
+): Promise<void> {
+  if (logger === null) {
+    return;
+  }
+
+  const level =
+    event.event === "turn_failed" ||
+    event.event === "turn_ended_with_error" ||
+    event.event === "startup_failed" ||
+    event.event === "turn_input_required" ||
+    event.event === "malformed"
+      ? "error"
+      : event.event === "unsupported_tool_call"
+        ? "warn"
+        : "info";
+
+  const outcome =
+    event.event === "session_started"
+      ? "started"
+      : event.event === "turn_completed"
+        ? "completed"
+        : event.event === "approval_auto_approved"
+          ? "approved"
+          : event.event === "turn_failed" ||
+              event.event === "turn_cancelled" ||
+              event.event === "turn_ended_with_error" ||
+              event.event === "startup_failed" ||
+              event.event === "turn_input_required" ||
+              event.event === "malformed"
+            ? "failed"
+            : undefined;
+
+  await logger.log(level, event.event, event.message ?? event.event, {
+    ...(outcome === undefined ? {} : { outcome }),
+    ...(event.errorCode === undefined ? {} : { error_code: event.errorCode }),
+    issue_id: event.issueId,
+    issue_identifier: event.issueIdentifier,
+    session_id: event.sessionId ?? null,
+    thread_id: event.threadId ?? null,
+    turn_id: event.turnId ?? null,
+    attempt: event.attempt,
+    workspace_path: event.workspacePath,
+    ...(event.usage === undefined
+      ? {}
+      : {
+          input_tokens: event.usage.inputTokens,
+          output_tokens: event.usage.outputTokens,
+          total_tokens: event.usage.totalTokens,
+        }),
+  });
+}
+
+function toHookMessageSuffix(
+  event:
+    | "workspace_hook_started"
+    | "workspace_hook_completed"
+    | "workspace_hook_failed"
+    | "workspace_hook_timed_out",
+): string {
+  switch (event) {
+    case "workspace_hook_started":
+      return "started";
+    case "workspace_hook_completed":
+      return "completed";
+    case "workspace_hook_failed":
+      return "failed";
+    case "workspace_hook_timed_out":
+      return "timed out";
+  }
 }
 
 function toRunningIssueDetail(
