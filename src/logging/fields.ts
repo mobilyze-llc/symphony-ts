@@ -3,6 +3,8 @@ export const LOG_FIELDS = [
   "level",
   "event",
   "message",
+  "outcome",
+  "reason",
   "issue_id",
   "issue_identifier",
   "session_id",
@@ -19,6 +21,7 @@ export const LOG_FIELDS = [
   "rate_limit_requests_remaining",
   "rate_limit_tokens_remaining",
   "duration_ms",
+  "seconds_running",
   "error_code",
 ] as const;
 

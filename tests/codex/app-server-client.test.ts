@@ -206,7 +206,7 @@ function createClient(
     turnSandboxPolicy: {
       type: "workspace-write",
     },
-    readTimeoutMs: overrides?.readTimeoutMs ?? 250,
+    readTimeoutMs: overrides?.readTimeoutMs ?? 750,
     turnTimeoutMs: overrides?.turnTimeoutMs ?? 500,
     stallTimeoutMs: overrides?.stallTimeoutMs ?? 1_000,
     onEvent: (event) => {
