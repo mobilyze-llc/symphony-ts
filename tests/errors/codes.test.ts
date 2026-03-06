@@ -20,6 +20,17 @@ describe("ERROR_CODES", () => {
     expect(ERROR_CODES.workspaceRootEscape).toBe("workspace_root_escape");
     expect(ERROR_CODES.invalidWorkspaceCwd).toBe("invalid_workspace_cwd");
     expect(ERROR_CODES.hookTimedOut).toBe("hook_timed_out");
+    expect(ERROR_CODES.missingTrackerApiKey).toBe("missing_tracker_api_key");
+    expect(ERROR_CODES.missingTrackerProjectSlug).toBe(
+      "missing_tracker_project_slug",
+    );
+    expect(ERROR_CODES.linearApiRequest).toBe("linear_api_request");
+    expect(ERROR_CODES.linearApiStatus).toBe("linear_api_status");
+    expect(ERROR_CODES.linearGraphqlErrors).toBe("linear_graphql_errors");
+    expect(ERROR_CODES.linearUnknownPayload).toBe("linear_unknown_payload");
+    expect(ERROR_CODES.linearMissingEndCursor).toBe(
+      "linear_missing_end_cursor",
+    );
     expect(ERROR_CODES.codexReadTimeout).toBe("codex_read_timeout");
     expect(ERROR_CODES.codexTurnTimeout).toBe("codex_turn_timeout");
   });

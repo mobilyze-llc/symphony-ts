@@ -1,0 +1,99 @@
+const ISSUE_FIELDS = `
+  id
+  identifier
+  title
+  description
+  priority
+  branchName
+  url
+  createdAt
+  updatedAt
+  state {
+    name
+  }
+  labels {
+    nodes {
+      name
+    }
+  }
+  inverseRelations {
+    nodes {
+      type
+      sourceIssue {
+        id
+        identifier
+        state {
+          name
+        }
+      }
+    }
+  }
+`;
+
+export const LINEAR_CANDIDATE_ISSUES_QUERY = `
+  query SymphonyCandidateIssues(
+    $projectSlug: String!
+    $activeStates: [String!]!
+    $first: Int!
+    $after: String
+  ) {
+    issues(
+      first: $first
+      after: $after
+      filter: {
+        project: { slugId: { eq: $projectSlug } }
+        state: { name: { in: $activeStates } }
+      }
+      orderBy: createdAt
+    ) {
+      nodes {
+        ${ISSUE_FIELDS}
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`.trim();
+
+export const LINEAR_ISSUES_BY_STATES_QUERY = `
+  query SymphonyIssuesByStates(
+    $projectSlug: String!
+    $stateNames: [String!]!
+    $first: Int!
+    $after: String
+  ) {
+    issues(
+      first: $first
+      after: $after
+      filter: {
+        project: { slugId: { eq: $projectSlug } }
+        state: { name: { in: $stateNames } }
+      }
+      orderBy: createdAt
+    ) {
+      nodes {
+        ${ISSUE_FIELDS}
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`.trim();
+
+export const LINEAR_ISSUE_STATES_BY_IDS_QUERY = `
+  query SymphonyIssueStatesByIds($issueIds: [ID!]!) {
+    issues(filter: { id: { in: $issueIds } }) {
+      nodes {
+        id
+        identifier
+        state {
+          name
+        }
+      }
+    }
+  }
+`.trim();
