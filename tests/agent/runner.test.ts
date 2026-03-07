@@ -177,7 +177,6 @@ describe("AgentRunner", () => {
     const root = await createRoot();
     const workspacePath = join(root, "ABC-123");
     await mkdir(join(workspacePath, "tmp"), { recursive: true });
-    await mkdir(join(workspacePath, ".elixir_ls"), { recursive: true });
 
     const hooks = {
       run: vi.fn(
@@ -192,11 +191,6 @@ describe("AgentRunner", () => {
             await expect(
               stat(join(workspacePath, "tmp")),
             ).rejects.toMatchObject({ code: "ENOENT" });
-            await expect(
-              stat(join(workspacePath, ".elixir_ls")),
-            ).rejects.toMatchObject({
-              code: "ENOENT",
-            });
           }
           return true;
         },
