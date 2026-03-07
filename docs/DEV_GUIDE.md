@@ -127,8 +127,11 @@ tracker:
     - "Todo"
     - "In Progress"
   terminal_states:
-    - "Done"
+    - "Closed"
     - "Cancelled"
+    - "Canceled"
+    - "Duplicate"
+    - "Done"
 
 polling:
   interval_ms: 30000
@@ -158,19 +161,38 @@ Work on this issue. When done, use the linear_graphql tool to transition the
 issue to "In Review" and leave a comment summarizing what you did.
 ```
 
-**Key WORKFLOW.md fields**:
+**WORKFLOW.md field reference**:
+
+> For an annotated file covering every field with defaults and comments, see
+> [WORKFLOW.template.md](WORKFLOW.template.md).
 
 | Field | Description | Default |
 |-------|-------------|---------|
+| `tracker.kind` | Tracker backend. Only `linear` is supported | `linear` |
+| `tracker.endpoint` | GraphQL endpoint for the Linear API | `https://api.linear.app/graphql` |
 | `tracker.api_key` | Linear API key; use `$ENV_VAR` to reference env | Reads `LINEAR_API_KEY` env var |
 | `tracker.project_slug` | Linear project slug — required | None |
-| `tracker.active_states` | Issue states that trigger dispatch | `["Todo", "In Progress"]` |
-| `tracker.terminal_states` | States that trigger workspace cleanup | `["Done", "Cancelled", ...]` |
-| `polling.interval_ms` | Poll interval in milliseconds | 30000 |
-| `workspace.root` | Root directory for all workspaces | `/tmp/symphony_workspaces` |
-| `agent.max_concurrent_agents` | Global agent concurrency cap | 10 |
-| `agent.max_turns` | Max Codex turns per run | 20 |
+| `tracker.active_states` | Issue states that trigger dispatch | `[Todo, In Progress]` |
+| `tracker.terminal_states` | States that trigger workspace cleanup | `[Closed, Cancelled, Canceled, Duplicate, Done]` |
+| `polling.interval_ms` | Poll interval in milliseconds | `30000` |
+| `workspace.root` | Root directory for all workspaces | `<os.tmpdir()>/symphony_workspaces` |
+| `hooks.after_create` | Shell command run after workspace is created | `null` |
+| `hooks.before_run` | Shell command run before each agent turn (fatal on non-zero exit) | `null` |
+| `hooks.after_run` | Shell command run after each agent turn (errors suppressed) | `null` |
+| `hooks.before_remove` | Shell command run before workspace removal (errors suppressed) | `null` |
+| `hooks.timeout_ms` | Max time in ms for any single hook | `60000` |
+| `agent.max_concurrent_agents` | Global agent concurrency cap | `10` |
+| `agent.max_turns` | Max Codex turns per run | `20` |
+| `agent.max_retry_backoff_ms` | Max retry back-off delay in ms (exponential cap) | `300000` |
+| `agent.max_concurrent_agents_by_state` | Per-state concurrency overrides (map of state → limit) | `{}` |
 | `codex.command` | Shell command to launch Codex | `codex app-server` |
+| `codex.approval_policy` | Codex approval policy: `never` / `on-failure` / `always` | Inherits Codex default |
+| `codex.thread_sandbox` | Thread-level sandbox mode (e.g. `workspace-write`) | `null` |
+| `codex.turn_sandbox_policy` | Per-turn sandbox policy object | `null` |
+| `codex.turn_timeout_ms` | Max wall-clock time in ms for a full agent turn | `3600000` |
+| `codex.read_timeout_ms` | Max time in ms to wait for the next Codex event before declaring stream stalled | `5000` |
+| `codex.stall_timeout_ms` | Max silent time in ms before a running agent is declared stalled and stopped | `300000` |
+| `server.port` | HTTP dashboard port; omit or `null` to disable | `null` |
 
 The prompt body uses **Liquid template syntax**. Available variables:
 - `{{ issue.identifier }}`, `{{ issue.title }}`, `{{ issue.description }}`
@@ -304,25 +326,3 @@ These fields take effect on the next poll tick without restarting Symphony:
 - Launch with `--port 3000` to access the HTTP dashboard at `http://localhost:3000`
 
 ---
-
-## Contributing: Feature Development Workflow
-
-Per `AGENTS.md` conventions:
-
-1. **Tasks 1 and 2** can be developed directly on `main`.
-2. **Tasks 3+** must use a dedicated worktree:
-   ```bash
-   git worktree add .worktrees/my-feature -b my-feature
-   cd .worktrees/my-feature
-   # implement, test
-   git push origin my-feature
-   # open PR
-   ```
-3. After each task, verify behavior against `SPEC.upstream.md` before opening a PR. If code and spec conflict, the spec wins.
-4. Open PRs one task at a time — do not batch multiple tasks into one PR.
-
-**Code conventions**:
-- `SPEC.upstream.md` is the single source of truth for behavior
-- Test names should describe observable behavior: `dispatches eligible issues on poll tick until slots are exhausted`
-- Commit subjects: short imperative verb phrases, e.g. `Add stall timeout to agent runner`
-- Secrets go in untracked `.env.local`, never in committed files
