@@ -473,8 +473,9 @@ async function openEventStream(
   nextEvent(): Promise<{ event: string; data: string }>;
 }> {
   const eventQueue: Array<{ event: string; data: string }> = [];
-  const waitingResolvers: Array<(value: { event: string; data: string }) => void> =
-    [];
+  const waitingResolvers: Array<
+    (value: { event: string; data: string }) => void
+  > = [];
   let buffer = "";
   let responseRef: IncomingMessage | null = null;
 

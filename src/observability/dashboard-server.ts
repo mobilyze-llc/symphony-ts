@@ -214,15 +214,15 @@ class DashboardLiveUpdatesController {
       return;
     }
 
-    await Promise.allSettled(clients.map((client) => this.writeSnapshot(client)));
+    await Promise.allSettled(
+      clients.map((client) => this.writeSnapshot(client)),
+    );
   }
 
   private async writeSnapshot(response: ServerResponse): Promise<void> {
     try {
       const snapshot = await readSnapshot(this.#host, this.#snapshotTimeoutMs);
-      response.write(
-        `event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`,
-      );
+      response.write(`event: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`);
     } catch (error) {
       response.write(
         `event: error\ndata: ${JSON.stringify({
@@ -637,7 +637,9 @@ function renderDashboardHtml(
         }">
           <span class="status-dot"></span>
           <span>${
-            options.liveUpdatesEnabled ? "Live updates connected" : "Static snapshot"
+            options.liveUpdatesEnabled
+              ? "Live updates connected"
+              : "Static snapshot"
           }</span>
         </div>
       </div>
