@@ -99,7 +99,8 @@ codex:
   command: codex app-server
 
   # Codex approval policy, passed through to the app-server.
-  # Common values: "never" | "on-failure" | "always"
+  # Common values depend on the installed Codex schema.
+  # Example values: never, on-request, on-failure
   # Default: (not set — inherits Codex default)
   approval_policy: never
 
@@ -111,7 +112,14 @@ codex:
   # Per-turn sandbox policy passed through to Codex.
   # Example:
   #   turn_sandbox_policy:
-  #     type: workspace-write
+  #     type: workspaceWrite
+  #     writableRoots:
+  #       - /tmp/symphony_workspaces
+  #     readOnlyAccess:
+  #       type: fullAccess
+  #     networkAccess: true
+  #     excludeTmpdirEnvVar: false
+  #     excludeSlashTmp: false
   # Default: (not set)
   turn_sandbox_policy: null
 
@@ -148,6 +156,15 @@ Rules:
 2. Keep changes scoped and safe.
 3. Run the test suite before finishing.
 4. Do not add secrets or credentials to the repository.
+
+If this workflow needs authenticated external CLIs or APIs:
+
+1. Export the required credentials in the shell before launching Symphony.
+2. Prefer env-based credentials such as `GH_TOKEN`, `GITHUB_TOKEN`, or provider-specific API keys.
+3. Do not assume an interactive login state or OS keychain entry will be available inside the
+   agent turn.
+4. If the agent must call networked tools during a turn, configure `codex.turn_sandbox_policy`
+   with explicit `networkAccess: true`.
 
 When finished:
 
