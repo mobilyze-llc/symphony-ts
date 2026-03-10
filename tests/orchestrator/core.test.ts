@@ -141,6 +141,25 @@ describe("orchestrator core", () => {
     ]);
   });
 
+  it("requests stop when reconciliation no longer returns a running issue", async () => {
+    const tracker = createTracker({
+      statesById: [],
+    });
+    const orchestrator = createOrchestrator({ tracker });
+
+    await orchestrator.pollTick();
+    const result = await orchestrator.pollTick();
+
+    expect(result.stopRequests).toEqual([
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        cleanupWorkspace: false,
+        reason: "inactive_state",
+      },
+    ]);
+  });
+
   it("treats reconciliation with no running issues as a no-op", async () => {
     const tracker = createTracker({
       candidates: [],

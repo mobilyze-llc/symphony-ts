@@ -462,6 +462,7 @@ export class OrchestratorCore {
     const terminalStates = toNormalizedStateSet(
       this.config.tracker.terminalStates,
     );
+    const refreshedIds = new Set(refreshed.map((snapshot) => snapshot.id));
 
     for (const snapshot of refreshed) {
       const runningEntry = this.state.running[snapshot.id];
@@ -484,6 +485,21 @@ export class OrchestratorCore {
           state: snapshot.state,
         };
         runningEntry.identifier = snapshot.identifier;
+        continue;
+      }
+
+      stopRequests.push(
+        await this.requestStop(runningEntry, false, "inactive_state"),
+      );
+    }
+
+    for (const runningId of runningIds) {
+      if (refreshedIds.has(runningId)) {
+        continue;
+      }
+
+      const runningEntry = this.state.running[runningId];
+      if (runningEntry === undefined) {
         continue;
       }
 
