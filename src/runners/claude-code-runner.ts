@@ -84,6 +84,7 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
       const result = await generateText({
         model: claudeCode(resolvedModel, {
           cwd: this.options.cwd,
+          permissionMode: "bypassPermissions",
         }),
         prompt,
         abortSignal: controller.signal,

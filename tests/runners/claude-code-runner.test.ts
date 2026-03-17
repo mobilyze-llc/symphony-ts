@@ -59,7 +59,7 @@ describe("ClaudeCodeRunner", () => {
       title: "ABC-123: Fix the bug",
     });
 
-    expect(mockClaudeCode).toHaveBeenCalledWith("opus", { cwd: "/tmp/workspace" });
+    expect(mockClaudeCode).toHaveBeenCalledWith("opus", { cwd: "/tmp/workspace", permissionMode: "bypassPermissions" });
     expect(mockGenerateText).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "mock-claude-model",
@@ -235,7 +235,7 @@ describe("ClaudeCodeRunner", () => {
     await runner.startSession({ prompt: "test", title: "test" });
 
     // Should resolve "claude-sonnet-4-5" → "sonnet"
-    expect(mockClaudeCode).toHaveBeenCalledWith("sonnet", { cwd: "/tmp/workspace" });
+    expect(mockClaudeCode).toHaveBeenCalledWith("sonnet", { cwd: "/tmp/workspace", permissionMode: "bypassPermissions" });
   });
 
   it("passes abortSignal to generateText for subprocess cleanup", async () => {
