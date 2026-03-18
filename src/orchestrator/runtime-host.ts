@@ -452,10 +452,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
 
     const lastTurnMessage = execution.lastResult?.lastTurn?.message;
+    const fallbackMessage = execution.lastResult?.liveSession?.lastCodexMessage;
     const agentMessage =
       (lastTurnMessage !== null && lastTurnMessage !== undefined && lastTurnMessage !== ""
         ? lastTurnMessage
-        : execution.lastResult?.liveSession?.lastCodexMessage) ?? undefined;
+        : fallbackMessage !== null && fallbackMessage !== undefined && fallbackMessage !== ""
+          ? fallbackMessage
+          : undefined) ?? undefined;
 
     this.orchestrator.onWorkerExit({
       issueId: execution.issueId,

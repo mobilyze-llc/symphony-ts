@@ -90,23 +90,57 @@ describe("failure signal routing in onWorkerExit", () => {
     expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
   });
 
-  it("prevents redispatch of escalated issues on subsequent poll", async () => {
-    const orchestrator = createStagedOrchestrator();
+  it("prevents redispatch of escalated issues still in Blocked state", async () => {
+    // After escalation, Linear state becomes "Blocked".  The completed flag
+    // keeps the issue blocked while it remains in the escalation state.
+    let issueState = "In Progress";
+    const orchestrator = createStagedOrchestrator({
+      escalationState: "Blocked",
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1", state: issueState })],
+      trackerFactory: () => createTracker({
+        candidatesFn: () => [createIssue({ id: "1", identifier: "ISSUE-1", state: issueState })],
+      }),
+    });
 
     await orchestrator.pollTick();
+    // Simulate escalation side-effect moving issue to Blocked
+    issueState = "Blocked";
     orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: spec]",
     });
 
-    // Issue is completed and unclaimed — verify next poll does NOT redispatch
     expect(orchestrator.getState().completed.has("1")).toBe(true);
-    expect(orchestrator.getState().claimed.has("1")).toBe(false);
 
     const result = await orchestrator.pollTick();
     expect(result.dispatchedIssueIds).not.toContain("1");
     expect(orchestrator.getState().running["1"]).toBeUndefined();
+  });
+
+  it("allows redispatch of resumed issues moved out of Blocked state", async () => {
+    let issueState = "In Progress";
+    const orchestrator = createStagedOrchestrator({
+      escalationState: "Blocked",
+      trackerFactory: () => createTracker({
+        candidatesFn: () => [createIssue({ id: "1", identifier: "ISSUE-1", state: issueState })],
+      }),
+    });
+
+    await orchestrator.pollTick();
+    issueState = "Blocked";
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: spec]",
+    });
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+
+    // Human moves issue to "Resume" → next poll should re-dispatch
+    issueState = "Todo";
+    const result = await orchestrator.pollTick();
+    expect(result.dispatchedIssueIds).toContain("1");
+    expect(orchestrator.getState().completed.has("1")).toBe(false);
   });
 
   it("triggers rework on [STAGE_FAILED: review] with gate workflow", async () => {
@@ -551,6 +585,7 @@ function createStagedOrchestrator(overrides?: {
   escalationState?: string | null;
   updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
   postComment?: OrchestratorCoreOptions["postComment"];
+  trackerFactory?: () => IssueTracker;
   onSpawn?: (input: {
     issue: Issue;
     attempt: number | null;
@@ -563,7 +598,7 @@ function createStagedOrchestrator(overrides?: {
     ? overrides.stages
     : createThreeStageConfig();
 
-  const tracker = createTracker({
+  const tracker = overrides?.trackerFactory?.() ?? createTracker({
     candidates: overrides?.candidates ?? [
       createIssue({ id: "1", identifier: "ISSUE-1" }),
     ],
@@ -806,20 +841,26 @@ function createAgentReviewWorkflowConfig(): StagesConfig {
 
 function createTracker(input?: {
   candidates?: Issue[];
+  candidatesFn?: () => Issue[];
 }): IssueTracker {
+  const getCandidates = () =>
+    input?.candidatesFn?.() ??
+    input?.candidates ?? [createIssue({ id: "1", identifier: "ISSUE-1" })];
+
   return {
     async fetchCandidateIssues() {
-      return input?.candidates ?? [createIssue({ id: "1", identifier: "ISSUE-1" })];
+      return getCandidates();
     },
     async fetchIssuesByStates() {
       return [];
     },
     async fetchIssueStatesByIds() {
-      return input?.candidates?.map((issue) => ({
+      const candidates = getCandidates();
+      return candidates.map((issue) => ({
         id: issue.id,
         identifier: issue.identifier,
         state: issue.state,
-      })) ?? [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }];
+      }));
     },
   };
 }

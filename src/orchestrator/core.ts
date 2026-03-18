@@ -167,10 +167,23 @@ export class OrchestratorCore {
     if (
       !activeStates.has(normalizedState) ||
       terminalStates.has(normalizedState) ||
-      this.state.running[issue.id] !== undefined ||
-      this.state.completed.has(issue.id)
+      this.state.running[issue.id] !== undefined
     ) {
       return false;
+    }
+
+    // Allow resumed issues: clear completed flag when issue returns with a
+    // non-escalation active state (e.g., "Resume" or "Todo").  Issues still in
+    // the escalation state (e.g., "Blocked") remain blocked until a human
+    // explicitly moves them.
+    if (this.state.completed.has(issue.id)) {
+      if (
+        this.config.escalationState !== null &&
+        normalizedState === normalizeIssueState(this.config.escalationState)
+      ) {
+        return false;
+      }
+      this.state.completed.delete(issue.id);
     }
 
     const allowClaimedIssueId = options?.allowClaimedIssueId;

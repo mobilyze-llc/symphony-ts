@@ -19,6 +19,7 @@ import {
   type Workspace,
   createEmptyLiveSession,
   normalizeIssueState,
+  parseFailureSignal,
 } from "../domain/model.js";
 import { applyCodexEventToSession } from "../logging/session-metrics.js";
 import type { IssueTracker } from "../tracker/tracker.js";
@@ -306,8 +307,11 @@ export class AgentRunner {
           ...(lastTurn.message === null ? {} : { message: lastTurn.message }),
         });
 
-        // Early exit: agent signaled stage completion
+        // Early exit: agent signaled stage completion or failure
         if (lastTurn.message !== null && lastTurn.message.trimEnd().endsWith("[STAGE_COMPLETE]")) {
+          break;
+        }
+        if (lastTurn.message !== null && parseFailureSignal(lastTurn.message) !== null) {
           break;
         }
 
