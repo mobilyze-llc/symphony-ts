@@ -6,6 +6,7 @@ import type {
   StageDefinition,
 } from "../config/types.js";
 import {
+  type FailureClass,
   type Issue,
   type OrchestratorState,
   type RetryEntry,
@@ -13,6 +14,7 @@ import {
   createEmptyLiveSession,
   createInitialOrchestratorState,
   normalizeIssueState,
+  parseFailureSignal,
 } from "../domain/model.js";
 import {
   addEndedSessionRuntime,
@@ -74,6 +76,7 @@ export interface OrchestratorCoreOptions {
     attempt: number | null;
     stage: StageDefinition | null;
     stageName: string | null;
+    reworkCount: number;
   }) => Promise<SpawnWorkerResult> | SpawnWorkerResult;
   stopRunningIssue?: (input: {
     issueId: string;
@@ -323,6 +326,7 @@ export class OrchestratorCore {
     outcome: WorkerExitOutcome;
     reason?: string;
     endedAt?: Date;
+    agentMessage?: string;
   }): RetryEntry | null {
     const runningEntry = this.state.running[input.issueId];
     if (runningEntry === undefined) {
@@ -337,6 +341,15 @@ export class OrchestratorCore {
     );
 
     if (input.outcome === "normal") {
+      const failureSignal = parseFailureSignal(input.agentMessage);
+      if (failureSignal !== null) {
+        return this.handleFailureSignal(
+          input.issueId,
+          runningEntry,
+          failureSignal.failureClass,
+        );
+      }
+
       const transition = this.advanceStage(input.issueId);
       if (transition === "completed") {
         this.state.completed.add(input.issueId);
@@ -413,6 +426,161 @@ export class OrchestratorCore {
     // Move to the next stage
     this.state.issueStages[issueId] = nextStageName;
     return "advanced";
+  }
+
+  /**
+   * Handle agent-reported failure signals parsed from output.
+   * Routes to retry, rework, or escalation based on failure class.
+   */
+  private handleFailureSignal(
+    issueId: string,
+    runningEntry: RunningEntry,
+    failureClass: FailureClass,
+  ): RetryEntry | null {
+    if (failureClass === "spec") {
+      // Spec failures are unrecoverable — escalate immediately
+      this.state.completed.add(issueId);
+      this.releaseClaim(issueId);
+      delete this.state.issueStages[issueId];
+      delete this.state.issueReworkCounts[issueId];
+      return null;
+    }
+
+    if (failureClass === "verify" || failureClass === "infra") {
+      // Retryable failures — use existing exponential backoff
+      return this.scheduleRetry(
+        issueId,
+        nextRetryAttempt(runningEntry.retryAttempt),
+        {
+          identifier: runningEntry.identifier,
+          error: `agent reported failure: ${failureClass}`,
+          delayType: "failure",
+        },
+      );
+    }
+
+    // failureClass === "review" — trigger rework via gate lookup
+    return this.handleReviewFailure(issueId, runningEntry);
+  }
+
+  /**
+   * Handle review failure: find the downstream gate and use its rework target.
+   * Falls back to retry if no gate or rework target is found.
+   */
+  private handleReviewFailure(
+    issueId: string,
+    runningEntry: RunningEntry,
+  ): RetryEntry | null {
+    const stagesConfig = this.config.stages;
+    if (stagesConfig === null) {
+      // No stages — fall back to retry
+      return this.scheduleRetry(
+        issueId,
+        nextRetryAttempt(runningEntry.retryAttempt),
+        {
+          identifier: runningEntry.identifier,
+          error: "agent reported failure: review",
+          delayType: "failure",
+        },
+      );
+    }
+
+    const currentStageName = this.state.issueStages[issueId];
+    if (currentStageName === undefined) {
+      return this.scheduleRetry(
+        issueId,
+        nextRetryAttempt(runningEntry.retryAttempt),
+        {
+          identifier: runningEntry.identifier,
+          error: "agent reported failure: review",
+          delayType: "failure",
+        },
+      );
+    }
+
+    // Walk from current stage's onComplete to find the next gate
+    const gateName = this.findDownstreamGate(currentStageName);
+    if (gateName === null) {
+      return this.scheduleRetry(
+        issueId,
+        nextRetryAttempt(runningEntry.retryAttempt),
+        {
+          identifier: runningEntry.identifier,
+          error: "agent reported failure: review",
+          delayType: "failure",
+        },
+      );
+    }
+
+    // Use the gate's rework logic (reuses reworkGate by temporarily setting stage)
+    const savedStage = this.state.issueStages[issueId];
+    this.state.issueStages[issueId] = gateName;
+    const reworkTarget = this.reworkGate(issueId);
+    if (reworkTarget === null) {
+      // No rework target — restore and fall back to retry
+      this.state.issueStages[issueId] = savedStage!;
+      return this.scheduleRetry(
+        issueId,
+        nextRetryAttempt(runningEntry.retryAttempt),
+        {
+          identifier: runningEntry.identifier,
+          error: "agent reported failure: review",
+          delayType: "failure",
+        },
+      );
+    }
+
+    if (reworkTarget === "escalated") {
+      // reworkGate already cleaned up state
+      return null;
+    }
+
+    // Rework target set by reworkGate — schedule continuation
+    return this.scheduleRetry(issueId, 1, {
+      identifier: runningEntry.identifier,
+      error: `agent review failure: rework to ${reworkTarget}`,
+      delayType: "continuation",
+    });
+  }
+
+  /**
+   * Walk from a stage's onComplete transition to find the next gate stage.
+   * Returns the gate stage name or null if none found.
+   */
+  private findDownstreamGate(startStageName: string): string | null {
+    const stagesConfig = this.config.stages;
+    if (stagesConfig === null) {
+      return null;
+    }
+
+    const visited = new Set<string>();
+    let current = startStageName;
+
+    while (!visited.has(current)) {
+      visited.add(current);
+      const stage = stagesConfig.stages[current];
+      if (stage === undefined) {
+        return null;
+      }
+
+      const next = stage.transitions.onComplete;
+      if (next === null) {
+        return null;
+      }
+
+      const nextStage = stagesConfig.stages[next];
+      if (nextStage === undefined) {
+        return null;
+      }
+
+      if (nextStage.type === "gate") {
+        return next;
+      }
+
+      current = next;
+    }
+
+    return null;
   }
 
   /**
@@ -671,7 +839,8 @@ export class OrchestratorCore {
     }
 
     try {
-      const spawned = await this.spawnWorker({ issue, attempt, stage, stageName });
+      const reworkCount = this.state.issueReworkCounts[issue.id] ?? 0;
+      const spawned = await this.spawnWorker({ issue, attempt, stage, stageName, reworkCount });
       this.state.running[issue.id] = {
         ...createEmptyLiveSession(),
         issue,

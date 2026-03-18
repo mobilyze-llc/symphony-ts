@@ -78,6 +78,7 @@ export interface AgentRunInput {
   signal?: AbortSignal;
   stage?: StageDefinition | null;
   stageName?: string | null;
+  reworkCount?: number;
 }
 
 export interface AgentRunResult {
@@ -272,6 +273,7 @@ export class AgentRunner {
           issue,
           attempt: input.attempt,
           stageName: input.stageName ?? null,
+          reworkCount: input.reworkCount ?? 0,
           turnNumber,
           maxTurns: effectiveMaxTurns,
         });

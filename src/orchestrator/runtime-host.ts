@@ -178,8 +178,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             },
           }
         : {}),
-      spawnWorker: async ({ issue, attempt, stage, stageName }) =>
-        this.spawnWorkerExecution(issue, attempt, stage, stageName),
+      spawnWorker: async ({ issue, attempt, stage, stageName, reworkCount }) =>
+        this.spawnWorkerExecution(issue, attempt, stage, stageName, reworkCount),
       stopRunningIssue: async (input) => {
         await this.stopWorkerExecution(input.issueId, {
           issueId: input.issueId,
@@ -344,6 +344,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     attempt: number | null,
     stage: StageDefinition | null = null,
     stageName: string | null = null,
+    reworkCount: number = 0,
   ): Promise<{
     workerHandle: WorkerExecution;
     monitorHandle: Promise<void>;
@@ -374,6 +375,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         signal: controller.signal,
         stage,
         stageName,
+        reworkCount,
       })
       .then(async (result) => {
         execution.lastResult = result;
@@ -449,11 +451,17 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       await this.workspaceManager.removeForIssue(execution.issueId);
     }
 
+    const agentMessage =
+      execution.lastResult?.lastTurn?.message ??
+      execution.lastResult?.liveSession.lastCodexMessage ??
+      undefined;
+
     this.orchestrator.onWorkerExit({
       issueId: execution.issueId,
       outcome: input.outcome,
       ...(input.reason === undefined ? {} : { reason: input.reason }),
       endedAt: input.endedAt ?? this.now(),
+      ...(agentMessage === undefined || agentMessage === null ? {} : { agentMessage }),
     });
   }
 
