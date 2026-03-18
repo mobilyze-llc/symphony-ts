@@ -527,6 +527,30 @@ describe("agent-type review stage rework routing", () => {
     );
   });
 
+  it("routes implement-stage review failure through downstream agent-type review stage with onRework", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    // Dispatch puts issue in "implement" stage
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    // Implement agent reports [STAGE_FAILED: review] — should find downstream
+    // agent-type review stage via findDownstreamGate and use its onRework
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review]",
+    });
+
+    // Should rework back to implement via the downstream review stage's onRework
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+    expect(retryEntry).not.toBeNull();
+    expect(retryEntry!.error).toBe("agent review failure: rework to implement");
+  });
+
   it("agent-type stage WITHOUT onRework falls back to retry on review failure", async () => {
     // Three-stage config has no onRework on any stage and no gate stages
     const orchestrator = createStagedOrchestrator();

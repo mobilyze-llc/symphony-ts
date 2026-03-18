@@ -631,6 +631,11 @@ export class OrchestratorCore {
         return next;
       }
 
+      // Agent-type stages with onRework can also serve as rework gates
+      if (nextStage.type === "agent" && nextStage.transitions.onRework !== null) {
+        return next;
+      }
+
       current = next;
     }
 
