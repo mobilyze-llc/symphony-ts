@@ -225,6 +225,41 @@ describe("failure signal routing in onWorkerExit", () => {
     expect(orchestrator.getState().issueReworkCounts["1"]).toBe(2);
   });
 
+  it("passes correct reworkCount to spawnWorker during rework cycle", async () => {
+    const spawnCalls: Array<{ reworkCount: number }> = [];
+    const orchestrator = createStagedOrchestrator({
+      stages: createGateWorkflowConfig(),
+      onSpawn: (input) => {
+        spawnCalls.push({ reworkCount: input.reworkCount });
+      },
+    });
+
+    // Initial dispatch — reworkCount should be 0
+    await orchestrator.pollTick();
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]!.reworkCount).toBe(0);
+
+    // First review failure → rework
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review]",
+    });
+    await orchestrator.onRetryTimer("1");
+    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls[1]!.reworkCount).toBe(1);
+
+    // Second review failure → rework
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review]",
+    });
+    await orchestrator.onRetryTimer("1");
+    expect(spawnCalls).toHaveLength(3);
+    expect(spawnCalls[2]!.reworkCount).toBe(2);
+  });
+
   it("calls updateIssueState on spec failure when escalationState is configured", async () => {
     const updateIssueState = vi.fn().mockResolvedValue(undefined);
     const postComment = vi.fn().mockResolvedValue(undefined);
@@ -340,7 +375,7 @@ function createStagedOrchestrator(overrides?: {
   const options: OrchestratorCoreOptions = {
     config: createConfig({
       stages,
-      escalationState: overrides?.escalationState,
+      ...(overrides?.escalationState !== undefined ? { escalationState: overrides.escalationState } : {}),
     }),
     tracker,
     spawnWorker: async (input) => {

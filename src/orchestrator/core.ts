@@ -518,7 +518,7 @@ export class OrchestratorCore {
     }
 
     // Use the gate's rework logic (reuses reworkGate by temporarily setting stage)
-    const savedStage = this.state.issueStages[issueId];
+    const savedStage = this.state.issueStages[issueId]!;
     this.state.issueStages[issueId] = gateName;
     let reworkTarget: string | "escalated" | null;
     try {
