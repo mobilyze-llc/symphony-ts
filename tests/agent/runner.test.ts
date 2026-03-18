@@ -682,6 +682,7 @@ function createConfig(root: string, scenario: string): ResolvedWorkflowConfig {
       maxConcurrentAgents: 2,
       maxTurns: 3,
       maxRetryBackoffMs: 300_000,
+      maxRetryAttempts: 5,
       maxConcurrentAgentsByState: {},
     },
     codex: {

@@ -365,6 +365,184 @@ describe("failure signal routing in onWorkerExit", () => {
   });
 });
 
+describe("agent-type review stage rework routing", () => {
+  it("triggers rework on [STAGE_FAILED: review] from agent-type stage with onRework", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    // First dispatch puts issue in "implement" stage
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    // Normal exit advances to "review" (agent-type with onRework)
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+
+    // Re-dispatch review agent
+    await orchestrator.onRetryTimer("1");
+
+    // Review agent reports failure
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review]",
+    });
+
+    // Should rework back to implement (agent stage's onRework target)
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+    expect(retryEntry).not.toBeNull();
+    expect(retryEntry!.error).toBe("agent review failure: rework to implement");
+  });
+
+  it("increments reworkCount across multiple agent review→implement cycles", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+
+    // Advance through implement → review
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // First review failure
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review]",
+    });
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    // Re-dispatch implement, advance back to review
+    await orchestrator.onRetryTimer("1");
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // Second review failure
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review]",
+    });
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(2);
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+  });
+
+  it("escalates when maxRework exceeded on agent-type review stage", async () => {
+    const base = createAgentReviewWorkflowConfig();
+    const stages: StagesConfig = {
+      ...base,
+      stages: {
+        ...base.stages,
+        review: { ...base.stages.review!, maxRework: 1 },
+      },
+    };
+
+    const updateIssueState = vi.fn().mockResolvedValue(undefined);
+    const postComment = vi.fn().mockResolvedValue(undefined);
+
+    const orchestrator = createStagedOrchestrator({
+      stages,
+      escalationState: "Blocked",
+      updateIssueState,
+      postComment,
+    });
+
+    await orchestrator.pollTick();
+
+    // Advance to review
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // First review failure — rework (count 1 of max 1)
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review]",
+    });
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    // Re-dispatch implement, advance back to review
+    await orchestrator.onRetryTimer("1");
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // Second review failure — should escalate (count would exceed max)
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review]",
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
+
+    // Allow async side effects to fire
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(updateIssueState).toHaveBeenCalledWith("1", "ISSUE-1", "Blocked");
+    expect(postComment).toHaveBeenCalledWith(
+      "1",
+      expect.stringContaining("max rework"),
+    );
+  });
+
+  it("agent-type stage WITHOUT onRework falls back to retry on review failure", async () => {
+    // Three-stage config has no onRework on any stage and no gate stages
+    const orchestrator = createStagedOrchestrator();
+
+    await orchestrator.pollTick();
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review]",
+    });
+
+    // No onRework, no downstream gate → falls back to retry
+    expect(retryEntry).not.toBeNull();
+    expect(retryEntry!.error).toBe("agent reported failure: review");
+  });
+
+  it("passes correct reworkCount to spawnWorker during agent review rework cycle", async () => {
+    const spawnCalls: Array<{ reworkCount: number; stageName: string | null }> = [];
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+      onSpawn: (input) => {
+        spawnCalls.push({ reworkCount: input.reworkCount, stageName: input.stageName });
+      },
+    });
+
+    // Initial dispatch — implement stage, reworkCount 0
+    await orchestrator.pollTick();
+    expect(spawnCalls).toHaveLength(1);
+    expect(spawnCalls[0]!.reworkCount).toBe(0);
+    expect(spawnCalls[0]!.stageName).toBe("implement");
+
+    // Advance to review
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+    expect(spawnCalls).toHaveLength(2);
+    expect(spawnCalls[1]!.stageName).toBe("review");
+
+    // Review fails → rework to implement
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review]",
+    });
+    await orchestrator.onRetryTimer("1");
+    expect(spawnCalls).toHaveLength(3);
+    expect(spawnCalls[2]!.reworkCount).toBe(1);
+    expect(spawnCalls[2]!.stageName).toBe("implement");
+  });
+});
+
 // --- Helpers ---
 
 function createStagedOrchestrator(overrides?: {
@@ -550,6 +728,82 @@ function createGateWorkflowConfig(): StagesConfig {
   };
 }
 
+function createAgentReviewWorkflowConfig(): StagesConfig {
+  return {
+    initialStage: "implement",
+    stages: {
+      implement: {
+        type: "agent",
+        runner: "claude-code",
+        model: "claude-sonnet-4-5",
+        prompt: "implement.liquid",
+        maxTurns: 30,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "review",
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: null,
+      },
+      review: {
+        type: "agent",
+        runner: "claude-code",
+        model: "claude-opus-4-6",
+        prompt: "review.liquid",
+        maxTurns: 15,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: 3,
+        reviewers: [],
+        transitions: {
+          onComplete: "merge",
+          onApprove: null,
+          onRework: "implement",
+        },
+        linearState: null,
+      },
+      merge: {
+        type: "agent",
+        runner: "claude-code",
+        model: "claude-sonnet-4-5",
+        prompt: "merge.liquid",
+        maxTurns: 5,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "done",
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: null,
+      },
+      done: {
+        type: "terminal",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: { onComplete: null, onApprove: null, onRework: null },
+        linearState: null,
+      },
+    },
+  };
+}
+
 function createTracker(input?: {
   candidates?: Issue[];
 }): IssueTracker {
@@ -602,6 +856,7 @@ function createConfig(overrides?: {
       maxConcurrentAgents: 2,
       maxTurns: 5,
       maxRetryBackoffMs: 300_000,
+      maxRetryAttempts: 5,
       maxConcurrentAgentsByState: {},
     },
     runner: {

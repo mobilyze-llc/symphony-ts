@@ -504,6 +504,30 @@ export class OrchestratorCore {
       );
     }
 
+    // Check if the current stage itself has onRework (agent-type review stages)
+    const currentStage = stagesConfig.stages[currentStageName];
+    if (currentStage !== undefined && currentStage.type === "agent" && currentStage.transitions.onRework !== null) {
+      // Use reworkGate directly — it now supports agent stages with onRework
+      const reworkTarget = this.reworkGate(issueId);
+      if (reworkTarget === "escalated") {
+        void this.fireEscalationSideEffects(
+          issueId,
+          runningEntry.identifier,
+          "Agent review failure: max rework attempts exceeded. Escalating for manual review.",
+        );
+        return null;
+      }
+      if (reworkTarget !== null) {
+        return this.scheduleRetry(issueId, 1, {
+          identifier: runningEntry.identifier,
+          error: `agent review failure: rework to ${reworkTarget}`,
+          delayType: "continuation",
+        });
+      }
+      // reworkTarget === null should not happen since we checked onRework !== null,
+      // but fall through to downstream gate search just in case
+    }
+
     // Walk from current stage's onComplete to find the next gate
     const gateName = this.findDownstreamGate(currentStageName);
     if (gateName === null) {
@@ -713,6 +737,7 @@ export class OrchestratorCore {
   /**
    * Handle gate rework: send issue back to rework target.
    * Tracks rework count and escalates to terminal if max exceeded.
+   * Works for both gate-type stages and agent-type stages with onRework set.
    * Returns the rework target stage name, "escalated" if max rework
    * exceeded, or null if no rework transition defined.
    */
@@ -728,7 +753,12 @@ export class OrchestratorCore {
     }
 
     const currentStage = stagesConfig.stages[currentStageName];
-    if (currentStage === undefined || currentStage.type !== "gate") {
+    if (currentStage === undefined) {
+      return null;
+    }
+
+    // Allow gate stages (always) and agent stages with onRework set
+    if (currentStage.type !== "gate" && !(currentStage.type === "agent" && currentStage.transitions.onRework !== null)) {
       return null;
     }
 
@@ -1040,7 +1070,24 @@ export class OrchestratorCore {
       error: string | null;
       delayType: "continuation" | "failure";
     },
-  ): RetryEntry {
+  ): RetryEntry | null {
+    // Max retry guard — only applies to failure retries, not continuations
+    if (
+      input.delayType === "failure" &&
+      attempt > this.config.agent.maxRetryAttempts
+    ) {
+      this.state.completed.add(issueId);
+      this.releaseClaim(issueId);
+      delete this.state.issueStages[issueId];
+      delete this.state.issueReworkCounts[issueId];
+      void this.fireEscalationSideEffects(
+        issueId,
+        input.identifier ?? issueId,
+        `Max retry attempts (${this.config.agent.maxRetryAttempts}) exceeded. Escalating for manual review.`,
+      );
+      return null;
+    }
+
     this.clearRetryEntry(issueId);
 
     const delayMs =
