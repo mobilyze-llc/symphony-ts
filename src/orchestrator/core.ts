@@ -167,7 +167,8 @@ export class OrchestratorCore {
     if (
       !activeStates.has(normalizedState) ||
       terminalStates.has(normalizedState) ||
-      this.state.running[issue.id] !== undefined
+      this.state.running[issue.id] !== undefined ||
+      this.state.completed.has(issue.id)
     ) {
       return false;
     }

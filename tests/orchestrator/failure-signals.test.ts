@@ -90,6 +90,25 @@ describe("failure signal routing in onWorkerExit", () => {
     expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
   });
 
+  it("prevents redispatch of escalated issues on subsequent poll", async () => {
+    const orchestrator = createStagedOrchestrator();
+
+    await orchestrator.pollTick();
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: spec]",
+    });
+
+    // Issue is completed and unclaimed — verify next poll does NOT redispatch
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().claimed.has("1")).toBe(false);
+
+    const result = await orchestrator.pollTick();
+    expect(result.dispatchedIssueIds).not.toContain("1");
+    expect(orchestrator.getState().running["1"]).toBeUndefined();
+  });
+
   it("triggers rework on [STAGE_FAILED: review] with gate workflow", async () => {
     const orchestrator = createStagedOrchestrator({
       stages: createGateWorkflowConfig(),
