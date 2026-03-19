@@ -419,6 +419,50 @@ describe("updateIssueState integration", () => {
     expect(Object.keys(orchestrator.getState().running)).toEqual(["1"]);
     expect(updateIssueState).toHaveBeenCalledWith("1", "ISSUE-1", "In Progress");
   });
+
+  it("calls updateIssueState with terminal stage linearState when issue reaches terminal", async () => {
+    const updateIssueState = vi.fn().mockResolvedValue(undefined);
+
+    const orchestrator = createStagedOrchestrator({
+      stages: createTwoStageConfigWithTerminalLinearState(),
+      updateIssueState,
+    });
+
+    await orchestrator.pollTick();
+
+    // Normal exit from implement → done (terminal with linearState "Done")
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+
+    // Wait for the async updateIssueState call to complete
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
+    // Should have been called twice: once for dispatch ("In Progress") and once for terminal ("Done")
+    expect(updateIssueState).toHaveBeenCalledWith("1", "ISSUE-1", "In Progress");
+    expect(updateIssueState).toHaveBeenCalledWith("1", "ISSUE-1", "Done");
+  });
+
+  it("does not call updateIssueState when terminal stage has null linearState", async () => {
+    const updateIssueState = vi.fn().mockResolvedValue(undefined);
+
+    const orchestrator = createStagedOrchestrator({
+      stages: createSimpleTwoStageConfig(),
+      updateIssueState,
+    });
+
+    await orchestrator.pollTick();
+    updateIssueState.mockClear();
+
+    // Normal exit from implement → done (terminal with no linearState)
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    // updateIssueState should NOT have been called for the terminal stage
+    expect(updateIssueState).not.toHaveBeenCalled();
+  });
 });
 
 // --- Helpers ---
@@ -559,6 +603,46 @@ function createSimpleTwoStageConfig(): StagesConfig {
         reviewers: [],
         transitions: { onComplete: null, onApprove: null, onRework: null },
         linearState: null,
+      },
+    },
+  };
+}
+
+function createTwoStageConfigWithTerminalLinearState(): StagesConfig {
+  return {
+    initialStage: "implement",
+    stages: {
+      implement: {
+        type: "agent",
+        runner: "claude-code",
+        model: "claude-sonnet-4-5",
+        prompt: "implement.liquid",
+        maxTurns: 30,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "done",
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: "In Progress",
+      },
+      done: {
+        type: "terminal",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: { onComplete: null, onApprove: null, onRework: null },
+        linearState: "Done",
       },
     },
   };

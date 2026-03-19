@@ -112,6 +112,7 @@ stages:
 
   done:
     type: terminal
+    linear_state: Done
 ---
 
 You are running in headless/unattended mode. Do NOT use interactive skills, slash commands, or plan mode. Do not prompt for user input. Complete your work autonomously.

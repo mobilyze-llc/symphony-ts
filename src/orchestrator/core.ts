@@ -172,18 +172,19 @@ export class OrchestratorCore {
       return false;
     }
 
-    // Allow resumed issues: clear completed flag when issue returns with a
-    // non-escalation active state (e.g., "Resume" or "Todo").  Issues still in
-    // the escalation state (e.g., "Blocked") remain blocked until a human
-    // explicitly moves them.
+    // Allow resumed issues: clear completed flag ONLY when a human has
+    // explicitly moved the issue to a resume-designated state ("Resume" or
+    // "Todo").  Issues still in operational states like "In Progress" or
+    // "In Review" stay completed — they haven't been deliberately requeued.
+    // Issues in the escalation state ("Blocked") also stay completed until
+    // a human explicitly moves them.
     if (this.state.completed.has(issue.id)) {
-      if (
-        this.config.escalationState !== null &&
-        normalizedState === normalizeIssueState(this.config.escalationState)
-      ) {
+      const resumeStates: ReadonlySet<string> = new Set(["resume", "todo"]);
+      if (resumeStates.has(normalizedState)) {
+        this.state.completed.delete(issue.id);
+      } else {
         return false;
       }
-      this.state.completed.delete(issue.id);
     }
 
     const allowClaimedIssueId = options?.allowClaimedIssueId;
@@ -364,7 +365,7 @@ export class OrchestratorCore {
         );
       }
 
-      const transition = this.advanceStage(input.issueId);
+      const transition = this.advanceStage(input.issueId, runningEntry.identifier);
       if (transition === "completed") {
         this.state.completed.add(input.issueId);
         this.releaseClaim(input.issueId);
@@ -396,9 +397,14 @@ export class OrchestratorCore {
    * Returns "completed" if the issue reached a terminal stage,
    * "advanced" if it moved to the next stage, or "unchanged" if
    * no stages are configured.
+   *
+   * When reaching a terminal stage that has a linearState configured,
+   * fires updateIssueState as a best-effort side effect so the
+   * tracker reflects the final state (e.g., "Done").
    */
   private advanceStage(
     issueId: string,
+    issueIdentifier: string,
   ): "completed" | "advanced" | "unchanged" {
     const stagesConfig = this.config.stages;
     if (stagesConfig === null) {
@@ -434,6 +440,12 @@ export class OrchestratorCore {
     if (nextStage.type === "terminal") {
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
+      // Fire linearState update for the terminal stage (e.g., move to "Done")
+      if (nextStage.linearState !== null && this.updateIssueState !== undefined) {
+        void this.updateIssueState(issueId, issueIdentifier, nextStage.linearState).catch((err) => {
+          console.warn(`[orchestrator] Failed to update terminal state for ${issueIdentifier}:`, err);
+        });
+      }
       return "completed";
     }
 
