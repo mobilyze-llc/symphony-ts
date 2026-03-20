@@ -27,7 +27,7 @@ agent:
   max_retry_backoff_ms: 300000
 
 codex:
-  stall_timeout_ms: 900000
+  stall_timeout_ms: 1800000
 
 runner:
   kind: claude-code
@@ -57,13 +57,44 @@ hooks:
   before_run: |
     set -euo pipefail
     echo "Syncing workspace with upstream..."
-    git fetch origin
-    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+    # --- Git lock handling ---
+    wait_for_git_lock() {
+      local attempt=0
+      while [ -f .git/index.lock ] && [ $attempt -lt 6 ]; do
+        echo "WARNING: .git/index.lock exists, waiting 5s (attempt $((attempt+1))/6)..." >&2
+        sleep 5
+        attempt=$((attempt+1))
+      done
+      if [ -f .git/index.lock ]; then
+        echo "WARNING: .git/index.lock still exists after 30s, removing stale lock" >&2
+        rm -f .git/index.lock
+      fi
+    }
+
+    # --- Git fetch with retry ---
+    fetch_ok=false
+    for attempt in 1 2 3; do
+      wait_for_git_lock
+      if git fetch origin 2>/dev/null; then
+        fetch_ok=true
+        break
+      fi
+      echo "WARNING: git fetch failed (attempt $attempt/3), retrying in 2s..." >&2
+      sleep 2
+    done
+    if [ "$fetch_ok" = false ]; then
+      echo "WARNING: git fetch failed after 3 attempts, continuing with stale refs" >&2
+    fi
+
+    # --- Rebase (best-effort) ---
+    CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
     if [ "$CURRENT_BRANCH" = "main" ] || [ "$CURRENT_BRANCH" = "master" ]; then
       echo "On $CURRENT_BRANCH — rebasing onto latest..."
-      if ! git rebase origin/main 2>/dev/null; then
+      wait_for_git_lock
+      if ! git rebase "origin/$CURRENT_BRANCH" 2>/dev/null; then
         echo "WARNING: Rebase failed, aborting rebase" >&2
-        git rebase --abort
+        git rebase --abort 2>/dev/null || true
       fi
     else
       echo "On feature branch $CURRENT_BRANCH — skipping rebase, fetch only."

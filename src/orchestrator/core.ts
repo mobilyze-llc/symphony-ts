@@ -1008,9 +1008,11 @@ export class OrchestratorCore {
 
       const normalizedState = normalizeIssueState(snapshot.state);
       if (terminalStates.has(normalizedState)) {
-        stopRequests.push(
-          await this.requestStop(runningEntry, true, "terminal_state"),
-        );
+        if (!this.isWorkerInFinalActiveStage(snapshot.id)) {
+          stopRequests.push(
+            await this.requestStop(runningEntry, true, "terminal_state"),
+          );
+        }
         continue;
       }
 
@@ -1048,6 +1050,43 @@ export class OrchestratorCore {
       stopRequests,
       reconciliationFetchFailed: false,
     };
+  }
+
+  /**
+   * Returns true if the worker for the given issue is in the final active
+   * stage — i.e., its onComplete target is null or points to a terminal stage.
+   * In that case, the worker itself drove the issue to terminal state and
+   * should be allowed to finish gracefully rather than being stopped.
+   */
+  private isWorkerInFinalActiveStage(issueId: string): boolean {
+    const stagesConfig = this.config.stages;
+    if (stagesConfig === null) {
+      return false;
+    }
+
+    const currentStageName = this.state.issueStages[issueId];
+    if (currentStageName === undefined) {
+      // Stage already cleaned up by advanceStage (completed) — the worker
+      // is finishing its final stage. Allow it to complete gracefully.
+      return true;
+    }
+
+    const currentStage = stagesConfig.stages[currentStageName];
+    if (currentStage === undefined) {
+      return false;
+    }
+
+    const nextStageName = currentStage.transitions.onComplete;
+    if (nextStageName === null) {
+      return true;
+    }
+
+    const nextStage = stagesConfig.stages[nextStageName];
+    if (nextStage === undefined) {
+      return false;
+    }
+
+    return nextStage.type === "terminal";
   }
 
   private async reconcileStalledRuns(): Promise<StopRequest[]> {

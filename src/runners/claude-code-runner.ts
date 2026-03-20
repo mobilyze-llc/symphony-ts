@@ -87,20 +87,33 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
     let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
     try {
-      // Start workspace file-change heartbeat polling
+      // Start workspace file-change heartbeat polling.
+      // Watch both .git/index (implementation stages) and the workspace root
+      // directory (review stages that never touch git but do read/write files).
       if (heartbeatMs > 0) {
         const gitIndexPath = join(this.options.cwd, ".git", "index");
-        let lastMtimeMs = getMtimeMs(gitIndexPath);
+        const workspacePath = this.options.cwd;
+        let lastGitMtimeMs = getMtimeMs(gitIndexPath);
+        let lastWorkspaceMtimeMs = getMtimeMs(workspacePath);
         heartbeatTimer = setInterval(() => {
-          const currentMtimeMs = getMtimeMs(gitIndexPath);
-          if (currentMtimeMs !== lastMtimeMs) {
-            lastMtimeMs = currentMtimeMs;
+          const currentGitMtimeMs = getMtimeMs(gitIndexPath);
+          const currentWorkspaceMtimeMs = getMtimeMs(workspacePath);
+          const gitChanged = currentGitMtimeMs !== lastGitMtimeMs;
+          const workspaceChanged = currentWorkspaceMtimeMs !== lastWorkspaceMtimeMs;
+          if (gitChanged || workspaceChanged) {
+            lastGitMtimeMs = currentGitMtimeMs;
+            lastWorkspaceMtimeMs = currentWorkspaceMtimeMs;
+            const source = gitChanged && workspaceChanged
+              ? "git index and workspace dir"
+              : gitChanged
+                ? "git index"
+                : "workspace dir";
             this.emit({
               event: "activity_heartbeat",
               sessionId: fullSessionId,
               threadId,
               turnId,
-              message: "workspace file change detected",
+              message: `workspace file change detected (${source})`,
             });
           }
         }, heartbeatMs);

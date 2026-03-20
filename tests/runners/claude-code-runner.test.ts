@@ -312,9 +312,20 @@ describe("ClaudeCodeRunner", () => {
 });
 
 describe("ClaudeCodeRunner heartbeat", () => {
+  // Path-aware mtime tracking for heartbeat tests.
+  // The heartbeat polls both .git/index and the workspace root dir.
+  let mtimeByPath: Record<string, number>;
+
   beforeEach(() => {
     vi.useFakeTimers();
-    mockStatSync.mockReturnValue({ mtimeMs: 1000 } as never);
+    mtimeByPath = {
+      "/tmp/workspace/.git/index": 1000,
+      "/tmp/workspace": 1000,
+    };
+    mockStatSync.mockImplementation((p: unknown) => {
+      const key = String(p);
+      return { mtimeMs: mtimeByPath[key] ?? 0 } as never;
+    });
   });
 
   afterEach(() => {
@@ -343,12 +354,12 @@ describe("ClaudeCodeRunner heartbeat", () => {
     vi.advanceTimersByTime(5000);
     expect(events.filter((e) => e.event === "activity_heartbeat")).toHaveLength(0);
 
-    // Simulate a file change
-    mockStatSync.mockReturnValue({ mtimeMs: 2000 } as never);
+    // Simulate a git index change (only git, not workspace dir)
+    mtimeByPath["/tmp/workspace/.git/index"] = 2000;
     vi.advanceTimersByTime(5000);
     const heartbeats = events.filter((e) => e.event === "activity_heartbeat");
     expect(heartbeats).toHaveLength(1);
-    expect(heartbeats[0]!.message).toBe("workspace file change detected");
+    expect(heartbeats[0]!.message).toBe("workspace file change detected (git index)");
 
     // Resolve the turn
     resolveFn!({
@@ -358,7 +369,76 @@ describe("ClaudeCodeRunner heartbeat", () => {
     await turnPromise;
   });
 
-  it("does not emit heartbeat when git index mtime stays the same", async () => {
+  it("emits activity_heartbeat when workspace dir mtime changes (non-git activity)", async () => {
+    let resolveFn: (value: unknown) => void;
+    mockGenerateText.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFn = resolve;
+      }) as never,
+    );
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+      heartbeatIntervalMs: 5000,
+    });
+
+    const turnPromise = runner.startSession({ prompt: "review task", title: "test" });
+
+    // Initial poll — no change
+    vi.advanceTimersByTime(5000);
+    expect(events.filter((e) => e.event === "activity_heartbeat")).toHaveLength(0);
+
+    // Simulate workspace dir change only (e.g. review agent creating temp file)
+    mtimeByPath["/tmp/workspace"] = 2000;
+    vi.advanceTimersByTime(5000);
+    const heartbeats = events.filter((e) => e.event === "activity_heartbeat");
+    expect(heartbeats).toHaveLength(1);
+    expect(heartbeats[0]!.message).toBe("workspace file change detected (workspace dir)");
+
+    resolveFn!({
+      text: "done",
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    await turnPromise;
+  });
+
+  it("emits heartbeat indicating both sources when both change simultaneously", async () => {
+    let resolveFn: (value: unknown) => void;
+    mockGenerateText.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFn = resolve;
+      }) as never,
+    );
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+      heartbeatIntervalMs: 5000,
+    });
+
+    const turnPromise = runner.startSession({ prompt: "task", title: "test" });
+
+    // Both change at same interval
+    mtimeByPath["/tmp/workspace/.git/index"] = 2000;
+    mtimeByPath["/tmp/workspace"] = 2000;
+    vi.advanceTimersByTime(5000);
+    const heartbeats = events.filter((e) => e.event === "activity_heartbeat");
+    expect(heartbeats).toHaveLength(1);
+    expect(heartbeats[0]!.message).toBe("workspace file change detected (git index and workspace dir)");
+
+    resolveFn!({
+      text: "done",
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    await turnPromise;
+  });
+
+  it("does not emit heartbeat when neither mtime changes", async () => {
     let resolveFn: (value: unknown) => void;
     mockGenerateText.mockReturnValueOnce(
       new Promise((resolve) => {
@@ -412,7 +492,8 @@ describe("ClaudeCodeRunner heartbeat", () => {
     await turnPromise;
 
     // After turn completes, simulate file changes — should NOT emit heartbeats
-    mockStatSync.mockReturnValue({ mtimeMs: 9999 } as never);
+    mtimeByPath["/tmp/workspace/.git/index"] = 9999;
+    mtimeByPath["/tmp/workspace"] = 9999;
     vi.advanceTimersByTime(10000);
     expect(events.filter((e) => e.event === "activity_heartbeat")).toHaveLength(0);
   });
@@ -435,7 +516,8 @@ describe("ClaudeCodeRunner heartbeat", () => {
 
     const turnPromise = runner.startSession({ prompt: "task", title: "test" });
 
-    mockStatSync.mockReturnValue({ mtimeMs: 9999 } as never);
+    mtimeByPath["/tmp/workspace/.git/index"] = 9999;
+    mtimeByPath["/tmp/workspace"] = 9999;
     vi.advanceTimersByTime(20000);
     expect(events.filter((e) => e.event === "activity_heartbeat")).toHaveLength(0);
 
@@ -464,12 +546,12 @@ describe("ClaudeCodeRunner heartbeat", () => {
 
     const turnPromise = runner.startSession({ prompt: "task", title: "test" });
 
-    // First change
-    mockStatSync.mockReturnValue({ mtimeMs: 2000 } as never);
+    // First change — git index only
+    mtimeByPath["/tmp/workspace/.git/index"] = 2000;
     vi.advanceTimersByTime(5000);
 
-    // Second change
-    mockStatSync.mockReturnValue({ mtimeMs: 3000 } as never);
+    // Second change — workspace dir only
+    mtimeByPath["/tmp/workspace"] = 3000;
     vi.advanceTimersByTime(5000);
 
     // No change on third tick
