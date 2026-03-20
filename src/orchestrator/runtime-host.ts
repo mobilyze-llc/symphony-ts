@@ -72,6 +72,7 @@ export interface RuntimeServiceOptions {
   now?: () => Date;
   logger?: StructuredLogger;
   stdout?: Writable;
+  shutdownTimeoutMs?: number;
 }
 
 export interface RuntimeServiceHandle {
@@ -91,6 +92,9 @@ interface WorkerExecution {
   stopRequest: StopRequest | null;
   lastResult: AgentRunResult | null;
 }
+
+/** Maximum ms to wait for idle workers during shutdown before forcing exit. */
+const SHUTDOWN_IDLE_TIMEOUT_MS = 30_000;
 
 export class RuntimeHostStartupError extends Error {
   readonly code: string;
@@ -367,6 +371,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     };
   }
 
+  abortAllWorkers(): void {
+    for (const worker of this.workers.values()) {
+      worker.controller.abort("Shutdown: aborting running workers.");
+    }
+  }
+
   private async spawnWorkerExecution(
     issue: Issue,
     attempt: number | null,
@@ -510,6 +520,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         : {}),
       ...(liveSession?.codexCacheWriteTokens
         ? { cache_write_tokens: liveSession.codexCacheWriteTokens }
+        : {}),
+      ...(liveSession?.codexNoCacheTokens
+        ? { no_cache_tokens: liveSession.codexNoCacheTokens }
         : {}),
       ...(liveSession?.codexReasoningTokens
         ? { reasoning_tokens: liveSession.codexReasoningTokens }
@@ -739,6 +752,9 @@ export async function startRuntimeService(
       : options.workflowWatcher;
   workflowWatcher?.start();
 
+  const shutdownTimeoutMs =
+    options.shutdownTimeoutMs ?? SHUTDOWN_IDLE_TIMEOUT_MS;
+
   const shutdown = async () => {
     if (shuttingDown) {
       await exitPromise.closed;
@@ -754,8 +770,25 @@ export async function startRuntimeService(
 
     removeSignalHandlers();
 
+    runtimeHost.abortAllWorkers();
+
+    const idleOrTimeout = new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        void logger.warn(
+          "shutdown_idle_timeout",
+          "Timed out waiting for workers to become idle; proceeding with exit.",
+          { timeout_ms: shutdownTimeoutMs },
+        );
+        resolve();
+      }, shutdownTimeoutMs);
+      void runtimeHost.waitForIdle().then(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+
     await Promise.allSettled([
-      runtimeHost.waitForIdle(),
+      idleOrTimeout,
       dashboard?.close() ?? Promise.resolve(),
       workflowWatcher?.close() ?? Promise.resolve(),
     ]);

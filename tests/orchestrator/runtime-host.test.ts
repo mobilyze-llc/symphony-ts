@@ -10,7 +10,10 @@ import {
   type StructuredLogEntry,
   StructuredLogger,
 } from "../../src/logging/structured-logger.js";
-import { OrchestratorRuntimeHost } from "../../src/orchestrator/runtime-host.js";
+import {
+  OrchestratorRuntimeHost,
+  startRuntimeService,
+} from "../../src/orchestrator/runtime-host.js";
 import type {
   IssueStateSnapshot,
   IssueTracker,
@@ -540,6 +543,245 @@ describe("OrchestratorRuntimeHost", () => {
       stage_name: "investigate",
       turns_used: 2,
     });
+  });
+
+  it("includes no_cache_tokens in stage_completed when codexNoCacheTokens is non-zero", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.resolve("1", {
+      issue: createIssue({ state: "In Progress" }),
+      workspace: {
+        path: "/tmp/workspaces/1",
+        workspaceKey: "1",
+        createdNow: true,
+      },
+      runAttempt: {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        attempt: null,
+        workspacePath: "/tmp/workspaces/1",
+        startedAt: "2026-03-06T00:00:00.000Z",
+        status: "succeeded",
+      },
+      liveSession: {
+        sessionId: "thread-1-turn-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        codexAppServerPid: "1001",
+        lastCodexEvent: "turn_completed",
+        lastCodexTimestamp: "2026-03-06T00:00:02.000Z",
+        lastCodexMessage: "done",
+        codexInputTokens: 100,
+        codexOutputTokens: 50,
+        codexTotalTokens: 150,
+        codexCacheReadTokens: 0,
+        codexCacheWriteTokens: 0,
+        codexNoCacheTokens: 42,
+        codexReasoningTokens: 0,
+        lastReportedInputTokens: 100,
+        lastReportedOutputTokens: 50,
+        lastReportedTotalTokens: 150,
+        turnCount: 1,
+      },
+      turnsCompleted: 1,
+      lastTurn: null,
+      rateLimits: null,
+    });
+    await host.waitForIdle();
+
+    const stageCompletedEntry = entries.find(
+      (e) => e.event === "stage_completed",
+    );
+    expect(stageCompletedEntry).toBeDefined();
+    expect(stageCompletedEntry).toMatchObject({
+      event: "stage_completed",
+      no_cache_tokens: 42,
+    });
+  });
+
+  it("omits no_cache_tokens from stage_completed when codexNoCacheTokens is zero", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.resolve("1", {
+      issue: createIssue({ state: "In Progress" }),
+      workspace: {
+        path: "/tmp/workspaces/1",
+        workspaceKey: "1",
+        createdNow: true,
+      },
+      runAttempt: {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        attempt: null,
+        workspacePath: "/tmp/workspaces/1",
+        startedAt: "2026-03-06T00:00:00.000Z",
+        status: "succeeded",
+      },
+      liveSession: {
+        sessionId: "thread-1-turn-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        codexAppServerPid: "1001",
+        lastCodexEvent: "turn_completed",
+        lastCodexTimestamp: "2026-03-06T00:00:02.000Z",
+        lastCodexMessage: "done",
+        codexInputTokens: 100,
+        codexOutputTokens: 50,
+        codexTotalTokens: 150,
+        codexCacheReadTokens: 0,
+        codexCacheWriteTokens: 0,
+        codexNoCacheTokens: 0,
+        codexReasoningTokens: 0,
+        lastReportedInputTokens: 100,
+        lastReportedOutputTokens: 50,
+        lastReportedTotalTokens: 150,
+        turnCount: 1,
+      },
+      turnsCompleted: 1,
+      lastTurn: null,
+      rateLimits: null,
+    });
+    await host.waitForIdle();
+
+    const stageCompletedEntry = entries.find(
+      (e) => e.event === "stage_completed",
+    );
+    expect(stageCompletedEntry).toBeDefined();
+    expect(stageCompletedEntry).not.toHaveProperty("no_cache_tokens");
+  });
+});
+
+describe("startRuntimeService shutdown", () => {
+  it("aborts running workers before waiting for idle on shutdown", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+
+    const service = await startRuntimeService({
+      config: createConfig(),
+      tracker,
+      logger,
+      workflowWatcher: null,
+      runtimeHost: new OrchestratorRuntimeHost({
+        config: createConfig(),
+        tracker,
+        logger,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      }),
+    });
+
+    // Wait for the initial poll to dispatch the worker
+    await service.runtimeHost.flushEvents();
+
+    // Call shutdown — should abort all workers
+    await service.shutdown();
+
+    expect(fakeRunner.abortReasons).toContain(
+      "Shutdown: aborting running workers.",
+    );
+  });
+
+  it("proceeds with exit after shutdown timeout if waitForIdle hangs", async () => {
+    const tracker = createTracker();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+
+    // A runner that never settles — ignores abort signals
+    const hangingRunner = {
+      run(_input: Parameters<FakeAgentRunner["run"]>[0]): Promise<never> {
+        return new Promise(() => {
+          /* never resolves */
+        });
+      },
+    };
+
+    const service = await startRuntimeService({
+      config: createConfig(),
+      tracker,
+      logger,
+      workflowWatcher: null,
+      shutdownTimeoutMs: 50,
+      runtimeHost: new OrchestratorRuntimeHost({
+        config: createConfig(),
+        tracker,
+        logger,
+        agentRunner: hangingRunner,
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      }),
+    });
+
+    // Wait for the initial poll to dispatch the worker
+    await service.runtimeHost.flushEvents();
+
+    // Shutdown should complete within a reasonable time despite the hanging runner
+    const shutdownStart = Date.now();
+    await service.shutdown();
+    const elapsed = Date.now() - shutdownStart;
+
+    // Should have completed well within a second (timeout is 50ms)
+    expect(elapsed).toBeLessThan(5_000);
+
+    const timeoutEntry = entries.find(
+      (e) => e.event === "shutdown_idle_timeout",
+    );
+    expect(timeoutEntry).toBeDefined();
   });
 });
 
