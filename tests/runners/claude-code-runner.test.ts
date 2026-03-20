@@ -321,7 +321,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     vi.useRealTimers();
   });
 
-  it("emits activity_heartbeat when workspace mtime changes during execution", async () => {
+  it("emits activity_heartbeat when git index mtime changes during execution", async () => {
     let resolveFn: (value: unknown) => void;
     mockGenerateText.mockReturnValueOnce(
       new Promise((resolve) => {
@@ -358,7 +358,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     await turnPromise;
   });
 
-  it("does not emit heartbeat when workspace mtime stays the same", async () => {
+  it("does not emit heartbeat when git index mtime stays the same", async () => {
     let resolveFn: (value: unknown) => void;
     mockGenerateText.mockReturnValueOnce(
       new Promise((resolve) => {

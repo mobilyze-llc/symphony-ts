@@ -592,7 +592,7 @@ describe("AgentRunner", () => {
     expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
   });
 
-  it("still returns succeeded when a turn fails WITH a STAGE_FAILED signal", async () => {
+  it("returns succeeded when infrastructure marks turn failed but agent emitted STAGE_FAILED signal", async () => {
     const root = await createRoot();
     const tracker = createTracker({
       refreshStates: [
@@ -604,7 +604,7 @@ describe("AgentRunner", () => {
       tracker,
       createCodexClient: (input) =>
         createStubCodexClient([], input, {
-          statuses: ["completed"],
+          statuses: ["failed"],
           messages: ["Tests failed.\n[STAGE_FAILED: verify]\nSee logs."],
         }),
     });

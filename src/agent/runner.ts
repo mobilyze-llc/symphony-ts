@@ -318,7 +318,7 @@ export class AgentRunner {
         // Turn failed at infrastructure level (e.g. abort/timeout) without an
         // explicit agent failure signal — propagate so the orchestrator sees
         // worker_exit_abnormal instead of the misleading worker_exit_normal.
-        if (lastTurn.status === "failed") {
+        if (lastTurn.status !== "completed") {
           throw new AgentRunnerError({
             message: lastTurn.message ?? "Agent turn failed unexpectedly.",
             status: "failed",

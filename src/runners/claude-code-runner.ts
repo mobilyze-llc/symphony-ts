@@ -1,4 +1,5 @@
 import { statSync } from "node:fs";
+import { join } from "node:path";
 import { generateText } from "ai";
 import { claudeCode } from "ai-sdk-provider-claude-code";
 
@@ -88,9 +89,10 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
     try {
       // Start workspace file-change heartbeat polling
       if (heartbeatMs > 0) {
-        let lastMtimeMs = getDirectoryMtimeMs(this.options.cwd);
+        const gitIndexPath = join(this.options.cwd, ".git", "index");
+        let lastMtimeMs = getMtimeMs(gitIndexPath);
         heartbeatTimer = setInterval(() => {
-          const currentMtimeMs = getDirectoryMtimeMs(this.options.cwd);
+          const currentMtimeMs = getMtimeMs(gitIndexPath);
           if (currentMtimeMs !== lastMtimeMs) {
             lastMtimeMs = currentMtimeMs;
             this.emit({
@@ -181,9 +183,9 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
   }
 }
 
-function getDirectoryMtimeMs(dirPath: string): number {
+function getMtimeMs(filePath: string): number {
   try {
-    return statSync(dirPath).mtimeMs;
+    return statSync(filePath).mtimeMs;
   } catch {
     return 0;
   }
