@@ -20,6 +20,7 @@ const SESSION_EVENT_MESSAGES: Partial<
   notification: "notification",
   other_message: "other message",
   malformed: "malformed event",
+  activity_heartbeat: "activity heartbeat",
 });
 
 export interface SessionTelemetryUpdateResult {

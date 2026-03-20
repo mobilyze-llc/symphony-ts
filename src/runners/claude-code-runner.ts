@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { generateText } from "ai";
 import { claudeCode } from "ai-sdk-provider-claude-code";
 
@@ -23,6 +24,8 @@ export interface ClaudeCodeRunnerOptions {
   cwd: string;
   model: string;
   onEvent?: (event: CodexClientEvent) => void;
+  /** Interval in ms for workspace file-change heartbeat polling. Defaults to 5000. Set to 0 to disable. */
+  heartbeatIntervalMs?: number;
 }
 
 export class ClaudeCodeRunner implements AgentRunnerCodexClient {
@@ -79,7 +82,28 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
     const controller = new AbortController();
     this.activeTurnController = controller;
 
+    const heartbeatMs = this.options.heartbeatIntervalMs ?? 5000;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
     try {
+      // Start workspace file-change heartbeat polling
+      if (heartbeatMs > 0) {
+        let lastMtimeMs = getDirectoryMtimeMs(this.options.cwd);
+        heartbeatTimer = setInterval(() => {
+          const currentMtimeMs = getDirectoryMtimeMs(this.options.cwd);
+          if (currentMtimeMs !== lastMtimeMs) {
+            lastMtimeMs = currentMtimeMs;
+            this.emit({
+              event: "activity_heartbeat",
+              sessionId: fullSessionId,
+              threadId,
+              turnId,
+              message: "workspace file change detected",
+            });
+          }
+        }, heartbeatMs);
+      }
+
       const resolvedModel = resolveClaudeModelId(this.options.model);
       const result = await generateText({
         model: claudeCode(resolvedModel, {
@@ -136,6 +160,9 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
         message,
       };
     } finally {
+      if (heartbeatTimer !== null) {
+        clearInterval(heartbeatTimer);
+      }
       // Clear the controller ref so close() doesn't abort a completed turn
       if (this.activeTurnController === controller) {
         this.activeTurnController = null;
@@ -151,5 +178,13 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
       timestamp: new Date().toISOString(),
       codexAppServerPid: null,
     });
+  }
+}
+
+function getDirectoryMtimeMs(dirPath: string): number {
+  try {
+    return statSync(dirPath).mtimeMs;
+  } catch {
+    return 0;
   }
 }
