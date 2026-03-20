@@ -1,3 +1,5 @@
+import { statSync } from "node:fs";
+import { join } from "node:path";
 import { generateText } from "ai";
 import { claudeCode } from "ai-sdk-provider-claude-code";
 
@@ -23,6 +25,8 @@ export interface ClaudeCodeRunnerOptions {
   cwd: string;
   model: string;
   onEvent?: (event: CodexClientEvent) => void;
+  /** Interval in ms for workspace file-change heartbeat polling. Defaults to 5000. Set to 0 to disable. */
+  heartbeatIntervalMs?: number;
 }
 
 export class ClaudeCodeRunner implements AgentRunnerCodexClient {
@@ -79,7 +83,42 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
     const controller = new AbortController();
     this.activeTurnController = controller;
 
+    const heartbeatMs = this.options.heartbeatIntervalMs ?? 5000;
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
     try {
+      // Start workspace file-change heartbeat polling.
+      // Watch both .git/index (implementation stages) and the workspace root
+      // directory (review stages that never touch git but do read/write files).
+      if (heartbeatMs > 0) {
+        const gitIndexPath = join(this.options.cwd, ".git", "index");
+        const workspacePath = this.options.cwd;
+        let lastGitMtimeMs = getMtimeMs(gitIndexPath);
+        let lastWorkspaceMtimeMs = getMtimeMs(workspacePath);
+        heartbeatTimer = setInterval(() => {
+          const currentGitMtimeMs = getMtimeMs(gitIndexPath);
+          const currentWorkspaceMtimeMs = getMtimeMs(workspacePath);
+          const gitChanged = currentGitMtimeMs !== lastGitMtimeMs;
+          const workspaceChanged = currentWorkspaceMtimeMs !== lastWorkspaceMtimeMs;
+          if (gitChanged || workspaceChanged) {
+            lastGitMtimeMs = currentGitMtimeMs;
+            lastWorkspaceMtimeMs = currentWorkspaceMtimeMs;
+            const source = gitChanged && workspaceChanged
+              ? "git index and workspace dir"
+              : gitChanged
+                ? "git index"
+                : "workspace dir";
+            this.emit({
+              event: "activity_heartbeat",
+              sessionId: fullSessionId,
+              threadId,
+              turnId,
+              message: `workspace file change detected (${source})`,
+            });
+          }
+        }, heartbeatMs);
+      }
+
       const resolvedModel = resolveClaudeModelId(this.options.model);
       const result = await generateText({
         model: claudeCode(resolvedModel, {
@@ -136,6 +175,9 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
         message,
       };
     } finally {
+      if (heartbeatTimer !== null) {
+        clearInterval(heartbeatTimer);
+      }
       // Clear the controller ref so close() doesn't abort a completed turn
       if (this.activeTurnController === controller) {
         this.activeTurnController = null;
@@ -151,5 +193,13 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
       timestamp: new Date().toISOString(),
       codexAppServerPid: null,
     });
+  }
+}
+
+function getMtimeMs(filePath: string): number {
+  try {
+    return statSync(filePath).mtimeMs;
+  } catch {
+    return 0;
   }
 }

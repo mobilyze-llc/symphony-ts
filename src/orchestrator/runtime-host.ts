@@ -368,6 +368,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       completion: Promise.resolve(),
     };
 
+    await this.logger?.info("agent_runner_starting", "Agent runner starting for issue.", {
+      outcome: "started",
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      ...(stageName !== null ? { stage: stageName } : {}),
+    });
+
     const completion = this.agentRunner
       .run({
         issue,
@@ -387,6 +394,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         });
       })
       .catch(async (error) => {
+        await this.logger?.error("agent_runner_error", toErrorMessage(error), {
+          outcome: "failed",
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          ...(stageName !== null ? { stage: stageName } : {}),
+        });
         await this.enqueue(async () => {
           await this.finalizeWorkerExecution(execution, {
             outcome: "abnormal",
@@ -560,6 +573,7 @@ export async function startRuntimeService(
   const exitPromise = createExitPromise();
   let pollTimer: NodeJS.Timeout | null = null;
   let shuttingDown = false;
+  let pendingExitCode = 0;
 
   const scheduleNextPoll = () => {
     if (stopController.signal.aborted) {
@@ -580,7 +594,7 @@ export async function startRuntimeService(
       await logger.error("runtime_poll_failed", toErrorMessage(error), {
         error_code: ERROR_CODES.cliStartupFailed,
       });
-      resolveExit(exitPromise, 1);
+      pendingExitCode = 1;
       void shutdown();
     }
   };
@@ -589,7 +603,6 @@ export async function startRuntimeService(
     void logger.info("runtime_shutdown_signal", `received ${signal}`, {
       reason: signal,
     });
-    resolveExit(exitPromise, 0);
     void shutdown();
   };
 
@@ -667,7 +680,6 @@ export async function startRuntimeService(
       return;
     }
     shuttingDown = true;
-    resolveExit(exitPromise, 0);
     stopController.abort();
 
     if (pollTimer !== null) {
@@ -683,6 +695,7 @@ export async function startRuntimeService(
       workflowWatcher?.close() ?? Promise.resolve(),
     ]);
 
+    resolveExit(exitPromise, pendingExitCode);
     resolveClosed(exitPromise);
   };
 

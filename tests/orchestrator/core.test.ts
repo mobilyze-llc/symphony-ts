@@ -757,6 +757,248 @@ describe("max retry safety net", () => {
   });
 });
 
+describe("completed issue resume guard", () => {
+  it("does NOT re-dispatch a completed issue still in 'In Review' state", () => {
+    const config = createConfig({
+      agent: { maxConcurrentAgents: 2 },
+    });
+    // Include Resume and Blocked in active_states for this test
+    config.tracker.activeStates = ["Todo", "In Progress", "In Review", "Blocked", "Resume"];
+    config.escalationState = "Blocked";
+
+    const orchestrator = createOrchestrator({ config });
+
+    // Mark issue as completed (simulates having finished the pipeline)
+    orchestrator.getState().completed.add("1");
+
+    // Issue is still "In Review" on the tracker — should NOT be re-dispatched
+    const eligible = orchestrator.isDispatchEligible(
+      createIssue({ id: "1", identifier: "ISSUE-1", state: "In Review" }),
+    );
+
+    expect(eligible).toBe(false);
+    // completed flag should NOT be cleared
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+  });
+
+  it("does NOT re-dispatch a completed issue still in 'In Progress' state", () => {
+    const config = createConfig({
+      agent: { maxConcurrentAgents: 2 },
+    });
+    config.tracker.activeStates = ["Todo", "In Progress", "In Review", "Blocked", "Resume"];
+    config.escalationState = "Blocked";
+
+    const orchestrator = createOrchestrator({ config });
+    orchestrator.getState().completed.add("1");
+
+    const eligible = orchestrator.isDispatchEligible(
+      createIssue({ id: "1", identifier: "ISSUE-1", state: "In Progress" }),
+    );
+
+    expect(eligible).toBe(false);
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+  });
+
+  it("re-dispatches a completed issue moved to 'Resume' state", () => {
+    const config = createConfig({
+      agent: { maxConcurrentAgents: 2 },
+    });
+    config.tracker.activeStates = ["Todo", "In Progress", "In Review", "Blocked", "Resume"];
+    config.escalationState = "Blocked";
+
+    const orchestrator = createOrchestrator({ config });
+    orchestrator.getState().completed.add("1");
+
+    const eligible = orchestrator.isDispatchEligible(
+      createIssue({ id: "1", identifier: "ISSUE-1", state: "Resume" }),
+    );
+
+    expect(eligible).toBe(true);
+    // completed flag should be cleared
+    expect(orchestrator.getState().completed.has("1")).toBe(false);
+  });
+
+  it("re-dispatches a completed issue moved to 'Todo' state", () => {
+    const config = createConfig({
+      agent: { maxConcurrentAgents: 2 },
+    });
+    config.tracker.activeStates = ["Todo", "In Progress", "In Review", "Blocked", "Resume"];
+    config.escalationState = "Blocked";
+
+    const orchestrator = createOrchestrator({ config });
+    orchestrator.getState().completed.add("1");
+
+    const eligible = orchestrator.isDispatchEligible(
+      createIssue({ id: "1", identifier: "ISSUE-1", state: "Todo" }),
+    );
+
+    expect(eligible).toBe(true);
+    expect(orchestrator.getState().completed.has("1")).toBe(false);
+  });
+
+  it("skips terminal_state stop for worker in final active stage (merge → done)", async () => {
+    const config = createConfig();
+    config.stages = {
+      initialStage: "investigate",
+      stages: {
+        investigate: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: "merge", onApprove: null, onRework: null },
+          linearState: null,
+        },
+        merge: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: "done", onApprove: null, onRework: null },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: "Done",
+        },
+      },
+    };
+    const harness = createIntegrationHarness({ config });
+
+    // Dispatch the issue, which puts it in running state
+    await harness.orchestrator.pollTick();
+
+    // Simulate: worker is in the "merge" stage (final active stage before terminal "done")
+    harness.orchestrator.getState().issueStages["1"] = "merge";
+
+    // Issue transitions to Done (e.g., advanceStage fired updateIssueState)
+    harness.setStateSnapshots([
+      { id: "1", identifier: "ISSUE-1", state: "Done" },
+    ]);
+
+    const result = await harness.orchestrator.pollTick();
+
+    // Worker should NOT be stopped — it's in the final active stage
+    expect(result.stopRequests).toEqual([]);
+    expect(harness.stopCalls).toEqual([]);
+  });
+
+  it("stops worker in non-final stage when issue reaches terminal state", async () => {
+    const config = createConfig();
+    config.stages = {
+      initialStage: "investigate",
+      stages: {
+        investigate: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: "merge", onApprove: null, onRework: null },
+          linearState: null,
+        },
+        merge: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: "done", onApprove: null, onRework: null },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: "Done",
+        },
+      },
+    };
+    const harness = createIntegrationHarness({ config });
+
+    // Dispatch the issue
+    await harness.orchestrator.pollTick();
+
+    // Worker is in "investigate" stage (NOT the final active stage)
+    harness.orchestrator.getState().issueStages["1"] = "investigate";
+
+    // Issue manually moved to Done by a human
+    harness.setStateSnapshots([
+      { id: "1", identifier: "ISSUE-1", state: "Done" },
+    ]);
+
+    const result = await harness.orchestrator.pollTick();
+
+    // Worker SHOULD be stopped — investigate is not the final active stage
+    expect(result.stopRequests).toEqual([
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        cleanupWorkspace: true,
+        reason: "terminal_state",
+      },
+    ]);
+  });
+
+  it("does NOT re-dispatch a completed issue in escalation state ('Blocked')", () => {
+    const config = createConfig({
+      agent: { maxConcurrentAgents: 2 },
+    });
+    config.tracker.activeStates = ["Todo", "In Progress", "In Review", "Blocked", "Resume"];
+    config.escalationState = "Blocked";
+
+    const orchestrator = createOrchestrator({ config });
+    orchestrator.getState().completed.add("1");
+
+    const eligible = orchestrator.isDispatchEligible(
+      createIssue({ id: "1", identifier: "ISSUE-1", state: "Blocked" }),
+    );
+
+    expect(eligible).toBe(false);
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+  });
+});
+
 function createOrchestrator(overrides?: {
   config?: ResolvedWorkflowConfig;
   tracker?: IssueTracker;

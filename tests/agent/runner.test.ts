@@ -559,6 +559,66 @@ describe("AgentRunner", () => {
     expect(result.lastTurn?.message).toContain("[STAGE_FAILED: verify]");
   });
 
+  it("throws AgentRunnerError when a turn fails without a STAGE_FAILED signal", async () => {
+    const root = await createRoot();
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker,
+      createCodexClient: (input) =>
+        createStubCodexClient([], input, {
+          statuses: ["failed"],
+          messages: ["The operation was aborted"],
+        }),
+    });
+
+    await expect(
+      runner.run({
+        issue: ISSUE_FIXTURE,
+        attempt: null,
+      }),
+    ).rejects.toMatchObject({
+      name: "AgentRunnerError",
+      status: "failed",
+      failedPhase: "initializing_session",
+      message: "The operation was aborted",
+    } satisfies Partial<AgentRunnerError>);
+
+    // Should NOT have called refreshIssueState since we threw before it
+    expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
+  });
+
+  it("returns succeeded when infrastructure marks turn failed but agent emitted STAGE_FAILED signal", async () => {
+    const root = await createRoot();
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker,
+      createCodexClient: (input) =>
+        createStubCodexClient([], input, {
+          statuses: ["failed"],
+          messages: ["Tests failed.\n[STAGE_FAILED: verify]\nSee logs."],
+        }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    // STAGE_FAILED is an intentional agent signal — runner should succeed
+    expect(result.runAttempt.status).toBe("succeeded");
+    expect(result.lastTurn?.message).toContain("[STAGE_FAILED: verify]");
+  });
+
   it("cancels the run when the orchestrator aborts the worker signal", async () => {
     const root = await createRoot();
     const close = vi.fn().mockResolvedValue(undefined);
@@ -626,6 +686,7 @@ function createStubCodexClient(
   overrides?: Partial<{
     close: ReturnType<typeof vi.fn>;
     statuses: Array<"completed" | "failed" | "cancelled">;
+    messages: Array<string | null>;
     startSession: (input: { prompt: string; title: string }) => Promise<{
       status: "completed" | "failed" | "cancelled";
       threadId: string;
@@ -643,6 +704,7 @@ function createStubCodexClient(
 ) {
   let turn = 0;
   const statuses = overrides?.statuses ?? ["completed"];
+  const messages = overrides?.messages;
 
   return {
     async startSession({ prompt, title }: { prompt: string; title: string }) {
@@ -673,7 +735,7 @@ function createStubCodexClient(
         rateLimits: {
           requestsRemaining: 10 - turn,
         },
-        message: `turn ${turn}`,
+        message: messages ? messages[turn - 1] ?? `turn ${turn}` : `turn ${turn}`,
       };
     },
     async continueTurn(prompt: string) {
@@ -700,7 +762,7 @@ function createStubCodexClient(
         rateLimits: {
           requestsRemaining: 10 - turn,
         },
-        message: `turn ${turn}`,
+        message: messages ? messages[turn - 1] ?? `turn ${turn}` : `turn ${turn}`,
       };
     },
     close: overrides?.close ?? vi.fn().mockResolvedValue(undefined),
