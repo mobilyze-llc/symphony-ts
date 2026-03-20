@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 import type { CodexClientEvent } from "../../src/codex/app-server-client.js";
 import { ClaudeCodeRunner, resolveClaudeModelId } from "../../src/runners/claude-code-runner.js";
@@ -12,11 +12,18 @@ vi.mock("ai-sdk-provider-claude-code", () => ({
   claudeCode: vi.fn(() => "mock-claude-model"),
 }));
 
+// Mock node:fs for heartbeat tests
+vi.mock("node:fs", () => ({
+  statSync: vi.fn(() => ({ mtimeMs: 1000 })),
+}));
+
 import { generateText } from "ai";
 import { claudeCode } from "ai-sdk-provider-claude-code";
+import { statSync } from "node:fs";
 
 const mockGenerateText = vi.mocked(generateText);
 const mockClaudeCode = vi.mocked(claudeCode);
+const mockStatSync = vi.mocked(statSync);
 
 describe("ClaudeCodeRunner", () => {
   it("implements AgentRunnerCodexClient interface (startSession, continueTurn, close)", () => {
@@ -301,6 +308,180 @@ describe("ClaudeCodeRunner", () => {
     rejectFn!(new Error("aborted"));
     const result = await turnPromise;
     expect(result.status).toBe("failed");
+  });
+});
+
+describe("ClaudeCodeRunner heartbeat", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mockStatSync.mockReturnValue({ mtimeMs: 1000 } as never);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("emits activity_heartbeat when git index mtime changes during execution", async () => {
+    let resolveFn: (value: unknown) => void;
+    mockGenerateText.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFn = resolve;
+      }) as never,
+    );
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+      heartbeatIntervalMs: 5000,
+    });
+
+    const turnPromise = runner.startSession({ prompt: "long task", title: "test" });
+
+    // Initial poll — no change, no heartbeat
+    vi.advanceTimersByTime(5000);
+    expect(events.filter((e) => e.event === "activity_heartbeat")).toHaveLength(0);
+
+    // Simulate a file change
+    mockStatSync.mockReturnValue({ mtimeMs: 2000 } as never);
+    vi.advanceTimersByTime(5000);
+    const heartbeats = events.filter((e) => e.event === "activity_heartbeat");
+    expect(heartbeats).toHaveLength(1);
+    expect(heartbeats[0]!.message).toBe("workspace file change detected");
+
+    // Resolve the turn
+    resolveFn!({
+      text: "done",
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    await turnPromise;
+  });
+
+  it("does not emit heartbeat when git index mtime stays the same", async () => {
+    let resolveFn: (value: unknown) => void;
+    mockGenerateText.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFn = resolve;
+      }) as never,
+    );
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+      heartbeatIntervalMs: 5000,
+    });
+
+    const turnPromise = runner.startSession({ prompt: "task", title: "test" });
+
+    // Advance through multiple intervals with no mtime change
+    vi.advanceTimersByTime(20000);
+    expect(events.filter((e) => e.event === "activity_heartbeat")).toHaveLength(0);
+
+    resolveFn!({
+      text: "done",
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    await turnPromise;
+  });
+
+  it("clears heartbeat timer after turn completes", async () => {
+    let resolveFn: (value: unknown) => void;
+    mockGenerateText.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFn = resolve;
+      }) as never,
+    );
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+      heartbeatIntervalMs: 5000,
+    });
+
+    const turnPromise = runner.startSession({ prompt: "task", title: "test" });
+
+    resolveFn!({
+      text: "done",
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    await turnPromise;
+
+    // After turn completes, simulate file changes — should NOT emit heartbeats
+    mockStatSync.mockReturnValue({ mtimeMs: 9999 } as never);
+    vi.advanceTimersByTime(10000);
+    expect(events.filter((e) => e.event === "activity_heartbeat")).toHaveLength(0);
+  });
+
+  it("does not start heartbeat when heartbeatIntervalMs is 0", async () => {
+    let resolveFn: (value: unknown) => void;
+    mockGenerateText.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFn = resolve;
+      }) as never,
+    );
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+      heartbeatIntervalMs: 0,
+    });
+
+    const turnPromise = runner.startSession({ prompt: "task", title: "test" });
+
+    mockStatSync.mockReturnValue({ mtimeMs: 9999 } as never);
+    vi.advanceTimersByTime(20000);
+    expect(events.filter((e) => e.event === "activity_heartbeat")).toHaveLength(0);
+
+    resolveFn!({
+      text: "done",
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    await turnPromise;
+  });
+
+  it("emits multiple heartbeats for successive file changes", async () => {
+    let resolveFn: (value: unknown) => void;
+    mockGenerateText.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFn = resolve;
+      }) as never,
+    );
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+      heartbeatIntervalMs: 5000,
+    });
+
+    const turnPromise = runner.startSession({ prompt: "task", title: "test" });
+
+    // First change
+    mockStatSync.mockReturnValue({ mtimeMs: 2000 } as never);
+    vi.advanceTimersByTime(5000);
+
+    // Second change
+    mockStatSync.mockReturnValue({ mtimeMs: 3000 } as never);
+    vi.advanceTimersByTime(5000);
+
+    // No change on third tick
+    vi.advanceTimersByTime(5000);
+
+    expect(events.filter((e) => e.event === "activity_heartbeat")).toHaveLength(2);
+
+    resolveFn!({
+      text: "done",
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    await turnPromise;
   });
 });
 

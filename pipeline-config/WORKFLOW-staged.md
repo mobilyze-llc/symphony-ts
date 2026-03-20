@@ -26,6 +26,9 @@ agent:
   max_turns: 30
   max_retry_backoff_ms: 300000
 
+codex:
+  stall_timeout_ms: 900000
+
 runner:
   kind: claude-code
   model: claude-sonnet-4-5

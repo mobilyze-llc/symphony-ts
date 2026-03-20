@@ -33,7 +33,8 @@ export interface CodexClientEvent {
     | "unsupported_tool_call"
     | "notification"
     | "other_message"
-    | "malformed";
+    | "malformed"
+    | "activity_heartbeat";
   timestamp: string;
   codexAppServerPid: string | null;
   sessionId?: string | null;
