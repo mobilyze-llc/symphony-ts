@@ -213,6 +213,42 @@ describe("ClaudeCodeRunner", () => {
       outputTokens: 0,
       totalTokens: 0,
     });
+    // detail fields should be absent (not 0) when provider doesn't report them
+    expect(result.usage?.cacheReadTokens).toBeUndefined();
+    expect(result.usage?.cacheWriteTokens).toBeUndefined();
+    expect(result.usage?.noCacheTokens).toBeUndefined();
+    expect(result.usage?.reasoningTokens).toBeUndefined();
+  });
+
+  it("extracts cache and reasoning token details from inputTokenDetails / outputTokenDetails", async () => {
+    mockGenerateText.mockResolvedValueOnce({
+      text: "result",
+      usage: {
+        inputTokens: 100,
+        outputTokens: 50,
+        totalTokens: 150,
+        inputTokenDetails: {
+          cacheReadTokens: 20,
+          cacheWriteTokens: 10,
+          noCacheTokens: 70,
+        },
+        outputTokenDetails: {
+          textTokens: 40,
+          reasoningTokens: 10,
+        },
+      },
+    } as never);
+
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+    });
+
+    const result = await runner.startSession({ prompt: "p", title: "t" });
+    expect(result.usage?.cacheReadTokens).toBe(20);
+    expect(result.usage?.cacheWriteTokens).toBe(10);
+    expect(result.usage?.noCacheTokens).toBe(70);
+    expect(result.usage?.reasoningTokens).toBe(10);
   });
 
   it("maps full Anthropic model IDs to short provider names", async () => {

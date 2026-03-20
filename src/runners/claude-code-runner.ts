@@ -3,8 +3,12 @@ import { join } from "node:path";
 import { generateText } from "ai";
 import { claudeCode } from "ai-sdk-provider-claude-code";
 
-import type { CodexClientEvent, CodexTurnResult } from "../codex/app-server-client.js";
 import type { AgentRunnerCodexClient } from "../agent/runner.js";
+import type {
+  CodexClientEvent,
+  CodexTurnResult,
+  CodexUsage,
+} from "../codex/app-server-client.js";
 
 // ai-sdk-provider-claude-code uses short model names, not full Anthropic IDs.
 // Map standard names to provider-expected short names.
@@ -50,10 +54,7 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
     return this.executeTurn(input.prompt, input.title);
   }
 
-  async continueTurn(
-    prompt: string,
-    title: string,
-  ): Promise<CodexTurnResult> {
+  async continueTurn(prompt: string, title: string): Promise<CodexTurnResult> {
     return this.executeTurn(prompt, title);
   }
 
@@ -99,15 +100,17 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
           const currentGitMtimeMs = getMtimeMs(gitIndexPath);
           const currentWorkspaceMtimeMs = getMtimeMs(workspacePath);
           const gitChanged = currentGitMtimeMs !== lastGitMtimeMs;
-          const workspaceChanged = currentWorkspaceMtimeMs !== lastWorkspaceMtimeMs;
+          const workspaceChanged =
+            currentWorkspaceMtimeMs !== lastWorkspaceMtimeMs;
           if (gitChanged || workspaceChanged) {
             lastGitMtimeMs = currentGitMtimeMs;
             lastWorkspaceMtimeMs = currentWorkspaceMtimeMs;
-            const source = gitChanged && workspaceChanged
-              ? "git index and workspace dir"
-              : gitChanged
-                ? "git index"
-                : "workspace dir";
+            const source =
+              gitChanged && workspaceChanged
+                ? "git index and workspace dir"
+                : gitChanged
+                  ? "git index"
+                  : "workspace dir";
             this.emit({
               event: "activity_heartbeat",
               sessionId: fullSessionId,
@@ -129,10 +132,24 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
         abortSignal: controller.signal,
       });
 
-      const usage = {
+      const usage: CodexUsage = {
         inputTokens: result.usage.inputTokens ?? 0,
         outputTokens: result.usage.outputTokens ?? 0,
         totalTokens: result.usage.totalTokens ?? 0,
+        ...(result.usage.inputTokenDetails?.cacheReadTokens !== undefined
+          ? { cacheReadTokens: result.usage.inputTokenDetails.cacheReadTokens }
+          : {}),
+        ...(result.usage.inputTokenDetails?.cacheWriteTokens !== undefined
+          ? {
+              cacheWriteTokens: result.usage.inputTokenDetails.cacheWriteTokens,
+            }
+          : {}),
+        ...(result.usage.inputTokenDetails?.noCacheTokens !== undefined
+          ? { noCacheTokens: result.usage.inputTokenDetails.noCacheTokens }
+          : {}),
+        ...(result.usage.outputTokenDetails?.reasoningTokens !== undefined
+          ? { reasoningTokens: result.usage.outputTokenDetails.reasoningTokens }
+          : {}),
       };
 
       this.emit({

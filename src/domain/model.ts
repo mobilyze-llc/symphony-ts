@@ -90,6 +90,10 @@ export interface LiveSession {
   codexInputTokens: number;
   codexOutputTokens: number;
   codexTotalTokens: number;
+  codexCacheReadTokens: number;
+  codexCacheWriteTokens: number;
+  codexNoCacheTokens: number;
+  codexReasoningTokens: number;
   lastReportedInputTokens: number;
   lastReportedOutputTokens: number;
   lastReportedTotalTokens: number;
@@ -109,6 +113,10 @@ export interface CodexTotals {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  noCacheTokens: number;
+  reasoningTokens: number;
   secondsRunning: number;
 }
 
@@ -184,6 +192,10 @@ export function createEmptyLiveSession(): LiveSession {
     codexInputTokens: 0,
     codexOutputTokens: 0,
     codexTotalTokens: 0,
+    codexCacheReadTokens: 0,
+    codexCacheWriteTokens: 0,
+    codexNoCacheTokens: 0,
+    codexReasoningTokens: 0,
     lastReportedInputTokens: 0,
     lastReportedOutputTokens: 0,
     lastReportedTotalTokens: 0,
@@ -206,6 +218,10 @@ export function createInitialOrchestratorState(input: {
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      noCacheTokens: 0,
+      reasoningTokens: 0,
       secondsRunning: 0,
     },
     codexRateLimits: null,

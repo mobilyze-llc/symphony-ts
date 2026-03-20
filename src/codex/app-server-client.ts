@@ -16,6 +16,10 @@ export interface CodexUsage {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  noCacheTokens?: number;
+  reasoningTokens?: number;
 }
 
 export type CodexTurnStatus = "completed" | "failed" | "cancelled";

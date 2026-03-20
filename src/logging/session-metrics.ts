@@ -27,6 +27,10 @@ export interface SessionTelemetryUpdateResult {
   inputTokensDelta: number;
   outputTokensDelta: number;
   totalTokensDelta: number;
+  cacheReadTokensDelta: number;
+  cacheWriteTokensDelta: number;
+  noCacheTokensDelta: number;
+  reasoningTokensDelta: number;
   rateLimitsUpdated: boolean;
 }
 
@@ -57,6 +61,10 @@ export function applyCodexEventToSession(
       inputTokensDelta: 0,
       outputTokensDelta: 0,
       totalTokensDelta: 0,
+      cacheReadTokensDelta: 0,
+      cacheWriteTokensDelta: 0,
+      noCacheTokensDelta: 0,
+      reasoningTokensDelta: 0,
       rateLimitsUpdated: event.rateLimits !== undefined,
     };
   }
@@ -78,9 +86,30 @@ export function applyCodexEventToSession(
     totalTokens,
   );
 
+  const cacheReadTokensDelta =
+    event.usage.cacheReadTokens !== undefined
+      ? normalizeAbsoluteCounter(event.usage.cacheReadTokens)
+      : 0;
+  const cacheWriteTokensDelta =
+    event.usage.cacheWriteTokens !== undefined
+      ? normalizeAbsoluteCounter(event.usage.cacheWriteTokens)
+      : 0;
+  const noCacheTokensDelta =
+    event.usage.noCacheTokens !== undefined
+      ? normalizeAbsoluteCounter(event.usage.noCacheTokens)
+      : 0;
+  const reasoningTokensDelta =
+    event.usage.reasoningTokens !== undefined
+      ? normalizeAbsoluteCounter(event.usage.reasoningTokens)
+      : 0;
+
   session.codexInputTokens = inputTokens;
   session.codexOutputTokens = outputTokens;
   session.codexTotalTokens = totalTokens;
+  session.codexCacheReadTokens += cacheReadTokensDelta;
+  session.codexCacheWriteTokens += cacheWriteTokensDelta;
+  session.codexNoCacheTokens += noCacheTokensDelta;
+  session.codexReasoningTokens += reasoningTokensDelta;
   session.lastReportedInputTokens = inputTokens;
   session.lastReportedOutputTokens = outputTokens;
   session.lastReportedTotalTokens = totalTokens;
@@ -89,6 +118,10 @@ export function applyCodexEventToSession(
     inputTokensDelta,
     outputTokensDelta,
     totalTokensDelta,
+    cacheReadTokensDelta,
+    cacheWriteTokensDelta,
+    noCacheTokensDelta,
+    reasoningTokensDelta,
     rateLimitsUpdated: event.rateLimits !== undefined,
   };
 }
@@ -103,6 +136,10 @@ export function applyCodexEventToOrchestratorState(
   state.codexTotals.inputTokens += result.inputTokensDelta;
   state.codexTotals.outputTokens += result.outputTokensDelta;
   state.codexTotals.totalTokens += result.totalTokensDelta;
+  state.codexTotals.cacheReadTokens += result.cacheReadTokensDelta;
+  state.codexTotals.cacheWriteTokens += result.cacheWriteTokensDelta;
+  state.codexTotals.noCacheTokens += result.noCacheTokensDelta;
+  state.codexTotals.reasoningTokens += result.reasoningTokensDelta;
 
   if (event.rateLimits !== undefined) {
     state.codexRateLimits = event.rateLimits;

@@ -3,10 +3,17 @@ import { access, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { Writable } from "node:stream";
 
-import type { AgentRunInput, AgentRunResult, AgentRunnerEvent } from "../agent/runner.js";
+import type {
+  AgentRunInput,
+  AgentRunResult,
+  AgentRunnerEvent,
+} from "../agent/runner.js";
 import { AgentRunner } from "../agent/runner.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
-import type { ResolvedWorkflowConfig, StageDefinition } from "../config/types.js";
+import type {
+  ResolvedWorkflowConfig,
+  StageDefinition,
+} from "../config/types.js";
 import { WorkflowWatcher } from "../config/workflow-watch.js";
 import type { Issue, RetryEntry, RunningEntry } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
@@ -168,18 +175,33 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       ...(this.tracker instanceof LinearTrackerClient
         ? {
             postComment: async (issueId: string, body: string) => {
-              await (this.tracker as LinearTrackerClient).postComment(issueId, body);
+              await (this.tracker as LinearTrackerClient).postComment(
+                issueId,
+                body,
+              );
             },
-            updateIssueState: async (issueId: string, issueIdentifier: string, stateName: string) => {
+            updateIssueState: async (
+              issueId: string,
+              issueIdentifier: string,
+              stateName: string,
+            ) => {
               const teamKey = issueIdentifier.split("-")[0] ?? issueIdentifier;
               await (this.tracker as LinearTrackerClient).updateIssueState(
-                issueId, stateName, teamKey,
+                issueId,
+                stateName,
+                teamKey,
               );
             },
           }
         : {}),
       spawnWorker: async ({ issue, attempt, stage, stageName, reworkCount }) =>
-        this.spawnWorkerExecution(issue, attempt, stage, stageName, reworkCount),
+        this.spawnWorkerExecution(
+          issue,
+          attempt,
+          stage,
+          stageName,
+          reworkCount,
+        ),
       stopRunningIssue: async (input) => {
         await this.stopWorkerExecution(input.issueId, {
           issueId: input.issueId,
@@ -194,10 +216,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           issue,
           stage,
           workspacePath: workspaceInfo.workspacePath,
-          createReviewerClient: (reviewer: import("../config/types.js").ReviewerDefinition) => {
-            const kind = (reviewer.runner ?? options.config.runner.kind) as RunnerKind;
+          createReviewerClient: (
+            reviewer: import("../config/types.js").ReviewerDefinition,
+          ) => {
+            const kind = (reviewer.runner ??
+              options.config.runner.kind) as RunnerKind;
             if (!isAiSdkRunner(kind)) {
-              throw new Error(`Reviewer runner kind "${kind}" is not an AI SDK runner — only claude-code and gemini are supported for ensemble review.`);
+              throw new Error(
+                `Reviewer runner kind "${kind}" is not an AI SDK runner — only claude-code and gemini are supported for ensemble review.`,
+              );
             }
             return createRunnerFromConfig({
               config: { kind, model: reviewer.model },
@@ -368,12 +395,16 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       completion: Promise.resolve(),
     };
 
-    await this.logger?.info("agent_runner_starting", "Agent runner starting for issue.", {
-      outcome: "started",
-      issue_id: issue.id,
-      issue_identifier: issue.identifier,
-      ...(stageName !== null ? { stage: stageName } : {}),
-    });
+    await this.logger?.info(
+      "agent_runner_starting",
+      "Agent runner starting for issue.",
+      {
+        outcome: "started",
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        ...(stageName !== null ? { stage: stageName } : {}),
+      },
+    );
 
     const completion = this.agentRunner
       .run({
@@ -467,9 +498,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const lastTurnMessage = execution.lastResult?.lastTurn?.message;
     const fallbackMessage = execution.lastResult?.liveSession?.lastCodexMessage;
     const agentMessage =
-      (lastTurnMessage !== null && lastTurnMessage !== undefined && lastTurnMessage !== ""
+      (lastTurnMessage !== null &&
+      lastTurnMessage !== undefined &&
+      lastTurnMessage !== ""
         ? lastTurnMessage
-        : fallbackMessage !== null && fallbackMessage !== undefined && fallbackMessage !== ""
+        : fallbackMessage !== null &&
+            fallbackMessage !== undefined &&
+            fallbackMessage !== ""
           ? fallbackMessage
           : undefined) ?? undefined;
 
@@ -478,7 +513,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       outcome: input.outcome,
       ...(input.reason === undefined ? {} : { reason: input.reason }),
       endedAt: input.endedAt ?? this.now(),
-      ...(agentMessage === undefined || agentMessage === null ? {} : { agentMessage }),
+      ...(agentMessage === undefined || agentMessage === null
+        ? {}
+        : { agentMessage }),
     });
   }
 
@@ -987,6 +1024,18 @@ async function logAgentEvent(
           input_tokens: event.usage.inputTokens,
           output_tokens: event.usage.outputTokens,
           total_tokens: event.usage.totalTokens,
+          ...(event.usage.cacheReadTokens !== undefined
+            ? { cache_read_tokens: event.usage.cacheReadTokens }
+            : {}),
+          ...(event.usage.cacheWriteTokens !== undefined
+            ? { cache_write_tokens: event.usage.cacheWriteTokens }
+            : {}),
+          ...(event.usage.noCacheTokens !== undefined
+            ? { no_cache_tokens: event.usage.noCacheTokens }
+            : {}),
+          ...(event.usage.reasoningTokens !== undefined
+            ? { reasoning_tokens: event.usage.reasoningTokens }
+            : {}),
         }),
   });
 }

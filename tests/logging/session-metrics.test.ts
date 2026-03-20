@@ -64,6 +64,10 @@ describe("session metrics", () => {
       inputTokens: 14,
       outputTokens: 9,
       totalTokens: 23,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      noCacheTokens: 0,
+      reasoningTokens: 0,
       secondsRunning: 0,
     });
     expect(state.codexRateLimits).toEqual({
@@ -92,6 +96,116 @@ describe("session metrics", () => {
 
     expect(state.codexTotals.secondsRunning).toBe(5.25);
     expect(secondsRunning).toBe(15.75);
+  });
+
+  it("accumulates cache and reasoning token details when present", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 3,
+    });
+    const running = createRunningEntry();
+
+    const eventWithDetails = createEvent("turn_completed", {
+      usage: {
+        inputTokens: 20,
+        outputTokens: 10,
+        totalTokens: 30,
+        cacheReadTokens: 5,
+        cacheWriteTokens: 3,
+        noCacheTokens: 12,
+        reasoningTokens: 4,
+      },
+    });
+
+    applyCodexEventToOrchestratorState(state, running, eventWithDetails);
+
+    expect(running.codexCacheReadTokens).toBe(5);
+    expect(running.codexCacheWriteTokens).toBe(3);
+    expect(running.codexNoCacheTokens).toBe(12);
+    expect(running.codexReasoningTokens).toBe(4);
+    expect(state.codexTotals.cacheReadTokens).toBe(5);
+    expect(state.codexTotals.cacheWriteTokens).toBe(3);
+    expect(state.codexTotals.noCacheTokens).toBe(12);
+    expect(state.codexTotals.reasoningTokens).toBe(4);
+  });
+
+  it("leaves detail token counts at 0 when usage has no detail fields", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 3,
+    });
+    const running = createRunningEntry();
+
+    const eventWithoutDetails = createEvent("turn_completed", {
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        totalTokens: 15,
+      },
+    });
+
+    applyCodexEventToOrchestratorState(state, running, eventWithoutDetails);
+
+    expect(running.codexCacheReadTokens).toBe(0);
+    expect(running.codexCacheWriteTokens).toBe(0);
+    expect(running.codexNoCacheTokens).toBe(0);
+    expect(running.codexReasoningTokens).toBe(0);
+    expect(state.codexTotals.cacheReadTokens).toBe(0);
+    expect(state.codexTotals.cacheWriteTokens).toBe(0);
+    expect(state.codexTotals.noCacheTokens).toBe(0);
+    expect(state.codexTotals.reasoningTokens).toBe(0);
+  });
+
+  it("accumulates detail tokens across multiple events", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 3,
+    });
+    const running = createRunningEntry();
+
+    const firstEvent = createEvent("notification", {
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        totalTokens: 15,
+        cacheReadTokens: 3,
+        reasoningTokens: 2,
+      },
+    });
+    const secondEvent = createEvent("turn_completed", {
+      usage: {
+        inputTokens: 20,
+        outputTokens: 10,
+        totalTokens: 30,
+        cacheReadTokens: 7,
+        reasoningTokens: 6,
+      },
+    });
+
+    applyCodexEventToOrchestratorState(state, running, firstEvent);
+    applyCodexEventToOrchestratorState(state, running, secondEvent);
+
+    // Detail tokens are accumulated additively (not absolute like input/output/total)
+    expect(running.codexCacheReadTokens).toBe(10);
+    expect(running.codexReasoningTokens).toBe(8);
+    expect(state.codexTotals.cacheReadTokens).toBe(10);
+    expect(state.codexTotals.reasoningTokens).toBe(8);
+  });
+
+  it("returns zero deltas for detail tokens when no usage on event", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 3,
+    });
+    const running = createRunningEntry();
+
+    const noUsageEvent = createEvent("notification");
+    const result = applyCodexEventToOrchestratorState(state, running, noUsageEvent);
+
+    expect(result.cacheReadTokensDelta).toBe(0);
+    expect(result.cacheWriteTokensDelta).toBe(0);
+    expect(result.noCacheTokensDelta).toBe(0);
+    expect(result.reasoningTokensDelta).toBe(0);
   });
 
   it("summarizes codex events for snapshot and log surfaces", () => {

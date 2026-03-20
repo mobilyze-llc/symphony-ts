@@ -67,6 +67,10 @@ describe("domain model", () => {
       codexInputTokens: 0,
       codexOutputTokens: 0,
       codexTotalTokens: 0,
+      codexCacheReadTokens: 0,
+      codexCacheWriteTokens: 0,
+      codexNoCacheTokens: 0,
+      codexReasoningTokens: 0,
       lastReportedInputTokens: 0,
       lastReportedOutputTokens: 0,
       lastReportedTotalTokens: 0,
@@ -88,6 +92,10 @@ describe("domain model", () => {
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      noCacheTokens: 0,
+      reasoningTokens: 0,
       secondsRunning: 0,
     });
     expect(state.codexRateLimits).toBeNull();
