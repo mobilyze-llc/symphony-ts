@@ -99,45 +99,6 @@ resolve_all_states() {
   TODO_STATE_ID=$(echo "$states_json" | jq -r '.data.workflowStates.nodes[] | select(.name == "Todo") | .id' | head -1)
   BACKLOG_STATE_ID=$(echo "$states_json" | jq -r '.data.workflowStates.nodes[] | select(.name == "Backlog") | .id' | head -1)
 }
-
-# ── Post-creation verification ────────────────────────────────────────────────
-# Queries an issue by ID and confirms project.slugId and (for sub-issues) parent.id
-# match expected values. Logs warnings on mismatch; never exits.
-# Args: $1=issue_uuid, $2=expected_project_slug, $3=expected_parent_id (optional)
-verify_issue_creation() {
-  local issue_uuid="$1"
-  local expected_slug="$2"
-  local expected_parent_id="${3:-}"
-
-  # Skip verification in dry-run mode (no API calls)
-  if [[ "$DRY_RUN" == true ]]; then
-    return 0
-  fi
-
-  local verify_result
-  verify_result=$($LINEAR_CLI api query -o json --quiet --compact \
-    -v "issueId=$issue_uuid" \
-    'query($issueId: String!) { issue(id: $issueId) { project { slugId } parent { id } } }' 2>/dev/null) || true
-
-  local actual_slug
-  actual_slug=$(echo "$verify_result" | jq -r '.data.issue.project.slugId // empty')
-  if [[ -n "$actual_slug" && "$actual_slug" != "$expected_slug" ]]; then
-    echo "WARNING: project mismatch on $issue_uuid — expected slugId=$expected_slug, got $actual_slug" >&2
-  elif [[ -z "$actual_slug" ]]; then
-    echo "WARNING: VERIFY FAIL — could not confirm project.slugId for $issue_uuid" >&2
-  fi
-
-  if [[ -n "$expected_parent_id" ]]; then
-    local actual_parent
-    actual_parent=$(echo "$verify_result" | jq -r '.data.issue.parent.id // empty')
-    if [[ -n "$actual_parent" && "$actual_parent" != "$expected_parent_id" ]]; then
-      echo "WARNING: parent mismatch on $issue_uuid — expected parent=$expected_parent_id, got $actual_parent" >&2
-    elif [[ -z "$actual_parent" ]]; then
-      echo "WARNING: VERIFY FAIL — could not confirm parent.id for $issue_uuid" >&2
-    fi
-  fi
-}
-
 # ── Trivial mode: single issue in Todo, no spec ─────────────────────────────
 
 if [[ "$TRIVIAL" == true ]]; then
@@ -198,7 +159,7 @@ if [[ "$TRIVIAL" == true ]]; then
   trap 'rm -f "$TRIVIAL_GQL_TMPFILE"' EXIT
   if [[ -n "$TRIVIAL_DESC" ]]; then
     cat > "$TRIVIAL_GQL_TMPFILE" <<'GQLEOF'
-mutation($title: String!, $description: String, $teamId: String!, $stateId: String!, $projectId: String!) {
+mutation($title: String!, $description: String, $teamId: ID!, $stateId: ID!, $projectId: ID!) {
   issueCreate(input: {
     teamId: $teamId
     title: $title
@@ -220,7 +181,7 @@ GQLEOF
       - < "$TRIVIAL_GQL_TMPFILE" 2>&1)
   else
     cat > "$TRIVIAL_GQL_TMPFILE" <<'GQLEOF'
-mutation($title: String!, $teamId: String!, $stateId: String!, $projectId: String!) {
+mutation($title: String!, $teamId: ID!, $stateId: ID!, $projectId: ID!) {
   issueCreate(input: {
     teamId: $teamId
     title: $title
@@ -610,7 +571,7 @@ if [[ "$DRY_RUN" == true ]]; then
   [[ $overlap_count -eq 0 ]] && echo "    (none)"
 
   echo ""
-  echo "=== Dry run complete: 1 parent + $TOTAL sub-issues (Backlog → Todo) + $relation_count relations would be created ==="
+  echo "=== Dry run complete: 1 parent + $TOTAL sub-issues (Backlog→Todo) + $relation_count relations would be created ==="
   exit 0
 fi
 
@@ -634,16 +595,12 @@ else
 fi
 echo "Draft state: ${DRAFT_STATE_NAME:-<default>} (ID: ${DRAFT_STATE_ID:-<default>})"
 
-# Sub-issues → Todo state (fallback to Backlog)
+# Sub-issues → Todo state (always)
 TODO_STATE_NAME=""
 if [[ -n "$TODO_STATE_ID" ]]; then
   TODO_STATE_NAME="Todo"
-elif [[ -n "$BACKLOG_STATE_ID" ]]; then
-  TODO_STATE_ID="$BACKLOG_STATE_ID"
-  TODO_STATE_NAME="Backlog"
-  echo "WARNING: 'Todo' state not found for team. Falling back to 'Backlog'..." >&2
 else
-  echo "WARNING: Neither 'Todo' nor 'Backlog' state found. Sub-issues will use default state." >&2
+  echo "WARNING: 'Todo' state not found for team. Sub-issues will use default state." >&2
 fi
 echo "Todo state: ${TODO_STATE_NAME:-<default>} (ID: ${TODO_STATE_ID:-<default>})"
 
@@ -660,7 +617,7 @@ if [[ -n "$UPDATE_ISSUE_ID" ]]; then
   GQL_TMPFILE=$(mktemp)
   if [[ -n "$DRAFT_STATE_ID" ]]; then
     cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($issueId: String!, $title: String!, $description: String!, $stateId: String!) {
+mutation($issueId: ID!, $title: String!, $description: String!, $stateId: ID!) {
   issueUpdate(id: $issueId, input: {
     title: $title
     description: $description
@@ -679,7 +636,7 @@ GQLEOF
       - < "$GQL_TMPFILE" 2>&1)
   else
     cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($issueId: String!, $title: String!, $description: String!) {
+mutation($issueId: ID!, $title: String!, $description: String!) {
   issueUpdate(id: $issueId, input: {
     title: $title
     description: $description
@@ -720,7 +677,7 @@ else
   GQL_TMPFILE=$(mktemp)
   if [[ -n "$DRAFT_STATE_ID" ]]; then
     cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($title: String!, $description: String!, $teamId: String!, $projectId: String!, $stateId: String!) {
+mutation($title: String!, $description: String!, $teamId: ID!, $projectId: ID!, $stateId: ID!) {
   issueCreate(input: {
     title: $title
     description: $description
@@ -742,7 +699,7 @@ GQLEOF
       - < "$GQL_TMPFILE" 2>&1)
   else
     cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($title: String!, $description: String!, $teamId: String!, $projectId: String!) {
+mutation($title: String!, $description: String!, $teamId: ID!, $projectId: ID!) {
   issueCreate(input: {
     title: $title
     description: $description
@@ -790,101 +747,7 @@ if [[ "$PARENT_ONLY" == true ]]; then
   exit 0
 fi
 
-# ── Create sub-issues ────────────────────────────────────────────────────────
-
-declare -a SUB_ISSUE_IDS SUB_ISSUE_IDENTIFIERS
-echo ""
-echo "Creating $TOTAL sub-issues..."
-
-for ((i=0; i<TOTAL; i++)); do
-  title="${TASK_TITLES[$i]}"
-  sub_body=$(build_sub_issue_body "$i")
-
-  # Extract priority if present
-  pri_num=$(echo "${TASK_BODIES[$i]}" | grep -oE '\*\*Priority\*\*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
-  linear_priority=${pri_num:-3}
-
-  # Build sub-issue issueCreate mutation via temp file (title/description are user-provided strings)
-  # Includes both projectId and parentId at creation time — no separate API calls needed.
-  # Priority is inlined as integer literal to avoid Int/String type coercion issues with -v flag.
-  GQL_TMPFILE=$(mktemp)
-  if [[ -n "$BACKLOG_STATE_ID" ]]; then
-    cat > "$GQL_TMPFILE" <<GQLEOF
-mutation(\$title: String!, \$description: String!, \$teamId: String!, \$projectId: String!, \$parentId: String!, \$stateId: String!) {
-  issueCreate(input: {
-    title: \$title
-    description: \$description
-    teamId: \$teamId
-    projectId: \$projectId
-    parentId: \$parentId
-    stateId: \$stateId
-    priority: ${linear_priority}
-  }) {
-    success
-    issue { id identifier url }
-  }
-}
-GQLEOF
-    result=$($LINEAR_CLI api query -o json --quiet --compact \
-      -v "title=$title" \
-      -v "description=$sub_body" \
-      -v "teamId=$TEAM_ID" \
-      -v "projectId=$PROJECT_ID" \
-      -v "parentId=$PARENT_ID" \
-      -v "stateId=$BACKLOG_STATE_ID" \
-      - < "$GQL_TMPFILE" 2>&1)
-  else
-    cat > "$GQL_TMPFILE" <<GQLEOF
-mutation(\$title: String!, \$description: String!, \$teamId: String!, \$projectId: String!, \$parentId: String!) {
-  issueCreate(input: {
-    title: \$title
-    description: \$description
-    teamId: \$teamId
-    projectId: \$projectId
-    parentId: \$parentId
-    priority: ${linear_priority}
-  }) {
-    success
-    issue { id identifier url }
-  }
-}
-GQLEOF
-    result=$($LINEAR_CLI api query -o json --quiet --compact \
-      -v "title=$title" \
-      -v "description=$sub_body" \
-      -v "teamId=$TEAM_ID" \
-      -v "projectId=$PROJECT_ID" \
-      -v "parentId=$PARENT_ID" \
-      - < "$GQL_TMPFILE" 2>&1)
-  fi
-  rm -f "$GQL_TMPFILE"; GQL_TMPFILE=""
-
-  success=$(echo "$result" | jq -r '.data.issueCreate.success // false')
-  sub_identifier=$(echo "$result" | jq -r '.data.issueCreate.issue.identifier // empty')
-  sub_url=$(echo "$result" | jq -r '.data.issueCreate.issue.url // empty')
-  sub_id=$(echo "$result" | jq -r '.data.issueCreate.issue.id // empty')
-
-  if [[ "$success" == "true" && -n "$sub_identifier" && -n "$sub_id" ]]; then
-    echo "  Created: $sub_identifier — $title ($sub_url)"
-    SUB_ISSUE_IDS[$i]="$sub_id"
-    SUB_ISSUE_IDENTIFIERS[$i]="$sub_identifier"
-    verify_issue_creation "$sub_id" "$PROJECT_SLUG" "$PARENT_ID"
-  else
-    echo "  FAILED: $title" >&2
-    echo "  Response: $result" >&2
-    SUB_ISSUE_IDS[$i]=""
-    SUB_ISSUE_IDENTIFIERS[$i]=""
-  fi
-done
-
-# ── Create blockedBy relations ───────────────────────────────────────────────
-
-echo ""
-echo "Creating blockedBy relations..."
-relation_count=0
-
-# Track created relations to avoid duplicates (bash 3.2 compatible — no associative arrays)
-CREATED_RELATIONS=""
+# ── Helper functions (must be defined before creation loop) ────────────────────
 
 # Helper: create a blockedBy relation via GraphQL mutation.
 # linear-cli relations add is broken (claims success but relations don't persist).
@@ -919,25 +782,163 @@ GQLEOF
   return 1
 }
 
-# 1. Sequential chain based on priority ordering
-for ((k=0; k<TOTAL-1; k++)); do
-  blocker_idx="${SORTED_INDICES[$k]}"
-  blocked_idx="${SORTED_INDICES[$((k+1))]}"
-  blocker_id="${SUB_ISSUE_IDS[$blocker_idx]:-}"
-  blocked_id="${SUB_ISSUE_IDS[$blocked_idx]:-}"
-  blocker="${SUB_ISSUE_IDENTIFIERS[$blocker_idx]:-}"
-  blocked="${SUB_ISSUE_IDENTIFIERS[$blocked_idx]:-}"
+# ── Post-creation verification ────────────────────────────────────────────────
+# Queries an issue by ID and confirms project.slugId and (for sub-issues) parent.id
+# match expected values. Logs warnings on mismatch; never exits.
+# Args: $1=issue_uuid, $2=expected_project_slug, $3=expected_parent_id (optional)
+verify_issue_creation() {
+  local issue_uuid="$1"
+  local expected_slug="$2"
+  local expected_parent_id="${3:-}"
 
-  if [[ -n "$blocker_id" && -n "$blocked_id" ]]; then
-    relation_key="${blocker}:${blocked}"
-    if create_blocks_relation "$blocker_id" "$blocked_id" "$blocker" "$blocked" "sequential"; then
-      CREATED_RELATIONS="${CREATED_RELATIONS}|${relation_key}"
-      ((relation_count++))
+  # Skip verification in dry-run mode (no API calls)
+  if [[ "$DRY_RUN" == true ]]; then
+    return 0
+  fi
+
+  local verify_result
+  verify_result=$($LINEAR_CLI api query -o json --quiet --compact \
+    -v "issueId=$issue_uuid" \
+    'query($issueId: String!) { issue(id: $issueId) { project { slugId } parent { id } } }' 2>/dev/null) || true
+
+  local actual_slug
+  actual_slug=$(echo "$verify_result" | jq -r '.data.issue.project.slugId // empty')
+  if [[ -n "$actual_slug" && "$actual_slug" != "$expected_slug" ]]; then
+    echo "WARNING: project mismatch on $issue_uuid — expected slugId=$expected_slug, got $actual_slug" >&2
+  elif [[ -z "$actual_slug" ]]; then
+    echo "WARNING: VERIFY FAIL — could not confirm project.slugId for $issue_uuid" >&2
+  fi
+
+  if [[ -n "$expected_parent_id" ]]; then
+    local actual_parent
+    actual_parent=$(echo "$verify_result" | jq -r '.data.issue.parent.id // empty')
+    if [[ -n "$actual_parent" && "$actual_parent" != "$expected_parent_id" ]]; then
+      echo "WARNING: parent mismatch on $issue_uuid — expected parent=$expected_parent_id, got $actual_parent" >&2
+    elif [[ -z "$actual_parent" ]]; then
+      echo "WARNING: VERIFY FAIL — could not confirm parent.id for $issue_uuid" >&2
     fi
+  fi
+}
+
+# ── Create sub-issues with interleaved relations ─────────────────────────────
+# Sub-issues are created in Todo state, sorted by priority. After each sub-issue
+# (except the first), a sequential blockedBy relation is immediately added to
+# the previous sub-issue before creating the next one.
+
+declare -a SUB_ISSUE_IDS SUB_ISSUE_IDENTIFIERS
+echo ""
+echo "Creating $TOTAL sub-issues (with interleaved sequential relations)..."
+# Sequential chain: skip first sub-issue (k=0, no blocker); k>=1 adds blockedBy to previous
+
+relation_count=0
+# Track created relations to avoid duplicates (bash 3.2 compatible — no associative arrays)
+CREATED_RELATIONS=""
+
+# Previous sub-issue tracking for sequential chain
+prev_sub_id=""
+prev_sub_ident=""
+
+for ((k=0; k<TOTAL; k++)); do
+  i="${SORTED_INDICES[$k]}"
+  title="${TASK_TITLES[$i]}"
+  sub_body=$(build_sub_issue_body "$i")
+
+  # Extract priority if present
+  pri_num=$(echo "${TASK_BODIES[$i]}" | grep -oE '\*\*Priority\*\*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
+  linear_priority=${pri_num:-3}
+
+  # Write sub-issue body to temp file for description
+  echo "$sub_body" > "$SPEC_TMPFILE"
+
+  # Build sub-issue issueCreate mutation via temp file (title/description are user-provided strings)
+  # Includes both projectId and parentId at creation time — no separate API calls needed.
+  # Priority is inlined as integer literal to avoid Int/String type coercion issues with -v flag.
+  GQL_TMPFILE=$(mktemp)
+  if [[ -n "$TODO_STATE_ID" ]]; then
+    cat > "$GQL_TMPFILE" <<GQLEOF
+mutation(\$title: String!, \$description: String!, \$teamId: ID!, \$projectId: ID!, \$parentId: ID!, \$stateId: ID!) {
+  issueCreate(input: {
+    title: \$title
+    description: \$description
+    teamId: \$teamId
+    projectId: \$projectId
+    parentId: \$parentId
+    stateId: \$stateId
+    priority: ${linear_priority}
+  }) {
+    success
+    issue { id identifier url }
+  }
+}
+GQLEOF
+    result=$($LINEAR_CLI api query -o json --quiet --compact \
+      -v "title=$title" \
+      -v "description=$(cat "$SPEC_TMPFILE")" \
+      -v "teamId=$TEAM_ID" \
+      -v "projectId=$PROJECT_ID" \
+      -v "parentId=$PARENT_ID" \
+      -v "stateId=$TODO_STATE_ID" \
+      - < "$GQL_TMPFILE" 2>&1)
+  else
+    cat > "$GQL_TMPFILE" <<GQLEOF
+mutation(\$title: String!, \$description: String!, \$teamId: ID!, \$projectId: ID!, \$parentId: ID!) {
+  issueCreate(input: {
+    title: \$title
+    description: \$description
+    teamId: \$teamId
+    projectId: \$projectId
+    parentId: \$parentId
+    priority: ${linear_priority}
+  }) {
+    success
+    issue { id identifier url }
+  }
+}
+GQLEOF
+    result=$($LINEAR_CLI api query -o json --quiet --compact \
+      -v "title=$title" \
+      -v "description=$(cat "$SPEC_TMPFILE")" \
+      -v "teamId=$TEAM_ID" \
+      -v "projectId=$PROJECT_ID" \
+      -v "parentId=$PARENT_ID" \
+      - < "$GQL_TMPFILE" 2>&1)
+  fi
+  rm -f "$GQL_TMPFILE"; GQL_TMPFILE=""
+
+  success=$(echo "$result" | jq -r '.data.issueCreate.success // false')
+  sub_identifier=$(echo "$result" | jq -r '.data.issueCreate.issue.identifier // empty')
+  sub_url=$(echo "$result" | jq -r '.data.issueCreate.issue.url // empty')
+  sub_id=$(echo "$result" | jq -r '.data.issueCreate.issue.id // empty')
+
+  if [[ "$success" == "true" && -n "$sub_identifier" && -n "$sub_id" ]]; then
+    # Sequential blocking: skip first (k=0, no blocker); for k>=1 add blockedBy to previous
+    SUB_ISSUE_IDS[$i]="$sub_id"
+    SUB_ISSUE_IDENTIFIERS[$i]="$sub_identifier"
+    echo "  Created sub-issue: $sub_identifier — $title ($sub_url)"
+    if [[ $k -ge 1 && -n "$prev_sub_id" ]]; then
+      if create_blocks_relation "$prev_sub_id" "$sub_id" "$prev_sub_ident" "$sub_identifier" "sequential"; then
+        CREATED_RELATIONS="${CREATED_RELATIONS}|${prev_sub_ident}:${sub_identifier}"
+        ((relation_count++))
+      fi
+    fi
+    verify_issue_creation "$sub_id" "$PROJECT_SLUG" "$PARENT_ID"
+
+    prev_sub_id="$sub_id"
+    prev_sub_ident="$sub_identifier"
+  else
+    echo "  FAILED: $title" >&2
+    echo "  Response: $result" >&2
+    SUB_ISSUE_IDS[$i]=""
+    SUB_ISSUE_IDENTIFIERS[$i]=""
   fi
 done
 
-# 2. Additional file-overlap relations (only those not already covered)
+# ── File-overlap relations (second pass) ─────────────────────────────────────
+# Supplementary relations based on file overlap — don't affect dispatch order.
+
+echo ""
+echo "Creating file-overlap blockedBy relations..."
+
 for ((i=0; i<TOTAL; i++)); do
   for ((j=i+1; j<TOTAL; j++)); do
     if detect_overlap "${TASK_SCOPES[$i]:-}" "${TASK_SCOPES[$j]:-}"; then
@@ -960,30 +961,6 @@ for ((i=0; i<TOTAL; i++)); do
 done
 
 [[ $relation_count -eq 0 ]] && echo "  (none)"
-
-# ── Moving unblocked sub-issues to Todo ──────────────────────────────────────
-# A sub-issue is unblocked if its identifier never appears on the RIGHT side of
-# any colon-separated pair in CREATED_RELATIONS (format: |BLOCKER:BLOCKED|...).
-echo ""
-echo "Moving unblocked sub-issues to Todo..."
-promoted_count=0
-for ((i=0; i<TOTAL; i++)); do
-  ident="${SUB_ISSUE_IDENTIFIERS[$i]:-}"
-  sub_id="${SUB_ISSUE_IDS[$i]:-}"
-  [[ -z "$ident" || -z "$sub_id" ]] && continue
-  if [[ "$CREATED_RELATIONS" == *":${ident}"* ]]; then
-    echo "  $ident remains in Backlog (blocked)"
-  else
-    GQL_TMPFILE=$(mktemp)
-    printf 'mutation { issueUpdate(id: "%s", input: { stateId: "%s" }) { success issue { id } } }' \
-      "$sub_id" "$TODO_STATE_ID" > "$GQL_TMPFILE"
-    $LINEAR_CLI api query -o json --quiet --compact - < "$GQL_TMPFILE" > /dev/null 2>&1 || true
-    rm -f "$GQL_TMPFILE"; GQL_TMPFILE=""
-    echo "  $ident promoted to Todo (unblocked)"
-    ((promoted_count++))
-  fi
-done
-echo "Promoted $promoted_count sub-issue(s) to Todo"
 
 # ── Transition parent to Backlog (sub-issues now frozen) ─────────────────────
 # Only reached when PARENT_ONLY=false (--parent-only exits at line 555)
