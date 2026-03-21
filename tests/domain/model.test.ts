@@ -87,6 +87,7 @@ describe("domain model", () => {
       totalStageTotalTokens: 0,
       totalStageCacheReadTokens: 0,
       totalStageCacheWriteTokens: 0,
+      turnHistory: [],
     });
 
     const state = createInitialOrchestratorState({

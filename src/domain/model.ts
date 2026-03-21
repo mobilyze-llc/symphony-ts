@@ -82,6 +82,18 @@ export interface RunAttempt {
   error?: string;
 }
 
+export interface TurnHistoryEntry {
+  turnNumber: number;
+  timestamp: string;
+  message: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cacheReadTokens: number;
+  reasoningTokens: number;
+  event: string | null;
+}
+
 export interface LiveSession {
   sessionId: string | null;
   threadId: string | null;
@@ -108,6 +120,7 @@ export interface LiveSession {
   totalStageTotalTokens: number;
   totalStageCacheReadTokens: number;
   totalStageCacheWriteTokens: number;
+  turnHistory: TurnHistoryEntry[];
 }
 
 export interface RetryEntry {
@@ -231,6 +244,7 @@ export function createEmptyLiveSession(): LiveSession {
     totalStageTotalTokens: 0,
     totalStageCacheReadTokens: 0,
     totalStageCacheWriteTokens: 0,
+    turnHistory: [],
   };
 }
 

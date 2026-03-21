@@ -3,12 +3,14 @@ import { describe, expect, it } from "vitest";
 import type { CodexClientEvent } from "../../src/codex/app-server-client.js";
 import {
   type RunningEntry,
+  type TurnHistoryEntry,
   createEmptyLiveSession,
   createInitialOrchestratorState,
 } from "../../src/domain/model.js";
 import {
   addEndedSessionRuntime,
   applyCodexEventToOrchestratorState,
+  applyCodexEventToSession,
   getAggregateSecondsRunning,
   summarizeCodexEvent,
 } from "../../src/logging/session-metrics.js";
@@ -344,6 +346,91 @@ describe("session metrics", () => {
     expect(running.totalStageTotalTokens).toBe(0);
     expect(running.totalStageCacheReadTokens).toBe(0);
     expect(running.totalStageCacheWriteTokens).toBe(0);
+  });
+
+  it("turn history ring buffer captures turn summaries", () => {
+    const session = createEmptyLiveSession();
+
+    const event1 = createEvent("session_started", {
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      timestamp: "2026-03-06T10:00:01.000Z",
+    });
+    const event2 = createEvent("session_started", {
+      sessionId: "thread-1-turn-2",
+      threadId: "thread-1",
+      turnId: "turn-2",
+      timestamp: "2026-03-06T10:00:02.000Z",
+    });
+    const event3 = createEvent("session_started", {
+      sessionId: "thread-1-turn-3",
+      threadId: "thread-1",
+      turnId: "turn-3",
+      timestamp: "2026-03-06T10:00:03.000Z",
+    });
+
+    applyCodexEventToSession(session, event1);
+    applyCodexEventToSession(session, event2);
+    applyCodexEventToSession(session, event3);
+
+    // Turns 1 and 2 are complete; turn 3 is in progress
+    expect(session.turnHistory).toHaveLength(2);
+
+    const entry1 = session.turnHistory[0] as TurnHistoryEntry;
+    const entry2 = session.turnHistory[1] as TurnHistoryEntry;
+
+    // Each entry must have all required fields
+    expect(entry1).toHaveProperty("turnNumber");
+    expect(entry1).toHaveProperty("timestamp");
+    expect(entry1).toHaveProperty("message");
+    expect(entry1).toHaveProperty("inputTokens");
+    expect(entry1).toHaveProperty("outputTokens");
+    expect(entry1).toHaveProperty("totalTokens");
+    expect(entry1).toHaveProperty("cacheReadTokens");
+    expect(entry1).toHaveProperty("reasoningTokens");
+    expect(entry1).toHaveProperty("event");
+
+    expect(entry1.turnNumber).toBe(1);
+    expect(entry1.timestamp).toBe("2026-03-06T10:00:02.000Z");
+    expect(entry1.inputTokens).toBe(0);
+    expect(entry1.outputTokens).toBe(0);
+    expect(entry1.totalTokens).toBe(0);
+    expect(entry1.cacheReadTokens).toBe(0);
+    expect(entry1.reasoningTokens).toBe(0);
+    expect(entry1.event).toBe("session_started");
+
+    expect(entry2.turnNumber).toBe(2);
+    expect(entry2.timestamp).toBe("2026-03-06T10:00:03.000Z");
+  });
+
+  it("turn history ring buffer caps at 50 entries", () => {
+    const session = createEmptyLiveSession();
+
+    // Process 55 session_started events
+    for (let i = 1; i <= 55; i++) {
+      applyCodexEventToSession(
+        session,
+        createEvent("session_started", {
+          sessionId: `thread-1-turn-${i}`,
+          threadId: "thread-1",
+          turnId: `turn-${i}`,
+          timestamp: `2026-03-06T10:00:${String(i).padStart(2, "0")}.000Z`,
+        }),
+      );
+    }
+
+    // After 55 session_started events: 54 entries would exist before capping
+    // Capped at 50 → oldest 4 evicted
+    expect(session.turnHistory).toHaveLength(50);
+
+    // Oldest 4 entries (turnNumbers 1-4) should have been evicted
+    const firstEntry = session.turnHistory[0] as TurnHistoryEntry;
+    expect(firstEntry.turnNumber).toBe(5);
+
+    // Most recent retained entry is turn 54 (turn 55 is in progress)
+    const lastEntry = session.turnHistory[49] as TurnHistoryEntry;
+    expect(lastEntry.turnNumber).toBe(54);
   });
 
   it("summarizes codex events for snapshot and log surfaces", () => {

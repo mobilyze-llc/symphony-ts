@@ -3,7 +3,10 @@ import type {
   LiveSession,
   OrchestratorState,
   RunningEntry,
+  TurnHistoryEntry,
 } from "../domain/model.js";
+
+const TURN_HISTORY_MAX_SIZE = 50;
 
 const SESSION_EVENT_MESSAGES: Partial<
   Record<CodexClientEvent["event"], string>
@@ -53,6 +56,27 @@ export function applyCodexEventToSession(
   session.lastCodexMessage = summarizeCodexEvent(event);
 
   if (event.event === "session_started") {
+    // Push previous turn summary to ring buffer before resetting counters
+    if (session.turnCount > 0) {
+      const entry: TurnHistoryEntry = {
+        turnNumber: session.turnCount,
+        timestamp: event.timestamp,
+        message: session.lastCodexMessage,
+        inputTokens: session.codexInputTokens,
+        outputTokens: session.codexOutputTokens,
+        totalTokens: session.codexTotalTokens,
+        cacheReadTokens: session.codexCacheReadTokens,
+        reasoningTokens: session.codexReasoningTokens,
+        event: session.lastCodexEvent,
+      };
+      session.turnHistory.push(entry);
+      if (session.turnHistory.length > TURN_HISTORY_MAX_SIZE) {
+        session.turnHistory.splice(
+          0,
+          session.turnHistory.length - TURN_HISTORY_MAX_SIZE,
+        );
+      }
+    }
     session.turnCount += 1;
     // Reset per-turn absolute counters so the next turn's deltas accumulate from 0
     session.lastReportedInputTokens = 0;
