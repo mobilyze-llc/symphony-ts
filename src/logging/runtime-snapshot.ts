@@ -20,6 +20,7 @@ export interface RuntimeSnapshotRunningRow {
   last_event: string | null;
   last_message: string | null;
   started_at: string;
+  first_dispatched_at?: string;
   last_event_at: string | null;
   stage_duration_seconds: number;
   tokens_per_turn: number;
@@ -109,6 +110,7 @@ export function buildRuntimeSnapshot(
         last_event: entry.lastCodexEvent,
         last_message: entry.lastCodexMessage,
         started_at: entry.startedAt,
+        // TODO: populate first_dispatched_at from domain model (separate task)
         last_event_at: entry.lastCodexTimestamp,
         stage_duration_seconds: stageDurationSeconds,
         tokens_per_turn: tokensPerTurn,
