@@ -258,7 +258,7 @@ resolve_all_states() {
   local states_json
   states_json=$($LINEAR_CLI api query -o json --quiet --compact \
     -v "teamId=$TEAM_ID" \
-    'query($teamId: String!) { workflowStates(filter: { team: { id: { eq: $teamId } } }) { nodes { id name } } }' 2>/dev/null)
+    'query($teamId: ID!) { workflowStates(filter: { team: { id: { eq: $teamId } } }) { nodes { id name } } }' 2>/dev/null)
 
   DRAFT_STATE_ID=$(echo "$states_json" | jq -r '.data.workflowStates.nodes[] | select(.name == "Draft") | .id' | head -1)
   TODO_STATE_ID=$(echo "$states_json" | jq -r '.data.workflowStates.nodes[] | select(.name == "Todo") | .id' | head -1)
