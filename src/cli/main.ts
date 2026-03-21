@@ -216,7 +216,54 @@ export async function runCli(
   }
 }
 
+export function handleUncaughtException(error: unknown): void {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level: "error",
+    event: "process_crash",
+    message: `${error instanceof Error ? error.message : String(error)}`,
+    error_code: "uncaught_exception",
+    stack: error instanceof Error ? error.stack : undefined,
+  };
+  process.stderr.write(`${JSON.stringify(entry)}\n`);
+  process.exitCode = 70;
+  setTimeout(() => process.exit(70), 100);
+}
+
+export function handleUnhandledRejection(reason: unknown): void {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    level: "error",
+    event: "process_crash",
+    message: `${reason instanceof Error ? reason.message : String(reason)}`,
+    error_code: "unhandled_rejection",
+    stack: reason instanceof Error ? reason.stack : undefined,
+  };
+  process.stderr.write(`${JSON.stringify(entry)}\n`);
+  process.exitCode = 70;
+  setTimeout(() => process.exit(70), 100);
+}
+
+export function handleSignal(signal: string): void {
+  process.stderr.write(
+    `${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      level: "info",
+      event: "process_signal",
+      message: `Received ${signal}, shutting down`,
+    })}\n`,
+  );
+  process.exit(128 + (signal === "SIGTERM" ? 15 : 2));
+}
+
 export async function main(): Promise<void> {
+  process.on("uncaughtException", handleUncaughtException);
+  process.on("unhandledRejection", handleUnhandledRejection);
+
+  for (const signal of ["SIGTERM", "SIGINT"] as const) {
+    process.on(signal, () => handleSignal(signal));
+  }
+
   const exitCode = await runCli(process.argv.slice(2));
   process.exitCode = exitCode;
 }
@@ -287,5 +334,17 @@ function renderUsage(): string {
 }
 
 if (shouldRunAsCli(import.meta.url, process.argv[1])) {
-  void main();
+  void main().catch((error: unknown) => {
+    process.stderr.write(
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        level: "error",
+        event: "process_crash",
+        message: error instanceof Error ? error.message : String(error),
+        error_code: "main_promise_rejection",
+        stack: error instanceof Error ? error.stack : undefined,
+      })}\n`,
+    );
+    process.exitCode = 70;
+  });
 }
