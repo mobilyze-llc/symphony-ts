@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import type { ResolvedWorkflowConfig, StagesConfig } from "../../src/config/types.js";
+import type {
+  ResolvedWorkflowConfig,
+  StagesConfig,
+} from "../../src/config/types.js";
 import type { Issue } from "../../src/domain/model.js";
 import { createInitialOrchestratorState } from "../../src/domain/model.js";
 import {
@@ -86,8 +89,7 @@ function createOrchestrator(overrides?: {
   stages?: StagesConfig | null;
   now?: () => Date;
 }) {
-  const stages =
-    overrides?.stages !== undefined ? overrides.stages : null;
+  const stages = overrides?.stages !== undefined ? overrides.stages : null;
 
   const options: OrchestratorCoreOptions = {
     config: createConfig({ stages }),
@@ -107,7 +109,9 @@ function createOrchestrator(overrides?: {
 function createTracker(input?: { candidates?: Issue[] }): IssueTracker {
   return {
     async fetchCandidateIssues() {
-      return input?.candidates ?? [createIssue({ id: "1", identifier: "ISSUE-1" })];
+      return (
+        input?.candidates ?? [createIssue({ id: "1", identifier: "ISSUE-1" })]
+      );
     },
     async fetchIssuesByStates() {
       return [];
