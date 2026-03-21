@@ -164,6 +164,31 @@ export const LINEAR_ISSUES_BY_LABELS_QUERY = `
   }
 `.trim();
 
+export const LINEAR_ISSUE_PARENT_AND_SIBLINGS_QUERY = `
+  query SymphonyIssueParentAndSiblings($issueId: String!) {
+    issue(id: $issueId) {
+      id
+      identifier
+      parent {
+        id
+        identifier
+        state {
+          name
+        }
+        children {
+          nodes {
+            id
+            identifier
+            state {
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+`.trim();
+
 export const LINEAR_OPEN_ISSUES_BY_LABELS_QUERY = `
   query SymphonyOpenIssuesByLabels(
     $projectSlug: String!

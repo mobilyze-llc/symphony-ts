@@ -14,6 +14,7 @@ import {
   LINEAR_CREATE_COMMENT_MUTATION,
   LINEAR_ISSUES_BY_LABELS_QUERY,
   LINEAR_ISSUES_BY_STATES_QUERY,
+  LINEAR_ISSUE_PARENT_AND_SIBLINGS_QUERY,
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
   LINEAR_ISSUE_UPDATE_MUTATION,
   LINEAR_OPEN_ISSUES_BY_LABELS_QUERY,
@@ -64,6 +65,25 @@ interface LinearCommentCreateData {
   commentCreate?: {
     success?: boolean;
     comment?: { id?: string };
+  };
+}
+
+interface LinearIssueParentAndSiblingsData {
+  issue?: {
+    id?: string;
+    identifier?: string;
+    parent?: {
+      id?: string;
+      identifier?: string;
+      state?: { name?: string };
+      children?: {
+        nodes?: Array<{
+          id?: string;
+          identifier?: string;
+          state?: { name?: string };
+        }>;
+      };
+    } | null;
   };
 }
 
@@ -256,6 +276,48 @@ export class LinearTrackerClient implements IssueTracker {
         { details: updateResponse },
       );
     }
+  }
+
+  async checkAndCloseParent(
+    issueId: string,
+    terminalStates: string[],
+    teamKey: string,
+  ): Promise<void> {
+    const terminalSet = new Set(terminalStates.map((s) => s.toLowerCase()));
+
+    const response = await this.postGraphql<LinearIssueParentAndSiblingsData>(
+      LINEAR_ISSUE_PARENT_AND_SIBLINGS_QUERY,
+      { issueId },
+    );
+
+    const parent = response.issue?.parent;
+    if (!parent || !parent.id || !parent.identifier) {
+      // No parent — nothing to do
+      return;
+    }
+
+    const siblings = parent.children?.nodes;
+    if (!Array.isArray(siblings) || siblings.length === 0) {
+      return;
+    }
+
+    const allTerminal = siblings.every((sibling) => {
+      const stateName = sibling.state?.name;
+      return (
+        typeof stateName === "string" &&
+        terminalSet.has(stateName.toLowerCase())
+      );
+    });
+
+    if (!allTerminal) {
+      return;
+    }
+
+    console.log(
+      `[orchestrator] Auto-closing parent ${parent.identifier} — all sub-issues complete`,
+    );
+
+    await this.updateIssueState(parent.id, "Done", teamKey);
   }
 
   async executeRawGraphql(

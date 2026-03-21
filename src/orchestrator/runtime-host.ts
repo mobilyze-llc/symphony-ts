@@ -198,6 +198,18 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 teamKey,
               );
             },
+            autoCloseParentIssue: async (
+              issueId: string,
+              issueIdentifier: string,
+            ) => {
+              const teamKey = issueIdentifier.split("-")[0] ?? issueIdentifier;
+              const terminalStates = options.config.tracker.terminalStates;
+              await (this.tracker as LinearTrackerClient).checkAndCloseParent(
+                issueId,
+                terminalStates,
+                teamKey,
+              );
+            },
           }
         : {}),
       spawnWorker: async ({ issue, attempt, stage, stageName, reworkCount }) =>

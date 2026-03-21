@@ -101,6 +101,10 @@ export interface OrchestratorCoreOptions {
     issueIdentifier: string,
     stateName: string,
   ) => Promise<void>;
+  autoCloseParentIssue?: (
+    issueId: string,
+    issueIdentifier: string,
+  ) => Promise<void>;
   timerScheduler?: TimerScheduler;
   now?: () => Date;
 }
@@ -120,6 +124,8 @@ export class OrchestratorCore {
 
   private readonly updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
 
+  private readonly autoCloseParentIssue?: OrchestratorCoreOptions["autoCloseParentIssue"];
+
   private readonly timerScheduler: TimerScheduler;
 
   private readonly now: () => Date;
@@ -134,6 +140,7 @@ export class OrchestratorCore {
     this.runEnsembleGate = options.runEnsembleGate;
     this.postComment = options.postComment;
     this.updateIssueState = options.updateIssueState;
+    this.autoCloseParentIssue = options.autoCloseParentIssue;
     this.timerScheduler = options.timerScheduler ?? defaultTimerScheduler();
     this.now = options.now ?? (() => new Date());
     this.state = createInitialOrchestratorState({
@@ -541,6 +548,17 @@ export class OrchestratorCore {
             err,
           );
         });
+      }
+      // Best-effort: check if all sibling sub-issues are terminal and auto-close parent
+      if (this.autoCloseParentIssue !== undefined) {
+        void this.autoCloseParentIssue(issueId, issueIdentifier).catch(
+          (err) => {
+            console.warn(
+              `[orchestrator] Failed to auto-close parent for ${issueIdentifier}:`,
+              err,
+            );
+          },
+        );
       }
       return "completed";
     }
