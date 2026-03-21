@@ -221,6 +221,11 @@ observability:
 stages:
   initial_stage: investigate
 
+  # Fast-track: issues labeled "trivial" skip the investigate stage and start at implement.
+  fast_track:
+    label: trivial
+    initial_stage: implement
+
   investigate:
     type: agent
     runner: claude-code
