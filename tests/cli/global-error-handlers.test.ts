@@ -1,3 +1,4 @@
+import type { MockInstance } from "vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -6,8 +7,8 @@ import {
 } from "../../src/cli/main.js";
 
 describe("global error handlers", () => {
-  let stderrSpy: ReturnType<typeof vi.spyOn>;
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let stderrSpy: MockInstance;
+  let exitSpy: MockInstance;
 
   beforeEach(() => {
     stderrSpy = vi
