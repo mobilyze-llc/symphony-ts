@@ -244,25 +244,9 @@ export function handleUnhandledRejection(reason: unknown): void {
   setTimeout(() => process.exit(70), 100);
 }
 
-export function handleSignal(signal: string): void {
-  process.stderr.write(
-    `${JSON.stringify({
-      timestamp: new Date().toISOString(),
-      level: "info",
-      event: "process_signal",
-      message: `Received ${signal}, shutting down`,
-    })}\n`,
-  );
-  process.exit(128 + (signal === "SIGTERM" ? 15 : 2));
-}
-
 export async function main(): Promise<void> {
   process.on("uncaughtException", handleUncaughtException);
   process.on("unhandledRejection", handleUnhandledRejection);
-
-  for (const signal of ["SIGTERM", "SIGINT"] as const) {
-    process.on(signal, () => handleSignal(signal));
-  }
 
   const exitCode = await runCli(process.argv.slice(2));
   process.exitCode = exitCode;
@@ -346,5 +330,6 @@ if (shouldRunAsCli(import.meta.url, process.argv[1])) {
       })}\n`,
     );
     process.exitCode = 70;
+    setTimeout(() => process.exit(70), 100);
   });
 }
