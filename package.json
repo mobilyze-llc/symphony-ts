@@ -40,7 +40,7 @@
     "build": "tsc -p tsconfig.build.json",
     "prepack": "pnpm build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "node scripts/test.mjs",
     "test:watch": "vitest",
     "lint": "biome check .",
     "format": "biome format --write ."

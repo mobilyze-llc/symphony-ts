@@ -141,6 +141,16 @@ export interface RunningEntry extends LiveSession {
   monitorHandle: unknown;
 }
 
+export interface StageRecord {
+  stageName: string;
+  durationMs: number;
+  totalTokens: number;
+  turns: number;
+  outcome: string;
+}
+
+export type ExecutionHistory = StageRecord[];
+
 export interface OrchestratorState {
   pollIntervalMs: number;
   maxConcurrentAgents: number;
@@ -152,6 +162,7 @@ export interface OrchestratorState {
   codexRateLimits: CodexRateLimits;
   issueStages: Record<string, string>;
   issueReworkCounts: Record<string, number>;
+  issueExecutionHistory: Record<string, ExecutionHistory>;
 }
 
 export const FAILURE_CLASSES = ["verify", "review", "spec", "infra"] as const;
@@ -244,5 +255,6 @@ export function createInitialOrchestratorState(input: {
     codexRateLimits: null,
     issueStages: {},
     issueReworkCounts: {},
+    issueExecutionHistory: {},
   };
 }

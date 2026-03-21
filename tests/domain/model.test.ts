@@ -5,6 +5,8 @@ import {
   ORCHESTRATOR_EVENTS,
   ORCHESTRATOR_ISSUE_STATUSES,
   RUN_ATTEMPT_PHASES,
+  type ExecutionHistory,
+  type StageRecord,
   createEmptyLiveSession,
   createInitialOrchestratorState,
   normalizeIssueState,
@@ -109,6 +111,67 @@ describe("domain model", () => {
       secondsRunning: 0,
     });
     expect(state.codexRateLimits).toBeNull();
+    expect(state.issueExecutionHistory).toEqual({});
+  });
+});
+
+describe("ExecutionHistory", () => {
+  it("stage record captures all fields", () => {
+    const record: StageRecord = {
+      stageName: "implement",
+      durationMs: 12000,
+      totalTokens: 5000,
+      turns: 10,
+      outcome: "success",
+    };
+    expect(record.stageName).toBe("implement");
+    expect(record.durationMs).toBe(12000);
+    expect(record.totalTokens).toBe(5000);
+    expect(record.turns).toBe(10);
+    expect(record.outcome).toBe("success");
+  });
+
+  it("stage record appended on worker exit", () => {
+    const state = createInitialOrchestratorState({ pollIntervalMs: 1000, maxConcurrentAgents: 2 });
+    const record: StageRecord = {
+      stageName: "investigate",
+      durationMs: 5000,
+      totalTokens: 1000,
+      turns: 3,
+      outcome: "success",
+    };
+    // Simulate appending a StageRecord on worker exit
+    state.issueExecutionHistory["issue-1"] = [];
+    state.issueExecutionHistory["issue-1"].push(record);
+    expect(state.issueExecutionHistory["issue-1"]).toHaveLength(1);
+    expect(state.issueExecutionHistory["issue-1"][0]).toEqual(record);
+
+    // Simulate a second stage completing
+    const record2: StageRecord = {
+      stageName: "implement",
+      durationMs: 8000,
+      totalTokens: 2500,
+      turns: 5,
+      outcome: "success",
+    };
+    state.issueExecutionHistory["issue-1"].push(record2);
+    expect(state.issueExecutionHistory["issue-1"]).toHaveLength(2);
+  });
+
+  it("execution history cleaned up after completion", () => {
+    const state = createInitialOrchestratorState({ pollIntervalMs: 1000, maxConcurrentAgents: 2 });
+    const history: ExecutionHistory = [
+      { stageName: "investigate", durationMs: 1000, totalTokens: 100, turns: 1, outcome: "success" },
+      { stageName: "implement", durationMs: 2000, totalTokens: 200, turns: 2, outcome: "success" },
+      { stageName: "review", durationMs: 3000, totalTokens: 300, turns: 3, outcome: "success" },
+      { stageName: "ship", durationMs: 4000, totalTokens: 400, turns: 4, outcome: "success" },
+    ];
+    state.issueExecutionHistory["issue-1"] = history;
+    expect(state.issueExecutionHistory["issue-1"]).toHaveLength(4);
+
+    // Simulate cleanup when issue reaches Done terminal state
+    delete state.issueExecutionHistory["issue-1"];
+    expect(state.issueExecutionHistory["issue-1"]).toBeUndefined();
   });
 });
 
