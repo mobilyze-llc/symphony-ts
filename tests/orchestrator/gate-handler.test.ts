@@ -189,18 +189,30 @@ describe("formatGateComment", () => {
 
 describe("formatReviewFindingsComment", () => {
   it("starts with ## Review Findings header", () => {
-    const comment = formatReviewFindingsComment("ISSUE-42", "review", "Some message");
+    const comment = formatReviewFindingsComment(
+      "ISSUE-42",
+      "review",
+      "Some message",
+    );
     expect(comment.startsWith("## Review Findings")).toBe(true);
   });
 
   it("includes the stage name and issue identifier", () => {
-    const comment = formatReviewFindingsComment("ISSUE-42", "review", "Some message");
+    const comment = formatReviewFindingsComment(
+      "ISSUE-42",
+      "review",
+      "Some message",
+    );
     expect(comment).toContain("review");
     expect(comment).toContain("ISSUE-42");
   });
 
   it("includes the agent message when provided", () => {
-    const comment = formatReviewFindingsComment("ISSUE-1", "review", "Missing null check in handler.ts line 42");
+    const comment = formatReviewFindingsComment(
+      "ISSUE-1",
+      "review",
+      "Missing null check in handler.ts line 42",
+    );
     expect(comment).toContain("Missing null check in handler.ts line 42");
   });
 
