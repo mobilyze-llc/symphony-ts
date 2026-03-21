@@ -559,6 +559,7 @@ if [[ "$DRY_RUN" == true ]]; then
   for ((i=0; i<TOTAL; i++)); do
     echo "--- SUB-ISSUE $((i+1)): ${TASK_TITLES[$i]} ---"
     echo "Priority: ${TASK_PRIORITIES[$i]}"
+    echo "State: Backlog (promoted to Todo after relations)"
     echo "Scope: ${TASK_SCOPES[$i]:-<none>}"
     echo "Scenarios ref: ${TASK_SCENARIO_REFS[$i]:-<none>}"
     sub_body=$(build_sub_issue_body "$i")
@@ -609,7 +610,7 @@ if [[ "$DRY_RUN" == true ]]; then
   [[ $overlap_count -eq 0 ]] && echo "    (none)"
 
   echo ""
-  echo "=== Dry run complete: 1 parent + $TOTAL sub-issues + $relation_count relations would be created ==="
+  echo "=== Dry run complete: 1 parent + $TOTAL sub-issues (Backlog → Todo) + $relation_count relations would be created ==="
   exit 0
 fi
 
