@@ -13,13 +13,13 @@ describe("global error handlers", () => {
   beforeEach(() => {
     stderrSpy = vi
       .spyOn(process.stderr, "write")
-      .mockImplementation((
-        _chunk: unknown,
-        callback?: (error?: Error | null) => void,
-      ) => {
-        if (callback) callback();
+      .mockImplementation(((...args: unknown[]) => {
+        const cb = args.find((a) => typeof a === "function") as
+          | ((error?: Error | null) => void)
+          | undefined;
+        if (cb) cb();
         return true;
-      });
+      }) as any);
     exitSpy = vi
       .spyOn(process, "exit")
       .mockImplementation(() => undefined as never);
