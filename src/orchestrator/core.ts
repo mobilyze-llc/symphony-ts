@@ -992,16 +992,23 @@ export class OrchestratorCore {
    * Returns the first open halt issue, or null if none / on error (fail-open).
    */
   private async checkPipelineHalt(): Promise<Issue | null> {
-    try {
-      if (this.tracker.fetchOpenIssuesByLabels !== undefined) {
+    if (this.tracker.fetchOpenIssuesByLabels !== undefined) {
+      try {
         const haltIssues = await this.tracker.fetchOpenIssuesByLabels(
           ["pipeline-halt"],
           this.config.tracker.terminalStates,
         );
         return haltIssues[0] ?? null;
+      } catch (error) {
+        console.warn(
+          "[orchestrator] fetchOpenIssuesByLabels failed, falling back to fetchIssuesByLabels.",
+          error,
+        );
       }
+    }
 
-      if (this.tracker.fetchIssuesByLabels !== undefined) {
+    if (this.tracker.fetchIssuesByLabels !== undefined) {
+      try {
         const haltIssues = await this.tracker.fetchIssuesByLabels([
           "pipeline-halt",
         ]);
@@ -1013,12 +1020,12 @@ export class OrchestratorCore {
           return !terminalStates.has(normalizedState);
         });
         return openHaltIssue ?? null;
+      } catch (error) {
+        console.warn(
+          "[orchestrator] Failed to check for pipeline-halt issues. Continuing dispatch.",
+          error,
+        );
       }
-    } catch (error) {
-      console.warn(
-        "[orchestrator] Failed to check for pipeline-halt issues. Continuing dispatch.",
-        error,
-      );
     }
 
     return null;

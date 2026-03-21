@@ -531,6 +531,48 @@ describe("orchestrator core", () => {
     expect(openIssuesByLabelsCalled).toBe(true);
     expect(issuesByLabelsCalled).toBe(false);
   });
+
+  it("falls back to fetchIssuesByLabels when fetchOpenIssuesByLabels throws", async () => {
+    const haltIssue = createIssue({
+      id: "halt-1",
+      identifier: "SYMPH-123",
+      title: "Main branch build broken",
+      state: "In Progress",
+      labels: ["pipeline-halt"],
+    });
+
+    const regularIssues = [
+      createIssue({ id: "1", identifier: "ISSUE-1", state: "Todo" }),
+    ];
+
+    const tracker: IssueTracker = {
+      async fetchCandidateIssues() {
+        return regularIssues;
+      },
+      async fetchIssuesByStates() {
+        return [];
+      },
+      async fetchIssueStatesByIds() {
+        return [];
+      },
+      async fetchIssuesByLabels(labelNames: string[]) {
+        if (labelNames.includes("pipeline-halt")) {
+          return [haltIssue];
+        }
+        return [];
+      },
+      async fetchOpenIssuesByLabels() {
+        throw new Error("Linear API timeout");
+      },
+    };
+
+    const orchestrator = createOrchestrator({ tracker });
+    const result = await orchestrator.pollTick();
+
+    // Should halt dispatch because the fallback found the halt issue
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(Object.keys(orchestrator.getState().running)).toEqual([]);
+  });
 });
 
 describe("retry timer pipeline-halt guard", () => {
@@ -710,6 +752,74 @@ describe("retry timer pipeline-halt guard", () => {
     // Should proceed with dispatch despite halt check failure
     expect(result.dispatched).toBe(true);
     expect(spawnCalls).toEqual(["1"]);
+  });
+
+  it("falls back to fetchIssuesByLabels when fetchOpenIssuesByLabels throws", async () => {
+    const haltIssue = createIssue({
+      id: "halt-1",
+      identifier: "SYMPH-99",
+      title: "CI broken",
+      state: "In Progress",
+      labels: ["pipeline-halt"],
+    });
+
+    const timers = createFakeTimerScheduler();
+    const tracker: IssueTracker = {
+      async fetchCandidateIssues() {
+        return [createIssue({ id: "1", identifier: "ISSUE-1" })];
+      },
+      async fetchIssuesByStates() {
+        return [];
+      },
+      async fetchIssueStatesByIds() {
+        return [];
+      },
+      async fetchIssuesByLabels(labelNames: string[]) {
+        if (labelNames.includes("pipeline-halt")) {
+          return [haltIssue];
+        }
+        return [];
+      },
+      async fetchOpenIssuesByLabels() {
+        throw new Error("Linear API timeout");
+      },
+    };
+
+    const spawnCalls: string[] = [];
+    const orchestrator = new OrchestratorCore({
+      config: createConfig(),
+      tracker,
+      spawnWorker: async ({ issue }) => {
+        spawnCalls.push(issue.id);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      timerScheduler: timers,
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    orchestrator.getState().claimed.add("1");
+    orchestrator.getState().retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 2,
+      dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+      timerHandle: null,
+      error: "previous failure",
+      delayType: "failure",
+    };
+
+    const result = await orchestrator.onRetryTimer("1");
+
+    // Should halt because fallback found the halt issue
+    expect(result.dispatched).toBe(false);
+    expect(result.retryEntry).toMatchObject({
+      attempt: 2,
+      error: "pipeline halted: SYMPH-99",
+    });
+    expect(spawnCalls).toEqual([]);
   });
 
   it("falls back to fetchIssuesByLabels when fetchOpenIssuesByLabels is not available", async () => {

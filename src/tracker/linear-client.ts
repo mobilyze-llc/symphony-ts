@@ -146,14 +146,29 @@ export class LinearTrackerClient implements IssueTracker {
       return [];
     }
 
-    // Only fetch 1 issue — we only need to know if any non-terminal halt issue exists
-    return this.fetchIssuePages(LINEAR_OPEN_ISSUES_BY_LABELS_QUERY, {
-      projectSlug: this.requireProjectSlug(),
-      labelNames,
-      excludeStateNames,
-      first: 1,
-      relationFirst: this.pageSize,
-    });
+    // Single GraphQL call — we only need to know if any non-terminal halt issue
+    // exists, so fetch at most 1 result. No pagination needed.
+    const response = await this.postGraphql<LinearCandidateData>(
+      LINEAR_OPEN_ISSUES_BY_LABELS_QUERY,
+      {
+        projectSlug: this.requireProjectSlug(),
+        labelNames,
+        excludeStateNames,
+        first: 1,
+        relationFirst: this.pageSize,
+      },
+    );
+
+    const nodes = response.issues?.nodes;
+    if (!Array.isArray(nodes)) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear open issues by labels payload was missing issues.nodes.",
+        { details: response },
+      );
+    }
+
+    return nodes.map((node) => normalizeLinearIssue(node));
   }
 
   async fetchIssueStatesByIds(
