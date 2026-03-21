@@ -210,7 +210,9 @@ describe("runtime snapshot", () => {
       now: new Date("2026-03-06T10:00:10.000Z"),
     });
 
-    expect(snapshot.generated_at).toBe(formatEasternTimestamp(new Date("2026-03-06T10:00:10.000Z")));
+    expect(snapshot.generated_at).toBe(
+      formatEasternTimestamp(new Date("2026-03-06T10:00:10.000Z")),
+    );
     expect(snapshot.counts).toEqual({
       running: 2,
       retrying: 1,

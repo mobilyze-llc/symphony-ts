@@ -6,7 +6,6 @@ import {
   type CodexDynamicTool,
   type CodexTurnResult,
 } from "../codex/app-server-client.js";
-import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import { createLinearGraphqlDynamicTool } from "../codex/linear-graphql-tool.js";
 import { createWorkpadSyncDynamicTool } from "../codex/workpad-sync-tool.js";
 import type {
@@ -23,6 +22,7 @@ import {
   normalizeIssueState,
   parseFailureSignal,
 } from "../domain/model.js";
+import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import { applyCodexEventToSession } from "../logging/session-metrics.js";
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";

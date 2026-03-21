@@ -17,6 +17,7 @@ import type {
 import { WorkflowWatcher } from "../config/workflow-watch.js";
 import type { Issue, RetryEntry, RunningEntry } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
+import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
   type RuntimeSnapshot,
   buildRuntimeSnapshot,
@@ -25,7 +26,6 @@ import {
   StructuredLogger,
   createJsonLineSink,
 } from "../logging/structured-logger.js";
-import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
   type DashboardServerHost,
   type DashboardServerInstance,

@@ -17,11 +17,11 @@ import {
   normalizeIssueState,
   parseFailureSignal,
 } from "../domain/model.js";
+import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
   addEndedSessionRuntime,
   applyCodexEventToOrchestratorState,
 } from "../logging/session-metrics.js";
-import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 import {
   type EnsembleGateResult,
@@ -1215,7 +1215,9 @@ export class OrchestratorCore {
     }
 
     if (!this.state.issueFirstDispatchedAt[issue.id]) {
-      this.state.issueFirstDispatchedAt[issue.id] = formatEasternTimestamp(this.now());
+      this.state.issueFirstDispatchedAt[issue.id] = formatEasternTimestamp(
+        this.now(),
+      );
     }
 
     try {

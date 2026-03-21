@@ -54,7 +54,7 @@ function getEasternOffset(date: Date): string {
     return "-05:00";
   }
 
-  const hours = parseInt(match[1], 10);
+  const hours = Number.parseInt(match[1], 10);
   const sign = hours <= 0 ? "-" : "+";
   const absHours = Math.abs(hours);
 

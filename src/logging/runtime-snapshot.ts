@@ -5,8 +5,8 @@ import type {
   StageRecord,
   TurnHistoryEntry,
 } from "../domain/model.js";
-import { getAggregateSecondsRunning } from "./session-metrics.js";
 import { formatEasternTimestamp } from "./format-timestamp.js";
+import { getAggregateSecondsRunning } from "./session-metrics.js";
 
 export type HealthStatus = "green" | "yellow" | "red";
 
