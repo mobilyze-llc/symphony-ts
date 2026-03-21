@@ -118,6 +118,36 @@ describe("runtime snapshot", () => {
     expect(snapshot.running[0]!.pipeline_stage).toBeNull();
   });
 
+  it("includes stage_duration_seconds and tokens_per_turn in running rows", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    const now = new Date("2026-03-21T10:05:00.000Z");
+    const startedAt = new Date(now.getTime() - 300_000).toISOString(); // 300 seconds ago
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt,
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-21T10:04:59.000Z",
+      lastCodexMessage: "Finished",
+      turnCount: 10,
+      codexInputTokens: 50000,
+      codexOutputTokens: 70000,
+      codexTotalTokens: 120000,
+    });
+    entry.totalStageTotalTokens = 120000;
+    state.running["issue-1"] = entry;
+
+    const snapshot = buildRuntimeSnapshot(state, { now });
+
+    expect(snapshot.running).toHaveLength(1);
+    expect(snapshot.running[0]!.stage_duration_seconds).toBeCloseTo(300, 0);
+    expect(snapshot.running[0]!.tokens_per_turn).toBe(12000);
+  });
+
   it("builds a sorted state snapshot with live runtime totals", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,

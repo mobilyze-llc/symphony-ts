@@ -17,6 +17,8 @@ export interface RuntimeSnapshotRunningRow {
   last_message: string | null;
   started_at: string;
   last_event_at: string | null;
+  stage_duration_seconds: number;
+  tokens_per_turn: number;
   tokens: {
     input_tokens: number;
     output_tokens: number;
@@ -65,6 +67,14 @@ export function buildRuntimeSnapshot(
     )
     .map((entry) => {
       const reworkCount = state.issueReworkCounts[entry.issue.id] ?? 0;
+      const startedAtMs = Date.parse(entry.startedAt);
+      const stageDurationSeconds = Number.isFinite(startedAtMs)
+        ? Math.max(0, (now.getTime() - startedAtMs) / 1000)
+        : 0;
+      const tokensPerTurn =
+        entry.turnCount > 0
+          ? entry.totalStageTotalTokens / entry.turnCount
+          : 0;
       const row: RuntimeSnapshotRunningRow = {
         issue_id: entry.issue.id,
         issue_identifier: entry.identifier,
@@ -77,6 +87,8 @@ export function buildRuntimeSnapshot(
         last_message: entry.lastCodexMessage,
         started_at: entry.startedAt,
         last_event_at: entry.lastCodexTimestamp,
+        stage_duration_seconds: stageDurationSeconds,
+        tokens_per_turn: tokensPerTurn,
         tokens: {
           input_tokens: entry.codexInputTokens,
           output_tokens: entry.codexOutputTokens,

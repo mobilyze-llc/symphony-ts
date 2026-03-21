@@ -351,6 +351,8 @@ function createSnapshot(): RuntimeSnapshot {
         last_message: "Working on tests",
         started_at: "2026-03-06T09:58:00.000Z",
         last_event_at: "2026-03-06T09:59:30.000Z",
+        stage_duration_seconds: 120,
+        tokens_per_turn: 667,
         tokens: {
           input_tokens: 1200,
           output_tokens: 800,
