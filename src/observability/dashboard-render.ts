@@ -340,6 +340,117 @@ const DASHBOARD_STYLES = String.raw`
         margin: 1rem 0 0;
         color: var(--muted);
       }
+      .expand-toggle {
+        border: 1px solid var(--line-strong);
+        background: rgba(255, 255, 255, 0.72);
+        color: var(--muted);
+        border-radius: 4px;
+        padding: 0.18rem 0.48rem;
+        font-size: 0.78rem;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+        box-shadow: none;
+        cursor: pointer;
+        transition: background 120ms ease, color 120ms ease;
+        margin-top: 0.3rem;
+      }
+      .expand-toggle:hover {
+        transform: none;
+        box-shadow: none;
+        background: white;
+        border-color: var(--muted);
+        color: var(--ink);
+      }
+      .detail-row > td {
+        padding: 0;
+        border-top: none;
+      }
+      .detail-panel {
+        padding: 1rem 1.25rem;
+        background: var(--page-soft);
+        border-top: 1px solid var(--line);
+        border-bottom: 2px solid var(--line-strong);
+      }
+      .detail-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 1rem;
+      }
+      .detail-section {
+        min-width: 0;
+      }
+      .detail-section-title {
+        margin: 0 0 0.45rem;
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+      }
+      .detail-kv {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        gap: 0.12rem 0.75rem;
+        font-size: 0.88rem;
+      }
+      .detail-kv-label {
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .detail-kv-value {
+        font-variant-numeric: tabular-nums slashed-zero;
+        font-feature-settings: "tnum" 1, "zero" 1;
+      }
+      .turn-timeline {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+        font-size: 0.84rem;
+        max-height: 9rem;
+        overflow-y: auto;
+      }
+      .turn-timeline li {
+        display: grid;
+        grid-template-columns: 2rem 1fr;
+        gap: 0.3rem;
+        padding: 0.22rem 0;
+        border-top: 1px solid var(--line);
+        align-items: baseline;
+      }
+      .turn-timeline li:first-child {
+        border-top: none;
+      }
+      .turn-num {
+        color: var(--muted);
+        font-size: 0.78rem;
+        font-weight: 700;
+        text-align: right;
+      }
+      .turn-msg {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        color: var(--ink);
+      }
+      .exec-history-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.84rem;
+      }
+      .exec-history-table th {
+        text-align: left;
+        padding: 0 0.4rem 0.35rem 0;
+        font-size: 0.74rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+      }
+      .exec-history-table td {
+        padding: 0.2rem 0.4rem 0.2rem 0;
+        border-top: 1px solid var(--line);
+        vertical-align: top;
+      }
       @media (max-width: 860px) {
         .app-shell {
           padding: 1rem 0.85rem 2rem;
@@ -595,12 +706,53 @@ function renderDashboardClientScript(
           }
         }
 
+        function renderDetailPanel(row, rowId) {
+          const tokenBreakdown =
+            '<div class="detail-section">' +
+            '<p class="detail-section-title">Token breakdown</p>' +
+            '<div class="detail-kv">' +
+            '<span class="detail-kv-label">Input</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.input_tokens) + '</span>' +
+            '<span class="detail-kv-label">Output</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.output_tokens) + '</span>' +
+            '<span class="detail-kv-label">Total</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.total_tokens) + '</span>' +
+            '<span class="detail-kv-label">Cache read</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.cache_read_tokens) + '</span>' +
+            '<span class="detail-kv-label">Cache write</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.cache_write_tokens) + '</span>' +
+            '<span class="detail-kv-label">Reasoning</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.reasoning_tokens) + '</span>' +
+            '<span class="detail-kv-label">Pipeline</span><span class="detail-kv-value numeric">' + formatInteger(row.total_pipeline_tokens) + '</span>' +
+            '</div></div>';
+
+          const turnHistoryItems = (!row.turn_history || row.turn_history.length === 0)
+            ? '<li><span class="turn-num">\u2014</span><span class="turn-msg muted">No turns recorded.</span></li>'
+            : row.turn_history.map(function (t) {
+                return '<li><span class="turn-num">' + escapeHtml(t.turnNumber) + '</span><span class="turn-msg" title="' + escapeHtml(t.message || '') + '">' + escapeHtml(t.message || '(no message)') + '</span></li>';
+              }).join('');
+          const turnHistory =
+            '<div class="detail-section">' +
+            '<p class="detail-section-title">Turn history</p>' +
+            '<ul class="turn-timeline">' + turnHistoryItems + '</ul>' +
+            '</div>';
+
+          const execRows = (!row.execution_history || row.execution_history.length === 0)
+            ? '<tr><td colspan="4" class="muted">No completed stages.</td></tr>'
+            : row.execution_history.map(function (s) {
+                return '<tr><td>' + escapeHtml(s.stageName) + '</td><td class="numeric">' + formatInteger(s.turns) + '</td><td class="numeric">' + formatInteger(s.totalTokens) + '</td><td>' + escapeHtml(s.outcome) + '</td></tr>';
+              }).join('');
+          const executionHistory =
+            '<div class="detail-section">' +
+            '<p class="detail-section-title">Execution history</p>' +
+            '<table class="exec-history-table"><thead><tr><th>Stage</th><th>Turns</th><th>Tokens</th><th>Outcome</th></tr></thead>' +
+            '<tbody>' + execRows + '</tbody></table>' +
+            '</div>';
+
+          return '<div class="detail-panel"><div class="detail-grid">' + tokenBreakdown + turnHistory + executionHistory + '</div></div>';
+        }
+
         function renderRunningRows(next) {
           if (!next.running || next.running.length === 0) {
             return '<tr><td colspan="6"><p class="empty-state">No active sessions.</p></td></tr>';
           }
 
           return next.running.map(function (row) {
+            const detailId = 'detail-' + String(row.issue_identifier).replace(/[^a-zA-Z0-9]/g, '-');
             const sessionCell = row.session_id
               ? '<button type="button" class="subtle-button" data-label="Copy ID" data-copy="' + escapeHtml(row.session_id) + '" onclick="navigator.clipboard.writeText(this.dataset.copy); this.textContent = \\'Copied\\'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);">Copy ID</button>'
               : '<span class="muted">n/a</span>';
@@ -616,15 +768,18 @@ function renderDashboardClientScript(
               ? '<span class="state-badge state-badge-warning">Rework \xD7' + escapeHtml(row.rework_count) + '</span>'
               : '';
             const activityText = row.activity_summary || row.last_event || 'n/a';
+            const expandToggle = '<button type="button" class="expand-toggle" aria-expanded="false" data-detail="' + escapeHtml(detailId) + '" onclick="const d=document.getElementById(this.dataset.detail);const open=this.getAttribute(\\'aria-expanded\\')=== \\'true\\';d.style.display=open?\\'none\\':\\'table-row\\';this.setAttribute(\\'aria-expanded\\',String(!open));this.textContent=open?\\'\u25B6 Details\\':\\'\u25BC Details\\';">\u25B6 Details</button>';
 
-            return '<tr>' +
-              '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(row.issue_identifier) + '</span><a class="issue-link" href="/api/v1/' + encodeURIComponent(row.issue_identifier) + '">JSON details</a>' + pipelineStageHtml + '</div></td>' +
+            const detailRow = '<tr id="' + escapeHtml(detailId) + '" class="detail-row" style="display:none;"><td colspan="6">' + renderDetailPanel(row, detailId) + '</td></tr>';
+
+            return '<tr class="session-row">' +
+              '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(row.issue_identifier) + '</span><a class="issue-link" href="/api/v1/' + encodeURIComponent(row.issue_identifier) + '">JSON details</a>' + pipelineStageHtml + expandToggle + '</div></td>' +
               '<td><div class="detail-stack"><span class="' + stateBadgeClass(row.state) + '">' + escapeHtml(row.state) + '</span>' + reworkHtml + '</div></td>' +
               '<td><div class="session-stack">' + sessionCell + '</div></td>' +
               '<td class="numeric">' + formatRuntimeAndTurns(row, next.generated_at) + '</td>' +
               '<td><div class="detail-stack"><span class="event-text" title="' + escapeHtml(activityText) + '">' + escapeHtml(activityText) + '</span><span class="muted event-meta">' + eventMeta + '</span></div></td>' +
-              '<td><div class="token-stack numeric"><span>Total: ' + formatInteger(row.tokens?.total_tokens) + '</span><span class="muted">In ' + formatInteger(row.tokens?.input_tokens) + ' / Out ' + formatInteger(row.tokens?.output_tokens) + '</span><span class="muted">' + formatInteger(row.tokens_per_turn) + ' / turn</span><span class="muted">Pipeline: ' + formatInteger(row.total_pipeline_tokens) + '</span></div></td>' +
-              '</tr>';
+              '<td><div class="token-stack numeric"><span>Total: ' + formatInteger(row.tokens && row.tokens.total_tokens) + '</span><span class="muted">In ' + formatInteger(row.tokens && row.tokens.input_tokens) + ' / Out ' + formatInteger(row.tokens && row.tokens.output_tokens) + '</span><span class="muted">' + formatInteger(row.tokens_per_turn) + ' / turn</span><span class="muted">Pipeline: ' + formatInteger(row.total_pipeline_tokens) + '</span></div></td>' +
+              '</tr>' + detailRow;
           }).join('');
         }
 
@@ -690,12 +845,15 @@ function renderDashboardClientScript(
 }
 
 function renderRunningRows(snapshot: RuntimeSnapshot): string {
-  return snapshot.running.length === 0
-    ? '<tr><td colspan="6"><p class="empty-state">No active sessions.</p></td></tr>'
-    : snapshot.running
-        .map(
-          (row) => `
-            <tr>
+  if (snapshot.running.length === 0) {
+    return '<tr><td colspan="6"><p class="empty-state">No active sessions.</p></td></tr>';
+  }
+  return snapshot.running
+    .map((row) => {
+      const detailId = `detail-${row.issue_identifier.replace(/[^a-zA-Z0-9]/g, "-")}`;
+      const detailPanel = renderDetailPanel(row);
+      return `
+            <tr class="session-row">
               <td>
                 <div class="issue-stack">
                   <span class="issue-id">${escapeHtml(row.issue_identifier)}</span>
@@ -703,6 +861,7 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
                     row.issue_identifier,
                   )}">JSON details</a>
                   ${row.pipeline_stage !== null && row.pipeline_stage !== undefined ? `<span class="muted">${escapeHtml(row.pipeline_stage)}</span>` : ""}
+                  <button type="button" class="expand-toggle" aria-expanded="false" data-detail="${escapeHtml(detailId)}" onclick="const d=document.getElementById(this.dataset.detail);const open=this.getAttribute('aria-expanded')==='true';d.style.display=open?'none':'table-row';this.setAttribute('aria-expanded',String(!open));this.textContent=open?'\u25B6 Details':'\u25BC Details';">&#x25B6; Details</button>
                 </div>
               </td>
               <td>
@@ -755,9 +914,67 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
                   <span class="muted">Pipeline: ${formatInteger(row.total_pipeline_tokens)}</span>
                 </div>
               </td>
-            </tr>`,
-        )
-        .join("");
+            </tr>
+            <tr id="${escapeHtml(detailId)}" class="detail-row" style="display:none;">
+              <td colspan="6">${detailPanel}</td>
+            </tr>`;
+    })
+    .join("");
+}
+
+function renderDetailPanel(
+  row: RuntimeSnapshot["running"][number],
+): string {
+  const tokenBreakdown = `
+    <div class="detail-section">
+      <p class="detail-section-title">Token breakdown</p>
+      <div class="detail-kv">
+        <span class="detail-kv-label">Input</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.input_tokens)}</span>
+        <span class="detail-kv-label">Output</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.output_tokens)}</span>
+        <span class="detail-kv-label">Total</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.total_tokens)}</span>
+        <span class="detail-kv-label">Cache read</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.cache_read_tokens)}</span>
+        <span class="detail-kv-label">Cache write</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.cache_write_tokens)}</span>
+        <span class="detail-kv-label">Reasoning</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.reasoning_tokens)}</span>
+        <span class="detail-kv-label">Pipeline</span><span class="detail-kv-value numeric">${formatInteger(row.total_pipeline_tokens)}</span>
+      </div>
+    </div>`;
+
+  const turnHistoryRows =
+    row.turn_history.length === 0
+      ? '<li><span class="turn-num">—</span><span class="turn-msg muted">No turns recorded.</span></li>'
+      : row.turn_history
+          .map(
+            (t) =>
+              `<li><span class="turn-num">${escapeHtml(t.turnNumber)}</span><span class="turn-msg" title="${escapeHtml(t.message ?? "")}">${escapeHtml(t.message ?? "(no message)")}</span></li>`,
+          )
+          .join("");
+
+  const turnHistory = `
+    <div class="detail-section">
+      <p class="detail-section-title">Turn history</p>
+      <ul class="turn-timeline">${turnHistoryRows}</ul>
+    </div>`;
+
+  const execHistoryRows =
+    row.execution_history.length === 0
+      ? `<tr><td colspan="4" class="muted">No completed stages.</td></tr>`
+      : row.execution_history
+          .map(
+            (s) =>
+              `<tr><td>${escapeHtml(s.stageName)}</td><td class="numeric">${formatInteger(s.turns)}</td><td class="numeric">${formatInteger(s.totalTokens)}</td><td>${escapeHtml(s.outcome)}</td></tr>`,
+          )
+          .join("");
+
+  const executionHistory = `
+    <div class="detail-section">
+      <p class="detail-section-title">Execution history</p>
+      <table class="exec-history-table">
+        <thead><tr><th>Stage</th><th>Turns</th><th>Tokens</th><th>Outcome</th></tr></thead>
+        <tbody>${execHistoryRows}</tbody>
+      </table>
+    </div>`;
+
+  return `<div class="detail-panel"><div class="detail-grid">${tokenBreakdown}${turnHistory}${executionHistory}</div></div>`;
 }
 
 function renderRetryRows(snapshot: RuntimeSnapshot): string {
