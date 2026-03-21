@@ -180,14 +180,21 @@ export interface OrchestratorState {
   issueExecutionHistory: Record<string, ExecutionHistory>;
 }
 
-export const FAILURE_CLASSES = ["verify", "review", "rebase", "spec", "infra"] as const;
+export const FAILURE_CLASSES = [
+  "verify",
+  "review",
+  "rebase",
+  "spec",
+  "infra",
+] as const;
 export type FailureClass = (typeof FAILURE_CLASSES)[number];
 
 export interface FailureSignal {
   failureClass: FailureClass;
 }
 
-const STAGE_FAILED_REGEX = /\[STAGE_FAILED:\s*(verify|review|rebase|spec|infra)\s*\]/;
+const STAGE_FAILED_REGEX =
+  /\[STAGE_FAILED:\s*(verify|review|rebase|spec|infra)\s*\]/;
 
 /**
  * Parse a `[STAGE_FAILED: class]` signal from agent output text.

@@ -229,20 +229,12 @@ describe("formatReviewFindingsComment", () => {
 
 describe("formatRebaseComment", () => {
   it("starts with ## Rebase Needed header", () => {
-    const comment = formatRebaseComment(
-      "ISSUE-42",
-      "merge",
-      "Some message",
-    );
+    const comment = formatRebaseComment("ISSUE-42", "merge", "Some message");
     expect(comment.startsWith("## Rebase Needed")).toBe(true);
   });
 
   it("includes the stage name and issue identifier", () => {
-    const comment = formatRebaseComment(
-      "ISSUE-42",
-      "merge",
-      "Some message",
-    );
+    const comment = formatRebaseComment("ISSUE-42", "merge", "Some message");
     expect(comment).toContain("merge");
     expect(comment).toContain("ISSUE-42");
   });

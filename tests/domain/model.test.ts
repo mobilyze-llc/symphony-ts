@@ -209,7 +209,13 @@ describe("ExecutionHistory", () => {
 
 describe("parseFailureSignal", () => {
   it("defines the expected failure classes", () => {
-    expect(FAILURE_CLASSES).toEqual(["verify", "review", "rebase", "spec", "infra"]);
+    expect(FAILURE_CLASSES).toEqual([
+      "verify",
+      "review",
+      "rebase",
+      "spec",
+      "infra",
+    ]);
   });
 
   it("parses each failure class from agent output", () => {

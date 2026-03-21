@@ -1101,8 +1101,7 @@ describe("rebase failure signal routing", () => {
     orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
-      agentMessage:
-        "Merge conflict in src/handler.ts\n[STAGE_FAILED: rebase]",
+      agentMessage: "Merge conflict in src/handler.ts\n[STAGE_FAILED: rebase]",
     });
 
     // Allow async side effects to fire
