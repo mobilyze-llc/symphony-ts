@@ -306,14 +306,16 @@ cmd_cleanup() {
   local execute=false
   local skip_github=false
   local skip_linear=false
+  local prune_branches=false
 
   # Parse flags
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --execute)      execute=true ;;
-      --skip-github)  skip_github=true ;;
-      --skip-linear)  skip_linear=true ;;
-      *)              die "Unknown flag: $1" ;;
+      --execute)          execute=true ;;
+      --skip-github)      skip_github=true ;;
+      --skip-linear)      skip_linear=true ;;
+      --prune-branches)   prune_branches=true ;;
+      *)                  die "Unknown flag: $1" ;;
     esac
     shift
   done
@@ -614,8 +616,86 @@ cmd_cleanup() {
   fi
   echo ""
 
+  # --- Prune branches (optional phase) ---
+  local count_branches=0
+  if $prune_branches; then
+    info "=== Prune Branches ==="
+    _do_prune_branches "$execute"
+    count_branches="$_PRUNE_BRANCHES_COUNT"
+  fi
+
   # --- Summary ---
-  info "Summary: $count_workspaces workspaces, $count_prs PRs, $count_stale_issues stale issues, $count_logs logs"
+  info "Summary: $count_workspaces workspaces, $count_prs PRs, $count_stale_issues stale issues, $count_logs logs, $count_branches branches"
+  if ! $execute; then
+    info "Run with --execute to apply."
+  fi
+}
+
+# --- Prune Branches ---
+
+# Shared implementation: fetch --prune, list merged branches, optionally delete.
+# Sets global _PRUNE_BRANCHES_COUNT to the number of branches acted on.
+# Arguments: execute (true|false)
+_do_prune_branches() {
+  local execute="${1:-false}"
+  _PRUNE_BRANCHES_COUNT=0
+
+  # Step 1: fetch --prune to clean stale remote-tracking refs
+  info "Fetching and pruning stale remote-tracking refs..."
+  git -C "$SYMPHONY_ROOT" fetch --prune
+  echo ""
+
+  # Step 2: resolve the currently checked-out branch so we can skip it
+  local current_branch
+  current_branch="$(git -C "$SYMPHONY_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+
+  # Step 3: list local branches fully merged into main
+  info "Local branches merged into main (skipping main, master, current):"
+  local found=false
+  while IFS= read -r raw_branch; do
+    # Strip leading whitespace and the "* " current-branch marker
+    local branch
+    branch="$(echo "$raw_branch" | xargs)"
+    branch="${branch#\* }"
+    [[ -z "$branch" ]] && continue
+    [[ "$branch" == "main" || "$branch" == "master" || "$branch" == "$current_branch" ]] && continue
+    found=true
+    if $execute; then
+      git -C "$SYMPHONY_ROOT" branch -d "$branch"
+      ok "  $branch — deleted"
+    else
+      info "  $branch — would delete"
+    fi
+    _PRUNE_BRANCHES_COUNT=$((_PRUNE_BRANCHES_COUNT + 1))
+  done < <(git -C "$SYMPHONY_ROOT" branch --merged main 2>/dev/null)
+
+  if ! $found; then
+    info "  (none found)"
+  fi
+  echo ""
+}
+
+cmd_prune_branches() {
+  local execute=false
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --execute)    execute=true ;;
+      --dry-run)    execute=false ;;
+      *)            die "Unknown flag: $1" ;;
+    esac
+    shift
+  done
+
+  if $execute; then
+    info "symphony-ctl prune-branches [EXECUTING]"
+  else
+    info "symphony-ctl prune-branches [DRY RUN]"
+  fi
+  echo ""
+
+  _do_prune_branches "$execute"
+  info "Summary: $_PRUNE_BRANCHES_COUNT merged branch(es)"
   if ! $execute; then
     info "Run with --execute to apply."
   fi
@@ -972,9 +1052,13 @@ Commands:
   tail               Tail both stdout and stderr logs
   install-logrotate  Install newsyslog config for log rotation (requires sudo)
   cleanup            Detect stale pipeline artifacts (dry-run by default)
-                       --execute       Actually remove/close artifacts
-                       --skip-github   Skip PR/branch cleanup
-                       --skip-linear   Skip Linear API queries
+                       --execute           Actually remove/close artifacts
+                       --skip-github       Skip PR/branch cleanup
+                       --skip-linear       Skip Linear API queries
+                       --prune-branches    Also run branch pruning phase
+  prune-branches     Prune merged local branches (dry-run by default)
+                       --execute       Delete merged branches (git branch -d)
+                       --dry-run       Print what would be deleted (default)
   analyze            Analyze a JSONL run log and print a report
                        [path]          Path to symphony.jsonl
                                        (default: most recent /tmp/symphony-logs-*/symphony.jsonl)
@@ -1000,6 +1084,7 @@ case "${1:-}" in
   tail)               cmd_tail ;;
   install-logrotate)  cmd_install_logrotate ;;
   cleanup)            shift; cmd_cleanup "$@" ;;
+  prune-branches)     shift; cmd_prune_branches "$@" ;;
   analyze)            shift; cmd_analyze "$@" ;;
   -h|--help)          usage ;;
   *)                  usage; exit 1 ;;
