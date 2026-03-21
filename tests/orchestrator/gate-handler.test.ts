@@ -6,7 +6,7 @@ import type {
   ReviewerDefinition,
   StageDefinition,
 } from "../../src/config/types.js";
-import type { Issue } from "../../src/domain/model.js";
+import type { ExecutionHistory, Issue } from "../../src/domain/model.js";
 import {
   type AggregateVerdict,
   type CreateReviewerClient,
@@ -15,6 +15,7 @@ import {
   RATE_LIMIT_PATTERNS,
   type ReviewerResult,
   aggregateVerdicts,
+  formatExecutionReport,
   formatGateComment,
   formatReviewFindingsComment,
   parseReviewerOutput,
@@ -1016,3 +1017,131 @@ function createConfig(overrides?: {
     escalationState: null,
   };
 }
+
+describe("formatExecutionReport", () => {
+  it("starts with ## Execution Report header", () => {
+    const history: ExecutionHistory = [];
+    const report = formatExecutionReport("SYMPH-1", history);
+    expect(report).toMatch(/^## Execution Report/);
+  });
+
+  it("includes issue identifier", () => {
+    const history: ExecutionHistory = [];
+    const report = formatExecutionReport("SYMPH-42", history);
+    expect(report).toContain("SYMPH-42");
+  });
+
+  it("contains stage timeline table with correct columns", () => {
+    const history: ExecutionHistory = [
+      {
+        stageName: "investigate",
+        durationMs: 18_000,
+        totalTokens: 50_000,
+        turns: 5,
+        outcome: "normal",
+      },
+    ];
+    const report = formatExecutionReport("SYMPH-1", history);
+    expect(report).toContain("| Stage |");
+    expect(report).toContain("| Duration |");
+    expect(report).toContain("| Tokens |");
+    expect(report).toContain("| Turns |");
+    expect(report).toContain("| Outcome |");
+  });
+
+  it("includes each stage record in the table", () => {
+    const history: ExecutionHistory = [
+      {
+        stageName: "investigate",
+        durationMs: 18_000,
+        totalTokens: 50_000,
+        turns: 5,
+        outcome: "normal",
+      },
+      {
+        stageName: "implement",
+        durationMs: 120_000,
+        totalTokens: 200_000,
+        turns: 10,
+        outcome: "normal",
+      },
+    ];
+    const report = formatExecutionReport("SYMPH-1", history);
+    expect(report).toContain("investigate");
+    expect(report).toContain("18s");
+    expect(report).toContain("implement");
+    expect(report).toContain("120s");
+    expect(report).toContain("normal");
+  });
+
+  it("includes total tokens across all stages", () => {
+    const history: ExecutionHistory = [
+      {
+        stageName: "investigate",
+        durationMs: 18_000,
+        totalTokens: 50_000,
+        turns: 5,
+        outcome: "normal",
+      },
+      {
+        stageName: "implement",
+        durationMs: 120_000,
+        totalTokens: 200_000,
+        turns: 10,
+        outcome: "normal",
+      },
+      {
+        stageName: "review",
+        durationMs: 45_000,
+        totalTokens: 80_000,
+        turns: 3,
+        outcome: "normal",
+      },
+      {
+        stageName: "merge",
+        durationMs: 10_000,
+        totalTokens: 20_000,
+        turns: 2,
+        outcome: "normal",
+      },
+    ];
+    const report = formatExecutionReport("SYMPH-1", history);
+    // Total = 50000 + 200000 + 80000 + 20000 = 350000
+    expect(report).toContain("350,000");
+    expect(report).toContain("Total tokens");
+  });
+
+  it("includes rework count when provided and non-zero", () => {
+    const history: ExecutionHistory = [
+      {
+        stageName: "implement",
+        durationMs: 60_000,
+        totalTokens: 100_000,
+        turns: 8,
+        outcome: "normal",
+      },
+    ];
+    const report = formatExecutionReport("SYMPH-1", history, 1);
+    expect(report).toContain("Rework count");
+    expect(report).toContain("1");
+  });
+
+  it("omits rework count line when rework count is zero", () => {
+    const history: ExecutionHistory = [];
+    const report = formatExecutionReport("SYMPH-1", history, 0);
+    expect(report).not.toContain("Rework count");
+  });
+
+  it("omits rework count line when not provided", () => {
+    const history: ExecutionHistory = [];
+    const report = formatExecutionReport("SYMPH-1", history);
+    expect(report).not.toContain("Rework count");
+  });
+
+  it("handles empty history with total tokens of zero", () => {
+    const history: ExecutionHistory = [];
+    const report = formatExecutionReport("SYMPH-1", history);
+    expect(report).toContain("Total tokens");
+    expect(report).toContain("0");
+  });
+});

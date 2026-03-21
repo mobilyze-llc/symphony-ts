@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import type { AgentRunnerCodexClient } from "../agent/runner.js";
 import type { CodexTurnResult } from "../codex/app-server-client.js";
 import type { ReviewerDefinition, StageDefinition } from "../config/types.js";
-import type { Issue } from "../domain/model.js";
+import type { ExecutionHistory, Issue } from "../domain/model.js";
 
 /**
  * Known rate-limit / quota-exhaustion phrases that may appear in reviewer
@@ -417,4 +417,44 @@ export function formatGateComment(
   });
 
   return [header, "", ...sections].join("\n");
+}
+
+/**
+ * Format an execution report as a markdown comment for Linear.
+ * Generates a stage timeline table from ExecutionHistory and includes
+ * total tokens and optional rework count.
+ */
+export function formatExecutionReport(
+  issueIdentifier: string,
+  history: ExecutionHistory,
+  reworkCount?: number,
+): string {
+  const lines: string[] = [
+    "## Execution Report",
+    "",
+    `**Issue:** ${issueIdentifier}`,
+  ];
+
+  if (reworkCount !== undefined && reworkCount > 0) {
+    lines.push(`**Rework count:** ${reworkCount}`);
+  }
+
+  lines.push(
+    "",
+    "| Stage | Duration | Tokens | Turns | Outcome |",
+    "|-------|----------|--------|-------|---------|",
+  );
+
+  let totalTokens = 0;
+  for (const record of history) {
+    const durationSec = Math.round(record.durationMs / 1000);
+    totalTokens += record.totalTokens;
+    lines.push(
+      `| ${record.stageName} | ${durationSec}s | ${record.totalTokens.toLocaleString("en-US")} | ${record.turns} | ${record.outcome} |`,
+    );
+  }
+
+  lines.push("", `**Total tokens:** ${totalTokens.toLocaleString("en-US")}`);
+
+  return lines.join("\n");
 }

@@ -1763,6 +1763,445 @@ describe("execution history stage records", () => {
   });
 });
 
+describe("execution report on terminal state", () => {
+  function createTerminalStageConfig() {
+    const config = createConfig();
+    config.stages = {
+      initialStage: "investigate",
+      stages: {
+        investigate: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "merge",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        merge: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "done",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: "Done",
+        },
+      },
+    };
+    return config;
+  }
+
+  it("posts execution report on terminal state", async () => {
+    const postedComments: Array<{ issueId: string; body: string }> = [];
+    const config = createTerminalStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (issueId, body) => {
+        postedComments.push({ issueId, body });
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "merge";
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    // Allow microtasks (void promise) to flush
+    await Promise.resolve();
+
+    expect(postedComments).toHaveLength(1);
+    expect(postedComments[0]?.body).toMatch(/^## Execution Report/);
+  });
+
+  it("execution report contains stage timeline", async () => {
+    const postedComments: Array<{ issueId: string; body: string }> = [];
+    const config = createTerminalStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (issueId, body) => {
+        postedComments.push({ issueId, body });
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    // Manually inject history for investigate and merge stages
+    orchestrator.getState().issueExecutionHistory["1"] = [
+      {
+        stageName: "investigate",
+        durationMs: 18_000,
+        totalTokens: 50_000,
+        turns: 5,
+        outcome: "normal",
+      },
+    ];
+    orchestrator.getState().issueStages["1"] = "merge";
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    await Promise.resolve();
+
+    expect(postedComments).toHaveLength(1);
+    const body = postedComments[0]!.body;
+    // Table columns
+    expect(body).toContain("| Stage |");
+    expect(body).toContain("| Duration |");
+    expect(body).toContain("| Tokens |");
+    expect(body).toContain("| Turns |");
+    expect(body).toContain("| Outcome |");
+    // Stage rows
+    expect(body).toContain("investigate");
+    expect(body).toContain("merge");
+  });
+
+  it("execution report contains total tokens", async () => {
+    const postedComments: Array<{ issueId: string; body: string }> = [];
+    const config = createTerminalStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (issueId, body) => {
+        postedComments.push({ issueId, body });
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueExecutionHistory["1"] = [
+      {
+        stageName: "investigate",
+        durationMs: 18_000,
+        totalTokens: 50_000,
+        turns: 5,
+        outcome: "normal",
+      },
+      {
+        stageName: "implement",
+        durationMs: 120_000,
+        totalTokens: 200_000,
+        turns: 10,
+        outcome: "normal",
+      },
+      {
+        stageName: "review",
+        durationMs: 45_000,
+        totalTokens: 80_000,
+        turns: 3,
+        outcome: "normal",
+      },
+    ];
+    orchestrator.getState().issueStages["1"] = "merge";
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    await Promise.resolve();
+
+    expect(postedComments).toHaveLength(1);
+    const body = postedComments[0]!.body;
+    expect(body).toContain("Total tokens");
+    // 50000 + 200000 + 80000 = 330000, plus merge stage tokens (0 in this test)
+    // The merge stage exit adds its record too
+    expect(body).toMatch(/Total tokens.*\d/);
+  });
+
+  it("execution report shows rework count", async () => {
+    const postedComments: Array<{ issueId: string; body: string }> = [];
+    const config = createTerminalStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (issueId, body) => {
+        postedComments.push({ issueId, body });
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "merge";
+    orchestrator.getState().issueReworkCounts["1"] = 1;
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    await Promise.resolve();
+
+    expect(postedComments).toHaveLength(1);
+    const body = postedComments[0]!.body;
+    expect(body).toContain("Rework count");
+    expect(body).toContain("1");
+  });
+
+  it("execution report includes rework stages", async () => {
+    const postedComments: Array<{ issueId: string; body: string }> = [];
+    const config = createTerminalStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (issueId, body) => {
+        postedComments.push({ issueId, body });
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    // Simulate: investigate, implement, review (fail), implement (rework), review (pass)
+    orchestrator.getState().issueExecutionHistory["1"] = [
+      {
+        stageName: "investigate",
+        durationMs: 10_000,
+        totalTokens: 10_000,
+        turns: 3,
+        outcome: "normal",
+      },
+      {
+        stageName: "implement",
+        durationMs: 60_000,
+        totalTokens: 80_000,
+        turns: 8,
+        outcome: "normal",
+      },
+      {
+        stageName: "review",
+        durationMs: 20_000,
+        totalTokens: 30_000,
+        turns: 2,
+        outcome: "normal",
+      },
+      {
+        stageName: "implement",
+        durationMs: 50_000,
+        totalTokens: 70_000,
+        turns: 7,
+        outcome: "normal",
+      },
+      {
+        stageName: "review",
+        durationMs: 25_000,
+        totalTokens: 35_000,
+        turns: 2,
+        outcome: "normal",
+      },
+    ];
+    orchestrator.getState().issueStages["1"] = "merge";
+    orchestrator.getState().issueReworkCounts["1"] = 1;
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    await Promise.resolve();
+
+    expect(postedComments).toHaveLength(1);
+    const body = postedComments[0]!.body;
+    // 5 pre-existing records + 1 merge record = 6 total stage rows
+    const tableRows = body
+      .split("\n")
+      .filter(
+        (line) =>
+          line.startsWith("| ") &&
+          !line.startsWith("| Stage") &&
+          !line.startsWith("|----"),
+      );
+    expect(tableRows).toHaveLength(6);
+  });
+
+  it("execution report failure does not block terminal transition", async () => {
+    const config = createTerminalStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (_issueId, _body) => {
+        throw new Error("postComment failed");
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "merge";
+
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    // Terminal transition: returns null (no retry), issue is completed
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+  });
+
+  it("history cleaned up even if report posting fails", async () => {
+    const config = createTerminalStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (_issueId, _body) => {
+        throw new Error("postComment failed");
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "merge";
+    orchestrator.getState().issueExecutionHistory["1"] = [
+      {
+        stageName: "investigate",
+        durationMs: 10_000,
+        totalTokens: 10_000,
+        turns: 3,
+        outcome: "normal",
+      },
+    ];
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    // State should be cleaned up regardless of postComment failure
+    expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
+    // History may contain the merge record from onWorkerExit, but after advanceStage it's deleted
+    expect(orchestrator.getState().issueExecutionHistory["1"]).toBeUndefined();
+  });
+
+  it("no execution report without postComment", async () => {
+    // No postComment configured — just verify it completes normally without error
+    const config = createTerminalStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      // postComment intentionally not configured
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "merge";
+
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    // Issue completes normally
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    // No side effects
+    expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
+  });
+});
+
 function createOrchestrator(overrides?: {
   config?: ResolvedWorkflowConfig;
   tracker?: IssueTracker;

@@ -24,6 +24,7 @@ import {
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 import {
   type EnsembleGateResult,
+  formatExecutionReport,
   formatReviewFindingsComment,
 } from "./gate-handler.js";
 
@@ -506,6 +507,22 @@ export class OrchestratorCore {
     }
 
     if (nextStage.type === "terminal") {
+      // Post execution report before cleanup (best-effort)
+      if (nextStage.linearState !== null && this.postComment !== undefined) {
+        const history = this.state.issueExecutionHistory[issueId] ?? [];
+        const reworkCount = this.state.issueReworkCounts[issueId] ?? 0;
+        const report = formatExecutionReport(
+          issueIdentifier,
+          history,
+          reworkCount,
+        );
+        void this.postComment(issueId, report).catch((err) => {
+          console.warn(
+            `[orchestrator] Failed to post execution report for ${issueIdentifier}:`,
+            err,
+          );
+        });
+      }
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
       delete this.state.issueExecutionHistory[issueId];
