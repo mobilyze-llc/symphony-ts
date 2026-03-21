@@ -237,6 +237,46 @@ After completing your investigation, create the workpad comment on this Linear i
    ```
 4. Fill the Plan and Acceptance Criteria sections from your investigation findings.
 
+## Investigation Brief
+
+After posting the workpad, write `INVESTIGATION-BRIEF.md` to the worktree root. This file gives the implement-stage agent a concise orientation without re-reading the codebase.
+
+Keep the brief under ~200 lines (~4K tokens). Use exactly this structure:
+
+```markdown
+# Investigation Brief
+## Issue: [ISSUE-KEY] — [Title]
+
+## Objective
+One-paragraph summary of what needs to be done and why.
+
+## Relevant Files (ranked by importance)
+1. `src/path/to/primary-file.ts` — Main file to modify. [What it does, why it matters]
+2. `src/path/to/secondary-file.ts` — Related dependency. [What to know]
+3. `tests/path/to/test-file.test.ts` — Existing tests. [Coverage notes]
+
+## Key Code Patterns
+- Pattern X is used for Y (see `file.ts:42-67`)
+- The codebase uses Z convention for this type of change
+
+## Architecture Context
+- Brief description of relevant subsystem
+- Data flow: A → B → C
+- Key interfaces/types to be aware of
+
+## Test Strategy
+- Existing test files and what they cover
+- Test patterns used (describe/it, vitest, mocking approach)
+- Edge cases to cover
+
+## Gotchas & Constraints
+- Don't modify X because Y
+- Z is deprecated, use W instead
+
+## Key Code Excerpts
+[2-3 most important code blocks with file path and line numbers]
+```
+
 ## Completion Signals
 When you are done:
 - If investigation is complete and workpad is posted: output `[STAGE_COMPLETE]`
