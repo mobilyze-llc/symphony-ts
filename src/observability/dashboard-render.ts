@@ -439,7 +439,7 @@ const DASHBOARD_STYLES = String.raw`
       }
       .turn-timeline li {
         display: grid;
-        grid-template-columns: 2rem 1fr;
+        grid-template-columns: 5.5rem 1fr auto;
         gap: 0.3rem;
         padding: 0.22rem 0;
         border-top: 1px solid var(--line);
@@ -452,13 +452,21 @@ const DASHBOARD_STYLES = String.raw`
         color: var(--muted);
         font-size: 0.78rem;
         font-weight: 700;
-        text-align: right;
+        text-align: left;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       .turn-msg {
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
         color: var(--ink);
+      }
+      .activity-time {
+        color: var(--muted);
+        font-size: 0.76rem;
+        white-space: nowrap;
       }
       .exec-history-table {
         width: 100%;
@@ -817,15 +825,21 @@ function renderDashboardClientScript(
             '<span class="detail-kv-label">Pipeline</span><span class="detail-kv-value numeric">' + formatInteger(row.total_pipeline_tokens) + '</span>' +
             '</div></div>';
 
-          const turnHistoryItems = (!row.turn_history || row.turn_history.length === 0)
-            ? '<li><span class="turn-num">\u2014</span><span class="turn-msg muted">No turns recorded.</span></li>'
-            : row.turn_history.map(function (t) {
-                return '<li><span class="turn-num">' + escapeHtml(t.turnNumber) + '</span><span class="turn-msg" title="' + escapeHtml(t.message || '') + '">' + escapeHtml(t.message || '(no message)') + '</span></li>';
+          const recentActivityItems = (!row.recent_activity || row.recent_activity.length === 0)
+            ? '<li><span class="turn-num">\u2014</span><span class="turn-msg muted">No recent activity.</span><span></span></li>'
+            : row.recent_activity.map(function (a) {
+                var ago = '';
+                if (a.timestamp) {
+                  var diffMs = Date.now() - new Date(a.timestamp).getTime();
+                  var secs = Math.max(0, Math.floor(diffMs / 1000));
+                  ago = secs < 60 ? secs + 's ago' : Math.floor(secs / 60) + 'm ago';
+                }
+                return '<li><span class="turn-num">' + escapeHtml(a.toolName) + '</span><span class="turn-msg" title="' + escapeHtml(a.context || '') + '">' + escapeHtml(a.context || '\u2014') + '</span><span class="activity-time">' + escapeHtml(ago) + '</span></li>';
               }).join('');
-          const turnHistory =
+          const recentActivity =
             '<div class="detail-section">' +
-            '<p class="detail-section-title">Turn history</p>' +
-            '<ul class="turn-timeline">' + turnHistoryItems + '</ul>' +
+            '<p class="detail-section-title">Recent activity</p>' +
+            '<ul class="turn-timeline">' + recentActivityItems + '</ul>' +
             '</div>';
 
           const execRows = (!row.execution_history || row.execution_history.length === 0)
@@ -840,7 +854,7 @@ function renderDashboardClientScript(
             '<tbody>' + execRows + '</tbody></table>' +
             '</div>';
 
-          return '<div class="detail-panel">' + contextSection + '<div class="detail-grid">' + tokenBreakdown + turnHistory + executionHistory + '</div></div>';
+          return '<div class="detail-panel">' + contextSection + '<div class="detail-grid">' + tokenBreakdown + recentActivity + executionHistory + '</div></div>';
         }
 
         function renderRunningRows(next) {
@@ -1107,20 +1121,23 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
       </div>
     </div>`;
 
-  const turnHistoryRows =
-    row.turn_history.length === 0
-      ? '<li><span class="turn-num">—</span><span class="turn-msg muted">No turns recorded.</span></li>'
-      : row.turn_history
-          .map(
-            (t) =>
-              `<li><span class="turn-num">${escapeHtml(t.turnNumber)}</span><span class="turn-msg" title="${escapeHtml(t.message ?? "")}">${escapeHtml(t.message ?? "(no message)")}</span></li>`,
-          )
+  const recentActivityRows =
+    row.recent_activity.length === 0
+      ? '<li><span class="turn-num">—</span><span class="turn-msg muted">No recent activity.</span><span></span></li>'
+      : row.recent_activity
+          .map((a) => {
+            const diffMs = Date.now() - new Date(a.timestamp).getTime();
+            const secs = Math.max(0, Math.floor(diffMs / 1000));
+            const ago =
+              secs < 60 ? `${secs}s ago` : `${Math.floor(secs / 60)}m ago`;
+            return `<li><span class="turn-num">${escapeHtml(a.toolName)}</span><span class="turn-msg" title="${escapeHtml(a.context ?? "")}">${escapeHtml(a.context ?? "—")}</span><span class="activity-time">${escapeHtml(ago)}</span></li>`;
+          })
           .join("");
 
-  const turnHistory = `
+  const recentActivity = `
     <div class="detail-section">
-      <p class="detail-section-title">Turn history</p>
-      <ul class="turn-timeline">${turnHistoryRows}</ul>
+      <p class="detail-section-title">Recent activity</p>
+      <ul class="turn-timeline">${recentActivityRows}</ul>
     </div>`;
 
   const execHistoryRows =
@@ -1142,7 +1159,7 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
       </table>
     </div>`;
 
-  return `<div class="detail-panel">${contextSection}<div class="detail-grid">${tokenBreakdown}${turnHistory}${executionHistory}</div></div>`;
+  return `<div class="detail-panel">${contextSection}<div class="detail-grid">${tokenBreakdown}${recentActivity}${executionHistory}</div></div>`;
 }
 
 function renderRetryRows(snapshot: RuntimeSnapshot): string {

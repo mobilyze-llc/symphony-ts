@@ -94,6 +94,12 @@ export interface TurnHistoryEntry {
   event: string | null;
 }
 
+export interface RecentActivityEntry {
+  timestamp: string;
+  toolName: string;
+  context: string | null;
+}
+
 export interface LiveSession {
   sessionId: string | null;
   threadId: string | null;
@@ -121,6 +127,7 @@ export interface LiveSession {
   totalStageCacheReadTokens: number;
   totalStageCacheWriteTokens: number;
   turnHistory: TurnHistoryEntry[];
+  recentActivity: RecentActivityEntry[];
 }
 
 export interface RetryEntry {
@@ -246,6 +253,7 @@ export function createEmptyLiveSession(): LiveSession {
     totalStageCacheReadTokens: 0,
     totalStageCacheWriteTokens: 0,
     turnHistory: [],
+    recentActivity: [],
   };
 }
 
