@@ -3,6 +3,9 @@
  * Output: "2026-03-21T14:45:00.000-04:00" (or -05:00 in EST)
  */
 export function formatEasternTimestamp(date: Date = new Date()): string {
+  if (!Number.isFinite(date.getTime())) {
+    return "n/a";
+  }
   // Get the date/time components in Eastern time
   const formatter = new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/New_York",

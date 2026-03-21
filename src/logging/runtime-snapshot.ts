@@ -161,10 +161,10 @@ export function buildRuntimeSnapshot(
   let failedCount = 0;
   for (const history of Object.values(state.issueExecutionHistory)) {
     if (history.length > 0) {
-      const finalStage = history[history.length - 1]!;
-      if (finalStage.outcome === "success") {
+      const finalStage = history.at(-1);
+      if (finalStage?.outcome === "success") {
         completedCount++;
-      } else if (finalStage.outcome === "failure") {
+      } else if (finalStage?.outcome === "failure") {
         failedCount++;
       }
     }
@@ -229,22 +229,4 @@ function classifyHealth(
   }
 
   return { health: "green", health_reason: null };
-}
-
-/**
- * Format a Date as an Eastern-time string: "Mar 21, 10:05:30 AM ET".
- */
-export function formatEasternTimestamp(date: Date): string {
-  if (!Number.isFinite(date.getTime())) {
-    return "n/a";
-  }
-  return date.toLocaleString("en-US", {
-    timeZone: "America/New_York",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: true,
-  }) + " ET";
 }

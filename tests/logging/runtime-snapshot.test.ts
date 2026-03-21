@@ -239,8 +239,8 @@ describe("runtime snapshot", () => {
         total_tokens: 50,
       },
     });
-    // last_event_at is now formatted in Eastern time
-    expect(snapshot.running[0]!.last_event_at).toContain("ET");
+    // last_event_at is now formatted in Eastern time (ISO-8601 with Eastern offset)
+    expect(snapshot.running[0]!.last_event_at).toMatch(/-0[45]:00$/);
     expect(snapshot.retrying).toEqual([
       {
         issue_id: "issue-3",
@@ -709,10 +709,11 @@ describe("runtime snapshot", () => {
     });
 
     const lastEventAt = snapshot.running[0]!.last_event_at!;
-    // Should be formatted in Eastern time, not raw ISO
-    expect(lastEventAt).not.toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    expect(lastEventAt).toContain("ET");
-    // 15:30:45 UTC = 10:30:45 AM ET (EST)
+    // Should be formatted in Eastern time, not raw UTC (Z suffix)
+    expect(lastEventAt).not.toMatch(/Z$/);
+    // Should contain Eastern timezone offset (-05:00 for EST)
+    expect(lastEventAt).toMatch(/-0[45]:00$/);
+    // 15:30:45 UTC = 10:30:45 ET (EST)
     expect(lastEventAt).toContain("10:30:45");
   });
 
@@ -748,15 +749,45 @@ describe("runtime snapshot", () => {
       maxConcurrentAgents: 2,
     });
     state.issueExecutionHistory["done-1"] = [
-      { stageName: "investigate", durationMs: 5000, totalTokens: 1000, turns: 2, outcome: "success" },
+      {
+        stageName: "investigate",
+        durationMs: 5000,
+        totalTokens: 1000,
+        turns: 2,
+        outcome: "success",
+      },
     ];
     state.issueExecutionHistory["done-2"] = [
-      { stageName: "investigate", durationMs: 3000, totalTokens: 500, turns: 1, outcome: "success" },
-      { stageName: "implement", durationMs: 8000, totalTokens: 2000, turns: 5, outcome: "success" },
+      {
+        stageName: "investigate",
+        durationMs: 3000,
+        totalTokens: 500,
+        turns: 1,
+        outcome: "success",
+      },
+      {
+        stageName: "implement",
+        durationMs: 8000,
+        totalTokens: 2000,
+        turns: 5,
+        outcome: "success",
+      },
     ];
     state.issueExecutionHistory["fail-1"] = [
-      { stageName: "investigate", durationMs: 3000, totalTokens: 500, turns: 1, outcome: "success" },
-      { stageName: "implement", durationMs: 8000, totalTokens: 2000, turns: 5, outcome: "failure" },
+      {
+        stageName: "investigate",
+        durationMs: 3000,
+        totalTokens: 500,
+        turns: 1,
+        outcome: "success",
+      },
+      {
+        stageName: "implement",
+        durationMs: 8000,
+        totalTokens: 2000,
+        turns: 5,
+        outcome: "failure",
+      },
     ];
 
     const snapshot = buildRuntimeSnapshot(state, {
@@ -790,7 +821,13 @@ describe("runtime snapshot", () => {
     // First dispatched 1 hour ago
     state.issueFirstDispatchedAt["issue-1"] = "2026-03-06T10:00:00.000Z";
     state.issueExecutionHistory["issue-1"] = [
-      { stageName: "investigate", durationMs: 600_000, totalTokens: 10_000, turns: 5, outcome: "success" },
+      {
+        stageName: "investigate",
+        durationMs: 600_000,
+        totalTokens: 10_000,
+        turns: 5,
+        outcome: "success",
+      },
     ];
     const entry = createRunningEntry({
       issueId: "issue-1",
@@ -810,7 +847,9 @@ describe("runtime snapshot", () => {
     const snapshot = buildRuntimeSnapshot(state, { now });
 
     // first_dispatched_at should be 1 hour before now
-    expect(snapshot.running[0]!.first_dispatched_at).toBe("2026-03-06T10:00:00.000Z");
+    expect(snapshot.running[0]!.first_dispatched_at).toBe(
+      "2026-03-06T10:00:00.000Z",
+    );
     // Pipeline column uses first_dispatched_at for total wall-clock time
     // The dashboard formats elapsed from first_dispatched_at to generated_at
   });
@@ -839,25 +878,29 @@ describe("runtime snapshot", () => {
     const snapshot = buildRuntimeSnapshot(state, { now });
 
     // For single-stage, first_dispatched_at falls back to started_at
-    expect(snapshot.running[0]!.first_dispatched_at).toBe("2026-03-06T10:00:00.000Z");
+    expect(snapshot.running[0]!.first_dispatched_at).toBe(
+      "2026-03-06T10:00:00.000Z",
+    );
   });
 });
 
 describe("formatEasternTimestamp", () => {
-  it("formats a UTC date to Eastern time with ET suffix", () => {
+  it("formats a UTC date to Eastern time (ISO-8601 with EST offset)", () => {
     // 2026-03-06 is in EST (UTC-5)
     const result = formatEasternTimestamp(new Date("2026-03-06T15:30:45.000Z"));
+    // 15:30:45 UTC = 10:30:45 Eastern (EST = UTC-5)
     expect(result).toContain("10:30:45");
-    expect(result).toContain("AM");
-    expect(result).toContain("ET");
+    expect(result).toContain("-05:00");
+    expect(result).not.toMatch(/Z$/);
   });
 
   it("handles EDT dates correctly", () => {
     // 2026-07-15 is in EDT (UTC-4)
     const result = formatEasternTimestamp(new Date("2026-07-15T18:00:00.000Z"));
-    expect(result).toContain("2:00:00");
-    expect(result).toContain("PM");
-    expect(result).toContain("ET");
+    // 18:00:00 UTC = 14:00:00 Eastern (EDT = UTC-4)
+    expect(result).toContain("14:00:00");
+    expect(result).toContain("-04:00");
+    expect(result).not.toMatch(/Z$/);
   });
 
   it("returns n/a for invalid dates", () => {

@@ -6,6 +6,7 @@ import { renderDashboardHtml } from "../../src/observability/dashboard-render.js
 const BASE_ROW: RuntimeSnapshot["running"][number] = {
   issue_id: "issue-1",
   issue_identifier: "SYMPH-47",
+  issue_title: "Test issue title",
   state: "In Progress",
   pipeline_stage: "implement",
   activity_summary: "Working on it",
@@ -39,7 +40,7 @@ function buildSnapshot(
 ): RuntimeSnapshot {
   return {
     generated_at: "2026-03-21T10:05:30.000Z",
-    counts: { running: 1, retrying: 0 },
+    counts: { running: 1, retrying: 0, completed: 0, failed: 0 },
     running: [{ ...BASE_ROW, ...rowOverrides }],
     retrying: [],
     codex_totals: {
