@@ -343,6 +343,8 @@ function createSnapshot(): RuntimeSnapshot {
         issue_id: "issue-1",
         issue_identifier: "ABC-123",
         state: "In Progress",
+        pipeline_stage: null,
+        activity_summary: "Working on tests",
         session_id: "thread-1-turn-3",
         turn_count: 3,
         last_event: "notification",

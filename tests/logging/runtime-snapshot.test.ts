@@ -8,6 +8,116 @@ import {
 import { buildRuntimeSnapshot } from "../../src/logging/runtime-snapshot.js";
 
 describe("runtime snapshot", () => {
+  it("includes pipeline_stage and activity_summary in running rows", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    state.running["issue-1"] = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Editing src/foo.ts",
+      turnCount: 1,
+      codexInputTokens: 10,
+      codexOutputTokens: 5,
+      codexTotalTokens: 15,
+    });
+    state.issueStages["issue-1"] = "implement";
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running).toHaveLength(1);
+    expect(snapshot.running[0]!.pipeline_stage).toBe("implement");
+    expect(snapshot.running[0]!.activity_summary).toBe("Editing src/foo.ts");
+  });
+
+  it("includes rework_count in running row when greater than zero", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    state.running["issue-1"] = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Fixing review comments",
+      turnCount: 3,
+      codexInputTokens: 10,
+      codexOutputTokens: 5,
+      codexTotalTokens: 15,
+    });
+    state.issueReworkCounts["issue-1"] = 2;
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running).toHaveLength(1);
+    expect(snapshot.running[0]!.rework_count).toBe(2);
+  });
+
+  it("omits rework_count from running row when zero", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    state.running["issue-1"] = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Working",
+      turnCount: 1,
+      codexInputTokens: 10,
+      codexOutputTokens: 5,
+      codexTotalTokens: 15,
+    });
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running).toHaveLength(1);
+    expect(snapshot.running[0]!.rework_count).toBeUndefined();
+  });
+
+  it("sets pipeline_stage to null when no stage is set for the issue", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    state.running["issue-1"] = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Working",
+      turnCount: 1,
+      codexInputTokens: 10,
+      codexOutputTokens: 5,
+      codexTotalTokens: 15,
+    });
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running[0]!.pipeline_stage).toBeNull();
+  });
+
   it("builds a sorted state snapshot with live runtime totals", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,

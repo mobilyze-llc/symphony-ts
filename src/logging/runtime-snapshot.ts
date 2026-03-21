@@ -9,6 +9,8 @@ export interface RuntimeSnapshotRunningRow {
   issue_id: string;
   issue_identifier: string;
   state: string;
+  pipeline_stage: string | null;
+  activity_summary: string | null;
   session_id: string | null;
   turn_count: number;
   last_event: string | null;
@@ -20,6 +22,7 @@ export interface RuntimeSnapshotRunningRow {
     output_tokens: number;
     total_tokens: number;
   };
+  rework_count?: number;
 }
 
 export interface RuntimeSnapshotRetryRow {
@@ -60,22 +63,31 @@ export function buildRuntimeSnapshot(
     .sort((left, right) =>
       left.identifier.localeCompare(right.identifier, "en"),
     )
-    .map((entry) => ({
-      issue_id: entry.issue.id,
-      issue_identifier: entry.identifier,
-      state: entry.issue.state,
-      session_id: entry.sessionId,
-      turn_count: entry.turnCount,
-      last_event: entry.lastCodexEvent,
-      last_message: entry.lastCodexMessage,
-      started_at: entry.startedAt,
-      last_event_at: entry.lastCodexTimestamp,
-      tokens: {
-        input_tokens: entry.codexInputTokens,
-        output_tokens: entry.codexOutputTokens,
-        total_tokens: entry.codexTotalTokens,
-      },
-    }));
+    .map((entry) => {
+      const reworkCount = state.issueReworkCounts[entry.issue.id] ?? 0;
+      const row: RuntimeSnapshotRunningRow = {
+        issue_id: entry.issue.id,
+        issue_identifier: entry.identifier,
+        state: entry.issue.state,
+        pipeline_stage: state.issueStages[entry.issue.id] ?? null,
+        activity_summary: entry.lastCodexMessage,
+        session_id: entry.sessionId,
+        turn_count: entry.turnCount,
+        last_event: entry.lastCodexEvent,
+        last_message: entry.lastCodexMessage,
+        started_at: entry.startedAt,
+        last_event_at: entry.lastCodexTimestamp,
+        tokens: {
+          input_tokens: entry.codexInputTokens,
+          output_tokens: entry.codexOutputTokens,
+          total_tokens: entry.codexTotalTokens,
+        },
+      };
+      if (reworkCount > 0) {
+        row.rework_count = reworkCount;
+      }
+      return row;
+    });
 
   const retrying = Object.values(state.retryAttempts)
     .slice()

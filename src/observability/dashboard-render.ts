@@ -605,17 +605,24 @@ function renderDashboardClientScript(
               ? '<button type="button" class="subtle-button" data-label="Copy ID" data-copy="' + escapeHtml(row.session_id) + '" onclick="navigator.clipboard.writeText(this.dataset.copy); this.textContent = \\'Copied\\'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);">Copy ID</button>'
               : '<span class="muted">n/a</span>';
 
-            const message = row.last_message || row.last_event || 'n/a';
             const eventMeta = row.last_event
               ? escapeHtml(row.last_event) + (row.last_event_at ? ' · <span class="mono numeric">' + escapeHtml(row.last_event_at) + '</span>' : '')
               : 'n/a';
 
+            const pipelineStageHtml = (row.pipeline_stage != null)
+              ? '<span class="muted">' + escapeHtml(row.pipeline_stage) + '</span>'
+              : '';
+            const reworkHtml = (row.rework_count != null && row.rework_count > 0)
+              ? '<span class="state-badge state-badge-warning">Rework \xD7' + escapeHtml(row.rework_count) + '</span>'
+              : '';
+            const activityText = row.activity_summary || row.last_event || 'n/a';
+
             return '<tr>' +
-              '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(row.issue_identifier) + '</span><a class="issue-link" href="/api/v1/' + encodeURIComponent(row.issue_identifier) + '">JSON details</a></div></td>' +
-              '<td><span class="' + stateBadgeClass(row.state) + '">' + escapeHtml(row.state) + '</span></td>' +
+              '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(row.issue_identifier) + '</span><a class="issue-link" href="/api/v1/' + encodeURIComponent(row.issue_identifier) + '">JSON details</a>' + pipelineStageHtml + '</div></td>' +
+              '<td><div class="detail-stack"><span class="' + stateBadgeClass(row.state) + '">' + escapeHtml(row.state) + '</span>' + reworkHtml + '</div></td>' +
               '<td><div class="session-stack">' + sessionCell + '</div></td>' +
               '<td class="numeric">' + formatRuntimeAndTurns(row, next.generated_at) + '</td>' +
-              '<td><div class="detail-stack"><span class="event-text" title="' + escapeHtml(message) + '">' + escapeHtml(message) + '</span><span class="muted event-meta">' + eventMeta + '</span></div></td>' +
+              '<td><div class="detail-stack"><span class="event-text" title="' + escapeHtml(activityText) + '">' + escapeHtml(activityText) + '</span><span class="muted event-meta">' + eventMeta + '</span></div></td>' +
               '<td><div class="token-stack numeric"><span>Total: ' + formatInteger(row.tokens?.total_tokens) + '</span><span class="muted">In ' + formatInteger(row.tokens?.input_tokens) + ' / Out ' + formatInteger(row.tokens?.output_tokens) + '</span></div></td>' +
               '</tr>';
           }).join('');
@@ -695,10 +702,14 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
                   <a class="issue-link" href="/api/v1/${encodeURIComponent(
                     row.issue_identifier,
                   )}">JSON details</a>
+                  ${row.pipeline_stage !== null && row.pipeline_stage !== undefined ? `<span class="muted">${escapeHtml(row.pipeline_stage)}</span>` : ""}
                 </div>
               </td>
               <td>
-                <span class="${stateBadgeClass(row.state)}">${escapeHtml(row.state)}</span>
+                <div class="detail-stack">
+                  <span class="${stateBadgeClass(row.state)}">${escapeHtml(row.state)}</span>
+                  ${row.rework_count !== undefined && row.rework_count > 0 ? `<span class="state-badge state-badge-warning">Rework ×${escapeHtml(row.rework_count)}</span>` : ""}
+                </div>
               </td>
               <td>
                 <div class="session-stack">
@@ -719,9 +730,9 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
               <td>
                 <div class="detail-stack">
                   <span class="event-text" title="${escapeHtml(
-                    row.last_message ?? row.last_event ?? "n/a",
+                    row.activity_summary ?? row.last_event ?? "n/a",
                   )}">${escapeHtml(
-                    row.last_message ?? row.last_event ?? "n/a",
+                    row.activity_summary ?? row.last_event ?? "n/a",
                   )}</span>
                   <span class="muted event-meta">${escapeHtml(
                     row.last_event ?? "n/a",
