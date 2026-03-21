@@ -2718,6 +2718,262 @@ describe("review findings comment on agent review failure", () => {
   });
 });
 
+describe("auto-close parent", () => {
+  function createTerminalStageConfig() {
+    const config = createConfig();
+    config.stages = {
+      initialStage: "implement",
+      fastTrack: null,
+      stages: {
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "done",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: "Done",
+        },
+      },
+    };
+    return config;
+  }
+
+  it("auto-close parent fires on terminal state transition", async () => {
+    const autoCloseCalls: Array<{
+      issueId: string;
+      issueIdentifier: string;
+    }> = [];
+    const config = createTerminalStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "SYMPH-1" })],
+        statesById: [{ id: "1", identifier: "SYMPH-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      autoCloseParentIssue: async (issueId, issueIdentifier) => {
+        autoCloseCalls.push({ issueId, issueIdentifier });
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "implement";
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    // Allow microtasks (void promise) to flush
+    await Promise.resolve();
+
+    expect(autoCloseCalls).toHaveLength(1);
+    expect(autoCloseCalls[0]).toEqual({
+      issueId: "1",
+      issueIdentifier: "SYMPH-1",
+    });
+  });
+
+  it("auto-close parent does not fire on non-terminal stage transitions", async () => {
+    const autoCloseCalls: Array<{
+      issueId: string;
+      issueIdentifier: string;
+    }> = [];
+    const config = createConfig();
+    config.stages = {
+      initialStage: "implement",
+      fastTrack: null,
+      stages: {
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "review",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        review: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "done",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: "Done",
+        },
+      },
+    };
+
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "SYMPH-1" })],
+        statesById: [{ id: "1", identifier: "SYMPH-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      autoCloseParentIssue: async (issueId, issueIdentifier) => {
+        autoCloseCalls.push({ issueId, issueIdentifier });
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "implement";
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    // Allow microtasks to flush
+    await Promise.resolve();
+
+    // Should not fire — this was a non-terminal transition (implement → review)
+    expect(autoCloseCalls).toHaveLength(0);
+  });
+
+  it("auto-close parent failure does not block terminal transition", async () => {
+    const updateStateCalls: Array<{
+      issueId: string;
+      stateName: string;
+    }> = [];
+    const config = createTerminalStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "SYMPH-1" })],
+        statesById: [{ id: "1", identifier: "SYMPH-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      updateIssueState: async (issueId, _identifier, stateName) => {
+        updateStateCalls.push({ issueId, stateName });
+      },
+      autoCloseParentIssue: async () => {
+        throw new Error("Linear API unreachable");
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "implement";
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    // Allow microtasks to flush
+    await Promise.resolve();
+
+    // The terminal state update should still have fired despite autoCloseParentIssue failure
+    expect(updateStateCalls).toHaveLength(1);
+    expect(updateStateCalls[0]).toEqual({ issueId: "1", stateName: "Done" });
+
+    // Issue should be completed (not blocked by the auto-close failure)
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+  });
+
+  it("auto-close parent is not called when callback is not provided", async () => {
+    const config = createTerminalStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "SYMPH-1" })],
+        statesById: [{ id: "1", identifier: "SYMPH-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "implement";
+
+    // Should not throw even without autoCloseParentIssue callback
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    await Promise.resolve();
+
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+  });
+});
+
 describe("fast-track label-based stage routing", () => {
   function createFastTrackConfig(
     overrides?: Partial<ResolvedWorkflowConfig>,
