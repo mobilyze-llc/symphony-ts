@@ -177,6 +177,7 @@ export interface OrchestratorState {
   issueStages: Record<string, string>;
   issueReworkCounts: Record<string, number>;
   issueExecutionHistory: Record<string, ExecutionHistory>;
+  issueFirstDispatchedAt: Record<string, string>;
 }
 
 export const FAILURE_CLASSES = ["verify", "review", "spec", "infra"] as const;
@@ -273,5 +274,6 @@ export function createInitialOrchestratorState(input: {
     issueStages: {},
     issueReworkCounts: {},
     issueExecutionHistory: {},
+    issueFirstDispatchedAt: {},
   };
 }
