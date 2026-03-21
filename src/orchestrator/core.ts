@@ -212,10 +212,6 @@ export class OrchestratorCore {
       return false;
     }
 
-    if (normalizedState !== "todo") {
-      return true;
-    }
-
     return issue.blockedBy.every((blocker) => {
       const blockerState =
         blocker.state === null ? null : normalizeIssueState(blocker.state);
@@ -494,6 +490,7 @@ export class OrchestratorCore {
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
       delete this.state.issueExecutionHistory[issueId];
+      delete this.state.issueFirstDispatchedAt[issueId];
       return "completed";
     }
 
@@ -503,6 +500,7 @@ export class OrchestratorCore {
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
       delete this.state.issueExecutionHistory[issueId];
+      delete this.state.issueFirstDispatchedAt[issueId];
       return "completed";
     }
 
@@ -526,6 +524,7 @@ export class OrchestratorCore {
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
       delete this.state.issueExecutionHistory[issueId];
+      delete this.state.issueFirstDispatchedAt[issueId];
       // Fire linearState update for the terminal stage (e.g., move to "Done")
       if (
         nextStage.linearState !== null &&
@@ -567,6 +566,7 @@ export class OrchestratorCore {
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
       delete this.state.issueExecutionHistory[issueId];
+      delete this.state.issueFirstDispatchedAt[issueId];
       void this.fireEscalationSideEffects(
         issueId,
         runningEntry.identifier,
@@ -986,6 +986,7 @@ export class OrchestratorCore {
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
       delete this.state.issueExecutionHistory[issueId];
+      delete this.state.issueFirstDispatchedAt[issueId];
       this.state.completed.add(issueId);
       this.releaseClaim(issueId);
       return "escalated";
@@ -1129,6 +1130,7 @@ export class OrchestratorCore {
         this.releaseClaim(issue.id);
         delete this.state.issueStages[issue.id];
         delete this.state.issueReworkCounts[issue.id];
+        delete this.state.issueFirstDispatchedAt[issue.id];
         // Fire linearState update for the terminal stage (e.g., move to "Done")
         if (stage.linearState !== null && this.updateIssueState !== undefined) {
           void this.updateIssueState(
@@ -1196,6 +1198,10 @@ export class OrchestratorCore {
           );
         }
       }
+    }
+
+    if (!this.state.issueFirstDispatchedAt[issue.id]) {
+      this.state.issueFirstDispatchedAt[issue.id] = this.now().toISOString();
     }
 
     try {
@@ -1414,6 +1420,7 @@ export class OrchestratorCore {
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
       delete this.state.issueExecutionHistory[issueId];
+      delete this.state.issueFirstDispatchedAt[issueId];
       void this.fireEscalationSideEffects(
         issueId,
         input.identifier ?? issueId,

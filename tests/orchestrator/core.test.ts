@@ -65,6 +65,32 @@ describe("orchestrator core", () => {
     ).toBe(true);
   });
 
+  it("rejects non-Todo issues with non-terminal blockers", () => {
+    const orchestrator = createOrchestrator();
+
+    expect(
+      orchestrator.isDispatchEligible(
+        createIssue({
+          id: "ip-1",
+          identifier: "ISSUE-IP-1",
+          state: "In Progress",
+          blockedBy: [{ id: "b1", identifier: "B-1", state: "In Progress" }],
+        }),
+      ),
+    ).toBe(false);
+
+    expect(
+      orchestrator.isDispatchEligible(
+        createIssue({
+          id: "ip-2",
+          identifier: "ISSUE-IP-2",
+          state: "In Progress",
+          blockedBy: [{ id: "b2", identifier: "B-2", state: "Done" }],
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it("dispatches eligible issues on poll tick until slots are exhausted", async () => {
     const orchestrator = createOrchestrator({
       tracker: createTracker({
