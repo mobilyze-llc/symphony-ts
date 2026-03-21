@@ -503,6 +503,50 @@ const DASHBOARD_STYLES = String.raw`
           padding: 1rem;
         }
       }
+      .context-section {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem 1.25rem;
+        align-items: baseline;
+        margin-bottom: 0.75rem;
+        padding-bottom: 0.6rem;
+        border-bottom: 1px solid var(--line);
+      }
+      .context-item {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 0.4rem;
+        font-size: 0.88rem;
+      }
+      .context-label {
+        color: var(--muted);
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .context-value {
+        color: var(--ink);
+      }
+      .context-health-red {
+        color: var(--danger);
+        font-size: 0.86rem;
+      }
+      .context-health-yellow {
+        color: var(--warning);
+        font-size: 0.86rem;
+      }
+      .stage-badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.18rem 0.5rem;
+        border-radius: 999px;
+        border: 1px solid rgba(16, 163, 127, 0.18);
+        background: var(--accent-soft);
+        color: var(--accent-ink);
+        font-size: 0.78rem;
+        font-weight: 600;
+      }
 `;
 
 export function renderDashboardHtml(
@@ -736,6 +780,22 @@ function renderDashboardClientScript(
         }
 
         function renderDetailPanel(row, rowId) {
+          var contextItems = [];
+          if (row.pipeline_stage != null) {
+            contextItems.push('<span class="context-item"><span class="context-label">Stage</span> <span class="stage-badge">' + escapeHtml(row.pipeline_stage) + '</span></span>');
+          }
+          if (row.activity_summary != null) {
+            contextItems.push('<span class="context-item"><span class="context-label">Doing</span> <span class="context-value">' + escapeHtml(row.activity_summary) + '</span></span>');
+          }
+          if (row.health_reason != null) {
+            var healthClass = row.health === 'red' ? 'context-health-red' : 'context-health-yellow';
+            contextItems.push('<span class="context-item"><span class="context-label">Health</span> <span class="' + healthClass + '">' + escapeHtml(row.health_reason) + '</span></span>');
+          }
+          if (row.rework_count != null && row.rework_count > 0) {
+            contextItems.push('<span class="context-item"><span class="context-label">Rework</span> <span class="state-badge state-badge-warning">\xD7' + formatInteger(row.rework_count) + '</span></span>');
+          }
+          var contextSection = contextItems.length > 0 ? '<div class="context-section">' + contextItems.join('') + '</div>' : '';
+
           const tokenBreakdown =
             '<div class="detail-section">' +
             '<p class="detail-section-title">Token breakdown</p>' +
@@ -772,7 +832,7 @@ function renderDashboardClientScript(
             '<tbody>' + execRows + '</tbody></table>' +
             '</div>';
 
-          return '<div class="detail-panel"><div class="detail-grid">' + tokenBreakdown + turnHistory + executionHistory + '</div></div>';
+          return '<div class="detail-panel">' + contextSection + '<div class="detail-grid">' + tokenBreakdown + turnHistory + executionHistory + '</div></div>';
         }
 
         function formatPipelineTime(row, generatedAt) {
@@ -856,7 +916,24 @@ function renderDashboardClientScript(
           document.getElementById('metric-total').textContent = formatInteger(next.codex_totals.total_tokens);
           document.getElementById('metric-total-detail').textContent = 'In ' + formatInteger(next.codex_totals.input_tokens) + ' / Out ' + formatInteger(next.codex_totals.output_tokens);
           document.getElementById('metric-runtime').textContent = formatRuntimeSeconds(next.codex_totals.seconds_running);
+          // Preserve expand/collapse state before DOM replacement (SYMPH-37)
+          var expandedIds = new Set();
+          document.querySelectorAll('.expand-toggle[aria-expanded="true"]').forEach(function(btn) {
+            expandedIds.add(btn.getAttribute('data-detail'));
+          });
           document.getElementById('running-rows').innerHTML = renderRunningRows(next);
+          // Restore expand state after DOM replacement
+          expandedIds.forEach(function(detailId) {
+            var btn = document.querySelector('.expand-toggle[data-detail="' + detailId + '"]');
+            if (btn) {
+              var d = document.getElementById(detailId);
+              if (d) {
+                d.style.display = 'table-row';
+                btn.setAttribute('aria-expanded', 'true');
+                btn.textContent = '\u25BC Details';
+              }
+            }
+          });
           document.getElementById('retry-rows').innerHTML = renderRetryRows(next);
           document.getElementById('rate-limits').textContent = prettyValue(next.rate_limits);
         }
@@ -976,6 +1053,39 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
 }
 
 function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
+  const contextItems: string[] = [];
+
+  if (row.pipeline_stage !== null) {
+    contextItems.push(
+      `<span class="context-item"><span class="context-label">Stage</span> <span class="stage-badge">${escapeHtml(row.pipeline_stage)}</span></span>`,
+    );
+  }
+
+  if (row.activity_summary !== null) {
+    contextItems.push(
+      `<span class="context-item"><span class="context-label">Doing</span> <span class="context-value">${escapeHtml(row.activity_summary)}</span></span>`,
+    );
+  }
+
+  if (row.health_reason !== null) {
+    const healthClass =
+      row.health === "red" ? "context-health-red" : "context-health-yellow";
+    contextItems.push(
+      `<span class="context-item"><span class="context-label">Health</span> <span class="${healthClass}">${escapeHtml(row.health_reason)}</span></span>`,
+    );
+  }
+
+  if (row.rework_count !== undefined && row.rework_count > 0) {
+    contextItems.push(
+      `<span class="context-item"><span class="context-label">Rework</span> <span class="state-badge state-badge-warning">\u00D7${formatInteger(row.rework_count)}</span></span>`,
+    );
+  }
+
+  const contextSection =
+    contextItems.length > 0
+      ? `<div class="context-section">${contextItems.join("")}</div>`
+      : "";
+
   const tokenBreakdown = `
     <div class="detail-section">
       <p class="detail-section-title">Token breakdown</p>
@@ -1025,7 +1135,7 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
       </table>
     </div>`;
 
-  return `<div class="detail-panel"><div class="detail-grid">${tokenBreakdown}${turnHistory}${executionHistory}</div></div>`;
+  return `<div class="detail-panel">${contextSection}<div class="detail-grid">${tokenBreakdown}${turnHistory}${executionHistory}</div></div>`;
 }
 
 function renderRetryRows(snapshot: RuntimeSnapshot): string {
