@@ -13,17 +13,21 @@ describe("global error handlers", () => {
   beforeEach(() => {
     stderrSpy = vi
       .spyOn(process.stderr, "write")
-      .mockImplementation(() => true);
+      .mockImplementation((
+        _chunk: unknown,
+        callback?: (error?: Error | null) => void,
+      ) => {
+        if (callback) callback();
+        return true;
+      });
     exitSpy = vi
       .spyOn(process, "exit")
       .mockImplementation(() => undefined as never);
-    vi.useFakeTimers();
   });
 
   afterEach(() => {
     process.exitCode = undefined;
     vi.restoreAllMocks();
-    vi.useRealTimers();
   });
 
   it("handleUncaughtException logs structured JSON and exits with code 70", () => {
@@ -42,9 +46,6 @@ describe("global error handlers", () => {
     expect(entry.stack).toContain("kaboom");
     expect(entry.timestamp).toBeDefined();
     expect(process.exitCode).toBe(70);
-
-    // Advance past the 100ms flush delay
-    vi.advanceTimersByTime(100);
     expect(exitSpy).toHaveBeenCalledWith(70);
   });
 
@@ -55,6 +56,22 @@ describe("global error handlers", () => {
     const entry = JSON.parse(written.trimEnd());
 
     expect(entry.message).toBe("string rejection");
+    expect(entry.stack).toBeUndefined();
+    expect(entry.error_code).toBe("uncaught_exception");
+  });
+
+  it("handleUncaughtException handles non-stringifiable values", () => {
+    const obj = Object.create(null);
+    obj.toString = () => {
+      throw new Error("toString threw");
+    };
+
+    handleUncaughtException(obj);
+
+    const written = stderrSpy.mock.calls[0]![0] as string;
+    const entry = JSON.parse(written.trimEnd());
+
+    expect(entry.message).toBe("[non-stringifiable value]");
     expect(entry.stack).toBeUndefined();
     expect(entry.error_code).toBe("uncaught_exception");
   });
@@ -74,8 +91,6 @@ describe("global error handlers", () => {
     expect(entry.message).toBe("promise failed");
     expect(entry.stack).toContain("promise failed");
     expect(process.exitCode).toBe(70);
-
-    vi.advanceTimersByTime(100);
     expect(exitSpy).toHaveBeenCalledWith(70);
   });
 
@@ -86,6 +101,22 @@ describe("global error handlers", () => {
     const entry = JSON.parse(written.trimEnd());
 
     expect(entry.message).toBe("42");
+    expect(entry.stack).toBeUndefined();
+    expect(entry.error_code).toBe("unhandled_rejection");
+  });
+
+  it("handleUnhandledRejection handles non-stringifiable values", () => {
+    const obj = Object.create(null);
+    obj.toString = () => {
+      throw new Error("toString threw");
+    };
+
+    handleUnhandledRejection(obj);
+
+    const written = stderrSpy.mock.calls[0]![0] as string;
+    const entry = JSON.parse(written.trimEnd());
+
+    expect(entry.message).toBe("[non-stringifiable value]");
     expect(entry.stack).toBeUndefined();
     expect(entry.error_code).toBe("unhandled_rejection");
   });

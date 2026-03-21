@@ -216,18 +216,26 @@ export async function runCli(
   }
 }
 
+function safeErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  try {
+    return String(error);
+  } catch {
+    return "[non-stringifiable value]";
+  }
+}
+
 export function handleUncaughtException(error: unknown): void {
   const entry = {
     timestamp: new Date().toISOString(),
     level: "error",
     event: "process_crash",
-    message: `${error instanceof Error ? error.message : String(error)}`,
+    message: safeErrorMessage(error),
     error_code: "uncaught_exception",
     stack: error instanceof Error ? error.stack : undefined,
   };
-  process.stderr.write(`${JSON.stringify(entry)}\n`);
   process.exitCode = 70;
-  setTimeout(() => process.exit(70), 100);
+  process.stderr.write(`${JSON.stringify(entry)}\n`, () => process.exit(70));
 }
 
 export function handleUnhandledRejection(reason: unknown): void {
@@ -235,13 +243,12 @@ export function handleUnhandledRejection(reason: unknown): void {
     timestamp: new Date().toISOString(),
     level: "error",
     event: "process_crash",
-    message: `${reason instanceof Error ? reason.message : String(reason)}`,
+    message: safeErrorMessage(reason),
     error_code: "unhandled_rejection",
     stack: reason instanceof Error ? reason.stack : undefined,
   };
-  process.stderr.write(`${JSON.stringify(entry)}\n`);
   process.exitCode = 70;
-  setTimeout(() => process.exit(70), 100);
+  process.stderr.write(`${JSON.stringify(entry)}\n`, () => process.exit(70));
 }
 
 export async function main(): Promise<void> {
