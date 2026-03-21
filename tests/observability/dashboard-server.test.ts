@@ -295,6 +295,58 @@ describe("dashboard server", () => {
     stream.close();
   });
 
+  it("renders expandable detail rows with toggle and detail panel for running sessions", async () => {
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+    });
+    servers.push(server);
+
+    const dashboard = await sendRequest(server.port, {
+      method: "GET",
+      path: "/",
+    });
+    expect(dashboard.statusCode).toBe(200);
+    expect(dashboard.body).toContain("expand-toggle");
+    expect(dashboard.body).toContain("detail-row");
+    expect(dashboard.body).toContain("detail-panel");
+    expect(dashboard.body).toContain("detail-grid");
+    expect(dashboard.body).toContain("Token breakdown");
+    expect(dashboard.body).toContain("Turn history");
+    expect(dashboard.body).toContain("Execution history");
+    expect(dashboard.body).toContain("aria-expanded");
+    expect(dashboard.body).toContain("Cache read");
+    expect(dashboard.body).toContain("Cache write");
+    expect(dashboard.body).toContain("Reasoning");
+  });
+
+  it("renders an empty state for the running sessions table when there are no running sessions", async () => {
+    const emptySnapshot: RuntimeSnapshot = {
+      ...createSnapshot(),
+      counts: { running: 0, retrying: 0 },
+      running: [],
+      retrying: [],
+    };
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        getRuntimeSnapshot: () => emptySnapshot,
+      }),
+    });
+    servers.push(server);
+
+    const dashboard = await sendRequest(server.port, {
+      method: "GET",
+      path: "/",
+    });
+    expect(dashboard.statusCode).toBe(200);
+    expect(dashboard.body).toContain("No active sessions");
+    // Server-rendered running-rows tbody should show empty state, not session rows
+    expect(dashboard.body).toContain(
+      'id="running-rows"><tr><td colspan="6"><p class="empty-state">No active sessions.</p></td></tr>',
+    );
+  });
+
   it("returns a plain 404 for undefined routes", async () => {
     const server = await startDashboardServer({
       port: 0,
@@ -357,9 +409,13 @@ function createSnapshot(): RuntimeSnapshot {
           input_tokens: 1200,
           output_tokens: 800,
           total_tokens: 2000,
+          cache_read_tokens: 300,
+          cache_write_tokens: 150,
+          reasoning_tokens: 50,
         },
         total_pipeline_tokens: 2000,
         execution_history: [],
+        turn_history: [],
       },
     ],
     retrying: [

@@ -318,6 +318,108 @@ describe("runtime snapshot", () => {
     ]);
   });
 
+  it("includes turn_history in running rows", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Editing src/foo.ts",
+      turnCount: 2,
+      codexInputTokens: 500,
+      codexOutputTokens: 300,
+      codexTotalTokens: 800,
+    });
+    entry.turnHistory = [
+      {
+        turnNumber: 1,
+        timestamp: "2026-03-06T10:00:03.000Z",
+        message: "Checking tests",
+        inputTokens: 200,
+        outputTokens: 100,
+        totalTokens: 300,
+        cacheReadTokens: 50,
+        reasoningTokens: 20,
+        event: "turn_completed",
+      },
+      {
+        turnNumber: 2,
+        timestamp: "2026-03-06T10:00:05.000Z",
+        message: "Editing src/foo.ts",
+        inputTokens: 300,
+        outputTokens: 200,
+        totalTokens: 500,
+        cacheReadTokens: 80,
+        reasoningTokens: 30,
+        event: "turn_completed",
+      },
+    ];
+    state.running["issue-1"] = entry;
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running).toHaveLength(1);
+    expect(snapshot.running[0]!.turn_history).toHaveLength(2);
+    expect(snapshot.running[0]!.turn_history[0]).toMatchObject({
+      turnNumber: 1,
+      message: "Checking tests",
+      inputTokens: 200,
+      cacheReadTokens: 50,
+      reasoningTokens: 20,
+    });
+    expect(snapshot.running[0]!.turn_history[1]).toMatchObject({
+      turnNumber: 2,
+      message: "Editing src/foo.ts",
+    });
+  });
+
+  it("includes full token breakdown with cache and reasoning fields in running rows", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Working",
+      turnCount: 3,
+      codexInputTokens: 1000,
+      codexOutputTokens: 500,
+      codexTotalTokens: 1500,
+    });
+    entry.codexCacheReadTokens = 200;
+    entry.codexCacheWriteTokens = 150;
+    entry.codexReasoningTokens = 75;
+    state.running["issue-1"] = entry;
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running).toHaveLength(1);
+    const row = snapshot.running[0]!;
+    expect(row.tokens.input_tokens).toBe(1000);
+    expect(row.tokens.output_tokens).toBe(500);
+    expect(row.tokens.total_tokens).toBe(1500);
+    expect(row.tokens.cache_read_tokens).toBe(200);
+    expect(row.tokens.cache_write_tokens).toBe(150);
+    expect(row.tokens.reasoning_tokens).toBe(75);
+  });
+
   it("returns zero total_pipeline_tokens and empty execution_history when no history exists", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,
