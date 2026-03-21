@@ -2,9 +2,10 @@
 import urllib.request
 import urllib.error
 import json
+import os
 import sys
 
-LINEAR_API_KEY = "lin_api_918XV2C6hRqc4U4lIohtEJCs2NJYyHqhVBaXMFav"
+LINEAR_API_KEY = os.environ["LINEAR_API_KEY"]
 ISSUE_ID = "7b4cc9a1-e014-4463-8cab-78bce7cfa7d0"
 
 WORKPAD_CONTENT = r"""## Workpad
