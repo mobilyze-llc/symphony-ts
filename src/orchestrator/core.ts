@@ -26,6 +26,7 @@ import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 import {
   type EnsembleGateResult,
   formatExecutionReport,
+  formatRebaseComment,
   formatReviewFindingsComment,
 } from "./gate-handler.js";
 
@@ -607,6 +608,11 @@ export class OrchestratorCore {
       );
     }
 
+    if (failureClass === "rebase") {
+      // Rebase failures — trigger rework if onRework configured, else retry
+      return this.handleRebaseFailure(issueId, runningEntry, agentMessage);
+    }
+
     // failureClass === "review" — trigger rework via gate lookup
     return this.handleReviewFailure(issueId, runningEntry, agentMessage);
   }
@@ -767,6 +773,111 @@ export class OrchestratorCore {
     void this.postComment(issueId, comment).catch((err) => {
       console.warn(
         `[orchestrator] Failed to post review findings comment for ${issueIdentifier}:`,
+        err,
+      );
+    });
+  }
+
+  /**
+   * Handle rebase failure: check current stage for onRework and trigger rework.
+   * Mirrors the first half of handleReviewFailure() — checks the current stage
+   * has onRework, calls reworkGate(), posts a rebase comment, and schedules
+   * a continuation retry. Falls back to retryable failure if no onRework.
+   */
+  private handleRebaseFailure(
+    issueId: string,
+    runningEntry: RunningEntry,
+    agentMessage: string | undefined,
+  ): RetryEntry | null {
+    const stagesConfig = this.config.stages;
+    if (stagesConfig === null) {
+      return this.scheduleRetry(
+        issueId,
+        nextRetryAttempt(runningEntry.retryAttempt),
+        {
+          identifier: runningEntry.identifier,
+          error: "agent reported failure: rebase",
+          delayType: "failure",
+        },
+      );
+    }
+
+    const currentStageName = this.state.issueStages[issueId];
+    if (currentStageName === undefined) {
+      return this.scheduleRetry(
+        issueId,
+        nextRetryAttempt(runningEntry.retryAttempt),
+        {
+          identifier: runningEntry.identifier,
+          error: "agent reported failure: rebase",
+          delayType: "failure",
+        },
+      );
+    }
+
+    const currentStage = stagesConfig.stages[currentStageName];
+    if (
+      currentStage !== undefined &&
+      currentStage.type === "agent" &&
+      currentStage.transitions.onRework !== null
+    ) {
+      const reworkTarget = this.reworkGate(issueId);
+      if (reworkTarget === "escalated") {
+        void this.fireEscalationSideEffects(
+          issueId,
+          runningEntry.identifier,
+          "Rebase failure: max rework attempts exceeded. Escalating for manual review.",
+        );
+        return null;
+      }
+      if (reworkTarget !== null) {
+        this.postRebaseComment(
+          issueId,
+          runningEntry.identifier,
+          currentStageName,
+          agentMessage,
+        );
+        return this.scheduleRetry(issueId, 1, {
+          identifier: runningEntry.identifier,
+          error: `rebase failure: rework to ${reworkTarget}`,
+          delayType: "continuation",
+        });
+      }
+    }
+
+    // No onRework configured — fall back to retryable failure
+    return this.scheduleRetry(
+      issueId,
+      nextRetryAttempt(runningEntry.retryAttempt),
+      {
+        identifier: runningEntry.identifier,
+        error: "agent reported failure: rebase",
+        delayType: "failure",
+      },
+    );
+  }
+
+  /**
+   * Post a rebase comment as a best-effort side effect.
+   * Uses void...catch pattern to never affect pipeline flow.
+   */
+  private postRebaseComment(
+    issueId: string,
+    issueIdentifier: string,
+    stageName: string,
+    agentMessage: string | undefined,
+  ): void {
+    if (this.postComment === undefined) {
+      return;
+    }
+    const comment = formatRebaseComment(
+      issueIdentifier,
+      stageName,
+      agentMessage ?? "",
+    );
+    void this.postComment(issueId, comment).catch((err) => {
+      console.warn(
+        `[orchestrator] Failed to post rebase comment for ${issueIdentifier}:`,
         err,
       );
     });

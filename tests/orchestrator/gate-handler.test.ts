@@ -17,6 +17,7 @@ import {
   aggregateVerdicts,
   formatExecutionReport,
   formatGateComment,
+  formatRebaseComment,
   formatReviewFindingsComment,
   parseReviewerOutput,
   runEnsembleGate,
@@ -222,6 +223,35 @@ describe("formatReviewFindingsComment", () => {
     expect(comment).toContain("## Review Findings");
     expect(comment).toContain("review");
     // Should not have extra blank lines from empty message
+    expect(comment.split("\n").filter(Boolean).length).toBeLessThan(5);
+  });
+});
+
+describe("formatRebaseComment", () => {
+  it("starts with ## Rebase Needed header", () => {
+    const comment = formatRebaseComment("ISSUE-42", "merge", "Some message");
+    expect(comment.startsWith("## Rebase Needed")).toBe(true);
+  });
+
+  it("includes the stage name and issue identifier", () => {
+    const comment = formatRebaseComment("ISSUE-42", "merge", "Some message");
+    expect(comment).toContain("merge");
+    expect(comment).toContain("ISSUE-42");
+  });
+
+  it("includes the agent message when provided", () => {
+    const comment = formatRebaseComment(
+      "ISSUE-1",
+      "merge",
+      "Merge conflict in src/handler.ts",
+    );
+    expect(comment).toContain("Merge conflict in src/handler.ts");
+  });
+
+  it("omits the message body when agentMessage is empty", () => {
+    const comment = formatRebaseComment("ISSUE-1", "merge", "");
+    expect(comment).toContain("## Rebase Needed");
+    expect(comment).toContain("merge");
     expect(comment.split("\n").filter(Boolean).length).toBeLessThan(5);
   });
 });
