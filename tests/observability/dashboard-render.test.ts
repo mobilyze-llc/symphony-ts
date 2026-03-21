@@ -29,6 +29,7 @@ const BASE_ROW: RuntimeSnapshot["running"][number] = {
   total_pipeline_tokens: 1500,
   execution_history: [],
   turn_history: [],
+  recent_activity: [],
   health: "green",
   health_reason: null,
 };
