@@ -30,12 +30,12 @@ Usage: ./run-pipeline.sh <product> [additional-args...]
 Launch the symphony-ts pipeline for a product.
 
 Products:
-  symphony      Symphony orchestrator (github.com/ericlitman/symphony-ts)
+  symphony      Symphony orchestrator (github.com/mobilyze-llc/symphony-ts)
   jony-agent    Jony Agent
   hs-data       Household Services Data
   hs-ui         Household Services UI
   hs-mobile     Household Services Mobile
-  stickerlabs   Stickerlabs Factory (github.com/ericlitman/stickerlabs-factory)
+  stickerlabs   Stickerlabs Factory (github.com/mobilyze-llc/stickerlabs-factory)
   household     Household
 
 Options:
@@ -76,7 +76,7 @@ set -- "${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}"
 case "$PRODUCT" in
   symphony)
     WORKFLOW="pipeline-config/workflows/WORKFLOW-symphony.md"
-    DEFAULT_REPO_URL="https://github.com/ericlitman/symphony-ts.git"
+    DEFAULT_REPO_URL="https://github.com/mobilyze-llc/symphony-ts.git"
     ;;
   jony-agent)
     WORKFLOW="pipeline-config/workflows/WORKFLOW-jony-agent.md"
@@ -96,7 +96,7 @@ case "$PRODUCT" in
     ;;
   stickerlabs)
     WORKFLOW="pipeline-config/workflows/WORKFLOW-stickerlabs.md"
-    DEFAULT_REPO_URL="https://github.com/ericlitman/stickerlabs-factory.git"
+    DEFAULT_REPO_URL="https://github.com/mobilyze-llc/stickerlabs-factory.git"
     ;;
   household)
     WORKFLOW="pipeline-config/workflows/WORKFLOW-household.md"
