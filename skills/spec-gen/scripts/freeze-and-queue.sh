@@ -109,7 +109,7 @@ if [[ "$TRIVIAL" == true ]]; then
   trap 'rm -f "$TRIVIAL_GQL_TMPFILE"' EXIT
   if [[ -n "$TRIVIAL_DESC" ]]; then
     cat > "$TRIVIAL_GQL_TMPFILE" <<'GQLEOF'
-mutation($title: String!, $description: String, $teamId: String!, $stateId: String!, $projectId: String!) {
+mutation($title: String!, $description: String, $teamId: ID!, $stateId: ID!, $projectId: ID!) {
   issueCreate(input: {
     teamId: $teamId
     title: $title
@@ -131,7 +131,7 @@ GQLEOF
       - < "$TRIVIAL_GQL_TMPFILE" 2>&1)
   else
     cat > "$TRIVIAL_GQL_TMPFILE" <<'GQLEOF'
-mutation($title: String!, $teamId: String!, $stateId: String!, $projectId: String!) {
+mutation($title: String!, $teamId: ID!, $stateId: ID!, $projectId: ID!) {
   issueCreate(input: {
     teamId: $teamId
     title: $title
@@ -258,7 +258,7 @@ resolve_all_states() {
   local states_json
   states_json=$($LINEAR_CLI api query -o json --quiet --compact \
     -v "teamId=$TEAM_ID" \
-    'query($teamId: String!) { workflowStates(filter: { team: { id: { eq: $teamId } } }) { nodes { id name } } }' 2>/dev/null)
+    'query($teamId: ID!) { workflowStates(filter: { team: { id: { eq: $teamId } } }) { nodes { id name } } }' 2>/dev/null)
 
   DRAFT_STATE_ID=$(echo "$states_json" | jq -r '.data.workflowStates.nodes[] | select(.name == "Draft") | .id' | head -1)
   TODO_STATE_ID=$(echo "$states_json" | jq -r '.data.workflowStates.nodes[] | select(.name == "Todo") | .id' | head -1)
@@ -624,7 +624,7 @@ if [[ -n "$UPDATE_ISSUE_ID" ]]; then
   GQL_TMPFILE=$(mktemp)
   if [[ -n "$DRAFT_STATE_ID" ]]; then
     cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($issueId: String!, $title: String!, $description: String!, $stateId: String!) {
+mutation($issueId: ID!, $title: String!, $description: String!, $stateId: ID!) {
   issueUpdate(id: $issueId, input: {
     title: $title
     description: $description
@@ -643,7 +643,7 @@ GQLEOF
       - < "$GQL_TMPFILE" 2>&1)
   else
     cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($issueId: String!, $title: String!, $description: String!) {
+mutation($issueId: ID!, $title: String!, $description: String!) {
   issueUpdate(id: $issueId, input: {
     title: $title
     description: $description
@@ -683,7 +683,7 @@ else
   GQL_TMPFILE=$(mktemp)
   if [[ -n "$DRAFT_STATE_ID" ]]; then
     cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($title: String!, $description: String!, $teamId: String!, $projectId: String!, $stateId: String!) {
+mutation($title: String!, $description: String!, $teamId: ID!, $projectId: ID!, $stateId: ID!) {
   issueCreate(input: {
     title: $title
     description: $description
@@ -705,7 +705,7 @@ GQLEOF
       - < "$GQL_TMPFILE" 2>&1)
   else
     cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($title: String!, $description: String!, $teamId: String!, $projectId: String!) {
+mutation($title: String!, $description: String!, $teamId: ID!, $projectId: ID!) {
   issueCreate(input: {
     title: $title
     description: $description
@@ -775,7 +775,7 @@ for ((i=0; i<TOTAL; i++)); do
   GQL_TMPFILE=$(mktemp)
   if [[ -n "$TODO_STATE_ID" ]]; then
     cat > "$GQL_TMPFILE" <<GQLEOF
-mutation(\$title: String!, \$description: String!, \$teamId: String!, \$projectId: String!, \$parentId: String!, \$stateId: String!) {
+mutation(\$title: String!, \$description: String!, \$teamId: ID!, \$projectId: ID!, \$parentId: ID!, \$stateId: ID!) {
   issueCreate(input: {
     title: \$title
     description: \$description
@@ -800,7 +800,7 @@ GQLEOF
       - < "$GQL_TMPFILE" 2>&1)
   else
     cat > "$GQL_TMPFILE" <<GQLEOF
-mutation(\$title: String!, \$description: String!, \$teamId: String!, \$projectId: String!, \$parentId: String!) {
+mutation(\$title: String!, \$description: String!, \$teamId: ID!, \$projectId: ID!, \$parentId: ID!) {
   issueCreate(input: {
     title: \$title
     description: \$description
