@@ -2202,6 +2202,388 @@ describe("execution report on terminal state", () => {
   });
 });
 
+describe("review findings comment on agent review failure", () => {
+  /**
+   * Build a stage config with:
+   *   implement (agent) → review (agent, onRework: implement, maxRework: N) → done (terminal)
+   */
+  function createReviewStageConfig(maxRework = 2) {
+    const config = createConfig();
+    config.escalationState = "Blocked";
+    config.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Blocked",
+    ];
+    config.stages = {
+      initialStage: "implement",
+      stages: {
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "review",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        review: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework,
+          reviewers: [],
+          transitions: {
+            onComplete: "done",
+            onApprove: null,
+            onRework: "implement",
+          },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: "Done",
+        },
+      },
+    };
+    return config;
+  }
+
+  it("posts review findings comment on agent review failure", async () => {
+    const postedComments: Array<{ issueId: string; body: string }> = [];
+    const config = createReviewStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (issueId, body) => {
+        postedComments.push({ issueId, body });
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "review";
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "[STAGE_FAILED: review] Missing null check in handler.ts line 42",
+    });
+
+    // Flush microtasks so the void promise resolves
+    await Promise.resolve();
+
+    const reviewComment = postedComments.find((c) =>
+      c.body.startsWith("## Review Findings"),
+    );
+    expect(reviewComment).toBeDefined();
+    expect(reviewComment?.issueId).toBe("1");
+  });
+
+  it("review findings comment includes agent message", async () => {
+    const postedComments: Array<{ issueId: string; body: string }> = [];
+    const config = createReviewStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (issueId, body) => {
+        postedComments.push({ issueId, body });
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "review";
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "[STAGE_FAILED: review] Missing null check in handler.ts line 42",
+    });
+
+    await Promise.resolve();
+
+    const reviewComment = postedComments.find((c) =>
+      c.body.startsWith("## Review Findings"),
+    );
+    expect(reviewComment?.body).toContain(
+      "Missing null check in handler.ts line 42",
+    );
+  });
+
+  it("review failure triggers rework after posting comment", async () => {
+    const config = createReviewStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "review";
+
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "[STAGE_FAILED: review] Missing null check in handler.ts line 42",
+    });
+
+    // Should schedule a rework retry (continuation, not failure)
+    expect(retryEntry).not.toBeNull();
+    expect(retryEntry?.error).toContain("rework to implement");
+    // Stage should be updated to the rework target
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+  });
+
+  it("review findings comment failure does not block rework", async () => {
+    const config = createReviewStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (_issueId, _body) => {
+        throw new Error("Comment service unavailable");
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "review";
+
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review] Some failure",
+    });
+
+    // Rework must proceed despite postComment throwing
+    expect(retryEntry).not.toBeNull();
+    expect(retryEntry?.error).toContain("rework to implement");
+  });
+
+  it("postComment error is swallowed for review findings", async () => {
+    const config = createReviewStageConfig();
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (_issueId, _body) => {
+        throw new Error("Comment service unavailable");
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "review";
+
+    // Should not throw — error must be swallowed
+    let threw = false;
+    try {
+      orchestrator.onWorkerExit({
+        issueId: "1",
+        outcome: "normal",
+        agentMessage: "[STAGE_FAILED: review] Some failure",
+      });
+      // Allow microtasks to flush so the void promise rejects internally
+      await Promise.resolve();
+    } catch {
+      threw = true;
+    }
+
+    expect(threw).toBe(false);
+  });
+
+  it("skips review findings when postComment not configured", async () => {
+    const config = createReviewStageConfig();
+    // No postComment wired — omit it entirely
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "review";
+
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review] Some failure",
+    });
+
+    // Rework still proceeds
+    expect(retryEntry).not.toBeNull();
+    expect(retryEntry?.error).toContain("rework to implement");
+    // No comment was posted (no postComment configured — no crash either)
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+  });
+
+  it("escalation fires on max rework exceeded", async () => {
+    const escalationComments: Array<{ issueId: string; body: string }> = [];
+    const stateUpdates: Array<{ issueId: string; state: string }> = [];
+    const config = createReviewStageConfig(1); // maxRework=1
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (issueId, body) => {
+        escalationComments.push({ issueId, body });
+      },
+      updateIssueState: async (issueId, _issueIdentifier, stateName) => {
+        stateUpdates.push({ issueId, state: stateName });
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "review";
+    // Already used 1 rework — next failure should trigger escalation
+    orchestrator.getState().issueReworkCounts["1"] = 1;
+
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review] Another null check failure",
+    });
+
+    await Promise.resolve();
+
+    // Escalation: issue is completed, no retry
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+
+    // Escalation side effects fire
+    expect(stateUpdates).toHaveLength(1);
+    expect(stateUpdates[0]?.state).toBe("Blocked");
+    expect(escalationComments).toHaveLength(1);
+    expect(escalationComments[0]?.body).toContain(
+      "max rework attempts exceeded",
+    );
+  });
+
+  it("no review findings on escalation", async () => {
+    const postedComments: Array<{ issueId: string; body: string }> = [];
+    const config = createReviewStageConfig(1); // maxRework=1
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment: async (issueId, body) => {
+        postedComments.push({ issueId, body });
+      },
+      updateIssueState: async (_issueId, _identifier, _state) => {
+        // no-op
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "review";
+    orchestrator.getState().issueReworkCounts["1"] = 1;
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review] Another null check failure",
+    });
+
+    await Promise.resolve();
+
+    // Only the escalation comment should have been posted — not a review findings comment
+    const reviewFindings = postedComments.filter((c) =>
+      c.body.startsWith("## Review Findings"),
+    );
+    expect(reviewFindings).toHaveLength(0);
+
+    // The escalation comment should be present
+    const escalation = postedComments.filter(
+      (c) => !c.body.startsWith("## Review Findings"),
+    );
+    expect(escalation).toHaveLength(1);
+    expect(escalation[0]?.body).toContain("max rework attempts exceeded");
+  });
+});
+
 function createOrchestrator(overrides?: {
   config?: ResolvedWorkflowConfig;
   tracker?: IssueTracker;
