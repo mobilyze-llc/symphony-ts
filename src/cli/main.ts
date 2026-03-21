@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { realpathSync } from "node:fs";
+import { realpathSync, writeSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -235,7 +235,12 @@ export function handleUncaughtException(error: unknown): void {
     stack: error instanceof Error ? error.stack : undefined,
   };
   process.exitCode = 70;
-  process.stderr.write(`${JSON.stringify(entry)}\n`, () => process.exit(70));
+  try {
+    writeSync(2, `${JSON.stringify(entry)}\n`);
+  } catch {
+    // Ignore write errors during crash — exiting is the priority.
+  }
+  process.exit(70);
 }
 
 export function handleUnhandledRejection(reason: unknown): void {
@@ -248,7 +253,12 @@ export function handleUnhandledRejection(reason: unknown): void {
     stack: reason instanceof Error ? reason.stack : undefined,
   };
   process.exitCode = 70;
-  process.stderr.write(`${JSON.stringify(entry)}\n`, () => process.exit(70));
+  try {
+    writeSync(2, `${JSON.stringify(entry)}\n`);
+  } catch {
+    // Ignore write errors during crash — exiting is the priority.
+  }
+  process.exit(70);
 }
 
 export async function main(): Promise<void> {

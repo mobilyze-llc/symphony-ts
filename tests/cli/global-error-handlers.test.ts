@@ -1,25 +1,26 @@
 import type { MockInstance } from "vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const mockWriteSync = vi.hoisted(() => vi.fn());
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    writeSync: mockWriteSync,
+  };
+});
+
 import {
   handleUncaughtException,
   handleUnhandledRejection,
 } from "../../src/cli/main.js";
 
 describe("global error handlers", () => {
-  let stderrSpy: MockInstance;
   let exitSpy: MockInstance;
 
   beforeEach(() => {
-    stderrSpy = vi
-      .spyOn(process.stderr, "write")
-      .mockImplementation(((...args: unknown[]) => {
-        const cb = args.find((a) => typeof a === "function") as
-          | ((error?: Error | null) => void)
-          | undefined;
-        if (cb) cb();
-        return true;
-      }) as any);
+    mockWriteSync.mockReturnValue(0);
     exitSpy = vi
       .spyOn(process, "exit")
       .mockImplementation(() => undefined as never);
@@ -27,6 +28,7 @@ describe("global error handlers", () => {
 
   afterEach(() => {
     process.exitCode = undefined;
+    mockWriteSync.mockClear();
     vi.restoreAllMocks();
   });
 
@@ -35,8 +37,8 @@ describe("global error handlers", () => {
 
     handleUncaughtException(error);
 
-    expect(stderrSpy).toHaveBeenCalledOnce();
-    const written = stderrSpy.mock.calls[0]![0] as string;
+    expect(mockWriteSync).toHaveBeenCalledOnce();
+    const written = mockWriteSync.mock.calls[0]![1] as string;
     const entry = JSON.parse(written.trimEnd());
 
     expect(entry.level).toBe("error");
@@ -52,7 +54,7 @@ describe("global error handlers", () => {
   it("handleUncaughtException handles non-Error values", () => {
     handleUncaughtException("string rejection");
 
-    const written = stderrSpy.mock.calls[0]![0] as string;
+    const written = mockWriteSync.mock.calls[0]![1] as string;
     const entry = JSON.parse(written.trimEnd());
 
     expect(entry.message).toBe("string rejection");
@@ -68,7 +70,7 @@ describe("global error handlers", () => {
 
     handleUncaughtException(obj);
 
-    const written = stderrSpy.mock.calls[0]![0] as string;
+    const written = mockWriteSync.mock.calls[0]![1] as string;
     const entry = JSON.parse(written.trimEnd());
 
     expect(entry.message).toBe("[non-stringifiable value]");
@@ -81,8 +83,8 @@ describe("global error handlers", () => {
 
     handleUnhandledRejection(reason);
 
-    expect(stderrSpy).toHaveBeenCalledOnce();
-    const written = stderrSpy.mock.calls[0]![0] as string;
+    expect(mockWriteSync).toHaveBeenCalledOnce();
+    const written = mockWriteSync.mock.calls[0]![1] as string;
     const entry = JSON.parse(written.trimEnd());
 
     expect(entry.level).toBe("error");
@@ -97,7 +99,7 @@ describe("global error handlers", () => {
   it("handleUnhandledRejection handles non-Error values", () => {
     handleUnhandledRejection(42);
 
-    const written = stderrSpy.mock.calls[0]![0] as string;
+    const written = mockWriteSync.mock.calls[0]![1] as string;
     const entry = JSON.parse(written.trimEnd());
 
     expect(entry.message).toBe("42");
@@ -113,7 +115,7 @@ describe("global error handlers", () => {
 
     handleUnhandledRejection(obj);
 
-    const written = stderrSpy.mock.calls[0]![0] as string;
+    const written = mockWriteSync.mock.calls[0]![1] as string;
     const entry = JSON.parse(written.trimEnd());
 
     expect(entry.message).toBe("[non-stringifiable value]");
