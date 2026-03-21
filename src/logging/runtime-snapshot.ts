@@ -2,6 +2,7 @@ import type {
   CodexRateLimits,
   CodexTotals,
   OrchestratorState,
+  StageRecord,
 } from "../domain/model.js";
 import { getAggregateSecondsRunning } from "./session-metrics.js";
 
@@ -25,6 +26,8 @@ export interface RuntimeSnapshotRunningRow {
     total_tokens: number;
   };
   rework_count?: number;
+  total_pipeline_tokens: number;
+  execution_history: StageRecord[];
 }
 
 export interface RuntimeSnapshotRetryRow {
@@ -73,6 +76,14 @@ export function buildRuntimeSnapshot(
         : 0;
       const tokensPerTurn =
         entry.turnCount > 0 ? entry.totalStageTotalTokens / entry.turnCount : 0;
+      const executionHistory =
+        state.issueExecutionHistory[entry.issue.id] ?? [];
+      const completedStageTokens = executionHistory.reduce(
+        (sum, stage) => sum + stage.totalTokens,
+        0,
+      );
+      const totalPipelineTokens =
+        completedStageTokens + entry.totalStageTotalTokens;
       const row: RuntimeSnapshotRunningRow = {
         issue_id: entry.issue.id,
         issue_identifier: entry.identifier,
@@ -92,6 +103,8 @@ export function buildRuntimeSnapshot(
           output_tokens: entry.codexOutputTokens,
           total_tokens: entry.codexTotalTokens,
         },
+        total_pipeline_tokens: totalPipelineTokens,
+        execution_history: executionHistory,
       };
       if (reworkCount > 0) {
         row.rework_count = reworkCount;

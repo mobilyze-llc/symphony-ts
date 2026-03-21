@@ -358,6 +358,8 @@ function createSnapshot(): RuntimeSnapshot {
           output_tokens: 800,
           total_tokens: 2000,
         },
+        total_pipeline_tokens: 2000,
+        execution_history: [],
       },
     ],
     retrying: [

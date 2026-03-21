@@ -623,7 +623,7 @@ function renderDashboardClientScript(
               '<td><div class="session-stack">' + sessionCell + '</div></td>' +
               '<td class="numeric">' + formatRuntimeAndTurns(row, next.generated_at) + '</td>' +
               '<td><div class="detail-stack"><span class="event-text" title="' + escapeHtml(activityText) + '">' + escapeHtml(activityText) + '</span><span class="muted event-meta">' + eventMeta + '</span></div></td>' +
-              '<td><div class="token-stack numeric"><span>Total: ' + formatInteger(row.tokens?.total_tokens) + '</span><span class="muted">In ' + formatInteger(row.tokens?.input_tokens) + ' / Out ' + formatInteger(row.tokens?.output_tokens) + '</span><span class="muted">' + formatInteger(row.tokens_per_turn) + ' / turn</span></div></td>' +
+              '<td><div class="token-stack numeric"><span>Total: ' + formatInteger(row.tokens?.total_tokens) + '</span><span class="muted">In ' + formatInteger(row.tokens?.input_tokens) + ' / Out ' + formatInteger(row.tokens?.output_tokens) + '</span><span class="muted">' + formatInteger(row.tokens_per_turn) + ' / turn</span><span class="muted">Pipeline: ' + formatInteger(row.total_pipeline_tokens) + '</span></div></td>' +
               '</tr>';
           }).join('');
         }
@@ -752,6 +752,7 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
                     row.tokens.input_tokens,
                   )} / Out ${formatInteger(row.tokens.output_tokens)}</span>
                   <span class="muted">${formatInteger(row.tokens_per_turn)} / turn</span>
+                  <span class="muted">Pipeline: ${formatInteger(row.total_pipeline_tokens)}</span>
                 </div>
               </td>
             </tr>`,

@@ -246,6 +246,105 @@ describe("runtime snapshot", () => {
       tokensRemaining: 700,
     });
   });
+
+  it("includes cumulative ticket stats in running rows", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+
+    // Set up execution history with two completed stages
+    state.issueExecutionHistory["issue-1"] = [
+      {
+        stageName: "investigate",
+        durationMs: 10_000,
+        totalTokens: 50_000,
+        turns: 5,
+        outcome: "completed",
+      },
+      {
+        stageName: "implement",
+        durationMs: 20_000,
+        totalTokens: 80_000,
+        turns: 10,
+        outcome: "completed",
+      },
+    ];
+
+    // Running entry with 30K tokens accumulated in the current stage
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Finished",
+      turnCount: 3,
+      codexInputTokens: 10_000,
+      codexOutputTokens: 5_000,
+      codexTotalTokens: 15_000,
+    });
+    // Simulate 30K tokens accumulated in the current stage
+    entry.totalStageTotalTokens = 30_000;
+    state.running["issue-1"] = entry;
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running).toHaveLength(1);
+    const row = snapshot.running[0]!;
+
+    // total_pipeline_tokens = 50K (investigate) + 80K (implement) + 30K (current stage) = 160K
+    expect(row.total_pipeline_tokens).toBe(160_000);
+
+    // execution_history should include the two completed stage records
+    expect(row.execution_history).toEqual([
+      {
+        stageName: "investigate",
+        durationMs: 10_000,
+        totalTokens: 50_000,
+        turns: 5,
+        outcome: "completed",
+      },
+      {
+        stageName: "implement",
+        durationMs: 20_000,
+        totalTokens: 80_000,
+        turns: 10,
+        outcome: "completed",
+      },
+    ]);
+  });
+
+  it("returns zero total_pipeline_tokens and empty execution_history when no history exists", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+
+    state.running["issue-1"] = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: null,
+      lastCodexTimestamp: null,
+      lastCodexMessage: null,
+      turnCount: 0,
+      codexInputTokens: 0,
+      codexOutputTokens: 0,
+      codexTotalTokens: 0,
+    });
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running[0]!.total_pipeline_tokens).toBe(0);
+    expect(snapshot.running[0]!.execution_history).toEqual([]);
+  });
 });
 
 function createRunningEntry(input: {
@@ -253,9 +352,9 @@ function createRunningEntry(input: {
   identifier: string;
   startedAt: string;
   sessionId: string;
-  lastCodexEvent: string;
-  lastCodexTimestamp: string;
-  lastCodexMessage: string;
+  lastCodexEvent: string | null;
+  lastCodexTimestamp: string | null;
+  lastCodexMessage: string | null;
   turnCount: number;
   codexInputTokens: number;
   codexOutputTokens: number;
