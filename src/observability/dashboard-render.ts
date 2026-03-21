@@ -5,6 +5,7 @@ import {
   formatRuntimeAndTurns,
   formatRuntimeSeconds,
   prettyValue,
+  runtimeSecondsFromStartedAt,
   stateBadgeClass,
 } from "./dashboard-format.js";
 
@@ -646,6 +647,7 @@ ${DASHBOARD_STYLES}
                 <col style="width: 8rem;" />
                 <col style="width: 7.5rem;" />
                 <col style="width: 8.5rem;" />
+                <col style="width: 7rem;" />
                 <col />
                 <col style="width: 10rem;" />
               </colgroup>
@@ -655,6 +657,7 @@ ${DASHBOARD_STYLES}
                   <th>State</th>
                   <th>Session</th>
                   <th>Runtime / turns</th>
+                  <th>Pipeline</th>
                   <th>Codex update</th>
                   <th>Tokens</th>
                 </tr>
@@ -752,6 +755,13 @@ function renderDashboardClientScript(
           return runtime;
         }
 
+        function formatPipelineTime(row, generatedAt) {
+          if (!row.first_dispatched_at || row.first_dispatched_at === row.started_at) {
+            return '\u2014';
+          }
+          return formatRuntimeSeconds(runtimeSecondsFromStartedAt(row.first_dispatched_at, generatedAt));
+        }
+
         function stateBadgeClass(state) {
           const normalized = String(state || '').toLowerCase();
           if (normalized.includes('progress') || normalized.includes('running') || normalized.includes('active')) {
@@ -835,7 +845,7 @@ function renderDashboardClientScript(
 
         function renderRunningRows(next) {
           if (!next.running || next.running.length === 0) {
-            return '<tr><td colspan="6"><p class="empty-state">No active sessions.</p></td></tr>';
+            return '<tr><td colspan="7"><p class="empty-state">No active sessions.</p></td></tr>';
           }
 
           return next.running.map(function (row) {
@@ -861,13 +871,14 @@ function renderDashboardClientScript(
             const activityText = row.activity_summary || row.last_event || 'n/a';
             const expandToggle = '<button type="button" class="expand-toggle" aria-expanded="false" data-detail="' + escapeHtml(detailId) + '" onclick="const d=document.getElementById(this.dataset.detail);const open=this.getAttribute(\\'aria-expanded\\')=== \\'true\\';d.style.display=open?\\'none\\':\\'table-row\\';this.setAttribute(\\'aria-expanded\\',String(!open));this.textContent=open?\\'\u25B6 Details\\':\\'\u25BC Details\\';">\u25B6 Details</button>';
 
-            const detailRow = '<tr id="' + escapeHtml(detailId) + '" class="detail-row" style="display:none;"><td colspan="6">' + renderDetailPanel(row, detailId) + '</td></tr>';
+            const detailRow = '<tr id="' + escapeHtml(detailId) + '" class="detail-row" style="display:none;"><td colspan="7">' + renderDetailPanel(row, detailId) + '</td></tr>';
 
             return '<tr class="session-row">' +
               '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(row.issue_identifier) + '</span><a class="issue-link" href="/api/v1/' + encodeURIComponent(row.issue_identifier) + '">JSON details</a>' + pipelineStageHtml + expandToggle + '</div></td>' +
               '<td><div class="detail-stack"><span class="' + stateBadgeClass(row.state) + '">' + escapeHtml(row.state) + '</span>' + reworkHtml + healthHtml + '</div></td>' +
               '<td><div class="session-stack">' + sessionCell + '</div></td>' +
               '<td class="numeric">' + formatRuntimeAndTurns(row, next.generated_at) + '</td>' +
+              '<td class="numeric">' + formatPipelineTime(row, next.generated_at) + '</td>' +
               '<td><div class="detail-stack"><span class="event-text" title="' + escapeHtml(activityText) + '">' + escapeHtml(activityText) + '</span><span class="muted event-meta">' + eventMeta + '</span></div></td>' +
               '<td><div class="token-stack numeric"><span>Total: ' + formatInteger(row.tokens && row.tokens.total_tokens) + '</span><span class="muted">In ' + formatInteger(row.tokens && row.tokens.input_tokens) + ' / Out ' + formatInteger(row.tokens && row.tokens.output_tokens) + '</span><span class="muted">' + formatInteger(row.tokens_per_turn) + ' / turn</span><span class="muted">Pipeline: ' + formatInteger(row.total_pipeline_tokens) + '</span></div></td>' +
               '</tr>' + detailRow;
@@ -952,9 +963,21 @@ function renderDashboardClientScript(
       })();`;
 }
 
+function formatPipelineTime(
+  firstDispatchedAt: string,
+  startedAt: string,
+  generatedAt: string,
+): string {
+  if (firstDispatchedAt === startedAt) {
+    return "\u2014";
+  }
+  const seconds = runtimeSecondsFromStartedAt(firstDispatchedAt, generatedAt);
+  return formatRuntimeSeconds(seconds);
+}
+
 function renderRunningRows(snapshot: RuntimeSnapshot): string {
   if (snapshot.running.length === 0) {
-    return '<tr><td colspan="6"><p class="empty-state">No active sessions.</p></td></tr>';
+    return '<tr><td colspan="7"><p class="empty-state">No active sessions.</p></td></tr>';
   }
   return snapshot.running
     .map((row) => {
@@ -995,6 +1018,11 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
                 row.turn_count,
                 snapshot.generated_at,
               )}</td>
+              <td class="numeric">${formatPipelineTime(
+                row.first_dispatched_at,
+                row.started_at,
+                snapshot.generated_at,
+              )}</td>
               <td>
                 <div class="detail-stack">
                   <span class="event-text" title="${escapeHtml(
@@ -1025,7 +1053,7 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
               </td>
             </tr>
             <tr id="${escapeHtml(detailId)}" class="detail-row" style="display:none;">
-              <td colspan="6">${detailPanel}</td>
+              <td colspan="7">${detailPanel}</td>
             </tr>`;
     })
     .join("");

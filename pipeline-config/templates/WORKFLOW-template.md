@@ -216,10 +216,16 @@ observability:
 stages:
   initial_stage: investigate
 
+  # Fast-track: issues with this label skip the investigate stage and start at the target stage.
+  # Remove or comment out this block if you do not need fast-track routing.
+  # fast_track:
+  #   label: trivial
+  #   initial_stage: implement
+
   investigate:
     type: agent
     runner: claude-code
-    model: claude-sonnet-4-5
+    model: claude-opus-4-6
     max_turns: 8
     linear_state: In Progress
     mcp_servers:
@@ -233,7 +239,7 @@ stages:
   implement:
     type: agent
     runner: claude-code
-    model: claude-sonnet-4-5
+    model: claude-opus-4-6
     max_turns: 30
     mcp_servers:
       code-review-graph:

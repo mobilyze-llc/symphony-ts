@@ -462,7 +462,7 @@ describe("dashboard server", () => {
     expect(dashboard.body).toContain("No active sessions");
     // Server-rendered running-rows tbody should show empty state, not session rows
     expect(dashboard.body).toContain(
-      'id="running-rows"><tr><td colspan="6"><p class="empty-state">No active sessions.</p></td></tr>',
+      'id="running-rows"><tr><td colspan="7"><p class="empty-state">No active sessions.</p></td></tr>',
     );
   });
 

@@ -204,6 +204,7 @@ function createIssue(overrides?: Partial<Issue>): Issue {
 function createTwoAgentStageConfig(): StagesConfig {
   return {
     initialStage: "investigate",
+    fastTrack: null,
     stages: {
       investigate: {
         type: "agent",
@@ -249,6 +250,7 @@ function createTwoAgentStageConfig(): StagesConfig {
 function createTerminalStageConfig(): StagesConfig {
   return {
     initialStage: "implement",
+    fastTrack: null,
     stages: {
       implement: {
         type: "agent",
