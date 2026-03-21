@@ -960,6 +960,274 @@ describe("review findings comment posting on agent review failure", () => {
   });
 });
 
+describe("rebase failure signal routing", () => {
+  it("triggers rework on [STAGE_FAILED: rebase] with onRework configured", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createMergeWithRebaseWorkflowConfig(),
+    });
+
+    // Dispatch to implement stage
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    // Advance implement → merge
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    expect(orchestrator.getState().issueStages["1"]).toBe("merge");
+    await orchestrator.onRetryTimer("1");
+
+    // Merge agent reports rebase failure
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: rebase]",
+    });
+
+    // Should rework back to implement (merge stage's onRework target)
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+    expect(retryEntry).not.toBeNull();
+    expect(retryEntry!.error).toBe("rebase failure: rework to implement");
+  });
+
+  it("increments rework count on rebase failure", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createMergeWithRebaseWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+
+    // Advance to merge
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // First rebase failure
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: rebase]",
+    });
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+
+    // Re-dispatch implement, advance back to merge
+    await orchestrator.onRetryTimer("1");
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // Second rebase failure
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: rebase]",
+    });
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(2);
+  });
+
+  it("escalates when max rework exceeded on rebase failure", async () => {
+    const base = createMergeWithRebaseWorkflowConfig();
+    const stages: StagesConfig = {
+      ...base,
+      stages: {
+        ...base.stages,
+        merge: { ...base.stages.merge!, maxRework: 1 },
+      },
+    };
+
+    const updateIssueState = vi.fn().mockResolvedValue(undefined);
+    const postComment = vi.fn().mockResolvedValue(undefined);
+
+    const orchestrator = createStagedOrchestrator({
+      stages,
+      escalationState: "Blocked",
+      updateIssueState,
+      postComment,
+    });
+
+    await orchestrator.pollTick();
+
+    // Advance to merge
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // First rebase failure — rework (count 1 of max 1)
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: rebase]",
+    });
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+
+    // Re-dispatch implement, advance back to merge
+    await orchestrator.onRetryTimer("1");
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // Second rebase failure — should escalate
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: rebase]",
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
+
+    // Allow async side effects to fire
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(updateIssueState).toHaveBeenCalledWith("1", "ISSUE-1", "Blocked");
+    expect(postComment).toHaveBeenCalledWith(
+      "1",
+      expect.stringContaining("max rework"),
+    );
+  });
+
+  it("posts a Rebase Needed comment on rebase failure with onRework", async () => {
+    const postComment = vi.fn().mockResolvedValue(undefined);
+
+    const orchestrator = createStagedOrchestrator({
+      stages: createMergeWithRebaseWorkflowConfig(),
+      postComment,
+    });
+
+    await orchestrator.pollTick();
+
+    // Advance to merge
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // Merge agent reports rebase failure with message
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Merge conflict in src/handler.ts\n[STAGE_FAILED: rebase]",
+    });
+
+    // Allow async side effects to fire
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(postComment).toHaveBeenCalledWith(
+      "1",
+      expect.stringContaining("## Rebase Needed"),
+    );
+  });
+
+  it("falls back to retry for rebase failure when no onRework configured", async () => {
+    // Three-stage config has no onRework on any stage
+    const orchestrator = createStagedOrchestrator();
+
+    await orchestrator.pollTick();
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: rebase]",
+    });
+
+    // No onRework → falls back to retry
+    expect(retryEntry).not.toBeNull();
+    expect(retryEntry!.error).toBe("agent reported failure: rebase");
+  });
+
+  it("falls back to retry for rebase failure when no stages configured", async () => {
+    const orchestrator = createStagedOrchestrator({ stages: null });
+
+    await orchestrator.pollTick();
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: rebase]",
+    });
+
+    expect(retryEntry).not.toBeNull();
+    expect(retryEntry!.error).toBe("agent reported failure: rebase");
+  });
+
+  it("shares rework counter with review failures", async () => {
+    const base = createMergeWithRebaseWorkflowConfig();
+    // Add an agent review stage with onRework before merge
+    const stages: StagesConfig = {
+      ...base,
+      stages: {
+        ...base.stages,
+        implement: {
+          ...base.stages.implement!,
+          transitions: {
+            onComplete: "review",
+            onApprove: null,
+            onRework: null,
+          },
+        },
+        review: {
+          type: "agent",
+          runner: "claude-code",
+          model: "claude-opus-4-6",
+          prompt: "review.liquid",
+          maxTurns: 15,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: 2,
+          reviewers: [],
+          transitions: {
+            onComplete: "merge",
+            onApprove: null,
+            onRework: "implement",
+          },
+          linearState: null,
+        },
+        merge: { ...base.stages.merge!, maxRework: 2 },
+      },
+    };
+
+    const orchestrator = createStagedOrchestrator({ stages });
+
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    // Advance implement → review
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // Two review failures (rework count goes to 2)
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review]",
+    });
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+
+    await orchestrator.onRetryTimer("1");
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review]",
+    });
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(2);
+
+    // Now advance through review → merge
+    await orchestrator.onRetryTimer("1");
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // Rebase failure should escalate because total rework count (3) exceeds max (2)
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: rebase]",
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+  });
+});
+
 // --- Helpers ---
 
 function createStagedOrchestrator(overrides?: {
@@ -1209,6 +1477,65 @@ function createAgentReviewWorkflowConfig(): StagesConfig {
           onComplete: "done",
           onApprove: null,
           onRework: null,
+        },
+        linearState: null,
+      },
+      done: {
+        type: "terminal",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: { onComplete: null, onApprove: null, onRework: null },
+        linearState: null,
+      },
+    },
+  };
+}
+
+function createMergeWithRebaseWorkflowConfig(): StagesConfig {
+  return {
+    initialStage: "implement",
+    fastTrack: null,
+    stages: {
+      implement: {
+        type: "agent",
+        runner: "claude-code",
+        model: "claude-sonnet-4-5",
+        prompt: "implement.liquid",
+        maxTurns: 30,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "merge",
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: null,
+      },
+      merge: {
+        type: "agent",
+        runner: "claude-code",
+        model: "claude-sonnet-4-5",
+        prompt: "merge.liquid",
+        maxTurns: 5,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: 3,
+        reviewers: [],
+        transitions: {
+          onComplete: "done",
+          onApprove: null,
+          onRework: "implement",
         },
         linearState: null,
       },

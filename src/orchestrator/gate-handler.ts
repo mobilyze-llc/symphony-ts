@@ -395,6 +395,28 @@ export function formatReviewFindingsComment(
 }
 
 /**
+ * Format a rebase-needed comment for posting to the issue tracker when a
+ * merge-stage agent reports a rebase failure. Follows the
+ * formatReviewFindingsComment() markdown style.
+ */
+export function formatRebaseComment(
+  issueIdentifier: string,
+  stageName: string,
+  agentMessage: string,
+): string {
+  const sections = [
+    "## Rebase Needed",
+    "",
+    `**Stage:** ${stageName}`,
+    `**Issue:** ${issueIdentifier}`,
+  ];
+  if (agentMessage.trim() !== "") {
+    sections.push("", agentMessage);
+  }
+  return sections.join("\n");
+}
+
+/**
  * Format the aggregate gate result as a markdown comment for Linear.
  */
 export function formatGateComment(

@@ -209,7 +209,7 @@ describe("ExecutionHistory", () => {
 
 describe("parseFailureSignal", () => {
   it("defines the expected failure classes", () => {
-    expect(FAILURE_CLASSES).toEqual(["verify", "review", "spec", "infra"]);
+    expect(FAILURE_CLASSES).toEqual(["verify", "review", "rebase", "spec", "infra"]);
   });
 
   it("parses each failure class from agent output", () => {
@@ -218,6 +218,9 @@ describe("parseFailureSignal", () => {
     });
     expect(parseFailureSignal("[STAGE_FAILED: review]")).toEqual({
       failureClass: "review",
+    });
+    expect(parseFailureSignal("[STAGE_FAILED: rebase]")).toEqual({
+      failureClass: "rebase",
     });
     expect(parseFailureSignal("[STAGE_FAILED: spec]")).toEqual({
       failureClass: "spec",
