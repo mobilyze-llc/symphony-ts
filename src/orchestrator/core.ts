@@ -20,7 +20,7 @@ import {
   addEndedSessionRuntime,
   applyCodexEventToOrchestratorState,
 } from "../logging/session-metrics.js";
-import type { EnsembleGateResult } from "./gate-handler.js";
+import { formatReviewFindingsComment, type EnsembleGateResult } from "./gate-handler.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 
 const CONTINUATION_RETRY_DELAY_MS = 1_000;
@@ -505,24 +505,9 @@ export class OrchestratorCore {
   }
 
   /**
-   * Format a review findings comment for posting to the issue tracker.
-   * Follows the `formatGateComment()` markdown style.
-   */
-  private formatReviewFindingsComment(
-    failureClass: string,
-    agentMessage: string | undefined,
-  ): string {
-    const sections = [`## Review Findings`, "", `**Failure class:** ${failureClass}`];
-    if (agentMessage !== undefined && agentMessage.trim() !== "") {
-      sections.push("", agentMessage);
-    }
-    return sections.join("\n");
-  }
-
-  /**
    * Handle review failure: find the downstream gate and use its rework target.
    * Falls back to retry if no gate or rework target is found.
-   * Posts a review findings comment before triggering rework.
+   * Posts a "## Review Findings" comment (best-effort) before rework.
    */
   private handleReviewFailure(
     issueId: string,
@@ -570,7 +555,7 @@ export class OrchestratorCore {
         return null;
       }
       if (reworkTarget !== null) {
-        this.postReviewFindingsComment(issueId, runningEntry.identifier, agentMessage);
+        this.postReviewFindingsComment(issueId, runningEntry.identifier, currentStageName, agentMessage);
         return this.scheduleRetry(issueId, 1, {
           identifier: runningEntry.identifier,
           error: `agent review failure: rework to ${reworkTarget}`,
@@ -630,7 +615,7 @@ export class OrchestratorCore {
     }
 
     // Rework target set by reworkGate — post findings and schedule continuation
-    this.postReviewFindingsComment(issueId, runningEntry.identifier, agentMessage);
+    this.postReviewFindingsComment(issueId, runningEntry.identifier, savedStage, agentMessage);
     return this.scheduleRetry(issueId, 1, {
       identifier: runningEntry.identifier,
       error: `agent review failure: rework to ${reworkTarget}`,
@@ -639,18 +624,23 @@ export class OrchestratorCore {
   }
 
   /**
-   * Post a review findings comment as a best-effort side effect.
-   * Uses void...catch pattern to never affect pipeline flow.
+   * Post a "## Review Findings" comment with the agent's failure message.
+   * Best-effort: uses void...catch pattern so failures never affect pipeline flow.
    */
   private postReviewFindingsComment(
     issueId: string,
     issueIdentifier: string,
+    stageName: string,
     agentMessage: string | undefined,
   ): void {
     if (this.postComment === undefined) {
       return;
     }
-    const comment = this.formatReviewFindingsComment("review", agentMessage);
+    const comment = formatReviewFindingsComment(
+      issueIdentifier,
+      stageName,
+      agentMessage ?? "",
+    );
     void this.postComment(issueId, comment).catch((err) => {
       console.warn(`[orchestrator] Failed to post review findings comment for ${issueIdentifier}:`, err);
     });

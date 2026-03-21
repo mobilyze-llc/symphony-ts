@@ -733,6 +733,183 @@ describe("review findings comment posting on agent review failure", () => {
 
     expect(postComment).toHaveBeenCalled();
   });
+
+  it("review findings comment failure does not block rework", async () => {
+    const postComment = vi.fn().mockRejectedValue(new Error("connection refused"));
+
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+      postComment,
+    });
+
+    await orchestrator.pollTick();
+
+    // Advance to review stage
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // Review agent reports failure — comment posting will throw
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review] Some findings",
+    });
+
+    // Rework still proceeds even though comment posting failed
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(retryEntry).not.toBeNull();
+    expect(retryEntry!.error).toContain("rework to implement");
+
+    // Allow async side effects to settle
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+
+  it("postComment error is swallowed for review findings", async () => {
+    const postComment = vi.fn().mockRejectedValue(new Error("timeout"));
+
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+      postComment,
+    });
+
+    await orchestrator.pollTick();
+
+    // Advance to review stage
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // This should not throw even though postComment rejects
+    let caughtError: unknown = null;
+    try {
+      orchestrator.onWorkerExit({
+        issueId: "1",
+        outcome: "normal",
+        agentMessage: "[STAGE_FAILED: review] Some findings",
+      });
+    } catch (err) {
+      caughtError = err;
+    }
+
+    // No error propagated to caller
+    expect(caughtError).toBeNull();
+
+    // Allow async side effects to settle
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+
+  it("skips review findings when postComment not configured", async () => {
+    // No postComment configured
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+
+    // Advance to review stage
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // Review failure — no postComment wired
+    const retryEntry = orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review] Some findings",
+    });
+
+    // Rework proceeds silently
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(retryEntry).not.toBeNull();
+
+    // Allow async side effects to settle
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+
+  it("escalation fires on max rework exceeded", async () => {
+    const postedComments: Array<{ issueId: string; body: string }> = [];
+    const updatedStates: Array<{ issueId: string; state: string }> = [];
+
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfigWithMaxRework(1),
+      escalationState: "Blocked",
+      postComment: async (issueId, body) => { postedComments.push({ issueId, body }); },
+      updateIssueState: async (issueId, _identifier, state) => { updatedStates.push({ issueId, state }); },
+    });
+
+    await orchestrator.pollTick();
+
+    // Advance to review stage
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // First review failure — rework
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review] First finding",
+    });
+    await orchestrator.onRetryTimer("1");
+    await orchestrator.onRetryTimer("1");
+
+    // Clear comments from first rework
+    postedComments.length = 0;
+
+    // Second review failure — max rework exceeded (maxRework=1)
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review] Second finding",
+    });
+
+    // Allow async side effects to fire
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // Escalation comment should have been posted
+    expect(postedComments.some((c) => c.body.toLowerCase().includes("escalat"))).toBe(true);
+    // Escalation state should have been updated
+    expect(updatedStates.some((s) => s.state === "Blocked")).toBe(true);
+  });
+
+  it("no review findings on escalation", async () => {
+    const postedComments: Array<{ issueId: string; body: string }> = [];
+
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfigWithMaxRework(1),
+      escalationState: "Blocked",
+      postComment: async (issueId, body) => { postedComments.push({ issueId, body }); },
+    });
+
+    await orchestrator.pollTick();
+
+    // Advance to review stage
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    // First review failure — rework
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review] First finding",
+    });
+    await orchestrator.onRetryTimer("1");
+    await orchestrator.onRetryTimer("1");
+
+    // Clear comments from first rework
+    postedComments.length = 0;
+
+    // Second review failure — max rework exceeded
+    orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review] Second finding",
+    });
+
+    // Allow async side effects to fire
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // No "## Review Findings" comment should be posted (escalation takes precedence)
+    const reviewFindingsComments = postedComments.filter((c) => c.body.startsWith("## Review Findings"));
+    expect(reviewFindingsComments).toHaveLength(0);
+  });
 });
 
 // --- Helpers ---
@@ -1019,6 +1196,20 @@ function createTracker(input?: {
         identifier: issue.identifier,
         state: issue.state,
       }));
+    },
+  };
+}
+
+function createAgentReviewWorkflowConfigWithMaxRework(maxRework: number): StagesConfig {
+  const base = createAgentReviewWorkflowConfig();
+  return {
+    ...base,
+    stages: {
+      ...base.stages,
+      review: {
+        ...base.stages.review!,
+        maxRework,
+      },
     },
   };
 }

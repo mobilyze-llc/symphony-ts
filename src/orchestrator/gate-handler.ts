@@ -381,3 +381,25 @@ export function formatGateComment(
 
   return [header, "", ...sections].join("\n");
 }
+
+/**
+ * Format a review findings comment for posting when an agent-type review stage
+ * reports [STAGE_FAILED: review]. Follows the `formatGateComment()` markdown style.
+ */
+export function formatReviewFindingsComment(
+  issueIdentifier: string,
+  stageName: string,
+  agentMessage: string,
+): string {
+  const lines = [
+    `## Review Findings`,
+    ``,
+    `**Issue:** ${issueIdentifier}`,
+    `**Stage:** ${stageName}`,
+    `**Failure class:** review`,
+  ];
+  if (agentMessage.trim() !== "") {
+    lines.push("", agentMessage);
+  }
+  return lines.join("\n");
+}
