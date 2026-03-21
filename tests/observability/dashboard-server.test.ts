@@ -320,6 +320,125 @@ describe("dashboard server", () => {
     expect(dashboard.body).toContain("Reasoning");
   });
 
+  it("renders context section in detail panel with stage, activity summary, health reason, and rework count", async () => {
+    const baseRow = createSnapshot().running[0]!;
+    const snapshotWithContext: RuntimeSnapshot = {
+      ...createSnapshot(),
+      running: [
+        {
+          ...baseRow,
+          pipeline_stage: "implement",
+          activity_summary: "Reviewing PR #42",
+          health: "yellow",
+          health_reason: "high token burn: 23,400 tokens/turn",
+          rework_count: 2,
+        },
+      ],
+    };
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        getRuntimeSnapshot: () => snapshotWithContext,
+      }),
+    });
+    servers.push(server);
+
+    const dashboard = await sendRequest(server.port, {
+      method: "GET",
+      path: "/",
+    });
+    expect(dashboard.statusCode).toBe(200);
+    // Use class= attribute form since CSS also defines these class names
+    expect(dashboard.body).toContain('class="context-section"');
+    expect(dashboard.body).toContain('class="stage-badge"');
+    expect(dashboard.body).toContain("implement");
+    expect(dashboard.body).toContain("Reviewing PR #42");
+    expect(dashboard.body).toContain('class="context-health-yellow"');
+    expect(dashboard.body).toContain("high token burn: 23,400 tokens/turn");
+    expect(dashboard.body).toContain("state-badge-warning");
+    expect(dashboard.body).toContain("Rework");
+    // Context section (rendered element) appears before detail-grid in the HTML
+    const contextIdx = dashboard.body.indexOf('class="context-section"');
+    const gridIdx = dashboard.body.indexOf('class="detail-grid"');
+    expect(contextIdx).toBeGreaterThan(-1);
+    expect(gridIdx).toBeGreaterThan(-1);
+    expect(contextIdx).toBeLessThan(gridIdx);
+  });
+
+  it("omits context section when pipeline_stage, activity_summary, health_reason, and rework_count are all absent", async () => {
+    const baseRow = createSnapshot().running[0]!;
+    const snapshotNoContext: RuntimeSnapshot = {
+      ...createSnapshot(),
+      running: [
+        {
+          ...baseRow,
+          pipeline_stage: null,
+          activity_summary: null,
+          health: "green",
+          health_reason: null,
+        },
+      ],
+    };
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        getRuntimeSnapshot: () => snapshotNoContext,
+      }),
+    });
+    servers.push(server);
+
+    const dashboard = await sendRequest(server.port, {
+      method: "GET",
+      path: "/",
+    });
+    expect(dashboard.statusCode).toBe(200);
+    expect(dashboard.body).toContain("detail-panel");
+    expect(dashboard.body).toContain("Token breakdown");
+    // The rendered detail-row should not contain the context-section opening tag.
+    // The JS code embeds class="context-section" as a string literal, so we check
+    // only the server-rendered detail-row section (between detail-row and /tr).
+    const detailRowStart = dashboard.body.indexOf('class="detail-row"');
+    const detailRowEnd = dashboard.body.indexOf("</tr>", detailRowStart);
+    expect(detailRowStart).toBeGreaterThan(-1);
+    const detailRowHtml = dashboard.body.slice(detailRowStart, detailRowEnd);
+    expect(detailRowHtml).not.toContain('class="context-section"');
+    expect(detailRowHtml).toContain('class="detail-grid"');
+  });
+
+  it("shows context-health-red for stalled (red health) agent in detail panel", async () => {
+    const baseRow = createSnapshot().running[0]!;
+    const snapshotRed: RuntimeSnapshot = {
+      ...createSnapshot(),
+      running: [
+        {
+          ...baseRow,
+          pipeline_stage: "investigate",
+          activity_summary: null,
+          health: "red",
+          health_reason: "stalled: no activity for 145s",
+        },
+      ],
+    };
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        getRuntimeSnapshot: () => snapshotRed,
+      }),
+    });
+    servers.push(server);
+
+    const dashboard = await sendRequest(server.port, {
+      method: "GET",
+      path: "/",
+    });
+    expect(dashboard.statusCode).toBe(200);
+    expect(dashboard.body).toContain("context-health-red");
+    expect(dashboard.body).toContain("stalled: no activity for 145s");
+    expect(dashboard.body).toContain("investigate");
+    // The rendered context item uses context-health-red, not context-health-yellow
+    expect(dashboard.body).not.toContain('class="context-health-yellow"');
+  });
+
   it("renders an empty state for the running sessions table when there are no running sessions", async () => {
     const emptySnapshot: RuntimeSnapshot = {
       ...createSnapshot(),
