@@ -166,6 +166,13 @@ hooks:
         echo '@INVESTIGATION-BRIEF.md' >> CLAUDE.md
       fi
     fi
+    # Import rebase brief into CLAUDE.md if it exists
+    if [ -f "REBASE-BRIEF.md" ]; then
+      if ! grep -q "@REBASE-BRIEF.md" CLAUDE.md 2>/dev/null; then
+        echo '' >> CLAUDE.md
+        echo '@REBASE-BRIEF.md' >> CLAUDE.md
+      fi
+    fi
     echo "Workspace synced."
   before_remove: |
     set -uo pipefail
@@ -257,6 +264,8 @@ stages:
     model: claude-sonnet-4-5
     max_turns: 5
     on_complete: done
+    on_rework: implement
+    max_rework: 2
 
   done:
     type: terminal
@@ -386,7 +395,19 @@ You are in the IMPLEMENT stage. Read INVESTIGATION-BRIEF.md first if it exists i
 
 {% if reworkCount > 0 %}
 ## REWORK ATTEMPT {{ reworkCount }}
-This is a rework attempt. Read ALL comments on this Linear issue starting with `## Review Findings`. These contain the specific findings you must fix.
+
+**First, determine the rework type:**
+
+### If `REBASE-BRIEF.md` exists in the worktree root — this is a REBASE REWORK:
+1. Read `REBASE-BRIEF.md` for context on conflicting files and recent main commits
+2. Rebase the current branch onto `origin/main` and resolve all merge conflicts
+3. Run all `# Verify:` commands from the spec to ensure the build still passes
+4. Delete `REBASE-BRIEF.md` after successful rebase and verification
+5. Do NOT modify code beyond what is necessary to resolve conflicts
+6. If conflicts cannot be resolved cleanly, output `[STAGE_FAILED: verify]` with details
+
+### Else if `## Review Findings` comments exist — this is a REVIEW REWORK:
+Read ALL comments on this Linear issue starting with `## Review Findings`. These contain the specific findings you must fix.
 - Fix ONLY the identified findings
 - Do not modify code outside the affected files unless strictly necessary
 - Do not reinterpret the spec
@@ -452,9 +473,35 @@ If surviving P1/P2 findings exist: post them as a `## Review Findings` comment o
 {% if stageName == "merge" %}
 ## Stage: Merge
 You are in the MERGE stage. The PR has been reviewed and approved.
+
+### Step 1: Check PR Mergeability
+Run `gh pr view --json mergeable,mergeStateStatus` to check if the PR can be merged cleanly.
+
+### Step 2a: If Mergeable — Merge the PR
 - Merge the PR via `gh pr merge --squash --delete-branch`
 - Verify the merge succeeded on the main branch
 - Do NOT modify code in this stage
+
+### Step 2b: If Conflicts — Write Rebase Brief and Signal Failure
+If the PR has merge conflicts (mergeable is "CONFLICTING" or mergeStateStatus indicates conflicts):
+1. Do NOT attempt to resolve conflicts — detect and signal only
+2. Write `REBASE-BRIEF.md` to the worktree root with the following structure (keep under ~50 lines):
+   ```markdown
+   # Rebase Brief
+   ## Issue: {{ issue.identifier }} — {{ issue.title }}
+
+   ## Conflicting Files
+   - `path/to/conflicted-file.ts` — nature of conflict if identifiable
+
+   ## Recent Main Commits
+   (output of git log origin/main --oneline -10 since branch diverged)
+
+   ## Semantic Context
+   - Any observations about what the conflicting PRs changed (from PR titles/commits)
+   ```
+3. To identify conflicting files, run `git fetch origin && git merge-tree $(git merge-base HEAD origin/main) HEAD origin/main` or attempt a dry-run merge
+4. To get recent main commits, run `git log origin/main --oneline -10`
+5. Output `[STAGE_FAILED: rebase]` as the very last line of your final message
 
 ### Workpad (merge)
 After merging the PR, update the workpad comment one final time.
