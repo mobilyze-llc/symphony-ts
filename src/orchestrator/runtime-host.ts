@@ -529,6 +529,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       ...(liveSession?.codexReasoningTokens
         ? { reasoning_tokens: liveSession.codexReasoningTokens }
         : {}),
+      total_input_tokens: liveSession?.totalStageInputTokens ?? 0,
+      total_output_tokens: liveSession?.totalStageOutputTokens ?? 0,
+      total_total_tokens: liveSession?.totalStageTotalTokens ?? 0,
+      ...(liveSession?.totalStageCacheReadTokens
+        ? { total_cache_read_tokens: liveSession.totalStageCacheReadTokens }
+        : {}),
+      ...(liveSession?.totalStageCacheWriteTokens
+        ? { total_cache_write_tokens: liveSession.totalStageCacheWriteTokens }
+        : {}),
       turns_used: liveSession?.turnCount ?? 0,
       duration_ms: durationMs,
       outcome: input.outcome === "normal" ? "completed" : "failed",
