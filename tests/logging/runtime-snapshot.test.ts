@@ -161,7 +161,7 @@ describe("runtime snapshot", () => {
       requestsRemaining: 7,
       tokensRemaining: 700,
     };
-    state.running["issue-2"] = createRunningEntry({
+    const entry2 = createRunningEntry({
       issueId: "issue-2",
       identifier: "ZZZ-2",
       startedAt: "2026-03-06T10:00:03.000Z",
@@ -174,7 +174,11 @@ describe("runtime snapshot", () => {
       codexOutputTokens: 8,
       codexTotalTokens: 20,
     });
-    state.running["issue-1"] = createRunningEntry({
+    entry2.totalStageInputTokens = 12;
+    entry2.totalStageOutputTokens = 8;
+    entry2.totalStageTotalTokens = 20;
+    state.running["issue-2"] = entry2;
+    const entry1 = createRunningEntry({
       issueId: "issue-1",
       identifier: "AAA-1",
       startedAt: "2026-03-06T10:00:00.000Z",
@@ -187,6 +191,10 @@ describe("runtime snapshot", () => {
       codexOutputTokens: 20,
       codexTotalTokens: 50,
     });
+    entry1.totalStageInputTokens = 30;
+    entry1.totalStageOutputTokens = 20;
+    entry1.totalStageTotalTokens = 50;
+    state.running["issue-1"] = entry1;
     state.retryAttempts["issue-3"] = {
       issueId: "issue-3",
       identifier: "MMM-3",
@@ -401,8 +409,12 @@ describe("runtime snapshot", () => {
       codexOutputTokens: 500,
       codexTotalTokens: 1500,
     });
-    entry.codexCacheReadTokens = 200;
-    entry.codexCacheWriteTokens = 150;
+    // Cumulative stage token fields (used by the dashboard snapshot)
+    entry.totalStageInputTokens = 1000;
+    entry.totalStageOutputTokens = 500;
+    entry.totalStageTotalTokens = 1500;
+    entry.totalStageCacheReadTokens = 200;
+    entry.totalStageCacheWriteTokens = 150;
     entry.codexReasoningTokens = 75;
     state.running["issue-1"] = entry;
 
@@ -505,6 +517,50 @@ describe("runtime snapshot", () => {
 
     expect(snapshot.running[0]!.health).toBe("yellow");
     expect(snapshot.running[0]!.health_reason).toContain("token");
+  });
+
+  it("tokens in running row reflect cumulative stage totals, not per-turn absolute counters", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+
+    // Simulate a session where codex absolute counters are small (e.g. start of a new turn)
+    // but the stage has already accumulated significant tokens across prior turns
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "session_started",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Starting",
+      turnCount: 5,
+      codexInputTokens: 0,   // Absolute counters reset at turn boundary
+      codexOutputTokens: 0,
+      codexTotalTokens: 0,
+    });
+    // Cumulative stage totals have been accumulating across 4 completed turns
+    entry.totalStageInputTokens = 40_000;
+    entry.totalStageOutputTokens = 20_000;
+    entry.totalStageTotalTokens = 60_000;
+    entry.totalStageCacheReadTokens = 5_000;
+    entry.totalStageCacheWriteTokens = 2_000;
+    entry.codexReasoningTokens = 1_000; // accumulated via +=
+    state.running["issue-1"] = entry;
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    const row = snapshot.running[0]!;
+    // tokens should show cumulative stage values, not the zero absolute counters
+    expect(row.tokens.input_tokens).toBe(40_000);
+    expect(row.tokens.output_tokens).toBe(20_000);
+    expect(row.tokens.total_tokens).toBe(60_000);
+    expect(row.tokens.cache_read_tokens).toBe(5_000);
+    expect(row.tokens.cache_write_tokens).toBe(2_000);
+    expect(row.tokens.reasoning_tokens).toBe(1_000);
   });
 
   it("returns zero total_pipeline_tokens and empty execution_history when no history exists", () => {
