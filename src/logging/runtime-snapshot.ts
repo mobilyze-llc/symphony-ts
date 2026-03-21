@@ -2,6 +2,7 @@ import type {
   CodexRateLimits,
   CodexTotals,
   OrchestratorState,
+  RecentActivityEntry,
   StageRecord,
   TurnHistoryEntry,
 } from "../domain/model.js";
@@ -37,6 +38,7 @@ export interface RuntimeSnapshotRunningRow {
   total_pipeline_tokens: number;
   execution_history: StageRecord[];
   turn_history: TurnHistoryEntry[];
+  recent_activity: RecentActivityEntry[];
   health: HealthStatus;
   health_reason: string | null;
 }
@@ -127,6 +129,7 @@ export function buildRuntimeSnapshot(
         total_pipeline_tokens: totalPipelineTokens,
         execution_history: executionHistory,
         turn_history: entry.turnHistory,
+        recent_activity: entry.recentActivity,
         health,
         health_reason,
       };

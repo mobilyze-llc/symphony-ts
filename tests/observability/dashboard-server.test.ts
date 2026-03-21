@@ -312,7 +312,7 @@ describe("dashboard server", () => {
     expect(dashboard.body).toContain("detail-panel");
     expect(dashboard.body).toContain("detail-grid");
     expect(dashboard.body).toContain("Token breakdown");
-    expect(dashboard.body).toContain("Turn history");
+    expect(dashboard.body).toContain("Recent activity");
     expect(dashboard.body).toContain("Execution history");
     expect(dashboard.body).toContain("aria-expanded");
     expect(dashboard.body).toContain("Cache read");
@@ -536,6 +536,7 @@ function createSnapshot(): RuntimeSnapshot {
         total_pipeline_tokens: 2000,
         execution_history: [],
         turn_history: [],
+        recent_activity: [],
         health: "green",
         health_reason: null,
       },

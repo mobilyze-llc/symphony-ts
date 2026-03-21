@@ -1,12 +1,15 @@
+import * as path from "node:path";
 import type { CodexClientEvent } from "../codex/app-server-client.js";
 import type {
   LiveSession,
   OrchestratorState,
+  RecentActivityEntry,
   RunningEntry,
   TurnHistoryEntry,
 } from "../domain/model.js";
 
 const TURN_HISTORY_MAX_SIZE = 50;
+const RECENT_ACTIVITY_MAX_SIZE = 10;
 
 const SESSION_EVENT_MESSAGES: Partial<
   Record<CodexClientEvent["event"], string>
@@ -82,6 +85,32 @@ export function applyCodexEventToSession(
     session.lastReportedInputTokens = 0;
     session.lastReportedOutputTokens = 0;
     session.lastReportedTotalTokens = 0;
+  }
+
+  if (event.event === "approval_auto_approved" && event.raw != null) {
+    const raw =
+      typeof event.raw === "object" && !Array.isArray(event.raw)
+        ? (event.raw as Record<string, unknown>)
+        : null;
+    if (raw !== null) {
+      const toolName = extractToolNameFromRaw(raw);
+      if (toolName !== null) {
+        const toolInput = extractToolInputFromRaw(raw);
+        const context = buildActivityContext(toolName, toolInput);
+        const activityEntry: RecentActivityEntry = {
+          timestamp: event.timestamp,
+          toolName,
+          context,
+        };
+        session.recentActivity.push(activityEntry);
+        if (session.recentActivity.length > RECENT_ACTIVITY_MAX_SIZE) {
+          session.recentActivity.splice(
+            0,
+            session.recentActivity.length - RECENT_ACTIVITY_MAX_SIZE,
+          );
+        }
+      }
+    }
   }
 
   if (event.usage === undefined) {
@@ -254,4 +283,135 @@ function normalizeAbsoluteCounter(value: number): number {
 
 function roundSeconds(value: number): number {
   return Math.round(value * 1000) / 1000;
+}
+
+/**
+ * Extract the tool name from a raw JSON-RPC message object.
+ * Duplicates the extraction logic from app-server-client.ts (which is private).
+ */
+function extractNestedString(
+  source: Record<string, unknown>,
+  keyPath: readonly string[],
+): string | null {
+  let current: unknown = source;
+  for (const segment of keyPath) {
+    if (
+      current === null ||
+      typeof current !== "object" ||
+      Array.isArray(current)
+    ) {
+      return null;
+    }
+    current = (current as Record<string, unknown>)[segment];
+  }
+  if (typeof current === "string" && current.trim().length > 0) {
+    return current.trim();
+  }
+  return null;
+}
+
+export function extractToolNameFromRaw(
+  raw: Record<string, unknown>,
+): string | null {
+  const candidates = [
+    extractNestedString(raw, ["params", "toolName"]),
+    extractNestedString(raw, ["params", "name"]),
+    extractNestedString(raw, ["params", "tool", "name"]),
+    extractNestedString(raw, ["name"]),
+  ];
+  return candidates.find((v) => v !== null) ?? null;
+}
+
+export function extractToolInputFromRaw(raw: Record<string, unknown>): unknown {
+  const params =
+    raw.params !== null &&
+    typeof raw.params === "object" &&
+    !Array.isArray(raw.params)
+      ? (raw.params as Record<string, unknown>)
+      : null;
+
+  if (params === null) {
+    return undefined;
+  }
+
+  const candidates = [
+    params.input,
+    params.arguments,
+    params.args,
+    params.payload,
+    params.toolInput,
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate !== undefined) {
+      return candidate;
+    }
+  }
+
+  return undefined;
+}
+
+const BASH_COMMAND_MAX_LENGTH = 60;
+
+export function buildActivityContext(
+  toolName: string,
+  toolInput: unknown,
+): string | null {
+  if (
+    toolInput === null ||
+    toolInput === undefined ||
+    typeof toolInput !== "object" ||
+    Array.isArray(toolInput)
+  ) {
+    return null;
+  }
+
+  const input = toolInput as Record<string, unknown>;
+  const normalized = toolName.toLowerCase();
+
+  // File tools: Read, Edit, Write, Glob — extract file_path or pattern, take basename
+  if (
+    normalized === "read" ||
+    normalized === "edit" ||
+    normalized === "write"
+  ) {
+    const filePath =
+      typeof input.file_path === "string" ? input.file_path : null;
+    if (filePath !== null && filePath.trim().length > 0) {
+      return path.basename(filePath.trim());
+    }
+    return null;
+  }
+
+  if (normalized === "glob") {
+    const pattern = typeof input.pattern === "string" ? input.pattern : null;
+    if (pattern !== null && pattern.trim().length > 0) {
+      return pattern.trim();
+    }
+    return null;
+  }
+
+  // Bash: extract command and truncate
+  if (normalized === "bash") {
+    const command = typeof input.command === "string" ? input.command : null;
+    if (command !== null && command.trim().length > 0) {
+      const trimmed = command.trim();
+      if (trimmed.length <= BASH_COMMAND_MAX_LENGTH) {
+        return trimmed;
+      }
+      return `${trimmed.slice(0, BASH_COMMAND_MAX_LENGTH)}…`;
+    }
+    return null;
+  }
+
+  // Grep: extract pattern
+  if (normalized === "grep") {
+    const pattern = typeof input.pattern === "string" ? input.pattern : null;
+    if (pattern !== null && pattern.trim().length > 0) {
+      return pattern.trim();
+    }
+    return null;
+  }
+
+  return null;
 }
