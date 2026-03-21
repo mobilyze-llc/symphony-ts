@@ -91,6 +91,43 @@ describe("orchestrator core", () => {
     ).toBe(true);
   });
 
+  it("rejects Resume-state issues with non-terminal blockers", () => {
+    // Resume is an active state in some configurations — blockedBy check must
+    // apply to it just like Todo and In Progress (SYMPH-50).
+    const config = createConfig();
+    config.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ];
+    const orchestrator = createOrchestrator({ config });
+
+    // Blocked by a non-terminal issue → must NOT dispatch
+    expect(
+      orchestrator.isDispatchEligible(
+        createIssue({
+          id: "resume-1",
+          identifier: "ISSUE-RESUME-1",
+          state: "Resume",
+          blockedBy: [{ id: "b1", identifier: "B-1", state: "In Progress" }],
+        }),
+      ),
+    ).toBe(false);
+
+    // Blocked by a terminal issue → may dispatch
+    expect(
+      orchestrator.isDispatchEligible(
+        createIssue({
+          id: "resume-2",
+          identifier: "ISSUE-RESUME-2",
+          state: "Resume",
+          blockedBy: [{ id: "b2", identifier: "B-2", state: "Done" }],
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it("dispatches eligible issues on poll tick until slots are exhausted", async () => {
     const orchestrator = createOrchestrator({
       tracker: createTracker({
