@@ -16,7 +16,10 @@ import {
   createMessageHandler,
   splitAtParagraphs,
 } from "../../src/slack-bot/handler.js";
-import type { ChannelProjectMap, SessionMap } from "../../src/slack-bot/types.js";
+import type {
+  ChannelProjectMap,
+  SessionMap,
+} from "../../src/slack-bot/types.js";
 
 // Helper to create a mock thread
 function createMockThread(channelId: string) {
@@ -70,7 +73,9 @@ describe("createMessageHandler", () => {
     const sessions: SessionMap = new Map();
     const mockModel = { id: "mock-claude-code-model" };
 
-    vi.mocked(claudeCode).mockReturnValue(mockModel as unknown as ReturnType<typeof claudeCode>);
+    vi.mocked(claudeCode).mockReturnValue(
+      mockModel as unknown as ReturnType<typeof claudeCode>,
+    );
     vi.mocked(streamText).mockReturnValue({
       textStream: createAsyncIterable(["Hello from Claude"]),
     } as ReturnType<typeof streamText>);
@@ -84,7 +89,10 @@ describe("createMessageHandler", () => {
     const thread = createMockThread("C123");
     const message = createMockMessage("What files are in this project?");
 
-    await handler(thread as unknown as Parameters<typeof handler>[0], message as unknown as Parameters<typeof handler>[1]);
+    await handler(
+      thread as unknown as Parameters<typeof handler>[0],
+      message as unknown as Parameters<typeof handler>[1],
+    );
 
     // Verify claudeCode was called with correct cwd and permissionMode
     expect(claudeCode).toHaveBeenCalledWith("sonnet", {
@@ -106,7 +114,9 @@ describe("createMessageHandler", () => {
     const sessions: SessionMap = new Map();
     const mockModel = { id: "mock-claude-code-model" };
 
-    vi.mocked(claudeCode).mockReturnValue(mockModel as unknown as ReturnType<typeof claudeCode>);
+    vi.mocked(claudeCode).mockReturnValue(
+      mockModel as unknown as ReturnType<typeof claudeCode>,
+    );
     vi.mocked(streamText).mockReturnValue({
       textStream: createAsyncIterable(["Here are the files"]),
     } as ReturnType<typeof streamText>);
@@ -116,7 +126,10 @@ describe("createMessageHandler", () => {
     const thread = createMockThread("C123");
     const message = createMockMessage("What files?");
 
-    await handler(thread as unknown as Parameters<typeof handler>[0], message as unknown as Parameters<typeof handler>[1]);
+    await handler(
+      thread as unknown as Parameters<typeof handler>[0],
+      message as unknown as Parameters<typeof handler>[1],
+    );
 
     // Verify response was posted as a thread reply
     expect(thread.post).toHaveBeenCalledWith("Here are the files");
@@ -129,7 +142,9 @@ describe("createMessageHandler", () => {
     const sessions: SessionMap = new Map();
     const mockModel = { id: "mock-claude-code-model" };
 
-    vi.mocked(claudeCode).mockReturnValue(mockModel as unknown as ReturnType<typeof claudeCode>);
+    vi.mocked(claudeCode).mockReturnValue(
+      mockModel as unknown as ReturnType<typeof claudeCode>,
+    );
     vi.mocked(streamText).mockReturnValue({
       textStream: createAsyncIterable([
         "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.",
@@ -141,7 +156,10 @@ describe("createMessageHandler", () => {
     const thread = createMockThread("C123");
     const message = createMockMessage("Tell me about files");
 
-    await handler(thread as unknown as Parameters<typeof handler>[0], message as unknown as Parameters<typeof handler>[1]);
+    await handler(
+      thread as unknown as Parameters<typeof handler>[0],
+      message as unknown as Parameters<typeof handler>[1],
+    );
 
     expect(thread.post).toHaveBeenCalledTimes(3);
     expect(thread.post).toHaveBeenNthCalledWith(1, "First paragraph.");
@@ -156,7 +174,9 @@ describe("createMessageHandler", () => {
     const sessions: SessionMap = new Map();
     const mockModel = { id: "mock-claude-code-model" };
 
-    vi.mocked(claudeCode).mockReturnValue(mockModel as unknown as ReturnType<typeof claudeCode>);
+    vi.mocked(claudeCode).mockReturnValue(
+      mockModel as unknown as ReturnType<typeof claudeCode>,
+    );
     vi.mocked(streamText).mockReturnValue({
       textStream: createAsyncIterable(["OK"]),
     } as ReturnType<typeof streamText>);
@@ -165,7 +185,10 @@ describe("createMessageHandler", () => {
     const thread = createMockThread("C123");
     const message = createMockMessage("test");
 
-    await handler(thread as unknown as Parameters<typeof handler>[0], message as unknown as Parameters<typeof handler>[1]);
+    await handler(
+      thread as unknown as Parameters<typeof handler>[0],
+      message as unknown as Parameters<typeof handler>[1],
+    );
 
     expect(claudeCode).toHaveBeenCalledWith(
       expect.any(String),
@@ -181,7 +204,10 @@ describe("createMessageHandler", () => {
     const thread = createMockThread("C999");
     const message = createMockMessage("hello");
 
-    await handler(thread as unknown as Parameters<typeof handler>[0], message as unknown as Parameters<typeof handler>[1]);
+    await handler(
+      thread as unknown as Parameters<typeof handler>[0],
+      message as unknown as Parameters<typeof handler>[1],
+    );
 
     expect(thread.post).toHaveBeenCalledWith(
       expect.stringContaining("No project directory mapped"),
@@ -206,22 +232,33 @@ describe("createMessageHandler", () => {
     const sessions: SessionMap = new Map();
     const mockModel = { id: "mock-claude-code-model" };
 
-    vi.mocked(claudeCode).mockReturnValue(mockModel as unknown as ReturnType<typeof claudeCode>);
+    vi.mocked(claudeCode).mockReturnValue(
+      mockModel as unknown as ReturnType<typeof claudeCode>,
+    );
 
-    // Create a failing async iterable
-    async function* failingStream(): AsyncIterable<string> {
-      throw new Error("Claude Code failed");
-    }
+    // Create a failing async iterable (plain object to avoid lint/useYield)
+    const failingStream: AsyncIterable<string> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next(): Promise<IteratorResult<string>> {
+            throw new Error("Claude Code failed");
+          },
+        };
+      },
+    };
 
     vi.mocked(streamText).mockReturnValue({
-      textStream: failingStream(),
+      textStream: failingStream,
     } as ReturnType<typeof streamText>);
 
     const handler = createMessageHandler({ channelMap, sessions });
     const thread = createMockThread("C123");
     const message = createMockMessage("test");
 
-    await handler(thread as unknown as Parameters<typeof handler>[0], message as unknown as Parameters<typeof handler>[1]);
+    await handler(
+      thread as unknown as Parameters<typeof handler>[0],
+      message as unknown as Parameters<typeof handler>[1],
+    );
 
     // Should post error message
     expect(thread.post).toHaveBeenCalledWith("Error: Claude Code failed");
@@ -245,7 +282,9 @@ describe("createMessageHandler", () => {
     const sessions: SessionMap = new Map();
     const mockModel = { id: "mock-claude-code-model" };
 
-    vi.mocked(claudeCode).mockReturnValue(mockModel as unknown as ReturnType<typeof claudeCode>);
+    vi.mocked(claudeCode).mockReturnValue(
+      mockModel as unknown as ReturnType<typeof claudeCode>,
+    );
     vi.mocked(streamText).mockReturnValue({
       textStream: createAsyncIterable(["OK"]),
     } as ReturnType<typeof streamText>);
@@ -254,7 +293,10 @@ describe("createMessageHandler", () => {
     const thread = createMockThread("C123");
     const message = createMockMessage("test");
 
-    await handler(thread as unknown as Parameters<typeof handler>[0], message as unknown as Parameters<typeof handler>[1]);
+    await handler(
+      thread as unknown as Parameters<typeof handler>[0],
+      message as unknown as Parameters<typeof handler>[1],
+    );
 
     const session = sessions.get(thread.id);
     expect(session).toBeDefined();

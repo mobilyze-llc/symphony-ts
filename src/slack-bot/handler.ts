@@ -46,8 +46,7 @@ export function createMessageHandler(options: HandleMessageOptions) {
       const projectDir = channelMap.get(thread.channelId);
       if (!projectDir) {
         await thread.post(
-          `No project directory mapped for channel \`${thread.channelId}\`. ` +
-            "Please configure a channel-to-project mapping.",
+          `No project directory mapped for channel \`${thread.channelId}\`. Please configure a channel-to-project mapping.`,
         );
         await adapter.removeReaction(thread.id, message.id, "eyes");
         await adapter.addReaction(thread.id, message.id, "warning");

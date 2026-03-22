@@ -4,9 +4,9 @@
  * Configures a Chat instance with SlackAdapter and MemoryStateAdapter,
  * registers message handlers, and exports the webhook handler.
  */
-import { Chat, type Adapter } from "chat";
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { createMemoryState } from "@chat-adapter/state-memory";
+import { type Adapter, Chat } from "chat";
 
 import { createMessageHandler } from "./handler.js";
 import type { ChannelProjectMap, SessionMap, SlackBotConfig } from "./types.js";
@@ -24,7 +24,9 @@ export function parseChannelProjectMap(json: string): ChannelProjectMap {
     throw new Error("CHANNEL_PROJECT_MAP must be a JSON object");
   }
   const map: ChannelProjectMap = new Map();
-  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+  for (const [key, value] of Object.entries(
+    parsed as Record<string, unknown>,
+  )) {
     if (typeof value !== "string") {
       throw new Error(
         `CHANNEL_PROJECT_MAP values must be strings, got ${typeof value} for key "${key}"`,

@@ -13,7 +13,10 @@ import { streamText } from "ai";
 import { claudeCode } from "ai-sdk-provider-claude-code";
 
 import { createMessageHandler } from "../../src/slack-bot/handler.js";
-import type { ChannelProjectMap, SessionMap } from "../../src/slack-bot/types.js";
+import type {
+  ChannelProjectMap,
+  SessionMap,
+} from "../../src/slack-bot/types.js";
 
 // Helper to create a mock thread
 function createMockThread(channelId: string) {
@@ -67,7 +70,9 @@ describe("Reaction lifecycle", () => {
     const sessions: SessionMap = new Map();
     const mockModel = { id: "mock-claude-code-model" };
 
-    vi.mocked(claudeCode).mockReturnValue(mockModel as unknown as ReturnType<typeof claudeCode>);
+    vi.mocked(claudeCode).mockReturnValue(
+      mockModel as unknown as ReturnType<typeof claudeCode>,
+    );
     vi.mocked(streamText).mockReturnValue({
       textStream: createAsyncIterable(["response"]),
     } as ReturnType<typeof streamText>);
@@ -76,7 +81,10 @@ describe("Reaction lifecycle", () => {
     const thread = createMockThread("C123");
     const message = createMockMessage("test");
 
-    await handler(thread as unknown as Parameters<typeof handler>[0], message as unknown as Parameters<typeof handler>[1]);
+    await handler(
+      thread as unknown as Parameters<typeof handler>[0],
+      message as unknown as Parameters<typeof handler>[1],
+    );
 
     // Verify eyes reaction was added first
     expect(thread.adapter.addReaction).toHaveBeenCalledWith(
@@ -99,7 +107,9 @@ describe("Reaction lifecycle", () => {
     const sessions: SessionMap = new Map();
     const mockModel = { id: "mock-claude-code-model" };
 
-    vi.mocked(claudeCode).mockReturnValue(mockModel as unknown as ReturnType<typeof claudeCode>);
+    vi.mocked(claudeCode).mockReturnValue(
+      mockModel as unknown as ReturnType<typeof claudeCode>,
+    );
     vi.mocked(streamText).mockReturnValue({
       textStream: createAsyncIterable(["response"]),
     } as ReturnType<typeof streamText>);
@@ -108,7 +118,10 @@ describe("Reaction lifecycle", () => {
     const thread = createMockThread("C123");
     const message = createMockMessage("test");
 
-    await handler(thread as unknown as Parameters<typeof handler>[0], message as unknown as Parameters<typeof handler>[1]);
+    await handler(
+      thread as unknown as Parameters<typeof handler>[0],
+      message as unknown as Parameters<typeof handler>[1],
+    );
 
     // Verify eyes was removed
     expect(thread.adapter.removeReaction).toHaveBeenCalledWith(
@@ -140,22 +153,33 @@ describe("Reaction lifecycle", () => {
     const sessions: SessionMap = new Map();
     const mockModel = { id: "mock-claude-code-model" };
 
-    vi.mocked(claudeCode).mockReturnValue(mockModel as unknown as ReturnType<typeof claudeCode>);
+    vi.mocked(claudeCode).mockReturnValue(
+      mockModel as unknown as ReturnType<typeof claudeCode>,
+    );
 
-    // Create a failing async iterable
-    async function* failingStream(): AsyncIterable<string> {
-      throw new Error("CC error");
-    }
+    // Create a failing async iterable (plain object to avoid lint/useYield)
+    const failingStream: AsyncIterable<string> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next(): Promise<IteratorResult<string>> {
+            throw new Error("CC error");
+          },
+        };
+      },
+    };
 
     vi.mocked(streamText).mockReturnValue({
-      textStream: failingStream(),
+      textStream: failingStream,
     } as ReturnType<typeof streamText>);
 
     const handler = createMessageHandler({ channelMap, sessions });
     const thread = createMockThread("C123");
     const message = createMockMessage("test");
 
-    await handler(thread as unknown as Parameters<typeof handler>[0], message as unknown as Parameters<typeof handler>[1]);
+    await handler(
+      thread as unknown as Parameters<typeof handler>[0],
+      message as unknown as Parameters<typeof handler>[1],
+    );
 
     // Verify eyes was removed
     expect(thread.adapter.removeReaction).toHaveBeenCalledWith(
