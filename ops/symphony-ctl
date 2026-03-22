@@ -4,7 +4,7 @@ set -euo pipefail
 # symphony-ctl — manage symphony-ts as a macOS launchd service
 # Usage: symphony-ctl {install|uninstall|start|stop|restart|status|logs|tail|cleanup}
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 SYMPHONY_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Defaults — override via environment or .env
