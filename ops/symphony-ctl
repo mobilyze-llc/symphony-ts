@@ -620,7 +620,7 @@ cmd_cleanup() {
     else
       info "  $logfile (${file_age_days}d old) — recent, keeping"
     fi
-  done < <(ls /tmp/symphony-*.log 2>/dev/null)
+  done < <(find "$LOG_DIR" -name "*.log" -o -name "*.jsonl" 2>/dev/null)
   if ! $has_logs; then
     info "  (none found)"
   fi
@@ -1018,10 +1018,10 @@ cmd_analyze() {
     shift
   done
 
-  # Default: most recent symphony.jsonl under /tmp/symphony-logs-*/
+  # Default: symphony.jsonl under $LOG_DIR
   if [[ -z "$log_path" ]]; then
-    log_path="$(ls -t /tmp/symphony-logs-*/symphony.jsonl 2>/dev/null | head -1 || true)"
-    [[ -n "$log_path" ]] || die "No symphony.jsonl found in /tmp/symphony-logs-*/. Pass a path explicitly."
+    log_path="$LOG_DIR/symphony.jsonl"
+    [[ -f "$log_path" ]] || die "No symphony.jsonl found at $log_path. Pass a path explicitly."
   fi
 
   [[ -f "$log_path" ]] || die "Log file not found: $log_path"
@@ -1071,7 +1071,7 @@ Commands:
                        --dry-run       Print what would be deleted (default)
   analyze            Analyze a JSONL run log and print a report
                        [path]          Path to symphony.jsonl
-                                       (default: most recent /tmp/symphony-logs-*/symphony.jsonl)
+                                       (default: \$LOG_DIR/symphony.jsonl)
                        --json          Output machine-readable JSON instead of text
 
 Environment:
