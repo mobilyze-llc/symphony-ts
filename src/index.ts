@@ -28,3 +28,4 @@ export * from "./tracker/tracker.js";
 export * from "./runners/index.js";
 export * from "./workspace/path-safety.js";
 export * from "./workspace/workspace-manager.js";
+export * from "./slack-bot/index.js";
