@@ -26,6 +26,10 @@
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/youruser</string>
+        <key>NODE_ENV</key>
+        <string>production</string>
         <key>LINEAR_API_KEY</key>
         <string>lin_api_xxxxx</string>
         <key>LINEAR_PROJECT_SLUG</key>
@@ -50,7 +54,13 @@
     </dict>
 
     <key>ThrottleInterval</key>
-    <integer>30</integer>
+    <integer>60</integer>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
 
     <key>ProcessType</key>
     <string>Background</string>
