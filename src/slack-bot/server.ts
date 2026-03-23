@@ -52,7 +52,13 @@ export function loadSlackBotConfig(
     );
   }
 
-  const port = env.SLACK_BOT_PORT ? Number.parseInt(env.SLACK_BOT_PORT, 10) : 3000;
+  // At this point both botToken and signingSecret are defined (missing.length === 0).
+  const resolvedBotToken = botToken as string;
+  const resolvedSigningSecret = signingSecret as string;
+
+  const port = env.SLACK_BOT_PORT
+    ? Number.parseInt(env.SLACK_BOT_PORT, 10)
+    : 3000;
 
   const channelMapJson = env.CHANNEL_PROJECT_MAP ?? "{}";
   const channelMap = parseChannelProjectMap(channelMapJson);
@@ -60,8 +66,8 @@ export function loadSlackBotConfig(
   const model = env.CLAUDE_MODEL;
 
   return {
-    botToken: botToken!,
-    signingSecret: signingSecret!,
+    botToken: resolvedBotToken,
+    signingSecret: resolvedSigningSecret,
     port,
     channelMap,
     ...(model !== undefined ? { model } : {}),
@@ -171,9 +177,10 @@ export function createSlackBotServer(config: SlackBotServerConfig): Server {
   // Base URL used only for parsing request.url relative paths.
   // Use $BASE_URL if it looks like a valid origin; otherwise fall back to 0.0.0.0:<port>.
   const envBaseUrl = process.env.BASE_URL;
-  const hostPort = envBaseUrl && /^[\w.-]+:\d+$/.test(envBaseUrl)
-    ? envBaseUrl
-    : `0.0.0.0:${config.port}`;
+  const hostPort =
+    envBaseUrl && /^[\w.-]+:\d+$/.test(envBaseUrl)
+      ? envBaseUrl
+      : `0.0.0.0:${config.port}`;
   const baseUrl = `http://${hostPort}`;
 
   const handler = async (
@@ -282,7 +289,9 @@ if (isDirectExecution) {
     void startSlackBotServer(config);
   } catch (error) {
     console.error(
-      error instanceof Error ? error.message : "Failed to start Slack bot server",
+      error instanceof Error
+        ? error.message
+        : "Failed to start Slack bot server",
     );
     process.exit(1);
   }

@@ -3,16 +3,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Mock createSlackBot to avoid real Slack API calls
 vi.mock("../../src/slack-bot/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../src/slack-bot/index.js")>();
+  const actual =
+    await importOriginal<typeof import("../../src/slack-bot/index.js")>();
   return {
     ...actual,
     createSlackBot: vi.fn().mockReturnValue({
       chat: {},
       webhooks: {
-        slack: vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        })),
+        slack: vi.fn().mockResolvedValue(
+          new Response(JSON.stringify({ ok: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
       },
       sessions: new Map(),
       ccSessions: {},
@@ -31,8 +34,17 @@ import {
 /** Helper: make an HTTP request to a running server. */
 function request(
   server: http.Server,
-  options: { method?: string; path: string; body?: string; headers?: Record<string, string> },
-): Promise<{ statusCode: number; headers: http.IncomingHttpHeaders; body: string }> {
+  options: {
+    method?: string;
+    path: string;
+    body?: string;
+    headers?: Record<string, string>;
+  },
+): Promise<{
+  statusCode: number;
+  headers: http.IncomingHttpHeaders;
+  body: string;
+}> {
   return new Promise((resolve, reject) => {
     const address = server.address();
     if (address === null || typeof address === "string") {
@@ -75,9 +87,9 @@ describe("loadSlackBotConfig", () => {
   });
 
   it("names the missing variable SLACK_BOT_TOKEN", () => {
-    expect(() => loadSlackBotConfig({ SLACK_SIGNING_SECRET: "secret" })).toThrow(
-      "SLACK_BOT_TOKEN",
-    );
+    expect(() =>
+      loadSlackBotConfig({ SLACK_SIGNING_SECRET: "secret" }),
+    ).toThrow("SLACK_BOT_TOKEN");
   });
 
   it("names the missing variable SLACK_SIGNING_SECRET", () => {
@@ -152,14 +164,18 @@ describe("createSlackBotServer", () => {
   afterEach(async () => {
     if (server?.listening) {
       await new Promise<void>((resolve, reject) => {
-        server.close((err: Error | undefined) => (err ? reject(err) : resolve()));
+        server.close((err: Error | undefined) =>
+          err ? reject(err) : resolve(),
+        );
       });
     }
     vi.restoreAllMocks();
   });
 
   /** Start the server on an OS-assigned port for testing. */
-  async function startTestServer(config?: Partial<SlackBotServerConfig>): Promise<http.Server> {
+  async function startTestServer(
+    config?: Partial<SlackBotServerConfig>,
+  ): Promise<http.Server> {
     server = createSlackBotServer({ ...baseConfig, ...config });
     await new Promise<void>((resolve) => {
       server.listen(0, "127.0.0.1", resolve);
@@ -195,8 +211,8 @@ describe("createSlackBotServer", () => {
 
   it("forwards webhook POST to chat.webhooks.slack handler", async () => {
     await startTestServer();
-    const mockWebhookHandler = vi.mocked(createSlackBot).mock.results[0]!
-      .value.webhooks.slack as ReturnType<typeof vi.fn>;
+    const mockWebhookHandler = vi.mocked(createSlackBot).mock.results[0]!.value
+      .webhooks.slack as ReturnType<typeof vi.fn>;
 
     const res = await request(server, {
       method: "POST",
