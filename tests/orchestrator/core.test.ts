@@ -1191,7 +1191,7 @@ describe("max retry safety net", () => {
 
     // Should be null — escalated
     expect(retry3).toBeNull();
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
     expect(orchestrator.getState().claimed.has("1")).toBe(false);
     expect(orchestrator.getState().retryAttempts).not.toHaveProperty("1");
 
@@ -1243,7 +1243,7 @@ describe("max retry safety net", () => {
 
     expect(result.dispatched).toBe(false);
     expect(result.retryEntry).toBeNull();
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
     expect(orchestrator.getState().claimed.has("1")).toBe(false);
     expect(escalationComments).toHaveLength(1);
     expect(escalationComments[0]?.body).toContain(
@@ -1322,7 +1322,7 @@ describe("max retry safety net", () => {
     });
 
     expect(retry2).toBeNull();
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
     expect(orchestrator.getState().claimed.has("1")).toBe(false);
     expect(escalationComments).toHaveLength(1);
     expect(escalationComments[0]?.body).toContain(
@@ -1372,7 +1372,7 @@ describe("max retry safety net", () => {
     });
 
     expect(retry2).toBeNull();
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
     expect(escalationComments).toHaveLength(1);
   });
 
@@ -2656,9 +2656,9 @@ describe("review findings comment on agent review failure", () => {
 
     await Promise.resolve();
 
-    // Escalation: issue is completed, no retry
+    // Escalation: issue is failed, no retry
     expect(retryEntry).toBeNull();
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
 
     // Escalation side effects fire
     expect(stateUpdates).toHaveLength(1);

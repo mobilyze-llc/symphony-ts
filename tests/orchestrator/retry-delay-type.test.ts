@@ -323,7 +323,7 @@ describe("onRetryTimer preserves delayType from retry entry", () => {
     expect(escalationComments[0]?.body).toContain(
       "Max retry attempts (2) exceeded",
     );
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
     expect(orchestrator.getState().claimed.has("1")).toBe(false);
   });
 });

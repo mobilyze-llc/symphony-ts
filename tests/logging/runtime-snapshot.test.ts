@@ -743,52 +743,14 @@ describe("runtime snapshot", () => {
     expect(snapshot.running[0]!.last_event_at).toBeNull();
   });
 
-  it("counts completed issues whose final stage outcome is success", () => {
+  it("counts completed and failed issues from state Sets", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,
       maxConcurrentAgents: 2,
     });
-    state.issueExecutionHistory["done-1"] = [
-      {
-        stageName: "investigate",
-        durationMs: 5000,
-        totalTokens: 1000,
-        turns: 2,
-        outcome: "success",
-      },
-    ];
-    state.issueExecutionHistory["done-2"] = [
-      {
-        stageName: "investigate",
-        durationMs: 3000,
-        totalTokens: 500,
-        turns: 1,
-        outcome: "success",
-      },
-      {
-        stageName: "implement",
-        durationMs: 8000,
-        totalTokens: 2000,
-        turns: 5,
-        outcome: "success",
-      },
-    ];
-    state.issueExecutionHistory["fail-1"] = [
-      {
-        stageName: "investigate",
-        durationMs: 3000,
-        totalTokens: 500,
-        turns: 1,
-        outcome: "success",
-      },
-      {
-        stageName: "implement",
-        durationMs: 8000,
-        totalTokens: 2000,
-        turns: 5,
-        outcome: "failure",
-      },
-    ];
+    state.completed.add("done-1");
+    state.completed.add("done-2");
+    state.failed.add("fail-1");
 
     const snapshot = buildRuntimeSnapshot(state, {
       now: new Date("2026-03-06T10:00:10.000Z"),

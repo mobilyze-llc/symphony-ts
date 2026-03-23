@@ -159,7 +159,7 @@ describe("orchestrator stage machine", () => {
     expect(result).toBe("escalated");
     expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
     expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
   });
 
   it("preserves flat dispatch behavior when no stages configured", async () => {

@@ -1,6 +1,6 @@
 {
   "name": "symphony-ts",
-  "version": "0.1.8",
+  "version": "2026.03.23.1",
   "license": "Apache-2.0",
   "type": "module",
   "description": "TypeScript implementation of Symphony",

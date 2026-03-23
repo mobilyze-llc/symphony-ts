@@ -197,10 +197,11 @@ export class OrchestratorCore {
     // "In Review" stay completed — they haven't been deliberately requeued.
     // Issues in the escalation state ("Blocked") also stay completed until
     // a human explicitly moves them.
-    if (this.state.completed.has(issue.id)) {
+    if (this.state.completed.has(issue.id) || this.state.failed.has(issue.id)) {
       const resumeStates: ReadonlySet<string> = new Set(["resume", "todo"]);
       if (resumeStates.has(normalizedState)) {
         this.state.completed.delete(issue.id);
+        this.state.failed.delete(issue.id);
       } else {
         return false;
       }
@@ -581,7 +582,7 @@ export class OrchestratorCore {
   ): RetryEntry | null {
     if (failureClass === "spec") {
       // Spec failures are unrecoverable — escalate immediately
-      this.state.completed.add(issueId);
+      this.state.failed.add(issueId);
       this.releaseClaim(issueId);
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
@@ -1117,7 +1118,7 @@ export class OrchestratorCore {
       delete this.state.issueReworkCounts[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
-      this.state.completed.add(issueId);
+      this.state.failed.add(issueId);
       this.releaseClaim(issueId);
       return "escalated";
     }
@@ -1560,7 +1561,7 @@ export class OrchestratorCore {
       input.delayType === "failure" &&
       attempt > this.config.agent.maxRetryAttempts
     ) {
-      this.state.completed.add(issueId);
+      this.state.failed.add(issueId);
       this.releaseClaim(issueId);
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];

@@ -102,6 +102,7 @@ describe("domain model", () => {
     expect([...state.claimed]).toEqual([]);
     expect(state.retryAttempts).toEqual({});
     expect([...state.completed]).toEqual([]);
+    expect([...state.failed]).toEqual([]);
     expect(state.codexTotals).toEqual({
       inputTokens: 0,
       outputTokens: 0,

@@ -643,7 +643,7 @@ describe("ensemble gate orchestrator integration", () => {
       expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
     });
 
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
     expect(postedComments).toHaveLength(1);
     expect(postedComments[0]!.issueId).toBe("1");
     expect(postedComments[0]!.body).toContain(

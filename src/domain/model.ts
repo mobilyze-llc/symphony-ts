@@ -179,6 +179,7 @@ export interface OrchestratorState {
   claimed: Set<string>;
   retryAttempts: Record<string, RetryEntry>;
   completed: Set<string>;
+  failed: Set<string>;
   codexTotals: CodexTotals;
   codexRateLimits: CodexRateLimits;
   issueStages: Record<string, string>;
@@ -275,6 +276,7 @@ export function createInitialOrchestratorState(input: {
     claimed: new Set<string>(),
     retryAttempts: {},
     completed: new Set<string>(),
+    failed: new Set<string>(),
     codexTotals: {
       inputTokens: 0,
       outputTokens: 0,

@@ -84,7 +84,7 @@ describe("failure signal routing in onWorkerExit", () => {
     });
 
     expect(retryEntry).toBeNull();
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
     expect(orchestrator.getState().claimed.has("1")).toBe(false);
     expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
     expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
@@ -116,7 +116,7 @@ describe("failure signal routing in onWorkerExit", () => {
       agentMessage: "[STAGE_FAILED: spec]",
     });
 
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
 
     const result = await orchestrator.pollTick();
     expect(result.dispatchedIssueIds).not.toContain("1");
@@ -142,13 +142,13 @@ describe("failure signal routing in onWorkerExit", () => {
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: spec]",
     });
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
 
     // Human moves issue to "Resume" → next poll should re-dispatch
     issueState = "Todo";
     const result = await orchestrator.pollTick();
     expect(result.dispatchedIssueIds).toContain("1");
-    expect(orchestrator.getState().completed.has("1")).toBe(false);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
   });
 
   it("triggers rework on [STAGE_FAILED: review] with gate workflow", async () => {
@@ -207,7 +207,7 @@ describe("failure signal routing in onWorkerExit", () => {
     });
 
     expect(retryEntry).toBeNull();
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
     expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
     expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
   });
@@ -521,7 +521,7 @@ describe("agent-type review stage rework routing", () => {
     });
 
     expect(retryEntry).toBeNull();
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
     expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
     expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
 
@@ -886,7 +886,7 @@ describe("review findings comment posting on agent review failure", () => {
     });
 
     expect(retryEntry).toBeNull();
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
 
     // Allow async side effects to fire
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -1069,7 +1069,7 @@ describe("rebase failure signal routing", () => {
     });
 
     expect(retryEntry).toBeNull();
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
     expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
     expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
 
@@ -1223,7 +1223,7 @@ describe("rebase failure signal routing", () => {
     });
 
     expect(retryEntry).toBeNull();
-    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
   });
 });
 

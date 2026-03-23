@@ -157,26 +157,13 @@ export function buildRuntimeSnapshot(
       error: entry.error,
     }));
 
-  let completedCount = 0;
-  let failedCount = 0;
-  for (const history of Object.values(state.issueExecutionHistory)) {
-    if (history.length > 0) {
-      const finalStage = history.at(-1);
-      if (finalStage?.outcome === "success") {
-        completedCount++;
-      } else if (finalStage?.outcome === "failure") {
-        failedCount++;
-      }
-    }
-  }
-
   return {
     generated_at: formatEasternTimestamp(now),
     counts: {
       running: running.length,
       retrying: retrying.length,
-      completed: completedCount,
-      failed: failedCount,
+      completed: state.completed.size,
+      failed: state.failed.size,
     },
     running,
     retrying,

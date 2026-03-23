@@ -349,14 +349,7 @@ const DASHBOARD_STYLES = String.raw`
       }
       .issue-title {
         font-size: 0.84rem;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        max-width: 100%;
-      }
-      .issue-link {
-        color: var(--muted);
-        font-size: 0.86rem;
+        white-space: normal;
       }
       .muted {
         color: var(--muted);
@@ -892,9 +885,6 @@ function renderDashboardClientScript(
               ? escapeHtml(row.last_event) + (row.last_event_at ? ' · <span class="mono numeric">' + escapeHtml(row.last_event_at) + '</span>' : '')
               : 'n/a';
 
-            const pipelineStageHtml = (row.pipeline_stage != null)
-              ? '<span class="muted">' + escapeHtml(row.pipeline_stage) + '</span>'
-              : '';
             const reworkHtml = (row.rework_count != null && row.rework_count > 0)
               ? '<span class="state-badge state-badge-warning">Rework \xD7' + escapeHtml(row.rework_count) + '</span>'
               : '';
@@ -908,7 +898,7 @@ function renderDashboardClientScript(
             const detailRow = '<tr id="' + escapeHtml(detailId) + '" class="detail-row" style="display:none;"><td colspan="7">' + renderDetailPanel(row, detailId) + '</td></tr>';
 
             return '<tr class="session-row">' +
-              '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(row.issue_identifier) + '</span><span class="muted issue-title">' + escapeHtml(row.issue_title) + '</span><a class="issue-link" href="/api/v1/' + encodeURIComponent(row.issue_identifier) + '">JSON details</a>' + pipelineStageHtml + expandToggle + '</div></td>' +
+              '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(row.issue_identifier) + '</span><span class="muted issue-title">' + escapeHtml(row.issue_title) + '</span>' + expandToggle + '</div></td>' +
               '<td><div class="detail-stack"><span class="' + stateBadgeClass(row.state) + '">' + escapeHtml(row.state) + '</span>' + reworkHtml + healthHtml + '</div></td>' +
               '<td><div class="session-stack">' + sessionCell + '</div></td>' +
               '<td class="numeric">' + formatRuntimeAndTurns(row, next.generated_at) + '</td>' +
@@ -926,7 +916,7 @@ function renderDashboardClientScript(
 
           return next.retrying.map(function (row) {
             return '<tr>' +
-              '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(row.issue_identifier || row.issue_id) + '</span><a class="issue-link" href="/api/v1/' + encodeURIComponent(row.issue_identifier || row.issue_id) + '">JSON details</a></div></td>' +
+              '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(row.issue_identifier || row.issue_id) + '</span></div></td>' +
               '<td>' + escapeHtml(row.attempt) + '</td>' +
               '<td class="mono">' + escapeHtml(row.due_at || 'n/a') + '</td>' +
               '<td>' + escapeHtml(row.error || 'n/a') + '</td>' +
@@ -1025,10 +1015,6 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
                 <div class="issue-stack">
                   <span class="issue-id">${escapeHtml(row.issue_identifier)}</span>
                   <span class="muted issue-title">${escapeHtml(row.issue_title)}</span>
-                  <a class="issue-link" href="/api/v1/${encodeURIComponent(
-                    row.issue_identifier,
-                  )}">JSON details</a>
-                  ${row.pipeline_stage !== null && row.pipeline_stage !== undefined ? `<span class="muted">${escapeHtml(row.pipeline_stage)}</span>` : ""}
                   <button type="button" class="expand-toggle" aria-expanded="false" data-detail="${escapeHtml(detailId)}" onclick="const d=document.getElementById(this.dataset.detail);const open=this.getAttribute('aria-expanded')==='true';d.style.display=open?'none':'table-row';this.setAttribute('aria-expanded',String(!open));this.textContent=open?'\u25B6 Details':'\u25BC Details';">&#x25B6; Details</button>
                 </div>
               </td>
@@ -1195,9 +1181,6 @@ function renderRetryRows(snapshot: RuntimeSnapshot): string {
               <td>
                 <div class="issue-stack">
                   <span class="issue-id">${escapeHtml(row.issue_identifier ?? row.issue_id)}</span>
-                  <a class="issue-link" href="/api/v1/${encodeURIComponent(
-                    row.issue_identifier ?? row.issue_id,
-                  )}">JSON details</a>
                 </div>
               </td>
               <td>${row.attempt}</td>
