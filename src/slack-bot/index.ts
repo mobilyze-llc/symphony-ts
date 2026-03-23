@@ -21,6 +21,14 @@ export {
 } from "./session-store.js";
 export { parseSlashCommand } from "./slash-commands.js";
 export { createMessageHandler, splitAtParagraphs } from "./handler.js";
+export { chunkResponse, SLACK_MAX_CHARS } from "../chunking.js";
+export {
+  markProcessing,
+  markSuccess,
+  markError,
+  markWarning,
+} from "../reactions.js";
+export { collectStream } from "../streaming.js";
 
 /**
  * Parse a JSON string of channel→project mappings into a ChannelProjectMap.

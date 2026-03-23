@@ -479,13 +479,31 @@ If surviving P1/P2 findings exist: post them as a `## Review Findings` comment o
 ## Stage: Merge
 You are in the MERGE stage. The PR has been reviewed and approved.
 
-### Step 1: Check PR Mergeability
-Run `gh pr view --json mergeable,mergeStateStatus` to check if the PR can be merged cleanly.
+### Merge Queue Context
+This repo uses GitHub's merge queue. When you run `gh pr merge`, GitHub will:
+- **If checks passed**: Add the PR to the merge queue. You'll see: `"✓ Pull request ...#N will be added to the merge queue for main when ready"`
+- **If checks pending**: Enable auto-merge. You'll see: `"✓ Pull request ...#N will be automatically merged via squash when all requirements are met"`
 
-### Step 2a: If Mergeable — Merge the PR
-- Merge the PR via `gh pr merge --squash --delete-branch`
-- Verify the merge succeeded on the main branch
-- Do NOT modify code in this stage
+In BOTH cases, the merge is not immediate — GitHub queues it, rebases, runs CI on the rebased version, then merges. This is normal behavior. Do NOT interpret it as a failure.
+
+### Step 1: Merge the PR
+Run `gh pr merge --squash --delete-branch`. This single command is sufficient. Do NOT:
+- Retry the merge command if you see a "merge queue" or "auto-merge" response — that IS success
+- Run `gh pr merge` with `--admin` to bypass the queue
+- Modify any code in this stage
+
+### Step 2: Wait for Merge to Complete
+After the merge command succeeds, wait for the merge queue to finish:
+```
+gh pr checks --watch --required --fail-fast
+```
+This blocks until all checks complete (including merge queue CI). Then confirm the PR merged:
+```
+gh pr view --json state --jq '.state'
+```
+Expected: `MERGED`. If the state is `MERGED`, proceed to workpad update.
+
+If the merge queue rejects the PR (check failures on rebased code), run `gh pr view --json state,statusCheckRollup` to understand the failure, then output `[STAGE_FAILED: rebase]` — the queue failure means the code doesn't work after rebase against latest main.
 
 ### Step 2b: If Conflicts — Write Rebase Brief and Signal Failure
 If the PR has merge conflicts (mergeable is "CONFLICTING" or mergeStateStatus indicates conflicts):
@@ -522,7 +540,6 @@ After merging the PR, update the workpad comment one final time.
 
 - When you have successfully merged the PR, output the exact text `[STAGE_COMPLETE]` as the very last line of your final message.
 {% endif %}
-
 ## Scope Discipline
 
 - If your task requires a capability that doesn't exist in the codebase and isn't specified in the spec, stop and comment what's missing on the issue. Don't scaffold unspecced infrastructure.

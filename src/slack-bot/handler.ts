@@ -10,7 +10,15 @@ import { streamText } from "ai";
 import { claudeCode } from "ai-sdk-provider-claude-code";
 import type { Adapter, Message, Thread } from "chat";
 
+import { chunkResponse } from "../chunking.js";
+import {
+  markError,
+  markProcessing,
+  markSuccess,
+  markWarning,
+} from "../reactions.js";
 import { resolveClaudeModelId } from "../runners/claude-code-runner.js";
+import { collectStream } from "../streaming.js";
 import type { CcSessionStore } from "./session-store.js";
 import { getCcSessionId, setCcSessionId } from "./session-store.js";
 import { parseSlashCommand } from "./slash-commands.js";
@@ -30,6 +38,9 @@ export interface HandleMessageOptions {
 /**
  * Split a response into paragraph-sized chunks at `\n\n` boundaries.
  * Returns the original text as a single-element array if no paragraph breaks exist.
+ *
+ * @deprecated Use `chunkResponse()` from `../chunking.js` instead, which also
+ * enforces the 39,000 character Slack message limit.
  */
 export function splitAtParagraphs(text: string): string[] {
   const chunks = text.split(/\n\n+/).filter((chunk) => chunk.trim().length > 0);
@@ -58,7 +69,7 @@ export function createMessageHandler(options: HandleMessageOptions) {
     }
 
     // Add eyes reaction to indicate processing
-    await adapter.addReaction(thread.id, message.id, "eyes");
+    await markProcessing(adapter, thread.id, message.id);
 
     try {
       // Resolve channel → project directory
@@ -67,8 +78,7 @@ export function createMessageHandler(options: HandleMessageOptions) {
         await thread.post(
           `No project directory mapped for channel \`${thread.channelId}\`. Please configure a channel-to-project mapping.`,
         );
-        await adapter.removeReaction(thread.id, message.id, "eyes");
-        await adapter.addReaction(thread.id, message.id, "warning");
+        await markWarning(adapter, thread.id, message.id);
         return;
       }
 
@@ -100,11 +110,8 @@ export function createMessageHandler(options: HandleMessageOptions) {
         prompt: message.text,
       });
 
-      // Collect full response text for paragraph chunking
-      let fullText = "";
-      for await (const chunk of result.textStream) {
-        fullText += chunk;
-      }
+      // Collect full response text via streaming utility
+      const fullText = await collectStream(result.textStream);
 
       // Extract and store session ID from provider metadata for continuity
       const response = await result.response;
@@ -116,19 +123,17 @@ export function createMessageHandler(options: HandleMessageOptions) {
         setCcSessionId(ccSessions, thread.id, ccSessionId);
       }
 
-      // Split at paragraph boundaries and post each chunk as a thread reply
-      const chunks = splitAtParagraphs(fullText);
+      // Split at paragraph boundaries respecting Slack's 39K char limit
+      const chunks = chunkResponse(fullText);
       for (const chunk of chunks) {
         await thread.post(chunk);
       }
 
       // Replace eyes with checkmark on success
-      await adapter.removeReaction(thread.id, message.id, "eyes");
-      await adapter.addReaction(thread.id, message.id, "white_check_mark");
+      await markSuccess(adapter, thread.id, message.id);
     } catch (error) {
       // Replace eyes with error indicator on failure
-      await adapter.removeReaction(thread.id, message.id, "eyes");
-      await adapter.addReaction(thread.id, message.id, "x");
+      await markError(adapter, thread.id, message.id);
 
       const errorMessage =
         error instanceof Error ? error.message : "An unexpected error occurred";

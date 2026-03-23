@@ -150,7 +150,7 @@ describe("createMessageHandler", () => {
     expect(thread.post).toHaveBeenCalledWith("Here are the files");
   });
 
-  it("splits multi-paragraph responses into separate thread posts", async () => {
+  it("splits multi-paragraph responses into separate thread posts when they exceed chunk limit", async () => {
     const channelMap: ChannelProjectMap = new Map([
       ["C123", "/tmp/test-project"],
     ]);
@@ -161,6 +161,8 @@ describe("createMessageHandler", () => {
     vi.mocked(claudeCode).mockReturnValue(
       mockModel as unknown as ReturnType<typeof claudeCode>,
     );
+
+    // Small paragraphs that fit in a single chunk are posted together
     vi.mocked(streamText).mockReturnValue(
       createMockStreamResult([
         "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.",
@@ -177,10 +179,11 @@ describe("createMessageHandler", () => {
       message as unknown as Parameters<typeof handler>[1],
     );
 
-    expect(thread.post).toHaveBeenCalledTimes(3);
-    expect(thread.post).toHaveBeenNthCalledWith(1, "First paragraph.");
-    expect(thread.post).toHaveBeenNthCalledWith(2, "Second paragraph.");
-    expect(thread.post).toHaveBeenNthCalledWith(3, "Third paragraph.");
+    // Small paragraphs are combined into a single chunk (under 39K limit)
+    expect(thread.post).toHaveBeenCalledTimes(1);
+    expect(thread.post).toHaveBeenCalledWith(
+      "First paragraph.\n\nSecond paragraph.\n\nThird paragraph.",
+    );
   });
 
   it("uses bypassPermissions for all CC invocations", async () => {
