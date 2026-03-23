@@ -37,6 +37,7 @@ import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
 import type { IssueTracker } from "../tracker/tracker.js";
+import { getDisplayVersion } from "../version.js";
 import { WorkspaceHookRunner } from "../workspace/hooks.js";
 import { WorkspaceManager } from "../workspace/workspace-manager.js";
 import type {
@@ -835,6 +836,7 @@ export async function startRuntimeService(
   };
 
   await logger.info("runtime_starting", "Symphony runtime started.", {
+    symphony_version: getDisplayVersion(),
     poll_interval_ms: currentConfig.polling.intervalMs,
     max_concurrent_agents: currentConfig.agent.maxConcurrentAgents,
     ...(dashboard === null ? {} : { port: dashboard.port }),
