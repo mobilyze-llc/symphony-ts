@@ -8,6 +8,7 @@ import type {
 import {
   type FailureClass,
   type Issue,
+  type LiveSession,
   type OrchestratorState,
   type RetryEntry,
   type RunningEntry,
@@ -451,6 +452,7 @@ export class OrchestratorCore {
       const transition = this.advanceStage(
         input.issueId,
         runningEntry.identifier,
+        runningEntry,
       );
       if (transition === "completed") {
         this.state.completed.add(input.issueId);
@@ -491,6 +493,7 @@ export class OrchestratorCore {
   private advanceStage(
     issueId: string,
     issueIdentifier: string,
+    session?: LiveSession,
   ): "completed" | "advanced" | "unchanged" {
     const stagesConfig = this.config.stages;
     if (stagesConfig === null) {
@@ -580,9 +583,8 @@ export class OrchestratorCore {
 
     // Move to the next stage
     this.state.issueStages[issueId] = nextStageName;
-    const runningEntry = this.state.running[issueId];
-    if (runningEntry !== undefined) {
-      addPipelineActivity(runningEntry, "stage_transition", `Stage → ${nextStageName}`);
+    if (session !== undefined) {
+      addPipelineActivity(session, "stage_transition", `Stage → ${nextStageName}`);
     }
     return "advanced";
   }

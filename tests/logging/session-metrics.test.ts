@@ -466,7 +466,8 @@ describe("session metrics", () => {
 
       expect(session.recentActivity).toHaveLength(1);
       expect(session.recentActivity[0]!.toolName).toBe("Turn completed");
-      expect(session.recentActivity[0]!.context).toBe("700 tokens");
+      expect(session.recentActivity[0]!.context).toBeNull();
+      expect(session.recentActivity[0]!.totalTokens).toBe(700);
     });
 
     it("tracks turn_completed events without usage", () => {
@@ -494,7 +495,8 @@ describe("session metrics", () => {
 
       expect(session.recentActivity).toHaveLength(1);
       expect(session.recentActivity[0]!.toolName).toBe("Turn failed");
-      expect(session.recentActivity[0]!.context).toBe("150 tokens");
+      expect(session.recentActivity[0]!.context).toBeNull();
+      expect(session.recentActivity[0]!.totalTokens).toBe(150);
     });
 
     it("tracks session_started events", () => {

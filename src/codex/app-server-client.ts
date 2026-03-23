@@ -984,13 +984,13 @@ function extractUsage(message: JsonObject): CodexUsage | null {
 }
 
 function coerceUsage(value: JsonObject): CodexUsage | null {
-  const aliases = [
+  const specificAliases = [
     ["inputTokens", "outputTokens", "totalTokens"],
     ["input_tokens", "output_tokens", "total_tokens"],
-    ["input", "output", "total"],
   ] as const;
 
-  for (const [inputKey, outputKey, totalKey] of aliases) {
+  // Check specific aliases first (input + output sufficient)
+  for (const [inputKey, outputKey, totalKey] of specificAliases) {
     const input = asFiniteNumber(value[inputKey]);
     const output = asFiniteNumber(value[outputKey]);
     const total = asFiniteNumber(value[totalKey]);
@@ -1003,6 +1003,19 @@ function coerceUsage(value: JsonObject): CodexUsage | null {
         ...extractExtendedTokenFields(value),
       };
     }
+  }
+
+  // Check generic alias (require all 3 fields to avoid false matches)
+  const genericInput = asFiniteNumber(value.input);
+  const genericOutput = asFiniteNumber(value.output);
+  const genericTotal = asFiniteNumber(value.total);
+  if (genericInput !== null && genericOutput !== null && genericTotal !== null) {
+    return {
+      inputTokens: genericInput,
+      outputTokens: genericOutput,
+      totalTokens: genericTotal,
+      ...extractExtendedTokenFields(value),
+    };
   }
 
   if ("total_token_usage" in value) {

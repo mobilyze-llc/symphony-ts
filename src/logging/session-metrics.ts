@@ -382,7 +382,6 @@ function buildRecentActivityEntry(
     if (event.usage !== undefined) {
       const total = normalizeAbsoluteCounter(event.usage.totalTokens);
       if (total > 0) {
-        entry.context = `${total} tokens`;
         entry.totalTokens = total;
       }
     }
