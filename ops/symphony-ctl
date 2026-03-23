@@ -62,8 +62,9 @@ generate_env_dict() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     # Skip comments and blank lines
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-    # Trim leading/trailing whitespace
-    line="$(echo "$line" | xargs)"
+    # Trim leading/trailing whitespace (bash-native, preserves quotes)
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
     [[ -z "$line" ]] && continue
 
     local key="${line%%=*}"
@@ -334,7 +335,8 @@ cmd_cleanup() {
   if [[ -f "$ENV_FILE" ]]; then
     while IFS= read -r line || [[ -n "$line" ]]; do
       [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
-      line="$(echo "$line" | xargs)"
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
       [[ -z "$line" ]] && continue
       local key="${line%%=*}"
       local value="${line#*=}"
