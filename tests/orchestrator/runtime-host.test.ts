@@ -1570,7 +1570,7 @@ describe("pipeline notifications in startRuntimeService", () => {
     state.completed.add("A");
     // "B" is mid-continuation — it has a retryAttempts entry but is NOT in completed
     // (after the fix, continuations no longer add to completed)
-    state.retryAttempts["B"] = {
+    state.retryAttempts.B = {
       issueId: "B",
       identifier: "ISSUE-B",
       attempt: 1,
