@@ -135,7 +135,7 @@ hooks:
   timeout_ms: 120000
 
 server:
-  port: 4321
+  port: 4324
 
 observability:
   dashboard_enabled: true
