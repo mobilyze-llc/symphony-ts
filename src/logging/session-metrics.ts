@@ -361,7 +361,11 @@ function buildRecentActivityEntry(
       if (toolName !== null) {
         const toolInput = extractToolInputFromRaw(raw);
         const context = buildActivityContext(toolName, toolInput);
-        const entry: RecentActivityEntry = { timestamp: event.timestamp, toolName, context };
+        const entry: RecentActivityEntry = {
+          timestamp: event.timestamp,
+          toolName,
+          context,
+        };
         if (event.usage !== undefined) {
           const total = normalizeAbsoluteCounter(event.usage.totalTokens);
           if (total > 0) {
@@ -378,7 +382,11 @@ function buildRecentActivityEntry(
   if (event.event === "turn_completed" || event.event === "turn_failed") {
     const label =
       event.event === "turn_completed" ? "Turn completed" : "Turn failed";
-    const entry: RecentActivityEntry = { timestamp: event.timestamp, toolName: label, context: null };
+    const entry: RecentActivityEntry = {
+      timestamp: event.timestamp,
+      toolName: label,
+      context: null,
+    };
     if (event.usage !== undefined) {
       const total = normalizeAbsoluteCounter(event.usage.totalTokens);
       if (total > 0) {
@@ -400,10 +408,7 @@ function buildRecentActivityEntry(
   // Notification: use event.message (truncated) as context
   if (event.event === "notification") {
     let context: string | null = null;
-    if (
-      event.message !== undefined &&
-      event.message.trim().length > 0
-    ) {
+    if (event.message !== undefined && event.message.trim().length > 0) {
       const trimmed = event.message.trim();
       if (trimmed.length <= NOTIFICATION_CONTEXT_MAX_LENGTH) {
         context = trimmed;

@@ -1165,8 +1165,13 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
           // Fallback: show stage-level status when session is active but no tool calls yet
           if (row.pipeline_stage !== null) {
             const startMs = Date.parse(row.started_at);
-            const elapsedSecs = Number.isFinite(startMs) ? Math.max(0, Math.floor((Date.now() - startMs) / 1000)) : 0;
-            const agoLabel = elapsedSecs < 60 ? `${elapsedSecs}s ago` : `${Math.floor(elapsedSecs / 60)}m ago`;
+            const elapsedSecs = Number.isFinite(startMs)
+              ? Math.max(0, Math.floor((Date.now() - startMs) / 1000))
+              : 0;
+            const agoLabel =
+              elapsedSecs < 60
+                ? `${elapsedSecs}s ago`
+                : `${Math.floor(elapsedSecs / 60)}m ago`;
             return `<li><span class="turn-num">${escapeHtml(row.pipeline_stage)}</span><span class="turn-msg muted">stage started</span><span class="activity-time">${escapeHtml(agoLabel)}</span></li>`;
           }
           return '<li><span class="turn-num">\u2014</span><span class="turn-msg muted">No recent activity.</span><span></span></li>';
@@ -1177,9 +1182,10 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
             const secs = Math.max(0, Math.floor(diffMs / 1000));
             const ago =
               secs < 60 ? `${secs}s ago` : `${Math.floor(secs / 60)}m ago`;
-            const tokenLabel = a.totalTokens !== undefined && a.totalTokens > 0
-              ? ` \u00B7 ${formatCompactTokens(a.totalTokens)}`
-              : "";
+            const tokenLabel =
+              a.totalTokens !== undefined && a.totalTokens > 0
+                ? ` \u00B7 ${formatCompactTokens(a.totalTokens)}`
+                : "";
             return `<li><span class="turn-num">${escapeHtml(a.toolName)}</span><span class="turn-msg" title="${escapeHtml(a.context ?? "")}">${escapeHtml(a.context ?? "\u2014")}${tokenLabel}</span><span class="activity-time">${escapeHtml(ago)}</span></li>`;
           })
           .join("");

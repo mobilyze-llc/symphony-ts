@@ -86,9 +86,7 @@ export function formatDurationMs(ms: number): string {
   }
   const hours = Math.floor(minutes / 60);
   const remainingMinutes = minutes % 60;
-  return remainingMinutes > 0
-    ? `${hours}h ${remainingMinutes}m`
-    : `${hours}h`;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
 }
 
 export function formatStageTimeline(history: ExecutionHistory): string {
@@ -113,9 +111,7 @@ export function formatNotification(event: PipelineNotificationEvent): string {
 
   switch (event.type) {
     case "pipeline_started": {
-      const parts = [
-        `:rocket: *Pipeline started* — ${event.productName}`,
-      ];
+      const parts = [`:rocket: *Pipeline started* — ${event.productName}`];
       if (event.dashboardUrl !== null) {
         parts.push(`Dashboard: ${event.dashboardUrl}`);
       }
@@ -167,9 +163,7 @@ export function formatNotification(event: PipelineNotificationEvent): string {
         parts.push(`Reason: ${event.failureReason}`);
       }
       if (event.retriesExhausted) {
-        parts.push(
-          `Retries exhausted (attempt ${event.retryAttempt ?? "?"})`,
-        );
+        parts.push(`Retries exhausted (attempt ${event.retryAttempt ?? "?"})`);
       }
       parts.push(version);
       return parts.join("\n");
@@ -212,9 +206,7 @@ export function createSlackPoster(input: {
 }): NotificationPoster {
   // Lazy-import to avoid pulling @slack/web-api into test bundles
   // when using mock posters.
-  let clientPromise: Promise<
-    import("@slack/web-api").WebClient
-  > | null = null;
+  let clientPromise: Promise<import("@slack/web-api").WebClient> | null = null;
 
   const getClient = () => {
     if (clientPromise === null) {

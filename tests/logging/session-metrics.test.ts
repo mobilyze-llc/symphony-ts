@@ -539,9 +539,7 @@ describe("session metrics", () => {
       applyCodexEventToSession(session, event);
 
       expect(session.recentActivity).toHaveLength(1);
-      expect(session.recentActivity[0]!.context).toBe(
-        `${"A".repeat(80)}…`,
-      );
+      expect(session.recentActivity[0]!.context).toBe(`${"A".repeat(80)}…`);
     });
 
     it("tracks notification events without message", () => {

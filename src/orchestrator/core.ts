@@ -584,7 +584,11 @@ export class OrchestratorCore {
     // Move to the next stage
     this.state.issueStages[issueId] = nextStageName;
     if (session !== undefined) {
-      addPipelineActivity(session, "stage_transition", `Stage → ${nextStageName}`);
+      addPipelineActivity(
+        session,
+        "stage_transition",
+        `Stage → ${nextStageName}`,
+      );
     }
     return "advanced";
   }
@@ -1745,7 +1749,7 @@ export function classifyExitOutcome(
   if (turnCount === 0) {
     return "failed_to_start";
   }
-  if (reason !== undefined && reason.includes("stall_timeout")) {
+  if (reason?.includes("stall_timeout")) {
     return "timed_out";
   }
   return "error";

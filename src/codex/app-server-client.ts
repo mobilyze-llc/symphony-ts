@@ -1009,7 +1009,11 @@ function coerceUsage(value: JsonObject): CodexUsage | null {
   const genericInput = asFiniteNumber(value.input);
   const genericOutput = asFiniteNumber(value.output);
   const genericTotal = asFiniteNumber(value.total);
-  if (genericInput !== null && genericOutput !== null && genericTotal !== null) {
+  if (
+    genericInput !== null &&
+    genericOutput !== null &&
+    genericTotal !== null
+  ) {
     return {
       inputTokens: genericInput,
       outputTokens: genericOutput,
@@ -1047,7 +1051,10 @@ function extractExtendedTokenFields(
   const result: Partial<
     Pick<
       CodexUsage,
-      "cacheReadTokens" | "cacheWriteTokens" | "noCacheTokens" | "reasoningTokens"
+      | "cacheReadTokens"
+      | "cacheWriteTokens"
+      | "noCacheTokens"
+      | "reasoningTokens"
     >
   > = {};
 

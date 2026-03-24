@@ -600,9 +600,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const preHistory: ExecutionHistory = [
       ...(state.issueExecutionHistory[execution.issueId] ?? []),
     ];
-    const preReworkCount =
-      state.issueReworkCounts[execution.issueId] ?? 0;
-    const capturedTitle = runningEntry?.issue.title ?? execution.issueIdentifier;
+    const preReworkCount = state.issueReworkCounts[execution.issueId] ?? 0;
+    const capturedTitle =
+      runningEntry?.issue.title ?? execution.issueIdentifier;
     const capturedUrl = runningEntry?.issue.url ?? null;
     const capturedRetryAttempt = runningEntry?.retryAttempt ?? null;
     const preFailedHas = state.failed.has(execution.issueId);
@@ -623,8 +623,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     // For terminal cases (completed/failed), history is preserved.
     // For continuations, history is deleted — but we don't notify on continuations.
     const postHistory: ExecutionHistory = [
-      ...(this.orchestrator.getState().issueExecutionHistory[execution.issueId] ??
-        preHistory),
+      ...(this.orchestrator.getState().issueExecutionHistory[
+        execution.issueId
+      ] ?? preHistory),
     ];
 
     // Fire notifications after state update
@@ -715,7 +716,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const isInCompleted = state.completed.has(execution.issueId);
     const hasContinuationRetry =
       state.retryAttempts[execution.issueId] !== undefined;
-    const isNewlyFailed = state.failed.has(execution.issueId) && !captured.preFailedHas;
+    const isNewlyFailed =
+      state.failed.has(execution.issueId) && !captured.preFailedHas;
 
     if (isInCompleted && !hasContinuationRetry && !isNewlyFailed) {
       const totalTokens = captured.preHistory.reduce(
@@ -1511,5 +1513,5 @@ export function extractProductName(workflowPath: string): string {
   const filename = workflowPath.split("/").pop() ?? workflowPath;
   const base = filename.replace(/\.md$/i, "");
   const match = /^WORKFLOW-(.+)$/i.exec(base);
-  return match !== null ? match[1] ?? base : base;
+  return match !== null ? (match[1] ?? base) : base;
 }

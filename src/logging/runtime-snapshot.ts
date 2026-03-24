@@ -202,7 +202,7 @@ const HIGH_TOKEN_BURN_THRESHOLD = 20_000;
 
 export function getStallThreshold(stageName: string | null): number {
   if (stageName !== null && stageName in STAGE_STALL_THRESHOLDS) {
-    return STAGE_STALL_THRESHOLDS[stageName]!;
+    return STAGE_STALL_THRESHOLDS[stageName] ?? DEFAULT_STALL_THRESHOLD_SECONDS;
   }
   return DEFAULT_STALL_THRESHOLD_SECONDS;
 }

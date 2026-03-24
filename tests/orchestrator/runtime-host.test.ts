@@ -10,6 +10,7 @@ import {
   type StructuredLogEntry,
   StructuredLogger,
 } from "../../src/logging/structured-logger.js";
+import type { PipelineNotificationEvent } from "../../src/orchestrator/pipeline-notifier.js";
 import {
   OrchestratorRuntimeHost,
   extractProductName,
@@ -1155,13 +1156,10 @@ describe("startRuntimeService poll_tick_completed", () => {
 
 describe("pipeline notifications", () => {
   function createMockNotifier() {
-    const events: Array<import("../../src/orchestrator/pipeline-notifier.js").PipelineNotificationEvent> =
-      [];
+    const events: PipelineNotificationEvent[] = [];
     return {
       events,
-      notify(
-        event: import("../../src/orchestrator/pipeline-notifier.js").PipelineNotificationEvent,
-      ) {
+      notify(event: PipelineNotificationEvent) {
         events.push(event);
       },
     };
@@ -1376,6 +1374,7 @@ describe("pipeline notifications", () => {
     const reconcileTick = await host.pollOnce();
 
     // Manually mark this as a stall_timeout stop request to simulate the flow
+    // biome-ignore lint/suspicious/noExplicitAny: accessing private field for test setup
     const worker = (host as any).workers.get("1");
     if (worker) {
       worker.stopRequest = {
@@ -1418,9 +1417,7 @@ describe("pipeline notifications", () => {
     fakeRunner.reject("1", new Error("Failed to start agent process"));
     await host.waitForIdle();
 
-    const infraEvents = notifier.events.filter(
-      (e) => e.type === "infra_error",
-    );
+    const infraEvents = notifier.events.filter((e) => e.type === "infra_error");
     expect(infraEvents).toHaveLength(1);
     expect(infraEvents[0]).toMatchObject({
       type: "infra_error",
@@ -1469,9 +1466,7 @@ describe("pipeline notifications", () => {
     fakeRunner.reject("1", new Error("agent crashed mid-run"));
     await host.waitForIdle();
 
-    const infraEvents = notifier.events.filter(
-      (e) => e.type === "infra_error",
-    );
+    const infraEvents = notifier.events.filter((e) => e.type === "infra_error");
     expect(infraEvents).toHaveLength(0);
   });
 
@@ -1545,13 +1540,10 @@ describe("pipeline notifications in startRuntimeService", () => {
   });
 
   function createMockNotifierForService() {
-    const events: Array<import("../../src/orchestrator/pipeline-notifier.js").PipelineNotificationEvent> =
-      [];
+    const events: PipelineNotificationEvent[] = [];
     return {
       events,
-      notify(
-        event: import("../../src/orchestrator/pipeline-notifier.js").PipelineNotificationEvent,
-      ) {
+      notify(event: PipelineNotificationEvent) {
         events.push(event);
       },
     };
@@ -1560,7 +1552,9 @@ describe("pipeline notifications in startRuntimeService", () => {
 
 describe("extractProductName", () => {
   it("extracts product name from WORKFLOW-<product>.md pattern", () => {
-    expect(extractProductName("/path/to/WORKFLOW-symphony.md")).toBe("symphony");
+    expect(extractProductName("/path/to/WORKFLOW-symphony.md")).toBe(
+      "symphony",
+    );
   });
 
   it("returns base name for plain WORKFLOW.md", () => {

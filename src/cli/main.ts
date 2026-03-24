@@ -10,13 +10,13 @@ import { loadWorkflowDefinition } from "../config/workflow-loader.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
-  type RuntimeServiceHandle,
-  startRuntimeService,
-} from "../orchestrator/runtime-host.js";
-import {
   PipelineNotifier,
   createSlackPoster,
 } from "../orchestrator/pipeline-notifier.js";
+import {
+  type RuntimeServiceHandle,
+  startRuntimeService,
+} from "../orchestrator/runtime-host.js";
 import { getDisplayVersion } from "../version.js";
 
 export const CLI_ACKNOWLEDGEMENT_FLAG = "--acknowledge-high-trust-preview";

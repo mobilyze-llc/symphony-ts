@@ -3524,15 +3524,21 @@ function createIntegrationHarness(input?: {
 
 describe("classifyExitOutcome", () => {
   it("classifies abnormal exit with turnCount=0 as failed_to_start", () => {
-    expect(classifyExitOutcome("abnormal", 0, "some error")).toBe("failed_to_start");
+    expect(classifyExitOutcome("abnormal", 0, "some error")).toBe(
+      "failed_to_start",
+    );
   });
 
   it("classifies abnormal exit with stall_timeout in reason as timed_out", () => {
-    expect(classifyExitOutcome("abnormal", 5, "stopped after stall_timeout")).toBe("timed_out");
+    expect(
+      classifyExitOutcome("abnormal", 5, "stopped after stall_timeout"),
+    ).toBe("timed_out");
   });
 
   it("classifies abnormal exit without stall_timeout as error", () => {
-    expect(classifyExitOutcome("abnormal", 3, "some error message")).toBe("error");
+    expect(classifyExitOutcome("abnormal", 3, "some error message")).toBe(
+      "error",
+    );
   });
 
   it("passes through normal outcome unchanged", () => {
@@ -3540,7 +3546,9 @@ describe("classifyExitOutcome", () => {
   });
 
   it("passes through already classified outcomes unchanged", () => {
-    expect(classifyExitOutcome("failed_to_start", 0, undefined)).toBe("failed_to_start");
+    expect(classifyExitOutcome("failed_to_start", 0, undefined)).toBe(
+      "failed_to_start",
+    );
     expect(classifyExitOutcome("timed_out", 3, undefined)).toBe("timed_out");
     expect(classifyExitOutcome("error", 1, undefined)).toBe("error");
   });
