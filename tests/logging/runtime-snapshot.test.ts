@@ -401,6 +401,117 @@ describe("runtime snapshot", () => {
     });
   });
 
+  it("populates last_tool_call from the last recentActivity entry", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Editing",
+      turnCount: 2,
+      codexInputTokens: 500,
+      codexOutputTokens: 300,
+      codexTotalTokens: 800,
+    });
+    entry.recentActivity = [
+      {
+        timestamp: "2026-03-06T10:00:03.000Z",
+        toolName: "Read",
+        context: "model.ts",
+        totalTokens: 100,
+      },
+      {
+        timestamp: "2026-03-06T10:00:04.000Z",
+        toolName: "Bash",
+        context: "npm test",
+        totalTokens: 200,
+      },
+      {
+        timestamp: "2026-03-06T10:00:05.000Z",
+        toolName: "Grep",
+        context: "pattern",
+        totalTokens: 150,
+      },
+    ];
+    state.running["issue-1"] = entry;
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running[0]!.last_tool_call).toBe("Grep pattern");
+  });
+
+  it("sets last_tool_call to tool name only when context is null", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Editing",
+      turnCount: 1,
+      codexInputTokens: 500,
+      codexOutputTokens: 300,
+      codexTotalTokens: 800,
+    });
+    entry.recentActivity = [
+      {
+        timestamp: "2026-03-06T10:00:05.000Z",
+        toolName: "Agent",
+        context: null,
+      },
+    ];
+    state.running["issue-1"] = entry;
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running[0]!.last_tool_call).toBe("Agent");
+  });
+
+  it("sets last_tool_call to null when recentActivity is empty", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Starting",
+      turnCount: 0,
+      codexInputTokens: 0,
+      codexOutputTokens: 0,
+      codexTotalTokens: 0,
+    });
+    state.running["issue-1"] = entry;
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running[0]!.last_tool_call).toBeNull();
+  });
+
   it("includes full token breakdown with cache and reasoning fields in running rows", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,

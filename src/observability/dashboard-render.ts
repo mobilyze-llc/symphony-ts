@@ -920,7 +920,7 @@ function renderDashboardClientScript(
             const healthClass = 'health-badge health-badge-' + (row.health || 'green');
             const healthTitle = row.health_reason ? ' title="' + escapeHtml(row.health_reason) + '"' : '';
             const healthHtml = '<span class="' + healthClass + '"' + healthTitle + '><span class="health-badge-dot"></span>' + escapeHtml(healthLabel) + '</span>';
-            const activityText = row.activity_summary || row.last_event || 'n/a';
+            const activityText = row.last_tool_call || row.activity_summary || row.last_event || 'n/a';
             const expandToggle = '<button type="button" class="expand-toggle" aria-expanded="false" data-detail="' + escapeHtml(detailId) + '" onclick="const d=document.getElementById(this.dataset.detail);const open=this.getAttribute(\\'aria-expanded\\')=== \\'true\\';d.style.display=open?\\'none\\':\\'table-row\\';this.setAttribute(\\'aria-expanded\\',String(!open));this.textContent=open?\\'\u25B6 Details\\':\\'\u25BC Details\\';">\u25B6 Details</button>';
 
             const detailRow = '<tr id="' + escapeHtml(detailId) + '" class="detail-row" style="display:none;"><td colspan="7">' + renderDetailPanel(row, detailId) + '</td></tr>';
@@ -1077,9 +1077,15 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
               <td>
                 <div class="detail-stack">
                   <span class="event-text" title="${escapeHtml(
-                    row.activity_summary ?? row.last_event ?? "n/a",
+                    row.last_tool_call ??
+                      row.activity_summary ??
+                      row.last_event ??
+                      "n/a",
                   )}">${escapeHtml(
-                    row.activity_summary ?? row.last_event ?? "n/a",
+                    row.last_tool_call ??
+                      row.activity_summary ??
+                      row.last_event ??
+                      "n/a",
                   )}</span>
                   <span class="muted event-meta">${escapeHtml(
                     row.last_event ?? "n/a",

@@ -40,6 +40,7 @@ export interface RuntimeSnapshotRunningRow {
   execution_history: StageRecord[];
   turn_history: TurnHistoryEntry[];
   recent_activity: RecentActivityEntry[];
+  last_tool_call: string | null;
   health: HealthStatus;
   health_reason: string | null;
 }
@@ -139,6 +140,7 @@ export function buildRuntimeSnapshot(
         execution_history: executionHistory,
         turn_history: entry.turnHistory,
         recent_activity: entry.recentActivity,
+        last_tool_call: deriveLastToolCall(entry.recentActivity),
         health,
         health_reason,
       };
@@ -175,6 +177,15 @@ export function buildRuntimeSnapshot(
     ),
     rate_limits: state.codexRateLimits,
   };
+}
+
+function deriveLastToolCall(
+  recentActivity: RecentActivityEntry[],
+): string | null {
+  if (recentActivity.length === 0) return null;
+  const last = recentActivity[recentActivity.length - 1];
+  if (last === undefined) return null;
+  return last.context ? `${last.toolName} ${last.context}` : last.toolName;
 }
 
 function toSnapshotCodexTotals(

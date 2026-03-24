@@ -542,6 +542,7 @@ function createSnapshot(): RuntimeSnapshot {
         execution_history: [],
         turn_history: [],
         recent_activity: [],
+        last_tool_call: null,
         health: "green",
         health_reason: null,
       },

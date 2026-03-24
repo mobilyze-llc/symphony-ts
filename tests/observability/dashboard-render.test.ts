@@ -32,6 +32,7 @@ const BASE_ROW: RuntimeSnapshot["running"][number] = {
   execution_history: [],
   turn_history: [],
   recent_activity: [],
+  last_tool_call: null,
   health: "green",
   health_reason: null,
 };
@@ -105,5 +106,31 @@ describe("Dashboard Pipeline column", () => {
     const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
     expect(html).toContain(getDisplayVersion());
     expect(html).toContain("Symphony Observability");
+  });
+
+  it("activity column shows last_tool_call when present", () => {
+    const snapshot = buildSnapshot({
+      last_tool_call: "Read model.ts",
+      activity_summary: "Working on it",
+      last_event: "notification",
+    });
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+    expect(html).toContain("Read model.ts");
+  });
+
+  it("activity column falls back to activity_summary when last_tool_call is null", () => {
+    const snapshot = buildSnapshot({
+      last_tool_call: null,
+      activity_summary: "Working on it",
+      last_event: "notification",
+    });
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+    expect(html).toContain("Working on it");
+  });
+
+  it("client-side JavaScript references last_tool_call for activity text", () => {
+    const snapshot = buildSnapshot({});
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: true });
+    expect(html).toContain("row.last_tool_call");
   });
 });
