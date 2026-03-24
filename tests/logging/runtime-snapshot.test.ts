@@ -421,9 +421,24 @@ describe("runtime snapshot", () => {
       codexTotalTokens: 800,
     });
     entry.recentActivity = [
-      { timestamp: "2026-03-06T10:00:03.000Z", toolName: "Read", context: "model.ts", totalTokens: 100 },
-      { timestamp: "2026-03-06T10:00:04.000Z", toolName: "Bash", context: "npm test", totalTokens: 200 },
-      { timestamp: "2026-03-06T10:00:05.000Z", toolName: "Grep", context: "pattern", totalTokens: 150 },
+      {
+        timestamp: "2026-03-06T10:00:03.000Z",
+        toolName: "Read",
+        context: "model.ts",
+        totalTokens: 100,
+      },
+      {
+        timestamp: "2026-03-06T10:00:04.000Z",
+        toolName: "Bash",
+        context: "npm test",
+        totalTokens: 200,
+      },
+      {
+        timestamp: "2026-03-06T10:00:05.000Z",
+        toolName: "Grep",
+        context: "pattern",
+        totalTokens: 150,
+      },
     ];
     state.running["issue-1"] = entry;
 
@@ -454,7 +469,11 @@ describe("runtime snapshot", () => {
       codexTotalTokens: 800,
     });
     entry.recentActivity = [
-      { timestamp: "2026-03-06T10:00:05.000Z", toolName: "Agent", context: null },
+      {
+        timestamp: "2026-03-06T10:00:05.000Z",
+        toolName: "Agent",
+        context: null,
+      },
     ];
     state.running["issue-1"] = entry;
 
