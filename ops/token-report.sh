@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# token-report.sh — Wrapper for token history extraction + JSONL persistence
+# token-report.sh — Wrapper for token history extraction, analysis, reporting, and rotation
 #
 # Responsibilities:
 #   - Validate/set default env vars (SYMPHONY_HOME, SYMPHONY_LOG_DIR)
 #   - Create directory tree
 #   - Acquire lockfile via shlock (concurrent execution guard)
 #   - Route to node ops/token-report.mjs <subcommand>
+#   - Orchestrate daily pipeline (extract → analyze → render → slack → rotate)
 #   - Release lockfile via trap
 #
-# Usage: token-report.sh [extract|analyze|daily]
+# Usage: token-report.sh [extract|analyze|render|slack|rotate|daily]
 #
-# SYMPH-129
+# SYMPH-129, SYMPH-131
 
 SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 SYMPHONY_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -77,13 +78,50 @@ case "$SUBCOMMAND" in
     acquire_lock
     "$NODE_BIN" "$SCRIPT_DIR/token-report.mjs" analyze
     ;;
+  render)
+    acquire_lock
+    "$NODE_BIN" "$SCRIPT_DIR/token-report.mjs" render
+    ;;
+  slack)
+    "$NODE_BIN" "$SCRIPT_DIR/token-report.mjs" slack
+    ;;
+  rotate)
+    "$NODE_BIN" "$SCRIPT_DIR/token-report.mjs" rotate
+    ;;
   daily)
     acquire_lock
+
+    # Daily pipeline: extract → analyze → render → slack → rotate
+    # If extract/analyze/render fail → skip subsequent, exit non-zero
+    # Slack failure → log warning, continue to rotate (graceful degradation)
+    # Rotate failure → log warning, exit non-zero
+
+    echo "INFO: Starting daily pipeline" >&2
+
     "$NODE_BIN" "$SCRIPT_DIR/token-report.mjs" extract
-    # TODO: daily report generation — covered by separate task
+    echo "INFO: extract complete" >&2
+
+    "$NODE_BIN" "$SCRIPT_DIR/token-report.mjs" analyze > /dev/null
+    echo "INFO: analyze complete" >&2
+
+    "$NODE_BIN" "$SCRIPT_DIR/token-report.mjs" render
+    echo "INFO: render complete" >&2
+
+    # Slack: graceful degradation — failure logs warning but continues
+    if ! "$NODE_BIN" "$SCRIPT_DIR/token-report.mjs" slack; then
+      echo "WARN: Slack step failed, continuing to rotate" >&2
+    fi
+
+    # Rotate: failure is non-zero exit
+    if ! "$NODE_BIN" "$SCRIPT_DIR/token-report.mjs" rotate; then
+      echo "WARN: Rotate step failed" >&2
+      exit 1
+    fi
+
+    echo "INFO: Daily pipeline complete" >&2
     ;;
   *)
-    echo "Usage: token-report.sh [extract|analyze|daily]" >&2
+    echo "Usage: token-report.sh [extract|analyze|render|slack|rotate|daily]" >&2
     exit 1
     ;;
 esac

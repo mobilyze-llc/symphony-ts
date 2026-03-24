@@ -12,7 +12,10 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -958,5 +961,268 @@ describe("token-report.mjs analyze", () => {
     expect(result.executive_summary).toBeDefined();
     expect(result.per_product).toEqual({});
     expect(result.outliers).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Render subcommand tests — SYMPH-131
+// ---------------------------------------------------------------------------
+
+function runRender(
+  symphonyHome: string,
+  extraEnv: Record<string, string> = {},
+) {
+  const env = {
+    ...process.env,
+    SYMPHONY_HOME: symphonyHome,
+    SYMPHONY_LOG_DIR: join(symphonyHome, "logs"),
+    LINEAR_API_KEY: "",
+    ...extraEnv,
+  };
+  return execFileSync(NODE_BIN, [SCRIPT_PATH, "render"], {
+    env,
+    encoding: "utf-8",
+    stdio: ["pipe", "pipe", "pipe"],
+    timeout: 15000,
+  });
+}
+
+describe("token-report.mjs render", () => {
+  let symphonyHome: string;
+
+  beforeEach(() => {
+    symphonyHome = tmpDir();
+  });
+
+  afterEach(() => {
+    rmSync(symphonyHome, { recursive: true, force: true });
+  });
+
+  it("generates self-contained HTML with all 8 sections", () => {
+    const records = generateDaysOfRecords(10, 3);
+    writeTokenHistory(symphonyHome, records);
+    writeConfigHistory(symphonyHome, [makeConfigSnapshot()]);
+
+    runRender(symphonyHome);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const htmlPath = join(symphonyHome, "reports", `${today}.html`);
+    expect(existsSync(htmlPath)).toBe(true);
+
+    const html = readFileSync(htmlPath, "utf-8");
+
+    // Self-contained: no external resources (no http:// or https:// in link/script/img tags — except Linear links)
+    const externalRefs = html.match(
+      /<(?:link|script|img)[^>]*(?:src|href)=["']https?:\/\//gi,
+    );
+    expect(externalRefs).toBeNull();
+
+    // All 8 sections present
+    expect(html).toContain("Executive Summary");
+    expect(html).toContain("Efficiency Scorecard");
+    expect(html).toContain("Per-Stage Utilization Trend");
+    expect(html).toContain("Per-Ticket Cost Trend");
+    expect(html).toContain("Outlier Analysis");
+    expect(html).toContain("Issue Leaderboard");
+    expect(html).toContain("Stage Efficiency");
+    expect(html).toContain("Per-Product Breakdown");
+
+    // Inline SVG elements present
+    expect(html).toContain("<svg");
+    expect(html).toContain("<polyline");
+
+    // WCAG AA: dark theme styles present
+    expect(html).toContain("--bg: #0d1117");
+    expect(html).toContain("--text: #c9d1d9");
+  });
+
+  it("renders with empty data (cold start)", () => {
+    mkdirSync(join(symphonyHome, "data", "linear-cache"), { recursive: true });
+
+    runRender(symphonyHome);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const htmlPath = join(symphonyHome, "reports", `${today}.html`);
+    expect(existsSync(htmlPath)).toBe(true);
+
+    const html = readFileSync(htmlPath, "utf-8");
+    expect(html).toContain("Executive Summary");
+    expect(html).toContain("<svg");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slack subcommand tests — SYMPH-131
+// ---------------------------------------------------------------------------
+
+function runSlack(symphonyHome: string, extraEnv: Record<string, string> = {}) {
+  const env = {
+    ...process.env,
+    SYMPHONY_HOME: symphonyHome,
+    SYMPHONY_LOG_DIR: join(symphonyHome, "logs"),
+    LINEAR_API_KEY: "",
+    ...extraEnv,
+  };
+  try {
+    const stdout = execFileSync(NODE_BIN, [SCRIPT_PATH, "slack"], {
+      env,
+      encoding: "utf-8",
+      timeout: 15000,
+    });
+    return { stdout, stderr: "", exitCode: 0 };
+  } catch (err: unknown) {
+    const e = err as { stdout?: string; stderr?: string; status?: number };
+    return {
+      stdout: e.stdout || "",
+      stderr: e.stderr || "",
+      exitCode: e.status ?? 1,
+    };
+  }
+}
+
+describe("token-report.mjs slack", () => {
+  let symphonyHome: string;
+
+  beforeEach(() => {
+    symphonyHome = tmpDir();
+  });
+
+  afterEach(() => {
+    rmSync(symphonyHome, { recursive: true, force: true });
+  });
+
+  it("graceful degradation when SLACK_WEBHOOK_URL not set", () => {
+    const records = generateDaysOfRecords(5, 2);
+    writeTokenHistory(symphonyHome, records);
+    writeConfigHistory(symphonyHome, [makeConfigSnapshot()]);
+
+    const env: Record<string, string> = {};
+    // Explicitly unset SLACK_WEBHOOK_URL
+    process.env.SLACK_WEBHOOK_URL = undefined;
+    const { exitCode, stderr } = runSlack(symphonyHome, env);
+
+    expect(exitCode).toBe(0);
+    // stderr should contain warning (captured by parent process)
+  });
+
+  it("exits 0 when SLACK_WEBHOOK_URL is empty", () => {
+    const records = generateDaysOfRecords(5, 2);
+    writeTokenHistory(symphonyHome, records);
+    writeConfigHistory(symphonyHome, [makeConfigSnapshot()]);
+
+    const { exitCode } = runSlack(symphonyHome, { SLACK_WEBHOOK_URL: "" });
+    expect(exitCode).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Rotate subcommand tests — SYMPH-131
+// ---------------------------------------------------------------------------
+
+function runRotate(
+  symphonyHome: string,
+  extraEnv: Record<string, string> = {},
+) {
+  const env = {
+    ...process.env,
+    SYMPHONY_HOME: symphonyHome,
+    SYMPHONY_LOG_DIR: join(symphonyHome, "logs"),
+    LINEAR_API_KEY: "",
+    ...extraEnv,
+  };
+  return execFileSync(NODE_BIN, [SCRIPT_PATH, "rotate"], {
+    env,
+    encoding: "utf-8",
+    stdio: ["pipe", "pipe", "pipe"],
+    timeout: 15000,
+  });
+}
+
+describe("token-report.mjs rotate", () => {
+  let symphonyHome: string;
+
+  beforeEach(() => {
+    symphonyHome = tmpDir();
+  });
+
+  afterEach(() => {
+    rmSync(symphonyHome, { recursive: true, force: true });
+  });
+
+  it("compresses JSONL files older than 7 days", () => {
+    const dataDir = join(symphonyHome, "data");
+    mkdirSync(dataDir, { recursive: true });
+
+    const oldFile = join(dataDir, "old-log.jsonl");
+    writeFileSync(oldFile, '{"test": true}\n');
+
+    // Set mtime to 10 days ago
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+    utimesSync(oldFile, tenDaysAgo, tenDaysAgo);
+
+    runRotate(symphonyHome);
+
+    // Original should be gone, compressed should exist
+    expect(existsSync(oldFile)).toBe(false);
+    expect(existsSync(`${oldFile}.gz`)).toBe(true);
+  });
+
+  it("deletes compressed files older than 14 days", () => {
+    const dataDir = join(symphonyHome, "data");
+    mkdirSync(dataDir, { recursive: true });
+
+    const oldGz = join(dataDir, "ancient-log.jsonl.gz");
+    writeFileSync(oldGz, "compressed-data");
+
+    // Set mtime to 20 days ago
+    const twentyDaysAgo = new Date(Date.now() - 20 * 24 * 60 * 60 * 1000);
+    utimesSync(oldGz, twentyDaysAgo, twentyDaysAgo);
+
+    runRotate(symphonyHome);
+
+    expect(existsSync(oldGz)).toBe(false);
+  });
+
+  it("does not touch files with mtime less than 2 hours", () => {
+    const dataDir = join(symphonyHome, "data");
+    mkdirSync(dataDir, { recursive: true });
+
+    const recentFile = join(dataDir, "recent.jsonl");
+    writeFileSync(recentFile, '{"test": true}\n');
+    // File was just created, mtime < 2h
+
+    runRotate(symphonyHome);
+
+    // File should still exist and not be compressed
+    expect(existsSync(recentFile)).toBe(true);
+    expect(existsSync(`${recentFile}.gz`)).toBe(false);
+  });
+
+  it("deletes HTML reports older than 90 days", () => {
+    const reportsDir = join(symphonyHome, "reports");
+    mkdirSync(reportsDir, { recursive: true });
+
+    const oldReport = join(reportsDir, "2025-01-01.html");
+    writeFileSync(oldReport, "<html></html>");
+
+    // Set mtime to 100 days ago
+    const hundredDaysAgo = new Date(Date.now() - 100 * 24 * 60 * 60 * 1000);
+    utimesSync(oldReport, hundredDaysAgo, hundredDaysAgo);
+
+    runRotate(symphonyHome);
+
+    expect(existsSync(oldReport)).toBe(false);
+  });
+
+  it("preserves recent HTML reports", () => {
+    const reportsDir = join(symphonyHome, "reports");
+    mkdirSync(reportsDir, { recursive: true });
+
+    const recentReport = join(reportsDir, "2026-03-20.html");
+    writeFileSync(recentReport, "<html></html>");
+
+    runRotate(symphonyHome);
+
+    expect(existsSync(recentReport)).toBe(true);
   });
 });
