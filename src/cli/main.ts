@@ -43,6 +43,7 @@ export interface CliHost {
 export interface StartCliHostInput {
   options: CliOptions;
   runtime: CliRuntimeSettings;
+  env: NodeJS.ProcessEnv;
 }
 
 export interface CliIo {
@@ -163,7 +164,7 @@ export async function startCliHost(
   input: StartCliHostInput,
 ): Promise<RuntimeServiceHandle> {
   const slackChannel = input.runtime.config.server.slackNotifyChannel;
-  const slackToken = process.env.SLACK_BOT_TOKEN;
+  const slackToken = input.env.SLACK_BOT_TOKEN;
   const notifier =
     slackChannel !== null && slackToken !== undefined
       ? new PipelineNotifier({
@@ -231,6 +232,7 @@ export async function runCli(
     const host = await startHost({
       options,
       runtime,
+      env,
     });
     const exitCode = await host.waitForExit();
 
