@@ -1,6 +1,6 @@
 ---
 name: spec-gen
-description: Generate structured specs from brain dumps. Explores target codebase in plan mode, classifies complexity (trivial/standard/complex), generates specs with Gherkin scenarios and executable verify lines, syncs to Linear as parent issue, then freezes to sub-issues for autonomous pipeline execution.
+description: Generate structured specs from brain dumps. Explores target codebase in plan mode, classifies complexity (trivial/standard/complex), generates specs with Gherkin scenarios and executable verify lines, syncs to Linear as parent issue in Draft state for review.
 argument-hint: <brain dump description of what to build>
 ---
 
@@ -43,7 +43,7 @@ The skill reads Linear config from a WORKFLOW file. The user can provide either:
 #   tracker:
 #     project_slug: fdba14472043   ← Linear project UUID
 #
-# Auth: linear-cli handles auth via OAuth or LINEAR_API_KEY env var.
+# Auth: linear handles auth via LINEAR_API_KEY env var or `linear auth login`.
 ```
 
 **Resolution order:**
@@ -152,7 +152,7 @@ Analyze the brain dump and classify as one of:
 |------|--------|
 | **TRIVIAL** | Skip spec. Create a single Linear issue directly in `Todo` state using `freeze-and-queue.sh --trivial "Title" <workflow-path>`. Pipe a description to stdin if needed. No parent issue, no sub-issues, no Gherkin. Done. |
 | **STANDARD** | Generate full spec → create parent issue in `Draft` state (Steps 2-5). |
-| **COMPLEX** | Generate full spec + flag sub-issues for ensemble gate (Steps 2-5, Step 6). |
+| **COMPLEX** | Generate full spec (Steps 2-5). Flag for ensemble review before freezing. |
 
 **State your classification and reasoning before proceeding.** Examples:
 
@@ -297,11 +297,11 @@ If any check fails, fix the spec before presenting it.
 
 ## Step 5: Sync to Linear (Parent Only)
 
-After presenting the spec to the user and getting approval, use `freeze-and-queue.sh` for ALL Linear issue operations. **Do NOT create issues via inline linear-cli commands or raw GraphQL — always use the script.**
+After presenting the spec to the user and getting approval, use `freeze-and-queue.sh` for ALL Linear issue operations. **Do NOT create issues via inline `linear` commands or raw GraphQL — always use the script.**
 
 ### Create Parent Issue (new spec)
 
-Write the spec content to a temp file and run the script with `--parent-only` to create ONLY the parent issue in Draft state. Sub-issues are NOT created yet — that happens in Step 7 (freeze).
+Write the spec content to a temp file and run the script with `--parent-only` to create ONLY the parent issue in Draft state (no sub-issues).
 
 ```bash
 # Create parent issue only (no sub-issues):
@@ -320,7 +320,7 @@ The script automatically:
 - Creates the parent issue with `[Spec]` title prefix
 - Prints the parent issue identifier and URL
 
-Return the Linear deep link from the script output to the user for review. **Save the parent issue identifier** — you'll need it for Step 7.
+Return the Linear deep link from the script output to the user for review.
 
 ### Update Parent Issue (iteration)
 
@@ -358,72 +358,42 @@ cat /tmp/spec-content.md | bash ~/.claude/skills/spec-gen/scripts/freeze-and-que
 If you need to inspect team states for debugging purposes:
 
 ```bash
-# List all statuses for a team
-linear-cli statuses list -t SYMPH -o json
+# List all statuses for a team (via GraphQL — no built-in statuses command)
+linear api '{ workflowStates(filter: { team: { key: { eq: "SYMPH" } } }) { nodes { id name type } } }'
 
-# Get project info by slug (slugId is embedded in the project URL)
-linear-cli projects list -o json --filter "url~=PROJECT_SLUG"
+# List projects (optionally filter by team)
+linear project list --team SYMPH
 
-# Raw GraphQL via linear-cli (uses configured auth automatically)
-linear-cli api query '{ viewer { id name } }'
+# Raw GraphQL via linear (uses configured auth automatically)
+linear api '{ viewer { id name } }'
 ```
 
 These queries are handled automatically by `freeze-and-queue.sh` during normal operation.
 
 </details>
 
----
+### Done — Next: Freeze
 
-## Step 6: Ensemble Gate (COMPLEX only)
+The parent issue is now in `Draft` state in Linear. Share the link with the user for review.
 
-For COMPLEX features, flag the spec for ensemble review before freezing. The ensemble gate runs PM/Architect/VoC reviewers against the spec.
+**When the user is ready to freeze** (create sub-issues for autonomous pipeline execution), they should invoke:
 
-If any reviewer returns CONCERNS:
-1. Present the feedback to the user
-2. Iterate on the spec based on feedback
-3. Re-run the gate until PASS
+`/spec-freeze <PARENT_ISSUE_ID> <workflow-path>`
 
-**Skip this step for TRIVIAL and STANDARD classifications.**
-
----
-
-## Step 7: Freeze to Sub-Issues
-
-When the user says "freeze" (or approves the final spec):
-
-**The parent issue already exists from Step 5.** Use `freeze-and-queue.sh` with `--update` (without `--parent-only`) to finalize the spec and create sub-issues:
-
-```bash
-cat /tmp/spec-content.md | bash ~/.claude/skills/spec-gen/scripts/freeze-and-queue.sh \
-  --update <PARENT_ISSUE_ID> <workflow-path>
-```
-
-This is the "freeze" step — it creates sub-issues and blockedBy relations. Run without `--parent-only` to get the full behavior.
-
-The script will:
-1. **Update the parent issue** description with the final spec content
-2. **Create sub-issues** in `Todo` state — one per `## Task N:` or `### Task N:` heading in the spec
-   - Each sub-issue includes: task scope, full Gherkin scenarios (matched from parent spec), and Boundaries section
-   - For COMPLEX specs: add ensemble gate flag to sub-issues
-3. **Add `blockedBy` relations** — sequential chain by priority order (lower priority blocks higher), plus additional relations for file-path overlap between non-adjacent tasks
-4. **Parent issue** stays in `Draft` state
-   - Parent stays outside symphony's `active_states` — it's never dispatched
-   - Sub-issues in `Todo` are what symphony picks up
-5. **Return** the list of created sub-issues with their Linear identifiers
+This is a separate skill invocation — the freeze operation is structurally separated to enforce the review gate.
 
 ---
 
 ## Parent Issue Lifecycle
 
 ```
-Idea → Draft → Backlog
-         ↑        ↓
-    (iterate)  (sub-issues in Todo → symphony picks up)
+Idea → Draft
+         ↑
+    (iterate via chat, one-way sync to Linear)
 ```
 
 - **Idea**: Raw concept, no spec. Optional starting point.
 - **Draft**: `/spec-gen` has run. Full spec in description. Actively iterating via chat.
-- **Backlog**: Frozen. Sub-issues created in `Todo`. No further edits.
 
 ---
 
@@ -432,12 +402,11 @@ Idea → Draft → Backlog
 - **Don't invent requirements.** The spec should capture what was asked, not what you think should be asked. Scope creep is the most common spec generation artifact.
 - **Verify lines are NOT tests.** They are behavioral checks run by the implementing agent. They should be fast, self-contained, and deterministic.
 - **One-way sync only.** Never parse spec content back from Linear. The skill is the source of truth during iteration; Linear is the store.
-- **Spec iteration only before freeze.** Once sub-issues are in `Todo`, the spec is frozen. In-flight agents always have stable context.
-- **Parent issues are never dispatched.** They stay in `Draft`/`Backlog`, outside symphony's `active_states`. Only sub-issues become work items.
 - **Don't generate design.md for STANDARD features.** Only COMPLEX features need architectural documentation.
 
 ## Related Skills
 
+- `/spec-freeze` — freeze a drafted spec into Linear sub-issues for autonomous pipeline execution
 - `/pipeline-review` — headless adversarial review for the review stage (runs AFTER implementation)
 - `/council-review` — multi-model cross-examination review (for highest-assurance review)
 - `/adversarial-review` — interactive multi-model development + review cycle

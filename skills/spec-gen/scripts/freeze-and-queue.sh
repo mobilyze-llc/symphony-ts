@@ -3,14 +3,19 @@
 # Decision 32: Linear as spec store — specs live as Linear issues, not filesystem files.
 #
 # Usage:
-#   bash freeze-and-queue.sh [--dry-run] [--parent-only] [--update ISSUE_ID] <workflow-path> [spec-file]
+#   bash freeze-and-queue.sh [--dry-run] [--parent-only] [--update ISSUE_ID] [--timeout SECS] <workflow-path> [spec-file]
 #   cat spec.md | bash freeze-and-queue.sh [--dry-run] [--parent-only] <workflow-path>
 #   bash freeze-and-queue.sh --trivial "Issue title" <workflow-path>
 #   echo "description" | bash freeze-and-queue.sh --trivial "Issue title" <workflow-path>
 #
 # The WORKFLOW file provides: project_slug (from YAML frontmatter)
-# Auth: Uses linear-cli's configured auth (OAuth or --api-key).
+# Auth: Uses LINEAR_API_KEY env var (schpet linear CLI picks it up automatically).
 # Team ID is resolved from the project via the Linear API.
+
+# Relation semantics (Linear GraphQL API):
+#   issueRelationCreate(input: { issueId: BLOCKER, relatedIssueId: BLOCKED, type: blocks })
+#   means: BLOCKER blocks BLOCKED (i.e., BLOCKED is blocked by BLOCKER)
+#   To verify: query BLOCKER's relations — should have type:"blocks" pointing to BLOCKED
 
 set -euo pipefail
 
@@ -29,16 +34,21 @@ while [[ $# -gt 0 ]]; do
     --update)       shift; UPDATE_ISSUE_ID="${1:-}"; shift ;;
     --parent-only)  PARENT_ONLY=true; shift ;;
     --trivial)      TRIVIAL=true; shift; TRIVIAL_TITLE="${1:-}"; shift ;;
+    --timeout)      shift; API_TIMEOUT_ARG="${1:-}"; shift ;;
     *)              POSITIONAL+=("$1"); shift ;;
   esac
 done
+
+# Set API timeout from --timeout flag, env var, or default (30s)
+API_TIMEOUT="${API_TIMEOUT_ARG:-${API_TIMEOUT:-30}}"
 
 WORKFLOW_PATH="${POSITIONAL[0]:-}"
 SPEC_FILE="${POSITIONAL[1]:-}"
 
 if [[ -z "$WORKFLOW_PATH" ]]; then
-  echo "Usage: freeze-and-queue.sh [--dry-run] [--parent-only] [--update ISSUE_ID] [--trivial TITLE] <workflow-path> [spec-file]" >&2
-  echo "  --trivial TITLE  Create a single issue in Todo state (no spec, no parent/sub-issue hierarchy)" >&2
+  echo "Usage: freeze-and-queue.sh [--dry-run] [--parent-only] [--update ISSUE_ID] [--trivial TITLE] [--timeout SECS] <workflow-path> [spec-file]" >&2
+  echo "  --trivial TITLE    Create a single issue in Todo state (no spec, no parent/sub-issue hierarchy)" >&2
+  echo "  --timeout SECS     API call timeout in seconds (default: 30, env: API_TIMEOUT)" >&2
   echo "  If no spec-file is given, reads spec content from stdin." >&2
   exit 1
 fi
@@ -48,25 +58,48 @@ if [[ ! -f "$WORKFLOW_PATH" ]]; then
   exit 1
 fi
 
-# ── Linear CLI helpers ───────────────────────────────────────────────────────
-# All Linear operations use linear-cli, which handles auth (OAuth or API key).
-# Pass --api-key via LINEAR_API_KEY env var if needed (linear-cli reads it).
+# ── Portable timeout wrapper ──────────────────────────────────────────────────
+# macOS has no `timeout` command. Uses perl's alarm() signal which works on all
+# POSIX systems. Args: $1=label (for error messages), remaining args=command.
 
-LINEAR_CLI="linear-cli"
+run_with_timeout() {
+  local label="$1"; shift
+  local output
+  if output=$(perl -e "alarm($API_TIMEOUT); exec(@ARGV)" -- "$@" 2>&1); then
+    echo "$output"
+    return 0
+  else
+    local exit_code=$?
+    if [[ $exit_code -eq 142 ]]; then
+      echo "ERROR: Timed out after ${API_TIMEOUT}s during: $label" >&2
+      echo "  Re-run the script or increase timeout with --timeout <seconds>" >&2
+      exit 1
+    else
+      echo "$output"
+      return $exit_code
+    fi
+  fi
+}
+
+# ── Linear CLI helpers ───────────────────────────────────────────────────────
+# All Linear operations use schpet linear CLI (binary: "linear"), which handles
+# auth via LINEAR_API_KEY env var.
+
+LINEAR_CLI="linear"
 
 # ── Resolve team from project ────────────────────────────────────────────────
 
 resolve_team_from_project() {
   # Single GraphQL query to resolve both project ID and team info from slugId
   local project_json
-  project_json=$($LINEAR_CLI api query -o json --quiet --compact \
-    -v "slug=$PROJECT_SLUG" \
-    'query($slug: String!) { projects(filter: { slugId: { eq: $slug } }) { nodes { id teams { nodes { id key } } } } }' 2>/dev/null)
+  project_json=$(run_with_timeout "resolving project and team" $LINEAR_CLI api \
+    --variable "slug=$PROJECT_SLUG" \
+    'query($slug: String!) { projects(filter: { slugId: { eq: $slug } }) { nodes { id teams { nodes { id key } } } } }')
 
   PROJECT_ID=$(echo "$project_json" | jq -r '.data.projects.nodes[0].id // empty')
   if [[ -z "$PROJECT_ID" ]]; then
     echo "ERROR: Could not find project with slugId: $PROJECT_SLUG" >&2
-    echo "  Ensure the project exists and linear-cli is authenticated." >&2
+    echo "  Ensure the project exists and LINEAR_API_KEY is set." >&2
     exit 1
   fi
   echo "Project ID: $PROJECT_ID"
@@ -91,69 +124,77 @@ BACKLOG_STATE_ID=""
 resolve_all_states() {
   # Single workflowStates GraphQL query to batch-resolve all needed state IDs
   local states_json
-  states_json=$($LINEAR_CLI api query -o json --quiet --compact \
-    -v "teamId=$TEAM_ID" \
-    'query($teamId: String!) { workflowStates(filter: { team: { id: { eq: $teamId } } }) { nodes { id name } } }' 2>/dev/null)
+  states_json=$(run_with_timeout "resolving workflow states" $LINEAR_CLI api \
+    --variable "teamId=$TEAM_ID" \
+    'query($teamId: ID!) { workflowStates(filter: { team: { id: { eq: $teamId } } }) { nodes { id name } } }')
 
   DRAFT_STATE_ID=$(echo "$states_json" | jq -r '.data.workflowStates.nodes[] | select(.name == "Draft") | .id' | head -1)
   TODO_STATE_ID=$(echo "$states_json" | jq -r '.data.workflowStates.nodes[] | select(.name == "Todo") | .id' | head -1)
   BACKLOG_STATE_ID=$(echo "$states_json" | jq -r '.data.workflowStates.nodes[] | select(.name == "Backlog") | .id' | head -1)
 }
 
-# ── Helper: create a blockedBy relation via GraphQL mutation ──────────────────
-# linear-cli relations add is broken (claims success but relations don't persist).
-# Uses issueRelationCreate mutation via temp file to avoid shell escaping issues
-# with String! types that linear-cli api query auto-escapes.
+# ── Helper functions ──────────────────────────────────────────────────────────
+
+# Helper: create a blocks relation via high-level linear CLI command.
 # Args: $1=blocker_uuid $2=blocked_uuid $3=blocker_ident $4=blocked_ident $5=reason
 create_blocks_relation() {
   local blocker_uuid="$1" blocked_uuid="$2"
   local blocker_ident="$3" blocked_ident="$4" reason="$5"
 
-  # issueId=BLOCKER, relatedIssueId=BLOCKED, type=blocks
-  # means: issueId blocks relatedIssueId
-  local gql_tmpfile
-  gql_tmpfile=$(mktemp)
-  cat > "$gql_tmpfile" <<'GQLEOF'
-mutation($issueId: String!, $relatedIssueId: String!) { issueRelationCreate(input: { issueId: $issueId, relatedIssueId: $relatedIssueId, type: blocks }) { issueRelation { id } } }
-GQLEOF
-
   local result
-  if result=$($LINEAR_CLI api query -o json --quiet --compact \
-    -v "issueId=$blocker_uuid" \
-    -v "relatedIssueId=$blocked_uuid" \
-    - < "$gql_tmpfile" 2>&1); then
-    local rel_id
-    rel_id=$(echo "$result" | jq -r '.data.issueRelationCreate.issueRelation.id // empty')
-    if [[ -n "$rel_id" ]]; then
-      echo "  $blocked_ident blocked by $blocker_ident ($reason)"
-      rm -f "$gql_tmpfile"
-      return 0
-    fi
+  if result=$(run_with_timeout "creating blocking relation" $LINEAR_CLI issue relation add "$blocker_ident" blocks "$blocked_ident" 2>&1); then
+    echo "  $blocked_ident blocked by $blocker_ident ($reason)"
+    return 0
   fi
   echo "  WARNING: Failed to create relation $blocker_ident blocks $blocked_ident" >&2
   echo "  Response: ${result:-<empty>}" >&2
-  rm -f "$gql_tmpfile"
   return 1
 }
 
-# ── Post-creation verification ────────────────────────────────────────────────
-# Queries an issue by ID and confirms project.slugId and (for sub-issues) parent.id
-# match expected values. Logs warnings on mismatch; never exits.
+# Verify that a blocking relation was created with the correct direction.
+# Args: $1=blocker_uuid $2=blocked_uuid $3=blocker_ident $4=blocked_ident
+verify_blocking_relation() {
+  local blocker_uuid="$1" blocked_uuid="$2"
+  local blocker_ident="$3" blocked_ident="$4"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    return 0
+  fi
+
+  local verify_result
+  verify_result=$(run_with_timeout "verifying blocking relation" $LINEAR_CLI api \
+    --variable "issueId=$blocker_uuid" \
+    'query($issueId: String!) { issue(id: $issueId) { relations { nodes { type relatedIssue { id } } } } }' 2>/dev/null) || true
+
+  local found
+  found=$(echo "$verify_result" | jq -r --arg blocked "$blocked_uuid" \
+    '.data.issue.relations.nodes[] | select(.type == "blocks" and .relatedIssue.id == $blocked) | .type' 2>/dev/null) || true
+
+  if [[ "$found" == "blocks" ]]; then
+    echo "  Verified: $blocker_ident blocks $blocked_ident"
+    return 0
+  else
+    echo "  WARNING: Could not verify relation $blocker_ident blocks $blocked_ident" >&2
+    echo "  Manual fix: linear issue relation add $blocker_ident blocks $blocked_ident" >&2
+    return 1
+  fi
+}
+
+# Post-creation verification — confirms project.slugId and parent.id match expected.
 # Args: $1=issue_uuid, $2=expected_project_slug, $3=expected_parent_id (optional)
 verify_issue_creation() {
   local issue_uuid="$1"
   local expected_slug="$2"
   local expected_parent_id="${3:-}"
 
-  # Skip verification in dry-run mode (no API calls)
   if [[ "$DRY_RUN" == true ]]; then
     return 0
   fi
 
   local verify_result
-  verify_result=$($LINEAR_CLI api query -o json --quiet --compact \
-    -v "issueId=$issue_uuid" \
-    'query($issueId: String!) { issue(id: $issueId) { project { slugId } parent { id } } }' 2>/dev/null) || true
+  verify_result=$(run_with_timeout "verifying issue creation" $LINEAR_CLI api \
+    --variable "issueId=$issue_uuid" \
+    'query($issueId: String!) { issue(id: $issueId) { project { slugId } parent { id } } }') || true
 
   local actual_slug
   actual_slug=$(echo "$verify_result" | jq -r '.data.issue.project.slugId // empty')
@@ -174,119 +215,9 @@ verify_issue_creation() {
   fi
 }
 
-# ── Post-creation verification (parent only, no project check) ─────────────
-# Queries an issue by ID and confirms parent.id matches expected value.
-# Used for sub-issues where projectId is deferred until after relation verification.
-# Args: $1=issue_uuid, $2=expected_parent_id
-verify_issue_creation_parent_only() {
-  local issue_uuid="$1"
-  local expected_parent_id="$2"
-
-  # Skip verification in dry-run mode (no API calls)
-  if [[ "$DRY_RUN" == true ]]; then
-    return 0
-  fi
-
-  local verify_result
-  verify_result=$($LINEAR_CLI api query -o json --quiet --compact \
-    -v "issueId=$issue_uuid" \
-    'query($issueId: String!) { issue(id: $issueId) { parent { id } } }' 2>/dev/null) || true
-
-  local actual_parent
-  actual_parent=$(echo "$verify_result" | jq -r '.data.issue.parent.id // empty')
-  if [[ -n "$actual_parent" && "$actual_parent" != "$expected_parent_id" ]]; then
-    echo "WARNING: parent mismatch on $issue_uuid — expected parent=$expected_parent_id, got $actual_parent" >&2
-  elif [[ -z "$actual_parent" ]]; then
-    echo "WARNING: VERIFY FAIL — could not confirm parent.id for $issue_uuid" >&2
-  fi
-}
-
-# ── Verify blocking relations on sub-issues ──────────────────────────────────
-# Queries each sub-issue's inverseRelations and confirms the correct blocker
-# identity and direction (type=blocks). Returns non-zero on failure.
-# Globals: SUB_ISSUE_IDS[], SUB_ISSUE_IDENTIFIERS[], SORTED_INDICES[], TOTAL
-verify_blocking_relations() {
-  local all_ok=true
-
-  for ((k=1; k<TOTAL; k++)); do
-    local curr_idx="${SORTED_INDICES[$k]}"
-    local prev_idx="${SORTED_INDICES[$((k-1))]}"
-    local curr_id="${SUB_ISSUE_IDS[$curr_idx]:-}"
-    local prev_id="${SUB_ISSUE_IDS[$prev_idx]:-}"
-    local curr_ident="${SUB_ISSUE_IDENTIFIERS[$curr_idx]:-}"
-    local prev_ident="${SUB_ISSUE_IDENTIFIERS[$prev_idx]:-}"
-
-    if [[ -z "$curr_id" || -z "$prev_id" ]]; then
-      echo "WARNING: Skipping relation check — missing sub-issue ID for index $k" >&2
-      all_ok=false
-      continue
-    fi
-
-    local rel_result
-    rel_result=$($LINEAR_CLI api query -o json --quiet --compact \
-      -v "issueId=$curr_id" \
-      'query($issueId: String!) { issue(id: $issueId) { inverseRelations { nodes { type relatedIssue { id } } } } }' 2>/dev/null) || true
-
-    # Check that there is a blocks-type inverseRelation from the predecessor
-    local found
-    found=$(echo "$rel_result" | jq -r --arg pred "$prev_id" \
-      '.data.issue.inverseRelations.nodes[] | select(.type == "blocks" and .relatedIssue.id == $pred) | .type' 2>/dev/null | head -1)
-
-    if [[ "$found" != "blocks" ]]; then
-      echo "ERROR: $curr_ident missing expected blocks relation from $prev_ident" >&2
-      all_ok=false
-    else
-      echo "  ✓ $curr_ident blocked by $prev_ident (verified)"
-    fi
-  done
-
-  if [[ "$all_ok" != true ]]; then
-    return 1
-  fi
-  return 0
-}
-
-# ── Batch project assignment via issueUpdate ──────────────────────────────────
-# Assigns projectId to all sub-issues after blocking relations are verified.
-# Globals: SUB_ISSUE_IDS[], SUB_ISSUE_IDENTIFIERS[], SORTED_INDICES[], TOTAL
-assign_project_to_sub_issues() {
-  echo ""
-  echo "Assigning project to sub-issues (deferred)..."
-  local gql_tmpfile
-  for ((k=0; k<TOTAL; k++)); do
-    local idx="${SORTED_INDICES[$k]}"
-    local sub_id="${SUB_ISSUE_IDS[$idx]:-}"
-    local sub_ident="${SUB_ISSUE_IDENTIFIERS[$idx]:-}"
-
-    if [[ -z "$sub_id" ]]; then
-      echo "  Skipping index $idx — no sub-issue ID" >&2
-      continue
-    fi
-
-    gql_tmpfile=$(mktemp)
-    cat > "$gql_tmpfile" <<GQLEOF
-mutation { issueUpdate(id: "${sub_id}", input: { projectId: "${PROJECT_ID}" }) { success issue { id identifier } } }
-GQLEOF
-
-    local result
-    result=$($LINEAR_CLI api query -o json --quiet --compact - < "$gql_tmpfile" 2>&1)
-    rm -f "$gql_tmpfile"
-
-    local success
-    success=$(echo "$result" | jq -r '.data.issueUpdate.success // false')
-    if [[ "$success" == "true" ]]; then
-      echo "  ✓ $sub_ident assigned to project (issueUpdate projectId)"
-    else
-      echo "  WARNING: Failed to assign project to $sub_ident" >&2
-      echo "  Response: $result" >&2
-    fi
-  done
-}
-
 # ── Trivial mode: single issue in Todo, no spec ─────────────────────────────
 
 if [[ "$TRIVIAL" == true ]]; then
-  # TRIVIAL mode: creates single issue with projectId at creation time (unchanged)
   if [[ -z "$TRIVIAL_TITLE" ]]; then
     echo "ERROR: --trivial requires a title argument." >&2
     echo "  Usage: freeze-and-queue.sh --trivial 'Fix the typo in README' <workflow-path>" >&2
@@ -357,13 +288,13 @@ mutation($title: String!, $description: String, $teamId: String!, $stateId: Stri
   }
 }
 GQLEOF
-    result=$($LINEAR_CLI api query -o json --quiet --compact \
-      -v "title=$TRIVIAL_TITLE" \
-      -v "description=$TRIVIAL_DESC" \
-      -v "teamId=$TEAM_ID" \
-      -v "stateId=$TODO_STATE_ID" \
-      -v "projectId=$PROJECT_ID" \
-      - < "$TRIVIAL_GQL_TMPFILE" 2>&1)
+    result=$(run_with_timeout "creating trivial issue (with description)" $LINEAR_CLI api \
+      --variable "title=$TRIVIAL_TITLE" \
+      --variable "description=$TRIVIAL_DESC" \
+      --variable "teamId=$TEAM_ID" \
+      --variable "stateId=$TODO_STATE_ID" \
+      --variable "projectId=$PROJECT_ID" \
+      < "$TRIVIAL_GQL_TMPFILE")
   else
     cat > "$TRIVIAL_GQL_TMPFILE" <<'GQLEOF'
 mutation($title: String!, $teamId: String!, $stateId: String!, $projectId: String!) {
@@ -378,12 +309,12 @@ mutation($title: String!, $teamId: String!, $stateId: String!, $projectId: Strin
   }
 }
 GQLEOF
-    result=$($LINEAR_CLI api query -o json --quiet --compact \
-      -v "title=$TRIVIAL_TITLE" \
-      -v "teamId=$TEAM_ID" \
-      -v "stateId=$TODO_STATE_ID" \
-      -v "projectId=$PROJECT_ID" \
-      - < "$TRIVIAL_GQL_TMPFILE" 2>&1)
+    result=$(run_with_timeout "creating trivial issue" $LINEAR_CLI api \
+      --variable "title=$TRIVIAL_TITLE" \
+      --variable "teamId=$TEAM_ID" \
+      --variable "stateId=$TODO_STATE_ID" \
+      --variable "projectId=$PROJECT_ID" \
+      < "$TRIVIAL_GQL_TMPFILE")
   fi
   rm -f "$TRIVIAL_GQL_TMPFILE"
 
@@ -526,7 +457,7 @@ detect_overlap() {
 
 declare -a TASK_PRIORITIES
 for ((i=0; i<TOTAL; i++)); do
-  pri=$(echo "${TASK_BODIES[$i]}" | grep -oE '\*\*Priority\*\*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
+  pri=$(echo "${TASK_BODIES[$i]}" | grep -oE '\*\*Priority\*\*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
   TASK_PRIORITIES[$i]="${pri:-$((i+1))}"
 done
 
@@ -621,7 +552,7 @@ done <<< "$SPEC_CONTENT"
 
 declare -a TASK_SCENARIO_REFS
 for ((i=0; i<TOTAL; i++)); do
-  ref=$(echo "${TASK_BODIES[$i]}" | grep -oE '\*\*Scenarios\*\*:[[:space:]]*(.+)' | sed 's/\*\*Scenarios\*\*:[[:space:]]*//' | head -1)
+  ref=$(echo "${TASK_BODIES[$i]}" | grep -oE '\*\*Scenarios\*\*:[[:space:]]*(.+)' | sed 's/\*\*Scenarios\*\*:[[:space:]]*//' | head -1 || true)
   TASK_SCENARIO_REFS[$i]="${ref:-}"
 done
 
@@ -702,19 +633,21 @@ if [[ "$DRY_RUN" == true ]]; then
     exit 0
   fi
 
-  # Interleaved creation order: create each sub-issue in Todo, then add its sequential blocking relation
+  echo "--- PHASE 1: Create sub-issues (WITHOUT project — invisible to symphony-ts) ---"
+  echo ""
   relation_count=0
   for ((k=0; k<TOTAL; k++)); do
     i="${SORTED_INDICES[$k]}"
-    echo "--- SUB-ISSUE $((i+1)): ${TASK_TITLES[$i]} ---"
-    echo "Priority: ${TASK_PRIORITIES[$i]}"
-    echo "State: Todo"
-    echo "Scope: ${TASK_SCOPES[$i]:-<none>}"
-    echo "Scenarios ref: ${TASK_SCENARIO_REFS[$i]:-<none>}"
+    echo "  SUB-ISSUE $((i+1)): ${TASK_TITLES[$i]}"
+    echo "  Priority: ${TASK_PRIORITIES[$i]}"
+    echo "  State: Todo"
+    echo "  Project: (deferred — assigned after relations)"
+    echo "  Scope: ${TASK_SCOPES[$i]:-<none>}"
+    echo "  Scenarios ref: ${TASK_SCENARIO_REFS[$i]:-<none>}"
     sub_body=$(build_sub_issue_body "$i")
-    echo "Body preview (first 10 lines):"
-    echo "$sub_body" | head -10 | sed 's/^/  /'
-    echo "  ..."
+    echo "  Body preview (first 10 lines):"
+    echo "$sub_body" | head -10 | sed 's/^/    /'
+    echo "    ..."
     # Show sequential blocking relation immediately after this sub-issue
     if [[ $k -gt 0 ]]; then
       blocker_idx="${SORTED_INDICES[$((k-1))]}"
@@ -724,8 +657,11 @@ if [[ "$DRY_RUN" == true ]]; then
     echo ""
   done
 
+  echo "--- PHASE 2: Add blocking relations ---"
+  echo ""
+  echo "  Sequential chain: $((TOTAL > 1 ? TOTAL - 1 : 0)) relations"
+
   # Additional file-overlap relations (second pass, only those not already covered by sequential chain)
-  echo "--- FILE-OVERLAP RELATIONS ---"
   overlap_count=0
   for ((i=0; i<TOTAL; i++)); do
     for ((j=i+1; j<TOTAL; j++)); do
@@ -741,22 +677,28 @@ if [[ "$DRY_RUN" == true ]]; then
           fi
         done
         if [[ "$already_covered" == false ]]; then
-          echo "    Task $((j+1)) (${TASK_TITLES[$j]}) blocked by Task $((i+1)) (${TASK_TITLES[$i]}) (file overlap)"
+          echo "  File overlap: Task $((j+1)) (${TASK_TITLES[$j]}) blocked by Task $((i+1)) (${TASK_TITLES[$i]})"
           ((relation_count++)) || true
           ((overlap_count++)) || true
         fi
       fi
     done
   done
-  [[ $overlap_count -eq 0 ]] && echo "    (none)"
+  [[ $overlap_count -eq 0 ]] && echo "  File overlap: (none)"
 
   echo ""
-  echo "--- DEFERRED PROJECT ASSIGNMENT ---"
-  echo "Sub-issues created without project assignment."
-  echo "After all relations are created and verified, each sub-issue"
-  echo "receives projectId via issueUpdate (deferred batch assignment)."
+  echo "--- PHASE 3: Assign project to all sub-issues (now visible to symphony-ts) ---"
   echo ""
-  echo "=== Dry run complete: 1 parent + $TOTAL sub-issues (Todo) + $relation_count relations would be created ==="
+  echo "  $TOTAL sub-issues → Pipeline project ($PROJECT_SLUG)"
+  echo "  (Relations are in place — safe to dispatch)"
+
+  echo ""
+  echo "--- PHASE 4: Transition parent to Backlog ---"
+  echo ""
+  echo "  $SPEC_TITLE → Backlog"
+
+  echo ""
+  echo "=== Dry run complete: 1 parent + $TOTAL sub-issues + $relation_count relations + deferred project assignment ==="
   exit 0
 fi
 
@@ -791,8 +733,11 @@ echo "Todo state: ${TODO_STATE_NAME:-<default>} (ID: ${TODO_STATE_ID:-<default>}
 
 # ── Create or update parent issue ────────────────────────────────────────────
 
+# Write spec content to temp file for stdin piping (avoids arg length limits)
+SPEC_TMPFILE=$(mktemp)
 GQL_TMPFILE=""
-trap 'rm -f ${GQL_TMPFILE:+"$GQL_TMPFILE"}' EXIT
+trap 'rm -f "$SPEC_TMPFILE" ${GQL_TMPFILE:+"$GQL_TMPFILE"}' EXIT
+echo "$SPEC_CONTENT" > "$SPEC_TMPFILE"
 
 if [[ -n "$UPDATE_ISSUE_ID" ]]; then
   echo ""
@@ -813,12 +758,12 @@ mutation($issueId: String!, $title: String!, $description: String!, $stateId: St
   }
 }
 GQLEOF
-    result=$($LINEAR_CLI api query -o json --quiet --compact \
-      -v "issueId=$UPDATE_ISSUE_ID" \
-      -v "title=[Spec] $SPEC_TITLE" \
-      -v "description=$SPEC_CONTENT" \
-      -v "stateId=$DRAFT_STATE_ID" \
-      - < "$GQL_TMPFILE" 2>&1)
+    result=$(run_with_timeout "updating parent issue (with state)" $LINEAR_CLI api \
+      --variable "issueId=$UPDATE_ISSUE_ID" \
+      --variable "title=[Spec] $SPEC_TITLE" \
+      --variable "description=@$SPEC_TMPFILE" \
+      --variable "stateId=$DRAFT_STATE_ID" \
+      < "$GQL_TMPFILE")
   else
     cat > "$GQL_TMPFILE" <<'GQLEOF'
 mutation($issueId: String!, $title: String!, $description: String!) {
@@ -831,11 +776,11 @@ mutation($issueId: String!, $title: String!, $description: String!) {
   }
 }
 GQLEOF
-    result=$($LINEAR_CLI api query -o json --quiet --compact \
-      -v "issueId=$UPDATE_ISSUE_ID" \
-      -v "title=[Spec] $SPEC_TITLE" \
-      -v "description=$SPEC_CONTENT" \
-      - < "$GQL_TMPFILE" 2>&1)
+    result=$(run_with_timeout "updating parent issue" $LINEAR_CLI api \
+      --variable "issueId=$UPDATE_ISSUE_ID" \
+      --variable "title=[Spec] $SPEC_TITLE" \
+      --variable "description=@$SPEC_TMPFILE" \
+      < "$GQL_TMPFILE")
   fi
   rm -f "$GQL_TMPFILE"; GQL_TMPFILE=""
 
@@ -855,7 +800,6 @@ GQLEOF
   fi
 else
   echo ""
-  # Creating parent issue — includes projectId at creation time (unchanged)
   echo "Creating parent issue..."
 
   # Spec parent: issueCreate mutation via temp file (title/description are user-provided strings)
@@ -876,13 +820,13 @@ mutation($title: String!, $description: String!, $teamId: String!, $projectId: S
   }
 }
 GQLEOF
-    result=$($LINEAR_CLI api query -o json --quiet --compact \
-      -v "title=[Spec] $SPEC_TITLE" \
-      -v "description=$SPEC_CONTENT" \
-      -v "teamId=$TEAM_ID" \
-      -v "projectId=$PROJECT_ID" \
-      -v "stateId=$DRAFT_STATE_ID" \
-      - < "$GQL_TMPFILE" 2>&1)
+    result=$(run_with_timeout "creating parent issue (with state)" $LINEAR_CLI api \
+      --variable "title=[Spec] $SPEC_TITLE" \
+      --variable "description=@$SPEC_TMPFILE" \
+      --variable "teamId=$TEAM_ID" \
+      --variable "projectId=$PROJECT_ID" \
+      --variable "stateId=$DRAFT_STATE_ID" \
+      < "$GQL_TMPFILE")
   else
     cat > "$GQL_TMPFILE" <<'GQLEOF'
 mutation($title: String!, $description: String!, $teamId: String!, $projectId: String!) {
@@ -897,12 +841,12 @@ mutation($title: String!, $description: String!, $teamId: String!, $projectId: S
   }
 }
 GQLEOF
-    result=$($LINEAR_CLI api query -o json --quiet --compact \
-      -v "title=[Spec] $SPEC_TITLE" \
-      -v "description=$SPEC_CONTENT" \
-      -v "teamId=$TEAM_ID" \
-      -v "projectId=$PROJECT_ID" \
-      - < "$GQL_TMPFILE" 2>&1)
+    result=$(run_with_timeout "creating parent issue" $LINEAR_CLI api \
+      --variable "title=[Spec] $SPEC_TITLE" \
+      --variable "description=@$SPEC_TMPFILE" \
+      --variable "teamId=$TEAM_ID" \
+      --variable "projectId=$PROJECT_ID" \
+      < "$GQL_TMPFILE")
   fi
   rm -f "$GQL_TMPFILE"; GQL_TMPFILE=""
 
@@ -933,14 +877,16 @@ if [[ "$PARENT_ONLY" == true ]]; then
   exit 0
 fi
 
-# ── Create sub-issues with interleaved relations ─────────────────────────────
-# Sub-issues are created in Todo state, sorted by priority. After each sub-issue
-# (except the first), a sequential blockedBy relation is immediately added to
-# the previous sub-issue before creating the next one.
+# ── Phase 1: Create sub-issues with interleaved relations (no projectId) ─────
+# Sub-issues are created in Todo state WITHOUT projectId, sorted by priority.
+# After each sub-issue (except the first), a sequential blockedBy relation is
+# immediately added to the previous sub-issue before creating the next one.
+# projectId is deferred to Phase 3 (after all relations) to prevent symphony-ts
+# from dispatching a sub-issue before its blocking relations are established.
 
 declare -a SUB_ISSUE_IDS SUB_ISSUE_IDENTIFIERS
 echo ""
-echo "Creating $TOTAL sub-issues (with interleaved sequential relations)..."
+echo "Creating $TOTAL sub-issues WITHOUT project (relations interleaved, project deferred)..."
 # Sequential chain: skip first sub-issue (k=0, no blocker); k>=1 adds blockedBy to previous
 
 relation_count=0
@@ -957,14 +903,16 @@ for ((k=0; k<TOTAL; k++)); do
   sub_body=$(build_sub_issue_body "$i")
 
   # Extract priority if present
-  pri_num=$(echo "${TASK_BODIES[$i]}" | grep -oE '\*\*Priority\*\*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1)
+  pri_num=$(echo "${TASK_BODIES[$i]}" | grep -oE '\*\*Priority\*\*:[[:space:]]*[0-9]+' | grep -oE '[0-9]+' | head -1 || true)
   linear_priority=${pri_num:-3}
 
   # Write sub-issue body to temp file for description
   echo "$sub_body" > "$SPEC_TMPFILE"
 
   # Build sub-issue issueCreate mutation via temp file (title/description are user-provided strings)
-  # projectId is deferred — assigned via issueUpdate after blocking relations are verified.
+  # projectId is deliberately OMITTED here — assigned after all relations are in place.
+  # This prevents a race condition where symphony-ts polls the Pipeline project and dispatches
+  # a sub-issue before its blocking relations are established.
   # Priority is inlined as integer literal to avoid Int/String type coercion issues with -v flag.
   GQL_TMPFILE=$(mktemp)
   if [[ -n "$TODO_STATE_ID" ]]; then
@@ -983,13 +931,13 @@ mutation(\$title: String!, \$description: String!, \$teamId: String!, \$parentId
   }
 }
 GQLEOF
-    result=$($LINEAR_CLI api query -o json --quiet --compact \
-      -v "title=$title" \
-      -v "description=$(cat "$SPEC_TMPFILE")" \
-      -v "teamId=$TEAM_ID" \
-      -v "parentId=$PARENT_ID" \
-      -v "stateId=$TODO_STATE_ID" \
-      - < "$GQL_TMPFILE" 2>&1)
+    result=$(run_with_timeout "creating sub-issue (with state)" $LINEAR_CLI api \
+      --variable "title=$title" \
+      --variable "description=@$SPEC_TMPFILE" \
+      --variable "teamId=$TEAM_ID" \
+      --variable "parentId=$PARENT_ID" \
+      --variable "stateId=$TODO_STATE_ID" \
+      < "$GQL_TMPFILE")
   else
     cat > "$GQL_TMPFILE" <<GQLEOF
 mutation(\$title: String!, \$description: String!, \$teamId: String!, \$parentId: String!) {
@@ -1005,12 +953,12 @@ mutation(\$title: String!, \$description: String!, \$teamId: String!, \$parentId
   }
 }
 GQLEOF
-    result=$($LINEAR_CLI api query -o json --quiet --compact \
-      -v "title=$title" \
-      -v "description=$(cat "$SPEC_TMPFILE")" \
-      -v "teamId=$TEAM_ID" \
-      -v "parentId=$PARENT_ID" \
-      - < "$GQL_TMPFILE" 2>&1)
+    result=$(run_with_timeout "creating sub-issue" $LINEAR_CLI api \
+      --variable "title=$title" \
+      --variable "description=@$SPEC_TMPFILE" \
+      --variable "teamId=$TEAM_ID" \
+      --variable "parentId=$PARENT_ID" \
+      < "$GQL_TMPFILE")
   fi
   rm -f "$GQL_TMPFILE"; GQL_TMPFILE=""
 
@@ -1026,11 +974,13 @@ GQLEOF
     echo "  Created sub-issue: $sub_identifier — $title ($sub_url)"
     if [[ $k -ge 1 && -n "$prev_sub_id" ]]; then
       if create_blocks_relation "$prev_sub_id" "$sub_id" "$prev_sub_ident" "$sub_identifier" "sequential"; then
+        verify_blocking_relation "$prev_sub_id" "$sub_id" "$prev_sub_ident" "$sub_identifier"
         CREATED_RELATIONS="${CREATED_RELATIONS}|${prev_sub_ident}:${sub_identifier}"
         ((relation_count++))
       fi
     fi
-    verify_issue_creation_parent_only "$sub_id" "$PARENT_ID"
+    # NOTE: verify_issue_creation is deferred to after project assignment (Phase 3).
+    # Sub-issues are created WITHOUT projectId to prevent symphony-ts dispatch race.
 
     prev_sub_id="$sub_id"
     prev_sub_ident="$sub_identifier"
@@ -1042,7 +992,7 @@ GQLEOF
   fi
 done
 
-# ── File-overlap relations (second pass) ─────────────────────────────────────
+# ── Phase 2: File-overlap relations (second pass) ────────────────────────────
 # Supplementary relations based on file overlap — don't affect dispatch order.
 
 echo ""
@@ -1060,6 +1010,7 @@ for ((i=0; i<TOTAL; i++)); do
         relation_key="${blocker}:${blocked}"
         if [[ "$CREATED_RELATIONS" != *"|${relation_key}"* ]]; then
           if create_blocks_relation "$blocker_id" "$blocked_id" "$blocker" "$blocked" "file overlap"; then
+            verify_blocking_relation "$blocker_id" "$blocked_id" "$blocker" "$blocked"
             CREATED_RELATIONS="${CREATED_RELATIONS}|${relation_key}"
             ((relation_count++))
           fi
@@ -1071,36 +1022,64 @@ done
 
 [[ $relation_count -eq 0 ]] && echo "  (none)"
 
-# ── Verify blocking relations before project assignment ──────────────────────
+# ── Assign project to all sub-issues (deferred to avoid race condition) ──────
+# Sub-issues were created WITHOUT projectId so symphony-ts can't dispatch them
+# before blocking relations are in place. Now that all relations are created and
+# verified, we batch-assign the Pipeline project to make them visible to the
+# orchestrator.
 
-if [[ $TOTAL -gt 1 ]]; then
-  echo ""
-  echo "Verifying blocking relations..."
-  if ! verify_blocking_relations; then
-    echo "ERROR: Blocking relation verification failed. Project NOT assigned to sub-issues." >&2
-    exit 1
+echo ""
+echo "Assigning sub-issues to project (deferred — relations are now in place)..."
+
+assign_failures=0
+for ((k=0; k<TOTAL; k++)); do
+  i="${SORTED_INDICES[$k]}"
+  sub_id="${SUB_ISSUE_IDS[$i]:-}"
+  sub_ident="${SUB_ISSUE_IDENTIFIERS[$i]:-}"
+  if [[ -n "$sub_id" ]]; then
+    GQL_TMPFILE=$(mktemp)
+    cat > "$GQL_TMPFILE" <<'GQLEOF'
+mutation($issueId: String!, $projectId: String!) {
+  issueUpdate(id: $issueId, input: { projectId: $projectId }) {
+    success
+  }
+}
+GQLEOF
+    result=$(run_with_timeout "assigning project to $sub_ident" $LINEAR_CLI api \
+      --variable "issueId=$sub_id" \
+      --variable "projectId=$PROJECT_ID" \
+      < "$GQL_TMPFILE")
+    rm -f "$GQL_TMPFILE"; GQL_TMPFILE=""
+
+    success=$(echo "$result" | jq -r '.data.issueUpdate.success // false')
+    if [[ "$success" == "true" ]]; then
+      echo "  $sub_ident → Pipeline project"
+    else
+      echo "  WARNING: Failed to assign $sub_ident to project" >&2
+      echo "  Response: $result" >&2
+      ((assign_failures++))
+    fi
+    # Post-assignment verification: confirm project slug and parent
+    verify_issue_creation "$sub_id" "$PROJECT_SLUG" "$PARENT_ID"
   fi
-  echo "All blocking relations verified."
+done
+
+if [[ $assign_failures -gt 0 ]]; then
+  echo "ERROR: $assign_failures sub-issue(s) failed project assignment. Issues remain invisible to symphony-ts." >&2
+  echo "  Manual fix: assign them to project $PROJECT_SLUG in Linear UI or re-run the script." >&2
+  exit 1
 fi
 
-# ── Batch project assignment (deferred) ──────────────────────────────────────
-# Project is assigned after sub-issue creation and relation verification pass.
-
-assign_project_to_sub_issues
-
-# ── Transition parent to Backlog (sub-issues now frozen) ─────────────────────
-# Only reached when PARENT_ONLY=false (--parent-only exits at line 555)
+# ── Phase 4: Transition parent to Backlog (sub-issues now frozen) ────────────
+# Only reached when PARENT_ONLY=false (--parent-only exits earlier)
 
 echo ""
 # Transition parent to Backlog via issueUpdate GraphQL mutation using stateId
 GQL_TMPFILE=$(mktemp)
-cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($issueId: String!, $stateId: String!) { issueUpdate(id: $issueId, input: { stateId: $stateId }) { success issue { id } } }
+cat > "$GQL_TMPFILE" <<GQLEOF
+mutation { issueUpdate(id: "${PARENT_ID}", input: { stateId: "${BACKLOG_STATE_ID}" }) { success issue { id } } }
 GQLEOF
-$LINEAR_CLI api query -o json --quiet --compact \
-  -v "issueId=$PARENT_ID" \
-  -v "stateId=$BACKLOG_STATE_ID" \
-  - < "$GQL_TMPFILE" > /dev/null 2>&1 || true
+run_with_timeout "final parent update" $LINEAR_CLI api < "$GQL_TMPFILE" > /dev/null 2>&1 || true
 rm -f "$GQL_TMPFILE"; GQL_TMPFILE=""
 echo "Parent $PARENT_IDENTIFIER transitioned to Backlog"
 
