@@ -3,7 +3,7 @@
 # Decision 32: Linear as spec store — specs live as Linear issues, not filesystem files.
 #
 # Usage:
-#   bash freeze-and-queue.sh [--dry-run] [--parent-only] [--update ISSUE_ID] [--timeout SECS] <workflow-path> [spec-file]
+#   bash freeze-and-queue.sh [--dry-run] [--parent-only] [--allow-empty-scenarios] [--update ISSUE_ID] [--timeout SECS] <workflow-path> [spec-file]
 #   cat spec.md | bash freeze-and-queue.sh [--dry-run] [--parent-only] <workflow-path>
 #   bash freeze-and-queue.sh --trivial "Issue title" <workflow-path>
 #   echo "description" | bash freeze-and-queue.sh --trivial "Issue title" <workflow-path>
@@ -26,6 +26,7 @@ UPDATE_ISSUE_ID=""
 PARENT_ONLY=false
 TRIVIAL=false
 TRIVIAL_TITLE=""
+ALLOW_EMPTY_SCENARIOS=false
 POSITIONAL=()
 
 while [[ $# -gt 0 ]]; do
@@ -35,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     --parent-only)  PARENT_ONLY=true; shift ;;
     --trivial)      TRIVIAL=true; shift; TRIVIAL_TITLE="${1:-}"; shift ;;
     --timeout)      shift; API_TIMEOUT_ARG="${1:-}"; shift ;;
+    --allow-empty-scenarios) ALLOW_EMPTY_SCENARIOS=true; shift ;;
     *)              POSITIONAL+=("$1"); shift ;;
   esac
 done
@@ -499,12 +501,19 @@ done <<< "$SPEC_CONTENT"
 # Parse individual scenarios from the Scenarios section
 # Each scenario starts with "Scenario:" (possibly inside a gherkin block) and ends
 # before the next "Scenario:" or the end of the section.
-declare -a SCENARIO_NAMES SCENARIO_BODIES
+# Feature headings (### Feature: <name>) group scenarios for feature-level matching.
+declare -a SCENARIO_NAMES SCENARIO_BODIES SCENARIO_FEATURES
 scenario_idx=-1
 current_scenario_body=""
 current_scenario_name=""
+current_feature=""
 
 while IFS= read -r line; do
+  # Track Feature headings for feature-level grouping
+  if [[ "$line" =~ ^###[[:space:]]+Feature:[[:space:]]*(.+)$ ]]; then
+    current_feature="${BASH_REMATCH[1]}"
+    continue
+  fi
   if [[ "$line" =~ ^[[:space:]]*Scenario:[[:space:]]*(.+)$ ]]; then
     # Save previous scenario
     if [[ $scenario_idx -ge 0 ]]; then
@@ -513,6 +522,7 @@ while IFS= read -r line; do
     ((scenario_idx++))
     current_scenario_name="${BASH_REMATCH[1]}"
     SCENARIO_NAMES[$scenario_idx]="$current_scenario_name"
+    SCENARIO_FEATURES[$scenario_idx]="$current_feature"
     current_scenario_body="$line"$'\n'
   elif [[ $scenario_idx -ge 0 ]]; then
     # Skip gherkin code fence markers (``` lines)
@@ -561,6 +571,7 @@ done
 match_scenario_to_task() {
   local scenario_name="$1"
   local task_ref="$2"
+  local scenario_feature="${3:-}"
 
   # "All" matches everything
   if [[ "$task_ref" == "All" || "$task_ref" == "all" ]]; then
@@ -571,8 +582,18 @@ match_scenario_to_task() {
   IFS=',' read -ra refs <<< "$task_ref"
   for ref in "${refs[@]}"; do
     ref_clean=$(echo "$ref" | xargs)  # trim whitespace
+
+    # Direct scenario name match (existing behavior)
     if [[ "$scenario_name" == *"$ref_clean"* || "$ref_clean" == *"$scenario_name"* ]]; then
       return 0
+    fi
+
+    # Feature-level match: ref like "<Feature Name> scenarios" matches all scenarios under that Feature
+    if [[ -n "$scenario_feature" && "$ref_clean" =~ ^(.+)[[:space:]]+(scenarios|Scenarios)$ ]]; then
+      local feature_ref="${BASH_REMATCH[1]}"
+      if [[ "$scenario_feature" == "$feature_ref" ]]; then
+        return 0
+      fi
     fi
   done
   return 1
@@ -582,8 +603,15 @@ build_sub_issue_body() {
   local idx=$1
   local body="${TASK_BODIES[$idx]}"
   local task_ref="${TASK_SCENARIO_REFS[$idx]:-}"
+  local parent_ref="${PARENT_REF_LINE:-}"
 
   local output=""
+
+  # F3: Parent reference at top of sub-issue body
+  if [[ -n "$parent_ref" ]]; then
+    output+="$parent_ref"$'\n'$'\n'
+  fi
+
   output+="## Task Scope"$'\n'
   output+="$body"$'\n'
 
@@ -592,7 +620,7 @@ build_sub_issue_body() {
     output+="## Scenarios"$'\n'$'\n'
     local matched=0
     for ((s=0; s<TOTAL_SCENARIOS; s++)); do
-      if match_scenario_to_task "${SCENARIO_NAMES[$s]}" "$task_ref"; then
+      if match_scenario_to_task "${SCENARIO_NAMES[$s]}" "$task_ref" "${SCENARIO_FEATURES[$s]:-}"; then
         output+="${SCENARIO_BODIES[$s]}"$'\n'
         ((matched++))
       fi
@@ -612,6 +640,47 @@ build_sub_issue_body() {
   output+="_Created by freeze-and-queue.sh from parent spec. Implement exactly what is specified._"
   echo "$output"
 }
+
+# ── F2: Validate that all tasks have matching scenarios (hard gate) ────────
+# Checks each task's scenario ref against the parsed scenarios. If any task has
+# a non-empty ref that matches zero scenarios, the script fails unless
+# --allow-empty-scenarios is passed.
+
+if [[ $TOTAL -gt 0 && $TOTAL_SCENARIOS -gt 0 ]]; then
+  empty_tasks=()
+  for ((i=0; i<TOTAL; i++)); do
+    task_ref="${TASK_SCENARIO_REFS[$i]:-}"
+    if [[ -z "$task_ref" ]]; then
+      continue
+    fi
+    matched=0
+    for ((s=0; s<TOTAL_SCENARIOS; s++)); do
+      if match_scenario_to_task "${SCENARIO_NAMES[$s]}" "$task_ref" "${SCENARIO_FEATURES[$s]:-}"; then
+        ((matched++))
+      fi
+    done
+    if [[ $matched -eq 0 ]]; then
+      empty_tasks+=("${TASK_TITLES[$i]} (ref: $task_ref)")
+    fi
+  done
+
+  if [[ ${#empty_tasks[@]} -gt 0 ]]; then
+    if [[ "$ALLOW_EMPTY_SCENARIOS" == true ]]; then
+      echo "WARNING: No matching scenarios for ${#empty_tasks[@]} task(s):" >&2
+      for t in "${empty_tasks[@]}"; do
+        echo "  - $t" >&2
+      done
+    else
+      echo "ERROR: No matching scenarios for ${#empty_tasks[@]} task(s):" >&2
+      for t in "${empty_tasks[@]}"; do
+        echo "  - $t" >&2
+      done
+      echo "" >&2
+      echo "Fix the **Scenarios** refs in the spec, or re-run with --allow-empty-scenarios to bypass." >&2
+      exit 1
+    fi
+  fi
+fi
 
 # ── Execute: Create or update parent, create sub-issues ──────────────────────
 
@@ -633,6 +702,9 @@ if [[ "$DRY_RUN" == true ]]; then
     exit 0
   fi
 
+  # F3: Set parent reference for sub-issue bodies (dry-run uses spec title as placeholder)
+  PARENT_REF_LINE="Parent spec: [Spec] $SPEC_TITLE"
+
   echo "--- PHASE 1: Create sub-issues (WITHOUT project — invisible to symphony-ts) ---"
   echo ""
   relation_count=0
@@ -645,9 +717,8 @@ if [[ "$DRY_RUN" == true ]]; then
     echo "  Scope: ${TASK_SCOPES[$i]:-<none>}"
     echo "  Scenarios ref: ${TASK_SCENARIO_REFS[$i]:-<none>}"
     sub_body=$(build_sub_issue_body "$i")
-    echo "  Body preview (first 10 lines):"
-    echo "$sub_body" | head -10 | sed 's/^/    /'
-    echo "    ..."
+    echo "  Body:"
+    echo "$sub_body" | sed 's/^/    /'
     # Show sequential blocking relation immediately after this sub-issue
     if [[ $k -gt 0 ]]; then
       blocker_idx="${SORTED_INDICES[$((k-1))]}"
@@ -876,6 +947,9 @@ if [[ "$PARENT_ONLY" == true ]]; then
   echo "Run again without --parent-only (with --update $PARENT_IDENTIFIER) to create sub-issues."
   exit 0
 fi
+
+# F3: Set parent reference for sub-issue bodies (live mode uses Linear URL)
+PARENT_REF_LINE="Parent spec: [$PARENT_IDENTIFIER]($parent_url)"
 
 # ── Phase 1: Create sub-issues with interleaved relations (no projectId) ─────
 # Sub-issues are created in Todo state WITHOUT projectId, sorted by priority.
