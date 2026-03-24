@@ -166,6 +166,16 @@ echo "  Workflow: $WORKFLOW"
 echo "  Repo URL: $REPO_URL"
 echo ""
 
+# Read port from ports.json
+PORTS_FILE="$SCRIPT_DIR/pipeline-config/ports.json"
+if [[ -f "$PORTS_FILE" ]] && command -v jq &>/dev/null; then
+  PRODUCT_PORT=$(jq -r --arg p "$PRODUCT" '.[$p] // empty' "$PORTS_FILE")
+  if [[ -n "$PRODUCT_PORT" ]]; then
+    # Inject --port before user args (user can still override via --port in passthrough)
+    set -- --port "$PRODUCT_PORT" "$@"
+  fi
+fi
+
 LOGS_DIR="/tmp/symphony-logs-${PRODUCT}"
 mkdir -p "$LOGS_DIR"
 exec node "$SCRIPT_DIR/dist/src/cli/main.js" "$WORKFLOW_PATH" --acknowledge-high-trust-preview --logs-root "$LOGS_DIR" "$@"
