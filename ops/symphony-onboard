@@ -166,8 +166,8 @@ info "=== Step 1: Verify Linear project access ==="
 if $DRY_RUN; then
   info "[dry-run] Would verify Linear project slug '$PROJECT_SLUG'"
 else
-  LINEAR_QUERY='{ "query": "query($slug: String!) { projects(filter: { slugId: { eq: $slug } }) { nodes { id name slugId } } }", "variables": { "slug": "'"$PROJECT_SLUG"'" } }'
-  LINEAR_RESULT="$(echo "$LINEAR_QUERY" | LINEAR_API_KEY="$LINEAR_API_KEY" linear api 2>/dev/null || true)"
+  LINEAR_GQL='query($slug: String!) { projects(filter: { slugId: { eq: $slug } }) { nodes { id name slugId } } }'
+  LINEAR_RESULT="$(echo "$LINEAR_GQL" | LINEAR_API_KEY="$LINEAR_API_KEY" linear api --variables-json "{\"slug\":\"$PROJECT_SLUG\"}" 2>/dev/null || true)"
 
   if [[ -z "$LINEAR_RESULT" ]]; then
     die "Failed to query Linear API. Check LINEAR_API_KEY and network connectivity."
