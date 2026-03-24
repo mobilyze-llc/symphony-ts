@@ -37,6 +37,7 @@ Products:
   hs-mobile     Household Services Mobile
   stickerlabs   Stickerlabs Factory (github.com/mobilyze-llc/stickerlabs-factory)
   household     Household
+  toys          TOYS (github.com/mobilyze-llc/pipeline-test-1)
 
 Options:
   -h, --help          Show this help message
@@ -106,10 +107,14 @@ case "$PRODUCT" in
     WORKFLOW="pipeline-config/workflows/WORKFLOW-household.md"
     DEFAULT_REPO_URL="TBD"
     ;;
+  toys)
+    WORKFLOW="pipeline-config/workflows/WORKFLOW-toys.md"
+    DEFAULT_REPO_URL="https://github.com/mobilyze-llc/pipeline-test-1.git"
+    ;;
   *)
     echo "Error: Unknown product '$PRODUCT'"
     echo ""
-    echo "Available products: symphony, jony-agent, hs-data, hs-ui, hs-mobile, stickerlabs, household"
+    echo "Available products: symphony, jony-agent, hs-data, hs-ui, hs-mobile, stickerlabs, household, toys"
     echo "Run './run-pipeline.sh --help' for details."
     exit 1
     ;;
