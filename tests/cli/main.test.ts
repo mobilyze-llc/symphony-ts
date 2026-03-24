@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   CLI_ACKNOWLEDGEMENT_FLAG,
+  type StartCliHostInput,
   applyCliOverrides,
   parseCliArgs,
   runCli,
@@ -229,6 +230,34 @@ describe("cli", () => {
     expect(stdout).toHaveBeenCalledWith(
       expect.stringMatching(/^symphony-ts .+\n$/),
     );
+  });
+
+  it("env with SLACK_BOT_TOKEN is forwarded to startHost", async () => {
+    const capturedInput: StartCliHostInput[] = [];
+    const startHost = vi.fn(async (input: StartCliHostInput) => {
+      capturedInput.push(input);
+      return {
+        async waitForExit() {
+          return 0;
+        },
+      };
+    });
+
+    const injectedEnv = { SLACK_BOT_TOKEN: "xoxb-injected-token" };
+
+    await runCli([CLI_ACKNOWLEDGEMENT_FLAG], {
+      env: injectedEnv,
+      loadWorkflowDefinition: vi.fn(async () => ({
+        workflowPath: "/repo/WORKFLOW.md",
+        config: {},
+        promptTemplate: "Prompt",
+      })),
+      startHost,
+    });
+
+    expect(startHost).toHaveBeenCalledOnce();
+    expect(capturedInput[0]?.env).toBe(injectedEnv);
+    expect(capturedInput[0]?.env.SLACK_BOT_TOKEN).toBe("xoxb-injected-token");
   });
 
   it("parses --version flag", () => {
