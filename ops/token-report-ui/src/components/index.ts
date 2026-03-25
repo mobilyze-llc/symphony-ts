@@ -12,6 +12,8 @@ export { default as IssueLeaderboard } from "./IssueLeaderboard.tsx";
 export { default as StageEfficiency } from "./StageEfficiency.tsx";
 export { default as PerProductBreakdown } from "./PerProductBreakdown.tsx";
 export { default as ReportFooter } from "./ReportFooter.tsx";
+export { default as StageUtilizationChart } from "./StageUtilizationChart.tsx";
+export { default as TicketCostChart } from "./TicketCostChart.tsx";
 export { fmtNum, WowBadge, Sparkline, MultiLineChart } from "./chartUtils.tsx";
 
 export const designTokens = {
