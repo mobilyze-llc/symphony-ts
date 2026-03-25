@@ -3,7 +3,7 @@
  * Converted from design reference EfficiencyScorecard.jsx.
  */
 import type { EfficiencyScorecard as EfficiencyScorecardData } from "../types.ts";
-import { fmtNum, Sparkline } from "./chartUtils.tsx";
+import { Sparkline, fmtNum } from "./chartUtils.tsx";
 
 function round(n: number, decimals = 0): number {
   const f = 10 ** decimals;
@@ -29,7 +29,10 @@ export interface EfficiencyScorecardProps {
   series?: ScorecardSeries;
 }
 
-export default function EfficiencyScorecard({ scorecard, series }: EfficiencyScorecardProps) {
+export default function EfficiencyScorecard({
+  scorecard,
+  series,
+}: EfficiencyScorecardProps) {
   const sc = scorecard ?? ({} as Partial<EfficiencyScorecardData>);
   const s = series ?? {};
 

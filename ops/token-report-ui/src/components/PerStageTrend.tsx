@@ -2,8 +2,8 @@
  * Section 3: Per-Stage Utilization Trend
  * Converted from design reference PerStageTrend.jsx.
  */
-import type { StageTrend, Inflection } from "../types.ts";
-import { fmtNum, MultiLineChart } from "./chartUtils.tsx";
+import type { Inflection, StageTrend } from "../types.ts";
+import { MultiLineChart, fmtNum } from "./chartUtils.tsx";
 import type { ConfigChange } from "./chartUtils.tsx";
 
 export interface PerStageTrendProps {
@@ -12,7 +12,11 @@ export interface PerStageTrendProps {
   inflections?: Inflection[];
 }
 
-export default function PerStageTrend({ perStageTrend, configChanges, inflections }: PerStageTrendProps) {
+export default function PerStageTrend({
+  perStageTrend,
+  configChanges,
+  inflections,
+}: PerStageTrendProps) {
   const trend = perStageTrend ?? {};
   const infl = Array.isArray(inflections) ? inflections : [];
 
@@ -20,15 +24,16 @@ export default function PerStageTrend({ perStageTrend, configChanges, inflection
     <section>
       <h2>Per-Stage Utilization Trend</h2>
       <div className="chart-container">
-        <MultiLineChart
-          stageData={trend}
-          configChanges={configChanges}
-        />
+        <MultiLineChart stageData={trend} configChanges={configChanges} />
         {infl.length > 0 &&
-          infl.map((inf, i) => (
-            <div className="inflection-panel" key={i}>
+          infl.map((inf) => (
+            <div className="inflection-panel" key={`${inf.date}-${inf.metric}`}>
               <div className="label">
-                {"\u26A1"} Inflection: {inf.metric ?? ""} &mdash; {inf.direction ?? ""} {inf.magnitude != null ? `${Math.round(inf.magnitude * 100)}%` : ""}
+                {"\u26A1"} Inflection: {inf.metric ?? ""} &mdash;{" "}
+                {inf.direction ?? ""}{" "}
+                {inf.magnitude != null
+                  ? `${Math.round(inf.magnitude * 100)}%`
+                  : ""}
               </div>
               <div
                 style={{

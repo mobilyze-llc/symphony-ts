@@ -3,14 +3,17 @@
  * Converted from design reference StageEfficiency.jsx.
  */
 import type { StageSpend } from "../types.ts";
-import { fmtNum, Sparkline } from "./chartUtils.tsx";
+import { Sparkline, fmtNum } from "./chartUtils.tsx";
 
 export interface StageEfficiencyProps {
   perStageSpend: Record<string, StageSpend>;
   stageSparklines?: Record<string, number[]>;
 }
 
-export default function StageEfficiency({ perStageSpend, stageSparklines }: StageEfficiencyProps) {
+export default function StageEfficiency({
+  perStageSpend,
+  stageSparklines,
+}: StageEfficiencyProps) {
   const spend = perStageSpend ?? {};
   const sparklines = stageSparklines ?? {};
 
@@ -22,8 +25,8 @@ export default function StageEfficiency({ perStageSpend, stageSparklines }: Stag
           <div className="stage-header">
             <span className="stage-name">{stage}</span>
             <span style={{ color: "var(--text-muted)" }}>
-              {fmtNum(data.total_tokens)} tokens &middot; {data.count} runs &middot; {data.completed}{" "}
-              ok &middot; {data.failed} fail
+              {fmtNum(data.total_tokens)} tokens &middot; {data.count} runs
+              &middot; {data.completed} ok &middot; {data.failed} fail
             </span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>

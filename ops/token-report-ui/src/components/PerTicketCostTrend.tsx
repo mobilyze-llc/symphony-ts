@@ -3,14 +3,17 @@
  * Converted from design reference PerTicketCostTrend.jsx.
  */
 import type { PerTicketTrend } from "../types.ts";
-import { fmtNum, Sparkline } from "./chartUtils.tsx";
+import { Sparkline, fmtNum } from "./chartUtils.tsx";
 
 export interface PerTicketCostTrendProps {
   perTicket: PerTicketTrend;
   perTicketSeries?: number[];
 }
 
-export default function PerTicketCostTrend({ perTicket, perTicketSeries }: PerTicketCostTrendProps) {
+export default function PerTicketCostTrend({
+  perTicket,
+  perTicketSeries,
+}: PerTicketCostTrendProps) {
   const pt = perTicket ?? ({} as Partial<PerTicketTrend>);
 
   return (
@@ -24,8 +27,8 @@ export default function PerTicketCostTrend({ perTicket, perTicketSeries }: PerTi
             fontSize: "0.85rem",
           }}
         >
-          Rolling median tokens per ticket &middot; median: {fmtNum(pt.median)} &middot; mean:{" "}
-          {fmtNum(pt.mean)} &middot; {pt.ticket_count} tickets
+          Rolling median tokens per ticket &middot; median: {fmtNum(pt.median)}{" "}
+          &middot; mean: {fmtNum(pt.mean)} &middot; {pt.ticket_count} tickets
         </div>
         <Sparkline
           values={perTicketSeries}

@@ -18,7 +18,9 @@ export interface IssueLeaderboardProps {
   leaderboard: LeaderboardItem[];
 }
 
-export default function IssueLeaderboard({ leaderboard }: IssueLeaderboardProps) {
+export default function IssueLeaderboard({
+  leaderboard,
+}: IssueLeaderboardProps) {
   const items = Array.isArray(leaderboard) ? leaderboard.slice(0, 25) : [];
 
   return (

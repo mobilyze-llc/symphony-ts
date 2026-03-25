@@ -10,17 +10,32 @@ export interface ReportHeaderProps {
   dataSpanDays: number;
 }
 
-export default function ReportHeader({ today, recordCount, dataSpanDays }: ReportHeaderProps) {
+export default function ReportHeader({
+  today,
+  recordCount,
+  dataSpanDays,
+}: ReportHeaderProps) {
   return (
     <header>
-      <h1 style={{ color: "var(--text-bright)", marginBottom: "8px", fontSize: "1.5rem" }}>
+      <h1
+        style={{
+          color: "var(--text-bright)",
+          marginBottom: "8px",
+          fontSize: "1.5rem",
+        }}
+      >
         Symphony Token Report
       </h1>
       <p
         className="subtitle"
-        style={{ color: "var(--text-muted)", fontSize: "0.9rem", marginBottom: "24px" }}
+        style={{
+          color: "var(--text-muted)",
+          fontSize: "0.9rem",
+          marginBottom: "24px",
+        }}
       >
-        Generated {today} &middot; {fmtNum(recordCount)} records &middot; {dataSpanDays} day span
+        Generated {today} &middot; {fmtNum(recordCount)} records &middot;{" "}
+        {dataSpanDays} day span
       </p>
     </header>
   );

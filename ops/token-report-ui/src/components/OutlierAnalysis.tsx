@@ -29,8 +29,8 @@ export default function OutlierAnalysis({ outliers }: OutlierAnalysisProps) {
   return (
     <section>
       <h2>Outlier Analysis</h2>
-      {items.map((o, i) => (
-        <div className="outlier-card" key={i}>
+      {items.map((o) => (
+        <div className="outlier-card" key={o.issue}>
           <div className="outlier-title">
             <a
               href={`https://linear.app/issue/${o.issue}`}
@@ -38,8 +38,8 @@ export default function OutlierAnalysis({ outliers }: OutlierAnalysisProps) {
               rel="noopener noreferrer"
             >
               {o.issue}
-            </a>
-            {" "}&mdash; {o.stage} &mdash; {fmtNum(o.tokens)} tokens (z={o.z_score})
+            </a>{" "}
+            &mdash; {o.stage} &mdash; {fmtNum(o.tokens)} tokens (z={o.z_score})
           </div>
           <div className="outlier-hypothesis">
             {o.reason ?? "No hypothesis available"}

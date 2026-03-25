@@ -2,19 +2,19 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import App from "./App.tsx";
 import analysisData from "./analysis.json";
-import type { AnalysisData } from "./types.ts";
 import {
-  ReportHeader,
-  ExecutiveSummary,
   EfficiencyScorecard,
+  ExecutiveSummary,
+  IssueLeaderboard,
+  OutlierAnalysis,
+  PerProductBreakdown,
   PerStageTrend,
   PerTicketCostTrend,
-  OutlierAnalysis,
-  IssueLeaderboard,
-  StageEfficiency,
-  PerProductBreakdown,
   ReportFooter,
+  ReportHeader,
+  StageEfficiency,
 } from "./components/index.ts";
+import type { AnalysisData } from "./types.ts";
 
 const data = analysisData as AnalysisData;
 

@@ -62,6 +62,8 @@ export function Sparkline({
         width={width}
         height={height}
         xmlns="http://www.w3.org/2000/svg"
+        aria-label="Sparkline chart"
+        role="img"
       />
     );
   }
@@ -77,7 +79,13 @@ export function Sparkline({
     .join(" ");
 
   return (
-    <svg width={width} height={height} xmlns="http://www.w3.org/2000/svg">
+    <svg
+      width={width}
+      height={height}
+      xmlns="http://www.w3.org/2000/svg"
+      aria-label="Sparkline chart"
+      role="img"
+    >
       <polyline
         points={points}
         fill="none"
@@ -134,7 +142,13 @@ export function MultiLineChart({
 
   if (sortedDates.length < 2) {
     return (
-      <svg width={width} height={height} xmlns="http://www.w3.org/2000/svg">
+      <svg
+        width={width}
+        height={height}
+        xmlns="http://www.w3.org/2000/svg"
+        aria-label="Insufficient data for trend chart"
+        role="img"
+      >
         <text x="10" y="20" fill="#8b949e" fontSize="12">
           Insufficient data for trend chart
         </text>
@@ -208,7 +222,13 @@ export function MultiLineChart({
           strokeWidth="1"
           strokeDasharray="4,4"
         />
-        <text x={x} y={padT - 2} fill="#d29922" fontSize="9" textAnchor="middle">
+        <text
+          x={x}
+          y={padT - 2}
+          fill="#d29922"
+          fontSize="9"
+          textAnchor="middle"
+        >
           {"\u2699"}
         </text>
       </g>
@@ -250,7 +270,14 @@ export function MultiLineChart({
     const color = colors[si % colors.length];
     return (
       <g key={`legend-${stage}`}>
-        <rect x={x} y={height - 15} width="10" height="10" fill={color} rx="2" />
+        <rect
+          x={x}
+          y={height - 15}
+          width="10"
+          height="10"
+          fill={color}
+          rx="2"
+        />
         <text x={x + 14} y={height - 6} fill="#c9d1d9" fontSize="10">
           {stage}
         </text>
@@ -264,6 +291,8 @@ export function MultiLineChart({
       height={height}
       xmlns="http://www.w3.org/2000/svg"
       style={{ background: "#0d1117", borderRadius: "6px" }}
+      aria-label="Per-stage token trend chart"
+      role="img"
     >
       {gridLines}
       {markers}

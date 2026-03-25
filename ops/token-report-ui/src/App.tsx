@@ -1,18 +1,18 @@
 import analysisData from "./analysis.json";
-import type { AnalysisData, Inflection, Outlier } from "./types.ts";
 import {
-  ReportHeader,
-  ExecutiveSummary,
   EfficiencyScorecard,
+  ExecutiveSummary,
+  IssueLeaderboard,
+  OutlierAnalysis,
+  PerProductBreakdown,
   PerStageTrend,
   PerTicketCostTrend,
-  OutlierAnalysis,
-  IssueLeaderboard,
-  StageEfficiency,
-  PerProductBreakdown,
   ReportFooter,
+  ReportHeader,
+  StageEfficiency,
   reportCSS,
 } from "./components/index.ts";
+import type { AnalysisData, Inflection, Outlier } from "./types.ts";
 
 const data = analysisData as AnalysisData;
 
@@ -43,11 +43,16 @@ export default function App() {
   // WoW deltas computed from scorecard trends where available
   const cacheWow =
     sc.cache_efficiency.trend_7d != null
-      ? Math.round(((sc.cache_efficiency.current - sc.cache_efficiency.trend_7d) / (sc.cache_efficiency.trend_7d || 1)) * 100)
+      ? Math.round(
+          ((sc.cache_efficiency.current - sc.cache_efficiency.trend_7d) /
+            (sc.cache_efficiency.trend_7d || 1)) *
+            100,
+        )
       : null;
 
   return (
     <>
+      {/* biome-ignore lint/security/noDangerouslySetInnerHtml: report CSS is a static build-time string, not user input */}
       <style dangerouslySetInnerHTML={{ __html: reportCSS }} />
       <ReportHeader
         today={data.analyzed_at.slice(0, 10)}

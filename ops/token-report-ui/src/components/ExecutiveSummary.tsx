@@ -2,7 +2,7 @@
  * Section 1: Executive Summary
  * Converted from design reference ExecutiveSummary.jsx.
  */
-import { fmtNum, WowBadge } from "./chartUtils.tsx";
+import { WowBadge, fmtNum } from "./chartUtils.tsx";
 
 function round(n: number, decimals = 0): number {
   const f = 10 ** decimals;
@@ -45,7 +45,8 @@ export default function ExecutiveSummary({
           <div className="kpi-label">Tokens / Issue (median)</div>
           <div className="kpi-value">{fmtNum(tokensPerIssueMedian)}</div>
           <div className="kpi-delta">
-            mean: {fmtNum(tokensPerIssueMean)} <WowBadge delta={tokPerIssueWow} />
+            mean: {fmtNum(tokensPerIssueMean)}{" "}
+            <WowBadge delta={tokPerIssueWow} />
           </div>
         </div>
         <div className="kpi-card">

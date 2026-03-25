@@ -14,7 +14,9 @@ export interface PerProductBreakdownProps {
   perProduct: Record<string, ProductData>;
 }
 
-export default function PerProductBreakdown({ perProduct }: PerProductBreakdownProps) {
+export default function PerProductBreakdown({
+  perProduct,
+}: PerProductBreakdownProps) {
   const products = perProduct ?? {};
   const totalTokens =
     Object.values(products).reduce((s, p) => s + (p.total_tokens ?? 0), 0) || 1;
@@ -42,15 +44,13 @@ export default function PerProductBreakdown({ perProduct }: PerProductBreakdownP
             return (
               <tr key={name}>
                 <td>{name}</td>
-                <td style={{ textAlign: "right" }}>{fmtNum(data.total_tokens)}</td>
+                <td style={{ textAlign: "right" }}>
+                  {fmtNum(data.total_tokens)}
+                </td>
                 <td style={{ textAlign: "right" }}>{data.total_stages}</td>
                 <td style={{ textAlign: "right" }}>{data.unique_issues}</td>
                 <td>
-                  <div
-                    className="product-bar"
-                    style={{ width: `${pct}%` }}
-                  />
-                  {" "}
+                  <div className="product-bar" style={{ width: `${pct}%` }} />{" "}
                   {pct}%
                 </td>
               </tr>
