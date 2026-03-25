@@ -195,7 +195,7 @@ stages:
 
 You are running in headless/unattended mode. Do NOT use interactive skills, slash commands, or plan mode. Do not prompt for user input. Complete your work autonomously.
 
-You are working on the HS UI product.
+You are working on the Healthspanners Dash product.
 
 Implement only what your task specifies. If you encounter missing functionality that another task covers, add a TODO comment rather than implementing it. Do not refactor surrounding code or add unsolicited improvements.
 
