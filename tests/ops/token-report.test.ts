@@ -1196,6 +1196,27 @@ describe("token-report.mjs slack", () => {
 
     expect(stderr).not.toContain("skipping");
   });
+
+  it("DRY_RUN bypasses cooldown (does not post, should not be gated)", () => {
+    const records = generateDaysOfRecords(5, 2);
+    writeTokenHistory(symphonyHome, records);
+    writeConfigHistory(symphonyHome, [makeConfigSnapshot()]);
+
+    // Write a recent timestamp to the cooldown file
+    const dataDir = join(symphonyHome, "data");
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(join(dataDir, ".last-slack-ts"), String(Date.now()), "utf-8");
+
+    // DRY_RUN should bypass cooldown and print the digest to stderr
+    const { exitCode, stderr } = runSlack(symphonyHome, {
+      SLACK_BOT_TOKEN: "xoxb-fake-token",
+      DRY_RUN: "1",
+    });
+
+    expect(exitCode).toBe(0);
+    // Should NOT contain cooldown skip message — DRY_RUN bypasses cooldown
+    expect(stderr).not.toContain("skipping");
+  });
 });
 
 // ---------------------------------------------------------------------------

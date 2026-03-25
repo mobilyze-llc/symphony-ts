@@ -1864,7 +1864,8 @@ function runSlack() {
   }
 
   // 24-hour cooldown guard — prevent duplicate posts from agents, retries, etc.
-  if (!process.env.SLACK_FORCE) {
+  // DRY_RUN and SLACK_FORCE both bypass: DRY_RUN doesn't post, SLACK_FORCE is explicit override.
+  if (!process.env.SLACK_FORCE && !process.env.DRY_RUN) {
     try {
       if (existsSync(SLACK_COOLDOWN_PATH)) {
         const lastTs = parseInt(readFileSync(SLACK_COOLDOWN_PATH, "utf-8").trim(), 10);
