@@ -188,14 +188,21 @@ cmd_start() {
   check_installed
 
   if is_running; then
-    warn "Service is already running."
+    warn "Service is already running. Use 'restart' to bounce it."
     return 0
   fi
 
   launchctl kickstart "gui/$(id -u)/${SERVICE_LABEL}"
-  ok "Service started: $SERVICE_LABEL"
-  info "Dashboard: http://localhost:$(get_port)"
-  info "Logs: $LOG_DIR/"
+
+  # Give it a moment to come up, then verify
+  sleep 1
+  if is_running; then
+    ok "Service started: $SERVICE_LABEL"
+    info "Dashboard: http://localhost:$(get_port)"
+    info "Logs: $LOG_DIR/"
+  else
+    die "Service failed to start. Check logs: $LOG_DIR/"
+  fi
 }
 
 cmd_stop() {

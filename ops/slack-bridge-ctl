@@ -148,37 +148,69 @@ ${env_dict}    </dict>
 PLIST
 
   ok "Plist written to $PLIST_PATH"
+
+  launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+  ok "Service registered: $SERVICE_LABEL"
   info "Run 'slack-bridge-ctl start' to start the service."
 }
 
 cmd_uninstall() {
   check_installed
-  cmd_stop 2>/dev/null || true
+
+  # Stop first if running
+  if is_running; then
+    launchctl kill SIGTERM "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null || true
+    sleep 1
+  fi
+
+  launchctl bootout "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null || true
   rm -f "$PLIST_PATH"
   ok "Service uninstalled."
 }
 
 cmd_start() {
   check_installed
-  launchctl load "$PLIST_PATH"
+
+  if is_running; then
+    warn "Service is already running. Use 'restart' to bounce it."
+    return 0
+  fi
+
+  launchctl kickstart "gui/$(id -u)/${SERVICE_LABEL}"
   ok "Service started."
 }
 
 cmd_stop() {
   check_installed
-  launchctl unload "$PLIST_PATH" 2>/dev/null || true
+
+  if ! is_running; then
+    warn "Service is not running."
+    return 0
+  fi
+
+  launchctl kill SIGTERM "gui/$(id -u)/${SERVICE_LABEL}"
   ok "Service stopped."
 }
 
 cmd_restart() {
-  cmd_stop
+  check_installed
+
+  if is_running; then
+    cmd_stop
+    sleep 1
+  fi
   cmd_start
 }
 
+is_running() {
+  launchctl print "gui/$(id -u)/${SERVICE_LABEL}" &>/dev/null && \
+    launchctl print "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null | grep -q 'pid = [0-9]'
+}
+
 cmd_status() {
-  if launchctl list "$SERVICE_LABEL" &>/dev/null; then
+  if is_running; then
     ok "Service is running."
-    launchctl list "$SERVICE_LABEL"
+    launchctl print "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null
   else
     warn "Service is not running."
   fi

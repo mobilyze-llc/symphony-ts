@@ -241,7 +241,7 @@ if ! $NO_RESTART && $DO_SYMPHONY; then
     info ".env was refreshed — reinstalling service (plist bakes env vars)..."
     run_or_dry "$CTL" uninstall
     run_or_dry "$CTL" install
-    run_or_dry "$CTL" start
+    run_or_dry "$CTL" restart
     ok "Service reinstalled and started"
   elif $SYMPHONY_UPDATED; then
     info "Code updated — restarting service..."
@@ -267,7 +267,7 @@ if ! $NO_RESTART && $DO_SYMPHONY; then
     info ".env was refreshed — reinstalling slack bridge..."
     run_or_dry "$SLACK_CTL" uninstall
     run_or_dry "$SLACK_CTL" install
-    run_or_dry "$SLACK_CTL" start
+    run_or_dry "$SLACK_CTL" restart
     ok "Slack bridge reinstalled and started"
   elif $SYMPHONY_UPDATED; then
     info "Code updated — restarting slack bridge..."
