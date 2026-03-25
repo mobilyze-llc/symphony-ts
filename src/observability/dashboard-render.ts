@@ -838,6 +838,9 @@ function renderDashboardClientScript(
             var healthClass = row.health === 'red' ? 'context-health-red' : 'context-health-yellow';
             contextItems.push('<span class="context-item"><span class="context-label">Health</span> <span class="' + healthClass + '">' + escapeHtml(row.health_reason) + '</span></span>');
           }
+          if (row.failure_reason != null) {
+            contextItems.push('<span class="context-item"><span class="context-label">Failure</span> <span class="context-health-red">' + escapeHtml(row.failure_reason) + '</span></span>');
+          }
           if (row.rework_count != null && row.rework_count > 0) {
             contextItems.push('<span class="context-item"><span class="context-label">Rework</span> <span class="state-badge state-badge-warning">\xD7' + formatInteger(row.rework_count) + '</span></span>');
           }
@@ -914,6 +917,9 @@ function renderDashboardClientScript(
               ? escapeHtml(row.last_event) + (row.last_event_at ? ' · <span class="mono numeric">' + escapeHtml(row.last_event_at) + '</span>' : '')
               : 'n/a';
 
+            const failureHtml = (row.failure_reason != null)
+              ? '<span class="state-badge state-badge-danger" title="' + escapeHtml(row.failure_reason) + '">' + escapeHtml(row.failure_reason) + '</span>'
+              : '';
             const reworkHtml = (row.rework_count != null && row.rework_count > 0)
               ? '<span class="state-badge state-badge-warning">Rework \xD7' + escapeHtml(row.rework_count) + '</span>'
               : '';
@@ -928,7 +934,7 @@ function renderDashboardClientScript(
 
             return '<tr class="session-row">' +
               '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(row.issue_identifier) + '</span><span class="muted issue-title">' + escapeHtml(row.issue_title) + '</span>' + expandToggle + '</div></td>' +
-              '<td><div class="detail-stack"><span class="' + stateBadgeClass(row.state) + '">' + escapeHtml(row.state) + '</span>' + reworkHtml + healthHtml + '</div></td>' +
+              '<td><div class="detail-stack"><span class="' + stateBadgeClass(row.state) + '">' + escapeHtml(row.state) + '</span>' + failureHtml + reworkHtml + healthHtml + '</div></td>' +
               '<td><div class="session-stack">' + sessionCell + '</div></td>' +
               '<td class="numeric">' + formatRuntimeAndTurns(row, next.generated_at) + '</td>' +
               '<td class="numeric">' + formatPipelineTime(row, next.generated_at) + '</td>' +
@@ -1050,6 +1056,7 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
               <td>
                 <div class="detail-stack">
                   <span class="${stateBadgeClass(row.state)}">${escapeHtml(row.state)}</span>
+                  ${row.failure_reason != null ? `<span class="state-badge state-badge-danger" title="${escapeHtml(row.failure_reason)}">${escapeHtml(row.failure_reason)}</span>` : ""}
                   ${row.rework_count !== undefined && row.rework_count > 0 ? `<span class="state-badge state-badge-warning">Rework ×${escapeHtml(row.rework_count)}</span>` : ""}
                   ${renderHealthBadge(row.health, row.health_reason)}
                 </div>
@@ -1137,6 +1144,12 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
       row.health === "red" ? "context-health-red" : "context-health-yellow";
     contextItems.push(
       `<span class="context-item"><span class="context-label">Health</span> <span class="${healthClass}">${escapeHtml(row.health_reason)}</span></span>`,
+    );
+  }
+
+  if (row.failure_reason !== null && row.failure_reason !== undefined) {
+    contextItems.push(
+      `<span class="context-item"><span class="context-label">Failure</span> <span class="context-health-red">${escapeHtml(row.failure_reason)}</span></span>`,
     );
   }
 

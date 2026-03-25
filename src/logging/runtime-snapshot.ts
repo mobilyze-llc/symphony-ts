@@ -48,6 +48,7 @@ export interface RuntimeSnapshotRunningRow {
   turn_history: TurnHistoryEntry[];
   recent_activity: RecentActivityEntry[];
   last_tool_call: string | null;
+  failure_reason: string | null;
   health: HealthStatus;
   health_reason: string | null;
 }
@@ -175,6 +176,7 @@ export function buildRuntimeSnapshot(
         turn_history: entry.turnHistory,
         recent_activity: entry.recentActivity,
         last_tool_call: deriveLastToolCall(entry.recentActivity),
+        failure_reason: entry.failureReason ?? null,
         health,
         health_reason,
       };
