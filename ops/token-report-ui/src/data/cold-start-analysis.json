@@ -24,8 +24,18 @@
     "data_span_days": 3
   },
   "per_stage_spend": {
-    "investigate": { "total_tokens": 120000, "count": 3, "completed": 3, "failed": 0 },
-    "implement": { "total_tokens": 280000, "count": 5, "completed": 4, "failed": 1 }
+    "investigate": {
+      "total_tokens": 120000,
+      "count": 3,
+      "completed": 3,
+      "failed": 0
+    },
+    "implement": {
+      "total_tokens": 280000,
+      "count": 5,
+      "completed": 4,
+      "failed": 1
+    }
   },
   "per_stage_trend": {
     "investigate": { "daily_avg": 40000, "wow_delta": 0 },
@@ -33,7 +43,11 @@
   },
   "per_ticket_trend": { "median": 140000, "mean": 140000, "ticket_count": 3 },
   "per_product": {
-    "symphony-ts": { "total_tokens": 420000, "total_stages": 8, "unique_issues": 3 }
+    "symphony-ts": {
+      "total_tokens": 420000,
+      "total_stages": 8,
+      "unique_issues": 3
+    }
   },
   "inflections": { "status": "insufficient data", "items": [] },
   "outliers": { "status": "insufficient data", "items": [] }

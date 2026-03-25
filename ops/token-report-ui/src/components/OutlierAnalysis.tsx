@@ -43,7 +43,10 @@ export default function OutlierAnalysis({
           <div style={{ fontSize: "0.85rem" }}>
             Outlier detection requires at least 7 days of data.{" "}
             {dataSpanDays != null && 7 - dataSpanDays > 0 && (
-              <>{7 - dataSpanDays} more {7 - dataSpanDays === 1 ? "day" : "days"} needed.</>
+              <>
+                {7 - dataSpanDays} more{" "}
+                {7 - dataSpanDays === 1 ? "day" : "days"} needed.
+              </>
             )}
           </div>
         </div>

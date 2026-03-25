@@ -25,7 +25,10 @@ export default function PerTicketCostTrend({
     <section>
       <h2>Per-Ticket Cost Trend</h2>
       {coldStart ? (
-        <ColdStartPlaceholder requiredDays={7} currentDays={dataSpanDays ?? 0} />
+        <ColdStartPlaceholder
+          requiredDays={7}
+          currentDays={dataSpanDays ?? 0}
+        />
       ) : (
         <div className="chart-container">
           <div
@@ -35,8 +38,9 @@ export default function PerTicketCostTrend({
               fontSize: "0.85rem",
             }}
           >
-            Rolling median tokens per ticket &middot; median: {fmtNum(pt.median)}{" "}
-            &middot; mean: {fmtNum(pt.mean)} &middot; {pt.ticket_count} tickets
+            Rolling median tokens per ticket &middot; median:{" "}
+            {fmtNum(pt.median)} &middot; mean: {fmtNum(pt.mean)} &middot;{" "}
+            {pt.ticket_count} tickets
           </div>
           <Sparkline
             values={perTicketSeries}

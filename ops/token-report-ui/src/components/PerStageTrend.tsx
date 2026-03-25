@@ -29,13 +29,19 @@ export default function PerStageTrend({
     <section>
       <h2>Per-Stage Utilization Trend</h2>
       {coldStart ? (
-        <ColdStartPlaceholder requiredDays={7} currentDays={dataSpanDays ?? 0} />
+        <ColdStartPlaceholder
+          requiredDays={7}
+          currentDays={dataSpanDays ?? 0}
+        />
       ) : (
         <div className="chart-container">
           <MultiLineChart stageData={trend} configChanges={configChanges} />
           {infl.length > 0 &&
             infl.map((inf) => (
-              <div className="inflection-panel" key={`${inf.date}-${inf.metric}`}>
+              <div
+                className="inflection-panel"
+                key={`${inf.date}-${inf.metric}`}
+              >
                 <div className="label">
                   {"\u26A1"} Inflection: {inf.metric ?? ""} &mdash;{" "}
                   {inf.direction ?? ""}{" "}
