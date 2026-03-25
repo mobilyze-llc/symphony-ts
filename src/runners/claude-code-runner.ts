@@ -128,6 +128,7 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
         model: claudeCode(resolvedModel, {
           cwd: this.options.cwd,
           permissionMode: "bypassPermissions",
+          env: { SYMPHONY_PIPELINE: "1" },
         }),
         prompt,
         abortSignal: controller.signal,

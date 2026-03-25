@@ -72,6 +72,7 @@ describe("ClaudeCodeRunner", () => {
     expect(mockClaudeCode).toHaveBeenCalledWith("opus", {
       cwd: "/tmp/workspace",
       permissionMode: "bypassPermissions",
+      env: { SYMPHONY_PIPELINE: "1" },
     });
     expect(mockGenerateText).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -285,6 +286,7 @@ describe("ClaudeCodeRunner", () => {
     expect(mockClaudeCode).toHaveBeenCalledWith("sonnet", {
       cwd: "/tmp/workspace",
       permissionMode: "bypassPermissions",
+      env: { SYMPHONY_PIPELINE: "1" },
     });
   });
 
