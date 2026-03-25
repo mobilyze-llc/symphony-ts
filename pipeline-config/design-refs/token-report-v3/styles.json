@@ -1,0 +1,113 @@
+{
+  "colors": {
+    "background": "#0F1117",
+    "text": "#F0F0F2",
+    "textSecondary": "#FFFFFF66",
+    "textTertiary": "#FFFFFF59",
+    "textMuted": "#FFFFFF40",
+    "textDimmest": "#FFFFFF33",
+    "accent": "#34D399",
+    "warning": "#F59E0B",
+    "info": "#60A5FA",
+    "purple": "#A78BFA",
+    "error": "#EF4444",
+    "cardBackground": "#FFFFFF08",
+    "cardBorder": "#FFFFFF0F",
+    "chartBackground": "#FFFFFF05",
+    "divider": "#FFFFFF0F",
+    "dividerSubtle": "#FFFFFF0A"
+  },
+  "typography": {
+    "heading": {
+      "fontFamily": "\"DM Sans\", system-ui, sans-serif",
+      "fontSize": "36px",
+      "fontWeight": 700,
+      "lineHeight": "44px",
+      "letterSpacing": "-0.02em"
+    },
+    "sectionHeader": {
+      "fontFamily": "\"DM Sans\", system-ui, sans-serif",
+      "fontSize": "11px",
+      "fontWeight": 600,
+      "lineHeight": "14px",
+      "letterSpacing": "0.1em",
+      "textTransform": "uppercase"
+    },
+    "value": {
+      "fontFamily": "\"DM Sans\", system-ui, sans-serif",
+      "fontSize": "32px",
+      "fontWeight": 700,
+      "lineHeight": "40px",
+      "letterSpacing": "-0.02em"
+    },
+    "valueMedium": {
+      "fontFamily": "\"DM Sans\", system-ui, sans-serif",
+      "fontSize": "28px",
+      "fontWeight": 700,
+      "lineHeight": "34px",
+      "letterSpacing": "-0.02em"
+    },
+    "valueSmall": {
+      "fontFamily": "\"DM Sans\", system-ui, sans-serif",
+      "fontSize": "24px",
+      "fontWeight": 700,
+      "lineHeight": "30px",
+      "letterSpacing": "-0.02em"
+    },
+    "body": {
+      "fontFamily": "\"DM Sans\", system-ui, sans-serif",
+      "fontSize": "12px",
+      "fontWeight": 400,
+      "lineHeight": "16px"
+    },
+    "caption": {
+      "fontFamily": "\"DM Sans\", system-ui, sans-serif",
+      "fontSize": "11px",
+      "fontWeight": 400,
+      "lineHeight": "14px"
+    },
+    "label": {
+      "fontFamily": "\"DM Sans\", system-ui, sans-serif",
+      "fontSize": "10px",
+      "fontWeight": 600,
+      "lineHeight": "12px",
+      "letterSpacing": "0.05em",
+      "textTransform": "uppercase"
+    },
+    "mono": {
+      "fontFamily": "\"JetBrains Mono\", system-ui, sans-serif",
+      "fontSize": "13px",
+      "fontWeight": 400,
+      "lineHeight": "16px"
+    },
+    "monoSmall": {
+      "fontFamily": "\"JetBrains Mono\", system-ui, sans-serif",
+      "fontSize": "12px",
+      "fontWeight": 400,
+      "lineHeight": "16px"
+    },
+    "monoTiny": {
+      "fontFamily": "\"JetBrains Mono\", system-ui, sans-serif",
+      "fontSize": "10px",
+      "fontWeight": 400,
+      "lineHeight": "12px"
+    }
+  },
+  "spacing": {
+    "sectionPadding": "64px",
+    "sectionGap": "0px",
+    "groupGap": "20px",
+    "elementGap": "16px",
+    "cardGap": "12px",
+    "cardPadding": "24px",
+    "cardPaddingSmall": "20px",
+    "sectionVerticalPadding": "32px"
+  },
+  "borders": {
+    "radius": "12px",
+    "radiusSmall": "10px",
+    "color": "#FFFFFF0F",
+    "width": "1px",
+    "style": "solid"
+  }
+}
