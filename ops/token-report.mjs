@@ -1843,14 +1843,18 @@ function runRender() {
 // ---------------------------------------------------------------------------
 
 /**
- * Post a ≤15-line Slack digest via webhook.
+ * Post narrative Slack digest via Bot Token API (SYMPH-139).
+ *
+ * 9-section markdown digest with interpretive commentary.
+ * Set DRY_RUN=1 to log to stderr instead of posting.
  */
 function runSlack() {
-  const webhookUrl = process.env.SLACK_WEBHOOK_URL;
-  if (!webhookUrl) {
-    warn("SLACK_WEBHOOK_URL not set — skipping Slack digest");
+  const botToken = process.env.SLACK_BOT_TOKEN;
+  if (!botToken) {
+    warn("SLACK_BOT_TOKEN not set — skipping Slack digest");
     return;
   }
+  const channelId = process.env.SLACK_CHANNEL_ID || "C0ANRJRBYGL";
 
   const analysis = computeAnalysis();
   const es = analysis.executive_summary ?? {};
@@ -1861,6 +1865,9 @@ function runSlack() {
   const inflections = Array.isArray(analysis.inflections)
     ? analysis.inflections
     : (analysis.inflections?.items ?? []);
+  const perStageSpend = analysis.per_stage_spend ?? {};
+  const perProduct = analysis.per_product ?? {};
+  const perTicket = analysis.per_ticket_trend ?? {};
 
   // Compute tokens-per-issue
   const records = readJsonl(TOKEN_HISTORY_PATH);
@@ -1881,60 +1888,135 @@ function runSlack() {
     topConsumer = `${sorted[0][0]} (${fmtNum(sorted[0][1])})`;
   }
 
-  // Report link
-  const baseUrl = process.env.BASE_URL || "pro16.local:8090";
+  // Report link — always use BASE_URL; fall back to pro16.local:{port}
   const reportPort = process.env.TOKEN_REPORT_PORT || "8090";
+  const baseUrl = process.env.BASE_URL || `pro16.local:${reportPort}`;
   const today = dateKey(new Date());
-  // Use BASE_URL if set, otherwise construct from hostname:port
-  const reportUrl = process.env.BASE_URL
-    ? `http://${baseUrl}/${today}.html`
-    : `http://pro16.local:${reportPort}/${today}.html`;
+  const reportUrl = `http://${baseUrl}/${today}.html`;
 
-  // Build ≤15-line message
-  const lines = [
-    `*Symphony Token Digest — ${today}*`,
-    `Tokens/issue: *${medianTPI}* median (${meanTPI} mean)`,
-    `Total: ${fmtNum(es.total_tokens?.value)} tokens · ${fmtNum(es.unique_issues?.value)} issues · ${analysis.data_span_days ?? 0}d span`,
-    `Cache: ${round(sc.cache_efficiency?.current ?? 0, 1)}% · Output ratio: ${round(sc.output_ratio?.current ?? 0, 1)}%`,
-    `First-pass: ${round(sc.first_pass_rate?.current ?? 0, 1)}% · Tokens/turn: ${fmtNum(sc.tokens_per_turn?.current ?? 0)}`,
-  ];
+  // --- Section 1: Title ---
+  const sections = [];
+  sections.push(`*🎵 Symphony Token Digest — ${today}*`);
 
+  // --- Section 2: Executive Summary ---
+  const spanDays = analysis.data_span_days ?? 0;
+  const tier = analysis.cold_start_tier ?? "unknown";
+  sections.push(
+    `*Executive Summary*\n` +
+      `> *${fmtNum(es.total_tokens?.value)}* tokens across *${fmtNum(es.unique_issues?.value)}* issues over *${spanDays}d* (tier: ${tier})\n` +
+      `> ${fmtNum(es.total_stages?.value ?? 0)} total stages completed`,
+  );
+
+  // --- Section 3: Tokens per Issue ---
+  sections.push(
+    `*Tokens per Issue*\n` +
+      `> Median: *${medianTPI}* · Mean: *${meanTPI}* · Issues tracked: *${issueValues.length}*\n` +
+      `> Top consumer: *${topConsumer}*\n` +
+      (perTicket.ticket_count > 0
+        ? `> Rolling trend — median: ${fmtNum(perTicket.median)}, mean: ${fmtNum(perTicket.mean)}`
+        : `> _No rolling trend data yet_`),
+  );
+
+  // --- Section 4: Efficiency Scorecard ---
+  const cacheEff = round(sc.cache_efficiency?.current ?? 0, 1);
+  const cacheTrend7d = round(sc.cache_efficiency?.trend_7d ?? 0, 1);
+  const outputRatio = round(sc.output_ratio?.current ?? 0, 1);
+  const firstPass = round(sc.first_pass_rate?.current ?? 0, 1);
+  const tokPerTurn = fmtNum(sc.tokens_per_turn?.current ?? 0);
+  const wastedCtx = round(sc.wasted_context?.current ?? 0, 1);
+  sections.push(
+    `*Efficiency Scorecard*\n` +
+      `> Cache hit rate: *${cacheEff}%* (7d trend: ${cacheTrend7d >= 0 ? "+" : ""}${cacheTrend7d}%)\n` +
+      `> Output ratio: *${outputRatio}%* · First-pass success: *${firstPass}%*\n` +
+      `> Tokens/turn: *${tokPerTurn}* · Wasted context: *${wastedCtx}%*`,
+  );
+
+  // --- Section 5: Per-Stage Spend ---
+  const stageEntries = Object.entries(perStageSpend);
+  if (stageEntries.length > 0) {
+    const stageLines = stageEntries
+      .sort((a, b) => (b[1]?.total ?? 0) - (a[1]?.total ?? 0))
+      .slice(0, 5)
+      .map(
+        ([stage, data]) =>
+          `>  • ${stage}: *${fmtNum(data?.total ?? 0)}* tokens (${fmtNum(data?.count ?? 0)} stages)`,
+      );
+    sections.push(`*Per-Stage Spend (top 5)*\n${stageLines.join("\n")}`);
+  } else {
+    sections.push(`*Per-Stage Spend*\n> _No stage data available_`);
+  }
+
+  // --- Section 6: Per-Product Breakdown ---
+  const productEntries = Object.entries(perProduct);
+  if (productEntries.length > 0) {
+    const productLines = productEntries
+      .sort((a, b) => (b[1]?.total_tokens ?? 0) - (a[1]?.total_tokens ?? 0))
+      .slice(0, 5)
+      .map(
+        ([product, data]) =>
+          `>  • ${product}: *${fmtNum(data?.total_tokens ?? 0)}* tokens (${fmtNum(data?.stage_count ?? 0)} stages)`,
+      );
+    sections.push(
+      `*Per-Product Breakdown (top 5)*\n${productLines.join("\n")}`,
+    );
+  } else {
+    sections.push(`*Per-Product Breakdown*\n> _No product data available_`);
+  }
+
+  // --- Section 7: Outliers ---
   if (outliers.length > 0) {
-    lines.push(
-      `⚠️ Outliers: ${outliers
-        .slice(0, 3)
-        .map((o) => `${o.issue_identifier} (z=${o.z_score})`)
-        .join(", ")}`,
+    const outlierLines = outliers.slice(0, 5).map(
+      (o) =>
+        `>  • ⚠️ ${o.issue_identifier}: *${fmtNum(o.total_tokens)}* tokens (z=${round(o.z_score, 2)})${o.hypothesis ? ` — ${o.hypothesis}` : ""}`,
+    );
+    sections.push(
+      `*Outliers* (>${"2σ"} from mean)\n${outlierLines.join("\n")}`,
+    );
+  } else {
+    sections.push(
+      `*Outliers*\n> ✅ No outliers detected — all issues within 2σ of mean`,
     );
   }
+
+  // --- Section 8: Inflections ---
   if (inflections.length > 0) {
-    lines.push(
-      `⚡ Inflections: ${inflections
-        .slice(0, 3)
-        .map((inf) => `${inf.stage} ${inf.direction} ${inf.pct_change}%`)
-        .join(", ")}`,
+    const inflectionLines = inflections.slice(0, 5).map(
+      (inf) =>
+        `>  • ⚡ ${inf.stage}: ${inf.direction} *${round(inf.pct_change, 1)}%* (7d avg crossed 30d avg)`,
+    );
+    sections.push(`*Trend Inflections*\n${inflectionLines.join("\n")}`);
+  } else {
+    sections.push(
+      `*Trend Inflections*\n> _No inflection points detected${spanDays < 30 ? " (requires ≥30d of data)" : ""}_`,
     );
   }
 
-  lines.push(`Top consumer: ${topConsumer}`);
-  lines.push(`<${reportUrl}|Full report>`);
+  // --- Section 9: Report Link ---
+  sections.push(`📊 <${reportUrl}|View full HTML report>`);
 
-  const payload = JSON.stringify({ text: lines.join("\n") });
+  const message = sections.join("\n\n");
+
+  // DRY_RUN support: log to stderr instead of posting
+  if (process.env.DRY_RUN) {
+    process.stderr.write(`[DRY_RUN] Slack digest message:\n${message}\n`);
+    info("DRY_RUN set — Slack digest logged to stderr, not posted");
+    return;
+  }
+
+  const payload = JSON.stringify({ channel: channelId, text: message });
 
   try {
-    execFileSync(
+    const response = execFileSync(
       "curl",
       [
         "-s",
-        "-o",
-        "/dev/null",
-        "-w",
-        "%{http_code}",
         "-X",
         "POST",
-        webhookUrl,
+        "https://slack.com/api/chat.postMessage",
         "-H",
-        "Content-type: application/json",
+        `Authorization: Bearer ${botToken}`,
+        "-H",
+        "Content-type: application/json; charset=utf-8",
         "-d",
         payload,
       ],
@@ -1944,7 +2026,18 @@ function runSlack() {
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
-    info("Slack digest posted");
+    let parsed;
+    try {
+      parsed = JSON.parse(response);
+    } catch {
+      warn(`Slack post returned non-JSON response: ${response.slice(0, 200)}`);
+      return;
+    }
+    if (parsed.ok) {
+      info("Slack digest posted");
+    } else {
+      warn(`Slack API error: ${parsed.error ?? "unknown"}`);
+    }
   } catch (err) {
     warn(`Slack post failed: ${err.message}`);
     // Graceful degradation: don't throw
