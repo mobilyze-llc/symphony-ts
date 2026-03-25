@@ -27,11 +27,13 @@ export interface ScorecardSeries {
 export interface EfficiencyScorecardProps {
   scorecard: EfficiencyScorecardData;
   series?: ScorecardSeries;
+  coldStart?: boolean;
 }
 
 export default function EfficiencyScorecard({
   scorecard,
   series,
+  coldStart,
 }: EfficiencyScorecardProps) {
   const sc = scorecard ?? ({} as Partial<EfficiencyScorecardData>);
   const s = series ?? {};
@@ -82,6 +84,19 @@ export default function EfficiencyScorecard({
   return (
     <section>
       <h2>Efficiency Scorecard</h2>
+      {coldStart && (
+        <div
+          className="cold-start-scorecard-note"
+          style={{
+            color: "var(--text-muted)",
+            fontSize: "0.85rem",
+            marginBottom: "12px",
+            fontStyle: "italic",
+          }}
+        >
+          Trend data unavailable — requires 7+ days of history
+        </div>
+      )}
       {rows.map((row) => (
         <div className="metric-row" key={row.name}>
           <span className="metric-name">{row.name}</span>

@@ -2,6 +2,8 @@
  * Barrel export for Token Report v2 React components.
  * Exports all 10 sections, chart utilities, design tokens, and CSS.
  */
+export { default as ColdStartBanner } from "./ColdStartBanner.tsx";
+export { default as ColdStartPlaceholder } from "./ColdStartPlaceholder.tsx";
 export { default as ReportHeader } from "./ReportHeader.tsx";
 export { default as ExecutiveSummary } from "./ExecutiveSummary.tsx";
 export { default as EfficiencyScorecard } from "./EfficiencyScorecard.tsx";

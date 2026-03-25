@@ -1,4 +1,5 @@
 import {
+  ColdStartBanner,
   EfficiencyScorecard,
   ExecutiveSummary,
   IssueLeaderboard,
@@ -15,6 +16,7 @@ import analysisData from "./data/analysis.json";
 import type { AnalysisData, Inflection, Outlier } from "./types.ts";
 
 const data = analysisData as AnalysisData;
+const isColdStart = data.cold_start === true && data.data_span_days < 7;
 
 /** Normalize inflections/outliers from the dual union shape. */
 function normalizeInflections(raw: AnalysisData["inflections"]): Inflection[] {
@@ -59,6 +61,12 @@ export default function App() {
         recordCount={data.record_count}
         dataSpanDays={data.data_span_days}
       />
+      {isColdStart && (
+        <ColdStartBanner
+          dataSpanDays={data.data_span_days}
+          message={data.message}
+        />
+      )}
       <ExecutiveSummary
         totalTokens={totalTokens}
         tokensDelta={null}
@@ -69,13 +77,23 @@ export default function App() {
         cacheHitRate={cacheHitRate}
         cacheWow={cacheWow}
       />
-      <EfficiencyScorecard scorecard={sc} />
+      <EfficiencyScorecard scorecard={sc} coldStart={isColdStart} />
       <PerStageTrend
         perStageTrend={data.per_stage_trend}
         inflections={inflections}
+        coldStart={isColdStart}
+        dataSpanDays={data.data_span_days}
       />
-      <PerTicketCostTrend perTicket={data.per_ticket_trend} />
-      <OutlierAnalysis outliers={outliers} />
+      <PerTicketCostTrend
+        perTicket={data.per_ticket_trend}
+        coldStart={isColdStart}
+        dataSpanDays={data.data_span_days}
+      />
+      <OutlierAnalysis
+        outliers={outliers}
+        coldStart={isColdStart}
+        dataSpanDays={data.data_span_days}
+      />
       {/* TODO: IssueLeaderboard data not in current analysis.json shape */}
       <IssueLeaderboard leaderboard={[]} />
       <StageEfficiency perStageSpend={data.per_stage_spend} />
