@@ -1211,12 +1211,45 @@ describe("formatEasternTimestamp", () => {
 
 describe("pipeline_tokens cumulative computation", () => {
   it("shows cumulative pipeline totals across completed and current stages", () => {
-    const state = createInitialOrchestratorState({ pollIntervalMs: 30_000, maxConcurrentAgents: 2 });
-    state.issueExecutionHistory["issue-1"] = [{ stageName: "investigate", durationMs: 10_000, totalTokens: 8_000, inputTokens: 5_000, outputTokens: 2_000, cacheReadTokens: 800, cacheWriteTokens: 200, turns: 5, outcome: "completed" }];
-    const entry = createRunningEntry({ issueId: "issue-1", identifier: "AAA-1", startedAt: "2026-03-06T10:00:00.000Z", sessionId: "thread-a-turn-1", lastCodexEvent: "turn_completed", lastCodexTimestamp: "2026-03-06T10:00:05.000Z", lastCodexMessage: "Implementing", turnCount: 3, codexInputTokens: 1_000, codexOutputTokens: 500, codexTotalTokens: 1_500 });
-    entry.totalStageInputTokens = 3_000; entry.totalStageOutputTokens = 1_500; entry.totalStageTotalTokens = 5_000; entry.totalStageCacheReadTokens = 400; entry.totalStageCacheWriteTokens = 100;
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    state.issueExecutionHistory["issue-1"] = [
+      {
+        stageName: "investigate",
+        durationMs: 10_000,
+        totalTokens: 8_000,
+        inputTokens: 5_000,
+        outputTokens: 2_000,
+        cacheReadTokens: 800,
+        cacheWriteTokens: 200,
+        turns: 5,
+        outcome: "completed",
+      },
+    ];
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Implementing",
+      turnCount: 3,
+      codexInputTokens: 1_000,
+      codexOutputTokens: 500,
+      codexTotalTokens: 1_500,
+    });
+    entry.totalStageInputTokens = 3_000;
+    entry.totalStageOutputTokens = 1_500;
+    entry.totalStageTotalTokens = 5_000;
+    entry.totalStageCacheReadTokens = 400;
+    entry.totalStageCacheWriteTokens = 100;
     state.running["issue-1"] = entry;
-    const snapshot = buildRuntimeSnapshot(state, { now: new Date("2026-03-06T10:00:10.000Z") });
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
     const row = snapshot.running[0]!;
     expect(row.pipeline_tokens.input_tokens).toBe(8_000);
     expect(row.pipeline_tokens.output_tokens).toBe(3_500);
@@ -1226,15 +1259,56 @@ describe("pipeline_tokens cumulative computation", () => {
     expect(row.total_pipeline_tokens).toBe(13_000);
   });
   it("includes tokens from completed stages via execution_history across stage transitions", () => {
-    const state = createInitialOrchestratorState({ pollIntervalMs: 30_000, maxConcurrentAgents: 2 });
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
     state.issueExecutionHistory["issue-1"] = [
-      { stageName: "investigate", durationMs: 10_000, totalTokens: 50_000, inputTokens: 30_000, outputTokens: 15_000, cacheReadTokens: 4_000, cacheWriteTokens: 1_000, turns: 5, outcome: "completed" },
-      { stageName: "implement", durationMs: 20_000, totalTokens: 80_000, inputTokens: 50_000, outputTokens: 25_000, cacheReadTokens: 3_000, cacheWriteTokens: 2_000, turns: 10, outcome: "completed" },
+      {
+        stageName: "investigate",
+        durationMs: 10_000,
+        totalTokens: 50_000,
+        inputTokens: 30_000,
+        outputTokens: 15_000,
+        cacheReadTokens: 4_000,
+        cacheWriteTokens: 1_000,
+        turns: 5,
+        outcome: "completed",
+      },
+      {
+        stageName: "implement",
+        durationMs: 20_000,
+        totalTokens: 80_000,
+        inputTokens: 50_000,
+        outputTokens: 25_000,
+        cacheReadTokens: 3_000,
+        cacheWriteTokens: 2_000,
+        turns: 10,
+        outcome: "completed",
+      },
     ];
-    const entry = createRunningEntry({ issueId: "issue-1", identifier: "AAA-1", startedAt: "2026-03-06T10:00:00.000Z", sessionId: "thread-a-turn-1", lastCodexEvent: "turn_completed", lastCodexTimestamp: "2026-03-06T10:00:05.000Z", lastCodexMessage: "Reviewing", turnCount: 0, codexInputTokens: 0, codexOutputTokens: 0, codexTotalTokens: 0 });
-    entry.totalStageInputTokens = 0; entry.totalStageOutputTokens = 0; entry.totalStageTotalTokens = 0; entry.totalStageCacheReadTokens = 0; entry.totalStageCacheWriteTokens = 0;
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Reviewing",
+      turnCount: 0,
+      codexInputTokens: 0,
+      codexOutputTokens: 0,
+      codexTotalTokens: 0,
+    });
+    entry.totalStageInputTokens = 0;
+    entry.totalStageOutputTokens = 0;
+    entry.totalStageTotalTokens = 0;
+    entry.totalStageCacheReadTokens = 0;
+    entry.totalStageCacheWriteTokens = 0;
     state.running["issue-1"] = entry;
-    const snapshot = buildRuntimeSnapshot(state, { now: new Date("2026-03-06T10:00:10.000Z") });
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
     const row = snapshot.running[0]!;
     expect(row.pipeline_tokens.input_tokens).toBe(80_000);
     expect(row.pipeline_tokens.output_tokens).toBe(40_000);
@@ -1244,11 +1318,32 @@ describe("pipeline_tokens cumulative computation", () => {
     expect(row.total_pipeline_tokens).toBe(130_000);
   });
   it("shows current stage tokens only when no execution_history exists (first stage)", () => {
-    const state = createInitialOrchestratorState({ pollIntervalMs: 30_000, maxConcurrentAgents: 2 });
-    const entry = createRunningEntry({ issueId: "issue-1", identifier: "AAA-1", startedAt: "2026-03-06T10:00:00.000Z", sessionId: "thread-a-turn-1", lastCodexEvent: "turn_completed", lastCodexTimestamp: "2026-03-06T10:00:05.000Z", lastCodexMessage: "Investigating", turnCount: 2, codexInputTokens: 1_000, codexOutputTokens: 500, codexTotalTokens: 1_500 });
-    entry.totalStageInputTokens = 4_000; entry.totalStageOutputTokens = 2_000; entry.totalStageTotalTokens = 7_000; entry.totalStageCacheReadTokens = 600; entry.totalStageCacheWriteTokens = 400;
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Investigating",
+      turnCount: 2,
+      codexInputTokens: 1_000,
+      codexOutputTokens: 500,
+      codexTotalTokens: 1_500,
+    });
+    entry.totalStageInputTokens = 4_000;
+    entry.totalStageOutputTokens = 2_000;
+    entry.totalStageTotalTokens = 7_000;
+    entry.totalStageCacheReadTokens = 600;
+    entry.totalStageCacheWriteTokens = 400;
     state.running["issue-1"] = entry;
-    const snapshot = buildRuntimeSnapshot(state, { now: new Date("2026-03-06T10:00:10.000Z") });
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
     const row = snapshot.running[0]!;
     expect(row.pipeline_tokens.input_tokens).toBe(4_000);
     expect(row.pipeline_tokens.output_tokens).toBe(2_000);
@@ -1258,12 +1353,41 @@ describe("pipeline_tokens cumulative computation", () => {
     expect(row.total_pipeline_tokens).toBe(7_000);
   });
   it("handles execution_history with missing optional token fields (backward compat)", () => {
-    const state = createInitialOrchestratorState({ pollIntervalMs: 30_000, maxConcurrentAgents: 2 });
-    state.issueExecutionHistory["issue-1"] = [{ stageName: "investigate", durationMs: 10_000, totalTokens: 50_000, turns: 5, outcome: "completed" }];
-    const entry = createRunningEntry({ issueId: "issue-1", identifier: "AAA-1", startedAt: "2026-03-06T10:00:00.000Z", sessionId: "thread-a-turn-1", lastCodexEvent: "turn_completed", lastCodexTimestamp: "2026-03-06T10:00:05.000Z", lastCodexMessage: "Implementing", turnCount: 1, codexInputTokens: 500, codexOutputTokens: 250, codexTotalTokens: 750 });
-    entry.totalStageInputTokens = 2_000; entry.totalStageOutputTokens = 1_000; entry.totalStageTotalTokens = 3_000; entry.totalStageCacheReadTokens = 100; entry.totalStageCacheWriteTokens = 50;
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    state.issueExecutionHistory["issue-1"] = [
+      {
+        stageName: "investigate",
+        durationMs: 10_000,
+        totalTokens: 50_000,
+        turns: 5,
+        outcome: "completed",
+      },
+    ];
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "AAA-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Implementing",
+      turnCount: 1,
+      codexInputTokens: 500,
+      codexOutputTokens: 250,
+      codexTotalTokens: 750,
+    });
+    entry.totalStageInputTokens = 2_000;
+    entry.totalStageOutputTokens = 1_000;
+    entry.totalStageTotalTokens = 3_000;
+    entry.totalStageCacheReadTokens = 100;
+    entry.totalStageCacheWriteTokens = 50;
     state.running["issue-1"] = entry;
-    const snapshot = buildRuntimeSnapshot(state, { now: new Date("2026-03-06T10:00:10.000Z") });
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
     const row = snapshot.running[0]!;
     expect(row.pipeline_tokens.input_tokens).toBe(2_000);
     expect(row.pipeline_tokens.output_tokens).toBe(1_000);
