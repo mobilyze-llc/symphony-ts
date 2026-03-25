@@ -1,4 +1,4 @@
-import analysisData from "./analysis.json";
+import analysisData from "./data/analysis.json";
 import {
   EfficiencyScorecard,
   ExecutiveSummary,

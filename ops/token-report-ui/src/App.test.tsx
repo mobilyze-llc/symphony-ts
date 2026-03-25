@@ -1,7 +1,7 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import App from "./App.tsx";
-import analysisData from "./analysis.json";
+import analysisData from "./data/analysis.json";
 import {
   EfficiencyScorecard,
   ExecutiveSummary,
