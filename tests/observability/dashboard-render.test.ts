@@ -40,6 +40,7 @@ const BASE_ROW: RuntimeSnapshot["running"][number] = {
   turn_history: [],
   recent_activity: [],
   last_tool_call: null,
+  failure_reason: null,
   health: "green",
   health_reason: null,
 };
@@ -139,6 +140,29 @@ describe("Dashboard Pipeline column", () => {
     const snapshot = buildSnapshot({});
     const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: true });
     expect(html).toContain("row.last_tool_call");
+  });
+
+  it("detail panel shows failure reason prominently for failed_to_start", () => {
+    const snapshot = buildSnapshot({
+      failure_reason: "Worker process exited with code 1 before any turns",
+    });
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+    // Failure reason displayed in the detail panel context section
+    expect(html).toContain("Failure");
+    expect(html).toContain(
+      "Worker process exited with code 1 before any turns",
+    );
+    expect(html).toContain("context-health-red");
+  });
+
+  it("main table status column shows failure reason for failed_to_start", () => {
+    const snapshot = buildSnapshot({
+      failure_reason: "Sandbox initialization failed",
+    });
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+    // Failure reason visible in the status column as a danger badge
+    expect(html).toContain("state-badge-danger");
+    expect(html).toContain("Sandbox initialization failed");
   });
 
   it("token breakdown renders cumulative pipeline token values", () => {

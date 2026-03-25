@@ -550,6 +550,7 @@ function createSnapshot(): RuntimeSnapshot {
         turn_history: [],
         recent_activity: [],
         last_tool_call: null,
+        failure_reason: null,
         health: "green",
         health_reason: null,
       },
