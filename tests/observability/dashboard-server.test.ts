@@ -539,6 +539,13 @@ function createSnapshot(): RuntimeSnapshot {
           reasoning_tokens: 50,
         },
         total_pipeline_tokens: 2000,
+        pipeline_tokens: {
+          input_tokens: 1000,
+          output_tokens: 500,
+          total_tokens: 2000,
+          cache_read_tokens: 200,
+          cache_write_tokens: 100,
+        },
         execution_history: [],
         turn_history: [],
         recent_activity: [],

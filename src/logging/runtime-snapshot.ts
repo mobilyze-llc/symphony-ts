@@ -37,6 +37,13 @@ export interface RuntimeSnapshotRunningRow {
   };
   rework_count?: number;
   total_pipeline_tokens: number;
+  pipeline_tokens: {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    cache_read_tokens: number;
+    cache_write_tokens: number;
+  };
   execution_history: StageRecord[];
   turn_history: TurnHistoryEntry[];
   recent_activity: RecentActivityEntry[];
@@ -101,6 +108,26 @@ export function buildRuntimeSnapshot(
       );
       const totalPipelineTokens =
         completedStageTokens + entry.totalStageTotalTokens;
+      const pipelineInputTokens =
+        executionHistory.reduce(
+          (sum, stage) => sum + (stage.inputTokens ?? 0),
+          0,
+        ) + entry.totalStageInputTokens;
+      const pipelineOutputTokens =
+        executionHistory.reduce(
+          (sum, stage) => sum + (stage.outputTokens ?? 0),
+          0,
+        ) + entry.totalStageOutputTokens;
+      const pipelineCacheReadTokens =
+        executionHistory.reduce(
+          (sum, stage) => sum + (stage.cacheReadTokens ?? 0),
+          0,
+        ) + entry.totalStageCacheReadTokens;
+      const pipelineCacheWriteTokens =
+        executionHistory.reduce(
+          (sum, stage) => sum + (stage.cacheWriteTokens ?? 0),
+          0,
+        ) + entry.totalStageCacheWriteTokens;
       const pipelineStage = state.issueStages[entry.issue.id] ?? null;
       const { health, health_reason } = classifyHealth(
         entry.lastCodexTimestamp,
@@ -137,6 +164,13 @@ export function buildRuntimeSnapshot(
           reasoning_tokens: entry.codexReasoningTokens,
         },
         total_pipeline_tokens: totalPipelineTokens,
+        pipeline_tokens: {
+          input_tokens: pipelineInputTokens,
+          output_tokens: pipelineOutputTokens,
+          total_tokens: totalPipelineTokens,
+          cache_read_tokens: pipelineCacheReadTokens,
+          cache_write_tokens: pipelineCacheWriteTokens,
+        },
         execution_history: executionHistory,
         turn_history: entry.turnHistory,
         recent_activity: entry.recentActivity,

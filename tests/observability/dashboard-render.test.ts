@@ -29,6 +29,13 @@ const BASE_ROW: RuntimeSnapshot["running"][number] = {
     reasoning_tokens: 50,
   },
   total_pipeline_tokens: 1500,
+  pipeline_tokens: {
+    input_tokens: 1000,
+    output_tokens: 500,
+    total_tokens: 1500,
+    cache_read_tokens: 200,
+    cache_write_tokens: 100,
+  },
   execution_history: [],
   turn_history: [],
   recent_activity: [],
@@ -132,5 +139,24 @@ describe("Dashboard Pipeline column", () => {
     const snapshot = buildSnapshot({});
     const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: true });
     expect(html).toContain("row.last_tool_call");
+  });
+
+  it("token breakdown renders cumulative pipeline token values", () => {
+    const snapshot = buildSnapshot({
+      pipeline_tokens: {
+        input_tokens: 8_000,
+        output_tokens: 3_500,
+        total_tokens: 13_000,
+        cache_read_tokens: 1_200,
+        cache_write_tokens: 300,
+      },
+      total_pipeline_tokens: 13_000,
+    });
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+    expect(html).toContain("8,000");
+    expect(html).toContain("3,500");
+    expect(html).toContain("13,000");
+    expect(html).toContain("1,200");
+    expect(html).toContain("300");
   });
 });

@@ -843,15 +843,16 @@ function renderDashboardClientScript(
           }
           var contextSection = contextItems.length > 0 ? '<div class="context-section">' + contextItems.join('') + '</div>' : '';
 
+          var pt = row.pipeline_tokens || { input_tokens: 0, output_tokens: 0, total_tokens: row.total_pipeline_tokens, cache_read_tokens: 0, cache_write_tokens: 0 };
           const tokenBreakdown =
             '<div class="detail-section">' +
             '<p class="detail-section-title">Token breakdown</p>' +
             '<div class="detail-kv">' +
-            '<span class="detail-kv-label">Input</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.input_tokens) + '</span>' +
-            '<span class="detail-kv-label">Output</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.output_tokens) + '</span>' +
-            '<span class="detail-kv-label">Total</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.total_tokens) + '</span>' +
-            '<span class="detail-kv-label">Cache read</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.cache_read_tokens) + '</span>' +
-            '<span class="detail-kv-label">Cache write</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.cache_write_tokens) + '</span>' +
+            '<span class="detail-kv-label">Input</span><span class="detail-kv-value numeric">' + formatInteger(pt.input_tokens) + '</span>' +
+            '<span class="detail-kv-label">Output</span><span class="detail-kv-value numeric">' + formatInteger(pt.output_tokens) + '</span>' +
+            '<span class="detail-kv-label">Total</span><span class="detail-kv-value numeric">' + formatInteger(pt.total_tokens) + '</span>' +
+            '<span class="detail-kv-label">Cache read</span><span class="detail-kv-value numeric">' + formatInteger(pt.cache_read_tokens) + '</span>' +
+            '<span class="detail-kv-label">Cache write</span><span class="detail-kv-value numeric">' + formatInteger(pt.cache_write_tokens) + '</span>' +
             '<span class="detail-kv-label">Reasoning</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.reasoning_tokens) + '</span>' +
             '<span class="detail-kv-label">Pipeline</span><span class="detail-kv-value numeric">' + formatInteger(row.total_pipeline_tokens) + '</span>' +
             '</div></div>';
@@ -1150,15 +1151,22 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
       ? `<div class="context-section">${contextItems.join("")}</div>`
       : "";
 
+  const pt = row.pipeline_tokens ?? {
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: row.total_pipeline_tokens,
+    cache_read_tokens: 0,
+    cache_write_tokens: 0,
+  };
   const tokenBreakdown = `
     <div class="detail-section">
       <p class="detail-section-title">Token breakdown</p>
       <div class="detail-kv">
-        <span class="detail-kv-label">Input</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.input_tokens)}</span>
-        <span class="detail-kv-label">Output</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.output_tokens)}</span>
-        <span class="detail-kv-label">Total</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.total_tokens)}</span>
-        <span class="detail-kv-label">Cache read</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.cache_read_tokens)}</span>
-        <span class="detail-kv-label">Cache write</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.cache_write_tokens)}</span>
+        <span class="detail-kv-label">Input</span><span class="detail-kv-value numeric">${formatInteger(pt.input_tokens)}</span>
+        <span class="detail-kv-label">Output</span><span class="detail-kv-value numeric">${formatInteger(pt.output_tokens)}</span>
+        <span class="detail-kv-label">Total</span><span class="detail-kv-value numeric">${formatInteger(pt.total_tokens)}</span>
+        <span class="detail-kv-label">Cache read</span><span class="detail-kv-value numeric">${formatInteger(pt.cache_read_tokens)}</span>
+        <span class="detail-kv-label">Cache write</span><span class="detail-kv-value numeric">${formatInteger(pt.cache_write_tokens)}</span>
         <span class="detail-kv-label">Reasoning</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.reasoning_tokens)}</span>
         <span class="detail-kv-label">Pipeline</span><span class="detail-kv-value numeric">${formatInteger(row.total_pipeline_tokens)}</span>
       </div>

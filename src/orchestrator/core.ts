@@ -455,6 +455,8 @@ export class OrchestratorCore {
         totalTokens: runningEntry.totalStageTotalTokens,
         inputTokens: runningEntry.totalStageInputTokens,
         outputTokens: runningEntry.totalStageOutputTokens,
+        cacheReadTokens: runningEntry.totalStageCacheReadTokens,
+        cacheWriteTokens: runningEntry.totalStageCacheWriteTokens,
         turns: runningEntry.turnCount,
         outcome: classifiedOutcome,
       };
