@@ -29,7 +29,7 @@ Exact commands to build, run, and develop. No ambiguity — copy-paste ready.
 npm install
 
 # Development server (port from D40 port table)
-# jony=3000, hs-data=3001, hs-ui=3002, stickerlabs=3003, household=3004, pipeline-test-1=3005
+# jony=3000, hs-data=3001, hs-dash=3002, stickerlabs=3003, household=3004, pipeline-test-1=3005
 npm run dev          # http://localhost:<PORT>
 
 # Build

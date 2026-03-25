@@ -33,7 +33,7 @@ Products:
   symphony      Symphony orchestrator (github.com/mobilyze-llc/symphony-ts)
   jony-agent    Jony Agent
   hs-data       Household Services Data
-  hs-ui         Household Services UI
+  hs-dash       Healthspanners Dash
   hs-mobile     Household Services Mobile
   stickerlabs   Stickerlabs Factory (github.com/mobilyze-llc/stickerlabs-factory)
   household     Household
@@ -91,8 +91,8 @@ case "$PRODUCT" in
     WORKFLOW="pipeline-config/workflows/WORKFLOW-hs-data.md"
     DEFAULT_REPO_URL="TBD"
     ;;
-  hs-ui)
-    WORKFLOW="pipeline-config/workflows/WORKFLOW-hs-ui.md"
+  hs-dash)
+    WORKFLOW="pipeline-config/workflows/WORKFLOW-hs-dash.md"
     DEFAULT_REPO_URL="TBD"
     ;;
   hs-mobile)
@@ -114,7 +114,7 @@ case "$PRODUCT" in
   *)
     echo "Error: Unknown product '$PRODUCT'"
     echo ""
-    echo "Available products: symphony, jony-agent, hs-data, hs-ui, hs-mobile, stickerlabs, household, toys"
+    echo "Available products: symphony, jony-agent, hs-data, hs-dash, hs-mobile, stickerlabs, household, toys"
     echo "Run './run-pipeline.sh --help' for details."
     exit 1
     ;;

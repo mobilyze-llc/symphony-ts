@@ -54,7 +54,7 @@ pnpm build            # or: npm run build
 
 # Run the pipeline for a specific product
 ./run-pipeline.sh <product>
-# Products: symphony, jony-agent, hs-data, hs-ui, hs-mobile, stickerlabs, household
+# Products: symphony, jony-agent, hs-data, hs-dash, hs-mobile, stickerlabs, household
 
 # Run directly (after building)
 node dist/src/cli/main.js <workflow-path> --acknowledge-high-trust-preview
