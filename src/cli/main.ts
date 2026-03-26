@@ -171,36 +171,25 @@ export async function startCliHost(
     ? new PipelineNotifier({
         channel: slackChannel,
         poster: createSlackPoster({ botToken: slackToken }),
-        onError: (error) => {
-          const entry = {
+        onError: (error) =>
+          logToStderr({
             timestamp: formatEasternTimestamp(new Date()),
             level: "error",
             event: "slack_notification_failed",
             channel: slackChannel,
             message: safeErrorMessage(error),
-          };
-          try {
-            writeSync(2, `${JSON.stringify(entry)}\n`);
-          } catch {
-            // Ignore write errors — notification failures must never crash the pipeline.
-          }
-        },
+          }),
       })
     : null;
 
-  const startupEntry = {
+  logToStderr({
     timestamp: formatEasternTimestamp(new Date()),
     level: "info",
     event: "notifier_init",
     enabled: canNotify,
     channel: slackChannel,
     tokenPresent: slackToken !== undefined,
-  };
-  try {
-    writeSync(2, `${JSON.stringify(startupEntry)}\n`);
-  } catch {
-    // Ignore write errors.
-  }
+  });
 
   return startRuntimeService({
     config: input.runtime.config,
@@ -286,39 +275,38 @@ function safeErrorMessage(error: unknown): string {
   }
 }
 
+/** Best-effort structured JSON line to stderr. Never throws. */
+function logToStderr(entry: Record<string, unknown>): void {
+  try {
+    writeSync(2, `${JSON.stringify(entry)}\n`);
+  } catch {
+    // Swallow — logging must never crash the pipeline.
+  }
+}
+
 export function handleUncaughtException(error: unknown): void {
-  const entry = {
+  process.exitCode = 70;
+  logToStderr({
     timestamp: formatEasternTimestamp(new Date()),
     level: "error",
     event: "process_crash",
     message: safeErrorMessage(error),
     error_code: "uncaught_exception",
     stack: error instanceof Error ? error.stack : undefined,
-  };
-  process.exitCode = 70;
-  try {
-    writeSync(2, `${JSON.stringify(entry)}\n`);
-  } catch {
-    // Ignore write errors during crash — exiting is the priority.
-  }
+  });
   process.exit(70);
 }
 
 export function handleUnhandledRejection(reason: unknown): void {
-  const entry = {
+  process.exitCode = 70;
+  logToStderr({
     timestamp: formatEasternTimestamp(new Date()),
     level: "error",
     event: "process_crash",
     message: safeErrorMessage(reason),
     error_code: "unhandled_rejection",
     stack: reason instanceof Error ? reason.stack : undefined,
-  };
-  process.exitCode = 70;
-  try {
-    writeSync(2, `${JSON.stringify(entry)}\n`);
-  } catch {
-    // Ignore write errors during crash — exiting is the priority.
-  }
+  });
   process.exit(70);
 }
 
