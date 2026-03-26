@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { describe, expect, it } from "vitest";
 
 const SKILL_PATH = resolve(__dirname, "../../skills/export-design/SKILL.md");
 const skillContent = readFileSync(SKILL_PATH, "utf-8");
@@ -9,7 +9,7 @@ describe("export-design SKILL.md", () => {
   describe("Step 3b: Inline DATA annotations", () => {
     it("contains Step 3b heading for DATA annotations", () => {
       expect(skillContent).toContain(
-        "### Step 3b: Annotate Ambiguous Dynamic Values"
+        "### Step 3b: Annotate Ambiguous Dynamic Values",
       );
     });
 
@@ -40,39 +40,33 @@ describe("export-design SKILL.md", () => {
     it("explicitly excludes static style values from annotation", () => {
       expect(skillContent).toContain("Do NOT annotate");
       expect(skillContent).toMatch(
-        /colors in.*style.*objects that are constant/i
+        /colors in.*style.*objects that are constant/i,
       );
       expect(skillContent).toMatch(/spacing.*padding.*margin/i);
     });
 
     it("specifies in-place annotation (no separate file)", () => {
       expect(skillContent).toContain(
-        "Apply annotations in-place within each `sections/<name>.jsx` file"
+        "Apply annotations in-place within each `sections/<name>.jsx` file",
       );
       expect(skillContent).toContain(
-        "Do not create a separate file for annotations"
+        "Do not create a separate file for annotations",
       );
     });
 
     it("provides before/after annotation example", () => {
       // Before example
-      expect(skillContent).toContain(
-        "{trendIcon[m.trend]} {m.delta}"
-      );
+      expect(skillContent).toContain("{trendIcon[m.trend]} {m.delta}");
       // After example with DATA comments
-      expect(skillContent).toContain(
-        "{/* DATA: color varies by trend status"
-      );
-      expect(skillContent).toContain(
-        "{/* DATA: delta percentage value"
-      );
+      expect(skillContent).toContain("{/* DATA: color varies by trend status");
+      expect(skillContent).toContain("{/* DATA: delta percentage value");
     });
   });
 
   describe("Step 5b: Per-section screenshots", () => {
     it("contains Step 5b heading for per-section screenshots", () => {
       expect(skillContent).toContain(
-        "### Step 5b: Capture Per-Section Screenshots"
+        "### Step 5b: Capture Per-Section Screenshots",
       );
     });
 
@@ -93,7 +87,7 @@ describe("export-design SKILL.md", () => {
 
     it("re-uses existing MCP session from Step 5", () => {
       expect(skillContent).toContain(
-        "Re-use the existing $SESSION_ID from Step 5"
+        "Re-use the existing $SESSION_ID from Step 5",
       );
     });
 
@@ -103,7 +97,7 @@ describe("export-design SKILL.md", () => {
 
     it("keeps full-artboard screenshot alongside per-section screenshots", () => {
       expect(skillContent).toContain(
-        "full-artboard screenshot (`screenshot.png`) is always kept"
+        "full-artboard screenshot (`screenshot.png`) is always kept",
       );
     });
   });
@@ -126,30 +120,28 @@ describe("export-design SKILL.md", () => {
   describe("Quality checklist", () => {
     it("includes DATA annotation check", () => {
       expect(skillContent).toContain(
-        "Each `.jsx` file contains `{/* DATA: ... */}` annotations"
+        "Each `.jsx` file contains `{/* DATA: ... */}` annotations",
       );
     });
 
     it("includes per-section screenshot check", () => {
       expect(skillContent).toContain(
-        "Every section has a corresponding `.png` file in `sections/`"
+        "Every section has a corresponding `.png` file in `sections/`",
       );
     });
 
     it("preserves existing checklist items", () => {
       expect(skillContent).toContain(
-        "Every top-level artboard child has a corresponding `.jsx` file"
+        "Every top-level artboard child has a corresponding `.jsx` file",
       );
       expect(skillContent).toContain("`screenshot.png` exists and is > 10KB");
       expect(skillContent).toContain(
-        "`styles.json` contains at least `colors` and `typography` keys"
+        "`styles.json` contains at least `colors` and `typography` keys",
       );
       expect(skillContent).toContain(
-        "`structure.md` lists all sections with dimensions"
+        "`structure.md` lists all sections with dimensions",
       );
-      expect(skillContent).toContain(
-        "No node IDs appear in any output file"
-      );
+      expect(skillContent).toContain("No node IDs appear in any output file");
     });
   });
 
@@ -158,10 +150,7 @@ describe("export-design SKILL.md", () => {
       // All localhost refs should be inside ${BASE_URL:-...} fallback patterns
       const lines = skillContent.split("\n");
       for (const line of lines) {
-        if (
-          line.includes("localhost") ||
-          line.includes("127.0.0.1")
-        ) {
+        if (line.includes("localhost") || line.includes("127.0.0.1")) {
           // Must be inside a ${BASE_URL:-...} pattern
           expect(line).toMatch(/\$\{BASE_URL:-/);
         }
