@@ -17,9 +17,7 @@ describe("export-design SKILL.md", () => {
 
     it("covers conditional colors pattern", () => {
       expect(skillContent).toMatch(/conditional colors/i);
-      expect(skillContent).toContain(
-        "DATA: color indicates threshold/status",
-      );
+      expect(skillContent).toContain("DATA: color indicates threshold/status");
     });
 
     it("covers computed text pattern (numbers with units)", () => {
@@ -81,9 +79,7 @@ describe("export-design SKILL.md", () => {
     });
 
     it("keeps full-artboard screenshot alongside per-section screenshots", () => {
-      expect(skillContent).toContain(
-        "full-artboard screenshot is verified",
-      );
+      expect(skillContent).toContain("full-artboard screenshot is verified");
     });
   });
 
@@ -183,9 +179,7 @@ describe("export-design SKILL.md", () => {
     });
 
     it("references DATA annotations in Component Mapping column header", () => {
-      expect(skillContent).toContain(
-        "Key Props (from DATA annotations)",
-      );
+      expect(skillContent).toContain("Key Props (from DATA annotations)");
     });
   });
 
