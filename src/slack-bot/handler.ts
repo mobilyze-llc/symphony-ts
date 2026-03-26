@@ -197,9 +197,32 @@ export function createMessageHandler(options: HandleMessageOptions) {
         teamId,
       );
       try {
+        let lastChunkTime = Date.now();
+        let chunkCount = 0;
+        let totalChars = 0;
         for await (const chunk of result.textStream) {
+          const now = Date.now();
+          const gap = now - lastChunkTime;
+          chunkCount++;
+          totalChars += chunk.length;
+          if (gap > 3000) {
+            process.stderr.write(
+              `[stream-diag] ${gap}ms gap before chunk #${chunkCount} (${chunk.length} chars, total ${totalChars})\n`,
+            );
+          }
+          const t0 = Date.now();
           await consumer.append(chunk);
+          const appendMs = Date.now() - t0;
+          if (appendMs > 1000) {
+            process.stderr.write(
+              `[stream-diag] append took ${appendMs}ms for chunk #${chunkCount} (${chunk.length} chars)\n`,
+            );
+          }
+          lastChunkTime = Date.now();
         }
+        process.stderr.write(
+          `[stream-diag] stream complete: ${chunkCount} chunks, ${totalChars} chars\n`,
+        );
         await consumer.finish();
       } catch (error) {
         await consumer.finish(); // ensure cleanup
