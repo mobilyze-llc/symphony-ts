@@ -579,11 +579,11 @@ describe("createMessageHandler", () => {
     });
     await handler(secondArgs);
 
-    // Verify second call includes resume with session ID
+    // Verify second call includes resume but NOT settingSources
+    // (settingSources on resume forces fresh initialisation, breaking context)
     expect(claudeCode).toHaveBeenCalledWith("sonnet", {
       cwd: "/tmp/test-project",
       permissionMode: "bypassPermissions",
-      settingSources: ["user", "project"],
       resume: "cc-session-abc",
     });
   });

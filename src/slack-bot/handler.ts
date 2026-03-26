@@ -152,21 +152,27 @@ export function createMessageHandler(options: HandleMessageOptions) {
         lastActiveAt: new Date(),
       });
 
-      // Build CC provider options with session continuity
+      // Build CC provider options with session continuity.
+      // settingSources loads MCP servers, plugins, and skills from the user's
+      // Claude config.  It is only passed for NEW sessions — resumed sessions
+      // inherit them from the persisted session state.  Passing settingSources
+      // on resume would force a fresh session initialisation, breaking
+      // conversation continuity.
       const resolvedModel = resolveClaudeModelId(model);
       const existingSessionId = getCcSessionId(ccSessions, threadTs);
       const ccOptions: {
         cwd: string;
         permissionMode: "bypassPermissions";
-        settingSources: Array<"user" | "project">;
+        settingSources?: Array<"user" | "project">;
         resume?: string;
       } = {
         cwd: projectDir,
         permissionMode: "bypassPermissions",
-        settingSources: ["user", "project"],
       };
       if (existingSessionId) {
         ccOptions.resume = existingSessionId;
+      } else {
+        ccOptions.settingSources = ["user", "project"];
       }
 
       // Set "is thinking..." status (best-effort)
