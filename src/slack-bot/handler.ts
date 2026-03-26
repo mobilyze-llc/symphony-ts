@@ -171,8 +171,14 @@ export function createMessageHandler(options: HandleMessageOptions) {
       };
       if (existingSessionId) {
         ccOptions.resume = existingSessionId;
+        process.stderr.write(
+          `[session-diag] RESUME thread=${threadTs} sessionId=${existingSessionId}\n`,
+        );
       } else {
         ccOptions.settingSources = ["user", "project"];
+        process.stderr.write(
+          `[session-diag] NEW thread=${threadTs} (no existing session)\n`,
+        );
       }
 
       // Set "is thinking..." status (best-effort)
@@ -231,6 +237,7 @@ export function createMessageHandler(options: HandleMessageOptions) {
 
       // Extract and store session ID from provider metadata for continuity
       const response = await result.response;
+      const msgCount = response.messages?.length ?? 0;
       const lastMsg = response.messages?.[response.messages.length - 1] as
         | {
             providerMetadata?: {
@@ -241,6 +248,13 @@ export function createMessageHandler(options: HandleMessageOptions) {
       const ccSessionId = lastMsg?.providerMetadata?.["claude-code"]?.sessionId;
       if (ccSessionId) {
         setCcSessionId(ccSessions, threadTs, ccSessionId);
+        process.stderr.write(
+          `[session-diag] STORED thread=${threadTs} sessionId=${ccSessionId}\n`,
+        );
+      } else {
+        process.stderr.write(
+          `[session-diag] NO SESSION ID in response (${msgCount} messages, lastMsg keys: ${lastMsg ? Object.keys(lastMsg).join(",") : "null"})\n`,
+        );
       }
 
       // Replace eyes with checkmark on success
