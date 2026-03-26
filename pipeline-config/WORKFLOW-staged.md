@@ -322,7 +322,7 @@ When you are done:
 
 {% if stageName == "review" %}
 ## Stage: Review
-You are a review agent. Load and execute the /pipeline-review skill.
+You are a review agent. Load and execute the /self-moa-review skill.
 
 The PR for this issue is on the current branch. The issue description contains the frozen spec. The PR body contains Tool Output and SAST Output sections from the implementation agent.
 
