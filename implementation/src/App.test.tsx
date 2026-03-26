@@ -1,12 +1,12 @@
-import { describe, expect, it } from "vitest";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { describe, expect, it } from "vitest";
 import App from "./App.tsx";
+import ChartSection from "./components/ChartSection.tsx";
+import DataTable from "./components/DataTable.tsx";
+import Footer from "./components/Footer.tsx";
 import Header from "./components/Header.tsx";
 import MetricsPanel from "./components/MetricsPanel.tsx";
-import DataTable from "./components/DataTable.tsx";
-import ChartSection from "./components/ChartSection.tsx";
-import Footer from "./components/Footer.tsx";
 
 /**
  * Tests for skill-validation-v1 implementation.
@@ -118,7 +118,12 @@ describe("Dynamic values as props", () => {
     const html = renderToStaticMarkup(
       createElement(MetricsPanel, {
         metrics: [
-          { label: "Custom Metric", value: "999", delta: "50%", trend: "up" as const },
+          {
+            label: "Custom Metric",
+            value: "999",
+            delta: "50%",
+            trend: "up" as const,
+          },
         ],
       }),
     );
@@ -156,7 +161,9 @@ describe("Dynamic values as props", () => {
       createElement(ChartSection, {
         title: "Custom Chart Title",
         subtitle: "Custom period",
-        series: [{ name: "custom-series", color: "#FF0000", data: [100, 200, 300] }],
+        series: [
+          { name: "custom-series", color: "#FF0000", data: [100, 200, 300] },
+        ],
         xLabels: ["A", "B", "C"],
         yMax: 300,
       }),

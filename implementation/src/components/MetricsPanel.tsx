@@ -30,9 +30,9 @@ export default function MetricsPanel({ metrics }: MetricsPanelProps) {
         boxSizing: "border-box",
       }}
     >
-      {metrics.map((m, i) => (
+      {metrics.map((m) => (
         <div
-          key={i}
+          key={m.label}
           style={{
             background: "#FFFFFF",
             borderRadius: "8px",

@@ -17,16 +17,18 @@ function Sparkline({ data, color }: { data: number[]; color: string }) {
   const range = max - min || 1;
   const points = data
     .map(
-      (v, i) =>
-        `${(i / (data.length - 1)) * w},${h - ((v - min) / range) * h}`,
+      (v, i) => `${(i / (data.length - 1)) * w},${h - ((v - min) / range) * h}`,
     )
     .join(" ");
   return (
     <svg
       width={w}
       height={h}
+      role="img"
+      aria-label="Cost sparkline"
       style={{ verticalAlign: "middle", marginLeft: "8px" }}
     >
+      <title>Cost sparkline</title>
       <polyline fill="none" stroke={color} strokeWidth="1.5" points={points} />
     </svg>
   );
@@ -65,6 +67,7 @@ export default function DataTable({
         <thead>
           <tr>
             {columns.map((col) => (
+              // biome-ignore lint/a11y/useKeyWithClickEvents: sort headers are mouse-interactive per design spec
               <th
                 key={col}
                 onClick={() => onSort?.(col)}
@@ -89,9 +92,9 @@ export default function DataTable({
           </tr>
         </thead>
         <tbody>
-          {agents.map((agent, i) => (
+          {agents.map((agent) => (
             <tr
-              key={i}
+              key={agent.name}
               style={{
                 borderBottom: "1px solid #E2E8F0",
                 transition: "background 150ms ease",
@@ -100,7 +103,8 @@ export default function DataTable({
                 (e.currentTarget as HTMLElement).style.background = "#F1F5F9";
               }}
               onMouseLeave={(e) => {
-                (e.currentTarget as HTMLElement).style.background = "transparent";
+                (e.currentTarget as HTMLElement).style.background =
+                  "transparent";
               }}
             >
               <td

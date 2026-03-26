@@ -80,6 +80,8 @@ export default function ChartSection({
         width={chartW}
         height={chartH}
         viewBox={`0 0 ${chartW} ${chartH}`}
+        role="img"
+        aria-label={`${title} chart`}
         style={{
           background: "#FFFFFF",
           borderRadius: "8px",
@@ -87,9 +89,10 @@ export default function ChartSection({
           maxWidth: "100%",
         }}
       >
+        <title>{title}</title>
         {/* Grid lines */}
-        {gridLines.map((g, i) => (
-          <g key={i}>
+        {gridLines.map((g) => (
+          <g key={g.label}>
             <line
               x1={padL}
               y1={g.y}
@@ -110,10 +113,10 @@ export default function ChartSection({
         ))}
 
         {/* X-axis labels */}
-        {xLabels.map((label, i) => (
+        {xLabels.map((label) => (
           <text
-            key={i}
-            x={padL + (i / (xLabels.length - 1)) * plotW}
+            key={label}
+            x={padL + (xLabels.indexOf(label) / (xLabels.length - 1)) * plotW}
             y={chartH - 8}
             textAnchor="middle"
             style={{ fontSize: "11px", fill: "#64748B", fontFamily: "Inter" }}
@@ -123,9 +126,9 @@ export default function ChartSection({
         ))}
 
         {/* Data lines */}
-        {series.map((s, i) => (
+        {series.map((s) => (
           <path
-            key={i}
+            key={s.name}
             d={toPath(s.data)}
             fill="none"
             stroke={s.color}
@@ -145,9 +148,9 @@ export default function ChartSection({
           justifyContent: "center",
         }}
       >
-        {series.map((s, i) => (
+        {series.map((s) => (
           <div
-            key={i}
+            key={s.name}
             style={{
               display: "flex",
               alignItems: "center",
