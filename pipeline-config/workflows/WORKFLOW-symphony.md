@@ -68,6 +68,13 @@ hooks:
     # --- Fetch latest refs into bare clone ---
     git -C "$BARE_CLONE" fetch origin 2>/dev/null || echo "WARNING: fetch failed, using cached refs" >&2
 
+    # --- Clean up stale branch from previous failed attempt (idempotency) ---
+    if git -C "$BARE_CLONE" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
+      echo "Cleaning up stale branch $BRANCH_NAME from previous attempt..."
+      git -C "$BARE_CLONE" worktree prune 2>/dev/null || true
+      git -C "$BARE_CLONE" branch -D "$BRANCH_NAME" 2>/dev/null || true
+    fi
+
     # --- Create worktree for this issue ---
     echo "Creating worktree for $ISSUE_KEY on branch $BRANCH_NAME..."
     git -C "$BARE_CLONE" worktree add "$WORKSPACE_DIR" -b "$BRANCH_NAME" main
