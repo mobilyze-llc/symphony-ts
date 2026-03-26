@@ -165,13 +165,42 @@ export async function startCliHost(
 ): Promise<RuntimeServiceHandle> {
   const slackChannel = input.runtime.config.server.slackNotifyChannel;
   const slackToken = input.env.SLACK_BOT_TOKEN;
-  const notifier =
-    slackChannel !== null && slackToken !== undefined
-      ? new PipelineNotifier({
-          channel: slackChannel,
-          poster: createSlackPoster({ botToken: slackToken }),
-        })
-      : null;
+  const canNotify = slackChannel !== null && slackToken !== undefined;
+
+  const notifier = canNotify
+    ? new PipelineNotifier({
+        channel: slackChannel,
+        poster: createSlackPoster({ botToken: slackToken }),
+        onError: (error) => {
+          const entry = {
+            timestamp: formatEasternTimestamp(new Date()),
+            level: "error",
+            event: "slack_notification_failed",
+            channel: slackChannel,
+            message: safeErrorMessage(error),
+          };
+          try {
+            writeSync(2, `${JSON.stringify(entry)}\n`);
+          } catch {
+            // Ignore write errors — notification failures must never crash the pipeline.
+          }
+        },
+      })
+    : null;
+
+  const startupEntry = {
+    timestamp: formatEasternTimestamp(new Date()),
+    level: "info",
+    event: "notifier_init",
+    enabled: canNotify,
+    channel: slackChannel,
+    tokenPresent: slackToken !== undefined,
+  };
+  try {
+    writeSync(2, `${JSON.stringify(startupEntry)}\n`);
+  } catch {
+    // Ignore write errors.
+  }
 
   return startRuntimeService({
     config: input.runtime.config,
