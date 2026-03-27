@@ -977,7 +977,14 @@ describe("token-report.mjs analyze", () => {
     expect(result.daily_series).toBeDefined();
     const ds = result.daily_series;
     // All six series keys present
-    for (const key of ["cacheEff", "outputRatio", "wastedCtx", "tokPerTurn", "firstPass", "failureRate"]) {
+    for (const key of [
+      "cacheEff",
+      "outputRatio",
+      "wastedCtx",
+      "tokPerTurn",
+      "firstPass",
+      "failureRate",
+    ]) {
       expect(Array.isArray(ds[key])).toBe(true);
       // 3 days of data → up to 3 values (sparse)
       expect(ds[key].length).toBeGreaterThan(0);
@@ -995,7 +1002,14 @@ describe("token-report.mjs analyze", () => {
     expect(result.cold_start_tier).toBe(">=30d");
     expect(result.daily_series).toBeDefined();
     const ds = result.daily_series;
-    for (const key of ["cacheEff", "outputRatio", "wastedCtx", "tokPerTurn", "firstPass", "failureRate"]) {
+    for (const key of [
+      "cacheEff",
+      "outputRatio",
+      "wastedCtx",
+      "tokPerTurn",
+      "firstPass",
+      "failureRate",
+    ]) {
       expect(Array.isArray(ds[key])).toBe(true);
       // 30-day window, so up to 30 values
       expect(ds[key].length).toBeGreaterThan(0);
