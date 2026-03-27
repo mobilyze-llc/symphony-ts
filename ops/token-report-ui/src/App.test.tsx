@@ -65,6 +65,7 @@ describe("analysis.json shape", () => {
     expect(analysisData).toHaveProperty("per_product");
     expect(analysisData).toHaveProperty("inflections");
     expect(analysisData).toHaveProperty("outliers");
+    expect(analysisData).toHaveProperty("leaderboard");
   });
 
   it("has correct efficiency_scorecard metrics", () => {
@@ -184,13 +185,15 @@ describe("PerTicketCostTrend", () => {
 });
 
 describe("OutlierAnalysis", () => {
-  it("renders outlier cards", () => {
+  it("renders outlier cards with multiplier", () => {
     const outliers = Array.isArray(data.outliers) ? data.outliers : [];
     const html = renderToString(<OutlierAnalysis outliers={outliers} />);
     expect(html).toContain("Outlier Analysis");
     expect(html).toContain("SYMPH-98");
     expect(html).toContain("JONY-42");
-    expect(html).toContain("3.2");
+    // SYMPH-179: multiplier displayed instead of z-score
+    expect(html).toContain("8.5x mean");
+    expect(html).toContain("mobilyze-llc/issue/SYMPH-98");
   });
 
   it("renders empty state", () => {
@@ -206,14 +209,20 @@ describe("IssueLeaderboard", () => {
     expect(html).toContain("<table");
   });
 
-  it("renders leaderboard items", () => {
+  it("renders leaderboard items with linear_url", () => {
     const items = [
-      { identifier: "SYMPH-100", title: "Test issue", tokens: 100000 },
+      {
+        identifier: "SYMPH-100",
+        title: "Test issue",
+        tokens: 100000,
+        linear_url: "https://linear.app/mobilyze-llc/issue/SYMPH-100",
+      },
     ];
     const html = renderToString(<IssueLeaderboard leaderboard={items} />);
     expect(html).toContain("SYMPH-100");
     expect(html).toContain("Test issue");
     expect(html).toContain("100,000");
+    expect(html).toContain("mobilyze-llc/issue/SYMPH-100");
   });
 });
 

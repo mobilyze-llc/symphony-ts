@@ -77,11 +77,29 @@ export interface Inflection {
 }
 
 export interface Outlier {
-  issue: string;
-  stage: string;
-  tokens: number;
+  issue_identifier: string;
+  issue_title: string;
+  total_tokens: number;
   z_score: number;
-  reason: string;
+  multiplier: number;
+  linear_url: string;
+  threshold: number;
+  mean: number;
+  stddev: number;
+  parent: {
+    identifier: string;
+    title: string;
+    complexity: string;
+    task_count: number;
+  } | null;
+  hypothesis: string;
+}
+
+export interface LeaderboardEntry {
+  identifier: string;
+  title: string;
+  tokens: number;
+  linear_url: string;
 }
 
 export interface InsufficientData {
@@ -116,4 +134,5 @@ export interface AnalysisData {
   daily_series?: DailySeries;
   inflections: Inflection[] | InsufficientData;
   outliers: Outlier[] | InsufficientData;
+  leaderboard: LeaderboardEntry[];
 }

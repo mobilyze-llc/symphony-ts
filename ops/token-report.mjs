@@ -1075,6 +1075,8 @@ function detectOutliers(records) {
         issue_title: meta.issue_title,
         total_tokens: tokens,
         z_score: zScore,
+        multiplier: round(tokens / m, 1),
+        linear_url: `https://linear.app/mobilyze-llc/issue/${identifier}`,
         threshold: round(threshold, 0),
         mean: round(m, 0),
         stddev: round(sd, 0),
@@ -1093,6 +1095,32 @@ function detectOutliers(records) {
 
   outliers.sort((a, b) => b.total_tokens - a.total_tokens);
   return outliers;
+}
+
+/**
+ * Build issue leaderboard sorted by total token spend (top 25).
+ * Ported from renderHtml() so computeAnalysis() can include it in the JSON output.
+ * SYMPH-179
+ */
+function buildLeaderboard(records) {
+  const issueTokens = {};
+  for (const r of records) {
+    const id = r.issue_identifier;
+    if (!id) continue;
+    issueTokens[id] = (issueTokens[id] ?? 0) + (r.total_total_tokens ?? 0);
+  }
+  return Object.entries(issueTokens)
+    .map(([id, tokens]) => {
+      const rec = records.find((r) => r.issue_identifier === id);
+      return {
+        identifier: id,
+        title: rec?.issue_title ?? "",
+        tokens,
+        linear_url: `https://linear.app/mobilyze-llc/issue/${id}`,
+      };
+    })
+    .sort((a, b) => b.tokens - a.tokens)
+    .slice(0, 25);
 }
 
 /**
@@ -1175,6 +1203,7 @@ function computeAnalysis() {
       },
       inflections: [],
       outliers: [],
+      leaderboard: [],
     };
   }
 
@@ -1190,6 +1219,7 @@ function computeAnalysis() {
   const perStageTrend = computePerStageTrend(records, configRecords);
   const perTicketTrend = computePerTicketTrend(records);
   const perProduct = computePerProduct(records);
+  const leaderboard = buildLeaderboard(records);
 
   // Inflection detection and outliers: only meaningful with sufficient data
   let inflections = [];
@@ -1253,6 +1283,7 @@ function computeAnalysis() {
       tier === "<7d" ? { status: "insufficient data", items: [] } : inflections,
     outliers:
       tier === "<7d" ? { status: "insufficient data", items: [] } : outliers,
+    leaderboard,
   };
 }
 

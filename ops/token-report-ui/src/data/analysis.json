@@ -419,18 +419,50 @@
   ],
   "outliers": [
     {
-      "issue": "SYMPH-98",
-      "stage": "implement",
-      "tokens": 450000,
+      "issue_identifier": "SYMPH-98",
+      "issue_title": "Large refactor with multiple file changes",
+      "total_tokens": 450000,
       "z_score": 3.2,
-      "reason": "Large refactor with multiple file changes"
+      "multiplier": 8.5,
+      "linear_url": "https://linear.app/mobilyze-llc/issue/SYMPH-98",
+      "threshold": 200000,
+      "mean": 53000,
+      "stddev": 74000,
+      "parent": null,
+      "hypothesis": "Linear parent spec unavailable — unable to determine complexity attribution"
     },
     {
-      "issue": "JONY-42",
-      "stage": "investigate",
-      "tokens": 180000,
+      "issue_identifier": "JONY-42",
+      "issue_title": "Deep codebase exploration across 3 repos",
+      "total_tokens": 180000,
       "z_score": 2.8,
-      "reason": "Deep codebase exploration across 3 repos"
+      "multiplier": 3.4,
+      "linear_url": "https://linear.app/mobilyze-llc/issue/JONY-42",
+      "threshold": 200000,
+      "mean": 53000,
+      "stddev": 74000,
+      "parent": null,
+      "hypothesis": "Linear parent spec unavailable — unable to determine complexity attribution"
+    }
+  ],
+  "leaderboard": [
+    {
+      "identifier": "SYMPH-98",
+      "title": "Large refactor with multiple file changes",
+      "tokens": 450000,
+      "linear_url": "https://linear.app/mobilyze-llc/issue/SYMPH-98"
+    },
+    {
+      "identifier": "JONY-42",
+      "title": "Deep codebase exploration across 3 repos",
+      "tokens": 180000,
+      "linear_url": "https://linear.app/mobilyze-llc/issue/JONY-42"
+    },
+    {
+      "identifier": "SYMPH-112",
+      "title": "Foundation setup",
+      "tokens": 95000,
+      "linear_url": "https://linear.app/mobilyze-llc/issue/SYMPH-112"
     }
   ],
   "per_ticket_series": [45000, 50000, 54000, 51000, 52000]

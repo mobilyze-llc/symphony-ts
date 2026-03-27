@@ -2,8 +2,8 @@
  * Section 5: Outlier Analysis
  * Converted from design reference OutlierAnalysis.jsx.
  *
- * Note: Design ref used issue_identifier/issue_title/total_tokens/hypothesis.
- * analysis.json uses issue/tokens/reason. Adapted to actual data shape.
+ * Per CH-1: outlier cards show hypothesis + multiplier only, no per-stage breakdown.
+ * SYMPH-179: enriched with multiplier and linear_url from computeAnalysis().
  */
 import type { Outlier } from "../types.ts";
 import { fmtNum } from "./chartUtils.tsx";
@@ -69,19 +69,20 @@ export default function OutlierAnalysis({
     <section>
       <h2>Outlier Analysis</h2>
       {items.map((o) => (
-        <div className="outlier-card" key={o.issue}>
+        <div className="outlier-card" key={o.issue_identifier}>
           <div className="outlier-title">
             <a
-              href={`https://linear.app/issue/${o.issue}`}
+              href={o.linear_url}
               target="_blank"
               rel="noopener noreferrer"
             >
-              {o.issue}
+              {o.issue_identifier}
             </a>{" "}
-            &mdash; {o.stage} &mdash; {fmtNum(o.tokens)} tokens (z={o.z_score})
+            &mdash; {o.issue_title} &mdash; {fmtNum(o.total_tokens)} tokens
+            ({o.multiplier}x mean)
           </div>
           <div className="outlier-hypothesis">
-            {o.reason ?? "No hypothesis available"}
+            {o.hypothesis ?? "No hypothesis available"}
           </div>
         </div>
       ))}

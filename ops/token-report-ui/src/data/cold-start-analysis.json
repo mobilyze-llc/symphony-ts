@@ -111,5 +111,6 @@
     "status": "insufficient data",
     "items": []
   },
+  "leaderboard": [],
   "per_ticket_series": [130000, 145000, 140000]
 }

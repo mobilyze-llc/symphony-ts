@@ -2,20 +2,13 @@
  * Section 6: Issue Leaderboard
  * Converted from design reference IssueLeaderboard.jsx.
  *
- * TODO: IssueLeaderboard data is not in the current analysis.json shape.
- * The leaderboard prop should be populated once computeAnalysis() is extended
- * to include per-issue token totals.
+ * SYMPH-179: leaderboard data now populated by computeAnalysis() with linear_url.
  */
+import type { LeaderboardEntry } from "../types.ts";
 import { fmtNum } from "./chartUtils.tsx";
 
-export interface LeaderboardItem {
-  identifier: string;
-  title: string;
-  tokens: number;
-}
-
 export interface IssueLeaderboardProps {
-  leaderboard: LeaderboardItem[];
+  leaderboard: LeaderboardEntry[];
 }
 
 export default function IssueLeaderboard({
@@ -41,7 +34,7 @@ export default function IssueLeaderboard({
               <td>{i + 1}</td>
               <td>
                 <a
-                  href={`https://linear.app/issue/${item.identifier}`}
+                  href={item.linear_url}
                   target="_blank"
                   rel="noopener noreferrer"
                 >

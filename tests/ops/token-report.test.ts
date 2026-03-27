@@ -926,9 +926,60 @@ describe("token-report.mjs analyze", () => {
     expect(outlier.total_tokens).toBe(127000);
     expect(outlier.z_score).toBeGreaterThan(2);
     expect(outlier.hypothesis).toBeDefined();
+    // SYMPH-179: multiplier = total_tokens / mean
+    expect(outlier.multiplier).toBeGreaterThan(1);
+    expect(outlier.multiplier).toBe(
+      Math.round((127000 / outlier.mean) * 10) / 10,
+    );
+    // SYMPH-179: linear_url uses mobilyze-llc org pattern
+    expect(outlier.linear_url).toBe(
+      "https://linear.app/mobilyze-llc/issue/SYMPH-145",
+    );
     // Without LINEAR_API_KEY, parent is null
     expect(outlier.parent).toBeNull();
     expect(outlier.hypothesis).toContain("unavailable");
+  });
+
+  it("leaderboard includes top 25 issues sorted by token spend (SYMPH-179)", () => {
+    const records: Record<string, unknown>[] = [];
+    const now = new Date();
+
+    // Create 30 issues with varying token counts
+    for (let i = 0; i < 30; i++) {
+      records.push(
+        makeTokenRecord({
+          timestamp: new Date(
+            now.getTime() - i * 24 * 60 * 60 * 1000,
+          ).toISOString(),
+          issue_identifier: `SYMPH-${500 + i}`,
+          issue_id: `id-${500 + i}`,
+          issue_title: `Issue ${500 + i}`,
+          total_total_tokens: (30 - i) * 1000,
+          stage_name: "implement",
+        }),
+      );
+    }
+
+    writeTokenHistory(symphonyHome, records);
+    writeConfigHistory(symphonyHome, [makeConfigSnapshot()]);
+
+    const result = runAnalyze(symphonyHome);
+
+    expect(Array.isArray(result.leaderboard)).toBe(true);
+    // Capped at 25
+    expect(result.leaderboard.length).toBe(25);
+    // Sorted descending by tokens
+    expect(result.leaderboard[0].tokens).toBeGreaterThanOrEqual(
+      result.leaderboard[1].tokens,
+    );
+    // Has required fields
+    const first = result.leaderboard[0];
+    expect(first.identifier).toBeDefined();
+    expect(first.title).toBeDefined();
+    expect(first.tokens).toBeGreaterThan(0);
+    expect(first.linear_url).toBe(
+      `https://linear.app/mobilyze-llc/issue/${first.identifier}`,
+    );
   });
 
   it("cold start with insufficient data (<7 days)", () => {
@@ -961,6 +1012,7 @@ describe("token-report.mjs analyze", () => {
     expect(result.executive_summary).toBeDefined();
     expect(result.per_product).toEqual({});
     expect(result.outliers).toEqual([]);
+    expect(result.leaderboard).toEqual([]);
     // daily_series present with empty arrays
     expect(result.daily_series).toBeDefined();
     expect(result.daily_series.cacheEff).toEqual([]);

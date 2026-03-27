@@ -99,8 +99,7 @@ export default function App() {
         coldStart={isColdStart}
         dataSpanDays={data.data_span_days}
       />
-      {/* TODO: IssueLeaderboard data not in current analysis.json shape */}
-      <IssueLeaderboard leaderboard={[]} />
+      <IssueLeaderboard leaderboard={data.leaderboard ?? []} />
       <StageEfficiency perStageSpend={data.per_stage_spend} />
       <PerProductBreakdown perProduct={data.per_product} />
       <ReportFooter />
