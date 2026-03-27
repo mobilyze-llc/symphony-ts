@@ -67,11 +67,19 @@
   },
   "per_stage_trend": {
     "investigate": {
-      "daily_avg": 40000,
+      "daily_avg": {
+        "2026-03-23": 44471,
+        "2026-03-24": 36320,
+        "2026-03-25": 44057
+      },
       "wow_delta": 0
     },
     "implement": {
-      "daily_avg": 93333,
+      "daily_avg": {
+        "2026-03-23": 89275,
+        "2026-03-24": 99562,
+        "2026-03-25": 97079
+      },
       "wow_delta": 0
     }
   },
@@ -88,12 +96,36 @@
     }
   },
   "daily_series": {
-    "cacheEff": [42.0, 44.5, 45.0],
-    "outputRatio": [26.0, 27.5, 28.0],
-    "wastedCtx": [16.0, 15.5, 15.0],
-    "tokPerTurn": [6500, 6350, 6200],
-    "firstPass": [50.0, 55.0, 60.0],
-    "failureRate": [15.0, 12.5, 12.0]
+    "cacheEff": [
+      42.0,
+      44.5,
+      45.0
+    ],
+    "outputRatio": [
+      26.0,
+      27.5,
+      28.0
+    ],
+    "wastedCtx": [
+      16.0,
+      15.5,
+      15.0
+    ],
+    "tokPerTurn": [
+      6500,
+      6350,
+      6200
+    ],
+    "firstPass": [
+      50.0,
+      55.0,
+      60.0
+    ],
+    "failureRate": [
+      15.0,
+      12.5,
+      12.0
+    ]
   },
   "inflections": {
     "status": "insufficient data",
@@ -103,5 +135,9 @@
     "status": "insufficient data",
     "items": []
   },
-  "per_ticket_series": [130000, 145000, 140000]
+  "per_ticket_series": [
+    130000,
+    145000,
+    140000
+  ]
 }

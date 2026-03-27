@@ -82,6 +82,19 @@ describe("analysis.json shape", () => {
     }
   });
 
+  it("has date-keyed per_stage_trend daily_avg", () => {
+    const trend = (analysisData as AnalysisData).per_stage_trend;
+    for (const stage of Object.keys(trend)) {
+      const avg = trend[stage].daily_avg;
+      expect(typeof avg).toBe("object");
+      expect(avg).not.toBeNull();
+      // Each stage should have date keys (YYYY-MM-DD format)
+      const dates = Object.keys(avg as Record<string, number>);
+      expect(dates.length).toBeGreaterThan(0);
+      expect(dates[0]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+  });
+
   it("has correct executive_summary shape", () => {
     const es = analysisData.executive_summary;
     expect(es.total_tokens).toHaveProperty("value");
@@ -367,11 +380,30 @@ describe("StageUtilizationChart", () => {
     expect(html).toContain("implement");
   });
 
-  it("renders insufficient data state for scalar daily_avg", () => {
+  it("renders stacked area chart with fixture date-keyed data", () => {
     const html = renderToString(
       <StageUtilizationChart stageData={data.per_stage_trend} />,
     );
-    // Sample analysis.json has scalar daily_avg, so no dates → insufficient data
+    // analysis.json now has date-keyed daily_avg, so chart renders normally
+    expect(html).toContain("svg");
+    expect(html).toContain("polygon");
+    expect(html).toContain("polyline");
+    // Should contain legend items for stages in the fixture
+    expect(html).toContain("investigate");
+    expect(html).toContain("implement");
+  });
+
+  it("renders insufficient data state for scalar daily_avg", () => {
+    const scalarTrend: Record<
+      string,
+      { daily_avg: number; wow_delta: number }
+    > = {
+      investigate: { daily_avg: 71111, wow_delta: -0.05 },
+      implement: { daily_avg: 217778, wow_delta: 0.03 },
+    };
+    const html = renderToString(
+      <StageUtilizationChart stageData={scalarTrend} />,
+    );
     expect(html).toContain("Insufficient data");
   });
 
