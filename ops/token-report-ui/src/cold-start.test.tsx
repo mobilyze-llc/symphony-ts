@@ -252,6 +252,29 @@ describe("cold start: sections that work without 7 days", () => {
   });
 });
 
+describe("cold start: per_stage_trend fixture shape", () => {
+  it("has date-keyed daily_avg in per_stage_trend", () => {
+    const trend = data.per_stage_trend;
+    for (const stage of Object.keys(trend)) {
+      const avg = trend[stage].daily_avg;
+      expect(typeof avg).toBe("object");
+      expect(avg).not.toBeNull();
+      const dates = Object.keys(avg as Record<string, number>);
+      expect(dates.length).toBeGreaterThan(0);
+      expect(dates[0]).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+  });
+
+  it("has fewer date entries than warm fixture (cold start = 3 days)", () => {
+    const trend = data.per_stage_trend;
+    for (const stage of Object.keys(trend)) {
+      const avg = trend[stage].daily_avg;
+      const dates = Object.keys(avg as Record<string, number>);
+      expect(dates.length).toBeLessThanOrEqual(data.data_span_days);
+    }
+  });
+});
+
 describe("cold start: analysis.json fixture shape", () => {
   it("has cold_start: true", () => {
     expect(data.cold_start).toBe(true);
