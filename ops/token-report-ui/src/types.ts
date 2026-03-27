@@ -7,6 +7,8 @@ export interface MetricWithTrend {
   current: number;
   trend_7d: number;
   trend_30d: number;
+  /** Daily values produced by buildDailyMetricSeries() — 30-day rolling window */
+  series?: number[];
 }
 
 export interface FailureRatePeriod {
@@ -99,6 +101,8 @@ export interface AnalysisData {
   per_stage_spend: Record<string, StageSpend>;
   per_stage_trend: Record<string, StageTrend>;
   per_ticket_trend: PerTicketTrend;
+  /** Daily median-per-ticket series produced by buildDailyMetricSeries() */
+  per_ticket_series?: number[];
   per_product: Record<string, ProductData>;
   inflections: Inflection[] | InsufficientData;
   outliers: Outlier[] | InsufficientData;
