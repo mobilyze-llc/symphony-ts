@@ -292,15 +292,9 @@ describe("IssueLeaderboard", () => {
       <IssueLeaderboard leaderboard={data.leaderboard} />,
     );
     // Verify URL pattern for entries within top 25
-    expect(html).toContain(
-      "https://linear.app/mobilyze-llc/issue/SYMPH-98",
-    );
-    expect(html).toContain(
-      "https://linear.app/mobilyze-llc/issue/JONY-42",
-    );
-    expect(html).toContain(
-      "https://linear.app/mobilyze-llc/issue/SYMPH-112",
-    );
+    expect(html).toContain("https://linear.app/mobilyze-llc/issue/SYMPH-98");
+    expect(html).toContain("https://linear.app/mobilyze-llc/issue/JONY-42");
+    expect(html).toContain("https://linear.app/mobilyze-llc/issue/SYMPH-112");
   });
 });
 
