@@ -16,7 +16,10 @@
   "bin": {
     "symphony": "./dist/src/cli/main.js"
   },
-  "files": ["dist/src", "README.md"],
+  "files": [
+    "dist/src",
+    "README.md"
+  ],
   "publishConfig": {
     "access": "public"
   },
@@ -45,6 +48,7 @@
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
     "@types/node": "^22.13.14",
+    "jsdom": "^29.0.1",
     "typescript": "^5.8.2",
     "vitest": "^3.0.8"
   },
