@@ -2,6 +2,7 @@
  * Section 1: Executive Summary
  * Converted from design reference ExecutiveSummary.jsx.
  */
+import type { CSSProperties } from "react";
 import { WowBadge, fmtNum } from "./chartUtils.tsx";
 
 function round(n: number, decimals = 0): number {
@@ -30,33 +31,75 @@ export default function ExecutiveSummary({
   cacheHitRate,
   cacheWow,
 }: ExecutiveSummaryProps) {
+  const kpiGridStyle: CSSProperties = {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+    gap: "16px",
+    marginBottom: "24px",
+  };
+
+  const kpiCardStyle: CSSProperties = {
+    background: "var(--bg-card)",
+    border: "1px solid var(--border)",
+    borderRadius: "6px",
+    padding: "16px",
+  };
+
+  const kpiLabelStyle: CSSProperties = {
+    color: "var(--text-muted)",
+    fontSize: "0.8rem",
+    textTransform: "uppercase",
+    letterSpacing: "0.05em",
+  };
+
+  const kpiValueStyle: CSSProperties = {
+    color: "var(--text-bright)",
+    fontSize: "1.6rem",
+    fontWeight: 600,
+    margin: "4px 0",
+  };
+
+  const kpiDeltaStyle: CSSProperties = {
+    fontSize: "0.85rem",
+  };
+
   return (
     <section>
-      <h2>Executive Summary</h2>
-      <div className="kpi-grid">
-        <div className="kpi-card">
-          <div className="kpi-label">Total Tokens</div>
-          <div className="kpi-value">{fmtNum(totalTokens)}</div>
-          <div className="kpi-delta">
+      <h2
+        style={{
+          color: "var(--text-bright)",
+          fontSize: "1.2rem",
+          margin: "32px 0 16px",
+          paddingBottom: "8px",
+          borderBottom: "1px solid var(--border)",
+        }}
+      >
+        Executive Summary
+      </h2>
+      <div style={kpiGridStyle}>
+        <div style={kpiCardStyle}>
+          <div style={kpiLabelStyle}>Total Tokens</div>
+          <div style={kpiValueStyle}>{fmtNum(totalTokens)}</div>
+          <div style={kpiDeltaStyle}>
             <WowBadge delta={tokensDelta} />
           </div>
         </div>
-        <div className="kpi-card">
-          <div className="kpi-label">Tokens / Issue (median)</div>
-          <div className="kpi-value">{fmtNum(tokensPerIssueMedian)}</div>
-          <div className="kpi-delta">
+        <div style={kpiCardStyle}>
+          <div style={kpiLabelStyle}>Tokens / Issue (median)</div>
+          <div style={kpiValueStyle}>{fmtNum(tokensPerIssueMedian)}</div>
+          <div style={kpiDeltaStyle}>
             mean: {fmtNum(tokensPerIssueMean)}{" "}
             <WowBadge delta={tokPerIssueWow} />
           </div>
         </div>
-        <div className="kpi-card">
-          <div className="kpi-label">Issues Processed</div>
-          <div className="kpi-value">{fmtNum(uniqueIssues)}</div>
+        <div style={kpiCardStyle}>
+          <div style={kpiLabelStyle}>Issues Processed</div>
+          <div style={kpiValueStyle}>{fmtNum(uniqueIssues)}</div>
         </div>
-        <div className="kpi-card">
-          <div className="kpi-label">Cache Hit Rate</div>
-          <div className="kpi-value">{round(cacheHitRate, 1)}%</div>
-          <div className="kpi-delta">
+        <div style={kpiCardStyle}>
+          <div style={kpiLabelStyle}>Cache Hit Rate</div>
+          <div style={kpiValueStyle}>{round(cacheHitRate, 1)}%</div>
+          <div style={kpiDeltaStyle}>
             <WowBadge delta={cacheWow} />
           </div>
         </div>
