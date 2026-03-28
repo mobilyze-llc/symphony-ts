@@ -344,9 +344,9 @@ describe("PipelineHealth", () => {
     // Ensure no CSS round() function in the output
     expect(html).not.toContain("round(");
     // Bar widths should be inline style percentages
-    expect(html).toContain('width:2%');
-    expect(html).toContain('width:8%');
-    expect(html).toContain('width:5%');
+    expect(html).toContain("width:2%");
+    expect(html).toContain("width:8%");
+    expect(html).toContain("width:5%");
   });
 
   it("shows direction and delta vs 7d avg", () => {
