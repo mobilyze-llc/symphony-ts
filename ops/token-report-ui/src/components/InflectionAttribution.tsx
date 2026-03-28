@@ -26,9 +26,11 @@ export default function InflectionAttribution({
   }
 
   return (
-    <div style={{
-      fontFamily: "var(--font-body)",
-    }}>
+    <div
+      style={{
+        fontFamily: "var(--font-body)",
+      }}
+    >
       {attrs.length > 0 && (
         <ul
           style={{
