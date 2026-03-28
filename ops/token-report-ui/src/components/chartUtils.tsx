@@ -31,7 +31,8 @@ export function WowBadge({ delta }: WowBadgeProps) {
     return <span style={{ color: "var(--text-muted)" }}>{"\u2014"}</span>;
   }
   const sign = delta > 0 ? "+" : "";
-  const color = delta > 0 ? "var(--red)" : delta < 0 ? "var(--green)" : "var(--text-muted)";
+  const color =
+    delta > 0 ? "var(--red)" : delta < 0 ? "var(--green)" : "var(--text-muted)";
   return (
     <span style={{ color, fontSize: "0.85em" }}>
       {sign}
