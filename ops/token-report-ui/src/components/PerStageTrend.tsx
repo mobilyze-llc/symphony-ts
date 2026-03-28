@@ -4,6 +4,7 @@
  */
 import type { Inflection, StageTrend } from "../types.ts";
 import ColdStartPlaceholder from "./ColdStartPlaceholder.tsx";
+import InflectionAttribution from "./InflectionAttribution.tsx";
 import { MultiLineChart, fmtNum } from "./chartUtils.tsx";
 import type { ConfigChange } from "./chartUtils.tsx";
 
@@ -23,6 +24,13 @@ export default function PerStageTrend({
   dataSpanDays,
 }: PerStageTrendProps) {
   const trend = perStageTrend ?? {};
+  // spec-gen exclusion: filter stage_name === "spec-gen" from trend data
+  const filteredTrend: Record<string, StageTrend> = {};
+  for (const [stage, val] of Object.entries(trend)) {
+    if (stage !== "spec-gen") {
+      filteredTrend[stage] = val;
+    }
+  }
   const infl = Array.isArray(inflections) ? inflections : [];
 
   return (
@@ -35,7 +43,10 @@ export default function PerStageTrend({
         />
       ) : (
         <div className="chart-container">
-          <MultiLineChart stageData={trend} configChanges={configChanges} />
+          <MultiLineChart
+            stageData={filteredTrend}
+            configChanges={configChanges}
+          />
           {infl.length > 0 &&
             infl.map((inf) => (
               <div
@@ -59,10 +70,8 @@ export default function PerStageTrend({
                   7d avg: {fmtNum(inf.avg_7d)} &middot; 30d avg:{" "}
                   {fmtNum(inf.avg_30d)}
                   {inf.context ? ` \u00B7 ${inf.context}` : ""}
-                  {inf.llm_insight ? (
-                    <div style={{ marginTop: "4px" }}>💡 {inf.llm_insight}</div>
-                  ) : null}
                 </div>
+                <InflectionAttribution inflection={inf} />
               </div>
             ))}
         </div>

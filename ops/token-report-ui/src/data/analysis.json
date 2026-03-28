@@ -414,9 +414,13 @@
         {
           "type": "ticket_mix",
           "description": "Switched to prompt caching strategy"
+        },
+        {
+          "type": "volume_shift",
+          "description": "3 fewer implement stages vs prior week"
         }
       ],
-      "llm_insight": null
+      "llm_insight": "The 15% drop in tokens/turn correlates with the caching rollout on Mar 4; fewer redundant context fetches per turn."
     },
     {
       "date": "2026-03-12",
@@ -432,7 +436,7 @@
           "description": "Enabled extended cache TTL"
         }
       ],
-      "llm_insight": null
+      "llm_insight": "Extended TTL reduced cache misses on long-running implement stages, lifting hit rate from 72% to 78%."
     }
   ],
   "outliers": [

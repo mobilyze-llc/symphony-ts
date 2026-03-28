@@ -7,6 +7,7 @@ export { default as ColdStartPlaceholder } from "./ColdStartPlaceholder.tsx";
 export { default as ReportHeader } from "./ReportHeader.tsx";
 export { default as ExecutiveSummary } from "./ExecutiveSummary.tsx";
 export { default as EfficiencyScorecard } from "./EfficiencyScorecard.tsx";
+export { default as InflectionAttribution } from "./InflectionAttribution.tsx";
 export { default as PerStageTrend } from "./PerStageTrend.tsx";
 export { default as PerTicketCostTrend } from "./PerTicketCostTrend.tsx";
 export { default as OutlierAnalysis } from "./OutlierAnalysis.tsx";

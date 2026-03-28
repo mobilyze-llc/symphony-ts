@@ -4,6 +4,7 @@ import App from "./App.tsx";
 import {
   EfficiencyScorecard,
   ExecutiveSummary,
+  InflectionAttribution,
   IssueLeaderboard,
   OutlierAnalysis,
   PerProductBreakdown,
@@ -171,6 +172,113 @@ describe("PerStageTrend", () => {
     );
     expect(html).toContain("Per-Stage Utilization Trend");
     expect(html).toContain("Inflection");
+  });
+
+  it("filters spec-gen from trend data", () => {
+    const inflections = Array.isArray(data.inflections) ? data.inflections : [];
+    const html = renderToString(
+      <PerStageTrend
+        perStageTrend={data.per_stage_trend}
+        inflections={inflections}
+      />,
+    );
+    // spec-gen should not appear in the legend/chart
+    // The chart renders stage names from filtered trend keys
+    expect(html).toContain("investigate");
+    expect(html).toContain("implement");
+    expect(html).not.toContain(">spec-gen<");
+  });
+
+  it("renders attribution details for inflections", () => {
+    const inflections = Array.isArray(data.inflections) ? data.inflections : [];
+    const html = renderToString(
+      <PerStageTrend
+        perStageTrend={data.per_stage_trend}
+        inflections={inflections}
+      />,
+    );
+    // Attribution type labels rendered
+    expect(html).toContain("Ticket Mix");
+    expect(html).toContain("Switched to prompt caching strategy");
+    expect(html).toContain("Config Change");
+    expect(html).toContain("Enabled extended cache TTL");
+  });
+
+  it("renders LLM insights via InflectionAttribution", () => {
+    const inflections = Array.isArray(data.inflections) ? data.inflections : [];
+    const html = renderToString(
+      <PerStageTrend
+        perStageTrend={data.per_stage_trend}
+        inflections={inflections}
+      />,
+    );
+    expect(html).toContain("💡");
+    expect(html).toContain("caching rollout");
+    expect(html).toContain("Extended TTL reduced cache misses");
+  });
+});
+
+describe("InflectionAttribution", () => {
+  it("renders attribution entries with type labels", () => {
+    const inflection = (
+      Array.isArray(data.inflections) ? data.inflections : []
+    )[0];
+    const html = renderToString(
+      <InflectionAttribution inflection={inflection} />,
+    );
+    expect(html).toContain("Ticket Mix");
+    expect(html).toContain("Switched to prompt caching strategy");
+    expect(html).toContain("Volume Shift");
+    expect(html).toContain("3 fewer implement stages vs prior week");
+  });
+
+  it("renders LLM insight when present", () => {
+    const inflection = (
+      Array.isArray(data.inflections) ? data.inflections : []
+    )[0];
+    const html = renderToString(
+      <InflectionAttribution inflection={inflection} />,
+    );
+    expect(html).toContain("💡");
+    expect(html).toContain("caching rollout");
+  });
+
+  it("returns null when no attributions and no llm_insight", () => {
+    const empty = {
+      date: "2026-03-01",
+      metric: "test",
+      direction: "up",
+      magnitude: 0.1,
+      context: null,
+      avg_7d: 100,
+      avg_30d: 90,
+      attributions: [],
+      llm_insight: null,
+    };
+    const html = renderToString(<InflectionAttribution inflection={empty} />);
+    // Should render nothing
+    expect(html).toBe("");
+  });
+
+  it("renders only LLM insight when attributions are empty", () => {
+    const insightOnly = {
+      date: "2026-03-01",
+      metric: "test",
+      direction: "up",
+      magnitude: 0.1,
+      context: null,
+      avg_7d: 100,
+      avg_30d: 90,
+      attributions: [],
+      llm_insight: "Insight with no attributions",
+    };
+    const html = renderToString(
+      <InflectionAttribution inflection={insightOnly} />,
+    );
+    expect(html).toContain("💡");
+    expect(html).toContain("Insight with no attributions");
+    // No list items should be rendered
+    expect(html).not.toContain("<li");
   });
 });
 
