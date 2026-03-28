@@ -60,9 +60,7 @@ export default function PerStageTrend({
                   {fmtNum(inf.avg_30d)}
                   {inf.context ? ` \u00B7 ${inf.context}` : ""}
                   {inf.llm_insight ? (
-                    <div style={{ marginTop: "4px" }}>
-                      💡 {inf.llm_insight}
-                    </div>
+                    <div style={{ marginTop: "4px" }}>💡 {inf.llm_insight}</div>
                   ) : null}
                 </div>
               </div>
