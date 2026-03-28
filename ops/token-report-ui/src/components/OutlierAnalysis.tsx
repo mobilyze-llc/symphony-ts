@@ -69,17 +69,44 @@ export default function OutlierAnalysis({
     <section>
       <h2>Outlier Analysis</h2>
       {items.map((o) => (
-        <div className="outlier-card" key={o.issue_identifier}>
-          <div className="outlier-title">
+        <div
+          key={o.issue_identifier}
+          style={{
+            background: "var(--bg-card)",
+            border: "1px solid var(--border)",
+            borderRadius: "6px",
+            padding: "16px",
+            marginBottom: "12px",
+          }}
+        >
+          <div style={{ color: "var(--accent)", fontWeight: 600 }}>
             <a href={o.linear_url} target="_blank" rel="noopener noreferrer">
               {o.issue_identifier}
             </a>{" "}
             &mdash; {o.issue_title} &mdash; {fmtNum(o.total_tokens)} tokens (
             {`${o.multiplier}x mean`})
           </div>
-          <div className="outlier-hypothesis">
+          <div
+            style={{
+              color: "var(--text-muted)",
+              fontSize: "0.9rem",
+              marginTop: "4px",
+            }}
+          >
             {o.hypothesis ?? "No hypothesis available"}
           </div>
+          {o.parent && (
+            <div
+              style={{
+                color: "var(--text-muted)",
+                fontSize: "0.85rem",
+                marginTop: "4px",
+              }}
+            >
+              Parent: {o.parent.identifier} ({o.parent.complexity},{" "}
+              {o.parent.task_count} tasks)
+            </div>
+          )}
         </div>
       ))}
     </section>
