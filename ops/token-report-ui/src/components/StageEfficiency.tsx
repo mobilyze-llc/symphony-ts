@@ -26,8 +26,7 @@ export default function StageEfficiency({
         style={{
           fontFamily: "var(--font-heading)",
           fontSize: "var(--font-size-subheading)",
-          fontWeight:
-            "var(--font-weight-subheading)" as unknown as number,
+          fontWeight: "var(--font-weight-subheading)" as unknown as number,
           lineHeight: "var(--line-height-heading)",
           color: "var(--color-text)",
           margin: 0,
