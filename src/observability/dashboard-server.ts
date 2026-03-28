@@ -197,10 +197,7 @@ export function createDashboardRequestHandler(
 
       // CORS headers on all responses
       response.setHeader("access-control-allow-origin", "*");
-      response.setHeader(
-        "access-control-allow-methods",
-        "GET, POST, OPTIONS",
-      );
+      response.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
       response.setHeader(
         "access-control-allow-headers",
         "Content-Type, Authorization",
