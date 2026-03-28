@@ -860,18 +860,18 @@ describe("Sparkline fill prop", () => {
   });
 
   it("uses unique gradient IDs for multiple sparklines", () => {
-    const html1 = renderToString(
-      <Sparkline values={sampleValues} stroke="#58a6ff" fill />,
+    // Render both sparklines in the same React tree so useId() generates unique IDs
+    const html = renderToString(
+      <>
+        <Sparkline values={sampleValues} stroke="#58a6ff" fill />
+        <Sparkline values={sampleValues} stroke="#3fb950" fill />
+      </>,
     );
-    const html2 = renderToString(
-      <Sparkline values={sampleValues} stroke="#3fb950" fill />,
-    );
-    // Extract gradient IDs
-    const match1 = html1.match(/id="(sparkline-grad-\d+)"/);
-    const match2 = html2.match(/id="(sparkline-grad-\d+)"/);
-    expect(match1).not.toBeNull();
-    expect(match2).not.toBeNull();
-    expect(match1![1]).not.toBe(match2![1]);
+    // Extract all gradient IDs from the combined output
+    const matches = [...html.matchAll(/id="([^"]+)"/g)].map((m) => m[1]);
+    expect(matches.length).toBeGreaterThanOrEqual(2);
+    // First two gradient IDs should be different
+    expect(matches[0]).not.toBe(matches[1]);
   });
 
   it("gradient goes from 20% opacity at top to 0% at bottom", () => {
