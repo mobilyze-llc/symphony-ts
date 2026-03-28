@@ -1156,7 +1156,12 @@ function computePerStageStats(records) {
   for (const r of records) {
     const s = r.stage_name ?? "unknown";
     if (!byStage[s]) {
-      byStage[s] = { total_turns: 0, total_input: 0, total_cache_read: 0, count: 0 };
+      byStage[s] = {
+        total_turns: 0,
+        total_input: 0,
+        total_cache_read: 0,
+        count: 0,
+      };
     }
     byStage[s].total_turns += r.turns_used ?? 0;
     byStage[s].total_input += r.total_input_tokens ?? 0;
@@ -1167,9 +1172,10 @@ function computePerStageStats(records) {
   for (const [stage, data] of Object.entries(byStage)) {
     const avgTurns = data.count > 0 ? data.total_turns / data.count : 0;
     const inputPlusCacheRead = data.total_input + data.total_cache_read;
-    const cacheRate = inputPlusCacheRead > 0
-      ? (data.total_cache_read / inputPlusCacheRead) * 100
-      : 0;
+    const cacheRate =
+      inputPlusCacheRead > 0
+        ? (data.total_cache_read / inputPlusCacheRead) * 100
+        : 0;
     result[stage] = {
       avg_turns: round(avgTurns, 1),
       cache_rate: round(cacheRate, 1),
