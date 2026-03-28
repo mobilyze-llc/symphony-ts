@@ -26,29 +26,35 @@ export default function InflectionAttribution({
   }
 
   return (
-    <div className="inflection-attributions">
+    <div
+      style={{
+        fontFamily: "var(--font-body)",
+      }}
+    >
       {attrs.length > 0 && (
         <ul
           style={{
             listStyle: "none",
             padding: 0,
-            margin: "6px 0 0 0",
+            margin: "var(--spacing-element) 0 0 0",
           }}
         >
           {attrs.map((attr) => (
             <li
               key={`${attr.type}-${attr.description}`}
               style={{
-                color: "var(--text-muted)",
-                fontSize: "0.82rem",
+                color: "var(--color-text-secondary)",
+                fontSize: "var(--font-size-caption)",
+                fontWeight: "var(--font-weight-body)",
                 marginBottom: "2px",
+                lineHeight: 1.5,
               }}
             >
               <span
                 style={{
-                  color: "var(--accent)",
-                  fontWeight: 600,
-                  marginRight: "6px",
+                  color: "var(--color-primary)",
+                  fontWeight: "var(--font-weight-subheading)",
+                  marginRight: "var(--spacing-element)",
                 }}
               >
                 {typeLabel(attr.type)}:
@@ -60,11 +66,12 @@ export default function InflectionAttribution({
       )}
       {inflection.llm_insight ? (
         <div
-          className="inflection-llm-insight"
           style={{
-            marginTop: "6px",
-            color: "var(--text-muted)",
-            fontSize: "0.82rem",
+            marginTop: "var(--spacing-element)",
+            color: "var(--color-text-secondary)",
+            fontSize: "var(--font-size-caption)",
+            fontWeight: "var(--font-weight-body)",
+            lineHeight: 1.5,
           }}
         >
           {"💡"} {inflection.llm_insight}
