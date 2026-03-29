@@ -1,15 +1,5 @@
-/**
- * Section 1: Executive Summary
- * Rebuilt from v5 executive-summary.jsx inline styles.
- * 4 KPI cards in flex row with glassmorphism styling.
- * Delta badges: #34D399 favorable, #F59E0B declining.
- */
+import { round } from "../lib/chart-utils.ts";
 import { fmtNum } from "./chartUtils.tsx";
-
-function round(n: number, decimals = 0): number {
-  const f = 10 ** decimals;
-  return Math.round(n * f) / f;
-}
 
 export interface ExecutiveSummaryProps {
   totalTokens: number;
@@ -24,7 +14,10 @@ export interface ExecutiveSummaryProps {
 }
 
 /** Determine if a delta is favorable (tokens/cost going down = good, cache going up = good). */
-function isFavorable(delta: number | null, invertSign?: boolean): boolean | null {
+function isFavorable(
+  delta: number | null,
+  invertSign?: boolean,
+): boolean | null {
   if (delta == null || delta === 0) return null;
   if (invertSign) return delta > 0;
   return delta < 0;
@@ -55,12 +48,17 @@ function DeltaBadge({
   }
 
   const color = favorable ? "#34D399" : "#F59E0B";
-  const arrowPath = favorable
-    ? "M6 2 L10 7 L2 7 Z"
-    : "M6 10 L10 5 L2 5 Z";
+  const arrowPath = favorable ? "M6 2 L10 7 L2 7 Z" : "M6 10 L10 5 L2 5 Z";
 
   return (
-    <div style={{ alignItems: "center", boxSizing: "border-box" as const, display: "flex", gap: "6px" }}>
+    <div
+      style={{
+        alignItems: "center",
+        boxSizing: "border-box" as const,
+        display: "flex",
+        gap: "6px",
+      }}
+    >
       <svg
         width="12"
         height="12"
@@ -133,13 +131,21 @@ export default function ExecutiveSummary({
   cacheWow,
 }: ExecutiveSummaryProps) {
   const tokensDeltaText =
-    tokensDelta != null ? `${tokensDelta > 0 ? "+" : ""}${round(tokensDelta, 1)}% vs 7d avg` : null;
+    tokensDelta != null
+      ? `${tokensDelta > 0 ? "+" : ""}${round(tokensDelta, 1)}% vs 7d avg`
+      : null;
   const tokWowText =
-    tokPerIssueWow != null ? `${tokPerIssueWow > 0 ? "+" : ""}${round(tokPerIssueWow, 1)}% WoW` : null;
+    tokPerIssueWow != null
+      ? `${tokPerIssueWow > 0 ? "+" : ""}${round(tokPerIssueWow, 1)}% WoW`
+      : null;
   const issuesDeltaText =
-    issuesDelta != null ? `${issuesDelta > 0 ? "+" : ""}${issuesDelta} vs 7d avg` : null;
+    issuesDelta != null
+      ? `${issuesDelta > 0 ? "+" : ""}${issuesDelta} vs 7d avg`
+      : null;
   const cacheWowText =
-    cacheWow != null ? `${cacheWow > 0 ? "+" : ""}${round(cacheWow, 1)}pp WoW` : null;
+    cacheWow != null
+      ? `${cacheWow > 0 ? "+" : ""}${round(cacheWow, 1)}pp WoW`
+      : null;
 
   return (
     <div
@@ -171,8 +177,13 @@ export default function ExecutiveSummary({
       >
         Executive Summary
       </div>
-      <div style={{ boxSizing: "border-box" as const, display: "flex", gap: "20px" }}>
-        {/* Total Tokens Today */}
+      <div
+        style={{
+          boxSizing: "border-box" as const,
+          display: "flex",
+          gap: "20px",
+        }}
+      >
         <div style={cardStyle}>
           <div style={labelStyle}>Total Tokens Today</div>
           <div style={valueStyle}>{fmtNum(totalTokens)}</div>
@@ -184,31 +195,12 @@ export default function ExecutiveSummary({
           )}
         </div>
 
-        {/* Issues Processed */}
         <div style={cardStyle}>
           <div style={labelStyle}>Issues Processed</div>
           <div style={valueStyle}>{fmtNum(uniqueIssues)}</div>
-          {issuesDeltaText ? (
-            <DeltaBadge text={issuesDeltaText} favorable={null} />
-          ) : (
-            <div style={{ alignItems: "center", boxSizing: "border-box" as const, display: "flex", gap: "6px" }}>
-              <div
-                style={{
-                  boxSizing: "border-box" as const,
-                  color: "#FFFFFF59",
-                  flexShrink: 0,
-                  fontFamily: '"JetBrains Mono", system-ui, sans-serif',
-                  fontSize: "12px",
-                  lineHeight: "16px",
-                }}
-              >
-                &mdash;
-              </div>
-            </div>
-          )}
+          <DeltaBadge text={issuesDeltaText ?? "\u2014"} favorable={null} />
         </div>
 
-        {/* Tokens / Issue */}
         <div style={cardStyle}>
           <div style={labelStyle}>Tokens / Issue</div>
           <div style={valueStyle}>{fmtNum(tokensPerIssueMedian)}</div>
@@ -231,7 +223,6 @@ export default function ExecutiveSummary({
           </div>
         </div>
 
-        {/* Cache Hit Rate */}
         <div style={cardStyle}>
           <div style={labelStyle}>Cache Hit Rate</div>
           <div style={valueStyle}>{round(cacheHitRate, 1)}%</div>

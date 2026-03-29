@@ -197,9 +197,7 @@ describe("cold start: OutlierAnalysis shows placeholder", () => {
 describe("cold start: sections that work without 7 days", () => {
   it("ReportHeader renders normally with cold-start data", () => {
     const html = renderToString(
-      <ReportHeader
-        today={data.analyzed_at.slice(0, 10)}
-      />,
+      <ReportHeader today={data.analyzed_at.slice(0, 10)} />,
     );
     expect(html).toContain("Token Intelligence Report");
     expect(html).toContain("2026-03-25");

@@ -1,9 +1,3 @@
-/**
- * InflectionAttribution -- renders attribution details for a single inflection.
- * Rebuilt from v5 inflection-attribution.jsx inline styles.
- * Stage-colored cards: implement = bg #F59E0B0F / border #F59E0B26,
- * review = bg #A78BFA0F / border #A78BFA26.
- */
 import type { Inflection } from "../types.ts";
 
 export interface InflectionAttributionProps {
@@ -40,7 +34,12 @@ export default function InflectionAttribution({
   const theme = getStageTheme(inflection.metric ?? "");
 
   // Build the summary line
-  const sign = inflection.magnitude != null && inflection.magnitude < 0 ? "" : inflection.direction === "down" ? "-" : "+";
+  const sign =
+    inflection.magnitude != null && inflection.magnitude < 0
+      ? ""
+      : inflection.direction === "down"
+        ? "-"
+        : "+";
   const magnitudePct =
     inflection.magnitude != null
       ? `${sign}${Math.round(Math.abs(inflection.magnitude) * 100)}%`
@@ -62,7 +61,6 @@ export default function InflectionAttribution({
         paddingInline: "24px",
       }}
     >
-      {/* Left: summary + inflection label */}
       <div
         style={{
           boxSizing: "border-box" as const,
@@ -98,7 +96,6 @@ export default function InflectionAttribution({
         </div>
       </div>
 
-      {/* Attribution cards */}
       {attrs.map((attr) => (
         <div
           key={`${attr.type}-${attr.description}`}
@@ -143,7 +140,6 @@ export default function InflectionAttribution({
         </div>
       ))}
 
-      {/* LLM insight as an attribution card if present */}
       {inflection.llm_insight && (
         <div
           style={{

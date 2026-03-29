@@ -1,7 +1,3 @@
-/**
- * Barrel export for Token Report v2 React components.
- * Exports all 10 sections, chart utilities, design tokens, and CSS.
- */
 export { default as ColdStartBanner } from "./ColdStartBanner.tsx";
 export { default as ColdStartPlaceholder } from "./ColdStartPlaceholder.tsx";
 export { default as ReportHeader } from "./ReportHeader.tsx";
@@ -20,43 +16,44 @@ export { default as StageUtilizationChart } from "./StageUtilizationChart.tsx";
 export { default as TicketCostChart } from "./TicketCostChart.tsx";
 export { fmtNum, WowBadge, Sparkline, MultiLineChart } from "./chartUtils.tsx";
 
-export const designTokens = {
-  bg: "#0F1117",
-  surface: "#FFFFFF08",
-  border: "#FFFFFF0F",
-  text: "#F0F0F2",
-  textSecondary: "#FFFFFF99",
-  textTertiary: "#FFFFFF66",
-  textMuted: "#FFFFFF59",
-  textCaption: "#FFFFFF40",
-  textBody: "#FFFFFF8C",
-  accent: "#60A5FA",
-  green: "#34D399",
-  red: "#EF4444",
-  yellow: "#F59E0B",
-  purple: "#A78BFA",
-  stageInvestigate: "#60A5FA",
-  stageImplement: "#F59E0B",
-  stageReview: "#A78BFA",
-  stageMerge: "#34D399",
-  sectionDivider: "#FFFFFF0F",
-  inflectionImplementBg: "#F59E0B0F",
-  inflectionImplementBorder: "#F59E0B26",
-  inflectionReviewBg: "#A78BFA0F",
-  inflectionReviewBorder: "#A78BFA26",
-  fontHeading: '"DM Sans", system-ui, sans-serif',
-  fontBody: '"DM Sans", system-ui, sans-serif',
-  fontMono: '"JetBrains Mono", system-ui, sans-serif',
-  borderRadius: "12px",
-  borderRadiusSmall: "8px",
-  spacingSection: "64px",
-  spacingSectionGap: "32px",
-  spacingCard: "20px",
-  spacingElement: "16px",
-  spacingInner: "12px",
-  spacingTight: "8px",
-  spacingLabel: "4px",
+/** Canonical pipeline stage order matching the design ref. */
+export const STAGE_ORDER = [
+  "Investigate",
+  "Implement",
+  "Validate",
+  "Review",
+  "Merge",
+];
+
+/** Stage name → color mapping for pipeline visualizations. */
+export const STAGE_COLORS: Record<string, string> = {
+  Investigate: "#60A5FA",
+  Implement: "#F59E0B",
+  Validate: "#A78BFA",
+  Review: "#A78BFA",
+  Merge: "#34D399",
 };
+
+/** Normalize a stage name to canonical casing. */
+export function canonicalStage(s: string): string {
+  const lower = s.toLowerCase();
+  for (const name of STAGE_ORDER) {
+    if (name.toLowerCase() === lower) return name;
+  }
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/** Case-insensitive key lookup in a Record. */
+export function findByKey<T>(
+  obj: Record<string, T>,
+  key: string,
+): T | undefined {
+  const lower = key.toLowerCase();
+  for (const [k, v] of Object.entries(obj)) {
+    if (k.toLowerCase() === lower) return v;
+  }
+  return undefined;
+}
 
 export const reportCSS = `
 :root {

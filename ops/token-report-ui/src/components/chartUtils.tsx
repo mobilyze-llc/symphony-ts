@@ -1,15 +1,6 @@
-/**
- * Shared SVG chart utilities for the Token Report v2.
- * Converted from chartUtils.jsx design reference.
- */
 import { useId } from "react";
-import { DEFAULT_PADDING } from "../lib/chart-utils.ts";
+import { DEFAULT_PADDING, round } from "../lib/chart-utils.ts";
 import type { StageTrend } from "../types.ts";
-
-function round(n: number, decimals = 0): number {
-  const f = 10 ** decimals;
-  return Math.round(n * f) / f;
-}
 
 /**
  * Format a number with thousands separators.
@@ -31,8 +22,7 @@ export function WowBadge({ delta }: WowBadgeProps) {
     return <span style={{ color: "#FFFFFF59" }}>{"\u2014"}</span>;
   }
   const sign = delta > 0 ? "+" : "";
-  const color =
-    delta > 0 ? "#EF4444" : delta < 0 ? "#34D399" : "#FFFFFF59";
+  const color = delta > 0 ? "#EF4444" : delta < 0 ? "#34D399" : "#FFFFFF59";
   return (
     <span style={{ color, fontSize: "0.85em" }}>
       {sign}
@@ -267,10 +257,10 @@ export function MultiLineChart({
     if (typeof avg !== "object" || avg === null) return null;
     const avgObj = avg as Record<string, number>;
     const pts: string[] = [];
-    for (const d of sortedDates) {
+    for (let i = 0; i < sortedDates.length; i++) {
+      const d = sortedDates[i];
       if (avgObj[d] != null) {
-        const x =
-          padL + (sortedDates.indexOf(d) / (sortedDates.length - 1)) * chartW;
+        const x = padL + (i / (sortedDates.length - 1)) * chartW;
         const y = padT + chartH - ((avgObj[d] - minY) / rangeY) * chartH;
         pts.push(`${round(x, 1)},${round(y, 1)}`);
       }

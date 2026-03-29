@@ -1,9 +1,3 @@
-/**
- * Reusable placeholder shown inside sections that require 7+ days of data
- * when the report is in cold-start mode (data_span_days < 7).
- * Rebuilt with v5 inline styles (SYMPH-205).
- */
-
 export interface ColdStartPlaceholderProps {
   /** Minimum days needed for this section to render fully */
   requiredDays: number;

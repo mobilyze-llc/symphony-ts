@@ -71,9 +71,7 @@ export default function App() {
   // Cache delta: percentage point difference (values are already percentages)
   const cacheWow =
     sc.cache_efficiency.trend_7d != null
-      ? Math.round(
-          sc.cache_efficiency.current - sc.cache_efficiency.trend_7d,
-        )
+      ? Math.round(sc.cache_efficiency.current - sc.cache_efficiency.trend_7d)
       : null;
 
   // Build series from MetricWithTrend.series, falling back to daily_series (SYMPH-175)
@@ -83,9 +81,7 @@ export default function App() {
     <>
       {/* biome-ignore lint/security/noDangerouslySetInnerHtml: report CSS is a static build-time string, not user input */}
       <style dangerouslySetInnerHTML={{ __html: reportCSS }} />
-      <ReportHeader
-        today={data.analyzed_at.slice(0, 10)}
-      />
+      <ReportHeader today={data.analyzed_at.slice(0, 10)} />
       {isColdStart && (
         <ColdStartBanner
           dataSpanDays={data.data_span_days}

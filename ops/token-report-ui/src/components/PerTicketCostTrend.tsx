@@ -1,15 +1,7 @@
-/**
- * Section 5: Per-Ticket Cost Trend
- * Rebuilt from v5 per-ticket-cost-trend.jsx inline styles.
- */
 import type { PerTicketTrend } from "../types.ts";
+import { round } from "../lib/chart-utils.ts";
 import ColdStartPlaceholder from "./ColdStartPlaceholder.tsx";
 import { Sparkline } from "./chartUtils.tsx";
-
-function round(n: number, decimals = 0): number {
-  const f = 10 ** decimals;
-  return Math.round(n * f) / f;
-}
 
 function formatK(n: number): string {
   if (n >= 1000) return `${round(n / 1000, 1)}K`;
@@ -32,9 +24,14 @@ export default function PerTicketCostTrend({
   const pt = perTicket ?? ({} as Partial<PerTicketTrend>);
 
   const wowDelta = pt.wow_delta_pct;
-  const deltaFavorable = wowDelta != null && wowDelta !== 0 ? wowDelta < 0 : null;
+  const deltaFavorable =
+    wowDelta != null && wowDelta !== 0 ? wowDelta < 0 : null;
   const deltaColor =
-    deltaFavorable === true ? "#34D399" : deltaFavorable === false ? "#F59E0B" : "#FFFFFF59";
+    deltaFavorable === true
+      ? "#34D399"
+      : deltaFavorable === false
+        ? "#F59E0B"
+        : "#FFFFFF59";
   const deltaArrow =
     deltaFavorable === true
       ? "M6 2 L10 7 L2 7 Z"
@@ -66,7 +63,14 @@ export default function PerTicketCostTrend({
         width: "1440px",
       }}
     >
-      <div style={{ boxSizing: "border-box" as const, display: "flex", flexDirection: "column" as const, gap: "4px" }}>
+      <div
+        style={{
+          boxSizing: "border-box" as const,
+          display: "flex",
+          flexDirection: "column" as const,
+          gap: "4px",
+        }}
+      >
         <div
           style={{
             boxSizing: "border-box" as const,

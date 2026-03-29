@@ -112,9 +112,7 @@ describe("analysis.json shape", () => {
 
 describe("ReportHeader", () => {
   it("renders header with metadata", () => {
-    const html = renderToString(
-      <ReportHeader today="2026-03-20" />,
-    );
+    const html = renderToString(<ReportHeader today="2026-03-20" />);
     expect(html).toContain("Token Intelligence Report");
     expect(html).toContain("2026-03-20");
     expect(html).toContain("Daily analysis across all products");
@@ -153,8 +151,11 @@ describe("SYMPH-190 formula verification", () => {
       "wow_delta_pct",
     );
     expect(
-      (analysisData.executive_summary.total_tokens as unknown as { wow_delta_pct: number })
-        .wow_delta_pct,
+      (
+        analysisData.executive_summary.total_tokens as unknown as {
+          wow_delta_pct: number;
+        }
+      ).wow_delta_pct,
     ).toBe(12.3);
   });
 
@@ -353,7 +354,9 @@ describe("InflectionAttribution", () => {
       attributions: [],
       llm_insight: null,
     };
-    const html = renderToString(<InflectionAttribution inflection={inflection} />);
+    const html = renderToString(
+      <InflectionAttribution inflection={inflection} />,
+    );
     expect(html).toContain("-15%");
     expect(html).not.toContain("+15%");
   });
@@ -370,7 +373,9 @@ describe("InflectionAttribution", () => {
       attributions: [],
       llm_insight: null,
     };
-    const html = renderToString(<InflectionAttribution inflection={inflection} />);
+    const html = renderToString(
+      <InflectionAttribution inflection={inflection} />,
+    );
     // magnitude is already negative, Math.abs ensures we don't get --15%
     expect(html).toContain("15%");
     expect(html).not.toContain("--15%");
@@ -1212,15 +1217,23 @@ describe("StageEfficiency sparkline delta", () => {
       <StageEfficiency
         perStageSpend={data.per_stage_spend}
         stageSparklines={{
-          investigate: [100000, 110000, 105000, 115000, 108000, 112000, 106000, 90000],
-          implement: [200000, 210000, 205000, 215000, 208000, 212000, 206000, 230000],
+          investigate: [
+            100000, 110000, 105000, 115000, 108000, 112000, 106000, 90000,
+          ],
+          implement: [
+            200000, 210000, 205000, 215000, 208000, 212000, 206000, 230000,
+          ],
         }}
       />,
     );
     // Should render sparkline SVG polylines
     expect(html).toContain("polyline");
-    // Should render delta text with % suffix
-    expect(html).toContain("%");
+    // investigate: ((90000 - 100000) / 100000) * 100 = -10% → favorable (green)
+    expect(html).toContain("-10%");
+    expect(html).toContain("#34D399");
+    // implement: ((230000 - 200000) / 200000) * 100 = +15% → declining (yellow)
+    expect(html).toContain("+15%");
+    expect(html).toContain("#F59E0B");
   });
 });
 
@@ -1282,7 +1295,12 @@ describe("Formula verification precision", () => {
   it("per-ticket WoW delta renders when provided", () => {
     const html = renderToString(
       <PerTicketCostTrend
-        perTicket={{ median: 52000, mean: 59000, ticket_count: 47, wow_delta_pct: -5.2 }}
+        perTicket={{
+          median: 52000,
+          mean: 59000,
+          ticket_count: 47,
+          wow_delta_pct: -5.2,
+        }}
       />,
     );
     expect(html).toContain("-5.2% WoW");
@@ -1301,7 +1319,7 @@ describe("Validate stage color", () => {
     const html = renderToString(<PipelineHealth failureRate={failureRate} />);
     expect(html).toContain("Validate");
     // Stage dot should use #A78BFA (purple) — the intended color
-    expect(html).toContain('background-color:#A78BFA');
+    expect(html).toContain("background-color:#A78BFA");
   });
 
   it("StageEfficiency renders Validate with #A78BFA, not fallback gray", () => {
@@ -1339,7 +1357,12 @@ describe("PerTicketCostTrend positive-delta (declining)", () => {
   it("renders amber color and up-arrow for positive wow_delta_pct", () => {
     const html = renderToString(
       <PerTicketCostTrend
-        perTicket={{ median: 52000, mean: 59000, ticket_count: 47, wow_delta_pct: 3.5 }}
+        perTicket={{
+          median: 52000,
+          mean: 59000,
+          ticket_count: 47,
+          wow_delta_pct: 3.5,
+        }}
       />,
     );
     // Positive delta = cost increasing = declining = amber
@@ -1353,7 +1376,12 @@ describe("PerTicketCostTrend delta=0 neutral", () => {
   it("renders neutral color when wow_delta_pct is zero", () => {
     const html = renderToString(
       <PerTicketCostTrend
-        perTicket={{ median: 52000, mean: 59000, ticket_count: 47, wow_delta_pct: 0 }}
+        perTicket={{
+          median: 52000,
+          mean: 59000,
+          ticket_count: 47,
+          wow_delta_pct: 0,
+        }}
       />,
     );
     // Delta=0 should show neutral — no arrow rendered

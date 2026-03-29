@@ -1,21 +1,9 @@
-/**
- * Section 2: Efficiency Scorecard
- * Rebuilt from v5 efficiency-scorecard.jsx inline styles.
- * LAYOUT CHANGE: vertical list -> 5-column card grid.
- * Sparkline colors conditional on delta direction.
- *
- * Note: Failure Rate row removed -- now displayed in PipelineHealth component.
- */
 import type {
   EfficiencyScorecard as EfficiencyScorecardData,
   MetricWithTrend,
 } from "../types.ts";
+import { round } from "../lib/chart-utils.ts";
 import { fmtNum } from "./chartUtils.tsx";
-
-function round(n: number, decimals = 0): number {
-  const f = 10 ** decimals;
-  return Math.round(n * f) / f;
-}
 
 /**
  * Format a metric value as a percentage string.
@@ -175,7 +163,13 @@ export default function EfficiencyScorecard({
         width: "1440px",
       }}
     >
-      <div style={{ boxSizing: "border-box" as const, display: "flex", gap: "12px" }}>
+      <div
+        style={{
+          boxSizing: "border-box" as const,
+          display: "flex",
+          gap: "12px",
+        }}
+      >
         <div
           style={{
             boxSizing: "border-box" as const,
@@ -215,7 +209,13 @@ export default function EfficiencyScorecard({
           Trend data unavailable &mdash; requires 7+ days of history
         </div>
       )}
-      <div style={{ boxSizing: "border-box" as const, display: "flex", gap: "16px" }}>
+      <div
+        style={{
+          boxSizing: "border-box" as const,
+          display: "flex",
+          gap: "16px",
+        }}
+      >
         {rows.map((row) => {
           const direction = getDeltaDirection(row.metric, row.higherIsBetter);
           const deltaText = formatDelta(row.metric, row.isTokenCount);
@@ -231,13 +231,6 @@ export default function EfficiencyScorecard({
               : direction === "declining"
                 ? "M6 10 L10 5 L2 5 Z"
                 : null;
-          // Sparkline color matches delta direction
-          const sparkColor =
-            direction === "favorable"
-              ? "#34D399"
-              : direction === "declining"
-                ? "#F59E0B"
-                : "#FFFFFF59";
 
           return (
             <div key={row.name} style={cardStyle}>
@@ -306,30 +299,30 @@ export default function EfficiencyScorecard({
                 xmlns="http://www.w3.org/2000/svg"
                 style={{ overflow: "visible" as const }}
               >
-                {row.sparkline && row.sparkline.length >= 2 ? (
-                  (() => {
-                    const vals = row.sparkline;
-                    const minV = Math.min(...vals);
-                    const maxV = Math.max(...vals);
-                    const rangeV = maxV - minV || 1;
-                    const pts = vals
-                      .map((v, i) => {
-                        const x = Math.round((i / (vals.length - 1)) * 200);
-                        const y = Math.round(28 - ((v - minV) / rangeV) * 24);
-                        return `${x},${y}`;
-                      })
-                      .join(" ");
-                    return (
-                      <polyline
-                        points={pts}
-                        stroke={sparkColor}
-                        strokeWidth="1.5"
-                        fill="none"
-                        opacity="0.8"
-                      />
-                    );
-                  })()
-                ) : null}
+                {row.sparkline && row.sparkline.length >= 2
+                  ? (() => {
+                      const vals = row.sparkline;
+                      const minV = Math.min(...vals);
+                      const maxV = Math.max(...vals);
+                      const rangeV = maxV - minV || 1;
+                      const pts = vals
+                        .map((v, i) => {
+                          const x = Math.round((i / (vals.length - 1)) * 200);
+                          const y = Math.round(28 - ((v - minV) / rangeV) * 24);
+                          return `${x},${y}`;
+                        })
+                        .join(" ");
+                      return (
+                        <polyline
+                          points={pts}
+                          stroke={color}
+                          strokeWidth="1.5"
+                          fill="none"
+                          opacity="0.8"
+                        />
+                      );
+                    })()
+                  : null}
               </svg>
               {row.range && (
                 <div

@@ -1,17 +1,9 @@
-/**
- * Section 0: Report Header
- * Rebuilt from v5 header.jsx inline styles.
- */
-
 export interface ReportHeaderProps {
   today: string;
   products?: string[];
 }
 
-export default function ReportHeader({
-  today,
-  products,
-}: ReportHeaderProps) {
+export default function ReportHeader({ today, products }: ReportHeaderProps) {
   const productList = products?.length
     ? products.join(", ")
     : "symphony, jony-agent, hs-data, hs-ui, hs-mobile, stickerlabs, household";
