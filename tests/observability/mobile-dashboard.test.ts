@@ -163,7 +163,9 @@ describe("mobile-dashboard.html", () => {
     expect(scriptSection).toContain("deploy_complete");
     expect(scriptSection).toContain("/api/v1/deploy");
     // Uses fetch POST, not EventSource for deploy
-    expect(scriptSection).toMatch(/fetch\(`\$\{baseUrl\}\/api\/v1\/deploy`.*method.*POST/s);
+    expect(scriptSection).toMatch(
+      /fetch\(`\$\{baseUrl\}\/api\/v1\/deploy`.*method.*POST/s,
+    );
     expect(scriptSection).not.toMatch(/new EventSource.*deploy/);
   });
 
@@ -217,6 +219,8 @@ describe("mobile-dashboard.html", () => {
   it("report links use port 8090 on the current host", () => {
     const scriptSection = html.slice(html.indexOf("<script>"));
     expect(scriptSection).toContain("8090");
-    expect(scriptSection).toMatch(/window\.location\.hostname.*8090|8090.*window\.location\.hostname/s);
+    expect(scriptSection).toMatch(
+      /window\.location\.hostname.*8090|8090.*window\.location\.hostname/s,
+    );
   });
 });
