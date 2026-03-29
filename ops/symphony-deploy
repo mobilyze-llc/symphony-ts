@@ -185,6 +185,21 @@ if $DO_SYMPHONY; then
     ok "Build complete"
   fi
 
+  # Sync mobile dashboard to report server directory
+  local dashboard_src="$SYMPHONY_ROOT/.symphony/reports/mobile-dashboard.html"
+  local reports_dir="$HOME/.symphony/reports"
+  if [[ -f "$dashboard_src" ]]; then
+    if ! cmp -s "$dashboard_src" "$reports_dir/index.html" 2>/dev/null; then
+      info "Syncing mobile dashboard to report server..."
+      run_or_dry mkdir -p "$reports_dir"
+      run_or_dry cp "$dashboard_src" "$reports_dir/index.html"
+      run_or_dry cp "$dashboard_src" "$reports_dir/mobile-dashboard.html"
+      ok "Dashboard synced (index.html + mobile-dashboard.html)"
+    else
+      ok "Mobile dashboard already current"
+    fi
+  fi
+
   # Decrypt .env.enc if it's newer than .env
   local_env="$SYMPHONY_ROOT/.env"
   local_enc="$SYMPHONY_ROOT/.env.enc"

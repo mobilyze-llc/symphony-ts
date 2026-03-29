@@ -1605,7 +1605,7 @@ body {
     const isFile = window.location.protocol === 'file:';
 
     container.innerHTML = reports.map(r => {
-      const href = isFile ? `./${r.date}.html` : `http://${window.location.hostname}:8090/reports/${r.date}.html`;
+      const href = isFile ? `./${r.date}.html` : `http://${window.location.hostname}:8090/${r.date}.html`;
       return `
         <a class="report-item" href="${esc(href)}" target="_blank" rel="noopener">
           <div>
