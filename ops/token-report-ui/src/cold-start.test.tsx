@@ -141,7 +141,7 @@ describe("cold start: PerTicketCostTrend shows placeholder", () => {
       />,
     );
     expect(html).toContain("Per-Ticket Cost Trend");
-    expect(html).toContain("Rolling median");
+    expect(html).toContain("Median:");
     expect(html).not.toContain("cold-start-placeholder");
   });
 });
@@ -179,19 +179,18 @@ describe("cold start: OutlierAnalysis shows placeholder", () => {
       <OutlierAnalysis outliers={[]} coldStart={true} dataSpanDays={3} />,
     );
     expect(html).toContain("Outlier Analysis");
-    expect(html).toContain("cold-start-placeholder");
-    expect(html).toContain("Collecting data");
     expect(html).toContain("Outlier detection requires at least 7 days");
+    expect(html).toContain("4 more");
     // Should NOT show the normal empty state
-    expect(html).not.toContain("No outliers detected");
+    expect(html).not.toContain("No statistical outliers detected");
   });
 
   it("renders normal empty state when coldStart is false", () => {
     const html = renderToString(
       <OutlierAnalysis outliers={[]} coldStart={false} dataSpanDays={3} />,
     );
-    expect(html).toContain("No outliers detected");
-    expect(html).not.toContain("cold-start-placeholder");
+    expect(html).toContain("No statistical outliers detected");
+    expect(html).not.toContain("Outlier detection requires at least 7 days");
   });
 });
 
@@ -200,11 +199,9 @@ describe("cold start: sections that work without 7 days", () => {
     const html = renderToString(
       <ReportHeader
         today={data.analyzed_at.slice(0, 10)}
-        recordCount={data.record_count}
-        dataSpanDays={data.data_span_days}
       />,
     );
-    expect(html).toContain("Symphony Token Report");
+    expect(html).toContain("Token Intelligence Report");
     expect(html).toContain("2026-03-25");
     expect(html).toContain("8");
     expect(html).toContain("3");
@@ -234,8 +231,8 @@ describe("cold start: sections that work without 7 days", () => {
       <StageEfficiency perStageSpend={data.per_stage_spend} />,
     );
     expect(html).toContain("Stage Efficiency");
-    expect(html).toContain("investigate");
-    expect(html).toContain("implement");
+    expect(html).toContain("Investigate");
+    expect(html).toContain("Implement");
   });
 
   it("PerProductBreakdown renders with cold-start product data", () => {
@@ -248,7 +245,7 @@ describe("cold start: sections that work without 7 days", () => {
 
   it("ReportFooter renders normally", () => {
     const html = renderToString(<ReportFooter />);
-    expect(html).toContain("SYMPH-131");
+    expect(html).toContain("Symphony Token Intelligence");
   });
 });
 

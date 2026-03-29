@@ -21,58 +21,87 @@ export { default as TicketCostChart } from "./TicketCostChart.tsx";
 export { fmtNum, WowBadge, Sparkline, MultiLineChart } from "./chartUtils.tsx";
 
 export const designTokens = {
-  bg: "#0d1117",
-  bgCard: "#161b22",
-  border: "#30363d",
-  text: "#c9d1d9",
-  textMuted: "#8b949e",
-  textBright: "#f0f6fc",
-  accent: "#58a6ff",
-  green: "#3fb950",
-  red: "#f85149",
-  yellow: "#d29922",
-  purple: "#bc8cff",
+  bg: "#0F1117",
+  surface: "#FFFFFF08",
+  border: "#FFFFFF0F",
+  text: "#F0F0F2",
+  textSecondary: "#FFFFFF99",
+  textTertiary: "#FFFFFF66",
+  textMuted: "#FFFFFF59",
+  textCaption: "#FFFFFF40",
+  textBody: "#FFFFFF8C",
+  accent: "#60A5FA",
+  green: "#34D399",
+  red: "#EF4444",
+  yellow: "#F59E0B",
+  purple: "#A78BFA",
+  stageInvestigate: "#60A5FA",
+  stageImplement: "#F59E0B",
+  stageReview: "#A78BFA",
+  stageMerge: "#34D399",
+  sectionDivider: "#FFFFFF0F",
+  inflectionImplementBg: "#F59E0B0F",
+  inflectionImplementBorder: "#F59E0B26",
+  inflectionReviewBg: "#A78BFA0F",
+  inflectionReviewBorder: "#A78BFA26",
+  fontHeading: '"DM Sans", system-ui, sans-serif',
+  fontBody: '"DM Sans", system-ui, sans-serif',
+  fontMono: '"JetBrains Mono", system-ui, sans-serif',
+  borderRadius: "12px",
+  borderRadiusSmall: "8px",
+  spacingSection: "64px",
+  spacingSectionGap: "32px",
+  spacingCard: "20px",
+  spacingElement: "16px",
+  spacingInner: "12px",
+  spacingTight: "8px",
+  spacingLabel: "4px",
 };
 
 export const reportCSS = `
 :root {
-  --bg: #0d1117;
-  --bg-card: #161b22;
-  --border: #30363d;
-  --text: #c9d1d9;
-  --text-muted: #8b949e;
-  --text-bright: #f0f6fc;
-  --accent: #58a6ff;
-  --green: #3fb950;
-  --red: #f85149;
-  --yellow: #d29922;
-  --purple: #bc8cff;
-  --color-primary: #1E40AF;
-  --color-secondary: #6366F1;
-  --color-background: #F8FAFC;
-  --color-surface: #FFFFFF;
-  --color-text: #0F172A;
-  --color-text-secondary: #64748B;
-  --color-accent: #10B981;
-  --color-danger: #EF4444;
-  --color-border: #E2E8F0;
-  --font-heading: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-  --font-body: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
-  --font-size-heading: 28px;
-  --font-size-subheading: 18px;
-  --font-size-body: 14px;
-  --font-size-caption: 12px;
-  --font-weight-heading: 700;
-  --font-weight-subheading: 600;
-  --font-weight-body: 400;
-  --line-height-heading: 1.2;
-  --line-height-subheading: 1.4;
-  --line-height-body: 1.5;
-  --spacing-section: 32px;
-  --spacing-group: 16px;
-  --spacing-element: 8px;
-  --border-radius: 8px;
-  --border-color: #E2E8F0;
+  /* Colors */
+  --bg: #0F1117;
+  --surface: #FFFFFF08;
+  --border: #FFFFFF0F;
+  --text: #F0F0F2;
+  --text-secondary: #FFFFFF99;
+  --text-tertiary: #FFFFFF66;
+  --text-muted: #FFFFFF59;
+  --text-caption: #FFFFFF40;
+  --text-body: #FFFFFF8C;
+  --accent: #60A5FA;
+  --green: #34D399;
+  --red: #EF4444;
+  --yellow: #F59E0B;
+  --purple: #A78BFA;
+  --stage-investigate: #60A5FA;
+  --stage-implement: #F59E0B;
+  --stage-review: #A78BFA;
+  --stage-merge: #34D399;
+  --section-divider: #FFFFFF0F;
+  --inflection-implement-bg: #F59E0B0F;
+  --inflection-implement-border: #F59E0B26;
+  --inflection-review-bg: #A78BFA0F;
+  --inflection-review-border: #A78BFA26;
+
+  /* Typography */
+  --font-heading: "DM Sans", system-ui, sans-serif;
+  --font-body: "DM Sans", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", system-ui, sans-serif;
+
+  /* Spacing */
+  --spacing-section: 64px;
+  --spacing-section-gap: 32px;
+  --spacing-card: 20px;
+  --spacing-element: 16px;
+  --spacing-inner: 12px;
+  --spacing-tight: 8px;
+  --spacing-label: 4px;
+
+  /* Borders */
+  --border-radius: 12px;
+  --border-radius-small: 8px;
   --border-width: 1px;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -85,104 +114,19 @@ body {
   max-width: 1200px;
   margin: 0 auto;
 }
-h1 { color: var(--text-bright); margin-bottom: 8px; font-size: 1.5rem; }
+h1 { color: var(--text); margin-bottom: 8px; font-family: var(--font-heading); font-size: 1.5rem; font-weight: 700; }
 h2 {
-  color: var(--text-bright);
-  font-size: 1.2rem;
-  margin: 32px 0 16px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
-}
-.subtitle { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 24px; }
-.kpi-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 16px;
-  margin-bottom: 24px;
-}
-.kpi-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 16px;
-}
-.kpi-label { color: var(--text-muted); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
-.kpi-value { color: var(--text-bright); font-size: 1.6rem; font-weight: 600; margin: 4px 0; }
-.kpi-delta { font-size: 0.85rem; }
-.metric-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  margin-bottom: 8px;
-}
-.metric-name { color: var(--text); font-weight: 500; min-width: 140px; }
-.metric-value { color: var(--text-bright); font-weight: 600; min-width: 60px; text-align: right; }
-.metric-sparkline { margin-left: 16px; }
-.chart-container {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 16px;
-  margin-bottom: 16px;
-  overflow-x: auto;
-}
-table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-bottom: 16px;
-}
-th {
-  text-align: left;
-  color: var(--text-muted);
-  font-size: 0.8rem;
+  color: #F0F0F2;
+  font-family: "DM Sans", system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
+  letter-spacing: 0.1em;
+  line-height: 14px;
+  margin: 0;
+  padding-bottom: 0;
+  border-bottom: none;
 }
-td {
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border);
-  color: var(--text);
-}
-tr:hover td { background: rgba(88,166,255,0.04); }
-.outlier-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 16px;
-  margin-bottom: 12px;
-}
-.outlier-title { color: var(--accent); font-weight: 600; }
-.outlier-hypothesis { color: var(--text-muted); font-size: 0.9rem; margin-top: 4px; }
-.stage-card {
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 16px;
-  margin-bottom: 12px;
-}
-.stage-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-.stage-name { color: var(--text-bright); font-weight: 600; }
-.inflection-panel {
-  background: rgba(210,153,34,0.1);
-  border: 1px solid var(--yellow);
-  border-radius: 6px;
-  padding: 12px 16px;
-  margin-bottom: 12px;
-}
-.inflection-panel .label { color: var(--yellow); font-weight: 600; font-size: 0.85rem; }
-a { color: var(--accent); text-decoration: none; }
+a { color: #60A5FA; text-decoration: none; }
 a:hover { text-decoration: underline; }
-.product-bar {
-  height: 8px;
-  border-radius: 4px;
-  background: var(--accent);
-  margin-top: 4px;
-}
-footer { color: var(--text-muted); font-size: 0.8rem; margin-top: 40px; text-align: center; }
 `;

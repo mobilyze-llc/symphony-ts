@@ -5,22 +5,22 @@
   "record_count": 312,
   "efficiency_scorecard": {
     "cache_efficiency": {
-      "current": 0.72,
-      "trend_7d": 0.68,
-      "trend_30d": 0.65,
-      "series": [0.63, 0.66, 0.68, 0.7, 0.72]
+      "current": 72,
+      "trend_7d": 68,
+      "trend_30d": 65,
+      "series": [63, 66, 68, 70, 72]
     },
     "output_ratio": {
-      "current": 0.34,
-      "trend_7d": 0.31,
-      "trend_30d": 0.29,
-      "series": [0.34, 0.35, 0.36, 0.36, 0.37]
+      "current": 34,
+      "trend_7d": 31,
+      "trend_30d": 29,
+      "series": [34, 35, 36, 36, 37]
     },
     "wasted_context": {
-      "current": 0.08,
-      "trend_7d": 0.1,
-      "trend_30d": 0.12,
-      "series": [0.22, 0.21, 0.2, 0.19, 0.18]
+      "current": 8,
+      "trend_7d": 10,
+      "trend_30d": 12,
+      "series": [22, 21, 20, 19, 18]
     },
     "tokens_per_turn": {
       "current": 4820,
@@ -36,25 +36,26 @@
     },
     "failure_rate": {
       "current": {
-        "investigate": 0.02,
-        "implement": 0.08,
-        "validate": 0.05
+        "investigate": 2,
+        "implement": 8,
+        "validate": 5
       },
       "trend_7d": {
-        "investigate": 0.03,
-        "implement": 0.1,
-        "validate": 0.06
+        "investigate": 3,
+        "implement": 10,
+        "validate": 6
       },
       "trend_30d": {
-        "investigate": 0.04,
-        "implement": 0.12,
-        "validate": 0.07
+        "investigate": 4,
+        "implement": 12,
+        "validate": 7
       }
     }
   },
   "executive_summary": {
     "total_tokens": {
-      "value": 18420000
+      "value": 18420000,
+      "wow_delta_pct": 12.3
     },
     "total_stages": {
       "value": 312
@@ -351,7 +352,8 @@
   "per_ticket_trend": {
     "median": 52000,
     "mean": 59000,
-    "ticket_count": 47
+    "ticket_count": 47,
+    "wow_delta_pct": -5.2
   },
   "per_product": {
     "symphony-ts": {
@@ -414,9 +416,13 @@
         {
           "type": "ticket_mix",
           "description": "Switched to prompt caching strategy"
+        },
+        {
+          "type": "volume_shift",
+          "description": "3 fewer implement stages vs prior week"
         }
       ],
-      "llm_insight": null
+      "llm_insight": "Driven by caching rollout reducing tokens per turn"
     },
     {
       "date": "2026-03-12",
@@ -432,7 +438,7 @@
           "description": "Enabled extended cache TTL"
         }
       ],
-      "llm_insight": null
+      "llm_insight": "Extended TTL reduced cache misses across all stages"
     }
   ],
   "outliers": [

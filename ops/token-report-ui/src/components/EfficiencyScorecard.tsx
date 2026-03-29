@@ -1,15 +1,16 @@
 /**
  * Section 2: Efficiency Scorecard
- * Converted from design reference EfficiencyScorecard.jsx.
- * Rebuilt from v5 efficiency-scorecard.jsx inline styles (SYMPH-197).
+ * Rebuilt from v5 efficiency-scorecard.jsx inline styles.
+ * LAYOUT CHANGE: vertical list -> 5-column card grid.
+ * Sparkline colors conditional on delta direction.
  *
- * Note: Failure Rate row removed — now displayed in PipelineHealth component.
+ * Note: Failure Rate row removed -- now displayed in PipelineHealth component.
  */
 import type {
   EfficiencyScorecard as EfficiencyScorecardData,
   MetricWithTrend,
 } from "../types.ts";
-import { Sparkline, fmtNum } from "./chartUtils.tsx";
+import { fmtNum } from "./chartUtils.tsx";
 
 function round(n: number, decimals = 0): number {
   const f = 10 ** decimals;
@@ -17,13 +18,11 @@ function round(n: number, decimals = 0): number {
 }
 
 /**
- * Format a metric value as a percentage string (SYMPH-189).
- * Most scorecard metrics are stored as decimals (0.72 = 72%);
- * `tokens_per_turn` is an integer and `first_pass_rate` is already a percentage.
+ * Format a metric value as a percentage string.
+ * Scorecard metrics are stored as raw percentages (72 = 72%).
  */
-function formatPct(value: number, isRawPct: boolean): string {
-  if (isRawPct) return `${round(value, 1)}%`;
-  return `${round(value * 100, 1)}%`;
+function formatPct(value: number): string {
+  return `${round(value, 1)}%`;
 }
 
 export interface ScorecardSeries {
@@ -41,20 +40,68 @@ export interface EfficiencyScorecardProps {
 }
 
 /**
- * Build range text: "30d: {formatPct(trend_30d)} → {formatPct(current)}" (SYMPH-189).
+ * Build range text: "30d: {formatPct(trend_30d)} -> {formatPct(current)}"
  */
 function rangeText(
   metric: MetricWithTrend | undefined,
-  isRawPct: boolean,
   isTokenCount?: boolean,
 ): string | null {
   if (!metric || metric.trend_30d == null || metric.current == null)
     return null;
   if (isTokenCount) {
-    return `30d: ${fmtNum(metric.trend_30d)} → ${fmtNum(metric.current)}`;
+    return `30d: ${fmtNum(metric.trend_30d)} \u2192 ${fmtNum(metric.current)}`;
   }
-  return `30d: ${formatPct(metric.trend_30d, isRawPct)} → ${formatPct(metric.current, isRawPct)}`;
+  return `30d: ${formatPct(metric.trend_30d)} \u2192 ${formatPct(metric.current)}`;
 }
+
+/**
+ * Determine delta direction for a metric.
+ * For most efficiency metrics: lower = better (wasted context, tokens/turn).
+ * For cache efficiency, output ratio, first-pass rate: higher = better.
+ * Returns: 'favorable' | 'declining' | null
+ */
+function getDeltaDirection(
+  metric: MetricWithTrend | undefined,
+  higherIsBetter: boolean,
+): "favorable" | "declining" | null {
+  if (!metric || metric.trend_7d == null) return null;
+  const delta = metric.current - metric.trend_7d;
+  if (delta === 0) return null;
+  if (higherIsBetter) return delta > 0 ? "favorable" : "declining";
+  return delta < 0 ? "favorable" : "declining";
+}
+
+function formatDelta(
+  metric: MetricWithTrend | undefined,
+  isTokenCount?: boolean,
+): string | null {
+  if (!metric || metric.trend_7d == null) return null;
+  const delta = metric.current - metric.trend_7d;
+  if (isTokenCount) {
+    const pct = metric.trend_7d !== 0 ? (delta / metric.trend_7d) * 100 : 0;
+    const sign = pct >= 0 ? "+" : "";
+    return `${sign}${round(pct, 1)}%`;
+  }
+  const sign = delta >= 0 ? "+" : "";
+  return `${sign}${round(delta, 1)}pp`;
+}
+
+const cardStyle: React.CSSProperties = {
+  backgroundColor: "#FFFFFF08",
+  borderColor: "#FFFFFF0F",
+  borderRadius: "12px",
+  borderStyle: "solid",
+  borderWidth: "1px",
+  boxSizing: "border-box",
+  display: "flex",
+  flexBasis: "0%",
+  flexDirection: "column",
+  flexGrow: 1,
+  flexShrink: 1,
+  gap: "12px",
+  paddingBlock: "20px",
+  paddingInline: "20px",
+};
 
 export default function EfficiencyScorecard({
   scorecard,
@@ -67,130 +114,240 @@ export default function EfficiencyScorecard({
   const rows = [
     {
       name: "Cache Efficiency",
+      metric: sc.cache_efficiency,
       value: `${round(sc.cache_efficiency?.current ?? 0, 1)}%`,
       sparkline: s.cacheEff,
-      stroke: "#58a6ff",
-      range: rangeText(sc.cache_efficiency, false),
+      range: rangeText(sc.cache_efficiency),
+      higherIsBetter: true,
+      isTokenCount: false,
     },
     {
       name: "Output Ratio",
+      metric: sc.output_ratio,
       value: `${round(sc.output_ratio?.current ?? 0, 1)}%`,
       sparkline: s.outputRatio,
-      stroke: "#3fb950",
-      range: rangeText(sc.output_ratio, false),
+      range: rangeText(sc.output_ratio),
+      higherIsBetter: true,
+      isTokenCount: false,
     },
     {
       name: "Wasted Context",
+      metric: sc.wasted_context,
       value: `${round(sc.wasted_context?.current ?? 0, 1)}%`,
       sparkline: s.wastedCtx,
-      stroke: "#d29922",
-      range: rangeText(sc.wasted_context, false),
+      range: rangeText(sc.wasted_context),
+      higherIsBetter: false,
+      isTokenCount: false,
     },
     {
       name: "Tokens / Turn",
+      metric: sc.tokens_per_turn,
       value: fmtNum(sc.tokens_per_turn?.current ?? 0),
       sparkline: s.tokPerTurn,
-      stroke: "#bc8cff",
-      range: rangeText(sc.tokens_per_turn, false, true),
+      range: rangeText(sc.tokens_per_turn, true),
+      higherIsBetter: false,
+      isTokenCount: true,
     },
     {
       name: "First-Pass Rate",
+      metric: sc.first_pass_rate,
       value: `${round(sc.first_pass_rate?.current ?? 0, 1)}%`,
       sparkline: s.firstPass,
-      stroke: "#56d364",
-      range: rangeText(sc.first_pass_rate, true),
+      range: rangeText(sc.first_pass_rate),
+      higherIsBetter: true,
+      isTokenCount: false,
     },
   ];
 
   return (
-    <section
+    <div
       style={{
-        marginBottom: "var(--spacing-section)",
+        boxSizing: "border-box" as const,
+        display: "flex",
+        flexDirection: "column" as const,
+        fontSynthesis: "none",
+        gap: "20px",
+        MozOsxFontSmoothing: "grayscale",
+        order: 2,
+        paddingBlock: "32px",
+        paddingInline: "64px",
+        WebkitFontSmoothing: "antialiased",
+        width: "1440px",
       }}
     >
-      <h2
-        style={{
-          fontFamily: "var(--font-heading)",
-          fontSize: "var(--font-size-subheading)",
-          fontWeight: "var(--font-weight-subheading)" as unknown as number,
-          lineHeight: "var(--line-height-heading)",
-          color: "var(--color-text)",
-          margin: 0,
-          marginBottom: "var(--spacing-group)",
-        }}
-      >
-        Efficiency Scorecard
-      </h2>
+      <div style={{ boxSizing: "border-box" as const, display: "flex", gap: "12px" }}>
+        <div
+          style={{
+            boxSizing: "border-box" as const,
+            color: "#FFFFFF59",
+            fontFamily: '"DM Sans", system-ui, sans-serif',
+            fontSize: "11px",
+            fontWeight: 600,
+            letterSpacing: "0.1em",
+            lineHeight: "14px",
+            textTransform: "uppercase" as const,
+          }}
+        >
+          Efficiency Scorecard
+        </div>
+        <div
+          style={{
+            boxSizing: "border-box" as const,
+            color: "#FFFFFF40",
+            fontFamily: '"DM Sans", system-ui, sans-serif',
+            fontSize: "11px",
+            lineHeight: "14px",
+          }}
+        >
+          Are your changes working?
+        </div>
+      </div>
       {coldStart && (
         <div
           style={{
-            fontFamily: "var(--font-body)",
-            fontSize: "var(--font-size-small)",
-            color: "var(--color-text-secondary)",
-            marginBottom: "var(--spacing-group)",
+            color: "#FFFFFF59",
+            fontFamily: '"DM Sans", system-ui, sans-serif',
+            fontSize: "11px",
+            lineHeight: "14px",
             fontStyle: "italic",
-            lineHeight: "var(--line-height-body)",
           }}
         >
-          Trend data unavailable — requires 7+ days of history
+          Trend data unavailable &mdash; requires 7+ days of history
         </div>
       )}
-      {rows.map((row) => (
-        <div
-          key={row.name}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "var(--spacing-group)",
-            background: "var(--color-surface)",
-            border: "var(--border-width) solid var(--border-color)",
-            borderRadius: "var(--border-radius)",
-            marginBottom: "var(--spacing-element)",
-          }}
-        >
-          <span
-            style={{
-              fontFamily: "var(--font-body)",
-              color: "var(--color-text)",
-              fontWeight: "var(--font-weight-subheading)" as unknown as number,
-              minWidth: 140,
-            }}
-          >
-            {row.name}
-          </span>
-          <span
-            style={{
-              fontFamily: "var(--font-body)",
-              color: "var(--color-text)",
-              fontWeight: "var(--font-weight-heading)" as unknown as number,
-              minWidth: 60,
-              textAlign: "right",
-            }}
-          >
-            {row.value}
-          </span>
-          {row.range && (
-            <span
-              style={{
-                fontFamily: "var(--font-body)",
-                fontSize: "var(--font-size-small)",
-                color: "var(--color-text-secondary)",
-                marginLeft: "var(--spacing-element)",
-              }}
-            >
-              {row.range}
-            </span>
-          )}
-          <span
-            style={{
-              marginLeft: "var(--spacing-group)",
-            }}
-          >
-            <Sparkline values={row.sparkline} stroke={row.stroke} fill />
-          </span>
-        </div>
-      ))}
-    </section>
+      <div style={{ boxSizing: "border-box" as const, display: "flex", gap: "16px" }}>
+        {rows.map((row) => {
+          const direction = getDeltaDirection(row.metric, row.higherIsBetter);
+          const deltaText = formatDelta(row.metric, row.isTokenCount);
+          const color =
+            direction === "favorable"
+              ? "#34D399"
+              : direction === "declining"
+                ? "#F59E0B"
+                : "#FFFFFF59";
+          const arrowPath =
+            direction === "favorable"
+              ? "M6 2 L10 7 L2 7 Z"
+              : direction === "declining"
+                ? "M6 10 L10 5 L2 5 Z"
+                : null;
+          // Sparkline color matches delta direction
+          const sparkColor =
+            direction === "favorable"
+              ? "#34D399"
+              : direction === "declining"
+                ? "#F59E0B"
+                : "#FFFFFF59";
+
+          return (
+            <div key={row.name} style={cardStyle}>
+              <div
+                style={{
+                  boxSizing: "border-box" as const,
+                  color: "#FFFFFF66",
+                  fontFamily: '"DM Sans", system-ui, sans-serif',
+                  fontSize: "12px",
+                  lineHeight: "16px",
+                }}
+              >
+                {row.name}
+              </div>
+              <div
+                style={{
+                  boxSizing: "border-box" as const,
+                  color: "#F0F0F2",
+                  fontFamily: '"DM Sans", system-ui, sans-serif',
+                  fontSize: "28px",
+                  fontWeight: 700,
+                  letterSpacing: "-0.02em",
+                  lineHeight: "36px",
+                }}
+              >
+                {row.value}
+              </div>
+              {deltaText && (
+                <div
+                  style={{
+                    alignItems: "center",
+                    boxSizing: "border-box" as const,
+                    display: "flex",
+                    gap: "6px",
+                  }}
+                >
+                  {arrowPath && (
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 12 12"
+                      xmlns="http://www.w3.org/2000/svg"
+                      style={{ flexShrink: 0 }}
+                    >
+                      <path d={arrowPath} fill={color} />
+                    </svg>
+                  )}
+                  <div
+                    style={{
+                      boxSizing: "border-box" as const,
+                      color,
+                      flexShrink: 0,
+                      fontFamily: '"JetBrains Mono", system-ui, sans-serif',
+                      fontSize: "12px",
+                      lineHeight: "16px",
+                    }}
+                  >
+                    {deltaText}
+                  </div>
+                </div>
+              )}
+              <svg
+                width="100%"
+                height="32"
+                viewBox="0 0 200 32"
+                xmlns="http://www.w3.org/2000/svg"
+                style={{ overflow: "visible" as const }}
+              >
+                {row.sparkline && row.sparkline.length >= 2 ? (
+                  (() => {
+                    const vals = row.sparkline;
+                    const minV = Math.min(...vals);
+                    const maxV = Math.max(...vals);
+                    const rangeV = maxV - minV || 1;
+                    const pts = vals
+                      .map((v, i) => {
+                        const x = Math.round((i / (vals.length - 1)) * 200);
+                        const y = Math.round(28 - ((v - minV) / rangeV) * 24);
+                        return `${x},${y}`;
+                      })
+                      .join(" ");
+                    return (
+                      <polyline
+                        points={pts}
+                        stroke={sparkColor}
+                        strokeWidth="1.5"
+                        fill="none"
+                        opacity="0.8"
+                      />
+                    );
+                  })()
+                ) : null}
+              </svg>
+              {row.range && (
+                <div
+                  style={{
+                    boxSizing: "border-box" as const,
+                    color: "#FFFFFF40",
+                    fontFamily: '"JetBrains Mono", system-ui, sans-serif',
+                    fontSize: "10px",
+                    lineHeight: "12px",
+                  }}
+                >
+                  {row.range}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }

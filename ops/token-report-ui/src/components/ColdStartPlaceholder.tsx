@@ -20,19 +20,19 @@ export default function ColdStartPlaceholder({
     <div
       className="cold-start-placeholder"
       style={{
-        background: "var(--color-surface)",
-        border: "var(--border-width) dashed var(--border-color)",
+        background: "var(--surface)",
+        border: "var(--border-width) dashed var(--border)",
         borderRadius: "var(--border-radius)",
-        padding: "var(--spacing-section)",
+        padding: "var(--spacing-section-gap)",
         textAlign: "center",
-        color: "var(--color-text-secondary)",
+        color: "var(--text-secondary)",
       }}
     >
       <div
         style={{
-          fontSize: "var(--font-size-heading)",
+          fontSize: "24px",
           marginBottom: "var(--spacing-element)",
-          lineHeight: "var(--line-height-heading)",
+          lineHeight: "32px",
         }}
       >
         📊
@@ -40,11 +40,11 @@ export default function ColdStartPlaceholder({
       <div
         style={{
           fontFamily: "var(--font-heading)",
-          fontWeight: "var(--font-weight-subheading)" as unknown as number,
-          fontSize: "var(--font-size-body)",
-          color: "var(--color-text)",
+          fontWeight: 600,
+          fontSize: "14px",
+          color: "var(--text)",
           marginBottom: "var(--spacing-element)",
-          lineHeight: "var(--line-height-body)",
+          lineHeight: "18px",
         }}
       >
         Collecting data&hellip;
@@ -52,9 +52,9 @@ export default function ColdStartPlaceholder({
       <div
         style={{
           fontFamily: "var(--font-body)",
-          fontSize: "var(--font-size-small)",
-          color: "var(--color-text-secondary)",
-          lineHeight: "var(--line-height-body)",
+          fontSize: "12px",
+          color: "var(--text-secondary)",
+          lineHeight: "16px",
         }}
       >
         This section requires at least {requiredDays} days of data.{" "}

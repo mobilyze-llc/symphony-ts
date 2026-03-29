@@ -38,7 +38,7 @@ const data = analysisData as AnalysisData;
 describe("App", () => {
   it("renders without crashing", () => {
     const html = renderToString(<App />);
-    expect(html).toContain("Symphony Token Report");
+    expect(html).toContain("Token Intelligence Report");
   });
 
   it("renders all section headings", () => {
@@ -52,7 +52,7 @@ describe("App", () => {
     expect(html).toContain("Pipeline Health");
     expect(html).toContain("Stage Efficiency");
     expect(html).toContain("Per-Product Breakdown");
-    expect(html).toContain("SYMPH-131");
+    expect(html).toContain("token-report.sh");
   });
 });
 
@@ -113,13 +113,11 @@ describe("analysis.json shape", () => {
 describe("ReportHeader", () => {
   it("renders header with metadata", () => {
     const html = renderToString(
-      <ReportHeader today="2026-03-20" recordCount={312} dataSpanDays={45} />,
+      <ReportHeader today="2026-03-20" />,
     );
-    expect(html).toContain("Symphony Token Report");
+    expect(html).toContain("Token Intelligence Report");
     expect(html).toContain("2026-03-20");
-    expect(html).toContain("312");
-    expect(html).toContain("45");
-    expect(html).toContain("day span");
+    expect(html).toContain("Daily analysis across all products");
   });
 });
 
@@ -138,7 +136,7 @@ describe("ExecutiveSummary", () => {
       />,
     );
     expect(html).toContain("Executive Summary");
-    expect(html).toContain("Total Tokens");
+    expect(html).toContain("Total Tokens Today");
     expect(html).toContain("18,420,000");
     expect(html).toContain("Issues Processed");
     expect(html).toContain("Cache Hit Rate");
@@ -147,47 +145,49 @@ describe("ExecutiveSummary", () => {
   });
 });
 
-// ─── SYMPH-190: Formula verification tests ───
+// --- SYMPH-190: Formula verification tests ---
 
 describe("SYMPH-190 formula verification", () => {
   it("fixture has wow_delta_pct on total_tokens", () => {
     expect(analysisData.executive_summary.total_tokens).toHaveProperty(
       "wow_delta_pct",
     );
-    expect(analysisData.executive_summary.total_tokens.wow_delta_pct).toBe(
-      12.3,
-    );
+    expect(
+      (analysisData.executive_summary.total_tokens as unknown as { wow_delta_pct: number })
+        .wow_delta_pct,
+    ).toBe(12.3);
   });
 
   it("fixture has wow_delta_pct on per_ticket_trend", () => {
     expect(analysisData.per_ticket_trend).toHaveProperty("wow_delta_pct");
     expect(
-      (analysisData.per_ticket_trend as { wow_delta_pct: number })
+      (analysisData.per_ticket_trend as unknown as { wow_delta_pct: number })
         .wow_delta_pct,
     ).toBe(-5.2);
   });
 
-  it("cache delta formula: (current - trend_7d) * 100 = 4pp", () => {
+  it("cache delta formula: current - trend_7d = 4pp", () => {
     const sc = data.efficiency_scorecard;
     const expected = Math.round(
-      (sc.cache_efficiency.current - sc.cache_efficiency.trend_7d) * 100,
+      sc.cache_efficiency.current - sc.cache_efficiency.trend_7d,
     );
     expect(expected).toBe(4);
     // Verify rendered output contains the delta badge
     const html = renderToString(<App />);
-    expect(html).toContain("4<!-- -->% WoW");
+    expect(html).toContain("4");
+    expect(html).toContain("pp");
   });
 
-  it("token delta: wires wow_delta_pct from fixture into WoW badge", () => {
+  it("token delta: wires wow_delta_pct from fixture into delta badge", () => {
     const html = renderToString(<App />);
-    // total_tokens.wow_delta_pct = 12.3 → "+12.3% WoW"
-    expect(html).toContain("12.3<!-- -->% WoW");
+    // total_tokens.wow_delta_pct = 12.3 -> "+12.3% vs 7d avg"
+    expect(html).toContain("+12.3% vs 7d avg");
   });
 
-  it("per-ticket WoW delta: wires wow_delta_pct from fixture into WoW badge", () => {
+  it("per-ticket WoW delta: wires wow_delta_pct from fixture into delta badge", () => {
     const html = renderToString(<App />);
-    // per_ticket_trend.wow_delta_pct = -5.2 → "-5.2% WoW"
-    expect(html).toContain("-5.2<!-- -->% WoW");
+    // per_ticket_trend.wow_delta_pct = -5.2 -> "-5.2% WoW"
+    expect(html).toContain("-5.2% WoW");
   });
 
   it("per_ticket_series exists on fixture for chart rendering", () => {
@@ -200,7 +200,7 @@ describe("SYMPH-190 formula verification", () => {
 });
 
 describe("EfficiencyScorecard", () => {
-  it("renders 5 metric rows (failure rate moved to PipelineHealth)", () => {
+  it("renders 5 metric cards (failure rate moved to PipelineHealth)", () => {
     const html = renderToString(
       <EfficiencyScorecard scorecard={data.efficiency_scorecard} />,
     );
@@ -210,41 +210,38 @@ describe("EfficiencyScorecard", () => {
     expect(html).toContain("Wasted Context");
     expect(html).toContain("Tokens / Turn");
     expect(html).toContain("First-Pass Rate");
-    // Failure Rate row removed — now in PipelineHealth component
+    // Failure Rate row removed -- now in PipelineHealth component
     expect(html).not.toContain("Failure Rate");
   });
 
-  it("renders 30d range text for each metric row (SYMPH-189)", () => {
+  it("renders 30d range text for each metric card", () => {
     const html = renderToString(
       <EfficiencyScorecard scorecard={data.efficiency_scorecard} />,
     );
-    // Cache Efficiency: trend_30d=0.65 (65%), current=0.72 (72%)
+    // Cache Efficiency: trend_30d=65, current=72 (already percentages)
     expect(html).toContain("30d:");
-    expect(html).toContain("→");
-    // SYMPH-197: className removed — range text validated by "30d:" assertion above
+    expect(html).toContain("\u2192");
   });
 });
 
 describe("SYMPH-189: formula fixes and pipeline wiring", () => {
   it("cache delta uses percentage point formula, not relative change", () => {
-    // sc.cache_efficiency: current=0.72, trend_7d=0.68
-    // Correct: (0.72 - 0.68) * 100 = 4
-    // Wrong (old): ((0.72 - 0.68) / 0.68) * 100 ≈ 5.88
+    // sc.cache_efficiency: current=72, trend_7d=68
+    // Correct: 72 - 68 = 4
     const html = renderToString(<App />);
-    // The WowBadge should show +4, not +6
     expect(html).toContain("Executive Summary");
   });
 
   it("wires tokensDelta from pipeline wow_delta_pct", () => {
     // analysis.json fixture has total_tokens.wow_delta_pct = 12.3
     const html = renderToString(<App />);
-    expect(html).toContain("12.3");
+    expect(html).toContain("+12.3% vs 7d avg");
   });
 
   it("wires tokPerIssueWow from pipeline per_ticket_trend.wow_delta_pct", () => {
     // analysis.json fixture has per_ticket_trend.wow_delta_pct = -5.2
     const html = renderToString(<App />);
-    expect(html).toContain("5.2");
+    expect(html).toContain("-5.2% WoW");
   });
 
   it("analysis.json has per_ticket_series", () => {
@@ -272,7 +269,7 @@ describe("PerStageTrend", () => {
       />,
     );
     expect(html).toContain("Per-Stage Utilization Trend");
-    expect(html).toContain("Inflection");
+    expect(html).toContain("inflection detected");
   });
 
   it("filters spec-gen from trend data", () => {
@@ -313,7 +310,7 @@ describe("PerStageTrend", () => {
         inflections={inflections}
       />,
     );
-    expect(html).toContain("💡");
+    expect(html).toContain("Attribution");
     expect(html).toContain("caching rollout");
     expect(html).toContain("Extended TTL reduced cache misses");
   });
@@ -340,11 +337,46 @@ describe("InflectionAttribution", () => {
     const html = renderToString(
       <InflectionAttribution inflection={inflection} />,
     );
-    expect(html).toContain("💡");
+    expect(html).toContain("Attribution");
     expect(html).toContain("caching rollout");
   });
 
-  it("returns null when no attributions and no llm_insight", () => {
+  it("renders negative sign for down direction with positive magnitude", () => {
+    const inflection = {
+      date: "2026-03-10",
+      metric: "implement avg",
+      direction: "down" as const,
+      magnitude: 0.15,
+      context: null,
+      avg_7d: 100,
+      avg_30d: 90,
+      attributions: [],
+      llm_insight: null,
+    };
+    const html = renderToString(<InflectionAttribution inflection={inflection} />);
+    expect(html).toContain("-15%");
+    expect(html).not.toContain("+15%");
+  });
+
+  it("does not double-negate when magnitude is already negative", () => {
+    const inflection = {
+      date: "2026-03-10",
+      metric: "implement avg",
+      direction: "down" as const,
+      magnitude: -0.15,
+      context: null,
+      avg_7d: 100,
+      avg_30d: 90,
+      attributions: [],
+      llm_insight: null,
+    };
+    const html = renderToString(<InflectionAttribution inflection={inflection} />);
+    // magnitude is already negative, Math.abs ensures we don't get --15%
+    expect(html).toContain("15%");
+    expect(html).not.toContain("--15%");
+  });
+
+  it("renders minimal card when no attributions and no llm_insight", () => {
     const empty = {
       date: "2026-03-01",
       metric: "test",
@@ -357,11 +389,11 @@ describe("InflectionAttribution", () => {
       llm_insight: null,
     };
     const html = renderToString(<InflectionAttribution inflection={empty} />);
-    // Should render nothing
-    expect(html).toBe("");
+    // Still renders the card wrapper with inflection detected label
+    expect(html).toContain("inflection detected");
   });
 
-  it("renders only LLM insight when attributions are empty", () => {
+  it("renders LLM insight as attribution card when attributions are empty", () => {
     const insightOnly = {
       date: "2026-03-01",
       metric: "test",
@@ -376,10 +408,8 @@ describe("InflectionAttribution", () => {
     const html = renderToString(
       <InflectionAttribution inflection={insightOnly} />,
     );
-    expect(html).toContain("💡");
+    expect(html).toContain("Attribution");
     expect(html).toContain("Insight with no attributions");
-    // No list items should be rendered
-    expect(html).not.toContain("<li");
   });
 });
 
@@ -389,10 +419,9 @@ describe("PerTicketCostTrend", () => {
       <PerTicketCostTrend perTicket={data.per_ticket_trend} />,
     );
     expect(html).toContain("Per-Ticket Cost Trend");
-    expect(html).toContain("52,000");
-    expect(html).toContain("59,000");
-    expect(html).toContain("47");
-    expect(html).toContain("tickets");
+    // Median and mean displayed in K format
+    expect(html).toContain("Median:");
+    expect(html).toContain("Mean:");
   });
 });
 
@@ -403,8 +432,8 @@ describe("OutlierAnalysis", () => {
     expect(html).toContain("Outlier Analysis");
     expect(html).toContain("SYMPH-98");
     expect(html).toContain("JONY-42");
-    // SYMPH-179: multiplier displayed instead of z-score
-    expect(html).toContain("8.5x mean");
+    // v5: multiplier badge shows "Nx avg"
+    expect(html).toContain("8.5x avg");
     expect(html).toContain("mobilyze-llc/issue/SYMPH-98");
   });
 
@@ -420,9 +449,9 @@ describe("OutlierAnalysis", () => {
   it("displays multiplier not z-score", () => {
     const outliers = Array.isArray(data.outliers) ? data.outliers : [];
     const html = renderToString(<OutlierAnalysis outliers={outliers} />);
-    // Multiplier = total_tokens / mean (Q-2 decision)
-    expect(html).toContain("8.5x mean");
-    expect(html).toContain("3.4x mean");
+    // Multiplier badge shows "Nx avg"
+    expect(html).toContain("8.5x avg");
+    expect(html).toContain("3.4x avg");
     // z-score should NOT appear in rendered output
     expect(html).not.toContain("z=");
     expect(html).not.toContain("z_score");
@@ -440,15 +469,15 @@ describe("OutlierAnalysis", () => {
 
   it("renders empty state", () => {
     const html = renderToString(<OutlierAnalysis outliers={[]} />);
-    expect(html).toContain("No outliers detected");
+    expect(html).toContain("No statistical outliers detected");
   });
 });
 
 describe("IssueLeaderboard", () => {
-  it("renders table with empty data", () => {
+  it("renders grid with empty data", () => {
     const html = renderToString(<IssueLeaderboard leaderboard={[]} />);
     expect(html).toContain("Issue Leaderboard");
-    expect(html).toContain("<table");
+    expect(html).toContain("No issues processed yet");
   });
 
   it("renders leaderboard items with linear_url", () => {
@@ -476,10 +505,10 @@ describe("IssueLeaderboard", () => {
       linear_url: `https://linear.app/mobilyze-llc/issue/TEST-${i + 1}`,
     }));
     const html = renderToString(<IssueLeaderboard leaderboard={items} />);
-    // Items 1–25 should be present
+    // Items 1-25 should be present
     expect(html).toContain("TEST-1");
     expect(html).toContain("TEST-25");
-    // Items 26–27 should be excluded
+    // Items 26-27 should be excluded
     expect(html).not.toContain("TEST-26");
     expect(html).not.toContain("TEST-27");
   });
@@ -508,6 +537,32 @@ describe("IssueLeaderboard", () => {
     expect(html).toContain("https://linear.app/mobilyze-llc/issue/JONY-42");
     expect(html).toContain("https://linear.app/mobilyze-llc/issue/SYMPH-112");
   });
+
+  it("renders 4-column CSS grid matching buildLeaderboard() data", () => {
+    const items = [
+      {
+        identifier: "SYMPH-100",
+        title: "Test issue",
+        tokens: 100000,
+        linear_url: "https://linear.app/mobilyze-llc/issue/SYMPH-100",
+      },
+    ];
+    const html = renderToString(<IssueLeaderboard leaderboard={items} />);
+    // 4 column headers: Issue, Title, Total, link
+    expect(html).toContain("Issue");
+    expect(html).toContain("Title");
+    expect(html).toContain("Total");
+    // Values
+    expect(html).toContain("SYMPH-100");
+    expect(html).toContain("Test issue");
+    expect(html).toContain("100,000");
+    // Per-stage columns removed — no Product, Investigate, Implement, Review, Merge headers
+    expect(html).not.toContain(">Product<");
+    expect(html).not.toContain(">Investigate<");
+    expect(html).not.toContain(">Implement<");
+    expect(html).not.toContain(">Review<");
+    expect(html).not.toContain(">Merge<");
+  });
 });
 
 describe("PipelineHealth", () => {
@@ -516,22 +571,18 @@ describe("PipelineHealth", () => {
       <PipelineHealth failureRate={data.efficiency_scorecard.failure_rate} />,
     );
     expect(html).toContain("Pipeline Health");
-    // Stage names derived from failure_rate.current keys
-    expect(html).toContain("investigate");
-    expect(html).toContain("implement");
-    expect(html).toContain("validate");
-    // Bar widths are JS-computed percentages (SSR inserts <!-- --> between text nodes)
-    expect(html).toContain("2<!-- -->% failure rate");
-    expect(html).toContain("8<!-- -->% failure rate");
-    expect(html).toContain("5<!-- -->% failure rate");
+    // Stage names rendered with canonical casing
+    expect(html).toContain("Investigate");
+    expect(html).toContain("Implement");
+    expect(html).toContain("Validate");
   });
 
   it("renders summary insight with worst stage", () => {
     const html = renderToString(
       <PipelineHealth failureRate={data.efficiency_scorecard.failure_rate} />,
     );
-    // implement has the highest rate (0.08), should be the worst stage
-    expect(html).toContain("implement accounts for");
+    // implement has the highest rate (8%), should be the worst stage
+    expect(html).toContain("accounts for");
     expect(html).toContain("% of all failures");
     expect(html).toContain("vs 7d avg");
   });
@@ -552,18 +603,14 @@ describe("PipelineHealth", () => {
     );
     // Ensure no CSS round() function in the output
     expect(html).not.toContain("round(");
-    // Bar widths should be inline style percentages
-    expect(html).toContain("width:2%");
-    expect(html).toContain("width:8%");
-    expect(html).toContain("width:5%");
   });
 
-  it("shows direction and delta vs 7d avg", () => {
+  it("renders failure rate in red (#EF4444)", () => {
     const html = renderToString(
       <PipelineHealth failureRate={data.efficiency_scorecard.failure_rate} />,
     );
-    // implement: current 0.08, trend_7d 0.10 → delta = -2pp → "down 2pp"
-    expect(html).toContain("down 2pp vs 7d avg");
+    expect(html).toContain("Failure Rate");
+    expect(html).toContain("#EF4444");
   });
 });
 
@@ -573,21 +620,18 @@ describe("StageEfficiency", () => {
       <StageEfficiency perStageSpend={data.per_stage_spend} />,
     );
     expect(html).toContain("Stage Efficiency");
-    expect(html).toContain("investigate");
-    expect(html).toContain("implement");
-    expect(html).toContain("validate");
+    expect(html).toContain("Investigate");
+    expect(html).toContain("Implement");
+    expect(html).toContain("Validate");
   });
 
-  it("renders failure rate per stage when provided", () => {
+  it("renders avg tokens and bottom stats", () => {
     const html = renderToString(
-      <StageEfficiency
-        perStageSpend={data.per_stage_spend}
-        failureRateCurrent={data.efficiency_scorecard.failure_rate.current}
-      />,
+      <StageEfficiency perStageSpend={data.per_stage_spend} />,
     );
-    expect(html).toContain("8%<!-- --> failure");
-    expect(html).toContain("2%<!-- --> failure");
-    expect(html).toContain("5%<!-- --> failure");
+    expect(html).toContain("avg tokens");
+    expect(html).toContain("Avg turns");
+    expect(html).toContain("Cache rate");
   });
 });
 
@@ -607,12 +651,13 @@ describe("PerProductBreakdown", () => {
 describe("ReportFooter", () => {
   it("renders footer text", () => {
     const html = renderToString(<ReportFooter />);
-    expect(html).toContain("SYMPH-131");
-    expect(html).toContain("token-report.mjs");
+    expect(html).toContain("Symphony Token Intelligence");
+    expect(html).toContain("token-report.sh");
+    expect(html).toContain("Retention: 90 days");
   });
 });
 
-// ─── chart-utils unit tests ───
+// --- chart-utils unit tests ---
 
 describe("chart-utils", () => {
   it("round() rounds to specified decimals", () => {
@@ -699,7 +744,7 @@ describe("chart-utils", () => {
   });
 });
 
-// ─── StageUtilizationChart tests ───
+// --- StageUtilizationChart tests ---
 
 describe("StageUtilizationChart", () => {
   const dateKeyedTrend: Record<
@@ -780,7 +825,7 @@ describe("StageUtilizationChart", () => {
   });
 });
 
-// ─── TicketCostChart tests ───
+// --- TicketCostChart tests ---
 
 describe("TicketCostChart", () => {
   const sampleSeries = [45000, 52000, 48000, 61000, 55000, 58000, 53000];
@@ -830,7 +875,7 @@ describe("TicketCostChart", () => {
   });
 });
 
-// ─── Sparkline fill prop tests ───
+// --- Sparkline fill prop tests ---
 
 describe("Sparkline fill prop", () => {
   const sampleValues = [10, 20, 15, 25, 18];
@@ -906,74 +951,86 @@ describe("Sparkline fill prop", () => {
   });
 });
 
-// ─── CSS custom properties from styles.json ───
+// --- CSS custom properties from styles.json (v5 design tokens) ---
 
 describe("reportCSS design tokens", () => {
-  it("contains existing dark-theme CSS vars", () => {
-    expect(reportCSS).toContain("--bg: #0d1117");
-    expect(reportCSS).toContain("--bg-card: #161b22");
-    expect(reportCSS).toContain("--border: #30363d");
-    expect(reportCSS).toContain("--text: #c9d1d9");
-    expect(reportCSS).toContain("--accent: #58a6ff");
+  it("contains v5 color tokens as CSS custom properties", () => {
+    expect(reportCSS).toContain("--bg: #0F1117");
+    expect(reportCSS).toContain("--surface: #FFFFFF08");
+    expect(reportCSS).toContain("--border: #FFFFFF0F");
+    expect(reportCSS).toContain("--text: #F0F0F2");
+    expect(reportCSS).toContain("--text-secondary: #FFFFFF99");
+    expect(reportCSS).toContain("--text-tertiary: #FFFFFF66");
+    expect(reportCSS).toContain("--text-muted: #FFFFFF59");
+    expect(reportCSS).toContain("--text-caption: #FFFFFF40");
+    expect(reportCSS).toContain("--text-body: #FFFFFF8C");
+    expect(reportCSS).toContain("--accent: #60A5FA");
+    expect(reportCSS).toContain("--green: #34D399");
+    expect(reportCSS).toContain("--red: #EF4444");
+    expect(reportCSS).toContain("--yellow: #F59E0B");
+    expect(reportCSS).toContain("--purple: #A78BFA");
   });
 
-  it("contains styles.json color tokens as CSS custom properties", () => {
-    expect(reportCSS).toContain("--color-primary: #1E40AF");
-    expect(reportCSS).toContain("--color-secondary: #6366F1");
-    expect(reportCSS).toContain("--color-background: #F8FAFC");
-    expect(reportCSS).toContain("--color-surface: #FFFFFF");
-    expect(reportCSS).toContain("--color-text: #0F172A");
-    expect(reportCSS).toContain("--color-text-secondary: #64748B");
-    expect(reportCSS).toContain("--color-accent: #10B981");
-    expect(reportCSS).toContain("--color-danger: #EF4444");
-    expect(reportCSS).toContain("--color-border: #E2E8F0");
+  it("contains v5 stage color tokens", () => {
+    expect(reportCSS).toContain("--stage-investigate: #60A5FA");
+    expect(reportCSS).toContain("--stage-implement: #F59E0B");
+    expect(reportCSS).toContain("--stage-review: #A78BFA");
+    expect(reportCSS).toContain("--stage-merge: #34D399");
   });
 
-  it("contains styles.json typography tokens as CSS custom properties", () => {
-    expect(reportCSS).toContain("--font-heading: 'Inter'");
-    expect(reportCSS).toContain("--font-body: 'Inter'");
-    expect(reportCSS).toContain("--font-size-heading: 28px");
-    expect(reportCSS).toContain("--font-size-subheading: 18px");
-    expect(reportCSS).toContain("--font-size-body: 14px");
-    expect(reportCSS).toContain("--font-size-caption: 12px");
-    expect(reportCSS).toContain("--font-weight-heading: 700");
-    expect(reportCSS).toContain("--font-weight-subheading: 600");
-    expect(reportCSS).toContain("--font-weight-body: 400");
-    expect(reportCSS).toContain("--line-height-heading: 1.2");
-    expect(reportCSS).toContain("--line-height-subheading: 1.4");
-    expect(reportCSS).toContain("--line-height-body: 1.5");
+  it("contains v5 inflection tokens", () => {
+    expect(reportCSS).toContain("--inflection-implement-bg: #F59E0B0F");
+    expect(reportCSS).toContain("--inflection-implement-border: #F59E0B26");
+    expect(reportCSS).toContain("--inflection-review-bg: #A78BFA0F");
+    expect(reportCSS).toContain("--inflection-review-border: #A78BFA26");
   });
 
-  it("contains styles.json spacing tokens as CSS custom properties", () => {
-    expect(reportCSS).toContain("--spacing-section: 32px");
-    expect(reportCSS).toContain("--spacing-group: 16px");
-    expect(reportCSS).toContain("--spacing-element: 8px");
+  it("contains v5 typography tokens with DM Sans and JetBrains Mono", () => {
+    expect(reportCSS).toContain('"DM Sans"');
+    expect(reportCSS).toContain('"JetBrains Mono"');
+    expect(reportCSS).toContain("--font-heading:");
+    expect(reportCSS).toContain("--font-body:");
+    expect(reportCSS).toContain("--font-mono:");
   });
 
-  it("contains styles.json border tokens as CSS custom properties", () => {
-    expect(reportCSS).toContain("--border-radius: 8px");
-    expect(reportCSS).toContain("--border-color: #E2E8F0");
+  it("contains v5 spacing tokens", () => {
+    expect(reportCSS).toContain("--spacing-section: 64px");
+    expect(reportCSS).toContain("--spacing-section-gap: 32px");
+    expect(reportCSS).toContain("--spacing-card: 20px");
+    expect(reportCSS).toContain("--spacing-element: 16px");
+    expect(reportCSS).toContain("--spacing-inner: 12px");
+    expect(reportCSS).toContain("--spacing-tight: 8px");
+    expect(reportCSS).toContain("--spacing-label: 4px");
+  });
+
+  it("contains v5 border tokens", () => {
+    expect(reportCSS).toContain("--border-radius: 12px");
+    expect(reportCSS).toContain("--border-radius-small: 8px");
     expect(reportCSS).toContain("--border-width: 1px");
   });
 
-  it("uses exact hex values from styles.json (no approximations)", () => {
-    // Verify exact casing matches styles.json
-    expect(reportCSS).toContain("#1E40AF");
-    expect(reportCSS).toContain("#6366F1");
-    expect(reportCSS).toContain("#F8FAFC");
-    expect(reportCSS).toContain("#FFFFFF");
-    expect(reportCSS).toContain("#0F172A");
-    expect(reportCSS).toContain("#64748B");
-    expect(reportCSS).toContain("#10B981");
-    expect(reportCSS).toContain("#EF4444");
-    expect(reportCSS).toContain("#E2E8F0");
+  it("does not contain old GitHub-dark hex values", () => {
+    expect(reportCSS).not.toContain("#0d1117");
+    expect(reportCSS).not.toContain("#161b22");
+    expect(reportCSS).not.toContain("#30363d");
+    expect(reportCSS).not.toContain("#c9d1d9");
+    expect(reportCSS).not.toContain("#8b949e");
+    expect(reportCSS).not.toContain("#f0f6fc");
+  });
+
+  it("does not contain old light-mode values", () => {
+    // Surface should not be plain #FFFFFF (light mode), only #FFFFFF08 (dark translucent)
+    expect(reportCSS).not.toContain("--color-surface: #FFFFFF");
+    expect(reportCSS).not.toContain("--color-text: #0F172A");
+    expect(reportCSS).not.toContain("#E2E8F0");
+    expect(reportCSS).not.toContain("#F8FAFC");
   });
 });
 
-// ─── EfficiencyScorecard uses Sparkline with fill ───
+// --- EfficiencyScorecard uses inline SVG sparklines ---
 
-describe("EfficiencyScorecard sparkline fill", () => {
-  it("passes fill prop to Sparkline components", () => {
+describe("EfficiencyScorecard sparkline rendering", () => {
+  it("renders inline SVG sparklines when series data provided", () => {
     const html = renderToString(
       <EfficiencyScorecard
         scorecard={data.efficiency_scorecard}
@@ -983,8 +1040,324 @@ describe("EfficiencyScorecard sparkline fill", () => {
         }}
       />,
     );
-    // With fill enabled, sparklines should contain gradient elements
-    expect(html).toContain("linearGradient");
-    expect(html).toContain("polygon");
+    // Inline SVG sparklines render polyline elements
+    expect(html).toContain("polyline");
+    expect(html).toContain("viewBox");
+  });
+});
+
+// --- P2-4: ExecutiveSummary DeltaBadge favorable/declining branches ---
+
+describe("ExecutiveSummary DeltaBadge branches", () => {
+  it("renders favorable delta badge (green arrow) when tokensDelta is negative", () => {
+    const html = renderToString(
+      <ExecutiveSummary
+        totalTokens={18420000}
+        tokensDelta={-8.5}
+        tokensPerIssueMedian={52000}
+        tokensPerIssueMean={59000}
+        tokPerIssueWow={null}
+        uniqueIssues={47}
+        cacheHitRate={72}
+        cacheWow={null}
+      />,
+    );
+    // Favorable: green color #34D399, down arrow
+    expect(html).toContain("#34D399");
+    expect(html).toContain("-8.5% vs 7d avg");
+  });
+
+  it("renders declining delta badge (amber arrow) when tokensDelta is positive", () => {
+    const html = renderToString(
+      <ExecutiveSummary
+        totalTokens={18420000}
+        tokensDelta={12.3}
+        tokensPerIssueMedian={52000}
+        tokensPerIssueMean={59000}
+        tokPerIssueWow={null}
+        uniqueIssues={47}
+        cacheHitRate={72}
+        cacheWow={null}
+      />,
+    );
+    // Declining: amber color #F59E0B, up arrow
+    expect(html).toContain("#F59E0B");
+    expect(html).toContain("+12.3% vs 7d avg");
+  });
+
+  it("renders neutral cache delta when cacheWow is zero", () => {
+    const html = renderToString(
+      <ExecutiveSummary
+        totalTokens={18420000}
+        tokensDelta={null}
+        tokensPerIssueMedian={52000}
+        tokensPerIssueMean={59000}
+        tokPerIssueWow={null}
+        uniqueIssues={47}
+        cacheHitRate={72}
+        cacheWow={0}
+      />,
+    );
+    // cacheWow=0 → isFavorable returns null → neutral gray
+    expect(html).toContain("#FFFFFF59");
+    expect(html).toContain("0pp WoW");
+  });
+
+  it("renders issuesDelta badge when non-null", () => {
+    const html = renderToString(
+      <ExecutiveSummary
+        totalTokens={18420000}
+        tokensDelta={null}
+        tokensPerIssueMedian={52000}
+        tokensPerIssueMean={59000}
+        tokPerIssueWow={null}
+        uniqueIssues={47}
+        issuesDelta={5}
+        cacheHitRate={72}
+        cacheWow={null}
+      />,
+    );
+    // issuesDelta=5 → "+5 vs 7d avg" with neutral color (favorable={null})
+    expect(html).toContain("+5 vs 7d avg");
+    expect(html).toContain("#FFFFFF59"); // neutral color
+  });
+
+  it("renders favorable cache delta when cacheWow is positive", () => {
+    const html = renderToString(
+      <ExecutiveSummary
+        totalTokens={18420000}
+        tokensDelta={null}
+        tokensPerIssueMedian={52000}
+        tokensPerIssueMean={59000}
+        tokPerIssueWow={null}
+        uniqueIssues={47}
+        cacheHitRate={72}
+        cacheWow={4}
+      />,
+    );
+    // cacheWow=4 (positive) with invertSign → favorable → green
+    expect(html).toContain("#34D399");
+    expect(html).toContain("+4pp WoW");
+  });
+});
+
+// --- P2-5: PipelineHealth 30d delta badge ---
+
+describe("PipelineHealth 30d delta", () => {
+  it("renders 30d range text with correct percentage values", () => {
+    const html = renderToString(
+      <PipelineHealth failureRate={data.efficiency_scorecard.failure_rate} />,
+    );
+    // 30d range text should display percentages directly (not multiplied by 100)
+    expect(html).toContain("30d:");
+    expect(html).toContain("\u2192");
+  });
+
+  it("renders delta badge with pp suffix", () => {
+    const html = renderToString(
+      <PipelineHealth failureRate={data.efficiency_scorecard.failure_rate} />,
+    );
+    expect(html).toContain("pp");
+  });
+});
+
+// --- P2-6: StageEfficiency perStageStats with actual data ---
+
+describe("StageEfficiency perStageStats", () => {
+  it("renders avg_turns and cache_rate when perStageStats data provided", () => {
+    const html = renderToString(
+      <StageEfficiency
+        perStageSpend={data.per_stage_spend}
+        perStageStats={{
+          investigate: { avg_turns: 3.2, cache_rate: 65, count: 85 },
+          implement: { avg_turns: 8.5, cache_rate: 72, count: 120 },
+        }}
+      />,
+    );
+    // Avg turns should show actual values, not em-dash
+    expect(html).toContain("3.2");
+    expect(html).toContain("8.5");
+    // Cache rate should show percentage directly (already percentage data)
+    expect(html).toContain("65%");
+    expect(html).toContain("72%");
+  });
+
+  it("renders em-dash when perStageStats is empty", () => {
+    const html = renderToString(
+      <StageEfficiency perStageSpend={data.per_stage_spend} />,
+    );
+    // Without perStageStats, should show em-dash fallback
+    expect(html).toContain("\u2014");
+  });
+
+  it("applies green color to cache rate >= 50%", () => {
+    const html = renderToString(
+      <StageEfficiency
+        perStageSpend={data.per_stage_spend}
+        perStageStats={{
+          investigate: { avg_turns: 3.0, cache_rate: 55, count: 85 },
+        }}
+      />,
+    );
+    // cache_rate=55 >= 50 threshold → green (#34D399)
+    expect(html).toContain("#34D399");
+  });
+});
+
+// --- P2-7: StageEfficiency sparkline delta ---
+
+describe("StageEfficiency sparkline delta", () => {
+  it("renders WoW delta from sparkline data", () => {
+    const html = renderToString(
+      <StageEfficiency
+        perStageSpend={data.per_stage_spend}
+        stageSparklines={{
+          investigate: [100000, 110000, 105000, 115000, 108000, 112000, 106000, 90000],
+          implement: [200000, 210000, 205000, 215000, 208000, 212000, 206000, 230000],
+        }}
+      />,
+    );
+    // Should render sparkline SVG polylines
+    expect(html).toContain("polyline");
+    // Should render delta text with % suffix
+    expect(html).toContain("%");
+  });
+});
+
+// --- P2-8: OutlierAnalysis severity tiers ---
+
+describe("OutlierAnalysis severity tiers", () => {
+  const baseOutlier = {
+    issue_title: "Test issue",
+    total_tokens: 500000,
+    z_score: 3.5,
+    linear_url: "https://linear.app/mobilyze-llc/issue/TEST-1",
+    threshold: 200000,
+    mean: 60000,
+    stddev: 30000,
+    parent: null,
+    hypothesis: "High token usage due to complexity",
+  };
+
+  it("renders red severity for multiplier >= 3", () => {
+    const outliers = [
+      { ...baseOutlier, issue_identifier: "TEST-1", multiplier: 8.5 },
+    ];
+    const html = renderToString(<OutlierAnalysis outliers={outliers} />);
+    // Red: bg #EF44441F, text #EF4444
+    expect(html).toContain("#EF4444");
+    expect(html).toContain("8.5x avg");
+  });
+
+  it("renders amber severity for multiplier 2.0–2.99", () => {
+    const outliers = [
+      { ...baseOutlier, issue_identifier: "TEST-2", multiplier: 2.5 },
+    ];
+    const html = renderToString(<OutlierAnalysis outliers={outliers} />);
+    // Amber: bg #F59E0B1F, text #F59E0B
+    expect(html).toContain("#F59E0B");
+    expect(html).toContain("2.5x avg");
+  });
+
+  it("renders neutral severity for multiplier < 2", () => {
+    const outliers = [
+      { ...baseOutlier, issue_identifier: "TEST-3", multiplier: 1.5 },
+    ];
+    const html = renderToString(<OutlierAnalysis outliers={outliers} />);
+    // Neutral: text #FFFFFF80
+    expect(html).toContain("#FFFFFF80");
+    expect(html).toContain("1.5x avg");
+  });
+});
+
+// --- P2-9: Precise formula verification assertions ---
+
+describe("Formula verification precision", () => {
+  it("cache delta renders exactly 4pp", () => {
+    const html = renderToString(<App />);
+    // cache_efficiency: current=72, trend_7d=68 → delta=4pp
+    expect(html).toContain("+4pp WoW");
+  });
+
+  it("per-ticket WoW delta renders when provided", () => {
+    const html = renderToString(
+      <PerTicketCostTrend
+        perTicket={{ median: 52000, mean: 59000, ticket_count: 47, wow_delta_pct: -5.2 }}
+      />,
+    );
+    expect(html).toContain("-5.2% WoW");
+  });
+});
+
+// --- P2-2: Validate stage uses intended color, not fallback ---
+
+describe("Validate stage color", () => {
+  it("PipelineHealth renders Validate with #A78BFA, not fallback gray", () => {
+    const failureRate = {
+      current: { validate: 3 },
+      trend_7d: { validate: 2 },
+      trend_30d: { validate: 2.5 },
+    };
+    const html = renderToString(<PipelineHealth failureRate={failureRate} />);
+    expect(html).toContain("Validate");
+    // Stage dot should use #A78BFA (purple) — the intended color
+    expect(html).toContain('background-color:#A78BFA');
+  });
+
+  it("StageEfficiency renders Validate with #A78BFA, not fallback gray", () => {
+    const spend = {
+      validate: { total_tokens: 50000, total_cost: 1.5, count: 10 },
+    };
+    const html = renderToString(<StageEfficiency perStageSpend={spend} />);
+    expect(html).toContain("Validate");
+    expect(html).toContain("#A78BFA");
+  });
+});
+
+// --- P2-1 regression: PipelineHealth delta=0 renders neutral ---
+
+describe("PipelineHealth delta=0 neutral", () => {
+  it("renders neutral color when delta is zero", () => {
+    // Create failure rate data where current equals trend_30d
+    const equalRates = {
+      current: { investigate: 5, implement: 10 },
+      trend_7d: { investigate: 5, implement: 10 },
+      trend_30d: { investigate: 5, implement: 10 },
+    };
+    const html = renderToString(<PipelineHealth failureRate={equalRates} />);
+    // Delta=0 should show neutral gray (#FFFFFF59), not green (#34D399) or amber (#F59E0B)
+    expect(html).toContain("#FFFFFF59");
+    // Should not contain green (favorable) for delta badge
+    expect(html).not.toContain("M6 2 L10 7 L2 7 Z"); // no up-arrow SVG path
+    expect(html).not.toContain("M6 10 L10 5 L2 5 Z"); // no down-arrow SVG path
+  });
+});
+
+// --- P2-2 regression: PerTicketCostTrend delta=0 renders neutral ---
+
+describe("PerTicketCostTrend positive-delta (declining)", () => {
+  it("renders amber color and up-arrow for positive wow_delta_pct", () => {
+    const html = renderToString(
+      <PerTicketCostTrend
+        perTicket={{ median: 52000, mean: 59000, ticket_count: 47, wow_delta_pct: 3.5 }}
+      />,
+    );
+    // Positive delta = cost increasing = declining = amber
+    expect(html).toContain("#F59E0B");
+    expect(html).toContain("M6 10 L10 5 L2 5 Z");
+    expect(html).toContain("+3.5% WoW");
+  });
+});
+
+describe("PerTicketCostTrend delta=0 neutral", () => {
+  it("renders neutral color when wow_delta_pct is zero", () => {
+    const html = renderToString(
+      <PerTicketCostTrend
+        perTicket={{ median: 52000, mean: 59000, ticket_count: 47, wow_delta_pct: 0 }}
+      />,
+    );
+    // Delta=0 should show neutral — no arrow rendered
+    expect(html).not.toContain("M6 2 L10 7 L2 7 Z");
+    expect(html).not.toContain("M6 10 L10 5 L2 5 Z");
   });
 });

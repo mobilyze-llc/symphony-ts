@@ -18,19 +18,19 @@ export default function ColdStartBanner({
       className="cold-start-banner"
       style={{
         background: "rgba(245, 158, 11, 0.08)",
-        border: "var(--border-width) solid var(--color-accent)",
+        border: "var(--border-width) solid var(--yellow)",
         borderRadius: "var(--border-radius)",
-        padding: "var(--spacing-group)",
-        marginBottom: "var(--spacing-section)",
+        padding: "var(--spacing-inner)",
+        marginBottom: "var(--spacing-section-gap)",
       }}
     >
       <div
         style={{
           fontFamily: "var(--font-heading)",
-          fontSize: "var(--font-size-body)",
-          color: "var(--color-accent)",
-          fontWeight: "var(--font-weight-subheading)" as unknown as number,
-          lineHeight: "var(--line-height-heading)",
+          fontSize: "14px",
+          color: "var(--yellow)",
+          fontWeight: 600,
+          lineHeight: "18px",
           marginBottom: "var(--spacing-element)",
         }}
       >
@@ -39,9 +39,9 @@ export default function ColdStartBanner({
       <div
         style={{
           fontFamily: "var(--font-body)",
-          fontSize: "var(--font-size-body)",
-          color: "var(--color-text-secondary)",
-          lineHeight: "var(--line-height-body)",
+          fontSize: "14px",
+          color: "var(--text-secondary)",
+          lineHeight: "18px",
         }}
       >
         {message ??

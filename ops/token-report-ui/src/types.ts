@@ -109,6 +109,17 @@ export interface LeaderboardEntry {
   title: string;
   tokens: number;
   linear_url: string;
+  product?: string;
+  investigate?: number;
+  implement?: number;
+  review?: number;
+  merge?: number;
+}
+
+export interface PerStageStats {
+  avg_turns: number;
+  cache_rate: number;
+  count: number;
 }
 
 export interface InsufficientData {
@@ -141,6 +152,7 @@ export interface AnalysisData {
   per_ticket_series?: number[];
   per_product: Record<string, ProductData>;
   daily_series?: DailySeries;
+  per_stage_stats?: Record<string, PerStageStats>;
   inflections: Inflection[] | InsufficientData;
   outliers: Outlier[] | InsufficientData;
   leaderboard: LeaderboardEntry[];
