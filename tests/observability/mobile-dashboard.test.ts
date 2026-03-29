@@ -114,7 +114,7 @@ describe("mobile-dashboard.html", () => {
     expect(scriptSection).toContain("${baseUrl}/api/v1/events");
   });
 
-  it("includes 4-tab navigation bar (pipeline, queue, deploy, reports)", () => {
+  it("includes 4-tab navigation bar (pipeline, merge queue, actions, reports)", () => {
     expect(html).toContain('data-tab="pipeline"');
     expect(html).toContain('data-tab="queue"');
     expect(html).toContain('data-tab="deploy"');
@@ -222,5 +222,18 @@ describe("mobile-dashboard.html", () => {
     expect(scriptSection).toMatch(
       /window\.location\.hostname.*8090|8090.*window\.location\.hostname/s,
     );
+  });
+
+  it("tab bar shows renamed labels", () => {
+    expect(html).toContain("Merge Queue");
+    expect(html).toContain("Actions");
+    // data-tab attributes remain unchanged for JS compatibility
+    expect(html).toContain('data-tab="queue"');
+    expect(html).toContain('data-tab="deploy"');
+  });
+
+  it("screen IDs remain backward compatible", () => {
+    expect(html).toContain('id="screen-queue"');
+    expect(html).toContain('id="screen-deploy"');
   });
 });

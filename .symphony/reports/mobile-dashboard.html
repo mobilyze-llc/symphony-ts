@@ -621,11 +621,11 @@ body {
     </button>
     <button class="tab-item" data-tab="queue">
       <span class="tab-icon">⏳</span>
-      Queue
+      Merge Queue
     </button>
     <button class="tab-item" data-tab="deploy">
       <span class="tab-icon">🚀</span>
-      Deploy
+      Actions
     </button>
     <button class="tab-item" data-tab="reports">
       <span class="tab-icon">📊</span>
@@ -753,7 +753,7 @@ body {
     currentScreen = screen;
     selectedIssueId = issueId || null;
 
-    const titles = { pipeline: 'Pipeline', queue: 'Queue', deploy: 'Deploy', reports: 'Reports' };
+    const titles = { pipeline: 'Pipeline', queue: 'Merge Queue', deploy: 'Actions', reports: 'Reports' };
 
     if (screen === 'detail') {
       $('#screen-detail').classList.add('active');
