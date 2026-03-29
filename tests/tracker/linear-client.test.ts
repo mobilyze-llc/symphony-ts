@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 import {
   LINEAR_CANDIDATE_ISSUES_QUERY,
+  LINEAR_CREATE_ISSUE_MUTATION,
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
   LinearTrackerClient,
   type TrackerError,
@@ -318,7 +319,7 @@ describe("fetchParent", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
-  it("caches null results to avoid re-fetching for orphan issues", async () => {
+  it("caches null results to avoid re-fetching for orphan issues (fetchParent)", async () => {
     const mockFetch = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({
         data: {
@@ -337,6 +338,103 @@ describe("fetchParent", () => {
 
     expect(result).toBeNull();
     expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createIssue", () => {
+  it("creates an issue and returns id, identifier, and title", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issueCreate: {
+            success: true,
+            issue: {
+              id: "issue-abc",
+              identifier: "ENG-99",
+              title: "Pipeline Halt",
+              state: { name: "Todo" },
+            },
+          },
+        },
+      }),
+    );
+
+    const client = createClient({ fetchFn });
+    const result = await client.createIssue({
+      teamId: "team-1",
+      title: "Pipeline Halt",
+      projectId: "proj-1",
+      labelIds: ["label-halt"],
+    });
+
+    expect(result).toEqual({
+      id: "issue-abc",
+      identifier: "ENG-99",
+      title: "Pipeline Halt",
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toBe(LINEAR_CREATE_ISSUE_MUTATION);
+    expect(request.variables).toEqual({
+      teamId: "team-1",
+      title: "Pipeline Halt",
+      projectId: "proj-1",
+      labelIds: ["label-halt"],
+    });
+  });
+
+  it("throws when issueCreate returns success false", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issueCreate: {
+            success: false,
+          },
+        },
+      }),
+    );
+
+    const client = createClient({ fetchFn });
+    await expect(
+      client.createIssue({
+        teamId: "team-1",
+        title: "Pipeline Halt",
+        projectId: "proj-1",
+        labelIds: ["label-halt"],
+      }),
+    ).rejects.toThrow(
+      expect.objectContaining<Partial<TrackerError>>({
+        code: ERROR_CODES.linearGraphqlErrors,
+      }),
+    );
+  });
+
+  it("throws when issueCreate returns incomplete issue data", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issueCreate: {
+            success: true,
+            issue: { id: "issue-abc" },
+          },
+        },
+      }),
+    );
+
+    const client = createClient({ fetchFn });
+    await expect(
+      client.createIssue({
+        teamId: "team-1",
+        title: "Pipeline Halt",
+        projectId: "proj-1",
+        labelIds: ["label-halt"],
+      }),
+    ).rejects.toThrow(
+      expect.objectContaining<Partial<TrackerError>>({
+        code: ERROR_CODES.linearUnknownPayload,
+      }),
+    );
   });
 });
 

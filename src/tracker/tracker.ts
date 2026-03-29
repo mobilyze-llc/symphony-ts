@@ -18,4 +18,10 @@ export interface IssueTracker {
   fetchParent?(
     issueId: string,
   ): Promise<{ identifier: string; title: string; url: string } | null>;
+  createIssue?(input: {
+    teamId: string;
+    title: string;
+    projectId: string;
+    labelIds: string[];
+  }): Promise<{ id: string; identifier: string; title: string }>;
 }

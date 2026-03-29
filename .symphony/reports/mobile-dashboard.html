@@ -581,6 +581,12 @@ body {
 
   <!-- Deploy Screen -->
   <div class="screen" id="screen-deploy">
+    <div class="screen-content" id="pipeline-control-content">
+      <div class="empty-state">
+        <div class="empty-state-icon">⏸</div>
+        <div class="empty-state-text">Loading pipeline status…</div>
+      </div>
+    </div>
     <div class="screen-content" id="deploy-content">
       <div class="empty-state">
         <div class="empty-state-icon">🚀</div>
@@ -770,7 +776,7 @@ body {
 
       // Trigger data loading on tab switch
       if (screen === 'queue') loadQueue();
-      if (screen === 'deploy') loadDeployPreview();
+      if (screen === 'deploy') { loadPipelineStatus(); loadDeployPreview(); }
     }
   }
 
@@ -1566,6 +1572,103 @@ body {
       statusEl.className = 'deploy-status-banner visible failure';
       deployInProgress = false;
       if (btn) btn.disabled = false;
+    }
+  }
+
+  // ── Pipeline Control ──
+  let pipelineStatusLoading = false;
+
+  async function loadPipelineStatus() {
+    if (pipelineStatusLoading) return;
+    pipelineStatusLoading = true;
+    const container = $('#pipeline-control-content');
+
+    try {
+      const resp = await fetch(`${baseUrl}/api/v1/pipeline/status`);
+      if (!resp.ok) {
+        if (resp.status === 501) {
+          container.innerHTML = `
+            <div class="empty-state">
+              <div class="empty-state-icon">⏸</div>
+              <div class="empty-state-text">Pipeline control not available</div>
+            </div>`;
+          return;
+        }
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const data = await resp.json();
+      renderPipelineControl(data);
+    } catch (err) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state-icon">⏸</div>
+          <div class="empty-state-text">Pipeline status unavailable: ${esc(err.message)}</div>
+        </div>`;
+    } finally {
+      pipelineStatusLoading = false;
+    }
+  }
+
+  function renderPipelineControl(data) {
+    const container = $('#pipeline-control-content');
+    const isPaused = data.paused;
+
+    let html = '<div class="deploy-preview" style="margin-bottom: 12px;">';
+    html += `<div class="deploy-actions-header">Pipeline Control</div>`;
+
+    if (isPaused && data.issues && data.issues.length > 0) {
+      html += `<div class="deploy-warning">
+        <span class="deploy-warning-icon">⏸</span>
+        <span>Pipeline is paused — ${data.issues.map(i => esc(i.identifier)).join(', ')}</span>
+      </div>`;
+    } else {
+      html += `<div style="padding: 8px 0; color: var(--green);">● Pipeline is running</div>`;
+    }
+
+    if (isPaused) {
+      html += `<button class="action-btn" id="resume-btn" style="width:100%;padding:12px 24px;border-radius:var(--radius);border:1px solid var(--line);background:var(--card);color:var(--green);cursor:pointer;font-size:14px;font-weight:500;">Resume Pipeline</button>`;
+    } else {
+      html += `<button class="hold-btn" id="pause-btn">
+        <span class="hold-fill"></span>
+        <span class="hold-btn-text">Pause Pipeline</span>
+      </button>`;
+    }
+
+    html += '</div>';
+    container.innerHTML = html;
+
+    if (isPaused) {
+      const resumeBtn = $('#resume-btn');
+      if (resumeBtn) {
+        resumeBtn.addEventListener('click', async () => {
+          resumeBtn.disabled = true;
+          resumeBtn.textContent = 'Resuming…';
+          try {
+            const resp = await fetch(`${baseUrl}/api/v1/pipeline/resume`, { method: 'POST' });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const result = await resp.json();
+            renderPipelineControl(result);
+          } catch (err) {
+            resumeBtn.textContent = 'Resume failed: ' + err.message;
+            resumeBtn.disabled = false;
+          }
+        });
+      }
+    } else {
+      const pauseBtn = $('#pause-btn');
+      if (pauseBtn) {
+        wireHoldToConfirm(pauseBtn, async () => {
+          pauseBtn.disabled = true;
+          try {
+            const resp = await fetch(`${baseUrl}/api/v1/pipeline/pause`, { method: 'POST' });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const result = await resp.json();
+            renderPipelineControl(result);
+          } catch (err) {
+            pauseBtn.disabled = false;
+          }
+        });
+      }
     }
   }
 

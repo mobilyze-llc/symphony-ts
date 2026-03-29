@@ -35,6 +35,7 @@ import {
   type DashboardServerHost,
   type DashboardServerInstance,
   type IssueDetailResponse,
+  type PipelineStatusResponse,
   type RefreshResponse,
   type StopIssueResponse,
   startDashboardServer,
@@ -429,6 +430,89 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     return () => {
       this.snapshotListeners.delete(listener);
     };
+  }
+
+  async getPipelineStatus(): Promise<PipelineStatusResponse> {
+    if (!(this.tracker instanceof LinearTrackerClient)) {
+      return { paused: false, issues: [] };
+    }
+
+    const tracker = this.tracker as LinearTrackerClient;
+    if (tracker.fetchOpenIssuesByLabels === undefined) {
+      return { paused: false, issues: [] };
+    }
+
+    const haltIssues = await tracker.fetchOpenIssuesByLabels(
+      ["pipeline-halt"],
+      ["Done", "Cancelled"],
+    );
+
+    return {
+      paused: haltIssues.length > 0,
+      issues: haltIssues.map((issue) => ({
+        identifier: issue.identifier,
+        title: issue.title,
+      })),
+    };
+  }
+
+  async requestPipelinePause(): Promise<PipelineStatusResponse> {
+    // Check for existing halt issues first (idempotent pause)
+    const status = await this.getPipelineStatus();
+    if (status.paused) {
+      return status;
+    }
+
+    if (!(this.tracker instanceof LinearTrackerClient)) {
+      return { paused: false, issues: [] };
+    }
+
+    const tracker = this.tracker as LinearTrackerClient;
+    if (tracker.createIssue === undefined) {
+      return { paused: false, issues: [] };
+    }
+
+    // TODO(SYMPH-221): resolve teamId, projectId, and haltLabelId from the tracker's
+    // configured project context once those fields are available on ResolvedWorkflowConfig.
+    const trackerConfig = this.config.tracker;
+    const teamId = trackerConfig.teamId ?? "";
+    const projectId = trackerConfig.projectId ?? "";
+    const haltLabelId = trackerConfig.haltLabelId ?? "";
+
+    const created = await tracker.createIssue({
+      teamId,
+      title: "Pipeline Halt",
+      projectId,
+      labelIds: [haltLabelId],
+    });
+
+    return {
+      paused: true,
+      issues: [{ identifier: created.identifier, title: created.title }],
+    };
+  }
+
+  async requestPipelineResume(): Promise<PipelineStatusResponse> {
+    if (!(this.tracker instanceof LinearTrackerClient)) {
+      return { paused: false, issues: [] };
+    }
+
+    const tracker = this.tracker as LinearTrackerClient;
+    if (tracker.fetchOpenIssuesByLabels === undefined) {
+      return { paused: false, issues: [] };
+    }
+
+    const haltIssues = await tracker.fetchOpenIssuesByLabels(
+      ["pipeline-halt"],
+      ["Done", "Cancelled"],
+    );
+
+    const teamKey = this.config.tracker.teamKey ?? "";
+    for (const issue of haltIssues) {
+      await tracker.updateIssueState(issue.id, "Cancelled", teamKey);
+    }
+
+    return { paused: false, issues: [] };
   }
 
   abortAllWorkers(): number {

@@ -13,6 +13,14 @@ export interface WorkflowTrackerConfig {
   projectSlug: string | null;
   activeStates: string[];
   terminalStates: string[];
+  /** Linear team ID for issue creation (pipeline-halt). Resolved from project context. */
+  teamId?: string;
+  /** Linear project ID for issue creation (pipeline-halt). Resolved from project context. */
+  projectId?: string;
+  /** Linear label ID for the pipeline-halt label. Resolved from project context. */
+  haltLabelId?: string;
+  /** Linear team key (e.g. "ENG") for workflow state resolution. */
+  teamKey?: string;
 }
 
 export interface WorkflowPollingConfig {

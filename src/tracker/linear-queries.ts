@@ -203,6 +203,32 @@ export const LINEAR_ISSUE_PARENT_DETAIL_QUERY = `
   }
 `.trim();
 
+export const LINEAR_CREATE_ISSUE_MUTATION = `
+  mutation SymphonyCreateIssue(
+    $teamId: String!
+    $title: String!
+    $projectId: String!
+    $labelIds: [String!]!
+  ) {
+    issueCreate(input: {
+      teamId: $teamId
+      title: $title
+      projectId: $projectId
+      labelIds: $labelIds
+    }) {
+      success
+      issue {
+        id
+        identifier
+        title
+        state {
+          name
+        }
+      }
+    }
+  }
+`.trim();
+
 export const LINEAR_OPEN_ISSUES_BY_LABELS_QUERY = `
   query SymphonyOpenIssuesByLabels(
     $projectSlug: String!

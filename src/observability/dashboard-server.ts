@@ -104,6 +104,11 @@ export interface StopIssueResponse {
   reason: string;
 }
 
+export interface PipelineStatusResponse {
+  paused: boolean;
+  issues: Array<{ identifier: string; title: string }>;
+}
+
 export interface DashboardServerHost {
   getRuntimeSnapshot(): RuntimeSnapshot | Promise<RuntimeSnapshot>;
   getIssueDetails(
@@ -114,6 +119,15 @@ export interface DashboardServerHost {
     issueIdentifier: string,
   ): StopIssueResponse | Promise<StopIssueResponse>;
   subscribeToSnapshots?(listener: () => void): () => void;
+  requestPipelinePause?():
+    | PipelineStatusResponse
+    | Promise<PipelineStatusResponse>;
+  requestPipelineResume?():
+    | PipelineStatusResponse
+    | Promise<PipelineStatusResponse>;
+  getPipelineStatus?():
+    | PipelineStatusResponse
+    | Promise<PipelineStatusResponse>;
 }
 
 /** Async function that runs `gh` with the given args and returns stdout. */
@@ -408,6 +422,62 @@ export function createDashboardRequestHandler(
                 : "GitHub CLI command failed.",
           });
         }
+        return;
+      }
+
+      if (url.pathname === "/api/v1/pipeline/pause") {
+        if (method !== "POST") {
+          writeMethodNotAllowed(response, ["POST"]);
+          return;
+        }
+
+        if (options.host.requestPipelinePause === undefined) {
+          writeJsonError(response, 501, "not_implemented", {
+            message: "Pipeline pause is not supported by this host.",
+          });
+          return;
+        }
+
+        await readRequestBody(request);
+        const result = await options.host.requestPipelinePause();
+        writeJson(response, 200, result);
+        return;
+      }
+
+      if (url.pathname === "/api/v1/pipeline/resume") {
+        if (method !== "POST") {
+          writeMethodNotAllowed(response, ["POST"]);
+          return;
+        }
+
+        if (options.host.requestPipelineResume === undefined) {
+          writeJsonError(response, 501, "not_implemented", {
+            message: "Pipeline resume is not supported by this host.",
+          });
+          return;
+        }
+
+        await readRequestBody(request);
+        const result = await options.host.requestPipelineResume();
+        writeJson(response, 200, result);
+        return;
+      }
+
+      if (url.pathname === "/api/v1/pipeline/status") {
+        if (method !== "GET") {
+          writeMethodNotAllowed(response, ["GET"]);
+          return;
+        }
+
+        if (options.host.getPipelineStatus === undefined) {
+          writeJsonError(response, 501, "not_implemented", {
+            message: "Pipeline status is not supported by this host.",
+          });
+          return;
+        }
+
+        const result = await options.host.getPipelineStatus();
+        writeJson(response, 200, result);
         return;
       }
 

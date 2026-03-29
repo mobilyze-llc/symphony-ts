@@ -12,6 +12,7 @@ import {
 import {
   LINEAR_CANDIDATE_ISSUES_QUERY,
   LINEAR_CREATE_COMMENT_MUTATION,
+  LINEAR_CREATE_ISSUE_MUTATION,
   LINEAR_ISSUES_BY_LABELS_QUERY,
   LINEAR_ISSUES_BY_STATES_QUERY,
   LINEAR_ISSUE_PARENT_AND_SIBLINGS_QUERY,
@@ -66,6 +67,13 @@ interface LinearCommentCreateData {
   commentCreate?: {
     success?: boolean;
     comment?: { id?: string };
+  };
+}
+
+interface LinearIssueCreateData {
+  issueCreate?: {
+    success?: boolean;
+    issue?: { id?: string; identifier?: string; title?: string };
   };
 }
 
@@ -251,6 +259,50 @@ export class LinearTrackerClient implements IssueTracker {
         { details: response },
       );
     }
+  }
+
+  async createIssue(input: {
+    teamId: string;
+    title: string;
+    projectId: string;
+    labelIds: string[];
+  }): Promise<{ id: string; identifier: string; title: string }> {
+    const response = await this.postGraphql<LinearIssueCreateData>(
+      LINEAR_CREATE_ISSUE_MUTATION,
+      {
+        teamId: input.teamId,
+        title: input.title,
+        projectId: input.projectId,
+        labelIds: input.labelIds,
+      },
+    );
+
+    if (response.issueCreate?.success !== true) {
+      throw new TrackerError(
+        ERROR_CODES.linearGraphqlErrors,
+        "Linear issueCreate mutation did not return success.",
+        { details: response },
+      );
+    }
+
+    const issue = response.issueCreate.issue;
+    if (
+      typeof issue?.id !== "string" ||
+      typeof issue.identifier !== "string" ||
+      typeof issue.title !== "string"
+    ) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear issueCreate returned incomplete issue data.",
+        { details: response },
+      );
+    }
+
+    return {
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+    };
   }
 
   async updateIssueState(
