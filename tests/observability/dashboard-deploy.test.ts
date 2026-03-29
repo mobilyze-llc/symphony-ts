@@ -27,12 +27,7 @@ describe("resolveDeployScriptPath", () => {
       "..",
       "..",
     );
-    const fakeDistDir = pathResolve(
-      repoRoot,
-      "dist",
-      "src",
-      "observability",
-    );
+    const fakeDistDir = pathResolve(repoRoot, "dist", "src", "observability");
     const fromDist = pathResolve(
       fakeDistDir,
       "..",
