@@ -119,9 +119,15 @@ export interface DashboardServerHost {
     issueIdentifier: string,
   ): StopIssueResponse | Promise<StopIssueResponse>;
   subscribeToSnapshots?(listener: () => void): () => void;
-  requestPipelinePause?(): PipelineStatusResponse | Promise<PipelineStatusResponse>;
-  requestPipelineResume?(): PipelineStatusResponse | Promise<PipelineStatusResponse>;
-  getPipelineStatus?(): PipelineStatusResponse | Promise<PipelineStatusResponse>;
+  requestPipelinePause?():
+    | PipelineStatusResponse
+    | Promise<PipelineStatusResponse>;
+  requestPipelineResume?():
+    | PipelineStatusResponse
+    | Promise<PipelineStatusResponse>;
+  getPipelineStatus?():
+    | PipelineStatusResponse
+    | Promise<PipelineStatusResponse>;
 }
 
 /** Async function that runs `gh` with the given args and returns stdout. */
