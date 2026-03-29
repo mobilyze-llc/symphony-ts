@@ -7,17 +7,17 @@
   "record_count": 8,
   "efficiency_scorecard": {
     "cache_efficiency": {
-      "current": 0.45,
+      "current": 45,
       "trend_7d": 0,
       "trend_30d": 0
     },
     "output_ratio": {
-      "current": 0.28,
+      "current": 28,
       "trend_7d": 0,
       "trend_30d": 0
     },
     "wasted_context": {
-      "current": 0.15,
+      "current": 15,
       "trend_7d": 0,
       "trend_30d": 0
     },
@@ -33,7 +33,7 @@
     },
     "failure_rate": {
       "current": {
-        "implement": 0.12
+        "implement": 12
       },
       "trend_7d": {},
       "trend_30d": {}

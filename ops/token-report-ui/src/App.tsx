@@ -41,25 +41,19 @@ export default function App() {
   const tokensPerIssueMedian = data.per_ticket_trend.median;
   const tokensPerIssueMean = data.per_ticket_trend.mean;
   const uniqueIssues = es.unique_issues.value;
-  const cacheHitRate = (sc.cache_efficiency.current ?? 0) * 100;
+  const cacheHitRate = sc.cache_efficiency.current ?? 0;
 
-  // Cache delta: percentage point difference (SYMPH-189)
+  // Cache delta: percentage point difference (values are already percentages)
   const cacheWow =
     sc.cache_efficiency.trend_7d != null
-      ? Math.round(
-          (sc.cache_efficiency.current - sc.cache_efficiency.trend_7d) * 100,
-        )
+      ? Math.round(sc.cache_efficiency.current - sc.cache_efficiency.trend_7d)
       : null;
 
   return (
     <>
       {/* biome-ignore lint/security/noDangerouslySetInnerHtml: report CSS is a static build-time string, not user input */}
       <style dangerouslySetInnerHTML={{ __html: reportCSS }} />
-      <ReportHeader
-        today={data.analyzed_at.slice(0, 10)}
-        recordCount={data.record_count}
-        dataSpanDays={data.data_span_days}
-      />
+      <ReportHeader today={data.analyzed_at.slice(0, 10)} />
       {isColdStart && (
         <ColdStartBanner
           dataSpanDays={data.data_span_days}
@@ -99,11 +93,11 @@ export default function App() {
         dataSpanDays={data.data_span_days}
       />
       <IssueLeaderboard leaderboard={data.leaderboard ?? []} />
-      <PipelineHealth failureRate={sc.failure_rate} />
       <StageEfficiency
         perStageSpend={data.per_stage_spend}
-        failureRateCurrent={sc.failure_rate?.current}
+        perStageStats={data.per_stage_stats}
       />
+      <PipelineHealth failureRate={sc.failure_rate} />
       <PerProductBreakdown perProduct={data.per_product} />
       <ReportFooter />
     </>

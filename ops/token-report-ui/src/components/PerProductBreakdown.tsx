@@ -1,15 +1,6 @@
-/**
- * Section 8: Per-Product Breakdown
- * Converted from design reference PerProductBreakdown.jsx.
- * Rebuilt with v5 inline styles (SYMPH-205).
- */
 import type { ProductData } from "../types.ts";
+import { round } from "../lib/chart-utils.ts";
 import { fmtNum } from "./chartUtils.tsx";
-
-function round(n: number, decimals = 0): number {
-  const f = 10 ** decimals;
-  return Math.round(n * f) / f;
-}
 
 export interface PerProductBreakdownProps {
   perProduct: Record<string, ProductData>;
@@ -27,24 +18,24 @@ export default function PerProductBreakdown({
   );
 
   return (
-    <section style={{ marginBottom: "var(--spacing-section)" }}>
+    <section style={{ marginBottom: "var(--spacing-section-gap)" }}>
       <h2
         style={{
           fontFamily: "var(--font-heading)",
-          fontSize: "var(--font-size-subheading)",
-          fontWeight: "var(--font-weight-subheading)" as unknown as number,
-          lineHeight: "var(--line-height-heading)",
-          color: "var(--color-text)",
+          fontSize: "14px",
+          fontWeight: 600,
+          lineHeight: "18px",
+          color: "var(--text)",
           margin: 0,
-          marginBottom: "var(--spacing-group)",
+          marginBottom: "var(--spacing-inner)",
         }}
       >
         Per-Product Breakdown
       </h2>
       <div
         style={{
-          background: "var(--color-surface)",
-          border: "var(--border-width) solid var(--border-color)",
+          background: "var(--surface)",
+          border: "var(--border-width) solid var(--border)",
           borderRadius: "var(--border-radius)",
           overflow: "hidden",
         }}
@@ -54,7 +45,7 @@ export default function PerProductBreakdown({
             width: "100%",
             borderCollapse: "collapse",
             fontFamily: "var(--font-body)",
-            fontSize: "var(--font-size-body)",
+            fontSize: "12px",
           }}
         >
           <thead>
@@ -62,12 +53,11 @@ export default function PerProductBreakdown({
               <th
                 style={{
                   textAlign: "left",
-                  color: "var(--color-text-secondary)",
-                  fontSize: "var(--font-size-caption)",
-                  fontWeight:
-                    "var(--font-weight-subheading)" as unknown as number,
-                  padding: "var(--spacing-element) var(--spacing-group)",
-                  borderBottom: "var(--border-width) solid var(--border-color)",
+                  color: "var(--text-muted)",
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  padding: "var(--spacing-element) var(--spacing-inner)",
+                  borderBottom: "var(--border-width) solid var(--border)",
                   textTransform: "uppercase" as const,
                   letterSpacing: "0.05em",
                 }}
@@ -77,12 +67,11 @@ export default function PerProductBreakdown({
               <th
                 style={{
                   textAlign: "right",
-                  color: "var(--color-text-secondary)",
-                  fontSize: "var(--font-size-caption)",
-                  fontWeight:
-                    "var(--font-weight-subheading)" as unknown as number,
-                  padding: "var(--spacing-element) var(--spacing-group)",
-                  borderBottom: "var(--border-width) solid var(--border-color)",
+                  color: "var(--text-muted)",
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  padding: "var(--spacing-element) var(--spacing-inner)",
+                  borderBottom: "var(--border-width) solid var(--border)",
                   textTransform: "uppercase" as const,
                   letterSpacing: "0.05em",
                 }}
@@ -92,12 +81,11 @@ export default function PerProductBreakdown({
               <th
                 style={{
                   textAlign: "right",
-                  color: "var(--color-text-secondary)",
-                  fontSize: "var(--font-size-caption)",
-                  fontWeight:
-                    "var(--font-weight-subheading)" as unknown as number,
-                  padding: "var(--spacing-element) var(--spacing-group)",
-                  borderBottom: "var(--border-width) solid var(--border-color)",
+                  color: "var(--text-muted)",
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  padding: "var(--spacing-element) var(--spacing-inner)",
+                  borderBottom: "var(--border-width) solid var(--border)",
                   textTransform: "uppercase" as const,
                   letterSpacing: "0.05em",
                 }}
@@ -107,12 +95,11 @@ export default function PerProductBreakdown({
               <th
                 style={{
                   textAlign: "right",
-                  color: "var(--color-text-secondary)",
-                  fontSize: "var(--font-size-caption)",
-                  fontWeight:
-                    "var(--font-weight-subheading)" as unknown as number,
-                  padding: "var(--spacing-element) var(--spacing-group)",
-                  borderBottom: "var(--border-width) solid var(--border-color)",
+                  color: "var(--text-muted)",
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  padding: "var(--spacing-element) var(--spacing-inner)",
+                  borderBottom: "var(--border-width) solid var(--border)",
                   textTransform: "uppercase" as const,
                   letterSpacing: "0.05em",
                 }}
@@ -122,12 +109,11 @@ export default function PerProductBreakdown({
               <th
                 style={{
                   textAlign: "left",
-                  color: "var(--color-text-secondary)",
-                  fontSize: "var(--font-size-caption)",
-                  fontWeight:
-                    "var(--font-weight-subheading)" as unknown as number,
-                  padding: "var(--spacing-element) var(--spacing-group)",
-                  borderBottom: "var(--border-width) solid var(--border-color)",
+                  color: "var(--text-muted)",
+                  fontSize: "10px",
+                  fontWeight: 600,
+                  padding: "var(--spacing-element) var(--spacing-inner)",
+                  borderBottom: "var(--border-width) solid var(--border)",
                   textTransform: "uppercase" as const,
                   letterSpacing: "0.05em",
                 }}
@@ -143,12 +129,10 @@ export default function PerProductBreakdown({
                 <tr key={name}>
                   <td
                     style={{
-                      padding: "var(--spacing-element) var(--spacing-group)",
-                      borderBottom:
-                        "var(--border-width) solid var(--border-color)",
-                      color: "var(--color-text)",
-                      fontWeight:
-                        "var(--font-weight-subheading)" as unknown as number,
+                      padding: "var(--spacing-element) var(--spacing-inner)",
+                      borderBottom: "var(--border-width) solid var(--border)",
+                      color: "var(--text)",
+                      fontWeight: 600,
                     }}
                   >
                     {name}
@@ -156,10 +140,9 @@ export default function PerProductBreakdown({
                   <td
                     style={{
                       textAlign: "right",
-                      padding: "var(--spacing-element) var(--spacing-group)",
-                      borderBottom:
-                        "var(--border-width) solid var(--border-color)",
-                      color: "var(--color-text)",
+                      padding: "var(--spacing-element) var(--spacing-inner)",
+                      borderBottom: "var(--border-width) solid var(--border)",
+                      color: "var(--text)",
                     }}
                   >
                     {fmtNum(data.total_tokens)}
@@ -167,10 +150,9 @@ export default function PerProductBreakdown({
                   <td
                     style={{
                       textAlign: "right",
-                      padding: "var(--spacing-element) var(--spacing-group)",
-                      borderBottom:
-                        "var(--border-width) solid var(--border-color)",
-                      color: "var(--color-text)",
+                      padding: "var(--spacing-element) var(--spacing-inner)",
+                      borderBottom: "var(--border-width) solid var(--border)",
+                      color: "var(--text)",
                     }}
                   >
                     {data.total_stages}
@@ -178,20 +160,18 @@ export default function PerProductBreakdown({
                   <td
                     style={{
                       textAlign: "right",
-                      padding: "var(--spacing-element) var(--spacing-group)",
-                      borderBottom:
-                        "var(--border-width) solid var(--border-color)",
-                      color: "var(--color-text)",
+                      padding: "var(--spacing-element) var(--spacing-inner)",
+                      borderBottom: "var(--border-width) solid var(--border)",
+                      color: "var(--text)",
                     }}
                   >
                     {data.unique_issues}
                   </td>
                   <td
                     style={{
-                      padding: "var(--spacing-element) var(--spacing-group)",
-                      borderBottom:
-                        "var(--border-width) solid var(--border-color)",
-                      color: "var(--color-text-secondary)",
+                      padding: "var(--spacing-element) var(--spacing-inner)",
+                      borderBottom: "var(--border-width) solid var(--border)",
+                      color: "var(--text-muted)",
                     }}
                   >
                     <div
@@ -200,7 +180,7 @@ export default function PerProductBreakdown({
                         width: `${pct}%`,
                         height: 8,
                         borderRadius: 4,
-                        background: "var(--color-primary)",
+                        background: "var(--accent)",
                         marginBottom: 4,
                       }}
                     />{" "}

@@ -1,11 +1,3 @@
-/**
- * Section 6: Issue Leaderboard
- * Converted from design reference IssueLeaderboard.jsx.
- * Rebuilt with v5 inline styles (SYMPH-201).
- *
- * SYMPH-179: leaderboard data now populated by computeAnalysis() with linear_url.
- */
-import type React from "react";
 import type { LeaderboardEntry } from "../types.ts";
 import { fmtNum } from "./chartUtils.tsx";
 
@@ -13,51 +5,44 @@ export interface IssueLeaderboardProps {
   leaderboard: LeaderboardEntry[];
 }
 
-/* ── Inline style objects (SYMPH-201) ── */
+const gridColumns = "120px 1fr 120px 40px";
 
-const sectionHeadingStyle: React.CSSProperties = {
-  color: "var(--text-bright)",
-  fontSize: "1.2rem",
-  margin: "32px 0 16px",
-  paddingBottom: "8px",
-  borderBottom: "1px solid var(--border)",
-};
-
-const tableStyle: React.CSSProperties = {
-  width: "100%",
-  borderCollapse: "collapse",
-  marginBottom: "16px",
-};
-
-const thStyle: React.CSSProperties = {
-  textAlign: "left",
-  color: "var(--text-muted)",
-  fontSize: "0.8rem",
-  textTransform: "uppercase",
+const headerCellStyle: React.CSSProperties = {
+  boxSizing: "border-box",
+  color: "#FFFFFF59",
+  fontFamily: '"DM Sans", system-ui, sans-serif',
+  fontSize: "10px",
   letterSpacing: "0.05em",
-  padding: "8px 12px",
-  borderBottom: "1px solid var(--border)",
+  lineHeight: "12px",
+  textTransform: "uppercase",
 };
 
-const thRightStyle: React.CSSProperties = {
-  ...thStyle,
+const headerCellRightStyle: React.CSSProperties = {
+  ...headerCellStyle,
   textAlign: "right",
 };
 
-const tdStyle: React.CSSProperties = {
-  padding: "8px 12px",
-  borderBottom: "1px solid var(--border)",
-  color: "var(--text)",
+const dataCellStyle: React.CSSProperties = {
+  boxSizing: "border-box",
+  color: "#F0F0F2",
+  fontFamily: '"DM Sans", system-ui, sans-serif',
+  fontSize: "12px",
+  lineHeight: "16px",
 };
 
-const tdRightStyle: React.CSSProperties = {
-  ...tdStyle,
+const numCellStyle: React.CSSProperties = {
+  boxSizing: "border-box",
+  color: "#FFFFFF66",
+  fontFamily: '"JetBrains Mono", system-ui, sans-serif',
+  fontSize: "12px",
+  lineHeight: "16px",
   textAlign: "right",
 };
 
-const linkStyle: React.CSSProperties = {
-  color: "var(--accent)",
-  textDecoration: "none",
+const totalCellStyle: React.CSSProperties = {
+  ...numCellStyle,
+  color: "#F0F0F2",
+  fontWeight: 600,
 };
 
 export default function IssueLeaderboard({
@@ -66,37 +51,137 @@ export default function IssueLeaderboard({
   const items = Array.isArray(leaderboard) ? leaderboard.slice(0, 25) : [];
 
   return (
-    <section>
-      <h2 style={sectionHeadingStyle}>Issue Leaderboard</h2>
-      <table style={tableStyle}>
-        <thead>
-          <tr>
-            <th style={thStyle}>#</th>
-            <th style={thStyle}>Issue</th>
-            <th style={thStyle}>Title</th>
-            <th style={thRightStyle}>Tokens</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((item, i) => (
-            <tr key={item.identifier}>
-              <td style={tdStyle}>{i + 1}</td>
-              <td style={tdStyle}>
-                <a
-                  href={item.linear_url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  style={linkStyle}
-                >
-                  {item.identifier}
-                </a>
-              </td>
-              <td style={tdStyle}>{item.title}</td>
-              <td style={tdRightStyle}>{fmtNum(item.tokens)}</td>
-            </tr>
+    <div
+      style={{
+        boxSizing: "border-box" as const,
+        display: "flex",
+        flexDirection: "column" as const,
+        fontSynthesis: "none",
+        gap: "16px",
+        MozOsxFontSmoothing: "grayscale",
+        order: 7,
+        paddingBlock: "32px",
+        paddingInline: "64px",
+        WebkitFontSmoothing: "antialiased",
+        width: "1440px",
+      }}
+    >
+      <div
+        style={{
+          boxSizing: "border-box" as const,
+          color: "#FFFFFF59",
+          fontFamily: '"DM Sans", system-ui, sans-serif',
+          fontSize: "11px",
+          fontWeight: 600,
+          letterSpacing: "0.1em",
+          lineHeight: "14px",
+          textTransform: "uppercase" as const,
+        }}
+      >
+        Issue Leaderboard
+      </div>
+
+      {items.length === 0 ? (
+        <div
+          style={{
+            color: "#FFFFFF59",
+            fontFamily: '"DM Sans", system-ui, sans-serif',
+            fontSize: "12px",
+            lineHeight: "16px",
+          }}
+        >
+          No issues processed yet
+        </div>
+      ) : (
+        <div
+          style={{
+            backgroundColor: "#FFFFFF08",
+            borderColor: "#FFFFFF0F",
+            borderRadius: "12px",
+            borderStyle: "solid" as const,
+            borderWidth: "1px",
+            boxSizing: "border-box" as const,
+            display: "flex",
+            flexDirection: "column" as const,
+            overflow: "hidden" as const,
+          }}
+        >
+          <div
+            style={{
+              backgroundColor: "#FFFFFF08",
+              boxSizing: "border-box" as const,
+              display: "grid",
+              gap: "16px",
+              gridTemplateColumns: gridColumns,
+              paddingBlock: "12px",
+              paddingInline: "24px",
+            }}
+          >
+            <div style={headerCellStyle}>Issue</div>
+            <div style={headerCellStyle}>Title</div>
+            <div style={headerCellRightStyle}>Total</div>
+            <div style={headerCellStyle}></div>
+          </div>
+
+          {items.map((item) => (
+            <div
+              key={item.identifier}
+              style={{
+                borderTopColor: "#FFFFFF0F",
+                borderTopStyle: "solid" as const,
+                borderTopWidth: "1px",
+                boxSizing: "border-box" as const,
+                display: "grid",
+                gap: "16px",
+                gridTemplateColumns: gridColumns,
+                paddingBlock: "16px",
+                paddingInline: "24px",
+              }}
+            >
+              <div
+                style={{
+                  boxSizing: "border-box" as const,
+                  color: "#60A5FA",
+                  fontFamily: '"JetBrains Mono", system-ui, sans-serif',
+                  fontSize: "12px",
+                  lineHeight: "16px",
+                }}
+              >
+                {item.linear_url ? (
+                  <a
+                    href={item.linear_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: "#60A5FA", textDecoration: "none" }}
+                  >
+                    {item.identifier}
+                  </a>
+                ) : (
+                  item.identifier
+                )}
+              </div>
+              <div style={dataCellStyle}>{item.title}</div>
+              <div style={totalCellStyle}>{fmtNum(item.tokens)}</div>
+              <div style={{ boxSizing: "border-box" as const }}>
+                {item.linear_url ? (
+                  <a
+                    href={item.linear_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      color: "#FFFFFF59",
+                      textDecoration: "none",
+                      fontSize: "12px",
+                    }}
+                  >
+                    ↗
+                  </a>
+                ) : null}
+              </div>
+            </div>
           ))}
-        </tbody>
-      </table>
-    </section>
+        </div>
+      )}
+    </div>
   );
 }

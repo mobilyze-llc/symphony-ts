@@ -1,15 +1,6 @@
-/**
- * Shared SVG chart utilities for the Token Report v2.
- * Converted from chartUtils.jsx design reference.
- */
 import { useId } from "react";
-import { DEFAULT_PADDING } from "../lib/chart-utils.ts";
+import { DEFAULT_PADDING, round } from "../lib/chart-utils.ts";
 import type { StageTrend } from "../types.ts";
-
-function round(n: number, decimals = 0): number {
-  const f = 10 ** decimals;
-  return Math.round(n * f) / f;
-}
 
 /**
  * Format a number with thousands separators.
@@ -28,11 +19,10 @@ export interface WowBadgeProps {
 
 export function WowBadge({ delta }: WowBadgeProps) {
   if (delta == null) {
-    return <span style={{ color: "var(--text-muted)" }}>{"\u2014"}</span>;
+    return <span style={{ color: "#FFFFFF59" }}>{"\u2014"}</span>;
   }
   const sign = delta > 0 ? "+" : "";
-  const color =
-    delta > 0 ? "var(--red)" : delta < 0 ? "var(--green)" : "var(--text-muted)";
+  const color = delta > 0 ? "#EF4444" : delta < 0 ? "#34D399" : "#FFFFFF59";
   return (
     <span style={{ color, fontSize: "0.85em" }}>
       {sign}
@@ -58,7 +48,7 @@ export function Sparkline({
   values,
   width = 120,
   height = 30,
-  stroke = "var(--accent)",
+  stroke = "#60A5FA",
   strokeWidth = 1.5,
   fill = false,
 }: SparklineProps) {
@@ -145,14 +135,14 @@ export function MultiLineChart({
   height = 200,
 }: MultiLineChartProps) {
   const colors = [
-    "var(--accent)",
-    "var(--green)",
-    "var(--yellow)",
-    "var(--red)",
-    "var(--purple)",
-    "#79c0ff", // TODO: no v5 token for extended palette color
-    "#56d364", // TODO: no v5 token for extended palette color
-    "#e3b341", // TODO: no v5 token for extended palette color
+    "#60A5FA",
+    "#34D399",
+    "#F59E0B",
+    "#EF4444",
+    "#A78BFA",
+    "#79c0ff",
+    "#56d364",
+    "#e3b341",
   ];
 
   const allDates = new Set<string>();
@@ -175,7 +165,7 @@ export function MultiLineChart({
         aria-label="Insufficient data for trend chart"
         role="img"
       >
-        <text x="10" y="20" fill="var(--text-muted)" fontSize="12">
+        <text x="10" y="20" fill="#FFFFFF59" fontSize="12">
           Insufficient data for trend chart
         </text>
       </svg>
@@ -216,13 +206,13 @@ export function MultiLineChart({
           y1={y}
           x2={width - padR}
           y2={y}
-          stroke="var(--border)"
+          stroke="#FFFFFF0F"
           strokeWidth="1"
         />
         <text
           x={padL - 5}
           y={y + 4}
-          fill="var(--text-muted)"
+          fill="#FFFFFF59"
           fontSize="10"
           textAnchor="end"
         >
@@ -244,14 +234,14 @@ export function MultiLineChart({
           y1={padT}
           x2={x}
           y2={padT + chartH}
-          stroke="var(--yellow)"
+          stroke="#F59E0B"
           strokeWidth="1"
           strokeDasharray="4,4"
         />
         <text
           x={x}
           y={padT - 2}
-          fill="var(--yellow)"
+          fill="#F59E0B"
           fontSize="9"
           textAnchor="middle"
         >
@@ -267,10 +257,10 @@ export function MultiLineChart({
     if (typeof avg !== "object" || avg === null) return null;
     const avgObj = avg as Record<string, number>;
     const pts: string[] = [];
-    for (const d of sortedDates) {
+    for (let i = 0; i < sortedDates.length; i++) {
+      const d = sortedDates[i];
       if (avgObj[d] != null) {
-        const x =
-          padL + (sortedDates.indexOf(d) / (sortedDates.length - 1)) * chartW;
+        const x = padL + (i / (sortedDates.length - 1)) * chartW;
         const y = padT + chartH - ((avgObj[d] - minY) / rangeY) * chartH;
         pts.push(`${round(x, 1)},${round(y, 1)}`);
       }
@@ -304,7 +294,7 @@ export function MultiLineChart({
           fill={color}
           rx="2"
         />
-        <text x={x + 14} y={height - 6} fill="var(--text)" fontSize="10">
+        <text x={x + 14} y={height - 6} fill="#F0F0F2" fontSize="10">
           {stage}
         </text>
       </g>
@@ -317,7 +307,7 @@ export function MultiLineChart({
       height={height}
       viewBox={`0 0 ${width} ${height}`}
       xmlns="http://www.w3.org/2000/svg"
-      style={{ background: "var(--bg)", borderRadius: "6px" }}
+      style={{ background: "#0F1117", borderRadius: "6px" }}
       aria-label="Per-stage token trend chart"
       role="img"
     >
