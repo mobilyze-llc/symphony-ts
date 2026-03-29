@@ -1,7 +1,3 @@
-/**
- * Section 3: Per-Stage Utilization Trend
- * Rebuilt from v5 per-stage-utilization-trend.jsx inline styles.
- */
 import type { Inflection, StageTrend } from "../types.ts";
 import ColdStartPlaceholder from "./ColdStartPlaceholder.tsx";
 import InflectionAttribution from "./InflectionAttribution.tsx";
@@ -24,7 +20,6 @@ export default function PerStageTrend({
   dataSpanDays,
 }: PerStageTrendProps) {
   const trend = perStageTrend ?? {};
-  // spec-gen exclusion: filter stage_name === "spec-gen" from trend data
   const filteredTrend: Record<string, StageTrend> = {};
   for (const [stage, val] of Object.entries(trend)) {
     if (stage !== "spec-gen") {
@@ -53,7 +48,14 @@ export default function PerStageTrend({
         width: "1440px",
       }}
     >
-      <div style={{ boxSizing: "border-box" as const, display: "flex", flexDirection: "column" as const, gap: "4px" }}>
+      <div
+        style={{
+          boxSizing: "border-box" as const,
+          display: "flex",
+          flexDirection: "column" as const,
+          gap: "4px",
+        }}
+      >
         <div
           style={{
             boxSizing: "border-box" as const,

@@ -1,8 +1,3 @@
-/**
- * Section 10: Report Footer
- * Rebuilt from v5 footer.jsx inline styles.
- */
-
 export interface ReportFooterProps {
   nextReport?: string;
 }

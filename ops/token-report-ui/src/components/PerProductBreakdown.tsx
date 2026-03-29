@@ -1,15 +1,6 @@
-/**
- * Section 8: Per-Product Breakdown
- * Converted from design reference PerProductBreakdown.jsx.
- * Rebuilt with v5 inline styles (SYMPH-205).
- */
 import type { ProductData } from "../types.ts";
+import { round } from "../lib/chart-utils.ts";
 import { fmtNum } from "./chartUtils.tsx";
-
-function round(n: number, decimals = 0): number {
-  const f = 10 ** decimals;
-  return Math.round(n * f) / f;
-}
 
 export interface PerProductBreakdownProps {
   perProduct: Record<string, ProductData>;
@@ -64,8 +55,7 @@ export default function PerProductBreakdown({
                   textAlign: "left",
                   color: "var(--text-muted)",
                   fontSize: "10px",
-                  fontWeight:
-                    600,
+                  fontWeight: 600,
                   padding: "var(--spacing-element) var(--spacing-inner)",
                   borderBottom: "var(--border-width) solid var(--border)",
                   textTransform: "uppercase" as const,
@@ -79,8 +69,7 @@ export default function PerProductBreakdown({
                   textAlign: "right",
                   color: "var(--text-muted)",
                   fontSize: "10px",
-                  fontWeight:
-                    600,
+                  fontWeight: 600,
                   padding: "var(--spacing-element) var(--spacing-inner)",
                   borderBottom: "var(--border-width) solid var(--border)",
                   textTransform: "uppercase" as const,
@@ -94,8 +83,7 @@ export default function PerProductBreakdown({
                   textAlign: "right",
                   color: "var(--text-muted)",
                   fontSize: "10px",
-                  fontWeight:
-                    600,
+                  fontWeight: 600,
                   padding: "var(--spacing-element) var(--spacing-inner)",
                   borderBottom: "var(--border-width) solid var(--border)",
                   textTransform: "uppercase" as const,
@@ -109,8 +97,7 @@ export default function PerProductBreakdown({
                   textAlign: "right",
                   color: "var(--text-muted)",
                   fontSize: "10px",
-                  fontWeight:
-                    600,
+                  fontWeight: 600,
                   padding: "var(--spacing-element) var(--spacing-inner)",
                   borderBottom: "var(--border-width) solid var(--border)",
                   textTransform: "uppercase" as const,
@@ -124,8 +111,7 @@ export default function PerProductBreakdown({
                   textAlign: "left",
                   color: "var(--text-muted)",
                   fontSize: "10px",
-                  fontWeight:
-                    600,
+                  fontWeight: 600,
                   padding: "var(--spacing-element) var(--spacing-inner)",
                   borderBottom: "var(--border-width) solid var(--border)",
                   textTransform: "uppercase" as const,
@@ -144,11 +130,9 @@ export default function PerProductBreakdown({
                   <td
                     style={{
                       padding: "var(--spacing-element) var(--spacing-inner)",
-                      borderBottom:
-                        "var(--border-width) solid var(--border)",
+                      borderBottom: "var(--border-width) solid var(--border)",
                       color: "var(--text)",
-                      fontWeight:
-                        600,
+                      fontWeight: 600,
                     }}
                   >
                     {name}
@@ -157,8 +141,7 @@ export default function PerProductBreakdown({
                     style={{
                       textAlign: "right",
                       padding: "var(--spacing-element) var(--spacing-inner)",
-                      borderBottom:
-                        "var(--border-width) solid var(--border)",
+                      borderBottom: "var(--border-width) solid var(--border)",
                       color: "var(--text)",
                     }}
                   >
@@ -168,8 +151,7 @@ export default function PerProductBreakdown({
                     style={{
                       textAlign: "right",
                       padding: "var(--spacing-element) var(--spacing-inner)",
-                      borderBottom:
-                        "var(--border-width) solid var(--border)",
+                      borderBottom: "var(--border-width) solid var(--border)",
                       color: "var(--text)",
                     }}
                   >
@@ -179,8 +161,7 @@ export default function PerProductBreakdown({
                     style={{
                       textAlign: "right",
                       padding: "var(--spacing-element) var(--spacing-inner)",
-                      borderBottom:
-                        "var(--border-width) solid var(--border)",
+                      borderBottom: "var(--border-width) solid var(--border)",
                       color: "var(--text)",
                     }}
                   >
@@ -189,8 +170,7 @@ export default function PerProductBreakdown({
                   <td
                     style={{
                       padding: "var(--spacing-element) var(--spacing-inner)",
-                      borderBottom:
-                        "var(--border-width) solid var(--border)",
+                      borderBottom: "var(--border-width) solid var(--border)",
                       color: "var(--text-muted)",
                     }}
                   >

@@ -1,9 +1,3 @@
-/**
- * Cold-start banner shown when data_span_days < 7.
- * Provides context about limited data and which sections are affected.
- * Rebuilt with v5 inline styles (SYMPH-205).
- */
-
 export interface ColdStartBannerProps {
   dataSpanDays: number;
   message?: string;

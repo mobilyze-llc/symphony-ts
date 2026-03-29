@@ -1,11 +1,11 @@
-/**
- * Section 8: Stage Efficiency
- * Rebuilt from v5 stage-efficiency.jsx inline styles.
- * LAYOUT CHANGE: vertical list -> 4-card horizontal row.
- * Stage-colored dots, sparklines, avg turns, cache rate.
- */
 import type { PerStageStats, StageSpend } from "../types.ts";
 import { fmtNum } from "./chartUtils.tsx";
+import {
+  STAGE_ORDER,
+  STAGE_COLORS,
+  canonicalStage,
+  findByKey,
+} from "./index.ts";
 
 export interface StageEfficiencyProps {
   perStageSpend: Record<string, StageSpend>;
@@ -13,28 +13,12 @@ export interface StageEfficiencyProps {
   perStageStats?: Record<string, PerStageStats>;
 }
 
-const STAGE_ORDER = ["Investigate", "Implement", "Validate", "Review", "Merge"];
-
-const STAGE_COLORS: Record<string, string> = {
-  Investigate: "#60A5FA",
-  Implement: "#F59E0B",
-  Validate: "#A78BFA",
-  Review: "#A78BFA",
-  Merge: "#34D399",
-};
-
-function canonicalStage(s: string): string {
-  const lower = s.toLowerCase();
-  for (const name of STAGE_ORDER) {
-    if (name.toLowerCase() === lower) return name;
-  }
-  return s.charAt(0).toUpperCase() + s.slice(1);
-}
-
 /**
  * Determine if a WoW delta is favorable (lower tokens = better for all stages).
  */
-function getDeltaDirection(wow: number | undefined): "favorable" | "declining" | null {
+function getDeltaDirection(
+  wow: number | undefined,
+): "favorable" | "declining" | null {
   if (wow == null || wow === 0) return null;
   return wow < 0 ? "favorable" : "declining";
 }
@@ -76,31 +60,6 @@ export default function StageEfficiency({
     }
   }
 
-  // Helper to find value by case-insensitive key
-  function findSpend(stage: string): StageSpend | undefined {
-    const lower = stage.toLowerCase();
-    for (const [k, v] of Object.entries(spend)) {
-      if (k.toLowerCase() === lower) return v;
-    }
-    return undefined;
-  }
-
-  function findSparkline(stage: string): number[] | undefined {
-    const lower = stage.toLowerCase();
-    for (const [k, v] of Object.entries(sparklines)) {
-      if (k.toLowerCase() === lower) return v;
-    }
-    return undefined;
-  }
-
-  function findStats(stage: string): PerStageStats | undefined {
-    const lower = stage.toLowerCase();
-    for (const [k, v] of Object.entries(stats)) {
-      if (k.toLowerCase() === lower) return v;
-    }
-    return undefined;
-  }
-
   return (
     <div
       style={{
@@ -136,11 +95,17 @@ export default function StageEfficiency({
         Stage Efficiency
       </div>
 
-      <div style={{ boxSizing: "border-box" as const, display: "flex", gap: "16px" }}>
+      <div
+        style={{
+          boxSizing: "border-box" as const,
+          display: "flex",
+          gap: "16px",
+        }}
+      >
         {stages.map((stage) => {
-          const data = findSpend(stage);
-          const sparkData = findSparkline(stage);
-          const stageStats = findStats(stage);
+          const data = findByKey(spend, stage);
+          const sparkData = findByKey(sparklines, stage);
+          const stageStats = findByKey(stats, stage);
           const stageColor = STAGE_COLORS[stage] ?? "#FFFFFF59";
 
           // Compute avg tokens per execution
@@ -180,7 +145,6 @@ export default function StageEfficiency({
 
           return (
             <div key={stage} style={cardStyle}>
-              {/* Header: dot + name + delta */}
               <div
                 style={{
                   alignItems: "baseline",
@@ -228,7 +192,6 @@ export default function StageEfficiency({
                 )}
               </div>
 
-              {/* Avg tokens value */}
               <div
                 style={{
                   boxSizing: "border-box" as const,
@@ -254,7 +217,6 @@ export default function StageEfficiency({
                 avg tokens
               </div>
 
-              {/* Sparkline with stage color */}
               <svg
                 width="100%"
                 height="32"
@@ -262,34 +224,39 @@ export default function StageEfficiency({
                 xmlns="http://www.w3.org/2000/svg"
                 style={{ overflow: "visible" as const }}
               >
-                {sparkData && sparkData.length >= 2 ? (
-                  (() => {
-                    const vals = sparkData;
-                    const minV = Math.min(...vals);
-                    const maxV = Math.max(...vals);
-                    const rangeV = maxV - minV || 1;
-                    const pts = vals
-                      .map((v, i) => {
-                        const x = Math.round((i / (vals.length - 1)) * 200);
-                        const y = Math.round(28 - ((v - minV) / rangeV) * 24);
-                        return `${x},${y}`;
-                      })
-                      .join(" ");
-                    return (
-                      <polyline
-                        points={pts}
-                        stroke={stageColor}
-                        strokeWidth="1.5"
-                        fill="none"
-                        opacity="0.8"
-                      />
-                    );
-                  })()
-                ) : null}
+                {sparkData && sparkData.length >= 2
+                  ? (() => {
+                      const vals = sparkData;
+                      const minV = Math.min(...vals);
+                      const maxV = Math.max(...vals);
+                      const rangeV = maxV - minV || 1;
+                      const pts = vals
+                        .map((v, i) => {
+                          const x = Math.round((i / (vals.length - 1)) * 200);
+                          const y = Math.round(28 - ((v - minV) / rangeV) * 24);
+                          return `${x},${y}`;
+                        })
+                        .join(" ");
+                      return (
+                        <polyline
+                          points={pts}
+                          stroke={stageColor}
+                          strokeWidth="1.5"
+                          fill="none"
+                          opacity="0.8"
+                        />
+                      );
+                    })()
+                  : null}
               </svg>
 
-              {/* Bottom stats: Avg turns + Cache rate */}
-              <div style={{ boxSizing: "border-box" as const, display: "flex", gap: "16px" }}>
+              <div
+                style={{
+                  boxSizing: "border-box" as const,
+                  display: "flex",
+                  gap: "16px",
+                }}
+              >
                 <div
                   style={{
                     boxSizing: "border-box" as const,
@@ -359,9 +326,7 @@ export default function StageEfficiency({
                       lineHeight: "18px",
                     }}
                   >
-                    {cacheRate != null
-                      ? `${Math.round(cacheRate)}%`
-                      : "\u2014"}
+                    {cacheRate != null ? `${Math.round(cacheRate)}%` : "\u2014"}
                   </div>
                 </div>
               </div>
