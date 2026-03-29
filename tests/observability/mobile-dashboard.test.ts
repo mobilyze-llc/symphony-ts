@@ -32,11 +32,13 @@ describe("mobile-dashboard.html", () => {
     expect(html).toContain("env(safe-area-inset-right)");
   });
 
-  it("includes port configuration flow", () => {
-    expect(html).toContain("port-overlay");
-    expect(html).toContain("port-input");
-    expect(html).toContain("port-connect");
-    expect(html).toContain("symphony_base_url");
+  it("auto-connects using window.location.hostname and localStorage port", () => {
+    const scriptSection = html.slice(html.indexOf("<script>"));
+    expect(scriptSection).toContain("window.location.hostname");
+    expect(scriptSection).toContain("symphony_port");
+    expect(scriptSection).toContain("4321");
+    // No port overlay blocking the UI
+    expect(html).not.toContain('id="port-overlay"');
   });
 
   it("includes pipeline home screen elements", () => {
@@ -62,8 +64,10 @@ describe("mobile-dashboard.html", () => {
     // Activity feed
     expect(html).toContain("activity-section");
     expect(html).toContain("activity-item");
-    // Linear deep link
-    expect(html).toContain("linear.app/issue");
+    // Linear deep link with workspace slug
+    expect(html).toContain("linear.app/mobilyze-llc/issue");
+    // No bare linear.app/issue/ without workspace
+    expect(html).not.toMatch(/linear\.app\/issue\//);
   });
 
   it("includes reports tab", () => {
@@ -99,9 +103,7 @@ describe("mobile-dashboard.html", () => {
   });
 
   it("does not hardcode localhost in connection logic", () => {
-    // Port config should construct URL dynamically, not hardcode connections
-    // The parseBaseUrl function uses localhost only as fallback for bare port numbers
-    // which is the expected behavior for local development per spec
+    // Auto-connect uses window.location.hostname, not hardcoded localhost
     const scriptSection = html.slice(html.indexOf("<script>"));
     // Ensure no hardcoded fetch URLs to localhost
     expect(scriptSection).not.toMatch(/fetch\s*\(\s*['"]https?:\/\/localhost/);
@@ -129,9 +131,11 @@ describe("mobile-dashboard.html", () => {
     expect(html).toContain("queue-badge-rejected");
   });
 
-  it("fetches queue data from /api/v1/queue", () => {
+  it("fetches queue data from /api/v1/github/queue", () => {
     const scriptSection = html.slice(html.indexOf("<script>"));
-    expect(scriptSection).toContain("/api/v1/queue");
+    expect(scriptSection).toContain("/api/v1/github/queue");
+    // Uses recently_merged field
+    expect(scriptSection).toContain("recently_merged");
   });
 
   it("includes deploy screen with preview, version display, and output", () => {
@@ -153,11 +157,16 @@ describe("mobile-dashboard.html", () => {
     expect(html).toContain("running_issues_count");
   });
 
-  it("streams deploy output via SSE with deploy_output events", () => {
+  it("executes deploy via POST fetch with ReadableStream", () => {
     const scriptSection = html.slice(html.indexOf("<script>"));
     expect(scriptSection).toContain("deploy_output");
     expect(scriptSection).toContain("deploy_complete");
-    expect(scriptSection).toContain("/api/v1/deploy/stream");
+    expect(scriptSection).toContain("/api/v1/deploy");
+    // Uses fetch POST, not EventSource for deploy
+    expect(scriptSection).toMatch(
+      /fetch\(`\$\{baseUrl\}\/api\/v1\/deploy`.*method.*POST/s,
+    );
+    expect(scriptSection).not.toMatch(/new EventSource.*deploy/);
   });
 
   it("includes stop confirmation bottom sheet", () => {
@@ -172,13 +181,13 @@ describe("mobile-dashboard.html", () => {
     expect(html).toContain("wireHoldToConfirm");
   });
 
-  it("stop bottom sheet shows per-step success/failure", () => {
+  it("stop shows simple success/failure result without data.steps", () => {
     const scriptSection = html.slice(html.indexOf("<script>"));
     expect(scriptSection).toContain("stop-check-icon");
     expect(scriptSection).toContain("success");
     expect(scriptSection).toContain("failed");
-    // Per-step results from stop endpoint
-    expect(scriptSection).toContain("data.steps");
+    // No fake data.steps array
+    expect(scriptSection).not.toContain("data.steps");
   });
 
   it("deploy uses hold-to-confirm pattern", () => {
@@ -199,5 +208,19 @@ describe("mobile-dashboard.html", () => {
   it("handles queue/deploy 404 gracefully", () => {
     const scriptSection = html.slice(html.indexOf("<script>"));
     expect(scriptSection).toContain("resp.status === 404");
+  });
+
+  it("includes parent spec link rendering in detail views", () => {
+    const scriptSection = html.slice(html.indexOf("<script>"));
+    expect(scriptSection).toContain("Parent Spec");
+    expect(scriptSection).toContain("parent_url");
+  });
+
+  it("report links use port 8090 on the current host", () => {
+    const scriptSection = html.slice(html.indexOf("<script>"));
+    expect(scriptSection).toContain("8090");
+    expect(scriptSection).toMatch(
+      /window\.location\.hostname.*8090|8090.*window\.location\.hostname/s,
+    );
   });
 });

@@ -54,40 +54,8 @@ body {
   padding-right: env(safe-area-inset-right);
 }
 
-/* ── Port Config Overlay ── */
-#port-overlay {
-  position: fixed; inset: 0; z-index: 100;
-  background: var(--page);
-  display: flex; flex-direction: column;
-  align-items: center; justify-content: center;
-  padding: 24px;
-}
-#port-overlay.hidden { display: none; }
-.port-logo { font-size: 32px; font-weight: 700; margin-bottom: 8px; letter-spacing: -0.5px; }
-.port-subtitle { color: var(--muted); font-size: 14px; margin-bottom: 32px; }
-.port-input-group { display: flex; gap: 8px; width: 100%; max-width: 320px; }
-.port-input {
-  flex: 1; padding: 12px 16px; border-radius: var(--radius);
-  background: var(--page-soft); border: 1px solid var(--line);
-  color: var(--ink); font-family: var(--font-mono); font-size: 16px;
-  outline: none; text-align: center;
-}
-.port-input:focus { border-color: var(--accent); }
-.port-input::placeholder { color: var(--muted); }
-.port-btn {
-  padding: 12px 24px; border-radius: var(--radius);
-  background: var(--accent); color: #fff; font-weight: 600;
-  font-size: 15px; border: none; cursor: pointer;
-  transition: opacity 0.15s;
-}
-.port-btn:active { opacity: 0.8; }
-.port-saved {
-  margin-top: 12px; font-size: 13px; color: var(--muted);
-}
-
 /* ── App Shell ── */
-#app { display: none; }
-#app.active { display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
+#app { display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh; }
 
 /* Header */
 .header {
@@ -556,17 +524,6 @@ body {
 </head>
 <body>
 
-<!-- Port Configuration -->
-<div id="port-overlay">
-  <div class="port-logo">Symphony</div>
-  <div class="port-subtitle">Connect to dashboard server</div>
-  <div class="port-input-group">
-    <input type="text" class="port-input" id="port-input" placeholder="host:port or port" autofocus>
-    <button class="port-btn" id="port-connect">Connect</button>
-  </div>
-  <div class="port-saved" id="port-saved"></div>
-</div>
-
 <!-- App Shell -->
 <div id="app">
   <!-- Header -->
@@ -692,61 +649,29 @@ body {
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
 
-  // ── Port Configuration ──
-  const savedBase = localStorage.getItem('symphony_base_url');
-  if (savedBase) {
-    $('#port-saved').textContent = `Last: ${savedBase}`;
-  }
+  // ── Auto-connect using window.location.hostname + localStorage port ──
+  const symphonyPort = localStorage.getItem('symphony_port') || '4321';
+  baseUrl = `http://${window.location.hostname}:${symphonyPort}`;
 
-  function parseBaseUrl(input) {
-    input = input.trim();
-    if (!input) return null;
-    // If just a number, treat as port on the BASE_URL env pattern
-    if (/^\d+$/.test(input)) {
-      return `http://localhost:${input}`;
-    }
-    // If no protocol, add http://
-    if (!/^https?:\/\//.test(input)) {
-      return `http://${input}`;
-    }
-    return input;
-  }
-
-  function connect(url) {
-    baseUrl = url;
-    localStorage.setItem('symphony_base_url', url);
-    $('#port-overlay').classList.add('hidden');
-    $('#app').classList.add('active');
+  function connect() {
     startSSE();
     loadReports();
   }
 
-  $('#port-connect').addEventListener('click', () => {
-    const url = parseBaseUrl($('#port-input').value);
-    if (url) connect(url);
-  });
-
-  $('#port-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') {
-      const url = parseBaseUrl($('#port-input').value);
-      if (url) connect(url);
+  // Settings button → prompt for port change
+  $('#header-settings').addEventListener('click', () => {
+    const newPort = prompt('Symphony API port:', localStorage.getItem('symphony_port') || '4321');
+    if (newPort && /^\d+$/.test(newPort.trim())) {
+      localStorage.setItem('symphony_port', newPort.trim());
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      $('#connection-dot').classList.remove('connected');
+      baseUrl = `http://${window.location.hostname}:${newPort.trim()}`;
+      connect();
     }
   });
 
-  // Auto-connect if saved
-  if (savedBase) {
-    $('#port-input').value = savedBase.replace(/^https?:\/\//, '');
-    connect(savedBase);
-  }
-
-  // Settings button → reconnect
-  $('#header-settings').addEventListener('click', () => {
-    if (eventSource) { eventSource.close(); eventSource = null; }
-    $('#connection-dot').classList.remove('connected');
-    $('#app').classList.remove('active');
-    $('#port-overlay').classList.remove('hidden');
-    $('#port-input').focus();
-  });
+  // Auto-connect on load
+  connect();
 
   // ── SSE Connection ──
   function startSSE() {
@@ -963,7 +888,7 @@ body {
   function renderDetailFromRunning(container, issue) {
     const stageClass = issue.pipeline_stage ? `stage-${issue.pipeline_stage}` : '';
     const healthClass = `health-${issue.health}`;
-    const linearUrl = `https://linear.app/issue/${encodeURIComponent(issue.issue_identifier)}`;
+    const linearUrl = `https://linear.app/mobilyze-llc/issue/${encodeURIComponent(issue.issue_identifier)}`;
 
     // Build stage breakdown bar from execution_history
     const stageBarHtml = buildStageBar(issue);
@@ -996,6 +921,12 @@ body {
           Open in Linear
           <span class="deep-link-arrow">→</span>
         </a>
+        ${issue.parent_url ? `
+        <a class="deep-link" href="${esc(issue.parent_url)}" target="_blank" rel="noopener">
+          <span class="deep-link-icon">📋</span>
+          Parent Spec
+          <span class="deep-link-arrow">→</span>
+        </a>` : ''}
         ${issue.last_tool_call ? `
         <div class="deep-link" style="cursor:default">
           <span class="deep-link-icon">🔧</span>
@@ -1131,7 +1062,7 @@ body {
   }
 
   function renderDetailFromApi(container, data) {
-    const linearUrl = `https://linear.app/issue/${encodeURIComponent(data.issue_identifier)}`;
+    const linearUrl = `https://linear.app/mobilyze-llc/issue/${encodeURIComponent(data.issue_identifier)}`;
 
     let activityHtml = '';
     if (data.recent_events && data.recent_events.length > 0) {
@@ -1184,6 +1115,12 @@ body {
           Open in Linear
           <span class="deep-link-arrow">→</span>
         </a>
+        ${data.parent_url ? `
+        <a class="deep-link" href="${esc(data.parent_url)}" target="_blank" rel="noopener">
+          <span class="deep-link-icon">📋</span>
+          Parent Spec
+          <span class="deep-link-arrow">→</span>
+        </a>` : ''}
       </div>
       ${data.last_error ? `
       <div style="padding:0 16px 16px">
@@ -1281,25 +1218,8 @@ body {
       const data = await resp.json();
 
       if (data.stopped) {
-        // Update checklist with per-step results if available
-        if (data.steps && Array.isArray(data.steps)) {
-          data.steps.forEach(step => {
-            updateStopStep(step.id, step.success ? 'success' : 'failed', step.success ? '✓' : '✗');
-            if (!step.success && step.error) {
-              appendStopStepError(step.id, step.error);
-            }
-          });
-          // Mark any remaining steps as success
-          STOP_STEPS.forEach(step => {
-            const icon = $(`#stop-checklist .stop-checklist-item[data-step="${step.id}"] .stop-check-icon`);
-            if (icon && icon.classList.contains('running')) {
-              updateStopStep(step.id, 'success', '✓');
-            }
-          });
-        } else {
-          // No per-step data — mark all as success
-          STOP_STEPS.forEach(step => updateStopStep(step.id, 'success', '✓'));
-        }
+        // Mark all steps as success
+        STOP_STEPS.forEach(step => updateStopStep(step.id, 'success', '✓'));
       } else {
         // Failed — mark all as failed, show error. Never auto-retry.
         STOP_STEPS.forEach(step => updateStopStep(step.id, 'failed', '✗'));
@@ -1343,9 +1263,8 @@ body {
   async function loadQueue() {
     const container = $('#queue-content');
 
-    // TODO: Backend endpoint GET /api/v1/queue not yet implemented (separate task)
     try {
-      const resp = await fetch(`${baseUrl}/api/v1/queue`);
+      const resp = await fetch(`${baseUrl}/api/v1/github/queue`);
       if (!resp.ok) {
         if (resp.status === 404) {
           container.innerHTML = `
@@ -1374,7 +1293,7 @@ body {
     const container = $('#queue-content');
     const alerts = data.alerts || [];
     const queued = data.in_queue || [];
-    const merged = data.merged || [];
+    const merged = data.recently_merged || [];
     const rejected = data.rejected || [];
 
     let html = `
@@ -1463,13 +1382,11 @@ body {
 
   // ── Deploy Screen ──
   let deployPreview = null;
-  let deployEventSource = null;
   let deployInProgress = false;
 
   async function loadDeployPreview() {
     const container = $('#deploy-content');
 
-    // TODO: Backend endpoint POST /api/v1/deploy/preview not yet implemented (separate task)
     try {
       const resp = await fetch(`${baseUrl}/api/v1/deploy/preview`, {
         method: 'POST',
@@ -1599,58 +1516,51 @@ body {
     outputEl.classList.add('visible');
     statusEl.classList.remove('visible', 'success', 'failure');
 
-    // TODO: Backend endpoint POST /api/v1/deploy (SSE stream) not yet implemented (separate task)
     try {
-      deployEventSource = new EventSource(`${baseUrl}/api/v1/deploy/stream`);
+      const resp = await fetch(`${baseUrl}/api/v1/deploy`, { method: 'POST' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
 
-      deployEventSource.addEventListener('deploy_output', (e) => {
-        try {
-          const payload = JSON.parse(e.data);
-          const line = document.createElement('div');
-          if (payload.level === 'error') line.className = 'line-error';
-          else if (payload.level === 'success') line.className = 'line-success';
-          else if (payload.level === 'info') line.className = 'line-info';
-          line.textContent = payload.text || payload.message || e.data;
-          outputEl.appendChild(line);
-          outputEl.scrollTop = outputEl.scrollHeight;
-        } catch (_) {
-          outputEl.textContent += e.data + '\n';
-          outputEl.scrollTop = outputEl.scrollHeight;
-        }
-      });
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
 
-      deployEventSource.addEventListener('deploy_complete', (e) => {
-        try {
-          const payload = JSON.parse(e.data);
-          const success = payload.success !== false && payload.status !== 'failure';
-          statusEl.textContent = success ? '✓ Deploy Successful' : '✗ Deploy Failed';
-          statusEl.className = `deploy-status-banner visible ${success ? 'success' : 'failure'}`;
-          if (payload.message) {
-            statusEl.textContent += ` — ${payload.message}`;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const rawLine of lines) {
+          const trimmed = rawLine.trim();
+          if (!trimmed) continue;
+          try {
+            const payload = JSON.parse(trimmed);
+            if (payload.event === 'deploy_output') {
+              const line = document.createElement('div');
+              if (payload.level === 'error') line.className = 'line-error';
+              else if (payload.level === 'success') line.className = 'line-success';
+              else if (payload.level === 'info') line.className = 'line-info';
+              line.textContent = payload.text || payload.message || trimmed;
+              outputEl.appendChild(line);
+              outputEl.scrollTop = outputEl.scrollHeight;
+            } else if (payload.event === 'deploy_complete') {
+              const success = payload.success !== false && payload.status !== 'failure';
+              statusEl.textContent = success ? '✓ Deploy Successful' : '✗ Deploy Failed';
+              statusEl.className = `deploy-status-banner visible ${success ? 'success' : 'failure'}`;
+              if (payload.message) {
+                statusEl.textContent += ` — ${payload.message}`;
+              }
+            }
+          } catch (_) {
+            outputEl.textContent += trimmed + '\n';
+            outputEl.scrollTop = outputEl.scrollHeight;
           }
-        } catch (_) {
-          statusEl.textContent = '✓ Deploy Complete';
-          statusEl.className = 'deploy-status-banner visible success';
         }
-        if (deployEventSource) { deployEventSource.close(); deployEventSource = null; }
-        deployInProgress = false;
-        const btn2 = $('#deploy-btn');
-        if (btn2) btn2.disabled = false;
-      });
+      }
 
-      deployEventSource.onerror = () => {
-        if (deployEventSource) {
-          deployEventSource.close();
-          deployEventSource = null;
-        }
-        if (deployInProgress) {
-          statusEl.textContent = '✗ Deploy stream disconnected';
-          statusEl.className = 'deploy-status-banner visible failure';
-          deployInProgress = false;
-          const btn2 = $('#deploy-btn');
-          if (btn2) btn2.disabled = false;
-        }
-      };
+      deployInProgress = false;
+      const btn2 = $('#deploy-btn');
+      if (btn2) btn2.disabled = false;
     } catch (err) {
       statusEl.textContent = `✗ Deploy failed: ${err.message}`;
       statusEl.className = 'deploy-status-banner visible failure';
@@ -1695,7 +1605,7 @@ body {
     const isFile = window.location.protocol === 'file:';
 
     container.innerHTML = reports.map(r => {
-      const href = isFile ? `./${r.date}.html` : `${baseUrl}/reports/${r.date}.html`;
+      const href = isFile ? `./${r.date}.html` : `http://${window.location.hostname}:8090/reports/${r.date}.html`;
       return `
         <a class="report-item" href="${esc(href)}" target="_blank" rel="noopener">
           <div>
