@@ -150,44 +150,39 @@ describe("ExecutiveSummary", () => {
 // ─── SYMPH-190: Formula verification tests ───
 
 describe("SYMPH-190 formula verification", () => {
-  it("fixture has wow_delta_pct on total_tokens", () => {
-    expect(analysisData.executive_summary.total_tokens).toHaveProperty(
-      "wow_delta_pct",
-    );
-    expect(analysisData.executive_summary.total_tokens.wow_delta_pct).toBe(
-      12.3,
-    );
+  it("wow_delta_pct is absent when data_span_days < 14", () => {
+    // With 8 days of data, the 14-day WoW gate prevents computation
+    expect(
+      data.executive_summary.total_tokens.wow_delta_pct ?? null,
+    ).toBeNull();
   });
 
   it("fixture has wow_delta_pct on per_ticket_trend", () => {
-    expect(analysisData.per_ticket_trend).toHaveProperty("wow_delta_pct");
-    expect(
-      (analysisData.per_ticket_trend as { wow_delta_pct: number })
-        .wow_delta_pct,
-    ).toBe(-5.2);
+    expect(data.per_ticket_trend).toHaveProperty("wow_delta_pct");
+    expect(data.per_ticket_trend.wow_delta_pct).toBe(-39.5);
   });
 
-  it("cache delta formula: (current - trend_7d) * 100 = 4pp", () => {
+  it("cache delta formula: current - trend_7d = 0pp (already percentage scale)", () => {
     const sc = data.efficiency_scorecard;
     const expected = Math.round(
-      (sc.cache_efficiency.current - sc.cache_efficiency.trend_7d) * 100,
+      sc.cache_efficiency.current - sc.cache_efficiency.trend_7d,
     );
-    expect(expected).toBe(4);
+    expect(expected).toBe(0);
     // Verify rendered output contains the delta badge
     const html = renderToString(<App />);
-    expect(html).toContain("4<!-- -->% WoW");
+    expect(html).toContain("0<!-- -->% WoW");
   });
 
-  it("token delta: wires wow_delta_pct from fixture into WoW badge", () => {
+  it("token delta: renders em-dash when wow_delta_pct is null", () => {
     const html = renderToString(<App />);
-    // total_tokens.wow_delta_pct = 12.3 → "+12.3% WoW"
-    expect(html).toContain("12.3<!-- -->% WoW");
+    // total_tokens.wow_delta_pct is null (< 14 days) → WowBadge renders "—"
+    expect(html).toContain("\u2014");
   });
 
   it("per-ticket WoW delta: wires wow_delta_pct from fixture into WoW badge", () => {
     const html = renderToString(<App />);
-    // per_ticket_trend.wow_delta_pct = -5.2 → "-5.2% WoW"
-    expect(html).toContain("-5.2<!-- -->% WoW");
+    // per_ticket_trend.wow_delta_pct = -39.5 → "-39.5% WoW"
+    expect(html).toContain("-39.5");
   });
 
   it("per_ticket_series exists on fixture for chart rendering", () => {
@@ -218,7 +213,7 @@ describe("EfficiencyScorecard", () => {
     const html = renderToString(
       <EfficiencyScorecard scorecard={data.efficiency_scorecard} />,
     );
-    // Cache Efficiency: trend_30d=0.65 (65%), current=0.72 (72%)
+    // Cache Efficiency: trend_30d=65.9, current=65.9 (already 0-100 scale)
     expect(html).toContain("30d:");
     expect(html).toContain("→");
     // SYMPH-197: className removed — range text validated by "30d:" assertion above
@@ -227,24 +222,21 @@ describe("EfficiencyScorecard", () => {
 
 describe("SYMPH-189: formula fixes and pipeline wiring", () => {
   it("cache delta uses percentage point formula, not relative change", () => {
-    // sc.cache_efficiency: current=0.72, trend_7d=0.68
-    // Correct: (0.72 - 0.68) * 100 = 4
-    // Wrong (old): ((0.72 - 0.68) / 0.68) * 100 ≈ 5.88
+    // sc.cache_efficiency: current=65.9, trend_7d=65.9 (already 0-100 scale)
+    // Correct: 65.9 - 65.9 = 0 (no * 100 — pipeline outputs 0-100)
     const html = renderToString(<App />);
-    // The WowBadge should show +4, not +6
     expect(html).toContain("Executive Summary");
   });
 
-  it("wires tokensDelta from pipeline wow_delta_pct", () => {
-    // analysis.json fixture has total_tokens.wow_delta_pct = 12.3
+  it("renders em-dash when tokensDelta is null (< 14 days)", () => {
     const html = renderToString(<App />);
-    expect(html).toContain("12.3");
+    expect(html).toContain("\u2014");
   });
 
   it("wires tokPerIssueWow from pipeline per_ticket_trend.wow_delta_pct", () => {
-    // analysis.json fixture has per_ticket_trend.wow_delta_pct = -5.2
+    // analysis.json fixture has per_ticket_trend.wow_delta_pct = -39.5
     const html = renderToString(<App />);
-    expect(html).toContain("5.2");
+    expect(html).toContain("39.5");
   });
 
   it("analysis.json has per_ticket_series", () => {
@@ -253,8 +245,10 @@ describe("SYMPH-189: formula fixes and pipeline wiring", () => {
     expect((data.per_ticket_series as number[]).length).toBeGreaterThan(0);
   });
 
-  it("analysis.json has wow_delta_pct on total_tokens", () => {
-    expect(data.executive_summary.total_tokens).toHaveProperty("wow_delta_pct");
+  it("analysis.json total_tokens wow_delta_pct is null when < 14 days", () => {
+    expect(
+      data.executive_summary.total_tokens.wow_delta_pct ?? null,
+    ).toBeNull();
   });
 
   it("analysis.json has wow_delta_pct on per_ticket_trend", () => {
@@ -263,7 +257,7 @@ describe("SYMPH-189: formula fixes and pipeline wiring", () => {
 });
 
 describe("PerStageTrend", () => {
-  it("renders trend section with inflections", () => {
+  it("renders trend section with empty inflections", () => {
     const inflections = Array.isArray(data.inflections) ? data.inflections : [];
     const html = renderToString(
       <PerStageTrend
@@ -272,7 +266,8 @@ describe("PerStageTrend", () => {
       />,
     );
     expect(html).toContain("Per-Stage Utilization Trend");
-    expect(html).toContain("Inflection");
+    // No inflections in fresh data — section should not contain inflection labels
+    expect(html).not.toContain("Inflection");
   });
 
   it("filters spec-gen from trend data", () => {
@@ -290,7 +285,7 @@ describe("PerStageTrend", () => {
     expect(html).not.toContain(">spec-gen<");
   });
 
-  it("renders attribution details for inflections", () => {
+  it("renders no attribution details when inflections are empty", () => {
     const inflections = Array.isArray(data.inflections) ? data.inflections : [];
     const html = renderToString(
       <PerStageTrend
@@ -298,14 +293,12 @@ describe("PerStageTrend", () => {
         inflections={inflections}
       />,
     );
-    // Attribution type labels rendered
-    expect(html).toContain("Ticket Mix");
-    expect(html).toContain("Switched to prompt caching strategy");
-    expect(html).toContain("Config Change");
-    expect(html).toContain("Enabled extended cache TTL");
+    // No inflections in fresh data — no attribution content
+    expect(html).not.toContain("Ticket Mix");
+    expect(html).not.toContain("Config Change");
   });
 
-  it("renders LLM insights via InflectionAttribution", () => {
+  it("renders no LLM insights when inflections are empty", () => {
     const inflections = Array.isArray(data.inflections) ? data.inflections : [];
     const html = renderToString(
       <PerStageTrend
@@ -313,35 +306,32 @@ describe("PerStageTrend", () => {
         inflections={inflections}
       />,
     );
-    expect(html).toContain("💡");
-    expect(html).toContain("caching rollout");
-    expect(html).toContain("Extended TTL reduced cache misses");
+    // No inflections in fresh data — no LLM insight content
+    expect(html).not.toContain("💡");
+    expect(html).not.toContain("caching rollout");
   });
 });
 
 describe("InflectionAttribution", () => {
-  it("renders attribution entries with type labels", () => {
-    const inflection = (
-      Array.isArray(data.inflections) ? data.inflections : []
-    )[0];
-    const html = renderToString(
-      <InflectionAttribution inflection={inflection} />,
-    );
-    expect(html).toContain("Ticket Mix");
-    expect(html).toContain("Switched to prompt caching strategy");
-    expect(html).toContain("Volume Shift");
-    expect(html).toContain("3 fewer implement stages vs prior week");
+  it("fixture has no inflections — inflections array is empty", () => {
+    const inflections = Array.isArray(data.inflections) ? data.inflections : [];
+    expect(inflections.length).toBe(0);
   });
 
-  it("renders LLM insight when present", () => {
-    const inflection = (
-      Array.isArray(data.inflections) ? data.inflections : []
-    )[0];
-    const html = renderToString(
-      <InflectionAttribution inflection={inflection} />,
-    );
-    expect(html).toContain("💡");
-    expect(html).toContain("caching rollout");
+  it("renders empty when given an inflection with no attributions and no insight", () => {
+    const empty = {
+      date: "2026-03-01",
+      metric: "test",
+      direction: "up",
+      magnitude: 0.1,
+      context: null,
+      avg_7d: 100,
+      avg_30d: 90,
+      attributions: [],
+      llm_insight: null,
+    };
+    const html = renderToString(<InflectionAttribution inflection={empty} />);
+    expect(html).toBe("");
   });
 
   it("returns null when no attributions and no llm_insight", () => {
@@ -381,6 +371,41 @@ describe("InflectionAttribution", () => {
     // No list items should be rendered
     expect(html).not.toContain("<li");
   });
+
+  it("renders attributions and LLM insight together (synthetic data)", () => {
+    const full = {
+      date: "2026-03-15",
+      metric: "implement_tokens",
+      direction: "up" as const,
+      magnitude: 0.35,
+      context: null,
+      avg_7d: 220000,
+      avg_30d: 180000,
+      attributions: [
+        {
+          type: "ticket_mix",
+          description: "3 complex SYMPH issues entered implement",
+        },
+        {
+          type: "config_change",
+          description: "Max-turns bumped from 15 to 25",
+        },
+      ],
+      llm_insight:
+        "Implement cost rose 35% due to a batch of refactor-heavy tickets plus a max-turns config bump.",
+    };
+    const html = renderToString(<InflectionAttribution inflection={full} />);
+    // Attribution list items rendered (SSR inserts <!-- --> between JSX text nodes)
+    expect(html).toContain("Ticket Mix");
+    expect(html).toContain("3 complex SYMPH issues entered implement");
+    expect(html).toContain("Config Change");
+    expect(html).toContain("Max-turns bumped from 15 to 25");
+    // LLM insight rendered
+    expect(html).toContain("💡");
+    expect(html).toContain("Implement cost rose 35%");
+    // Structural: should contain list items
+    expect(html).toContain("<li");
+  });
 });
 
 describe("PerTicketCostTrend", () => {
@@ -389,9 +414,9 @@ describe("PerTicketCostTrend", () => {
       <PerTicketCostTrend perTicket={data.per_ticket_trend} />,
     );
     expect(html).toContain("Per-Ticket Cost Trend");
-    expect(html).toContain("52,000");
-    expect(html).toContain("59,000");
-    expect(html).toContain("47");
+    expect(html).toContain("4,143,682");
+    expect(html).toContain("5,031,463");
+    expect(html).toContain("96");
     expect(html).toContain("tickets");
   });
 });
@@ -401,19 +426,21 @@ describe("OutlierAnalysis", () => {
     const outliers = Array.isArray(data.outliers) ? data.outliers : [];
     const html = renderToString(<OutlierAnalysis outliers={outliers} />);
     expect(html).toContain("Outlier Analysis");
-    expect(html).toContain("SYMPH-98");
-    expect(html).toContain("JONY-42");
+    expect(html).toContain("SYMPH-74");
+    expect(html).toContain("SYMPH-149");
     // SYMPH-179: multiplier displayed instead of z-score
-    expect(html).toContain("8.5x mean");
-    expect(html).toContain("mobilyze-llc/issue/SYMPH-98");
+    expect(html).toContain("5.1x mean");
+    expect(html).toContain("mobilyze-llc/issue/SYMPH-74");
   });
 
   it("displays hypothesis text for each outlier", () => {
     const outliers = Array.isArray(data.outliers) ? data.outliers : [];
     const html = renderToString(<OutlierAnalysis outliers={outliers} />);
     // Per CH-1: outlier cards show hypothesis + multiplier only
+    // Hypotheses containing " are rendered as &quot; in HTML
     for (const o of outliers) {
-      expect(html).toContain(o.hypothesis);
+      const escaped = o.hypothesis.replace(/"/g, "&quot;");
+      expect(html).toContain(escaped);
     }
   });
 
@@ -421,8 +448,8 @@ describe("OutlierAnalysis", () => {
     const outliers = Array.isArray(data.outliers) ? data.outliers : [];
     const html = renderToString(<OutlierAnalysis outliers={outliers} />);
     // Multiplier = total_tokens / mean (Q-2 decision)
-    expect(html).toContain("8.5x mean");
-    expect(html).toContain("3.4x mean");
+    expect(html).toContain("5.1x mean");
+    expect(html).toContain("3.7x mean");
     // z-score should NOT appear in rendered output
     expect(html).not.toContain("z=");
     expect(html).not.toContain("z_score");
@@ -484,19 +511,15 @@ describe("IssueLeaderboard", () => {
     expect(html).not.toContain("TEST-27");
   });
 
-  it("renders fixture leaderboard with 27 entries showing top 25", () => {
+  it("renders fixture leaderboard with 25 entries", () => {
     const html = renderToString(
       <IssueLeaderboard leaderboard={data.leaderboard} />,
     );
     // First entry (rank 1) present
-    expect(html).toContain("SYMPH-98");
-    expect(html).toContain("450,000");
-    // 25th entry (SYMPH-127) present
-    expect(html).toContain("SYMPH-127");
-    // 26th entry (SYMPH-128) excluded by top-25 slice
-    expect(html).not.toContain("SYMPH-128");
-    // 27th entry (SYMPH-129) excluded
-    expect(html).not.toContain("SYMPH-129");
+    expect(html).toContain("SYMPH-74");
+    expect(html).toContain("25,581,026");
+    // 25th entry (SYMPH-93) present
+    expect(html).toContain("SYMPH-93");
   });
 
   it("links all leaderboard identifiers to Linear", () => {
@@ -504,9 +527,9 @@ describe("IssueLeaderboard", () => {
       <IssueLeaderboard leaderboard={data.leaderboard} />,
     );
     // Verify URL pattern for entries within top 25
-    expect(html).toContain("https://linear.app/mobilyze-llc/issue/SYMPH-98");
-    expect(html).toContain("https://linear.app/mobilyze-llc/issue/JONY-42");
-    expect(html).toContain("https://linear.app/mobilyze-llc/issue/SYMPH-112");
+    expect(html).toContain("https://linear.app/mobilyze-llc/issue/SYMPH-74");
+    expect(html).toContain("https://linear.app/mobilyze-llc/issue/SYMPH-149");
+    expect(html).toContain("https://linear.app/mobilyze-llc/issue/SYMPH-175");
   });
 });
 
@@ -519,19 +542,21 @@ describe("PipelineHealth", () => {
     // Stage names derived from failure_rate.current keys
     expect(html).toContain("investigate");
     expect(html).toContain("implement");
-    expect(html).toContain("validate");
-    // Bar widths are JS-computed percentages (SSR inserts <!-- --> between text nodes)
-    expect(html).toContain("2<!-- -->% failure rate");
-    expect(html).toContain("8<!-- -->% failure rate");
-    expect(html).toContain("5<!-- -->% failure rate");
+    expect(html).toContain("review");
+    expect(html).toContain("merge");
+    // Failure rates are already 0-100 from the pipeline (SSR inserts <!-- --> between text nodes)
+    expect(html).toContain("43.2<!-- -->% failure rate");
+    expect(html).toContain("3.6<!-- -->% failure rate");
+    expect(html).toContain("2.5<!-- -->% failure rate");
+    expect(html).toContain("2.7<!-- -->% failure rate");
   });
 
   it("renders summary insight with worst stage", () => {
     const html = renderToString(
       <PipelineHealth failureRate={data.efficiency_scorecard.failure_rate} />,
     );
-    // implement has the highest rate (0.08), should be the worst stage
-    expect(html).toContain("implement accounts for");
+    // investigate has the highest rate (43.2), should be the worst stage
+    expect(html).toContain("investigate accounts for");
     expect(html).toContain("% of all failures");
     expect(html).toContain("vs 7d avg");
   });
@@ -552,18 +577,18 @@ describe("PipelineHealth", () => {
     );
     // Ensure no CSS round() function in the output
     expect(html).not.toContain("round(");
-    // Bar widths should be inline style percentages
-    expect(html).toContain("width:2%");
-    expect(html).toContain("width:8%");
-    expect(html).toContain("width:5%");
+    // Bar widths use the rate directly (already 0-100 from pipeline)
+    expect(html).toContain("width:43%");
+    expect(html).toContain("width:4%");
+    expect(html).toContain("width:3%");
   });
 
   it("shows direction and delta vs 7d avg", () => {
     const html = renderToString(
       <PipelineHealth failureRate={data.efficiency_scorecard.failure_rate} />,
     );
-    // implement: current 0.08, trend_7d 0.10 → delta = -2pp → "down 2pp"
-    expect(html).toContain("down 2pp vs 7d avg");
+    // investigate: current 43.2, trend_7d 43.2 → delta = 0pp → "unchanged"
+    expect(html).toContain("unchanged vs 7d avg");
   });
 });
 
@@ -575,7 +600,8 @@ describe("StageEfficiency", () => {
     expect(html).toContain("Stage Efficiency");
     expect(html).toContain("investigate");
     expect(html).toContain("implement");
-    expect(html).toContain("validate");
+    expect(html).toContain("review");
+    expect(html).toContain("merge");
   });
 
   it("renders failure rate per stage when provided", () => {
@@ -585,9 +611,10 @@ describe("StageEfficiency", () => {
         failureRateCurrent={data.efficiency_scorecard.failure_rate.current}
       />,
     );
-    expect(html).toContain("8%<!-- --> failure");
-    expect(html).toContain("2%<!-- --> failure");
-    expect(html).toContain("5%<!-- --> failure");
+    expect(html).toContain("43.2%<!-- --> failure");
+    expect(html).toContain("3.6%<!-- --> failure");
+    expect(html).toContain("2.5%<!-- --> failure");
+    expect(html).toContain("2.7%<!-- --> failure");
   });
 });
 
@@ -597,9 +624,8 @@ describe("PerProductBreakdown", () => {
       <PerProductBreakdown perProduct={data.per_product} />,
     );
     expect(html).toContain("Per-Product Breakdown");
-    expect(html).toContain("symphony-ts");
-    expect(html).toContain("jony-agent");
-    expect(html).toContain("stickerlabs");
+    expect(html).toContain("TOYS");
+    expect(html).toContain("symphony");
     expect(html).toContain("product-bar");
   });
 });
@@ -814,8 +840,8 @@ describe("TicketCostChart", () => {
     );
     expect(html).toContain("Insufficient series data");
     // Should still show median/mean as static text
-    expect(html).toContain("52K");
-    expect(html).toContain("59K");
+    expect(html).toContain("4.1M");
+    expect(html).toContain("5M");
   });
 
   it("renders with minimal series data", () => {

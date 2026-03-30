@@ -37,7 +37,7 @@ export default function StageEfficiency({
       </h2>
       {Object.entries(spend).map(([stage, data]) => {
         const rate = failRates[stage];
-        const ratePct = rate != null ? `${Math.round(rate * 100)}%` : null;
+        const ratePct = rate != null ? `${Math.round(rate * 10) / 10}%` : null;
         return (
           <div
             key={stage}

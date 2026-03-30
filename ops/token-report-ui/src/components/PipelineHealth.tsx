@@ -108,11 +108,16 @@ export default function PipelineHealth({ failureRate }: PipelineHealthProps) {
       : 0;
   const worstCurrent = current[worstStage] ?? 0;
   const worst7d = trend7d[worstStage] ?? 0;
-  const deltaPp = Math.round((worstCurrent - worst7d) * 100);
-  const direction = deltaPp <= 0 ? "down" : "up";
+  const deltaPp = Math.round((worstCurrent - worst7d) * 10) / 10;
+  const direction = deltaPp === 0 ? "flat" : deltaPp < 0 ? "down" : "up";
   const absDelta = Math.abs(deltaPp);
 
-  const insight = `${worstStage} accounts for ${worstShare}% of all failures — ${direction} ${absDelta}pp vs 7d avg`;
+  const deltaText =
+    direction === "flat"
+      ? "unchanged vs 7d avg"
+      : `${direction} ${absDelta}pp vs 7d avg`;
+
+  const insight = `${worstStage} accounts for ${worstShare}% of all failures — ${deltaText}`;
 
   return (
     <section style={sectionStyle}>
@@ -120,13 +125,13 @@ export default function PipelineHealth({ failureRate }: PipelineHealthProps) {
       <div style={insightStyle}>{insight}</div>
       {stages.map((stage) => {
         const rate = current[stage] ?? 0;
-        const widthPct = `${Math.round(rate * 100)}%`;
+        const widthPct = `${Math.round(rate)}%`;
         return (
           <div key={stage} style={stageCardStyle}>
             <div style={stageRowStyle}>
               <span style={stageNameStyle}>{stage}</span>
               <span style={stageRateStyle}>
-                {Math.round(rate * 100)}% failure rate
+                {Math.round(rate * 10) / 10}% failure rate
               </span>
             </div>
             <div style={barTrackStyle}>
