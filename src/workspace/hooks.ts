@@ -48,12 +48,17 @@ export interface WorkspaceHookRunnerConfig {
 
 export type HookCommandExecutor = (
   script: string,
-  options: { cwd: string; timeoutMs: number },
+  options: {
+    cwd: string;
+    timeoutMs: number;
+    env?: Record<string, string> | undefined;
+  },
 ) => Promise<HookCommandResult>;
 
 export interface RunWorkspaceHookOptions {
   name: WorkspaceHookName;
   workspacePath: string;
+  env?: Record<string, string> | undefined;
 }
 
 export class WorkspaceHookError extends Error {
@@ -121,6 +126,7 @@ export class WorkspaceHookRunner {
       const result = await this.#execute(script, {
         cwd: options.workspacePath,
         timeoutMs: this.#config.timeoutMs,
+        ...(options.env !== undefined ? { env: options.env } : {}),
       });
       const durationMs = Date.now() - startedAt;
 
@@ -195,12 +201,17 @@ export class WorkspaceHookRunner {
 
 export async function executeShellHook(
   script: string,
-  options: { cwd: string; timeoutMs: number },
+  options: {
+    cwd: string;
+    timeoutMs: number;
+    env?: Record<string, string> | undefined;
+  },
 ): Promise<HookCommandResult> {
   return await new Promise<HookCommandResult>((resolve, reject) => {
     const child = spawn("sh", ["-lc", script], {
       cwd: options.cwd,
       stdio: ["ignore", "pipe", "pipe"],
+      env: options.env ? { ...process.env, ...options.env } : undefined,
     });
 
     let stdout = "";

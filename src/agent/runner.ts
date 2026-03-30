@@ -235,6 +235,7 @@ export class AgentRunner {
       await this.hooks.run({
         name: "beforeRun",
         workspacePath: workspace.path,
+        ...(input.stageName ? { env: { SYMPHONY_STAGE: input.stageName } } : {}),
       });
 
       runAttempt.status = "launching_agent_process";
@@ -404,6 +405,9 @@ export class AgentRunner {
         await this.hooks.runBestEffort({
           name: "afterRun",
           workspacePath: workspace.path,
+          ...(input.stageName
+            ? { env: { SYMPHONY_STAGE: input.stageName } }
+            : {}),
         });
       }
     }

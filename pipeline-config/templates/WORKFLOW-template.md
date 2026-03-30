@@ -33,7 +33,7 @@ codex:
 
 runner:
   kind: claude-code
-  model: claude-sonnet-4-5
+  model: claude-opus-4-6
 
 hooks:
   after_create: |
@@ -69,6 +69,16 @@ hooks:
 
     # --- Fetch latest refs into bare clone ---
     git -C "$BARE_CLONE" fetch origin 2>/dev/null || echo "WARNING: fetch failed, using cached refs" >&2
+
+    # --- Clean up stale branch from previous failed attempt (idempotency) ---
+    if git -C "$BARE_CLONE" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
+      echo "Cleaning up stale branch $BRANCH_NAME from previous attempt..."
+      # Remove workspace contents so the worktree entry becomes stale
+      find "$WORKSPACE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null || true
+      # Prune now-stale worktree entry, then delete the orphaned branch
+      git -C "$BARE_CLONE" worktree prune 2>/dev/null || true
+      git -C "$BARE_CLONE" branch -D "$BRANCH_NAME" 2>/dev/null || true
+    fi
 
     # --- Create worktree for this issue ---
     echo "Creating worktree for $ISSUE_KEY on branch $BRANCH_NAME..."
@@ -161,18 +171,19 @@ hooks:
     else
       echo "On feature branch $CURRENT_BRANCH — skipping rebase, fetch only."
     fi
-    # Import investigation brief into CLAUDE.md if it exists
-    if [ -f "INVESTIGATION-BRIEF.md" ]; then
-      if ! grep -q "@INVESTIGATION-BRIEF.md" CLAUDE.md 2>/dev/null; then
-        echo '' >> CLAUDE.md
-        echo '@INVESTIGATION-BRIEF.md' >> CLAUDE.md
+    # Import briefs into CLAUDE.md (skip during merge — merge agent doesn't need them)
+    if [ "${SYMPHONY_STAGE:-}" != "merge" ]; then
+      if [ -f "INVESTIGATION-BRIEF.md" ]; then
+        if ! grep -q "@INVESTIGATION-BRIEF.md" CLAUDE.md 2>/dev/null; then
+          echo '' >> CLAUDE.md
+          echo '@INVESTIGATION-BRIEF.md' >> CLAUDE.md
+        fi
       fi
-    fi
-    # Import rebase brief into CLAUDE.md if it exists
-    if [ -f "REBASE-BRIEF.md" ]; then
-      if ! grep -q "@REBASE-BRIEF.md" CLAUDE.md 2>/dev/null; then
-        echo '' >> CLAUDE.md
-        echo '@REBASE-BRIEF.md' >> CLAUDE.md
+      if [ -f "REBASE-BRIEF.md" ]; then
+        if ! grep -q "@REBASE-BRIEF.md" CLAUDE.md 2>/dev/null; then
+          echo '' >> CLAUDE.md
+          echo '@REBASE-BRIEF.md' >> CLAUDE.md
+        fi
       fi
     fi
     echo "Workspace synced."
@@ -269,7 +280,7 @@ stages:
   merge:
     type: agent
     runner: claude-code
-    model: claude-sonnet-4-5
+    model: claude-opus-4-6
     max_turns: 5
     on_complete: done
     on_rework: implement
@@ -291,16 +302,17 @@ Never hardcode localhost or 127.0.0.1. Use the $BASE_URL environment variable fo
 <!-- CUSTOMIZE: Update the product description below to match your product. -->
 You are working on Linear issue {{ issue.identifier }}.
 
-## Issue Description
-
-{{ issue.description }}
-
 {% if issue.labels.size > 0 %}
 Labels: {{ issue.labels | join: ", " }}
 {% endif %}
 
 {% if stageName == "investigate" %}
 ## Stage: Investigation
+
+## Issue Description
+
+{{ issue.description }}
+
 You are in the INVESTIGATE stage. Your job is to analyze the issue and create an implementation plan.
 
 {% if issue.state == "Resume" %}
@@ -387,6 +399,19 @@ One-paragraph summary of what needs to be done and why.
 
 ## Key Code Excerpts
 [2-3 most important code blocks with file path and line numbers]
+
+## Files to Change
+- `path/to/file.ts:LINE_START-LINE_END` — what needs to change and why
+- `path/to/other-file.ts:LINE_START-LINE_END` — what needs to change and why
+
+## Read Order
+1. Primary change target (start here)
+2. Direct dependency of #1
+3. Test file for #1
+
+## Key Dependencies
+- `functionA()` in `file.ts` is called by `moduleB.ts:45` and `moduleC.ts:92`
+- Interface `FooConfig` is implemented by 3 classes (list them)
 ```
 
 ## Completion Signals
@@ -398,7 +423,12 @@ When you are done:
 
 {% if stageName == "implement" %}
 ## Stage: Implementation
-You are in the IMPLEMENT stage. Read INVESTIGATION-BRIEF.md first if it exists in the worktree root. It contains targeted findings from the investigation stage including relevant files, code patterns, architecture context, and test strategy. Use it to skip codebase exploration and go straight to implementation. If the file does not exist, fall back to reading issue comments for the investigation plan.
+
+## Issue Description
+
+{{ issue.description }}
+
+You are in the IMPLEMENT stage. Read INVESTIGATION-BRIEF.md first if it exists in the worktree root. It contains targeted findings from the investigation stage including relevant files, code patterns, architecture context, and test strategy. Follow the Read Order section — do NOT re-read files not listed there unless you discover a dependency not covered in Key Dependencies. The investigation agent already read the codebase; your job is to change it, not re-explore it. If the file does not exist, fall back to reading issue comments for the investigation plan.
 
 {% if reworkCount > 0 %}
 ## REWORK ATTEMPT {{ reworkCount }}
@@ -436,6 +466,7 @@ Read ALL comments on this Linear issue starting with `## Review Findings`. These
 7. Commit your changes with message format: `feat({{ issue.identifier }}): <description>`.
 8. Open a PR targeting this repo (not its upstream fork parent) via `gh pr create --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")` with the issue description in the PR body. Include the Tool Output and SAST Output sections.
 9. Link the PR to the Linear issue by including `{{ issue.identifier }}` in the PR title or body.
+10. Run `/simplify focus on code reuse and efficiency` to review your implementation for codebase reuse opportunities and efficiency improvements. `/simplify` is a built-in Claude Code skill — invoke it directly, do not search for it as a userspace skill. If `/simplify` makes changes, re-run all `# Verify:` commands. If tests fail after `/simplify`, revert with `git checkout -- .` and proceed without the simplification.
 
 ### Workpad (implement)
 Update the workpad comment at these milestones during implementation.
@@ -480,6 +511,15 @@ If surviving P1/P2 findings exist: post them as a `## Review Findings` comment o
 {% if stageName == "merge" %}
 ## Stage: Merge
 You are in the MERGE stage. The PR has been reviewed and approved.
+
+**MUST NOT:**
+- Modify any source code, tests, configs, or documentation
+- Reinterpret review findings or reopen closed discussions
+- Run test suites, linters, or build commands
+- Create new commits or amend existing ones
+- Cherry-pick, rebase, or manipulate git history
+
+Your ONLY job is to merge the PR and update the workpad.
 
 ### Merge Queue Context
 This repo uses GitHub's merge queue. When you run `gh pr merge`, GitHub will:

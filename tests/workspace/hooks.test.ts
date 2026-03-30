@@ -130,6 +130,66 @@ describe("WorkspaceHookRunner", () => {
     ]);
   });
 
+  it("passes env variables to the hook executor", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      stdout: "",
+      stderr: "",
+    });
+    const runner = new WorkspaceHookRunner({
+      config: {
+        afterCreate: null,
+        beforeRun: "echo hello",
+        afterRun: null,
+        beforeRemove: null,
+        timeoutMs: 100,
+      },
+      execute,
+    });
+
+    await runner.run({
+      name: "beforeRun",
+      workspacePath: "/tmp/workspace",
+      env: { SYMPHONY_STAGE: "implement" },
+    });
+
+    expect(execute).toHaveBeenCalledWith("echo hello", {
+      cwd: "/tmp/workspace",
+      timeoutMs: 100,
+      env: { SYMPHONY_STAGE: "implement" },
+    });
+  });
+
+  it("omits env when not provided", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      stdout: "",
+      stderr: "",
+    });
+    const runner = new WorkspaceHookRunner({
+      config: {
+        afterCreate: null,
+        beforeRun: "echo hello",
+        afterRun: null,
+        beforeRemove: null,
+        timeoutMs: 100,
+      },
+      execute,
+    });
+
+    await runner.run({
+      name: "beforeRun",
+      workspacePath: "/tmp/workspace",
+    });
+
+    expect(execute).toHaveBeenCalledWith("echo hello", {
+      cwd: "/tmp/workspace",
+      timeoutMs: 100,
+    });
+  });
+
   it("suppresses errors in best-effort mode", async () => {
     const runner = new WorkspaceHookRunner({
       config: {

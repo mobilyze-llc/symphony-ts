@@ -47,6 +47,8 @@ export const ERROR_CODES = {
   cliStartupFailed: "cli_startup_failed",
   githubCliFailed: "github_cli_failed",
   deployFailed: "deploy_failed",
+  baseConfigCircularReference: "base_config_circular_reference",
+  baseConfigReadFailed: "base_config_read_failed",
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 
 import { parse } from "yaml";
 
@@ -17,6 +17,30 @@ export class WorkflowLoaderError extends Error {
     this.code = input.code;
     this.workflowPath = input.workflowPath;
   }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function deepMergeConfigs(
+  base: Record<string, unknown>,
+  override: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...base };
+
+  for (const key of Object.keys(override)) {
+    const baseVal = base[key];
+    const overrideVal = override[key];
+
+    if (isPlainObject(baseVal) && isPlainObject(overrideVal)) {
+      result[key] = deepMergeConfigs(baseVal, overrideVal);
+    } else {
+      result[key] = overrideVal;
+    }
+  }
+
+  return result;
 }
 
 export function resolveWorkflowPath(workflowPath?: string): string {
@@ -52,6 +76,68 @@ export async function loadWorkflowDefinition(
   }
 
   const workflow = parseWorkflowContent(content, resolvedWorkflowPath);
+
+  if (typeof workflow.config.base_config === "string") {
+    const baseConfigRelative = workflow.config.base_config;
+    const baseConfigPath = resolve(
+      dirname(resolvedWorkflowPath),
+      baseConfigRelative,
+    );
+
+    let baseContent: string;
+    try {
+      baseContent = await readFile(baseConfigPath, "utf8");
+    } catch (error) {
+      const errorCode =
+        error instanceof Error &&
+        "code" in error &&
+        typeof error.code === "string" &&
+        error.code === "ENOENT"
+          ? ERROR_CODES.missingWorkflowFile
+          : ERROR_CODES.baseConfigReadFailed;
+
+      throw new WorkflowLoaderError({
+        code: errorCode,
+        message: `Unable to read base_config file at ${baseConfigPath}.`,
+        workflowPath: resolvedWorkflowPath,
+      });
+    }
+
+    const baseWorkflow = parseWorkflowContent(baseContent, baseConfigPath);
+
+    if (typeof baseWorkflow.config.base_config === "string") {
+      throw new WorkflowLoaderError({
+        code: ERROR_CODES.baseConfigCircularReference,
+        message: `Base config file at ${baseConfigPath} itself contains a base_config reference. Only one level of base_config indirection is allowed.`,
+        workflowPath: resolvedWorkflowPath,
+      });
+    }
+
+    const { base_config: _removed, ...productConfigWithoutBase } =
+      workflow.config;
+    const mergedConfig = deepMergeConfigs(
+      baseWorkflow.config,
+      productConfigWithoutBase,
+    );
+
+    const productBody = workflow.promptTemplate;
+    const baseBody = baseWorkflow.promptTemplate;
+    let mergedBody: string;
+
+    if (productBody.length > 0) {
+      mergedBody =
+        baseBody.length > 0 ? `${baseBody}\n${productBody}` : productBody;
+    } else {
+      mergedBody = baseBody;
+    }
+
+    return {
+      config: mergedConfig,
+      promptTemplate: mergedBody,
+      workflowPath: resolvedWorkflowPath,
+    };
+  }
+
   return {
     ...workflow,
     workflowPath: resolvedWorkflowPath,
