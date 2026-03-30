@@ -38,15 +38,31 @@ function makeTmpDir(): string {
 function runDryRun(specContent: string): string {
   const specFile = join(tmpDir, "spec.md");
   writeFileSync(specFile, specContent);
-  return execFileSync(
-    "bash",
-    [SCRIPT_PATH, "--dry-run", WORKFLOW_PATH, specFile],
-    {
-      encoding: "utf-8",
-      timeout: 15000,
-      env: { ...process.env, LINEAR_API_KEY: "" },
-    },
-  );
+  try {
+    return execFileSync(
+      "bash",
+      [SCRIPT_PATH, "--dry-run", WORKFLOW_PATH, specFile],
+      {
+        encoding: "utf-8",
+        timeout: 15000,
+        env: { ...process.env, LINEAR_API_KEY: "" },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+  } catch (err: unknown) {
+    const e = err as {
+      stderr?: Buffer | string;
+      stdout?: Buffer | string;
+      status?: number;
+    };
+    const stderr =
+      typeof e.stderr === "string" ? e.stderr : (e.stderr?.toString() ?? "");
+    const stdout =
+      typeof e.stdout === "string" ? e.stdout : (e.stdout?.toString() ?? "");
+    throw new Error(
+      `freeze-and-queue.sh failed (exit ${e.status}):\nSTDERR: ${stderr}\nSTDOUT (last 500): ${stdout.slice(-500)}`,
+    );
+  }
 }
 
 beforeEach(() => {
