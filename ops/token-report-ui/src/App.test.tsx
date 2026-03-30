@@ -582,8 +582,8 @@ describe("PipelineHealth", () => {
     const html = renderToString(
       <PipelineHealth failureRate={data.efficiency_scorecard.failure_rate} />,
     );
-    // investigate: current 43.2, trend_7d 43.2 → delta = 0pp → "down 0pp"
-    expect(html).toContain("down 0pp vs 7d avg");
+    // investigate: current 43.2, trend_7d 43.2 → delta = 0pp → "unchanged"
+    expect(html).toContain("unchanged vs 7d avg");
   });
 });
 
