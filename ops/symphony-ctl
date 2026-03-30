@@ -674,46 +674,96 @@ cmd_cleanup() {
 
 # --- Prune Branches ---
 
-# Shared implementation: fetch --prune, list merged branches, optionally delete.
+# Shared implementation: fetch --prune, delete branches whose remote tracking
+# ref has been removed (i.e., the remote branch was deleted after PR merge/close).
+#
+# Why not `git branch --merged main`?
+#   The pipeline squash-merges PRs, so the original branch commits are never
+#   ancestors of main. `--merged` misses them entirely.
+#
+# Safety checks (a branch is skipped if ANY apply):
+#   1. It is checked out in any worktree (would break running agents)
+#   2. It is the current branch, main, or master
+#
 # Sets global _PRUNE_BRANCHES_COUNT to the number of branches acted on.
 # Arguments: execute (true|false)
 _do_prune_branches() {
   local execute="${1:-false}"
   _PRUNE_BRANCHES_COUNT=0
+  local skipped=0
+  local branch="" in_worktree=false
 
-  # Step 1: fetch --prune to clean stale remote-tracking refs
   info "Fetching and pruning stale remote-tracking refs..."
-  git -C "$SYMPHONY_ROOT" fetch --prune
+  if ! git -C "$SYMPHONY_ROOT" fetch --prune 2>/dev/null; then
+    warn "git fetch --prune failed — proceeding with stale tracking data"
+  fi
   echo ""
 
-  # Step 2: resolve the currently checked-out branch so we can skip it
+  # Build set of branches checked out in worktrees (protected)
+  local -a worktree_branches=()
+  while IFS= read -r line; do
+    if [[ "$line" == branch\ * ]]; then
+      worktree_branches+=("${line#branch refs/heads/}")
+    fi
+  done < <(git -C "$SYMPHONY_ROOT" worktree list --porcelain 2>/dev/null)
+
   local current_branch
   current_branch="$(git -C "$SYMPHONY_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
 
-  # Step 3: list local branches fully merged into main
-  info "Local branches merged into main (skipping main, master, current):"
+  info "Branches with deleted remote (safe to remove after squash-merge):"
   local found=false
-  while IFS= read -r raw_branch; do
-    # Strip leading whitespace and the "* " current-branch marker
-    local branch
-    branch="$(echo "$raw_branch" | xargs)"
-    branch="${branch#\* }"
+  while IFS= read -r line; do
+    branch="${line##[* ] }"
+    branch="${branch%% *}"
     [[ -z "$branch" ]] && continue
     [[ "$branch" == "main" || "$branch" == "master" || "$branch" == "$current_branch" ]] && continue
+
+    in_worktree=false
+    for wt_branch in "${worktree_branches[@]}"; do
+      if [[ "$branch" == "$wt_branch" ]]; then
+        in_worktree=true
+        break
+      fi
+    done
+    if $in_worktree; then
+      warn "  $branch — SKIPPED (checked out in worktree)"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
     found=true
     if $execute; then
-      git -C "$SYMPHONY_ROOT" branch -d "$branch"
-      ok "  $branch — deleted"
+      if git -C "$SYMPHONY_ROOT" branch -D "$branch" 2>/dev/null; then
+        ok "  $branch — deleted"
+      else
+        warn "  $branch — failed to delete"
+        continue
+      fi
     else
       info "  $branch — would delete"
     fi
     _PRUNE_BRANCHES_COUNT=$((_PRUNE_BRANCHES_COUNT + 1))
-  done < <(git -C "$SYMPHONY_ROOT" branch --merged main 2>/dev/null)
+  done < <(git -C "$SYMPHONY_ROOT" branch -vv 2>/dev/null | grep ': gone]')
 
-  if ! $found; then
+  if ! $found && [[ $skipped -eq 0 ]]; then
     info "  (none found)"
   fi
+  if [[ $skipped -gt 0 ]]; then
+    info "  $skipped branch(es) skipped for safety"
+  fi
   echo ""
+
+  # Prune orphaned worktree entries (directories that no longer exist)
+  local pruned
+  pruned="$(git -C "$SYMPHONY_ROOT" worktree prune --dry-run 2>/dev/null | wc -l | xargs)"
+  if [[ "$pruned" -gt 0 ]]; then
+    if $execute; then
+      git -C "$SYMPHONY_ROOT" worktree prune
+      ok "Pruned $pruned orphaned worktree entries"
+    else
+      info "Would prune $pruned orphaned worktree entries"
+    fi
+  fi
 }
 
 cmd_prune_branches() {

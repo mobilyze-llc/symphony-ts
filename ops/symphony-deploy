@@ -160,8 +160,24 @@ if $DO_SYMPHONY; then
   # Pre-deploy version
   info "Pre-deploy version: $(get_version)"
 
-  info "Ensuring symphony-ts is on main..."
-  run_or_dry git -C "$SYMPHONY_ROOT" checkout main
+  # Ensure clean checkout to main — stash uncommitted changes if needed
+  current_branch=""
+  current_branch="$(git -C "$SYMPHONY_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+
+  if [[ "$current_branch" != "main" ]]; then
+    info "On branch '$current_branch' — switching to main..."
+
+    if ! $DRY_RUN; then
+      if ! git -C "$SYMPHONY_ROOT" diff --quiet 2>/dev/null || \
+         ! git -C "$SYMPHONY_ROOT" diff --cached --quiet 2>/dev/null; then
+        stash_msg="symphony-deploy auto-stash $(date +%Y%m%d-%H%M%S) from $current_branch"
+        git -C "$SYMPHONY_ROOT" stash push -m "$stash_msg"
+        warn "Stashed uncommitted changes: $stash_msg"
+      fi
+    fi
+  fi
+
+  run_or_dry git -C "$SYMPHONY_ROOT" checkout main || die "Failed to checkout main. Run 'git -C $SYMPHONY_ROOT stash list' to check for auto-stashed changes."
 
   pull_repo "$SYMPHONY_ROOT" "symphony-ts"
   SYMPH_PRE_SHA="$_PRE_SHA"
@@ -200,6 +216,16 @@ if $DO_SYMPHONY; then
       NEED_ENV_RESTART=true
     else
       ok ".env is current — skipping decrypt"
+    fi
+  fi
+
+  # Prune stale branches (squash-merged PRs leave local refs behind)
+  if [[ -x "$CTL" ]]; then
+    info "Pruning stale branches..."
+    if $DRY_RUN; then
+      run_or_dry "$CTL" prune-branches --dry-run
+    else
+      "$CTL" prune-branches --execute 2>&1 | sed 's/^/  /'
     fi
   fi
 
