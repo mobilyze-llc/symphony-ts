@@ -38,11 +38,15 @@ function makeTmpDir(): string {
 function runDryRun(specContent: string): string {
   const specFile = join(tmpDir, "spec.md");
   writeFileSync(specFile, specContent);
-  return execFileSync("bash", [SCRIPT_PATH, "--dry-run", WORKFLOW_PATH, specFile], {
-    encoding: "utf-8",
-    timeout: 15000,
-    env: { ...process.env, LINEAR_API_KEY: "" },
-  });
+  return execFileSync(
+    "bash",
+    [SCRIPT_PATH, "--dry-run", WORKFLOW_PATH, specFile],
+    {
+      encoding: "utf-8",
+      timeout: 15000,
+      env: { ...process.env, LINEAR_API_KEY: "" },
+    },
+  );
 }
 
 beforeEach(() => {
@@ -335,7 +339,8 @@ Scenario: Utils format works
 
   it("matches correct scenarios to Task 1 (core)", () => {
     const output = runDryRun(specMultiTask);
-    const firstBody = output.split("SUB-ISSUE 1:")[1]?.split("SUB-ISSUE 2:")[0] ?? "";
+    const firstBody =
+      output.split("SUB-ISSUE 1:")[1]?.split("SUB-ISSUE 2:")[0] ?? "";
     expect(firstBody).toContain("Scenario: Core initializes");
     expect(firstBody).toContain("Scenario: Core handles errors");
     expect(firstBody).not.toContain("Scenario: Utils format works");
@@ -350,7 +355,8 @@ Scenario: Utils format works
 
   it("includes Design and Boundaries in both sub-issue bodies", () => {
     const output = runDryRun(specMultiTask);
-    const firstBody = output.split("SUB-ISSUE 1:")[1]?.split("SUB-ISSUE 2:")[0] ?? "";
+    const firstBody =
+      output.split("SUB-ISSUE 1:")[1]?.split("SUB-ISSUE 2:")[0] ?? "";
     const secondBody = output.split("SUB-ISSUE 2:")[1] ?? "";
     expect(firstBody).toContain("## Design");
     expect(secondBody).toContain("## Design");
