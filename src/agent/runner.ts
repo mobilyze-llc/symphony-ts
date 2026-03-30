@@ -235,7 +235,9 @@ export class AgentRunner {
       await this.hooks.run({
         name: "beforeRun",
         workspacePath: workspace.path,
-        ...(input.stageName ? { env: { SYMPHONY_STAGE: input.stageName } } : {}),
+        ...(input.stageName
+          ? { env: { SYMPHONY_STAGE: input.stageName } }
+          : {}),
       });
 
       runAttempt.status = "launching_agent_process";
