@@ -135,6 +135,28 @@ resolve_all_states() {
   BACKLOG_STATE_ID=$(echo "$states_json" | jq -r '.data.workflowStates.nodes[] | select(.name == "Backlog") | .id' | head -1)
 }
 
+# ── Resolve "Spec" workspace label ID ────────────────────────────────────────
+# Global populated by resolve_spec_label():
+SPEC_LABEL_ID=""
+# Conditional labelIds line for GraphQL mutations (empty when label not found):
+LABEL_IDS_LINE=""
+
+resolve_spec_label() {
+  local labels_json
+  labels_json=$(run_with_timeout "resolving Spec workspace label" $LINEAR_CLI api \
+    'query { issueLabels(filter: { name: { eq: "Spec" } }) { nodes { id name } } }') || true
+
+  SPEC_LABEL_ID=$(echo "$labels_json" | jq -r '.data.issueLabels.nodes[] | select(.name == "Spec") | .id' | head -1)
+
+  if [[ -n "$SPEC_LABEL_ID" ]]; then
+    LABEL_IDS_LINE="labelIds: [\"${SPEC_LABEL_ID}\"]"
+    echo "Spec label: $SPEC_LABEL_ID"
+  else
+    echo "WARNING: 'Spec' workspace label not found. Parent issues will not be labeled." >&2
+    LABEL_IDS_LINE=""
+  fi
+}
+
 # ── Helper functions ──────────────────────────────────────────────────────────
 
 # Helper: create a blocks relation via high-level linear CLI command.
@@ -694,6 +716,7 @@ if [[ "$DRY_RUN" == true ]]; then
   echo "--- PARENT ISSUE ---"
   echo "Title: [Spec] $SPEC_TITLE"
   echo "State: Draft (fallback: Backlog)"
+  echo "Label: Spec (resolved at runtime)"
   echo "Description: (full spec content, ${#SPEC_CONTENT} chars)"
   echo ""
 
@@ -780,6 +803,9 @@ resolve_team_from_project
 # Resolve all workflow states in a single batch query
 resolve_all_states
 
+# Resolve "Spec" workspace label for parent issues
+resolve_spec_label
+
 # Parent issue → Draft state (fallback to Backlog)
 DRAFT_STATE_NAME=""
 if [[ -n "$DRAFT_STATE_ID" ]]; then
@@ -817,12 +843,13 @@ if [[ -n "$UPDATE_ISSUE_ID" ]]; then
   # Build issueUpdate mutation via temp file (title/description are user-provided strings)
   GQL_TMPFILE=$(mktemp)
   if [[ -n "$DRAFT_STATE_ID" ]]; then
-    cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($issueId: String!, $title: String!, $description: String!, $stateId: String!) {
-  issueUpdate(id: $issueId, input: {
-    title: $title
-    description: $description
-    stateId: $stateId
+    cat > "$GQL_TMPFILE" <<GQLEOF
+mutation(\$issueId: String!, \$title: String!, \$description: String!, \$stateId: String!) {
+  issueUpdate(id: \$issueId, input: {
+    title: \$title
+    description: \$description
+    stateId: \$stateId
+    ${LABEL_IDS_LINE}
   }) {
     success
     issue { id identifier url }
@@ -836,11 +863,12 @@ GQLEOF
       --variable "stateId=$DRAFT_STATE_ID" \
       < "$GQL_TMPFILE")
   else
-    cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($issueId: String!, $title: String!, $description: String!) {
-  issueUpdate(id: $issueId, input: {
-    title: $title
-    description: $description
+    cat > "$GQL_TMPFILE" <<GQLEOF
+mutation(\$issueId: String!, \$title: String!, \$description: String!) {
+  issueUpdate(id: \$issueId, input: {
+    title: \$title
+    description: \$description
+    ${LABEL_IDS_LINE}
   }) {
     success
     issue { id identifier url }
@@ -877,14 +905,15 @@ else
   # Includes projectId at creation time (eliminates separate issues update --project call)
   GQL_TMPFILE=$(mktemp)
   if [[ -n "$DRAFT_STATE_ID" ]]; then
-    cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($title: String!, $description: String!, $teamId: String!, $projectId: String!, $stateId: String!) {
+    cat > "$GQL_TMPFILE" <<GQLEOF
+mutation(\$title: String!, \$description: String!, \$teamId: String!, \$projectId: String!, \$stateId: String!) {
   issueCreate(input: {
-    title: $title
-    description: $description
-    teamId: $teamId
-    projectId: $projectId
-    stateId: $stateId
+    title: \$title
+    description: \$description
+    teamId: \$teamId
+    projectId: \$projectId
+    stateId: \$stateId
+    ${LABEL_IDS_LINE}
   }) {
     success
     issue { id identifier url }
@@ -899,13 +928,14 @@ GQLEOF
       --variable "stateId=$DRAFT_STATE_ID" \
       < "$GQL_TMPFILE")
   else
-    cat > "$GQL_TMPFILE" <<'GQLEOF'
-mutation($title: String!, $description: String!, $teamId: String!, $projectId: String!) {
+    cat > "$GQL_TMPFILE" <<GQLEOF
+mutation(\$title: String!, \$description: String!, \$teamId: String!, \$projectId: String!) {
   issueCreate(input: {
-    title: $title
-    description: $description
-    teamId: $teamId
-    projectId: $projectId
+    title: \$title
+    description: \$description
+    teamId: \$teamId
+    projectId: \$projectId
+    ${LABEL_IDS_LINE}
   }) {
     success
     issue { id identifier url }
