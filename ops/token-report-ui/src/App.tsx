@@ -14,7 +14,7 @@ import {
   reportCSS,
 } from "./components/index.ts";
 import analysisData from "./data/analysis.json";
-import type { AnalysisData, Inflection, Outlier } from "./types.ts";
+import type { AnalysisData, DailySeries, Inflection, Outlier } from "./types.ts";
 
 const data = analysisData as AnalysisData;
 const isColdStart = data.cold_start === true && data.data_span_days < 7;
@@ -28,6 +28,26 @@ function normalizeInflections(raw: AnalysisData["inflections"]): Inflection[] {
 function normalizeOutliers(raw: AnalysisData["outliers"]): Outlier[] {
   if (Array.isArray(raw)) return raw;
   return raw?.items ?? [];
+}
+
+/**
+ * Build the DailySeries for EfficiencyScorecard sparklines.
+ * Ported from renderHtml(): prefers MetricWithTrend.series on each scorecard
+ * metric (populated by buildDailyMetricSeries()), falling back to the
+ * top-level daily_series object for backward compatibility.
+ */
+function buildScorecardSeries(
+  sc: AnalysisData["efficiency_scorecard"],
+  fallback?: DailySeries,
+): DailySeries {
+  return {
+    cacheEff: sc.cache_efficiency?.series ?? fallback?.cacheEff,
+    outputRatio: sc.output_ratio?.series ?? fallback?.outputRatio,
+    wastedCtx: sc.wasted_context?.series ?? fallback?.wastedCtx,
+    tokPerTurn: sc.tokens_per_turn?.series ?? fallback?.tokPerTurn,
+    firstPass: sc.first_pass_rate?.series ?? fallback?.firstPass,
+    failureRate: fallback?.failureRate,
+  };
 }
 
 export default function App() {
@@ -50,6 +70,9 @@ export default function App() {
           (sc.cache_efficiency.current - sc.cache_efficiency.trend_7d) * 100,
         )
       : null;
+
+  // Build series from MetricWithTrend.series, falling back to daily_series (SYMPH-175)
+  const series = buildScorecardSeries(sc, data.daily_series);
 
   return (
     <>
@@ -78,7 +101,7 @@ export default function App() {
       />
       <EfficiencyScorecard
         scorecard={sc}
-        series={data.daily_series}
+        series={series}
         coldStart={isColdStart}
       />
       <PerStageTrend

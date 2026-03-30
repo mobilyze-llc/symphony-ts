@@ -116,6 +116,11 @@ export interface InsufficientData {
   items: never[];
 }
 
+/**
+ * Pre-computed daily metric series for efficiency scorecard sparklines.
+ * Keys match the camelCase aliases used by buildDailyMetricSeries() in token-report.mjs.
+ * failureRate is rendered separately in PipelineHealth, not EfficiencyScorecard.
+ */
 export interface DailySeries {
   cacheEff?: number[];
   outputRatio?: number[];

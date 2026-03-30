@@ -9,27 +9,32 @@
     "cache_efficiency": {
       "current": 0.45,
       "trend_7d": 0,
-      "trend_30d": 0
+      "trend_30d": 0,
+      "series": [42.0, 44.5, 45.0]
     },
     "output_ratio": {
       "current": 0.28,
       "trend_7d": 0,
-      "trend_30d": 0
+      "trend_30d": 0,
+      "series": [26.0, 27.5, 28.0]
     },
     "wasted_context": {
       "current": 0.15,
       "trend_7d": 0,
-      "trend_30d": 0
+      "trend_30d": 0,
+      "series": [16.0, 15.5, 15.0]
     },
     "tokens_per_turn": {
       "current": 6200,
       "trend_7d": 0,
-      "trend_30d": 0
+      "trend_30d": 0,
+      "series": [6500, 6350, 6200]
     },
     "first_pass_rate": {
       "current": 60,
       "trend_7d": 100,
-      "trend_30d": 100
+      "trend_30d": 100,
+      "series": [50.0, 55.0, 60.0]
     },
     "failure_rate": {
       "current": {
