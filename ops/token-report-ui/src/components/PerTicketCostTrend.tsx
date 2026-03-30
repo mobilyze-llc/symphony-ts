@@ -1,5 +1,5 @@
-import type { PerTicketTrend } from "../types.ts";
 import { round } from "../lib/chart-utils.ts";
+import type { PerTicketTrend } from "../types.ts";
 import ColdStartPlaceholder from "./ColdStartPlaceholder.tsx";
 import { Sparkline } from "./chartUtils.tsx";
 
@@ -155,6 +155,7 @@ export default function PerTicketCostTrend({
               >
                 {deltaArrow && (
                   <svg
+                    aria-hidden="true"
                     width="12"
                     height="12"
                     viewBox="0 0 12 12"

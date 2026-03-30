@@ -1,8 +1,8 @@
+import { round } from "../lib/chart-utils.ts";
 import type {
   EfficiencyScorecard as EfficiencyScorecardData,
   MetricWithTrend,
 } from "../types.ts";
-import { round } from "../lib/chart-utils.ts";
 import { fmtNum } from "./chartUtils.tsx";
 
 /**
@@ -269,6 +269,7 @@ export default function EfficiencyScorecard({
                 >
                   {arrowPath && (
                     <svg
+                      aria-hidden="true"
                       width="12"
                       height="12"
                       viewBox="0 0 12 12"
@@ -293,6 +294,7 @@ export default function EfficiencyScorecard({
                 </div>
               )}
               <svg
+                aria-hidden="true"
                 width="100%"
                 height="32"
                 viewBox="0 0 200 32"

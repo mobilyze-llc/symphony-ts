@@ -1,5 +1,5 @@
-import type { ProductData } from "../types.ts";
 import { round } from "../lib/chart-utils.ts";
+import type { ProductData } from "../types.ts";
 import { fmtNum } from "./chartUtils.tsx";
 
 export interface PerProductBreakdownProps {

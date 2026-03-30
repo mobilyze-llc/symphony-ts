@@ -1,8 +1,8 @@
 import type { PerStageStats, StageSpend } from "../types.ts";
 import { fmtNum } from "./chartUtils.tsx";
 import {
-  STAGE_ORDER,
   STAGE_COLORS,
+  STAGE_ORDER,
   canonicalStage,
   findByKey,
 } from "./index.ts";
@@ -218,6 +218,7 @@ export default function StageEfficiency({
               </div>
 
               <svg
+                aria-hidden="true"
                 width="100%"
                 height="32"
                 viewBox="0 0 200 32"

@@ -120,7 +120,7 @@ export default function IssueLeaderboard({
             <div style={headerCellStyle}>Issue</div>
             <div style={headerCellStyle}>Title</div>
             <div style={headerCellRightStyle}>Total</div>
-            <div style={headerCellStyle}></div>
+            <div style={headerCellStyle} />
           </div>
 
           {items.map((item) => (

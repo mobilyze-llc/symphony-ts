@@ -1,5 +1,5 @@
 import type { FailureRate } from "../types.ts";
-import { STAGE_ORDER, STAGE_COLORS, canonicalStage } from "./index.ts";
+import { STAGE_COLORS, STAGE_ORDER, canonicalStage } from "./index.ts";
 
 export interface PipelineHealthProps {
   failureRate: FailureRate;
@@ -245,6 +245,7 @@ export default function PipelineHealth({ failureRate }: PipelineHealthProps) {
             >
               {overallDeltaArrow && (
                 <svg
+                  aria-hidden="true"
                   width="12"
                   height="12"
                   viewBox="0 0 12 12"
