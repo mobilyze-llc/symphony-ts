@@ -2155,3 +2155,98 @@ function createNormalResult(): AgentRunResult {
     rateLimits: null,
   };
 }
+
+describe("pruneLocalBranches", () => {
+  it("PRUNE_DEBOUNCE_MS is 5 minutes", () => {
+    expect(OrchestratorRuntimeHost.PRUNE_DEBOUNCE_MS).toBe(300_000);
+  });
+
+  it("does not log prune events when SYMPHONY_SKIP_BRANCH_PRUNE is set", async () => {
+    const originalEnv = process.env.SYMPHONY_SKIP_BRANCH_PRUNE;
+    process.env.SYMPHONY_SKIP_BRANCH_PRUNE = "1";
+
+    try {
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const entries: StructuredLogEntry[] = [];
+      const logger = new StructuredLogger([
+        {
+          write(entry) {
+            entries.push(entry);
+          },
+        },
+      ]);
+      const host = new OrchestratorRuntimeHost({
+        config: createConfig(),
+        tracker,
+        logger,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      await host.pollOnce();
+      tracker.setStateSnapshots([
+        { id: "1", identifier: "ISSUE-1", state: "Done" },
+      ]);
+      await host.pollOnce();
+      await host.waitForIdle();
+
+      const pruneEvents = entries.filter(
+        (e) =>
+          e.event === "branch_prune_triggered" ||
+          e.event === "branch_prune_debounced",
+      );
+      expect(pruneEvents).toHaveLength(0);
+    } finally {
+      process.env.SYMPHONY_SKIP_BRANCH_PRUNE = originalEnv;
+    }
+  });
+
+  it("logs branch_prune_triggered on workspace cleanup", async () => {
+    const originalEnv = process.env.SYMPHONY_SKIP_BRANCH_PRUNE;
+    process.env.SYMPHONY_SKIP_BRANCH_PRUNE = undefined;
+
+    try {
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const entries: StructuredLogEntry[] = [];
+      const logger = new StructuredLogger([
+        {
+          write(entry) {
+            entries.push(entry);
+          },
+        },
+      ]);
+      const host = new OrchestratorRuntimeHost({
+        config: createConfig(),
+        tracker,
+        logger,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      await host.pollOnce();
+      tracker.setStateSnapshots([
+        { id: "1", identifier: "ISSUE-1", state: "Done" },
+      ]);
+      await host.pollOnce();
+      await host.waitForIdle();
+
+      const pruneEvents = entries.filter(
+        (e) => e.event === "branch_prune_triggered",
+      );
+      // pruneLocalBranches fires after workspace cleanup for terminal issues.
+      // The spawn itself may fail (symphony-ctl not at test path), but the
+      // log event should still be emitted before the spawn attempt.
+      expect(pruneEvents.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      process.env.SYMPHONY_SKIP_BRANCH_PRUNE = originalEnv;
+    }
+  });
+});
