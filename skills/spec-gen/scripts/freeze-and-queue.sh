@@ -588,29 +588,6 @@ while IFS= read -r line; do
   fi
 done <<< "$SPEC_CONTENT"
 
-# ── Parse Design section from parent spec ─────────────────────────────────────
-
-DESIGN_SECTION=""
-in_design=false
-while IFS= read -r line; do
-  if [[ "$line" =~ ^##\ Design$ ]]; then
-    in_design=true
-    DESIGN_SECTION+="## Design"$'\n'
-    continue
-  elif [[ "$in_design" == true && "$line" =~ ^##\  && ! "$line" =~ ^###\  ]]; then
-    break
-  fi
-  if [[ "$in_design" == true ]]; then
-    DESIGN_SECTION+="$line"$'\n'
-  fi
-done <<< "$SPEC_CONTENT"
-
-# Strip empty Design sections (bare heading with no content)
-design_body="${DESIGN_SECTION#"## Design"$'\n'}"
-if ! [[ "$design_body" =~ [^[:space:]] ]]; then
-  DESIGN_SECTION=""
-fi
-
 # ── Parse task scenario references ───────────────────────────────────────────
 
 declare -a TASK_SCENARIO_REFS
@@ -667,12 +644,6 @@ build_sub_issue_body() {
 
   output+="## Task Scope"$'\n'
   output+="$body"$'\n'
-
-  # Add design context from parent spec (between Task Scope and Scenarios)
-  if [[ -n "$DESIGN_SECTION" ]]; then
-    output+='> *Implementation context: JSON schemas, thresholds, and architecture notes are in **## Design** below.*'$'\n'$'\n'
-    output+="$DESIGN_SECTION"$'\n'
-  fi
 
   # Add matched scenarios
   if [[ -n "$task_ref" && $TOTAL_SCENARIOS -gt 0 ]]; then
