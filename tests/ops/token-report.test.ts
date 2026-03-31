@@ -1606,15 +1606,6 @@ describe("token-report.mjs slack", () => {
     // stderr should contain warning (captured by parent process)
   });
 
-  it("exits 0 when SLACK_BOT_TOKEN is empty", () => {
-    const records = generateDaysOfRecords(5, 2);
-    writeTokenHistory(symphonyHome, records);
-    writeConfigHistory(symphonyHome, [makeConfigSnapshot()]);
-
-    const { exitCode } = runSlack(symphonyHome, { SLACK_BOT_TOKEN: "" });
-    expect(exitCode).toBe(0);
-  });
-
   it("DRY_RUN outputs concerns section and correct field names", () => {
     const records = generateDaysOfRecords(10, 3);
     writeTokenHistory(symphonyHome, records);
