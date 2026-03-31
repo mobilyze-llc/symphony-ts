@@ -40,7 +40,7 @@ const CLAUDE_USAGE_CACHE_TTL_MS = 30_000;
 
 let claudeUsageCache: {
   data: Record<string, unknown>;
-  timestamp: number;
+  expiresAt: number;
 } | null = null;
 let claudeUsageInflight: Promise<Record<string, unknown>> | null = null;
 
@@ -346,10 +346,9 @@ export function createDashboardRequestHandler(
           return;
         }
 
-        const now = Date.now();
         if (
           claudeUsageCache !== null &&
-          now - claudeUsageCache.timestamp < CLAUDE_USAGE_CACHE_TTL_MS
+          Date.now() < claudeUsageCache.expiresAt
         ) {
           writeJson(response, 200, {
             ...claudeUsageCache.data,
@@ -366,7 +365,7 @@ export function createDashboardRequestHandler(
             });
           }
           const parsed = await claudeUsageInflight;
-          claudeUsageCache = { data: parsed, timestamp: Date.now() };
+          claudeUsageCache = { data: parsed, expiresAt: Date.now() + CLAUDE_USAGE_CACHE_TTL_MS };
           writeJson(response, 200, { ...parsed, cached: false });
         } catch (err) {
           writeJson(response, 200, {
