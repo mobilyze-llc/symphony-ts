@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# claude-usage — query Claude account usage via OAuth API
+# Usage: claude-usage [--json]
+
+# Colors (disabled if not a terminal)
+if [[ -t 1 ]]; then
+  RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+else
+  RED=''; GREEN=''; YELLOW=''; CYAN=''; NC=''
+fi
+
+info()  { echo -e "${CYAN}▸${NC} $*"; }
+ok()    { echo -e "${GREEN}✓${NC} $*"; }
+warn()  { echo -e "${YELLOW}⚠${NC} $*" >&2; }
+die()   { echo -e "${RED}✗${NC} $*" >&2; exit 1; }
+
+# --- Flags ---
+
+JSON_OUTPUT=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json) JSON_OUTPUT=true ;;
+    -h|--help)
+      echo "Usage: claude-usage [--json]"
+      echo ""
+      echo "Query Claude account usage via the Anthropic OAuth API."
+      echo ""
+      echo "Flags:"
+      echo "  --json    Output raw JSON instead of human-readable summary"
+      echo "  -h|--help Show this help message"
+      exit 0
+      ;;
+    *) die "Unknown flag: $1" ;;
+  esac
+  shift
+done
+
+# --- Read OAuth token from macOS Keychain ---
+
+KEYCHAIN_USER="${CLAUDE_USAGE_KEYCHAIN_USER:-$(whoami)}"
+
+KEYCHAIN_JSON=$(security find-generic-password -w -s "Claude Code-credentials" -a "$KEYCHAIN_USER" 2>/dev/null) \
+  || die "Failed to read Claude credentials from macOS Keychain. Is Claude Code signed in?"
+
+ACCESS_TOKEN=$(echo "$KEYCHAIN_JSON" | jq -r '.claudeAiOauth.accessToken // empty') \
+  || die "Failed to parse Keychain JSON with jq"
+
+if [[ -z "$ACCESS_TOKEN" ]]; then
+  die "No OAuth access token found in Keychain credentials. Ensure Claude Code is signed in."
+fi
+
+# --- Call usage API ---
+
+USAGE_API_URL="${CLAUDE_USAGE_API_URL:-https://api.anthropic.com/api/oauth/usage}"
+
+API_RESPONSE=$(curl -s -f -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "anthropic-beta: oauth-2025-04-20" \
+  "$USAGE_API_URL" 2>/dev/null) \
+  || die "Failed to fetch usage data from API ($USAGE_API_URL)"
+
+# --- Validate API response shape ---
+
+FIVE_HOUR_UTIL=$(echo "$API_RESPONSE" | jq '.five_hour.utilization // empty' 2>/dev/null)
+FIVE_HOUR_RESETS=$(echo "$API_RESPONSE" | jq -r '.five_hour.resets_at // empty' 2>/dev/null)
+SEVEN_DAY_UTIL=$(echo "$API_RESPONSE" | jq '.seven_day.utilization // empty' 2>/dev/null)
+SEVEN_DAY_RESETS=$(echo "$API_RESPONSE" | jq -r '.seven_day.resets_at // empty' 2>/dev/null)
+
+if [[ -z "$FIVE_HOUR_UTIL" || -z "$FIVE_HOUR_RESETS" ]]; then
+  die "Unexpected API response format: missing five_hour.utilization or five_hour.resets_at. API may have changed."
+fi
+
+if [[ -z "$SEVEN_DAY_UTIL" || -z "$SEVEN_DAY_RESETS" ]]; then
+  die "Unexpected API response format: missing seven_day.utilization or seven_day.resets_at. API may have changed."
+fi
+
+# Validate utilization is numeric
+if ! echo "$FIVE_HOUR_UTIL" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+  die "Unexpected API response format: five_hour.utilization is not numeric ($FIVE_HOUR_UTIL)"
+fi
+if ! echo "$SEVEN_DAY_UTIL" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+  die "Unexpected API response format: seven_day.utilization is not numeric ($SEVEN_DAY_UTIL)"
+fi
+
+# --- Read sequence.json for account metadata ---
+
+SEQUENCE_FILE="$HOME/.claude-swap-backup/sequence.json"
+ACTIVE_ACCOUNT="null"
+ACCOUNTS="[]"
+
+if [[ -f "$SEQUENCE_FILE" ]]; then
+  ACTIVE_NUM=$(jq -r '.activeAccountNumber // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+
+  if [[ -n "$ACTIVE_NUM" ]]; then
+    ACTIVE_EMAIL=$(jq -r --arg n "$ACTIVE_NUM" '.accounts[$n].email // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+    ACTIVE_ORG=$(jq -r --arg n "$ACTIVE_NUM" '.accounts[$n].organizationName // empty' "$SEQUENCE_FILE" 2>/dev/null || true)
+
+    if [[ -n "$ACTIVE_EMAIL" ]]; then
+      ACTIVE_ACCOUNT=$(jq -n \
+        --argjson num "$ACTIVE_NUM" \
+        --arg email "$ACTIVE_EMAIL" \
+        --arg org "$ACTIVE_ORG" \
+        '{account_number: $num, email: $email, org: $org}')
+    fi
+  fi
+
+  # Build accounts array from all entries
+  ACCOUNTS=$(jq '[.accounts | to_entries[] | {account_number: (.key | tonumber), email: .value.email, org: .value.organizationName}]' "$SEQUENCE_FILE" 2>/dev/null || echo "[]")
+fi
+
+# --- Write per-account cache ---
+
+CACHE_DIR="$HOME/.symphony"
+CACHE_FILE="$CACHE_DIR/usage-cache.json"
+
+mkdir -p "$CACHE_DIR"
+
+# Read existing cache or start fresh
+if [[ -f "$CACHE_FILE" ]]; then
+  EXISTING_CACHE=$(cat "$CACHE_FILE" 2>/dev/null || echo "{}")
+else
+  EXISTING_CACHE="{}"
+fi
+
+# Determine cache key (account number or "unknown")
+if [[ "$ACTIVE_ACCOUNT" != "null" ]]; then
+  CACHE_KEY=$(echo "$ACTIVE_ACCOUNT" | jq -r '.account_number')
+else
+  CACHE_KEY="unknown"
+fi
+
+TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Merge active account utilization into cache
+UPDATED_CACHE=$(echo "$EXISTING_CACHE" | jq \
+  --arg key "$CACHE_KEY" \
+  --argjson five_hour "$FIVE_HOUR_UTIL" \
+  --argjson seven_day "$SEVEN_DAY_UTIL" \
+  --arg ts "$TIMESTAMP" \
+  '.[$key] = {five_hour: $five_hour, seven_day: $seven_day, timestamp: $ts}')
+
+echo "$UPDATED_CACHE" > "$CACHE_FILE"
+
+# --- Output ---
+
+if [[ "$JSON_OUTPUT" == "true" ]]; then
+  jq -n \
+    --argjson five_hour_util "$FIVE_HOUR_UTIL" \
+    --arg five_hour_resets "$FIVE_HOUR_RESETS" \
+    --argjson seven_day_util "$SEVEN_DAY_UTIL" \
+    --arg seven_day_resets "$SEVEN_DAY_RESETS" \
+    --argjson active_account "$ACTIVE_ACCOUNT" \
+    --argjson accounts "$ACCOUNTS" \
+    '{
+      five_hour: {utilization: $five_hour_util, resets_at: $five_hour_resets},
+      seven_day: {utilization: $seven_day_util, resets_at: $seven_day_resets},
+      active_account: $active_account,
+      accounts: $accounts
+    }'
+else
+  echo ""
+  echo "Claude Usage Summary"
+  echo "===================="
+  echo ""
+  echo "  5-hour usage:  ${FIVE_HOUR_UTIL}%  (resets at ${FIVE_HOUR_RESETS})"
+  echo "  Weekly usage:  ${SEVEN_DAY_UTIL}%  (resets at ${SEVEN_DAY_RESETS})"
+  echo ""
+  if [[ "$ACTIVE_ACCOUNT" != "null" ]]; then
+    ACCT_EMAIL=$(echo "$ACTIVE_ACCOUNT" | jq -r '.email')
+    ACCT_ORG=$(echo "$ACTIVE_ACCOUNT" | jq -r '.org')
+    echo "  Active account: ${ACCT_EMAIL} (${ACCT_ORG})"
+  else
+    echo "  Active account: unknown (no sequence.json found)"
+  fi
+  echo ""
+fi
