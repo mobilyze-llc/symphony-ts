@@ -642,6 +642,19 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   ): Promise<void> {
     this.workers.delete(execution.issueId);
 
+    // Kill orphaned child processes (vitest, pnpm, bash) that survive the abort signal.
+    // On stall_timeout, the CC subprocess is killed but its children are not — they
+    // keep running in the workspace directory, accumulating across retry attempts.
+    if (input.outcome === "abnormal") {
+      const workspacePath = this.workspaceManager.resolveForIssue(
+        execution.issueId,
+      ).workspacePath;
+      await this.killOrphanedProcesses(
+        workspacePath,
+        execution.issueIdentifier,
+      );
+    }
+
     await this.logger?.log(
       input.outcome === "normal" ? "info" : "error",
       input.outcome === "normal"
@@ -772,6 +785,51 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         capturedFirstDispatchedAt,
         durationMs,
       });
+    }
+  }
+
+  private async killOrphanedProcesses(
+    workspacePath: string,
+    issueIdentifier: string,
+  ): Promise<void> {
+    try {
+      const { execFile } = await import("node:child_process");
+      const { promisify } = await import("node:util");
+      const execFileAsync = promisify(execFile);
+
+      const { stdout } = await execFileAsync("lsof", ["-d", "cwd"], {
+        timeout: 5000,
+      });
+
+      const pidsToKill = [
+        ...new Set(
+          stdout
+            .split("\n")
+            .filter((line) => line.includes(workspacePath))
+            .map((line) => line.trim().split(/\s+/)[1])
+            .filter(
+              (pid): pid is string => pid !== undefined && /^\d+$/.test(pid),
+            ),
+        ),
+      ];
+
+      if (pidsToKill.length > 0) {
+        for (const pid of pidsToKill) {
+          try {
+            process.kill(Number(pid), "SIGTERM");
+          } catch {
+            // Process may have already exited
+          }
+        }
+        await this.logger?.log(
+          "info",
+          "orphaned_processes_killed",
+          `Killed ${pidsToKill.length} orphaned process(es) in ${workspacePath}`,
+          { issue_identifier: issueIdentifier, pids: pidsToKill },
+        );
+      }
+    } catch {
+      // Best-effort — lsof unavailable or other failure should not block finalization
     }
   }
 
