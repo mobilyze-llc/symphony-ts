@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# ops/claude-usage — Fetch Claude API usage data for the active account
+# SYMPH-236
+
+set -euo pipefail
+
+# --- Parse arguments ---
+JSON_MODE=false
+for arg in "$@"; do
+  case "$arg" in
+    --json) JSON_MODE=true ;;
+    *) ;;
+  esac
+done
+
+# --- Read Keychain credentials ---
+KEYCHAIN_JSON=$(security find-generic-password -w -s "Claude Code-credentials" -a "$(whoami)" 2>/dev/null) || true
+
+if [ -z "$KEYCHAIN_JSON" ]; then
+  echo "Error: Unable to read Claude credentials from macOS Keychain" >&2
+  exit 1
+fi
+
+# --- Delegate to python3 processor (exec replaces bash to avoid extra process) ---
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+export KEYCHAIN_JSON JSON_MODE HOME PATH
+exec python3 "$SCRIPT_DIR/claude-usage-processor.py"
