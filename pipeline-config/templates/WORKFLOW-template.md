@@ -29,7 +29,7 @@ agent:
   max_retry_backoff_ms: 300000
 
 codex:
-  stall_timeout_ms: 1800000
+  stall_timeout_ms: 3600000
 
 runner:
   kind: claude-code
@@ -466,7 +466,6 @@ Read ALL comments on this Linear issue starting with `## Review Findings`. These
 7. Commit your changes with message format: `feat({{ issue.identifier }}): <description>`.
 8. Open a PR targeting this repo (not its upstream fork parent) via `gh pr create --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")` with the issue description in the PR body. Include the Tool Output and SAST Output sections.
 9. Link the PR to the Linear issue by including `{{ issue.identifier }}` in the PR title or body.
-10. Run `/simplify focus on code reuse and efficiency` to review your implementation for codebase reuse opportunities and efficiency improvements. `/simplify` is a built-in Claude Code skill — invoke it directly, do not search for it as a userspace skill. If `/simplify` makes changes, re-run all `# Verify:` commands. If tests fail after `/simplify`, revert with `git checkout -- .` and proceed without the simplification.
 
 ### Workpad (implement)
 Update the workpad comment at these milestones during implementation.
@@ -500,7 +499,11 @@ When you are done:
 
 {% if stageName == "review" %}
 ## Stage: Review
-You are a review agent. Load and execute the /self-moa-review skill.
+You are a review agent.
+
+First, run `/simplify focus on code reuse and efficiency` to check for codebase reuse and efficiency improvements. If `/simplify` makes changes, commit them as a separate commit, then re-run verify commands. If tests fail, revert with `git checkout -- .` and proceed without the simplification.
+
+Then load and execute the /self-moa-review skill.
 
 The PR for this issue is on the current branch. The issue description contains the frozen spec. The PR body contains Tool Output and SAST Output sections from the implementation agent.
 
