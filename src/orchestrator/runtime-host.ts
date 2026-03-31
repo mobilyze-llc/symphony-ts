@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   closeSync,
   createWriteStream,
@@ -9,6 +9,7 @@ import {
 import { access, mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
+import { promisify } from "node:util";
 
 import type {
   AgentRunInput,
@@ -642,6 +643,23 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   ): Promise<void> {
     this.workers.delete(execution.issueId);
 
+    // Kill orphaned child processes (vitest, pnpm, bash) that survive the abort signal.
+    // On stall_timeout, the CC subprocess is killed but its children are not — they
+    // keep running in the workspace directory, accumulating across retry attempts.
+    if (input.outcome === "abnormal") {
+      try {
+        const workspacePath = this.workspaceManager.resolveForIssue(
+          execution.issueId,
+        ).workspacePath;
+        await this.killOrphanedProcesses(
+          workspacePath,
+          execution.issueIdentifier,
+        );
+      } catch {
+        // Workspace may already be cleaned up — don't block finalization
+      }
+    }
+
     await this.logger?.log(
       input.outcome === "normal" ? "info" : "error",
       input.outcome === "normal"
@@ -772,6 +790,52 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         capturedFirstDispatchedAt,
         durationMs,
       });
+    }
+  }
+
+  private async killOrphanedProcesses(
+    workspacePath: string,
+    issueIdentifier: string,
+  ): Promise<void> {
+    try {
+      const execFileAsync = promisify(execFile);
+
+      const { stdout } = await execFileAsync("lsof", ["-d", "cwd"], {
+        timeout: 5000,
+      });
+
+      const pidsToKill = [
+        ...new Set(
+          stdout
+            .split("\n")
+            .filter((line) => line.includes(workspacePath))
+            .map((line) => line.trim().split(/\s+/)[1])
+            .filter(
+              (pid): pid is string =>
+                pid !== undefined &&
+                /^\d+$/.test(pid) &&
+                Number(pid) !== process.pid,
+            ),
+        ),
+      ];
+
+      if (pidsToKill.length > 0) {
+        for (const pid of pidsToKill) {
+          try {
+            process.kill(Number(pid), "SIGTERM");
+          } catch {
+            // Process may have already exited
+          }
+        }
+        await this.logger?.log(
+          "info",
+          "orphaned_processes_killed",
+          `Killed ${pidsToKill.length} orphaned process(es) in ${workspacePath}`,
+          { issue_identifier: issueIdentifier, pids: pidsToKill },
+        );
+      }
+    } catch {
+      // Best-effort — lsof unavailable or other failure should not block finalization
     }
   }
 
