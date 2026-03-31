@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import {
   closeSync,
   createWriteStream,
@@ -9,6 +9,7 @@ import {
 import { access, mkdir } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
+import { promisify } from "node:util";
 
 import type {
   AgentRunInput,
@@ -793,8 +794,6 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     issueIdentifier: string,
   ): Promise<void> {
     try {
-      const { execFile } = await import("node:child_process");
-      const { promisify } = await import("node:util");
       const execFileAsync = promisify(execFile);
 
       const { stdout } = await execFileAsync("lsof", ["-d", "cwd"], {
