@@ -1071,6 +1071,7 @@ CREATED_RELATIONS=""
 # Previous sub-issue tracking for sequential chain
 prev_sub_id=""
 prev_sub_ident=""
+prev_was_skipped=false
 
 created_count=0
 skipped_count=0
@@ -1090,19 +1091,17 @@ for ((k=0; k<TOTAL; k++)); do
       SUB_ISSUE_IDENTIFIERS[$i]="$existing_ident"
       echo "  Skipping (already exists): $existing_ident — $title"
       # Chain bridge: link prev→this if prev was newly created (not also skipped)
-      if [[ $k -ge 1 && -n "$prev_sub_id" ]]; then
-        prev_task_idx="${SORTED_INDICES[$((k-1))]}"
-        if [[ "${SKIPPED_CHILDREN[$prev_task_idx]}" != "true" ]]; then
-          if create_blocks_relation "$prev_sub_id" "$existing_id" "$prev_sub_ident" "$existing_ident" "sequential (dedup bridge)"; then
-            CREATED_RELATIONS="${CREATED_RELATIONS}|${prev_sub_ident}:${existing_ident}"
-            ((relation_count++)) || true
-          else
-            echo "  WARNING: dedup bridge relation failed — chain may have a gap" >&2
-          fi
+      if [[ -n "$prev_sub_id" && "$prev_was_skipped" != "true" ]]; then
+        if create_blocks_relation "$prev_sub_id" "$existing_id" "$prev_sub_ident" "$existing_ident" "sequential (dedup bridge)"; then
+          CREATED_RELATIONS="${CREATED_RELATIONS}|${prev_sub_ident}:${existing_ident}"
+          ((relation_count++)) || true
+        else
+          echo "  WARNING: dedup bridge relation failed — chain may have a gap" >&2
         fi
       fi
       prev_sub_id="$existing_id"
       prev_sub_ident="$existing_ident"
+      prev_was_skipped=true
       ((skipped_count++)) || true
       continue
     else
@@ -1196,6 +1195,7 @@ GQLEOF
 
     prev_sub_id="$sub_id"
     prev_sub_ident="$sub_identifier"
+    prev_was_skipped=false
     ((created_count++)) || true
   else
     echo "  FAILED: $title" >&2
