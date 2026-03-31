@@ -1,6 +1,6 @@
 import { type IncomingMessage, request as httpRequest } from "node:http";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { RuntimeSnapshot } from "../../src/logging/runtime-snapshot.js";
 import {
@@ -139,16 +139,8 @@ function sendRequest(
 
 describe("GET /api/v1/github/queue", () => {
   const servers: Array<{ close: () => Promise<void> }> = [];
-  const savedRepoUrl = process.env.REPO_URL;
-
   afterEach(async () => {
     await Promise.all(servers.splice(0).map((s) => s.close()));
-    if (savedRepoUrl === undefined) {
-      // biome-ignore lint/performance/noDelete: delete required - process.env coerces undefined to string "undefined"
-      delete process.env.REPO_URL;
-    } else {
-      process.env.REPO_URL = savedRepoUrl;
-    }
   });
 
   it("returns 405 for non-GET methods", async () => {
@@ -177,8 +169,7 @@ describe("GET /api/v1/github/queue", () => {
   });
 
   it("returns 500 when no repo slug is configured", async () => {
-    // biome-ignore lint/performance/noDelete: delete required - process.env coerces undefined to string "undefined"
-    delete process.env.REPO_URL;
+    vi.stubEnv("REPO_URL", "");
     const server = await startDashboardServer({
       port: 0,
       host: createHost(),
@@ -196,7 +187,7 @@ describe("GET /api/v1/github/queue", () => {
   });
 
   it("resolves repo slug from REPO_URL env var", async () => {
-    process.env.REPO_URL = "https://github.com/myorg/myrepo.git";
+    vi.stubEnv("REPO_URL", "https://github.com/myorg/myrepo.git");
     const mockExecGh = createMockExecGh();
 
     const server = await startDashboardServer({
@@ -361,7 +352,7 @@ describe("GET /api/v1/github/queue", () => {
   });
 
   it("prefers explicit githubRepoSlug over REPO_URL env var", async () => {
-    process.env.REPO_URL = "https://github.com/env/repo.git";
+    vi.stubEnv("REPO_URL", "https://github.com/env/repo.git");
     const mockExecGh = createMockExecGh();
     const server = await startDashboardServer({
       port: 0,

@@ -21,7 +21,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_PATH = join(__dirname, "../../ops/token-report.mjs");
@@ -1599,21 +1599,11 @@ describe("token-report.mjs slack", () => {
     writeConfigHistory(symphonyHome, [makeConfigSnapshot()]);
 
     const env: Record<string, string> = {};
-    // Explicitly unset SLACK_BOT_TOKEN
-    process.env.SLACK_BOT_TOKEN = undefined;
+    vi.stubEnv("SLACK_BOT_TOKEN", "");
     const { exitCode, stderr } = runSlack(symphonyHome, env);
 
     expect(exitCode).toBe(0);
     // stderr should contain warning (captured by parent process)
-  });
-
-  it("exits 0 when SLACK_BOT_TOKEN is empty", () => {
-    const records = generateDaysOfRecords(5, 2);
-    writeTokenHistory(symphonyHome, records);
-    writeConfigHistory(symphonyHome, [makeConfigSnapshot()]);
-
-    const { exitCode } = runSlack(symphonyHome, { SLACK_BOT_TOKEN: "" });
-    expect(exitCode).toBe(0);
   });
 
   it("DRY_RUN outputs concerns section and correct field names", () => {
