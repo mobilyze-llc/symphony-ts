@@ -12,13 +12,14 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
   chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const SCRIPT_PATH = join(__dirname, "../../ops/claude-usage");
@@ -67,12 +68,15 @@ const SAMPLE_SEQUENCE = {
   },
 };
 
+const dirsToCleanup: string[] = [];
+
 function tmpDir(prefix: string = "claude-usage-test") {
   const dir = join(
     tmpdir(),
     `${prefix}-${randomBytes(6).toString("hex")}`,
   );
   mkdirSync(dir, { recursive: true });
+  dirsToCleanup.push(dir);
   return dir;
 }
 
@@ -161,6 +165,12 @@ function runCLI(
 }
 
 describe("ops/claude-usage", () => {
+  afterEach(() => {
+    for (const dir of dirsToCleanup.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   describe("outputs valid JSON", () => {
     it("outputs valid JSON with five_hour and seven_day utilization fields", () => {
       const env = setupTestEnv({ sequenceJson: SAMPLE_SEQUENCE });
