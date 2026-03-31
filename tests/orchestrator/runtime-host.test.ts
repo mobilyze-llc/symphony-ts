@@ -2164,143 +2164,131 @@ describe("pruneLocalBranches", () => {
   it("does not log prune events when SYMPHONY_SKIP_BRANCH_PRUNE is set", async () => {
     vi.stubEnv("SYMPHONY_SKIP_BRANCH_PRUNE", "1");
 
-    try {
-      const tracker = createTracker();
-      const fakeRunner = new FakeAgentRunner();
-      const entries: StructuredLogEntry[] = [];
-      const logger = new StructuredLogger([
-        {
-          write(entry) {
-            entries.push(entry);
-          },
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
         },
-      ]);
-      const host = new OrchestratorRuntimeHost({
-        config: createConfig(),
-        tracker,
-        logger,
-        createAgentRunner: ({ onEvent }) => {
-          fakeRunner.onEvent = onEvent;
-          return fakeRunner;
-        },
-        now: () => new Date("2026-03-06T00:00:05.000Z"),
-      });
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
 
-      await host.pollOnce();
-      tracker.setStateSnapshots([
-        { id: "1", identifier: "ISSUE-1", state: "Done" },
-      ]);
-      await host.pollOnce();
-      await host.waitForIdle();
+    await host.pollOnce();
+    tracker.setStateSnapshots([
+      { id: "1", identifier: "ISSUE-1", state: "Done" },
+    ]);
+    await host.pollOnce();
+    await host.waitForIdle();
 
-      const pruneEvents = entries.filter(
-        (e) =>
-          e.event === "branch_prune_triggered" ||
-          e.event === "branch_prune_debounced",
-      );
-      expect(pruneEvents).toHaveLength(0);
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    const pruneEvents = entries.filter(
+      (e) =>
+        e.event === "branch_prune_triggered" ||
+        e.event === "branch_prune_debounced",
+    );
+    expect(pruneEvents).toHaveLength(0);
   });
 
   it("logs branch_prune_triggered on workspace cleanup", async () => {
     vi.stubEnv("SYMPHONY_SKIP_BRANCH_PRUNE", "");
 
-    try {
-      const tracker = createTracker();
-      const fakeRunner = new FakeAgentRunner();
-      const entries: StructuredLogEntry[] = [];
-      const logger = new StructuredLogger([
-        {
-          write(entry) {
-            entries.push(entry);
-          },
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
         },
-      ]);
-      const host = new OrchestratorRuntimeHost({
-        config: createConfig(),
-        tracker,
-        logger,
-        createAgentRunner: ({ onEvent }) => {
-          fakeRunner.onEvent = onEvent;
-          return fakeRunner;
-        },
-        now: () => new Date("2026-03-06T00:00:05.000Z"),
-      });
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
 
-      await host.pollOnce();
-      tracker.setStateSnapshots([
-        { id: "1", identifier: "ISSUE-1", state: "Done" },
-      ]);
-      await host.pollOnce();
-      await host.waitForIdle();
+    await host.pollOnce();
+    tracker.setStateSnapshots([
+      { id: "1", identifier: "ISSUE-1", state: "Done" },
+    ]);
+    await host.pollOnce();
+    await host.waitForIdle();
 
-      const pruneEvents = entries.filter(
-        (e) => e.event === "branch_prune_triggered",
-      );
-      // pruneLocalBranches fires after workspace cleanup for terminal issues.
-      // The spawn itself may fail (symphony-ctl not at test path), but the
-      // log event should still be emitted before the spawn attempt.
-      expect(pruneEvents.length).toBeGreaterThanOrEqual(1);
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    const pruneEvents = entries.filter(
+      (e) => e.event === "branch_prune_triggered",
+    );
+    // pruneLocalBranches fires after workspace cleanup for terminal issues.
+    // The spawn itself may fail (symphony-ctl not at test path), but the
+    // log event should still be emitted before the spawn attempt.
+    expect(pruneEvents.length).toBeGreaterThanOrEqual(1);
   });
 
   it("debounces rapid successive prune invocations", async () => {
     vi.stubEnv("SYMPHONY_SKIP_BRANCH_PRUNE", "");
 
-    try {
-      const tracker = createTracker({
-        candidates: [
-          createIssue({ id: "1", identifier: "ISSUE-1" }),
-          createIssue({ id: "2", identifier: "ISSUE-2" }),
-        ],
-      });
-      const fakeRunner = new FakeAgentRunner();
-      const entries: StructuredLogEntry[] = [];
-      const logger = new StructuredLogger([
-        {
-          write(entry) {
-            entries.push(entry);
-          },
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2" }),
+      ],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
         },
-      ]);
-      const host = new OrchestratorRuntimeHost({
-        config: createConfig(),
-        tracker,
-        logger,
-        createAgentRunner: ({ onEvent }) => {
-          fakeRunner.onEvent = onEvent;
-          return fakeRunner;
-        },
-        now: () => new Date("2026-03-06T00:00:05.000Z"),
-      });
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
 
-      // Dispatch both issues
-      await host.pollOnce();
+    // Dispatch both issues
+    await host.pollOnce();
 
-      // Move both to Done (terminal) — triggers cleanup for both
-      tracker.setStateSnapshots([
-        { id: "1", identifier: "ISSUE-1", state: "Done" },
-        { id: "2", identifier: "ISSUE-2", state: "Done" },
-      ]);
-      await host.pollOnce();
-      await host.waitForIdle();
+    // Move both to Done (terminal) — triggers cleanup for both
+    tracker.setStateSnapshots([
+      { id: "1", identifier: "ISSUE-1", state: "Done" },
+      { id: "2", identifier: "ISSUE-2", state: "Done" },
+    ]);
+    await host.pollOnce();
+    await host.waitForIdle();
 
-      const triggered = entries.filter(
-        (e) => e.event === "branch_prune_triggered",
-      );
-      const debounced = entries.filter(
-        (e) => e.event === "branch_prune_debounced",
-      );
+    const triggered = entries.filter(
+      (e) => e.event === "branch_prune_triggered",
+    );
+    const debounced = entries.filter(
+      (e) => e.event === "branch_prune_debounced",
+    );
 
-      // First cleanup triggers prune, second is debounced
-      expect(triggered.length).toBeGreaterThanOrEqual(1);
-      expect(debounced.length).toBeGreaterThanOrEqual(1);
-    } finally {
-      vi.unstubAllEnvs();
-    }
+    // First cleanup triggers prune, second is debounced
+    expect(triggered.length).toBeGreaterThanOrEqual(1);
+    expect(debounced.length).toBeGreaterThanOrEqual(1);
   });
 });

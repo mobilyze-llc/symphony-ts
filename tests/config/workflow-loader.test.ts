@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   WorkflowLoaderError,
@@ -14,6 +14,10 @@ import {
 import { ERROR_CODES } from "../../src/errors/codes.js";
 
 describe("workflow-loader", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("parses YAML front matter and trims the prompt body", () => {
     const workflow = parseWorkflowContent(`---
 tracker:
@@ -95,13 +99,11 @@ Prompt`);
   });
 
   it("prefers the explicit workflow path over the cwd default", async () => {
-    const workspace = await mkdtemp(join(tmpdir(), "symphony-task3-explicit-"));
     const otherWorkspace = await mkdtemp(
       join(tmpdir(), "symphony-task3-other-"),
     );
     const explicitPath = join(otherWorkspace, "WORKFLOW.md");
     await writeFile(explicitPath, "Explicit prompt\n", "utf8");
-    await writeFile(join(workspace, "WORKFLOW.md"), "Default prompt\n", "utf8");
     const workflow = await loadWorkflowDefinition(explicitPath);
     expect(workflow.workflowPath).toBe(explicitPath);
     expect(workflow.promptTemplate).toBe("Explicit prompt");
@@ -112,7 +114,6 @@ Prompt`);
 
     vi.spyOn(process, "cwd").mockReturnValue(workspace);
     expect(resolveWorkflowPath()).toBe(join(workspace, "WORKFLOW.md"));
-    vi.restoreAllMocks();
   });
 
   it("returns a typed missing-workflow error when the file does not exist", async () => {

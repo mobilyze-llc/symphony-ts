@@ -1590,7 +1590,6 @@ describe("token-report.mjs slack", () => {
   });
 
   afterEach(() => {
-    vi.unstubAllEnvs();
     rmSync(symphonyHome, { recursive: true, force: true });
   });
 
@@ -1600,7 +1599,6 @@ describe("token-report.mjs slack", () => {
     writeConfigHistory(symphonyHome, [makeConfigSnapshot()]);
 
     const env: Record<string, string> = {};
-    // Explicitly unset SLACK_BOT_TOKEN (thread-safe via vi.stubEnv)
     vi.stubEnv("SLACK_BOT_TOKEN", "");
     const { exitCode, stderr } = runSlack(symphonyHome, env);
 

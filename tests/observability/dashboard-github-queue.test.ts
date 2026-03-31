@@ -141,7 +141,6 @@ describe("GET /api/v1/github/queue", () => {
   const servers: Array<{ close: () => Promise<void> }> = [];
   afterEach(async () => {
     await Promise.all(servers.splice(0).map((s) => s.close()));
-    vi.unstubAllEnvs();
   });
 
   it("returns 405 for non-GET methods", async () => {
