@@ -18,15 +18,17 @@ vi.mock("ai-sdk-provider-claude-code", () => ({
 // Mock node:fs for heartbeat tests
 vi.mock("node:fs", () => ({
   statSync: vi.fn(() => ({ mtimeMs: 1000 })),
+  readdirSync: vi.fn(() => []),
 }));
 
-import { statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { generateText } from "ai";
 import { claudeCode } from "ai-sdk-provider-claude-code";
 
 const mockGenerateText = vi.mocked(generateText);
 const mockClaudeCode = vi.mocked(claudeCode);
 const mockStatSync = vi.mocked(statSync);
+const mockReaddirSync = vi.mocked(readdirSync);
 
 describe("ClaudeCodeRunner", () => {
   it("implements AgentRunnerCodexClient interface (startSession, continueTurn, close)", () => {
@@ -363,7 +365,7 @@ describe("ClaudeCodeRunner", () => {
 
 describe("ClaudeCodeRunner heartbeat", () => {
   // Path-aware mtime tracking for heartbeat tests.
-  // The heartbeat polls both .git/index and the workspace root dir.
+  // The heartbeat polls .git/index, workspace root, and immediate subdirectories.
   let mtimeByPath: Record<string, number>;
 
   beforeEach(() => {
@@ -371,11 +373,19 @@ describe("ClaudeCodeRunner heartbeat", () => {
     mtimeByPath = {
       "/tmp/workspace/.git/index": 1000,
       "/tmp/workspace": 1000,
+      "/tmp/workspace/ops": 1000,
+      "/tmp/workspace/src": 1000,
     };
     mockStatSync.mockImplementation((p: unknown) => {
       const key = String(p);
       return { mtimeMs: mtimeByPath[key] ?? 0 } as never;
     });
+    mockReaddirSync.mockReturnValue([
+      { name: "ops", isDirectory: () => true } as never,
+      { name: "src", isDirectory: () => true } as never,
+      { name: "node_modules", isDirectory: () => true } as never,
+      { name: "README.md", isDirectory: () => false } as never,
+    ]);
   });
 
   afterEach(() => {
@@ -414,9 +424,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     vi.advanceTimersByTime(5000);
     const heartbeats = events.filter((e) => e.event === "activity_heartbeat");
     expect(heartbeats).toHaveLength(1);
-    expect(heartbeats[0]!.message).toBe(
-      "workspace file change detected (git index)",
-    );
+    expect(heartbeats[0]!.message).toBe("workspace file change detected");
 
     // Resolve the turn
     resolveFn!({
@@ -458,9 +466,7 @@ describe("ClaudeCodeRunner heartbeat", () => {
     vi.advanceTimersByTime(5000);
     const heartbeats = events.filter((e) => e.event === "activity_heartbeat");
     expect(heartbeats).toHaveLength(1);
-    expect(heartbeats[0]!.message).toBe(
-      "workspace file change detected (workspace dir)",
-    );
+    expect(heartbeats[0]!.message).toBe("workspace file change detected");
 
     resolveFn!({
       text: "done",
@@ -493,9 +499,47 @@ describe("ClaudeCodeRunner heartbeat", () => {
     vi.advanceTimersByTime(5000);
     const heartbeats = events.filter((e) => e.event === "activity_heartbeat");
     expect(heartbeats).toHaveLength(1);
-    expect(heartbeats[0]!.message).toBe(
-      "workspace file change detected (git index and workspace dir)",
+    expect(heartbeats[0]!.message).toBe("workspace file change detected");
+
+    resolveFn!({
+      text: "done",
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    await turnPromise;
+  });
+
+  it("emits heartbeat when subdirectory mtime changes (file created in ops/)", async () => {
+    let resolveFn: (value: unknown) => void;
+    mockGenerateText.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFn = resolve;
+      }) as never,
     );
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+      heartbeatIntervalMs: 5000,
+    });
+
+    const turnPromise = runner.startSession({
+      prompt: "create ops/claude-usage",
+      title: "test",
+    });
+
+    // Initial poll — no change
+    vi.advanceTimersByTime(5000);
+    expect(events.filter((e) => e.event === "activity_heartbeat")).toHaveLength(
+      0,
+    );
+
+    // Agent creates a file in ops/ — only ops/ mtime changes, not root or .git/index
+    mtimeByPath["/tmp/workspace/ops"] = 2000;
+    vi.advanceTimersByTime(5000);
+    const heartbeats = events.filter((e) => e.event === "activity_heartbeat");
+    expect(heartbeats).toHaveLength(1);
 
     resolveFn!({
       text: "done",

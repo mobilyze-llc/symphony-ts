@@ -1,4 +1,4 @@
-import { statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { generateText } from "ai";
 import { claudeCode } from "ai-sdk-provider-claude-code";
@@ -90,34 +90,51 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
 
     try {
       // Start workspace file-change heartbeat polling.
-      // Watch both .git/index (implementation stages) and the workspace root
-      // directory (review stages that never touch git but do read/write files).
+      // Watch .git/index, workspace root, and immediate subdirectories.
+      // Subdirectory mtimes change when files are created/deleted inside them,
+      // catching agent activity in ops/, src/, tests/, etc. that the root
+      // directory mtime alone would miss.
       if (heartbeatMs > 0) {
-        const gitIndexPath = join(this.options.cwd, ".git", "index");
         const workspacePath = this.options.cwd;
-        let lastGitMtimeMs = getMtimeMs(gitIndexPath);
-        let lastWorkspaceMtimeMs = getMtimeMs(workspacePath);
+        const mtimeMap = new Map<string, number>();
+        mtimeMap.set(
+          join(workspacePath, ".git", "index"),
+          getMtimeMs(join(workspacePath, ".git", "index")),
+        );
+        mtimeMap.set(workspacePath, getMtimeMs(workspacePath));
+        try {
+          for (const entry of readdirSync(workspacePath, {
+            withFileTypes: true,
+          })) {
+            if (
+              entry.isDirectory() &&
+              entry.name !== "node_modules" &&
+              entry.name !== ".git"
+            ) {
+              const dirPath = join(workspacePath, entry.name);
+              mtimeMap.set(dirPath, getMtimeMs(dirPath));
+            }
+          }
+        } catch {
+          // readdirSync may fail if workspace is not yet fully initialized
+        }
+
         heartbeatTimer = setInterval(() => {
-          const currentGitMtimeMs = getMtimeMs(gitIndexPath);
-          const currentWorkspaceMtimeMs = getMtimeMs(workspacePath);
-          const gitChanged = currentGitMtimeMs !== lastGitMtimeMs;
-          const workspaceChanged =
-            currentWorkspaceMtimeMs !== lastWorkspaceMtimeMs;
-          if (gitChanged || workspaceChanged) {
-            lastGitMtimeMs = currentGitMtimeMs;
-            lastWorkspaceMtimeMs = currentWorkspaceMtimeMs;
-            const source =
-              gitChanged && workspaceChanged
-                ? "git index and workspace dir"
-                : gitChanged
-                  ? "git index"
-                  : "workspace dir";
+          let changed = false;
+          for (const [path, lastMtime] of mtimeMap) {
+            const current = getMtimeMs(path);
+            if (current !== lastMtime) {
+              mtimeMap.set(path, current);
+              changed = true;
+            }
+          }
+          if (changed) {
             this.emit({
               event: "activity_heartbeat",
               sessionId: fullSessionId,
               threadId,
               turnId,
-              message: `workspace file change detected (${source})`,
+              message: "workspace file change detected",
             });
           }
         }, heartbeatMs);
