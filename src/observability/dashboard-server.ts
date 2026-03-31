@@ -18,6 +18,7 @@ import {
 } from "../config/defaults.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import type { RuntimeSnapshot } from "../logging/runtime-snapshot.js";
+import { fetchClaudeUsageFromCli } from "./dashboard-claude-usage.js";
 import { toErrorMessage } from "./dashboard-format.js";
 import {
   isSnapshotTimeoutError,
@@ -35,6 +36,13 @@ import {
 
 const DEFAULT_SNAPSHOT_TIMEOUT_MS = 1_000;
 const GITHUB_QUEUE_CACHE_TTL_MS = 15_000;
+const CLAUDE_USAGE_CACHE_TTL_MS = 30_000;
+
+let claudeUsageCache: {
+  data: Record<string, unknown>;
+  timestamp: number;
+} | null = null;
+let claudeUsageInflight: Promise<Record<string, unknown>> | null = null;
 
 export interface IssueDetailRunningState {
   session_id: string | null;
@@ -332,6 +340,44 @@ export function createDashboardRequestHandler(
         return;
       }
 
+      if (url.pathname === "/api/v1/claude/usage") {
+        if (method !== "GET") {
+          writeMethodNotAllowed(response, ["GET"]);
+          return;
+        }
+
+        const now = Date.now();
+        if (
+          claudeUsageCache !== null &&
+          now - claudeUsageCache.timestamp < CLAUDE_USAGE_CACHE_TTL_MS
+        ) {
+          writeJson(response, 200, {
+            ...claudeUsageCache.data,
+            cached: true,
+          });
+          return;
+        }
+
+        try {
+          // Single-flight: reuse an in-progress CLI call instead of spawning N concurrent processes
+          if (claudeUsageInflight === null) {
+            claudeUsageInflight = fetchClaudeUsageFromCli().finally(() => {
+              claudeUsageInflight = null;
+            });
+          }
+          const parsed = await claudeUsageInflight;
+          claudeUsageCache = { data: parsed, timestamp: Date.now() };
+          writeJson(response, 200, { ...parsed, cached: false });
+        } catch (err) {
+          writeJson(response, 200, {
+            available: false,
+            error:
+              err instanceof Error ? err.message : "Unknown error running ops/claude-usage",
+          });
+        }
+        return;
+      }
+
       if (url.pathname === "/api/v1/deploy/preview") {
         if (method !== "POST") {
           writeMethodNotAllowed(response, ["POST"]);
@@ -538,6 +584,13 @@ export function createDashboardRequestHandler(
       });
     }
   };
+}
+
+/** Clear the cached claude usage data. Called after account switches. */
+// TODO(SYMPH-219): Wire this into account-switch handlers
+export function clearClaudeUsageCache(): void {
+  claudeUsageCache = null;
+  claudeUsageInflight = null;
 }
 
 // ── GitHub merge queue types & helpers ────────────────────────────
