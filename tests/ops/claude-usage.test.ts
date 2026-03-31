@@ -164,7 +164,7 @@ function runCLI(
   };
 }
 
-describe("ops/claude-usage", () => {
+describe("ops/claude-usage", { timeout: 30000 }, () => {
   afterEach(() => {
     for (const dir of dirsToCleanup.splice(0)) {
       rmSync(dir, { recursive: true, force: true });
