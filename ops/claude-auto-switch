@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# ops/claude-auto-switch — Auto-switch Claude accounts when utilization thresholds are hit
+# SYMPH-241
+#
+# Checks current usage via ops/claude-usage, and if 5-hour utilization >= 90%
+# or weekly utilization >= 95%, switches to the alternate account via cswap --switch.
+#
+# Guards:
+#   - 5-minute cooldown between switches
+#   - No switch if agents are currently running
+#   - No switch if target account is also above threshold (unless cache is stale)
+#   - Fail safe: skip switch if dashboard server is unreachable
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SYMPHONY_DIR="${HOME}/.symphony"
+COOLDOWN_FILE="${SYMPHONY_DIR}/auto-switch-last"
+USAGE_CACHE_FILE="${SYMPHONY_DIR}/usage-cache.json"
+SEQUENCE_FILE="${HOME}/.claude-swap-backup/sequence.json"
+
+FIVE_HOUR_THRESHOLD=90
+WEEKLY_THRESHOLD=95
+COOLDOWN_SECONDS=300      # 5 minutes
+CACHE_STALE_SECONDS=600   # 10 minutes
+
+BASE_URL="${BASE_URL:-localhost:26849}"
+
+# --- Logging helpers ---
+info()  { echo "[auto-switch] INFO:  $*"; }
+warn()  { echo "[auto-switch] WARN:  $*" >&2; }
+die()   { echo "[auto-switch] ERROR: $*" >&2; exit 1; }
+
+# --- Cooldown check ---
+check_cooldown() {
+  if [ -f "$COOLDOWN_FILE" ]; then
+    local last_switch
+    last_switch=$(cat "$COOLDOWN_FILE" 2>/dev/null || echo "")
+    if [ -n "$last_switch" ]; then
+      local last_epoch now_epoch diff
+      # Parse ISO timestamp to epoch — try GNU date first, fall back to python3
+      if last_epoch=$(date -d "$last_switch" +%s 2>/dev/null); then
+        :
+      elif last_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%S" "${last_switch%%.*}" +%s 2>/dev/null); then
+        :
+      else
+        last_epoch=$(python3 -c "from datetime import datetime; print(int(datetime.fromisoformat('${last_switch}'.replace('Z','+00:00')).timestamp()))" 2>/dev/null || echo "0")
+      fi
+      now_epoch=$(date +%s)
+      diff=$((now_epoch - last_epoch))
+      if [ "$diff" -lt "$COOLDOWN_SECONDS" ]; then
+        info "Cooldown active (${diff}s since last switch, need ${COOLDOWN_SECONDS}s). Skipping."
+        exit 0
+      fi
+    fi
+  fi
+}
+
+# --- Check running agents via dashboard server ---
+check_running_agents() {
+  local state_response
+  if ! state_response=$(curl -s -f "http://${BASE_URL}/api/v1/state" 2>/dev/null); then
+    warn "Dashboard server unreachable at ${BASE_URL}"
+    warn "Fail safe: skipping auto-switch due to unreachable server"
+    exit 0
+  fi
+
+  local running_count
+  running_count=$(echo "$state_response" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+issues = data.get('issues', [])
+running = sum(1 for i in issues if i.get('status') == 'running')
+print(running)
+" 2>/dev/null || echo "-1")
+
+  if [ "$running_count" = "-1" ]; then
+    warn "Failed to parse running agent count from dashboard"
+    warn "Fail safe: skipping auto-switch"
+    exit 0
+  fi
+
+  if [ "$running_count" -gt 0 ]; then
+    warn "Switch deferred: ${running_count} agent(s) currently running"
+    exit 0
+  fi
+}
+
+# --- Get current usage via ops/claude-usage ---
+get_current_usage() {
+  local usage_output
+  if ! usage_output=$("$SCRIPT_DIR/claude-usage" --json 2>/dev/null); then
+    die "Failed to fetch current usage via ops/claude-usage"
+  fi
+  echo "$usage_output"
+}
+
+# --- Check target account cached utilization ---
+check_target_account() {
+  local current_account_num="$1"
+  local five_hour_util="$2"
+
+  if [ ! -f "$USAGE_CACHE_FILE" ]; then
+    return 0  # No cache — proceed with switch
+  fi
+
+  if [ ! -f "$SEQUENCE_FILE" ]; then
+    return 0  # No sequence — can't determine target
+  fi
+
+  # Find target account number (the one that's not current)
+  local target_num
+  target_num=$(python3 -c "
+import json, sys
+with open('${SEQUENCE_FILE}') as f:
+    seq = json.load(f)
+accounts = seq.get('accounts', {})
+current = '${current_account_num}'
+for num in accounts:
+    if num != current:
+        print(num)
+        sys.exit(0)
+print('')
+" 2>/dev/null || echo "")
+
+  if [ -z "$target_num" ]; then
+    return 0  # Can't determine target — proceed
+  fi
+
+  # Check cache staleness and target utilization
+  python3 -c "
+import json, sys
+from datetime import datetime, timezone, timedelta
+
+with open('${USAGE_CACHE_FILE}') as f:
+    cache = json.load(f)
+
+target = cache.get('${target_num}')
+if target is None:
+    sys.exit(0)  # No cache for target — proceed
+
+ts_str = target.get('timestamp', '')
+if ts_str:
+    try:
+        ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+        age = (datetime.now(timezone.utc) - ts).total_seconds()
+        if age > ${CACHE_STALE_SECONDS}:
+            sys.exit(0)  # Stale cache — proceed
+    except (ValueError, TypeError):
+        sys.exit(0)  # Bad timestamp — proceed
+
+target_five = target.get('five_hour', 0)
+target_seven = target.get('seven_day', 0)
+if target_five >= ${FIVE_HOUR_THRESHOLD} or target_seven >= ${WEEKLY_THRESHOLD}:
+    sys.exit(1)  # Target also exhausted
+sys.exit(0)
+" 2>/dev/null
+  local result=$?
+  if [ "$result" -eq 1 ]; then
+    warn "Both accounts near limit — target account (${target_num}) also above threshold"
+    warn "Skipping auto-switch: target account cached utilization is also high"
+    return 1
+  fi
+  return 0
+}
+
+# --- Execute switch ---
+do_switch() {
+  info "Executing cswap --switch"
+  if cswap --switch 2>&1; then
+    info "Switch successful"
+    # Write cooldown timestamp
+    mkdir -p "$SYMPHONY_DIR"
+    date -u +"%Y-%m-%dT%H:%M:%S.000Z" > "$COOLDOWN_FILE"
+    info "Cooldown timestamp written"
+  else
+    warn "cswap --switch failed"
+    exit 1
+  fi
+}
+
+# --- Main ---
+main() {
+  info "Starting auto-switch check"
+
+  # 1. Check cooldown
+  check_cooldown
+
+  # 2. Get current usage
+  local usage_json
+  usage_json=$(get_current_usage)
+
+  local five_hour_util weekly_util current_account_num
+  five_hour_util=$(echo "$usage_json" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d['five_hour']['utilization'])" 2>/dev/null || echo "0")
+  weekly_util=$(echo "$usage_json" | python3 -c "import sys, json; d=json.load(sys.stdin); print(d['seven_day']['utilization'])" 2>/dev/null || echo "0")
+  current_account_num=$(echo "$usage_json" | python3 -c "import sys, json; d=json.load(sys.stdin); a=d.get('active_account'); print(a['account_number'] if a else '')" 2>/dev/null || echo "")
+
+  info "5-hour utilization: ${five_hour_util}%, weekly: ${weekly_util}%"
+
+  # 3. Check thresholds
+  local should_switch=false
+  if python3 -c "import sys; sys.exit(0 if float('${five_hour_util}') >= ${FIVE_HOUR_THRESHOLD} else 1)" 2>/dev/null; then
+    info "5-hour threshold exceeded (${five_hour_util}% >= ${FIVE_HOUR_THRESHOLD}%)"
+    should_switch=true
+  fi
+  if python3 -c "import sys; sys.exit(0 if float('${weekly_util}') >= ${WEEKLY_THRESHOLD} else 1)" 2>/dev/null; then
+    info "Weekly threshold exceeded (${weekly_util}% >= ${WEEKLY_THRESHOLD}%)"
+    should_switch=true
+  fi
+
+  if [ "$should_switch" = "false" ]; then
+    info "Usage within limits. No switch needed."
+    exit 0
+  fi
+
+  # 4. Check running agents (fail safe)
+  check_running_agents
+
+  # 5. Check target account
+  if ! check_target_account "$current_account_num" "$five_hour_util"; then
+    exit 0
+  fi
+
+  # 6. Switch
+  do_switch
+}
+
+main "$@"
