@@ -257,6 +257,60 @@ describe("ClaudeCodeRunner", () => {
     ).toHaveLength(0);
   });
 
+  it("returns {} without propagating when onEvent throws inside PreToolUse hook", async () => {
+    mockGenerateText.mockResolvedValueOnce({
+      text: "Done",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        totalTokens: 15,
+        inputTokenDetails: {
+          noCacheTokens: undefined,
+          cacheReadTokens: undefined,
+          cacheWriteTokens: undefined,
+        },
+        outputTokenDetails: {
+          textTokens: undefined,
+          reasoningTokens: undefined,
+        },
+      },
+    } as never);
+
+    // Throw only on approval_auto_approved (the hook path), not session lifecycle events
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => {
+        if (event.event === "approval_auto_approved") {
+          throw new Error("observer blew up");
+        }
+      },
+    });
+
+    await runner.startSession({ prompt: "test", title: "test" });
+
+    const claudeCodeArgs = mockClaudeCode.mock.calls.at(-1)![1] as Record<
+      string,
+      unknown
+    >;
+    const hooks = claudeCodeArgs.hooks as Record<
+      string,
+      Array<{
+        hooks: Array<(input: Record<string, unknown>) => Promise<unknown>>;
+      }>
+    >;
+    const preToolUseCallback = hooks.PreToolUse![0]!.hooks[0]!;
+
+    // Call with valid input — onEvent will throw, but the hook must swallow it
+    const result = await preToolUseCallback({
+      tool_name: "Bash",
+      tool_input: { command: "test" },
+      tool_use_id: "toolu_err",
+    });
+
+    expect(result).toEqual({});
+  });
+
   it("emits turn_failed on error and returns failed status", async () => {
     mockGenerateText.mockRejectedValueOnce(new Error("Rate limit exceeded"));
 
