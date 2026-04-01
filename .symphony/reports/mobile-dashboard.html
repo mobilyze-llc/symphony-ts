@@ -584,6 +584,25 @@ body {
   width: 6px; height: 6px; border-radius: 50%;
   background: var(--green); flex-shrink: 0;
 }
+/* ── Switch Account Button ── */
+.switch-account-btn {
+  display: flex; align-items: center; justify-content: center; gap: 6px;
+  width: 100%; margin-top: 8px; padding: 10px 0;
+  background: rgba(94, 106, 210, 0.12); border: 1px solid rgba(94, 106, 210, 0.25);
+  border-radius: var(--radius-sm); color: #5e6ad2;
+  font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.switch-account-btn:active {
+  background: rgba(94, 106, 210, 0.22);
+}
+.switch-account-btn:disabled {
+  opacity: 0.5; cursor: not-allowed;
+}
+.switch-account-btn .switch-icon {
+  font-size: 14px;
+}
+
 .usage-error-banner {
   background: var(--red-soft); border: 1px solid rgba(248, 113, 113, 0.3);
   border-radius: var(--radius-sm); padding: 8px 12px;
@@ -674,6 +693,9 @@ body {
           <span class="account-label">Organization</span>
           <span class="account-value" id="account-org">Loading…</span>
         </div>
+        <button class="switch-account-btn" id="switch-account" type="button">
+          <span class="switch-icon">⇄</span> Switch Account
+        </button>
       </div>
     </div>
 
@@ -1979,6 +2001,31 @@ body {
   // Initial fetch + refresh every 30 seconds (matches server-side cache TTL)
   fetchUsage();
   setInterval(fetchUsage, 30000);
+
+  // ── Switch Account Button ──
+  const switchBtn = $('#switch-account');
+  if (switchBtn) {
+    switchBtn.addEventListener('click', async function () {
+      if (switchBtn.disabled) return;
+      switchBtn.disabled = true;
+      switchBtn.textContent = 'Switching…';
+      try {
+        // TODO: POST to /api/v1/claude/switch endpoint (SYMPH-241 or related task)
+        const resp = await fetch(`${baseUrl}/api/v1/claude/switch`, { method: 'POST' });
+        if (!resp.ok) {
+          const body = await resp.json().catch(() => ({}));
+          throw new Error(body.error || 'Switch failed (HTTP ' + resp.status + ')');
+        }
+        // Refresh usage data after successful switch
+        await fetchUsage();
+      } catch (err) {
+        showUsageError('Account switch failed: ' + err.message);
+      } finally {
+        switchBtn.disabled = false;
+        switchBtn.innerHTML = '<span class="switch-icon">⇄</span> Switch Account';
+      }
+    });
+  }
 })();
 </script>
 </body>

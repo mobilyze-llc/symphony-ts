@@ -303,4 +303,41 @@ describe("mobile-dashboard.html", () => {
   it("validates account field presence", () => {
     expect(html).toContain("account.email");
   });
+
+  // ── Switch Account Button (SYMPH-240) ──
+  it("contains a switch-account button", () => {
+    expect(html).toContain('id="switch-account"');
+    expect(html).toContain("switch-account-btn");
+  });
+
+  it("switch button has visible label text", () => {
+    expect(html).toContain("Switch Account");
+  });
+
+  it("switch button triggers POST to /api/v1/claude/switch", () => {
+    const scriptSection = html.slice(html.indexOf("<script>"));
+    expect(scriptSection).toContain("/api/v1/claude/switch");
+    expect(scriptSection).toContain("method: 'POST'");
+  });
+
+  it("switch button refreshes usage data after successful switch", () => {
+    const scriptSection = html.slice(html.indexOf("<script>"));
+    // After switch response, fetchUsage is called
+    expect(scriptSection).toContain("await fetchUsage()");
+  });
+
+  it("switch button shows error on failure via showUsageError", () => {
+    const scriptSection = html.slice(html.indexOf("<script>"));
+    expect(scriptSection).toContain("Account switch failed");
+  });
+
+  it("does not hardcode localhost in switch fetch URL", () => {
+    const scriptSection = html.slice(html.indexOf("<script>"));
+    expect(scriptSection).not.toMatch(
+      /fetch\s*\(\s*['"]https?:\/\/localhost.*switch/,
+    );
+    expect(scriptSection).not.toMatch(
+      /fetch\s*\(\s*['"]https?:\/\/127\.0\.0\.1.*switch/,
+    );
+  });
 });
