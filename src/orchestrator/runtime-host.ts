@@ -7,6 +7,7 @@ import {
   openSync,
 } from "node:fs";
 import { access, mkdir } from "node:fs/promises";
+import { hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { promisify } from "node:util";
@@ -1284,7 +1285,9 @@ export async function startRuntimeService(
     type: "pipeline_started",
     productName,
     dashboardUrl:
-      dashboard !== null ? `http://localhost:${dashboard.port}` : null,
+      dashboard !== null
+        ? `http://${dashboard.hostname === "0.0.0.0" ? hostname() : dashboard.hostname}:${dashboard.port}`
+        : null,
   });
 
   void runPollCycle();
