@@ -194,6 +194,46 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
           env: { SYMPHONY_PIPELINE: "1" },
           settingSources: ["user", "project"],
           maxBudgetUsd: 50,
+          streamingInput: "always",
+          hooks: {
+            PreToolUse: [
+              {
+                hooks: [
+                  async (...args: unknown[]) => {
+                    try {
+                      const arg = args[0];
+                      if (
+                        typeof arg === "object" &&
+                        arg !== null &&
+                        !Array.isArray(arg)
+                      ) {
+                        const input = arg as Record<string, unknown>;
+                        const toolName = input.tool_name;
+                        if (typeof toolName === "string") {
+                          this.emit({
+                            event: "approval_auto_approved",
+                            sessionId: fullSessionId,
+                            threadId,
+                            turnId,
+                            raw: {
+                              params: {
+                                name: toolName,
+                                input: input.tool_input ?? null,
+                              },
+                            },
+                            toolName,
+                          });
+                        }
+                      }
+                    } catch {
+                      // Never let observation hook fail a tool call
+                    }
+                    return {};
+                  },
+                ],
+              },
+            ],
+          },
         }),
         prompt,
         abortSignal: controller.signal,

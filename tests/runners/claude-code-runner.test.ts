@@ -75,13 +75,20 @@ describe("ClaudeCodeRunner", () => {
       title: "ABC-123: Fix the bug",
     });
 
-    expect(mockClaudeCode).toHaveBeenCalledWith("opus", {
-      cwd: "/tmp/workspace",
-      permissionMode: "bypassPermissions",
-      env: { SYMPHONY_PIPELINE: "1" },
-      settingSources: ["user", "project"],
-      maxBudgetUsd: 50,
-    });
+    expect(mockClaudeCode).toHaveBeenCalledWith(
+      "opus",
+      expect.objectContaining({
+        cwd: "/tmp/workspace",
+        permissionMode: "bypassPermissions",
+        env: { SYMPHONY_PIPELINE: "1" },
+        settingSources: ["user", "project"],
+        maxBudgetUsd: 50,
+        streamingInput: "always",
+        hooks: expect.objectContaining({
+          PreToolUse: expect.any(Array),
+        }),
+      }),
+    );
     expect(mockGenerateText).toHaveBeenCalledWith(
       expect.objectContaining({
         model: "mock-claude-model",
@@ -134,6 +141,120 @@ describe("ClaudeCodeRunner", () => {
       outputTokens: 5,
       totalTokens: 15,
     });
+  });
+
+  it("emits approval_auto_approved via PreToolUse hook for each tool call", async () => {
+    mockGenerateText.mockResolvedValueOnce({
+      text: "Done",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        totalTokens: 15,
+        inputTokenDetails: {
+          noCacheTokens: undefined,
+          cacheReadTokens: undefined,
+          cacheWriteTokens: undefined,
+        },
+        outputTokenDetails: {
+          textTokens: undefined,
+          reasoningTokens: undefined,
+        },
+      },
+    } as never);
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+    });
+
+    await runner.startSession({ prompt: "test", title: "test" });
+
+    // Extract the PreToolUse hook callback from the claudeCode() call
+    const claudeCodeArgs = mockClaudeCode.mock.calls.at(-1)![1] as Record<
+      string,
+      unknown
+    >;
+    const hooks = claudeCodeArgs.hooks as Record<
+      string,
+      Array<{
+        hooks: Array<(input: Record<string, unknown>) => Promise<unknown>>;
+      }>
+    >;
+    const preToolUseCallback = hooks.PreToolUse![0]!.hooks[0]!;
+
+    // Simulate a tool call
+    const result = await preToolUseCallback({
+      tool_name: "Bash",
+      tool_input: { command: "git status" },
+      tool_use_id: "toolu_123",
+    });
+
+    // Hook should return {} (proceed normally)
+    expect(result).toEqual({});
+
+    // Should have emitted an approval_auto_approved event
+    const toolEvents = events.filter(
+      (e) => e.event === "approval_auto_approved",
+    );
+    expect(toolEvents).toHaveLength(1);
+    expect(toolEvents[0]!.toolName).toBe("Bash");
+    expect(toolEvents[0]!.raw).toEqual({
+      params: { name: "Bash", input: { command: "git status" } },
+    });
+  });
+
+  it("does not emit event when PreToolUse hook receives non-string tool_name", async () => {
+    mockGenerateText.mockResolvedValueOnce({
+      text: "Done",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        totalTokens: 15,
+        inputTokenDetails: {
+          noCacheTokens: undefined,
+          cacheReadTokens: undefined,
+          cacheWriteTokens: undefined,
+        },
+        outputTokenDetails: {
+          textTokens: undefined,
+          reasoningTokens: undefined,
+        },
+      },
+    } as never);
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+    });
+
+    await runner.startSession({ prompt: "test", title: "test" });
+
+    const claudeCodeArgs = mockClaudeCode.mock.calls.at(-1)![1] as Record<
+      string,
+      unknown
+    >;
+    const hooks = claudeCodeArgs.hooks as Record<
+      string,
+      Array<{
+        hooks: Array<(input: Record<string, unknown>) => Promise<unknown>>;
+      }>
+    >;
+    const preToolUseCallback = hooks.PreToolUse![0]!.hooks[0]!;
+
+    // Call with undefined tool_name
+    const result = await preToolUseCallback({
+      tool_input: { command: "git status" },
+      tool_use_id: "toolu_456",
+    });
+
+    expect(result).toEqual({});
+    expect(
+      events.filter((e) => e.event === "approval_auto_approved"),
+    ).toHaveLength(0);
   });
 
   it("emits turn_failed on error and returns failed status", async () => {
@@ -291,13 +412,17 @@ describe("ClaudeCodeRunner", () => {
     await runner.startSession({ prompt: "test", title: "test" });
 
     // Should resolve "claude-sonnet-4-5" → "sonnet"
-    expect(mockClaudeCode).toHaveBeenCalledWith("sonnet", {
-      cwd: "/tmp/workspace",
-      permissionMode: "bypassPermissions",
-      env: { SYMPHONY_PIPELINE: "1" },
-      settingSources: ["user", "project"],
-      maxBudgetUsd: 50,
-    });
+    expect(mockClaudeCode).toHaveBeenCalledWith(
+      "sonnet",
+      expect.objectContaining({
+        cwd: "/tmp/workspace",
+        permissionMode: "bypassPermissions",
+        env: { SYMPHONY_PIPELINE: "1" },
+        settingSources: ["user", "project"],
+        maxBudgetUsd: 50,
+        streamingInput: "always",
+      }),
+    );
   });
 
   it("passes abortSignal to generateText for subprocess cleanup", async () => {
