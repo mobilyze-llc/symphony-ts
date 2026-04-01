@@ -3,14 +3,17 @@ import {
   execFile as execFileCb,
   spawn,
 } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
 import {
   type IncomingMessage,
   type Server,
   type ServerResponse,
   createServer,
 } from "node:http";
-import { dirname, resolve as pathResolve } from "node:path";
+import { homedir } from "node:os";
+import { dirname, join, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import {
   DEFAULT_OBSERVABILITY_REFRESH_MS,
@@ -155,6 +158,13 @@ export interface DeployPreviewResponse {
   running_issues_count: number;
 }
 
+export type ExecCommandFn = (
+  cmd: string,
+  args: string[],
+) => Promise<{ stdout: string; stderr: string }>;
+
+const defaultExecCommand: ExecCommandFn = promisify(execFileCb);
+
 export interface DashboardServerOptions {
   host: DashboardServerHost;
   hostname?: string;
@@ -170,6 +180,7 @@ export interface DashboardServerOptions {
   execDeploy?: ExecDeploy;
   /** Injectable deploy script spawner for streaming. Defaults to spawning ops/symphony-deploy. */
   spawnDeploy?: SpawnDeploy;
+  execCommand?: ExecCommandFn;
 }
 
 export interface DashboardServerInstance {
@@ -263,6 +274,26 @@ export function createDashboardRequestHandler(
   const execDeploy = options.execDeploy ?? defaultExecDeploy;
   const spawnDeployFn = options.spawnDeploy ?? defaultSpawnDeploy;
   let githubQueueCache: GitHubQueueCache | null = null;
+  const execCommand = options.execCommand ?? defaultExecCommand;
+
+  function clearSwitchUsageCache(): void {
+    claudeUsageCache = null;
+    claudeUsageInflight = null;
+  }
+
+  function writeSwitchCooldown(): void {
+    const symphonyDir = join(homedir(), ".symphony");
+    try {
+      mkdirSync(symphonyDir, { recursive: true });
+      writeFileSync(
+        join(symphonyDir, "auto-switch-last"),
+        new Date().toISOString(),
+        "utf8",
+      );
+    } catch {
+      // Best-effort: don't fail the switch if we can't write cooldown
+    }
+  }
 
   return async (request, response) => {
     try {
@@ -337,6 +368,69 @@ export function createDashboardRequestHandler(
         await readRequestBody(request);
         const refresh = await options.host.requestRefresh();
         writeJson(response, 202, refresh);
+        return;
+      }
+
+      if (url.pathname === "/api/v1/claude/switch") {
+        if (method !== "POST") {
+          writeMethodNotAllowed(response, ["POST"]);
+          return;
+        }
+
+        await readRequestBody(request);
+
+        // Check for running agents before switching
+        const snapshot = await readSnapshot(options.host, snapshotTimeoutMs);
+        const runningCount = snapshot.counts.running;
+        if (runningCount > 0) {
+          writeJsonError(response, 409, ERROR_CODES.switchRefusedRunning, {
+            message: `Cannot switch accounts while ${runningCount} agent${runningCount === 1 ? " is" : "s are"} running.`,
+          });
+          return;
+        }
+
+        // Execute cswap --switch
+        try {
+          await execCommand("cswap", ["--switch"]);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          writeJsonError(response, 500, ERROR_CODES.switchFailed, {
+            message: `Account switch failed: ${reason}`,
+          });
+          return;
+        }
+
+        // Clear usage cache so next usage fetch is fresh
+        clearSwitchUsageCache();
+
+        // Write cooldown timestamp for auto-switch
+        writeSwitchCooldown();
+
+        // Fetch fresh account info
+        let usageData: unknown;
+        try {
+          const { stdout } = await execCommand("ops/claude-usage", ["--json"]);
+          usageData = JSON.parse(stdout);
+        } catch (error) {
+          // Switch succeeded but usage fetch failed — return success with warning
+          const reason = error instanceof Error ? error.message : String(error);
+          writeJson(response, 200, {
+            switched: true,
+            usage: null,
+            warning: `Switch succeeded but usage fetch failed: ${reason}`,
+          });
+          return;
+        }
+
+        // Log switch event for audit trail
+        console.log(
+          `[claude-switch] Account switched at ${new Date().toISOString()}`,
+        );
+
+        writeJson(response, 200, {
+          switched: true,
+          usage: usageData,
+        });
         return;
       }
 
