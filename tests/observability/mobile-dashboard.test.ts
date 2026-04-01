@@ -236,4 +236,71 @@ describe("mobile-dashboard.html", () => {
     expect(html).toContain('id="screen-queue"');
     expect(html).toContain('id="screen-deploy"');
   });
+
+  // ── Usage Gauges (SYMPH-238) ──
+  it("contains usage-gauge elements", () => {
+    expect(html).toContain("usage-gauge");
+  });
+
+  it("contains a 5-hour usage gauge", () => {
+    expect(html).toContain("5-hour");
+  });
+
+  it("contains a weekly usage gauge", () => {
+    expect(html).toContain("weekly");
+  });
+
+  it("renders two gauge ring SVGs in the pipeline screen", () => {
+    expect(html).toContain('id="gauge-5h-fill"');
+    expect(html).toContain('id="gauge-weekly-fill"');
+  });
+
+  it("renders gauge percentage placeholders", () => {
+    expect(html).toContain('id="gauge-5h-percent"');
+    expect(html).toContain('id="gauge-weekly-percent"');
+  });
+
+  it("fetches usage data from /api/v1/claude/usage", () => {
+    expect(html).toContain("/api/v1/claude/usage");
+  });
+
+  it("does not hardcode localhost in usage fetch URL", () => {
+    expect(html).not.toMatch(/fetch\s*\(\s*['"]https?:\/\/localhost.*usage/);
+    expect(html).not.toMatch(/fetch\s*\(\s*['"]https?:\/\/127\.0\.0\.1.*usage/);
+  });
+
+  // ── Active Account Info (SYMPH-238) ──
+  it("contains the active-account section", () => {
+    expect(html).toContain("active-account");
+  });
+
+  it("contains the account-org element", () => {
+    expect(html).toContain("account-org");
+  });
+
+  it("renders an email display element", () => {
+    expect(html).toContain('id="account-email"');
+  });
+
+  it("renders an organization display element", () => {
+    expect(html).toContain('id="account-org"');
+  });
+
+  // ── Response Validation (SYMPH-238) ──
+  it("includes validation logic for the API response shape", () => {
+    expect(html).toContain("validateUsageResponse");
+  });
+
+  it("validates five_hour field presence", () => {
+    expect(html).toContain("five_hour");
+  });
+
+  it("validates weekly field presence", () => {
+    const scriptSection = html.slice(html.indexOf("<script>"));
+    expect(scriptSection).toContain("weekly");
+  });
+
+  it("validates account field presence", () => {
+    expect(html).toContain("account.email");
+  });
 });
