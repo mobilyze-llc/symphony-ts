@@ -190,6 +190,7 @@ export interface OrchestratorState {
   codexRateLimits: CodexRateLimits;
   issueStages: Record<string, string>;
   issueReworkCounts: Record<string, number>;
+  issuePassedStages: Record<string, string[]>;
   issueFirstDispatchedAt: Record<string, string>;
   issueExecutionHistory: Record<string, ExecutionHistory>;
 }
@@ -296,6 +297,7 @@ export function createInitialOrchestratorState(input: {
     codexRateLimits: null,
     issueStages: {},
     issueReworkCounts: {},
+    issuePassedStages: {},
     issueFirstDispatchedAt: {},
     issueExecutionHistory: {},
   };
