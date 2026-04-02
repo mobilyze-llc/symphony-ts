@@ -78,7 +78,7 @@ describe("global error handlers", () => {
     expect(entry.error_code).toBe("uncaught_exception");
   });
 
-  it("handleUnhandledRejection logs structured JSON and exits with code 70", () => {
+  it("handleUnhandledRejection logs structured JSON without exiting", () => {
     const reason = new Error("promise failed");
 
     handleUnhandledRejection(reason);
@@ -88,12 +88,12 @@ describe("global error handlers", () => {
     const entry = JSON.parse(written.trimEnd());
 
     expect(entry.level).toBe("error");
-    expect(entry.event).toBe("process_crash");
+    expect(entry.event).toBe("unhandled_rejection");
     expect(entry.error_code).toBe("unhandled_rejection");
     expect(entry.message).toBe("promise failed");
     expect(entry.stack).toContain("promise failed");
-    expect(process.exitCode).toBe(70);
-    expect(exitSpy).toHaveBeenCalledWith(70);
+    // Must NOT exit — unhandled rejections should not kill all concurrent workers
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 
   it("handleUnhandledRejection handles non-Error values", () => {
