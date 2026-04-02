@@ -19,6 +19,39 @@ import { SLACK_MAX_CHARS } from "../chunking.js";
  */
 const STREAM_OVERFLOW_CHARS = SLACK_MAX_CHARS;
 
+/**
+ * Detect Slack's "message_not_in_streaming_state" platform error.
+ * This occurs when the server auto-finalizes a stream after ~30s of inactivity,
+ * but the SDK's ChatStreamer state still shows 'in_progress'.
+ */
+function isStreamExpiredError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const err = error as Record<string, unknown>;
+
+  // Primary check: structured Slack platform error
+  if (
+    err.code === "slack_webapi_platform_error" &&
+    typeof err.data === "object" &&
+    err.data !== null &&
+    (err.data as Record<string, unknown>).error ===
+      "message_not_in_streaming_state"
+  ) {
+    return true;
+  }
+
+  // Defensive fallback: message-based check in case the SDK wraps or re-throws
+  if (
+    typeof err.message === "string" &&
+    err.message.includes("message_not_in_streaming_state")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 export class StreamConsumer {
   private client: WebClient;
   private channel: string;
@@ -63,8 +96,23 @@ export class StreamConsumer {
       this.charCount = 0;
     }
 
-    await this.streamer.append({ markdown_text: text });
-    this.charCount += text.length;
+    try {
+      await this.streamer.append({ markdown_text: text });
+      this.charCount += text.length;
+    } catch (error: unknown) {
+      if (!isStreamExpiredError(error)) {
+        throw error;
+      }
+
+      // Server already finalized the stream — discard without calling stop()
+      this.streamer = null;
+      this.charCount = 0;
+
+      // Create a fresh stream and retry the failed chunk exactly once
+      this.streamer = this.createStreamer();
+      await this.streamer.append({ markdown_text: text });
+      this.charCount += text.length;
+    }
   }
 
   /**
