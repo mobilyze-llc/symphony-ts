@@ -235,10 +235,10 @@ stages:
   initial_stage: investigate
 
   # Fast-track: issues with this label skip the investigate stage and start at the target stage.
-  # Remove or comment out this block if you do not need fast-track routing.
-  # fast_track:
-  #   label: trivial
-  #   initial_stage: implement
+  # Comment out this block to disable fast-track routing.
+  fast_track:
+    label: trivial
+    initial_stage: implement
 
   investigate:
     type: agent
@@ -315,6 +315,15 @@ Labels: {{ issue.labels | join: ", " }}
 
 You are in the INVESTIGATE stage. Your job is to analyze the issue and create an implementation plan.
 
+### Spec-Informed Investigation
+If the issue description contains a detailed spec with specific file paths, line numbers, and proposed changes (typical of spec-gen'd issues): DO NOT re-explore the codebase from scratch. Instead:
+1. Read the spec from the issue description
+2. Verify the cited files and line numbers are still accurate (quick reads, not full grep sweeps)
+3. Write INVESTIGATION-BRIEF.md by reformatting the spec content into the brief template below
+4. Post the workpad and complete
+
+Save full codebase exploration for issues with vague or ambiguous descriptions that lack specific file references.
+
 {% if issue.state == "Resume" %}
 ## RESUME CONTEXT
 This issue was previously blocked. Check the issue comments for a `## Resume Context` comment explaining what changed. Focus your investigation on the blocking reasons and what has been updated.
@@ -328,13 +337,16 @@ This issue was previously blocked. Check the issue comments for a `## Resume Con
 ### Workpad (investigate)
 After completing your investigation, create the workpad comment on this Linear issue.
 **Preferred**: Write the workpad content to a local `workpad.md` file and call `sync_workpad` with `issue_id` and `file_path`. Save the returned `comment_id` for future updates.
-**Fallback** (if `sync_workpad` is unavailable):
-1. First, search for an existing workpad comment using `linear_graphql`:
-   ```graphql
-   query { issue(id: "{{ issue.id }}") { comments { nodes { id body } } } }
-   ```
-   Look for a comment whose body starts with `## Workpad`.
-2. If no workpad comment exists, create one using `commentCreate`. If one exists, update it using `commentUpdate`.
+**Fallback** (if `sync_workpad` is unavailable): Use the `linear` CLI:
+```bash
+# Check for existing workpad comment
+linear issue comment list {{ issue.identifier }} --json
+# Create new comment (if no workpad exists)
+linear issue comment add {{ issue.identifier }} --body-file workpad.md
+# Update existing comment (commentId is a UUID from the list output)
+linear issue comment update <COMMENT_UUID> --body-file workpad.md
+```
+Note: `comment add` and `comment list` take the issue identifier (e.g. {{ issue.identifier }}). `comment update` takes a comment UUID.
 3. Use this template for the workpad body:
    ```
    ## Workpad
@@ -482,12 +494,13 @@ Read ALL comments on this Linear issue starting with `## Review Findings`. These
 ### Workpad (implement)
 Update the workpad comment at these milestones during implementation.
 **Preferred**: Edit your local `workpad.md` file and call `sync_workpad` with `issue_id`, `file_path`, and `comment_id` (from the investigate stage).
-**Fallback** (if `sync_workpad` is unavailable):
-1. Search for the existing workpad comment (body starts with `## Workpad`) using `linear_graphql`:
-   ```graphql
-   query { issue(id: "{{ issue.id }}") { comments { nodes { id body } } } }
-   ```
-2. Update it using `commentUpdate` with the comment's `id`.
+**Fallback** (if `sync_workpad` is unavailable): Use the `linear` CLI:
+```bash
+# Find existing workpad comment (look for body starting with "## Workpad")
+linear issue comment list {{ issue.identifier }} --json
+# Update it (commentId is a UUID from the list output)
+linear issue comment update <COMMENT_UUID> --body-file workpad.md
+```
 3. At each milestone, update the relevant sections:
    - **After starting implementation**: Check off Plan items as you complete them.
    - **After implementation is done**: Add a Notes entry (e.g., `- <timestamp> Implementation complete. PR #<number> opened.`), update Validation with actual commands run.
@@ -513,9 +526,19 @@ When you are done:
 ## Stage: Review
 You are a review agent.
 
-First, run `/simplify focus on code reuse and efficiency` to check for codebase reuse and efficiency improvements. If `/simplify` makes changes, commit them as a separate commit, then re-run verify commands. If tests fail, revert with `git checkout -- .` and proceed without the simplification.
+### Step 1: Measure the diff
+Run `git diff main --shortstat` to measure the change size. Parse the output to get the number of files changed and total lines (insertions + deletions).
 
-Then load and execute the /self-moa-review skill.
+### Step 2: Choose review depth based on diff size
+
+**If the change touches ≤3 files AND ≤20 total lines changed** — run lightweight review:
+1. Load and execute the `/codex-review` skill. This runs a single Codex pass with Opus validation — no council, no cross-examination.
+
+**Otherwise (larger change)** — run full council review:
+1. Run `/simplify focus on code reuse and efficiency` to check for codebase reuse and efficiency improvements. If `/simplify` makes changes, commit them as a separate commit, then re-run verify commands. If tests fail, revert with `git checkout -- .` and proceed without the simplification.
+2. Then load and execute the `/self-moa-review` skill.
+
+### Step 3: Evaluate findings
 
 The PR for this issue is on the current branch. The issue description contains the frozen spec. The PR body contains Tool Output and SAST Output sections from the implementation agent.
 
@@ -544,7 +567,17 @@ This repo uses GitHub's merge queue. When you run `gh pr merge`, GitHub will:
 In BOTH cases, the merge is not immediate — GitHub queues it, rebases, runs CI on the rebased version, then merges. This is normal behavior. Do NOT interpret it as a failure.
 
 ### Step 1: Merge the PR
-Run `gh pr merge --squash --delete-branch --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")`. This single command is sufficient. Do NOT:
+First, get the PR number for the current branch:
+```
+PR_NUMBER=$(gh pr view --json number --jq '.number')
+```
+Then merge:
+```
+gh pr merge $PR_NUMBER --auto
+```
+This single command is sufficient. The merge queue controls the merge strategy (squash) and branch cleanup.
+
+Do NOT pass `--squash`, `--delete-branch`, `--repo`, or `--admin` — the merge queue controls these. Do NOT:
 - Retry the merge command if you see a "merge queue" or "auto-merge" response — that IS success
 - Run `gh pr merge` with `--admin` to bypass the queue
 - Modify any code in this stage
@@ -601,14 +634,14 @@ If the PR has merge conflicts (mergeable is "CONFLICTING" or mergeStateStatus in
 ### Workpad (merge)
 After merging the PR, update the workpad comment one final time.
 **Preferred**: Edit your local `workpad.md` file and call `sync_workpad` with `issue_id`, `file_path`, and `comment_id`.
-**Fallback** (if `sync_workpad` is unavailable):
-1. Search for the existing workpad comment (body starts with `## Workpad`) using `linear_graphql`:
-   ```graphql
-   query { issue(id: "{{ issue.id }}") { comments { nodes { id body } } } }
-   ```
-2. Update it using `commentUpdate`:
-   - Check off all remaining Plan and Acceptance Criteria items.
-   - Add a final Notes entry: `- <timestamp> PR merged. Issue complete.`
+**Fallback** (if `sync_workpad` is unavailable): Use the `linear` CLI:
+```bash
+linear issue comment list {{ issue.identifier }} --json
+linear issue comment update <COMMENT_UUID> --body-file workpad.md
+```
+Update the workpad to:
+- Check off all remaining Plan and Acceptance Criteria items.
+- Add a final Notes entry: `- <timestamp> PR merged. Issue complete.`
 
 - When you have successfully merged the PR, output the exact text `[STAGE_COMPLETE]` as the very last line of your final message.
 {% endif %}
@@ -624,12 +657,14 @@ You maintain a single persistent `## Workpad` comment on the Linear issue. This 
 **Critical rules:**
 - **Never create multiple workpad comments.** Always search for an existing comment with `## Workpad` in its body before creating a new one.
 - **Update at milestones only** — plan finalized, implementation done, validation complete. Do NOT sync after every minor change.
-- **Prefer `sync_workpad` over raw GraphQL.** Write your workpad content to a local `workpad.md` file, then call `sync_workpad` with `issue_id`, `file_path`, and optionally `comment_id` (returned from the first sync). This keeps the workpad body out of your conversation context and saves tokens. Fall back to `linear_graphql` only if `sync_workpad` is unavailable.
-- **`linear_graphql` fallback patterns** (use only if `sync_workpad` is unavailable):
-  - Search comments: `query { issue(id: "<issue_id>") { comments { nodes { id body } } } }`
-  - Create comment: `mutation { commentCreate(input: { issueId: "<issue_id>", body: "<markdown>" }) { comment { id } } }`
-  - Update comment: `mutation { commentUpdate(id: "<comment_id>", input: { body: "<markdown>" }) { comment { id } } }`
-- **Never use `__type` or `__schema` introspection queries** against the Linear API. Use the exact patterns above.
+- **Prefer `sync_workpad` over raw GraphQL.** Write your workpad content to a local `workpad.md` file, then call `sync_workpad` with `issue_id`, `file_path`, and optionally `comment_id` (returned from the first sync). This keeps the workpad body out of your conversation context and saves tokens.
+- **`linear` CLI fallback** (if `sync_workpad` is unavailable):
+  ```bash
+  linear issue comment list <ISSUE_KEY> --json      # Find existing workpad comment
+  linear issue comment add <ISSUE_KEY> --body-file workpad.md   # Create new comment
+  linear issue comment update <COMMENT_UUID> --body-file workpad.md  # Update existing
+  ```
+  Note: `add` and `list` take the issue identifier (e.g. SYMPH-246). `update` takes a comment UUID (from `list --json` output).
 
 ## Media in Workpads (fileUpload)
 
