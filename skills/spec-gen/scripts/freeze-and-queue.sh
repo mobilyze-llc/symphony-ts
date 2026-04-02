@@ -165,6 +165,27 @@ resolve_spec_label() {
   fi
 }
 
+# ── Resolve "trivial" workspace label ID ─────────────────────────────────────
+# Global populated by resolve_trivial_label():
+TRIVIAL_LABEL_ID=""
+TRIVIAL_LABEL_IDS_LINE=""
+
+resolve_trivial_label() {
+  local labels_json
+  labels_json=$(run_with_timeout "resolving trivial workspace label" $LINEAR_CLI api \
+    'query { issueLabels(filter: { name: { eq: "trivial" } }) { nodes { id name } } }') || true
+
+  TRIVIAL_LABEL_ID=$(echo "$labels_json" | jq -r '.data.issueLabels.nodes[] | select(.name == "trivial") | .id' | head -1)
+
+  if [[ -n "$TRIVIAL_LABEL_ID" ]]; then
+    TRIVIAL_LABEL_IDS_LINE="labelIds: [\"${TRIVIAL_LABEL_ID}\"]"
+    echo "Trivial label: $TRIVIAL_LABEL_ID"
+  else
+    echo "WARNING: 'trivial' workspace label not found. Trivial issues will not be labeled (fast-track routing will not work)." >&2
+    TRIVIAL_LABEL_IDS_LINE=""
+  fi
+}
+
 # ── Helper functions ──────────────────────────────────────────────────────────
 
 # Helper: create a blocks relation via high-level linear CLI command.
@@ -296,6 +317,9 @@ if [[ "$TRIVIAL" == true ]]; then
   # Resolve all states in one batch query
   resolve_all_states
   TODO_STATE_NAME="Todo"
+
+  # Resolve "trivial" label for fast-track routing
+  resolve_trivial_label
   if [[ -z "$TODO_STATE_ID" ]]; then
     echo "WARNING: 'Todo' state not found. Falling back to 'Backlog'..." >&2
     TODO_STATE_ID="$BACKLOG_STATE_ID"
@@ -306,14 +330,15 @@ if [[ "$TRIVIAL" == true ]]; then
   TRIVIAL_GQL_TMPFILE=$(mktemp)
   trap 'rm -f "$TRIVIAL_GQL_TMPFILE"' EXIT
   if [[ -n "$TRIVIAL_DESC" ]]; then
-    cat > "$TRIVIAL_GQL_TMPFILE" <<'GQLEOF'
-mutation($title: String!, $description: String, $teamId: String!, $stateId: String!, $projectId: String!) {
+    cat > "$TRIVIAL_GQL_TMPFILE" <<GQLEOF
+mutation(\$title: String!, \$description: String, \$teamId: String!, \$stateId: String!, \$projectId: String!) {
   issueCreate(input: {
-    teamId: $teamId
-    title: $title
-    description: $description
-    stateId: $stateId
-    projectId: $projectId
+    teamId: \$teamId
+    title: \$title
+    description: \$description
+    stateId: \$stateId
+    projectId: \$projectId
+    ${TRIVIAL_LABEL_IDS_LINE}
   }) {
     success
     issue { id identifier url }
@@ -328,13 +353,14 @@ GQLEOF
       --variable "projectId=$PROJECT_ID" \
       < "$TRIVIAL_GQL_TMPFILE")
   else
-    cat > "$TRIVIAL_GQL_TMPFILE" <<'GQLEOF'
-mutation($title: String!, $teamId: String!, $stateId: String!, $projectId: String!) {
+    cat > "$TRIVIAL_GQL_TMPFILE" <<GQLEOF
+mutation(\$title: String!, \$teamId: String!, \$stateId: String!, \$projectId: String!) {
   issueCreate(input: {
-    teamId: $teamId
-    title: $title
-    stateId: $stateId
-    projectId: $projectId
+    teamId: \$teamId
+    title: \$title
+    stateId: \$stateId
+    projectId: \$projectId
+    ${TRIVIAL_LABEL_IDS_LINE}
   }) {
     success
     issue { id identifier url }
