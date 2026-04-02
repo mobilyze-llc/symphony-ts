@@ -632,10 +632,10 @@ describe("session metrics", () => {
       ).toBe("Fix the bug");
     });
 
-    it("truncates long string arguments to 60 chars", () => {
+    it("preserves long string arguments without truncation", () => {
       const longValue = "A".repeat(80);
       expect(buildActivityContext("WebSearch", { query: longValue })).toBe(
-        `${"A".repeat(60)}…`,
+        longValue,
       );
     });
 
