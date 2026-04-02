@@ -9,6 +9,50 @@ import type { ExecutionHistory } from "../domain/model.js";
 import { getDisplayVersion } from "../version.js";
 
 // ---------------------------------------------------------------------------
+// Block Kit types (minimal inline — avoids @slack/types dependency)
+// ---------------------------------------------------------------------------
+
+export interface SlackTextObject {
+  type: "plain_text" | "mrkdwn";
+  text: string;
+  emoji?: boolean;
+}
+
+export interface SlackHeaderBlock {
+  type: "header";
+  text: SlackTextObject;
+}
+
+export interface SlackSectionBlock {
+  type: "section";
+  text: SlackTextObject;
+}
+
+export interface SlackDividerBlock {
+  type: "divider";
+}
+
+export interface SlackContextBlock {
+  type: "context";
+  elements: SlackTextObject[];
+}
+
+export type SlackBlock =
+  | SlackHeaderBlock
+  | SlackSectionBlock
+  | SlackDividerBlock
+  | SlackContextBlock;
+
+// ---------------------------------------------------------------------------
+// Formatted notification result
+// ---------------------------------------------------------------------------
+
+export interface FormattedNotification {
+  text: string;
+  blocks?: SlackBlock[];
+}
+
+// ---------------------------------------------------------------------------
 // Event types (discriminated union)
 // ---------------------------------------------------------------------------
 
@@ -121,11 +165,27 @@ export function formatStageTimeline(history: ExecutionHistory): string {
     .join("\n");
 }
 
+export function formatTokensCompact(tokens: number): string {
+  if (tokens >= 1_000_000) {
+    const value = tokens / 1_000_000;
+    const rounded = Math.round(value * 10) / 10;
+    return `${rounded % 1 === 0 ? rounded.toFixed(0) : rounded.toFixed(1)}M`;
+  }
+  if (tokens >= 1_000) {
+    const value = tokens / 1_000;
+    const rounded = Math.round(value * 10) / 10;
+    return `${rounded % 1 === 0 ? rounded.toFixed(0) : rounded.toFixed(1)}k`;
+  }
+  return `${tokens}`;
+}
+
 // ---------------------------------------------------------------------------
 // Message formatter
 // ---------------------------------------------------------------------------
 
-export function formatNotification(event: PipelineNotificationEvent): string {
+export function formatNotification(
+  event: PipelineNotificationEvent,
+): FormattedNotification {
   const version = `_symphony-ts v${getDisplayVersion()}_`;
 
   switch (event.type) {
@@ -135,17 +195,19 @@ export function formatNotification(event: PipelineNotificationEvent): string {
         parts.push(`Dashboard: ${event.dashboardUrl}`);
       }
       parts.push(version);
-      return parts.join("\n");
+      return { text: parts.join("\n") };
     }
 
     case "pipeline_stopped": {
       const total = event.completedCount + event.failedCount;
-      return [
-        `:stop_sign: *Pipeline stopped* — ${event.productName}`,
-        `Completed: ${event.completedCount} · Failed: ${event.failedCount} · Total: ${total}`,
-        `Duration: ${formatDurationMs(event.durationMs)}`,
-        version,
-      ].join("\n");
+      return {
+        text: [
+          `:stop_sign: *Pipeline stopped* — ${event.productName}`,
+          `Completed: ${event.completedCount} · Failed: ${event.failedCount} · Total: ${total}`,
+          `Duration: ${formatDurationMs(event.durationMs)}`,
+          version,
+        ].join("\n"),
+      };
     }
 
     case "issue_completed": {
@@ -167,7 +229,62 @@ export function formatNotification(event: PipelineNotificationEvent): string {
         parts.push(`Rework cycles: ${event.reworkCount}`);
       }
       parts.push(version);
-      return parts.join("\n");
+      const text = parts.join("\n");
+
+      // Build Block Kit layout for issue_completed
+      const blocks: SlackBlock[] = [
+        {
+          type: "header",
+          text: {
+            type: "plain_text",
+            text: `✅ Issue completed — ${event.issueIdentifier}`,
+            emoji: true,
+          },
+        },
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text:
+              event.issueUrl !== null
+                ? `*<${event.issueUrl}|${event.issueTitle}>*`
+                : `*${event.issueTitle}*`,
+          },
+        },
+      ];
+
+      if (event.executionHistory.length > 0) {
+        blocks.push({ type: "divider" });
+        const stageLines = event.executionHistory
+          .map(
+            (record) =>
+              `\`${record.stageName}\` ${formatDurationMs(record.durationMs)} · ${formatTokensCompact(record.totalTokens)} tokens · ${record.outcome}`,
+          )
+          .join("\n");
+        blocks.push({
+          type: "section",
+          text: { type: "mrkdwn", text: stageLines },
+        });
+      }
+
+      blocks.push({ type: "divider" });
+
+      const totalLine = `*Total:* ${formatDurationMs(event.totalDurationMs)} · ${formatTokensCompact(event.totalTokens)} tokens`;
+      const summaryParts = [totalLine];
+      if (event.reworkCount > 0) {
+        summaryParts.push(`Rework cycles: ${event.reworkCount}`);
+      }
+      blocks.push({
+        type: "section",
+        text: { type: "mrkdwn", text: summaryParts.join("\n") },
+      });
+
+      blocks.push({
+        type: "context",
+        elements: [{ type: "mrkdwn", text: version }],
+      });
+
+      return { text, blocks };
     }
 
     case "issue_failed": {
@@ -185,7 +302,7 @@ export function formatNotification(event: PipelineNotificationEvent): string {
         parts.push(`Retries exhausted (attempt ${event.retryAttempt ?? "?"})`);
       }
       parts.push(version);
-      return parts.join("\n");
+      return { text: parts.join("\n") };
     }
 
     case "stall_killed": {
@@ -198,16 +315,18 @@ export function formatNotification(event: PipelineNotificationEvent): string {
       }
       parts.push(`Stalled for: ${formatDurationMs(event.stallDurationMs)}`);
       parts.push(version);
-      return parts.join("\n");
+      return { text: parts.join("\n") };
     }
 
     case "infra_error": {
-      return [
-        `:rotating_light: *Infra error* — ${event.issueIdentifier}`,
-        `*${event.issueTitle}*`,
-        `Error: ${event.errorReason}`,
-        version,
-      ].join("\n");
+      return {
+        text: [
+          `:rotating_light: *Infra error* — ${event.issueIdentifier}`,
+          `*${event.issueTitle}*`,
+          `Error: ${event.errorReason}`,
+          version,
+        ].join("\n"),
+      };
     }
 
     case "issue_dispatched": {
@@ -225,7 +344,7 @@ export function formatNotification(event: PipelineNotificationEvent): string {
         parts.push(`Rework #${event.reworkCount}`);
       }
       parts.push(version);
-      return parts.join("\n");
+      return { text: parts.join("\n") };
     }
 
     case "issue_dropped": {
@@ -238,7 +357,7 @@ export function formatNotification(event: PipelineNotificationEvent): string {
       }
       parts.push(`Reason: ${event.reason}`);
       parts.push(version);
-      return parts.join("\n");
+      return { text: parts.join("\n") };
     }
   }
 }
@@ -248,7 +367,7 @@ export function formatNotification(event: PipelineNotificationEvent): string {
 // ---------------------------------------------------------------------------
 
 export interface NotificationPoster {
-  post(channel: string, text: string): Promise<void>;
+  post(channel: string, text: string, blocks?: SlackBlock[]): Promise<void>;
 }
 
 export function createSlackPoster(input: {
@@ -268,9 +387,17 @@ export function createSlackPoster(input: {
   };
 
   return {
-    async post(channel: string, text: string): Promise<void> {
+    async post(
+      channel: string,
+      text: string,
+      blocks?: SlackBlock[],
+    ): Promise<void> {
       const client = await getClient();
-      await client.chat.postMessage({ channel, text });
+      await client.chat.postMessage({
+        channel,
+        text,
+        ...(blocks !== undefined ? { blocks } : {}),
+      });
     },
   };
 }
@@ -303,8 +430,8 @@ export class PipelineNotifier implements PipelineNotificationSink {
   }
 
   notify(event: PipelineNotificationEvent): void {
-    const text = formatNotification(event);
-    const p = this.poster.post(this.channel, text).catch((error) => {
+    const { text, blocks } = formatNotification(event);
+    const p = this.poster.post(this.channel, text, blocks).catch((error) => {
       this.onError(error);
     });
     this.inflight.add(p);

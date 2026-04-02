@@ -5,10 +5,12 @@ import {
   formatDurationMs,
   formatNotification,
   formatStageTimeline,
+  formatTokensCompact,
 } from "../../src/orchestrator/pipeline-notifier.js";
 import type {
   NotificationPoster,
   PipelineNotificationEvent,
+  SlackBlock,
 } from "../../src/orchestrator/pipeline-notifier.js";
 
 describe("formatDurationMs", () => {
@@ -84,43 +86,43 @@ describe("formatStageTimeline", () => {
 
 describe("formatNotification", () => {
   it("formats pipeline_started", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "pipeline_started",
       productName: "symphony",
       dashboardUrl: "http://localhost:3000",
     });
-    expect(text).toContain("Pipeline started");
-    expect(text).toContain("symphony");
-    expect(text).toContain("http://localhost:3000");
+    expect(result.text).toContain("Pipeline started");
+    expect(result.text).toContain("symphony");
+    expect(result.text).toContain("http://localhost:3000");
   });
 
   it("formats pipeline_started without dashboard url", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "pipeline_started",
       productName: "symphony",
       dashboardUrl: null,
     });
-    expect(text).toContain("Pipeline started");
-    expect(text).not.toContain("Dashboard");
+    expect(result.text).toContain("Pipeline started");
+    expect(result.text).not.toContain("Dashboard");
   });
 
   it("formats pipeline_stopped", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "pipeline_stopped",
       productName: "symphony",
       completedCount: 5,
       failedCount: 2,
       durationMs: 3_600_000,
     });
-    expect(text).toContain("Pipeline stopped");
-    expect(text).toContain("Completed: 5");
-    expect(text).toContain("Failed: 2");
-    expect(text).toContain("Total: 7");
-    expect(text).toContain("1h");
+    expect(result.text).toContain("Pipeline stopped");
+    expect(result.text).toContain("Completed: 5");
+    expect(result.text).toContain("Failed: 2");
+    expect(result.text).toContain("Total: 7");
+    expect(result.text).toContain("1h");
   });
 
   it("formats issue_completed", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "issue_completed",
       issueIdentifier: "SYMPH-42",
       issueTitle: "Add pagination",
@@ -145,17 +147,18 @@ describe("formatNotification", () => {
       totalTokens: 20000,
       totalDurationMs: 180_000,
     });
-    expect(text).toContain("Issue completed");
-    expect(text).toContain("SYMPH-42");
-    expect(text).toContain("Add pagination");
-    expect(text).toContain("investigate");
-    expect(text).toContain("implement");
-    expect(text).toContain("20,000 tokens");
-    expect(text).toContain("Rework cycles: 1");
+    expect(result.text).toContain("Issue completed");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Add pagination");
+    expect(result.text).toContain("investigate");
+    expect(result.text).toContain("implement");
+    expect(result.text).toContain("20,000 tokens");
+    expect(result.text).toContain("Rework cycles: 1");
+    expect(result.blocks).toBeDefined();
   });
 
   it("formats issue_completed without rework", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "issue_completed",
       issueIdentifier: "SYMPH-42",
       issueTitle: "Add pagination",
@@ -165,11 +168,11 @@ describe("formatNotification", () => {
       totalTokens: 10000,
       totalDurationMs: 60_000,
     });
-    expect(text).not.toContain("Rework");
+    expect(result.text).not.toContain("Rework");
   });
 
   it("formats issue_failed", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "issue_failed",
       issueIdentifier: "SYMPH-42",
       issueTitle: "Add pagination",
@@ -178,14 +181,14 @@ describe("formatNotification", () => {
       retriesExhausted: true,
       retryAttempt: 3,
     });
-    expect(text).toContain("Issue failed");
-    expect(text).toContain("SYMPH-42");
-    expect(text).toContain("Max retries exceeded");
-    expect(text).toContain("Retries exhausted (attempt 3)");
+    expect(result.text).toContain("Issue failed");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Max retries exceeded");
+    expect(result.text).toContain("Retries exhausted (attempt 3)");
   });
 
   it("formats issue_failed without exhaustion", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "issue_failed",
       issueIdentifier: "SYMPH-42",
       issueTitle: "Fix bug",
@@ -194,49 +197,49 @@ describe("formatNotification", () => {
       retriesExhausted: false,
       retryAttempt: null,
     });
-    expect(text).toContain("Issue failed");
-    expect(text).not.toContain("Retries exhausted");
+    expect(result.text).toContain("Issue failed");
+    expect(result.text).not.toContain("Retries exhausted");
   });
 
   it("formats stall_killed", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "stall_killed",
       issueIdentifier: "SYMPH-42",
       issueTitle: "Add pagination",
       stageName: "implement",
       stallDurationMs: 900_000,
     });
-    expect(text).toContain("Stall killed");
-    expect(text).toContain("SYMPH-42");
-    expect(text).toContain("Stage: implement");
-    expect(text).toContain("15m");
+    expect(result.text).toContain("Stall killed");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Stage: implement");
+    expect(result.text).toContain("15m");
   });
 
   it("formats stall_killed without stage name", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "stall_killed",
       issueIdentifier: "SYMPH-42",
       issueTitle: "Fix bug",
       stageName: null,
       stallDurationMs: 300_000,
     });
-    expect(text).not.toContain("Stage:");
+    expect(result.text).not.toContain("Stage:");
   });
 
   it("formats infra_error", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "infra_error",
       issueIdentifier: "SYMPH-42",
       issueTitle: "Add pagination",
       errorReason: "Failed to start agent process",
     });
-    expect(text).toContain("Infra error");
-    expect(text).toContain("SYMPH-42");
-    expect(text).toContain("Failed to start agent process");
+    expect(result.text).toContain("Infra error");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Failed to start agent process");
   });
 
   it("formats issue_dispatched for first entry", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "issue_dispatched",
       issueIdentifier: "SYMPH-42",
       issueTitle: "Add pagination",
@@ -244,15 +247,15 @@ describe("formatNotification", () => {
       stageName: "investigate",
       reworkCount: 0,
     });
-    expect(text).toContain("Issue dispatched");
-    expect(text).toContain("SYMPH-42");
-    expect(text).toContain("Add pagination");
-    expect(text).toContain("Stage: investigate");
-    expect(text).not.toContain("Rework");
+    expect(result.text).toContain("Issue dispatched");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Add pagination");
+    expect(result.text).toContain("Stage: investigate");
+    expect(result.text).not.toContain("Rework");
   });
 
   it("formats issue_dispatched with rework count", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "issue_dispatched",
       issueIdentifier: "SYMPH-42",
       issueTitle: "Add pagination",
@@ -260,35 +263,102 @@ describe("formatNotification", () => {
       stageName: "implement",
       reworkCount: 2,
     });
-    expect(text).toContain("Issue dispatched");
-    expect(text).toContain("Rework #2");
-    expect(text).toContain("Stage: implement");
+    expect(result.text).toContain("Issue dispatched");
+    expect(result.text).toContain("Rework #2");
+    expect(result.text).toContain("Stage: implement");
   });
 
   it("formats issue_dropped", () => {
-    const text = formatNotification({
+    const result = formatNotification({
       type: "issue_dropped",
       issueIdentifier: "SYMPH-42",
       issueTitle: "Add pagination",
       issueUrl: "https://linear.app/mobilyze-llc/issue/SYMPH-42",
       reason: "issue no longer in candidate list",
     });
-    expect(text).toContain("Issue left pipeline");
-    expect(text).toContain("SYMPH-42");
-    expect(text).toContain("Add pagination");
-    expect(text).toContain("issue no longer in candidate list");
+    expect(result.text).toContain("Issue left pipeline");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Add pagination");
+    expect(result.text).toContain("issue no longer in candidate list");
+  });
+
+  it("returns text only with no blocks for non-issue_completed events", () => {
+    const events: PipelineNotificationEvent[] = [
+      { type: "pipeline_started", productName: "test", dashboardUrl: null },
+      {
+        type: "pipeline_stopped",
+        productName: "test",
+        completedCount: 1,
+        failedCount: 0,
+        durationMs: 5000,
+      },
+      {
+        type: "issue_failed",
+        issueIdentifier: "T-1",
+        issueTitle: "t",
+        issueUrl: null,
+        failureReason: null,
+        retriesExhausted: false,
+        retryAttempt: null,
+      },
+      {
+        type: "stall_killed",
+        issueIdentifier: "T-1",
+        issueTitle: "t",
+        stageName: null,
+        stallDurationMs: 1000,
+      },
+      {
+        type: "infra_error",
+        issueIdentifier: "T-1",
+        issueTitle: "t",
+        errorReason: "err",
+      },
+      {
+        type: "issue_dispatched",
+        issueIdentifier: "T-1",
+        issueTitle: "t",
+        issueUrl: null,
+        stageName: null,
+        reworkCount: 0,
+      },
+      {
+        type: "issue_dropped",
+        issueIdentifier: "T-1",
+        issueTitle: "t",
+        issueUrl: null,
+        reason: "dropped",
+      },
+    ];
+    for (const event of events) {
+      const result = formatNotification(event);
+      expect(result.text).toBeTruthy();
+      expect(result).not.toHaveProperty("blocks");
+    }
   });
 });
 
 describe("PipelineNotifier", () => {
   function createMockPoster(): NotificationPoster & {
-    calls: Array<{ channel: string; text: string }>;
+    calls: Array<{ channel: string; text: string; blocks?: SlackBlock[] }>;
   } {
-    const calls: Array<{ channel: string; text: string }> = [];
+    const calls: Array<{
+      channel: string;
+      text: string;
+      blocks?: SlackBlock[];
+    }> = [];
     return {
       calls,
-      async post(channel: string, text: string): Promise<void> {
-        calls.push({ channel, text });
+      async post(
+        channel: string,
+        text: string,
+        blocks?: SlackBlock[],
+      ): Promise<void> {
+        if (blocks !== undefined) {
+          calls.push({ channel, text, blocks });
+        } else {
+          calls.push({ channel, text });
+        }
       },
     };
   }
@@ -465,5 +535,59 @@ describe("PipelineNotifier", () => {
 
     // flush with a short timeout should resolve despite hanging poster
     await notifier.flush(100);
+  });
+
+  it("passes blocks to poster for issue_completed events", async () => {
+    const poster = createMockPoster();
+    const notifier = new PipelineNotifier({
+      channel: "C12345",
+      poster,
+    });
+
+    notifier.notify({
+      type: "issue_completed",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: "https://linear.app/mobilyze-llc/issue/SYMPH-42",
+      executionHistory: [
+        {
+          stageName: "implement",
+          durationMs: 120_000,
+          totalTokens: 15000,
+          turns: 5,
+          outcome: "completed",
+        },
+      ],
+      reworkCount: 0,
+      totalTokens: 15000,
+      totalDurationMs: 120_000,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(poster.calls).toHaveLength(1);
+    expect(poster.calls[0]?.text).toContain("Issue completed");
+    expect(poster.calls[0]?.blocks).toBeDefined();
+    expect(Array.isArray(poster.calls[0]?.blocks)).toBe(true);
+  });
+});
+
+describe("formatTokensCompact", () => {
+  it("formats tokens below 1k as plain numbers", () => {
+    expect(formatTokensCompact(999)).toBe("999");
+    expect(formatTokensCompact(0)).toBe("0");
+  });
+
+  it("formats tokens in thousands with k suffix", () => {
+    expect(formatTokensCompact(1000)).toBe("1k");
+    expect(formatTokensCompact(5000)).toBe("5k");
+    expect(formatTokensCompact(12300)).toBe("12.3k");
+    expect(formatTokensCompact(999_999)).toBe("1000k");
+  });
+
+  it("formats tokens in millions with M suffix", () => {
+    expect(formatTokensCompact(1_000_000)).toBe("1M");
+    expect(formatTokensCompact(1_200_000)).toBe("1.2M");
+    expect(formatTokensCompact(10_000_000)).toBe("10M");
   });
 });
