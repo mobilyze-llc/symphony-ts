@@ -310,7 +310,6 @@ describe("ClaudeCodeRunner", () => {
 
     expect(result).toEqual({});
   });
-
   it("emits turn_failed on error and returns failed status", async () => {
     mockGenerateText.mockRejectedValueOnce(new Error("Rate limit exceeded"));
 
