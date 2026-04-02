@@ -1894,6 +1894,15 @@ body {
     } catch { return ''; }
   }
 
+  function formatResetTime(isoStr, fallback) {
+    if (!isoStr) return fallback || 'unknown';
+    try {
+      const d = new Date(isoStr);
+      if (Number.isNaN(d.getTime())) return fallback || 'unknown';
+      return 'Resets ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    } catch { return fallback || 'unknown'; }
+  }
+
   // ── Usage Gauges & Account Info ──
   function gaugeColorClass(pct) {
     if (pct >= 90) return 'danger';
@@ -1936,20 +1945,20 @@ body {
     if (data.five_hour == null || typeof data.five_hour !== 'object') {
       return 'Invalid usage response: missing five_hour data';
     }
-    if (typeof data.five_hour.percentage !== 'number') {
-      return 'Invalid usage response: five_hour.percentage must be a number';
+    if (typeof data.five_hour.utilization !== 'number') {
+      return 'Invalid usage response: five_hour.utilization must be a number';
     }
-    if (data.weekly == null || typeof data.weekly !== 'object') {
-      return 'Invalid usage response: missing weekly data';
+    if (data.seven_day == null || typeof data.seven_day !== 'object') {
+      return 'Invalid usage response: missing seven_day data';
     }
-    if (typeof data.weekly.percentage !== 'number') {
-      return 'Invalid usage response: weekly.percentage must be a number';
+    if (typeof data.seven_day.utilization !== 'number') {
+      return 'Invalid usage response: seven_day.utilization must be a number';
     }
-    if (data.account == null || typeof data.account !== 'object') {
-      return 'Invalid usage response: missing account data';
+    if (data.active_account == null || typeof data.active_account !== 'object') {
+      return 'Invalid usage response: missing active_account data';
     }
-    if (typeof data.account.email !== 'string') {
-      return 'Invalid usage response: account.email must be a string';
+    if (typeof data.active_account.email !== 'string') {
+      return 'Invalid usage response: active_account.email must be a string';
     }
     return null;
   }
@@ -1971,26 +1980,20 @@ body {
 
         // Update 5-hour gauge
         const fiveHour = data.five_hour;
-        const fiveHourDetail = (fiveHour.used != null && fiveHour.limit != null)
-          ? fiveHour.used + ' / ' + fiveHour.limit
-          : '5-hour usage';
-        setGauge('5h', fiveHour.percentage, fiveHourDetail);
+        setGauge('5h', fiveHour.utilization, formatResetTime(fiveHour.resets_at, '5-hour usage'));
 
-        // Update weekly gauge
-        const weekly = data.weekly;
-        const weeklyDetail = (weekly.used != null && weekly.limit != null)
-          ? weekly.used + ' / ' + weekly.limit
-          : 'weekly usage';
-        setGauge('weekly', weekly.percentage, weeklyDetail);
+        // Update 7-day gauge (DOM IDs remain 'weekly' — see SYMPH-250 spec)
+        const sevenDay = data.seven_day;
+        setGauge('weekly', sevenDay.utilization, formatResetTime(sevenDay.resets_at, '7-day usage'));
 
         // Update active account info
         const emailEl = $('#account-email');
         const orgEl = $('#account-org');
         if (emailEl) {
-          emailEl.innerHTML = '<span class="account-status-dot"></span>' + esc(data.account.email);
+          emailEl.innerHTML = '<span class="account-status-dot"></span>' + esc(data.active_account.email);
         }
         if (orgEl) {
-          orgEl.textContent = data.account.organization || '\u2014';
+          orgEl.textContent = data.active_account.org || '\u2014';
         }
       })
       .catch(function (err) {
