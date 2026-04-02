@@ -251,6 +251,107 @@ describe("OrchestratorRuntimeHost", () => {
     });
   });
 
+  it("maps recentActivity entries to recent_events in issue details", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    fakeRunner.emit("1", {
+      event: "session_started",
+      timestamp: "2026-03-06T00:00:01.000Z",
+      codexAppServerPid: "1001",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+    fakeRunner.emit("1", {
+      event: "notification",
+      timestamp: "2026-03-06T00:00:02.000Z",
+      codexAppServerPid: "1001",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      message: "Working on tests",
+    });
+    fakeRunner.emit("1", {
+      event: "turn_completed",
+      timestamp: "2026-03-06T00:00:03.000Z",
+      codexAppServerPid: "1001",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      usage: {
+        inputTokens: 100,
+        outputTokens: 50,
+        totalTokens: 150,
+      },
+    });
+    fakeRunner.emit("1", {
+      event: "notification",
+      timestamp: "2026-03-06T00:00:04.000Z",
+      codexAppServerPid: "1001",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      message: "Refactoring module",
+    });
+    fakeRunner.emit("1", {
+      event: "turn_completed",
+      timestamp: "2026-03-06T00:00:05.000Z",
+      codexAppServerPid: "1001",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      usage: {
+        inputTokens: 200,
+        outputTokens: 100,
+        totalTokens: 300,
+      },
+    });
+    await host.flushEvents();
+
+    const details = await host.getIssueDetails("ISSUE-1");
+
+    expect(details).not.toBeNull();
+    expect(details!.recent_events).toEqual([
+      {
+        at: "2026-03-06T00:00:01.000Z",
+        event: "Session started",
+        message: null,
+      },
+      {
+        at: "2026-03-06T00:00:02.000Z",
+        event: "Notification",
+        message: "Working on tests",
+      },
+      {
+        at: "2026-03-06T00:00:03.000Z",
+        event: "Turn completed",
+        message: null,
+      },
+      {
+        at: "2026-03-06T00:00:04.000Z",
+        event: "Notification",
+        message: "Refactoring module",
+      },
+      {
+        at: "2026-03-06T00:00:05.000Z",
+        event: "Turn completed",
+        message: null,
+      },
+    ]);
+  });
+
   it("emits issue and session context for agent lifecycle logs", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();

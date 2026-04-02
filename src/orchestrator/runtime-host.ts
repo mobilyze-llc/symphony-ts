@@ -1658,7 +1658,11 @@ function toRunningIssueDetail(
     logs: {
       codex_session_logs: [],
     },
-    recent_events: [],
+    recent_events: running.recentActivity.map((entry) => ({
+      at: entry.timestamp,
+      event: entry.toolName,
+      message: entry.context,
+    })),
     last_error: null,
     tracked: {},
     parent,

@@ -116,6 +116,28 @@ describe("dashboard server", () => {
     });
   });
 
+  it("returns recent_events with at, event, and message fields in issue details", async () => {
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+    });
+    servers.push(server);
+
+    const issue = await sendRequest(server.port, {
+      method: "GET",
+      path: "/api/v1/ABC-123",
+    });
+    expect(issue.statusCode).toBe(200);
+    const body = JSON.parse(issue.body);
+    expect(body.recent_events).toEqual([
+      {
+        at: "2026-03-06T09:59:30.000Z",
+        event: "notification",
+        message: "Working on tests",
+      },
+    ]);
+  });
+
   it("accepts refresh requests and rejects unsupported methods with 405", async () => {
     const refreshCalls: RefreshResponse[] = [];
     const server = await startDashboardServer({
