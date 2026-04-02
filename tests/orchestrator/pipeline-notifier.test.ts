@@ -154,7 +154,40 @@ describe("formatNotification", () => {
     expect(result.text).toContain("implement");
     expect(result.text).toContain("20,000 tokens");
     expect(result.text).toContain("Rework cycles: 1");
+    // Structural assertions on Block Kit blocks
     expect(result.blocks).toBeDefined();
+    const blocks = result.blocks!;
+    // header, section (title link), divider, section (stage timeline), divider, section (totals + rework), context
+    expect(blocks).toHaveLength(7);
+    expect(blocks[0]?.type).toBe("header");
+    expect(blocks[1]?.type).toBe("section");
+    // issueUrl is set → title is a mrkdwn link
+    const titleBlock = blocks[1] as {
+      type: "section";
+      text: { type: string; text: string };
+    };
+    expect(titleBlock.text.text).toContain(
+      "<https://linear.app/mobilyze-llc/issue/SYMPH-42|Add pagination>",
+    );
+    // stage timeline section present (non-empty executionHistory)
+    expect(blocks[2]?.type).toBe("divider");
+    const stageBlock = blocks[3] as {
+      type: "section";
+      text: { type: string; text: string };
+    };
+    expect(stageBlock.type).toBe("section");
+    expect(stageBlock.text.text).toContain("`investigate`");
+    expect(stageBlock.text.text).toContain("`implement`");
+    // totals section includes rework count
+    expect(blocks[4]?.type).toBe("divider");
+    const totalsBlock = blocks[5] as {
+      type: "section";
+      text: { type: string; text: string };
+    };
+    expect(totalsBlock.text.text).toContain("Total:");
+    expect(totalsBlock.text.text).toContain("Rework cycles: 1");
+    // context block with version
+    expect(blocks[6]?.type).toBe("context");
   });
 
   it("formats issue_completed without rework", () => {
@@ -169,6 +202,30 @@ describe("formatNotification", () => {
       totalDurationMs: 60_000,
     });
     expect(result.text).not.toContain("Rework");
+    // Structural assertions on blocks for null URL, empty history, no rework
+    expect(result.blocks).toBeDefined();
+    const blocks = result.blocks!;
+    // header, section (plain title), divider, section (totals only), context
+    // No stage timeline divider+section since executionHistory is empty
+    expect(blocks).toHaveLength(5);
+    expect(blocks[0]?.type).toBe("header");
+    // issueUrl is null → plain title without link
+    const titleBlock = blocks[1] as {
+      type: "section";
+      text: { type: string; text: string };
+    };
+    expect(titleBlock.type).toBe("section");
+    expect(titleBlock.text.text).toBe("*Add pagination*");
+    expect(titleBlock.text.text).not.toContain("<");
+    // No stage timeline — jumps straight to divider + totals
+    expect(blocks[2]?.type).toBe("divider");
+    const totalsBlock = blocks[3] as {
+      type: "section";
+      text: { type: string; text: string };
+    };
+    expect(totalsBlock.text.text).toContain("Total:");
+    expect(totalsBlock.text.text).not.toContain("Rework");
+    expect(blocks[4]?.type).toBe("context");
   });
 
   it("formats issue_failed", () => {
