@@ -535,8 +535,7 @@ Run `git diff main --shortstat` to measure the change size. Parse the output to 
 1. Load and execute the `/codex-review` skill. This runs a single Codex pass with Opus validation — no council, no cross-examination.
 
 **Otherwise (larger change)** — run full council review:
-1. Run `/simplify focus on code reuse and efficiency` to check for codebase reuse and efficiency improvements. If `/simplify` makes changes, commit them as a separate commit, then re-run verify commands. If tests fail, revert with `git checkout -- .` and proceed without the simplification.
-2. Then load and execute the `/self-moa-review` skill.
+1. Load and execute the `/self-moa-review` skill.
 
 ### Step 3: Evaluate findings
 
