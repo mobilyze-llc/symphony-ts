@@ -25,7 +25,8 @@ export interface SlackHeaderBlock {
 
 export interface SlackSectionBlock {
   type: "section";
-  text: SlackTextObject;
+  text?: SlackTextObject;
+  fields?: SlackTextObject[];
 }
 
 export interface SlackDividerBlock {
@@ -192,7 +193,33 @@ export function formatNotification(
         parts.push(`Dashboard: ${event.dashboardUrl}`);
       }
       parts.push(version);
-      return { text: parts.join("\n") };
+      const text = parts.join("\n");
+
+      const blocks: SlackBlock[] = [
+        {
+          type: "header",
+          text: {
+            type: "plain_text",
+            text: `🚀 Pipeline started — ${event.productName}`,
+            emoji: true,
+          },
+        },
+      ];
+      if (event.dashboardUrl !== null) {
+        blocks.push({
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: `<${event.dashboardUrl}|Dashboard>`,
+          },
+        });
+      }
+      blocks.push({
+        type: "context",
+        elements: [{ type: "mrkdwn", text: version }],
+      });
+
+      return { text, blocks };
     }
 
     case "pipeline_stopped": {
@@ -312,18 +339,76 @@ export function formatNotification(
       }
       parts.push(`Stalled for: ${formatDurationMs(event.stallDurationMs)}`);
       parts.push(version);
-      return { text: parts.join("\n") };
+      const text = parts.join("\n");
+
+      const blocks: SlackBlock[] = [
+        {
+          type: "header",
+          text: {
+            type: "plain_text",
+            text: `⚠️ Stall killed — ${event.issueIdentifier}`,
+            emoji: true,
+          },
+        },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: `*${event.issueTitle}*` },
+        },
+      ];
+
+      const fields: SlackTextObject[] = [];
+      if (event.stageName !== null) {
+        fields.push({
+          type: "mrkdwn",
+          text: `:stop_sign: Stage: ${event.stageName}`,
+        });
+      }
+      fields.push({
+        type: "mrkdwn",
+        text: `:clock3: Stalled: ${formatDurationMs(event.stallDurationMs)}`,
+      });
+      blocks.push({ type: "section", fields });
+
+      blocks.push({
+        type: "context",
+        elements: [{ type: "mrkdwn", text: version }],
+      });
+
+      return { text, blocks };
     }
 
     case "infra_error": {
-      return {
-        text: [
-          `:rotating_light: *Infra error* — ${event.issueIdentifier}`,
-          `*${event.issueTitle}*`,
-          `Error: ${event.errorReason}`,
-          version,
-        ].join("\n"),
-      };
+      const text = [
+        `:rotating_light: *Infra error* — ${event.issueIdentifier}`,
+        `*${event.issueTitle}*`,
+        `Error: ${event.errorReason}`,
+        version,
+      ].join("\n");
+
+      const blocks: SlackBlock[] = [
+        {
+          type: "header",
+          text: {
+            type: "plain_text",
+            text: `🚨 Infra error — ${event.issueIdentifier}`,
+            emoji: true,
+          },
+        },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: `*${event.issueTitle}*` },
+        },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: `Error: ${event.errorReason}` },
+        },
+        {
+          type: "context",
+          elements: [{ type: "mrkdwn", text: version }],
+        },
+      ];
+
+      return { text, blocks };
     }
 
     case "issue_dispatched": {
@@ -354,7 +439,37 @@ export function formatNotification(
       }
       parts.push(`Reason: ${event.reason}`);
       parts.push(version);
-      return { text: parts.join("\n") };
+      const text = parts.join("\n");
+
+      const titleText =
+        event.issueUrl !== null
+          ? `*${event.issueTitle}*\n<${event.issueUrl}|View in Linear>`
+          : `*${event.issueTitle}*`;
+
+      const blocks: SlackBlock[] = [
+        {
+          type: "header",
+          text: {
+            type: "plain_text",
+            text: `⏹️ Issue left pipeline — ${event.issueIdentifier}`,
+            emoji: true,
+          },
+        },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: titleText },
+        },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: `Reason: ${event.reason}` },
+        },
+        {
+          type: "context",
+          elements: [{ type: "mrkdwn", text: version }],
+        },
+      ];
+
+      return { text, blocks };
     }
   }
 }

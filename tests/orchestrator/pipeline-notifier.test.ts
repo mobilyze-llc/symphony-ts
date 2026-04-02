@@ -339,9 +339,8 @@ describe("formatNotification", () => {
     expect(result.text).toContain("issue no longer in candidate list");
   });
 
-  it("returns text only with no blocks for non-issue_completed events", () => {
+  it("returns text only with no blocks for non-block-kit events", () => {
     const events: PipelineNotificationEvent[] = [
-      { type: "pipeline_started", productName: "test", dashboardUrl: null },
       {
         type: "pipeline_stopped",
         productName: "test",
@@ -359,19 +358,6 @@ describe("formatNotification", () => {
         retryAttempt: null,
       },
       {
-        type: "stall_killed",
-        issueIdentifier: "T-1",
-        issueTitle: "t",
-        stageName: null,
-        stallDurationMs: 1000,
-      },
-      {
-        type: "infra_error",
-        issueIdentifier: "T-1",
-        issueTitle: "t",
-        errorReason: "err",
-      },
-      {
         type: "issue_dispatched",
         issueIdentifier: "T-1",
         issueTitle: "t",
@@ -379,19 +365,218 @@ describe("formatNotification", () => {
         stageName: null,
         reworkCount: 0,
       },
-      {
-        type: "issue_dropped",
-        issueIdentifier: "T-1",
-        issueTitle: "t",
-        issueUrl: null,
-        reason: "dropped",
-      },
     ];
     for (const event of events) {
       const result = formatNotification(event);
       expect(result.text).toBeTruthy();
       expect(result).not.toHaveProperty("blocks");
     }
+  });
+
+  // --- Block Kit tests for pipeline_started ---
+
+  it("pipeline_started with dashboard URL returns Block Kit with header, dashboard link, and context", () => {
+    const result = formatNotification({
+      type: "pipeline_started",
+      productName: "symphony",
+      dashboardUrl: "http://localhost:3000",
+    });
+    expect(result.blocks).toBeDefined();
+    const blocks = result.blocks!;
+    // header, section (dashboard link), context
+    expect(blocks).toHaveLength(3);
+
+    const header = blocks[0] as { type: "header"; text: { text: string } };
+    expect(header.type).toBe("header");
+    expect(header.text.text).toContain("Pipeline started");
+    expect(header.text.text).toContain("symphony");
+
+    const dashSection = blocks[1] as {
+      type: "section";
+      text: { type: string; text: string };
+    };
+    expect(dashSection.type).toBe("section");
+    expect(dashSection.text.text).toContain(
+      "<http://localhost:3000|Dashboard>",
+    );
+
+    expect(blocks[2]?.type).toBe("context");
+    const ctx = blocks[2] as {
+      type: "context";
+      elements: Array<{ text: string }>;
+    };
+    expect(ctx.elements[0]?.text).toContain("symphony-ts v");
+  });
+
+  it("pipeline_started without dashboard URL omits link section", () => {
+    const result = formatNotification({
+      type: "pipeline_started",
+      productName: "symphony",
+      dashboardUrl: null,
+    });
+    expect(result.blocks).toBeDefined();
+    const blocks = result.blocks!;
+    // header, context (no dashboard section)
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]?.type).toBe("header");
+    expect(blocks[1]?.type).toBe("context");
+  });
+
+  // --- Block Kit tests for stall_killed ---
+
+  it("stall_killed returns Block Kit with header, title, stage and duration fields, and context", () => {
+    const result = formatNotification({
+      type: "stall_killed",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      stageName: "implement",
+      stallDurationMs: 900_000,
+    });
+    expect(result.blocks).toBeDefined();
+    const blocks = result.blocks!;
+    // header, section (title), section (fields), context
+    expect(blocks).toHaveLength(4);
+
+    const header = blocks[0] as { type: "header"; text: { text: string } };
+    expect(header.type).toBe("header");
+    expect(header.text.text).toContain("Stall killed");
+    expect(header.text.text).toContain("SYMPH-42");
+
+    const titleBlock = blocks[1] as {
+      type: "section";
+      text: { text: string };
+    };
+    expect(titleBlock.text.text).toBe("*Add pagination*");
+
+    const fieldsBlock = blocks[2] as {
+      type: "section";
+      fields: Array<{ text: string }>;
+    };
+    expect(fieldsBlock.type).toBe("section");
+    expect(fieldsBlock.fields).toHaveLength(2);
+    expect(fieldsBlock.fields[0]?.text).toContain("Stage: implement");
+    expect(fieldsBlock.fields[1]?.text).toContain("Stalled: 15m");
+
+    expect(blocks[3]?.type).toBe("context");
+  });
+
+  it("stall_killed without stage name omits stage field", () => {
+    const result = formatNotification({
+      type: "stall_killed",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Fix bug",
+      stageName: null,
+      stallDurationMs: 300_000,
+    });
+    expect(result.blocks).toBeDefined();
+    const blocks = result.blocks!;
+    // header, section (title), section (fields with duration only), context
+    expect(blocks).toHaveLength(4);
+
+    const fieldsBlock = blocks[2] as {
+      type: "section";
+      fields: Array<{ text: string }>;
+    };
+    expect(fieldsBlock.fields).toHaveLength(1);
+    expect(fieldsBlock.fields[0]?.text).toContain("Stalled:");
+    expect(fieldsBlock.fields[0]?.text).not.toContain("Stage:");
+  });
+
+  // --- Block Kit tests for infra_error ---
+
+  it("infra_error returns Block Kit with header, title, error reason, and context", () => {
+    const result = formatNotification({
+      type: "infra_error",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      errorReason: "Failed to start agent process",
+    });
+    expect(result.blocks).toBeDefined();
+    const blocks = result.blocks!;
+    // header, section (title), section (error), context
+    expect(blocks).toHaveLength(4);
+
+    const header = blocks[0] as { type: "header"; text: { text: string } };
+    expect(header.type).toBe("header");
+    expect(header.text.text).toContain("Infra error");
+    expect(header.text.text).toContain("SYMPH-42");
+
+    const titleBlock = blocks[1] as {
+      type: "section";
+      text: { text: string };
+    };
+    expect(titleBlock.text.text).toBe("*Add pagination*");
+
+    const errorBlock = blocks[2] as {
+      type: "section";
+      text: { text: string };
+    };
+    expect(errorBlock.text.text).toContain(
+      "Error: Failed to start agent process",
+    );
+
+    expect(blocks[3]?.type).toBe("context");
+  });
+
+  // --- Block Kit tests for issue_dropped ---
+
+  it("issue_dropped returns Block Kit with header, title with Linear link, reason, and context", () => {
+    const result = formatNotification({
+      type: "issue_dropped",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: "https://linear.app/mobilyze-llc/issue/SYMPH-42",
+      reason: "issue no longer in candidate list",
+    });
+    expect(result.blocks).toBeDefined();
+    const blocks = result.blocks!;
+    // header, section (title + link), section (reason), context
+    expect(blocks).toHaveLength(4);
+
+    const header = blocks[0] as { type: "header"; text: { text: string } };
+    expect(header.type).toBe("header");
+    expect(header.text.text).toContain("Issue left pipeline");
+    expect(header.text.text).toContain("SYMPH-42");
+
+    const titleBlock = blocks[1] as {
+      type: "section";
+      text: { text: string };
+    };
+    expect(titleBlock.text.text).toContain("*Add pagination*");
+    expect(titleBlock.text.text).toContain(
+      "<https://linear.app/mobilyze-llc/issue/SYMPH-42|View in Linear>",
+    );
+
+    const reasonBlock = blocks[2] as {
+      type: "section";
+      text: { text: string };
+    };
+    expect(reasonBlock.text.text).toContain(
+      "Reason: issue no longer in candidate list",
+    );
+
+    expect(blocks[3]?.type).toBe("context");
+  });
+
+  it("issue_dropped without URL omits View in Linear link", () => {
+    const result = formatNotification({
+      type: "issue_dropped",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      reason: "dropped",
+    });
+    expect(result.blocks).toBeDefined();
+    const blocks = result.blocks!;
+    // header, section (title only), section (reason), context
+    expect(blocks).toHaveLength(4);
+
+    const titleBlock = blocks[1] as {
+      type: "section";
+      text: { text: string };
+    };
+    expect(titleBlock.text.text).toBe("*Add pagination*");
+    expect(titleBlock.text.text).not.toContain("View in Linear");
   });
 });
 
