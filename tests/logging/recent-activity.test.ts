@@ -98,13 +98,11 @@ describe("buildActivityContext", () => {
     );
   });
 
-  it("truncates long Bash commands to ~60 chars", () => {
+  it("preserves long Bash commands without truncation", () => {
     const longCommand =
       "find /home/user -name '*.ts' -exec grep -l 'import' {} \\; | sort | uniq | head -100";
     const result = buildActivityContext("Bash", { command: longCommand });
-    expect(result).not.toBeNull();
-    expect(result!.length).toBeLessThanOrEqual(61); // 60 + ellipsis char
-    expect(result!).toContain("…");
+    expect(result).toBe(longCommand);
   });
 
   it("keeps short Bash commands as-is", () => {
@@ -117,10 +115,10 @@ describe("buildActivityContext", () => {
     expect(buildActivityContext("UnknownTool", { some: "data" })).toBe("data");
   });
 
-  it("truncates long string arguments for unknown tools to 60 chars", () => {
+  it("preserves long string arguments for unknown tools without truncation", () => {
     const longValue = "A".repeat(80);
     const result = buildActivityContext("TodoWrite", { content: longValue });
-    expect(result).toBe(`${"A".repeat(60)}…`);
+    expect(result).toBe(longValue);
   });
 
   it("returns null for unknown tools with no string-valued arguments", () => {
@@ -198,7 +196,7 @@ describe("recent activity ring buffer", () => {
     expect(session.recentActivity[9]!.context).toBe("file-14.ts");
   });
 
-  it("records Bash tool calls with truncated commands", () => {
+  it("records Bash tool calls with full commands", () => {
     const session = createEmptyLiveSession();
 
     const event = createEvent("approval_auto_approved", {

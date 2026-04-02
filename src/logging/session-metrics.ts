@@ -337,7 +337,6 @@ export function extractToolInputFromRaw(raw: Record<string, unknown>): unknown {
 }
 
 const NOTIFICATION_CONTEXT_MAX_LENGTH = 80;
-const BASH_COMMAND_MAX_LENGTH = 60;
 
 /**
  * Build a RecentActivityEntry from a CodexClientEvent, or return null if the
@@ -484,15 +483,11 @@ export function buildActivityContext(
     return null;
   }
 
-  // Bash: extract command and truncate
+  // Bash: extract command
   if (normalized === "bash") {
     const command = typeof input.command === "string" ? input.command : null;
     if (command !== null && command.trim().length > 0) {
-      const trimmed = command.trim();
-      if (trimmed.length <= BASH_COMMAND_MAX_LENGTH) {
-        return trimmed;
-      }
-      return `${trimmed.slice(0, BASH_COMMAND_MAX_LENGTH)}…`;
+      return command.trim();
     }
     return null;
   }
@@ -506,14 +501,10 @@ export function buildActivityContext(
     return null;
   }
 
-  // Unknown tools: extract first string-valued argument, truncated to 60 chars
+  // Unknown tools: extract first string-valued argument
   for (const value of Object.values(input)) {
     if (typeof value === "string" && value.trim().length > 0) {
-      const trimmed = value.trim();
-      if (trimmed.length <= BASH_COMMAND_MAX_LENGTH) {
-        return trimmed;
-      }
-      return `${trimmed.slice(0, BASH_COMMAND_MAX_LENGTH)}…`;
+      return value.trim();
     }
   }
 

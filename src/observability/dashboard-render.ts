@@ -459,9 +459,7 @@ const DASHBOARD_STYLES = String.raw`
         white-space: nowrap;
       }
       .turn-msg {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
+        word-break: break-all;
         color: var(--ink);
       }
       .activity-time {
