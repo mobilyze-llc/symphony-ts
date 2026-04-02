@@ -295,13 +295,13 @@ describe("mobile-dashboard.html", () => {
     expect(html).toContain("five_hour");
   });
 
-  it("validates weekly field presence", () => {
+  it("validates seven_day field presence", () => {
     const scriptSection = html.slice(html.indexOf("<script>"));
-    expect(scriptSection).toContain("weekly");
+    expect(scriptSection).toContain("seven_day");
   });
 
-  it("validates account field presence", () => {
-    expect(html).toContain("account.email");
+  it("validates active_account field presence", () => {
+    expect(html).toContain("active_account.email");
   });
 
   // ── Switch Account Button (SYMPH-240) ──

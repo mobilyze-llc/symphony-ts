@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# verify-dashboard-usage — Automated visual verification of the mobile dashboard
+# usage gauges via agent-browser. Checks that gauges render, no error banner
+# appears, and account info is populated.
+#
+# Usage:
+#   verify-dashboard-usage <dashboard-url>
+#   verify-dashboard-usage "$BASE_URL"
+#
+# Environment:
+#   AGENT_BROWSER  Path to agent-browser binary (default: /opt/homebrew/bin/agent-browser)
+#
+# Exit codes:
+#   0  All checks passed
+#   1  One or more checks failed
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+AGENT_BROWSER="${AGENT_BROWSER:-/opt/homebrew/bin/agent-browser}"
+SESSION_NAME="verify-usage-$$"
+WAIT_SECONDS=5
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+die() { echo "FAIL: $*" >&2; exit 1; }
+
+cleanup() {
+  "$AGENT_BROWSER" close --session "$SESSION_NAME" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+# ---------------------------------------------------------------------------
+# Arguments
+# ---------------------------------------------------------------------------
+[[ $# -lt 1 ]] && die "Usage: verify-dashboard-usage <dashboard-url>"
+DASHBOARD_URL="$1"
+
+# ---------------------------------------------------------------------------
+# Preflight
+# ---------------------------------------------------------------------------
+command -v "$AGENT_BROWSER" >/dev/null 2>&1 || die "agent-browser not found at $AGENT_BROWSER"
+
+echo "Opening dashboard: $DASHBOARD_URL"
+"$AGENT_BROWSER" open "$DASHBOARD_URL" --session "$SESSION_NAME" >/dev/null 2>&1 \
+  || die "Failed to open dashboard URL"
+
+echo "Waiting ${WAIT_SECONDS}s for data to load..."
+sleep "$WAIT_SECONDS"
+
+# ---------------------------------------------------------------------------
+# Checks
+# ---------------------------------------------------------------------------
+FAILURES=0
+
+# 1. No error banner visible
+ERROR_BANNER=$("$AGENT_BROWSER" evaluate --session "$SESSION_NAME" \
+  --expression "document.querySelector('#usage-error')?.classList.contains('visible') ?? false" 2>/dev/null)
+if [[ "$ERROR_BANNER" == "true" ]]; then
+  ERROR_TEXT=$("$AGENT_BROWSER" evaluate --session "$SESSION_NAME" \
+    --expression "document.querySelector('#usage-error')?.textContent || ''" 2>/dev/null)
+  echo "FAIL: Error banner is visible: $ERROR_TEXT"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: No error banner"
+fi
+
+# 2. 5-hour gauge renders (fill element has non-zero width or stroke)
+FIVE_HOUR_GAUGE=$("$AGENT_BROWSER" evaluate --session "$SESSION_NAME" \
+  --expression "document.querySelector('#gauge-5h-fill') !== null" 2>/dev/null)
+if [[ "$FIVE_HOUR_GAUGE" != "true" ]]; then
+  echo "FAIL: 5-hour gauge fill element not found"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: 5-hour gauge renders"
+fi
+
+# 3. Weekly gauge renders
+WEEKLY_GAUGE=$("$AGENT_BROWSER" evaluate --session "$SESSION_NAME" \
+  --expression "document.querySelector('#gauge-weekly-fill') !== null" 2>/dev/null)
+if [[ "$WEEKLY_GAUGE" != "true" ]]; then
+  echo "FAIL: Weekly gauge fill element not found"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: Weekly gauge renders"
+fi
+
+# 4. Account email is populated (not empty or "Loading...")
+ACCOUNT_EMAIL=$("$AGENT_BROWSER" evaluate --session "$SESSION_NAME" \
+  --expression "document.querySelector('#account-email')?.textContent?.trim() || ''" 2>/dev/null)
+if [[ -z "$ACCOUNT_EMAIL" || "$ACCOUNT_EMAIL" == "Loading..." ]]; then
+  echo "FAIL: Account email not populated (got: '$ACCOUNT_EMAIL')"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: Account email populated: $ACCOUNT_EMAIL"
+fi
+
+# 5. Account org is populated (not empty or em-dash placeholder from initial load)
+ACCOUNT_ORG=$("$AGENT_BROWSER" evaluate --session "$SESSION_NAME" \
+  --expression "document.querySelector('#account-org')?.textContent?.trim() || ''" 2>/dev/null)
+if [[ -z "$ACCOUNT_ORG" ]]; then
+  echo "FAIL: Account org not populated"
+  FAILURES=$((FAILURES + 1))
+else
+  echo "PASS: Account org populated: $ACCOUNT_ORG"
+fi
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+echo ""
+if [[ $FAILURES -gt 0 ]]; then
+  echo "RESULT: $FAILURES check(s) failed"
+  exit 1
+else
+  echo "RESULT: All checks passed"
+  exit 0
+fi
