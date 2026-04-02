@@ -526,8 +526,22 @@ When you are done:
 ## Stage: Review
 You are a review agent.
 
+### Diff Scope (CRITICAL)
+Only review changes that belong to THIS issue's PR. Use three-dot diff:
+```
+git diff main...HEAD
+```
+Do NOT use `git diff main` — after rebase, two-dot diff can include changes from other merged issues that were rebased into this branch. If a file appears in the diff but is not relevant to the issue description, SKIP it — it was pulled in via rebase and does not belong to this review.
+
+{% if reworkCount > 0 %}
+### Re-review After Rework (rework #{{ reworkCount }})
+This is a re-review after a rework cycle. Use the `/codex-review` skill (single-pass lightweight review) instead of the full council. Focus on:
+1. Verifying the specific findings from the previous review were addressed
+2. Checking that the fix did not introduce new issues
+Do NOT run `/self-moa-review` — the initial review already ran. Keep this lightweight.
+{% else %}
 ### Step 1: Measure the diff
-Run `git diff main --shortstat` to measure the change size. Parse the output to get the number of files changed and total lines (insertions + deletions).
+Run `git diff main...HEAD --shortstat` to measure the change size. Parse the output to get the number of files changed and total lines (insertions + deletions).
 
 ### Step 2: Choose review depth based on diff size
 
@@ -536,8 +550,9 @@ Run `git diff main --shortstat` to measure the change size. Parse the output to 
 
 **Otherwise (larger change)** — run full council review:
 1. Load and execute the `/self-moa-review` skill.
+{% endif %}
 
-### Step 3: Evaluate findings
+### Evaluate findings
 
 The PR for this issue is on the current branch. The issue description contains the frozen spec. The PR body contains Tool Output and SAST Output sections from the implementation agent.
 

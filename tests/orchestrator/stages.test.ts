@@ -262,6 +262,95 @@ describe("orchestrator stage machine", () => {
     expect(orchestrator.getState().issueStages["1"]).toBe("investigate");
   });
 
+  it("skips previously-passed stages after rework from a later stage", async () => {
+    // Simulate: investigate → implement → review(pass) → merge(fail, rework)
+    // After rework, implement → should skip review → land on merge
+    const orchestrator = createStagedOrchestrator({
+      stages: createFourStageReworkConfig(),
+    });
+
+    // Dispatch investigate
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("investigate");
+
+    // investigate → implement
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    // Dispatch implement
+    await orchestrator.onRetryTimer("1");
+
+    // implement → review
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+
+    // Dispatch review
+    await orchestrator.onRetryTimer("1");
+
+    // review → merge (review passes — recorded in passedStages)
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    expect(orchestrator.getState().issueStages["1"]).toBe("merge");
+    expect(orchestrator.getState().issuePassedStages["1"]).toContain("review");
+
+    // merge fails → reworkGate sends to implement
+    const reworkTarget = orchestrator.reworkGate("1");
+    expect(reworkTarget).toBe("implement");
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    // review should still be in passedStages (merge was removed, not review)
+    expect(orchestrator.getState().issuePassedStages["1"]).toContain("review");
+    expect(orchestrator.getState().issuePassedStages["1"]).not.toContain(
+      "merge",
+    );
+
+    // Dispatch implement (rework)
+    await orchestrator.onRetryTimer("1");
+
+    // implement completes again → should SKIP review and go to merge
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    expect(orchestrator.getState().issueStages["1"]).toBe("merge");
+  });
+
+  it("does not skip a stage that failed and triggered rework", async () => {
+    // Simulate: implement → review(fail, rework to implement)
+    // After rework, implement → should NOT skip review (it failed)
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    // Dispatch implement
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    // implement → review
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+
+    // Dispatch review
+    await orchestrator.onRetryTimer("1");
+
+    // review fails → reworkGate sends to implement
+    const reworkTarget = orchestrator.reworkGate("1");
+    expect(reworkTarget).toBe("implement");
+
+    // Dispatch implement (rework)
+    await orchestrator.onRetryTimer("1");
+
+    // implement completes again → should go to review (NOT skip it)
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+  });
+
+  it("cleans up issuePassedStages when issue completes through terminal", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createSimpleTwoStageConfig(),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+
+    expect(orchestrator.getState().issuePassedStages["1"]).toBeUndefined();
+  });
+
   it("cleans up stage tracking when issue completes through terminal", async () => {
     const orchestrator = createStagedOrchestrator({
       stages: createSimpleTwoStageConfig(),
@@ -1041,6 +1130,101 @@ function createAgentReviewWorkflowConfig(): StagesConfig {
           onComplete: "done",
           onApprove: null,
           onRework: null,
+        },
+        linearState: null,
+      },
+      done: {
+        type: "terminal",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: { onComplete: null, onApprove: null, onRework: null },
+        linearState: null,
+      },
+    },
+  };
+}
+
+function createFourStageReworkConfig(): StagesConfig {
+  return {
+    initialStage: "investigate",
+    fastTrack: null,
+    stages: {
+      investigate: {
+        type: "agent",
+        runner: "claude-code",
+        model: "claude-opus-4",
+        prompt: "investigate.liquid",
+        maxTurns: 8,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "implement",
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: null,
+      },
+      implement: {
+        type: "agent",
+        runner: "claude-code",
+        model: "claude-sonnet-4-5",
+        prompt: "implement.liquid",
+        maxTurns: 30,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "review",
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: null,
+      },
+      review: {
+        type: "agent",
+        runner: "claude-code",
+        model: "claude-opus-4-6",
+        prompt: "review.liquid",
+        maxTurns: 15,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: 3,
+        reviewers: [],
+        transitions: {
+          onComplete: "merge",
+          onApprove: null,
+          onRework: "implement",
+        },
+        linearState: null,
+      },
+      merge: {
+        type: "agent",
+        runner: "claude-code",
+        model: "claude-sonnet-4-5",
+        prompt: "merge.liquid",
+        maxTurns: 5,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: 2,
+        reviewers: [],
+        transitions: {
+          onComplete: "done",
+          onApprove: null,
+          onRework: "implement",
         },
         linearState: null,
       },

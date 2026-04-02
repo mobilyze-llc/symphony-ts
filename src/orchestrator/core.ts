@@ -420,6 +420,7 @@ export class OrchestratorCore {
       this.releaseClaim(issueId);
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
+      delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       this.onIssueDropped?.({
@@ -441,6 +442,7 @@ export class OrchestratorCore {
       this.releaseClaim(issueId);
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
+      delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       this.onIssueDropped?.({
@@ -605,6 +607,7 @@ export class OrchestratorCore {
       // No on_complete transition — treat as terminal
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
+      delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       return "completed";
@@ -615,6 +618,7 @@ export class OrchestratorCore {
       // Invalid target — treat as terminal
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
+      delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       return "completed";
@@ -639,6 +643,7 @@ export class OrchestratorCore {
       }
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
+      delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       // Fire linearState update for the terminal stage (e.g., move to "Done")
@@ -671,13 +676,35 @@ export class OrchestratorCore {
       return "completed";
     }
 
-    // Move to the next stage
-    this.state.issueStages[issueId] = nextStageName;
+    // Record current stage as passed before advancing
+    const passedStages = this.state.issuePassedStages[issueId] ?? [];
+    if (!passedStages.includes(currentStageName)) {
+      passedStages.push(currentStageName);
+      this.state.issuePassedStages[issueId] = passedStages;
+    }
+
+    // Skip stages that have already been passed (e.g., review after a merge-triggered rework)
+    let targetStageName = nextStageName;
+    while (passedStages.includes(targetStageName)) {
+      const targetStage = stagesConfig.stages[targetStageName];
+      if (
+        targetStage === undefined ||
+        targetStage.transitions.onComplete === null
+      ) {
+        break;
+      }
+      targetStageName = targetStage.transitions.onComplete;
+    }
+
+    // Move to the target stage (may be ahead of nextStageName if stages were skipped)
+    this.state.issueStages[issueId] = targetStageName;
     if (session !== undefined) {
       addPipelineActivity(
         session,
         "stage_transition",
-        `Stage → ${nextStageName}`,
+        targetStageName === nextStageName
+          ? `Stage → ${targetStageName}`
+          : `Stage → ${targetStageName} (skipped previously-passed ${nextStageName})`,
       );
     }
     return "advanced";
@@ -699,6 +726,7 @@ export class OrchestratorCore {
       this.releaseClaim(issueId);
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
+      delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       void this.fireEscalationSideEffects(
@@ -1229,11 +1257,23 @@ export class OrchestratorCore {
       // Exceeded max rework — escalate to completed/terminal
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
+      delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
       return "escalated";
+    }
+
+    // Remove the failing stage from passedStages so it will be re-run.
+    // Stages that passed BEFORE the failing stage remain — e.g., if merge fails,
+    // review stays passed and will be skipped when advancing through it again.
+    const passedStages = this.state.issuePassedStages[issueId];
+    if (passedStages !== undefined) {
+      const idx = passedStages.indexOf(currentStageName);
+      if (idx !== -1) {
+        passedStages.splice(idx, 1);
+      }
     }
 
     this.state.issueReworkCounts[issueId] = currentCount + 1;
@@ -1387,6 +1427,7 @@ export class OrchestratorCore {
         this.releaseClaim(issue.id);
         delete this.state.issueStages[issue.id];
         delete this.state.issueReworkCounts[issue.id];
+        delete this.state.issuePassedStages[issue.id];
         delete this.state.issueFirstDispatchedAt[issue.id];
         // Fire linearState update for the terminal stage (e.g., move to "Done")
         if (stage.linearState !== null && this.updateIssueState !== undefined) {
@@ -1704,6 +1745,7 @@ export class OrchestratorCore {
       this.releaseClaim(issueId);
       delete this.state.issueStages[issueId];
       delete this.state.issueReworkCounts[issueId];
+      delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       void this.fireEscalationSideEffects(
