@@ -298,16 +298,17 @@ export function handleUncaughtException(error: unknown): void {
 }
 
 export function handleUnhandledRejection(reason: unknown): void {
-  process.exitCode = 70;
   logToStderr({
     timestamp: formatEasternTimestamp(new Date()),
     level: "error",
-    event: "process_crash",
+    event: "unhandled_rejection",
     message: safeErrorMessage(reason),
     error_code: "unhandled_rejection",
     stack: reason instanceof Error ? reason.stack : undefined,
   });
-  process.exit(70);
+  // Do NOT process.exit() — unhandled rejections from third-party SDKs
+  // (e.g. agent-sdk "Operation aborted" during abort) must not kill all
+  // concurrent workers. The stall timeout cleans up stuck workers.
 }
 
 export async function main(): Promise<void> {
