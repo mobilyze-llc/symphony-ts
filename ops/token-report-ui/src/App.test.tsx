@@ -1324,7 +1324,7 @@ describe("Validate stage color", () => {
 
   it("StageEfficiency renders Validate with #A78BFA, not fallback gray", () => {
     const spend = {
-      validate: { total_tokens: 50000, total_cost: 1.5, count: 10 },
+      validate: { total_tokens: 50000, count: 10, completed: 8, failed: 2 },
     };
     const html = renderToString(<StageEfficiency perStageSpend={spend} />);
     expect(html).toContain("Validate");
