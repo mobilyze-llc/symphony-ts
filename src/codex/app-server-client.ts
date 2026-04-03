@@ -52,6 +52,8 @@ export interface CodexClientEvent {
   message?: string;
   raw?: unknown;
   toolName?: string | null;
+  /** Tool calls extracted from CC conversation .jsonl during heartbeat. */
+  toolCalls?: Array<{ name: string; context: string | null }>;
 }
 
 export interface CodexDynamicToolDefinition {

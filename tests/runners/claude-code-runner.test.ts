@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CodexClientEvent } from "../../src/codex/app-server-client.js";
 import {
   ClaudeCodeRunner,
+  extractToolCallsFromJsonl,
   resolveClaudeModelId,
 } from "../../src/runners/claude-code-runner.js";
 
@@ -23,9 +24,12 @@ vi.mock("node:os", () => ({
 vi.mock("node:fs", () => ({
   statSync: vi.fn(() => ({ mtimeMs: 1000 })),
   readdirSync: vi.fn(() => []),
+  openSync: vi.fn(() => 42),
+  readSync: vi.fn(() => 0),
+  closeSync: vi.fn(),
 }));
 
-import { readdirSync, statSync } from "node:fs";
+import { closeSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { generateText } from "ai";
 import { claudeCode } from "ai-sdk-provider-claude-code";
 
@@ -33,6 +37,9 @@ const mockGenerateText = vi.mocked(generateText);
 const mockClaudeCode = vi.mocked(claudeCode);
 const mockStatSync = vi.mocked(statSync);
 const mockReaddirSync = vi.mocked(readdirSync);
+const mockOpenSync = vi.mocked(openSync);
+const mockReadSync = vi.mocked(readSync);
+const mockCloseSync = vi.mocked(closeSync);
 
 describe("ClaudeCodeRunner", () => {
   it("implements AgentRunnerCodexClient interface (startSession, continueTurn, close)", () => {
@@ -972,6 +979,393 @@ describe("ClaudeCodeRunner heartbeat", () => {
       usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
     });
     await turnPromise;
+  });
+});
+
+describe("ClaudeCodeRunner heartbeat tool call extraction", () => {
+  let mtimeByPath: Record<string, number>;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    mtimeByPath = {
+      "/tmp/workspace/.git/index": 1000,
+      "/tmp/workspace": 1000,
+      "/tmp/workspace/ops": 1000,
+      "/tmp/workspace/src": 1000,
+    };
+    mockStatSync.mockImplementation((p: unknown) => {
+      const key = String(p);
+      // For file size queries during readTailBytes, return a size object
+      if (
+        key.endsWith(".jsonl") &&
+        mtimeByPath[key] !== undefined &&
+        mtimeByPath[key]! > 1000
+      ) {
+        return { mtimeMs: mtimeByPath[key]!, size: 4096 } as never;
+      }
+      return { mtimeMs: mtimeByPath[key] ?? 0 } as never;
+    });
+    mockReaddirSync.mockImplementation((p: unknown) => {
+      const path = String(p);
+      if (path.includes(".claude/projects")) {
+        return ["session-1.jsonl"] as never;
+      }
+      return [
+        { name: "ops", isDirectory: () => true },
+        { name: "src", isDirectory: () => true },
+        { name: "node_modules", isDirectory: () => true },
+        { name: "README.md", isDirectory: () => false },
+      ] as never;
+    });
+    mockOpenSync.mockReturnValue(42 as never);
+    mockCloseSync.mockReturnValue(undefined as never);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("extracts tool calls from CC conversation file and includes them in heartbeat event", async () => {
+    // Mock .jsonl content with Bash and Read tool_use entries
+    const jsonlLines = [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_1",
+              name: "Bash",
+              input: { command: "pnpm test" },
+            },
+          ],
+        },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_2",
+              name: "Read",
+              input: { file_path: "/tmp/workspace/src/index.ts" },
+            },
+          ],
+        },
+      }),
+    ].join("\n");
+
+    mockReadSync.mockImplementation(((
+      _fd: number,
+      buffer: NodeJS.ArrayBufferView,
+      _offset: number,
+      _length: number,
+      _position: number | null,
+    ) => {
+      const buf = Buffer.from(jsonlLines, "utf-8");
+      buf.copy(buffer as Buffer);
+      return buf.length;
+    }) as never);
+
+    let resolveFn: (value: unknown) => void;
+    mockGenerateText.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFn = resolve;
+      }) as never,
+    );
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+      heartbeatIntervalMs: 5000,
+    });
+
+    const turnPromise = runner.startSession({
+      prompt: "run tests",
+      title: "test",
+    });
+
+    // Initial tick — no change
+    vi.advanceTimersByTime(5000);
+    expect(events.filter((e) => e.event === "activity_heartbeat")).toHaveLength(
+      0,
+    );
+
+    // CC conversation file changes — triggers tool call extraction
+    mtimeByPath["/mock-home/.claude/projects/-tmp-workspace/session-1.jsonl"] =
+      2000;
+    vi.advanceTimersByTime(5000);
+
+    const heartbeats = events.filter((e) => e.event === "activity_heartbeat");
+    expect(heartbeats).toHaveLength(1);
+    expect(heartbeats[0]!.toolCalls).toBeDefined();
+    expect(heartbeats[0]!.toolCalls).toHaveLength(2);
+    expect(heartbeats[0]!.toolCalls![0]).toEqual({
+      name: "Bash",
+      context: "pnpm test",
+    });
+    expect(heartbeats[0]!.toolCalls![1]).toEqual({
+      name: "Read",
+      context: "index.ts",
+    });
+
+    resolveFn!({
+      text: "done",
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    await turnPromise;
+  });
+
+  it("handles malformed lines gracefully and still extracts valid tool calls", async () => {
+    // Mix of valid and malformed JSON lines
+    const jsonlLines = [
+      "this is not valid json",
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_1",
+              name: "Bash",
+              input: { command: "git status" },
+            },
+          ],
+        },
+      }),
+      "{truncated json...",
+      JSON.stringify({ type: "human", message: "user input" }),
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "toolu_3",
+              name: "Grep",
+              input: { pattern: "TODO" },
+            },
+          ],
+        },
+      }),
+    ].join("\n");
+
+    mockReadSync.mockImplementation(((
+      _fd: number,
+      buffer: NodeJS.ArrayBufferView,
+      _offset: number,
+      _length: number,
+      _position: number | null,
+    ) => {
+      const buf = Buffer.from(jsonlLines, "utf-8");
+      buf.copy(buffer as Buffer);
+      return buf.length;
+    }) as never);
+
+    let resolveFn: (value: unknown) => void;
+    mockGenerateText.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFn = resolve;
+      }) as never,
+    );
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+      heartbeatIntervalMs: 5000,
+    });
+
+    const turnPromise = runner.startSession({
+      prompt: "fix bug",
+      title: "test",
+    });
+
+    // CC conversation file changes
+    mtimeByPath["/mock-home/.claude/projects/-tmp-workspace/session-1.jsonl"] =
+      2000;
+    vi.advanceTimersByTime(5000);
+
+    const heartbeats = events.filter((e) => e.event === "activity_heartbeat");
+    expect(heartbeats).toHaveLength(1);
+    // Only the 2 valid tool_use entries should be extracted
+    expect(heartbeats[0]!.toolCalls).toHaveLength(2);
+    expect(heartbeats[0]!.toolCalls![0]!.name).toBe("Bash");
+    expect(heartbeats[0]!.toolCalls![0]!.context).toBe("git status");
+    expect(heartbeats[0]!.toolCalls![1]!.name).toBe("Grep");
+    expect(heartbeats[0]!.toolCalls![1]!.context).toBe("TODO");
+
+    resolveFn!({
+      text: "done",
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    await turnPromise;
+  });
+
+  it("degrades gracefully when no CC project directory exists and reports no tool calls", async () => {
+    // Override readdirSync to throw for CC project dir (simulating nonexistent dir)
+    mockReaddirSync.mockImplementation((p: unknown) => {
+      const path = String(p);
+      if (path.includes(".claude/projects")) {
+        throw new Error("ENOENT: no such file or directory");
+      }
+      return [
+        { name: "ops", isDirectory: () => true },
+        { name: "src", isDirectory: () => true },
+        { name: "node_modules", isDirectory: () => true },
+        { name: "README.md", isDirectory: () => false },
+      ] as never;
+    });
+
+    let resolveFn: (value: unknown) => void;
+    mockGenerateText.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveFn = resolve;
+      }) as never,
+    );
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+      heartbeatIntervalMs: 5000,
+    });
+
+    const turnPromise = runner.startSession({
+      prompt: "run tests",
+      title: "test",
+    });
+
+    // Simulate workspace change to trigger heartbeat (CC dir doesn't exist)
+    mtimeByPath["/tmp/workspace/.git/index"] = 2000;
+    vi.advanceTimersByTime(5000);
+
+    const heartbeats = events.filter((e) => e.event === "activity_heartbeat");
+    expect(heartbeats).toHaveLength(1);
+    // No toolCalls since CC dir doesn't exist
+    expect(heartbeats[0]!.toolCalls).toBeUndefined();
+    // Should not throw — heartbeat still works
+    expect(heartbeats[0]!.message).toContain("workspace file change detected");
+
+    resolveFn!({
+      text: "done",
+      usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    });
+    await turnPromise;
+  });
+});
+
+describe("extractToolCallsFromJsonl", () => {
+  beforeEach(() => {
+    mockStatSync.mockImplementation((p: unknown) => {
+      const key = String(p);
+      if (key.endsWith(".jsonl")) {
+        return { mtimeMs: 2000, size: 4096 } as never;
+      }
+      return { mtimeMs: 1000 } as never;
+    });
+    mockReaddirSync.mockImplementation(() => {
+      return ["session-1.jsonl"] as never;
+    });
+    mockOpenSync.mockReturnValue(42 as never);
+    mockCloseSync.mockReturnValue(undefined as never);
+  });
+
+  it("returns empty array when CC project dir has no jsonl files", () => {
+    mockReaddirSync.mockImplementation(() => [] as never);
+    expect(
+      extractToolCallsFromJsonl("/mock-home/.claude/projects/-test"),
+    ).toEqual([]);
+  });
+
+  it("returns empty array when CC project dir does not exist", () => {
+    mockReaddirSync.mockImplementation(() => {
+      throw new Error("ENOENT");
+    });
+    expect(extractToolCallsFromJsonl("/nonexistent")).toEqual([]);
+  });
+
+  it("extracts multiple tool_use blocks from a single assistant message", () => {
+    const jsonlContent = JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "t1",
+            name: "Bash",
+            input: { command: "ls" },
+          },
+          { type: "text", text: "some text" },
+          {
+            type: "tool_use",
+            id: "t2",
+            name: "Edit",
+            input: { file_path: "/a/b.ts" },
+          },
+        ],
+      },
+    });
+
+    mockReadSync.mockImplementation(((
+      _fd: number,
+      buffer: NodeJS.ArrayBufferView,
+      _offset: number,
+      _length: number,
+      _position: number | null,
+    ) => {
+      const buf = Buffer.from(jsonlContent, "utf-8");
+      buf.copy(buffer as Buffer);
+      return buf.length;
+    }) as never);
+
+    const result = extractToolCallsFromJsonl("/mock-cc-dir");
+    expect(result).toHaveLength(2);
+    expect(result[0]).toEqual({ name: "Bash", context: "ls" });
+    expect(result[1]).toEqual({ name: "Edit", context: "b.ts" });
+  });
+
+  it("skips non-assistant message types", () => {
+    const jsonlContent = [
+      JSON.stringify({
+        type: "human",
+        message: { content: [{ type: "text", text: "hi" }] },
+      }),
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [
+            {
+              type: "tool_use",
+              id: "t1",
+              name: "Bash",
+              input: { command: "echo hello" },
+            },
+          ],
+        },
+      }),
+    ].join("\n");
+
+    mockReadSync.mockImplementation(((
+      _fd: number,
+      buffer: NodeJS.ArrayBufferView,
+      _offset: number,
+      _length: number,
+      _position: number | null,
+    ) => {
+      const buf = Buffer.from(jsonlContent, "utf-8");
+      buf.copy(buffer as Buffer);
+      return buf.length;
+    }) as never);
+
+    const result = extractToolCallsFromJsonl("/mock-cc-dir");
+    expect(result).toHaveLength(1);
+    expect(result[0]!.name).toBe("Bash");
   });
 });
 

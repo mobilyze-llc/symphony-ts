@@ -1,4 +1,4 @@
-import { readdirSync, statSync } from "node:fs";
+import { closeSync, openSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { generateText } from "ai";
@@ -11,6 +11,7 @@ import type {
   CodexUsage,
 } from "../codex/app-server-client.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
+import { buildActivityContext } from "../logging/session-metrics.js";
 
 // ai-sdk-provider-claude-code uses short model names, not full Anthropic IDs.
 // Map standard names to provider-expected short names.
@@ -160,18 +161,35 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
           }
 
           // Check CC conversation files for activity invisible to workspace monitoring
+          let ccConversationChanged = false;
           try {
             for (const f of readdirSync(ccProjectDir)) {
               if (f.endsWith(".jsonl")) {
                 const mtime = getMtimeMs(join(ccProjectDir, f));
                 if (mtime > lastCcConvMtimeMs) {
                   lastCcConvMtimeMs = mtime;
+                  ccConversationChanged = true;
                   changedPaths.push("cc-conversation");
                 }
               }
             }
           } catch {
             // CC project dir may not exist yet or naming convention changed
+          }
+
+          // Extract tool calls from the CC conversation file when it changed
+          let toolCalls:
+            | Array<{ name: string; context: string | null }>
+            | undefined;
+          if (ccConversationChanged) {
+            try {
+              const extracted = extractToolCallsFromJsonl(ccProjectDir);
+              if (extracted.length > 0) {
+                toolCalls = extracted;
+              }
+            } catch {
+              // Graceful degradation — tool call extraction is best-effort
+            }
           }
 
           if (changedPaths.length > 0) {
@@ -181,6 +199,9 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
               threadId,
               turnId,
               message: `workspace file change detected (${changedPaths.map((p) => p.replace(workspacePath, ".")).join(", ")})`,
+              // TODO(SYMPH-244): session-metrics buildRecentActivityEntry should handle toolCalls
+              // to create RecentActivityEntry records from enriched heartbeat events.
+              ...(toolCalls !== undefined ? { toolCalls } : {}),
             });
           }
         }, heartbeatMs);
@@ -326,4 +347,129 @@ function getMtimeMs(filePath: string): number {
   } catch {
     return 0;
   }
+}
+
+/** Max bytes to read from end of CC conversation .jsonl file. */
+const CC_TAIL_BYTES = 8192;
+
+/**
+ * Find the newest .jsonl file in the CC project directory.
+ * Returns the full path, or null if no .jsonl files exist.
+ */
+function findNewestJsonl(ccProjectDir: string): string | null {
+  let newest: string | null = null;
+  let newestMtime = 0;
+  try {
+    for (const f of readdirSync(ccProjectDir)) {
+      if (f.endsWith(".jsonl")) {
+        const fullPath = join(ccProjectDir, f);
+        const mtime = getMtimeMs(fullPath);
+        if (mtime > newestMtime) {
+          newestMtime = mtime;
+          newest = fullPath;
+        }
+      }
+    }
+  } catch {
+    // Directory may not exist or naming convention changed
+  }
+  return newest;
+}
+
+/**
+ * Read the last `CC_TAIL_BYTES` bytes from a file using position-based reading.
+ * Returns the raw string content. Reads from `Math.max(0, size - CC_TAIL_BYTES)`.
+ */
+function readTailBytes(filePath: string): string {
+  const size = statSync(filePath).size;
+  const offset = Math.max(0, size - CC_TAIL_BYTES);
+  const length = Math.min(size, CC_TAIL_BYTES);
+  const buffer = Buffer.alloc(length);
+  const fd = openSync(filePath, "r");
+  let bytesRead: number;
+  try {
+    bytesRead = readSync(fd, buffer, 0, length, offset);
+  } finally {
+    closeSync(fd);
+  }
+  // Use only the bytes actually read (may be less than the buffer size
+  // if the file was truncated or smaller than expected).
+  return buffer.subarray(0, bytesRead).toString("utf-8");
+}
+
+/**
+ * Extract tool calls from the last 8KB of the newest CC conversation .jsonl file.
+ * Parses each line for assistant messages with `tool_use` content blocks.
+ * Malformed lines are silently skipped.
+ */
+export function extractToolCallsFromJsonl(
+  ccProjectDir: string,
+): Array<{ name: string; context: string | null }> {
+  const filePath = findNewestJsonl(ccProjectDir);
+  if (filePath === null) return [];
+
+  let raw: string;
+  try {
+    raw = readTailBytes(filePath);
+  } catch {
+    return [];
+  }
+
+  const lines = raw.split("\n");
+  const toolCalls: Array<{ name: string; context: string | null }> = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      // Malformed line — skip silently
+      continue;
+    }
+
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      continue;
+    }
+
+    const obj = parsed as Record<string, unknown>;
+    // CC .jsonl format: { type: "assistant", message: { content: [...] } }
+    if (obj.type !== "assistant") continue;
+
+    const message = obj.message;
+    if (
+      typeof message !== "object" ||
+      message === null ||
+      Array.isArray(message)
+    ) {
+      continue;
+    }
+
+    const content = (message as Record<string, unknown>).content;
+    if (!Array.isArray(content)) continue;
+
+    for (const block of content) {
+      if (
+        typeof block === "object" &&
+        block !== null &&
+        !Array.isArray(block) &&
+        (block as Record<string, unknown>).type === "tool_use"
+      ) {
+        const toolBlock = block as Record<string, unknown>;
+        const name = typeof toolBlock.name === "string" ? toolBlock.name : null;
+        if (name !== null) {
+          const context = buildActivityContext(name, toolBlock.input ?? null);
+          toolCalls.push({ name, context });
+        }
+      }
+    }
+  }
+
+  return toolCalls;
 }
