@@ -160,6 +160,22 @@ if $DO_SYMPHONY; then
   # Pre-deploy version
   info "Pre-deploy version: $(get_version)"
 
+  # Stop services before updating to prevent reading mixed old/new files
+  # (git pull changes templates/configs while service is running from this directory)
+  if ! $NO_RESTART && service_installed; then
+    info "Stopping service before update..."
+    run_or_dry "$CTL" stop
+    ok "Service stopped"
+  fi
+
+  SLACK_CTL="$SCRIPT_DIR/slack-bridge-ctl"
+  SLACK_PLIST="$HOME/Library/LaunchAgents/com.slack-bridge.plist"
+  if ! $NO_RESTART && [[ -x "$SLACK_CTL" ]] && [[ -f "$SLACK_PLIST" ]]; then
+    info "Stopping slack bridge before update..."
+    run_or_dry "$SLACK_CTL" stop
+    ok "Slack bridge stopped"
+  fi
+
   # Ensure clean checkout to main — stash uncommitted changes if needed
   current_branch=""
   current_branch="$(git -C "$SYMPHONY_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
@@ -271,12 +287,12 @@ if $DO_CONFIG; then
   echo ""
 fi
 
-# --- 3. Service restart ---
+# --- 3. Service start (services were stopped before git pull) ---
 if ! $NO_RESTART && $DO_SYMPHONY; then
   info "=== Service ==="
 
   if ! service_installed; then
-    info "Service not installed — skipping restart"
+    info "Service not installed — skipping"
   elif $NEED_ENV_RESTART; then
     # .env changed — must uninstall/install to rebake env vars into plist
     info ".env was refreshed — reinstalling service (plist bakes env vars)..."
@@ -284,22 +300,17 @@ if ! $NO_RESTART && $DO_SYMPHONY; then
     run_or_dry "$CTL" install
     run_or_dry "$CTL" start
     ok "Service reinstalled and started"
-  elif $SYMPHONY_UPDATED; then
-    info "Code updated — restarting service..."
-    run_or_dry "$CTL" restart
-    ok "Service restarted"
   else
-    ok "No changes — service left as-is"
+    info "Starting service..."
+    run_or_dry "$CTL" start
+    ok "Service started"
   fi
 
   echo ""
 fi
 
-# --- 3b. Slack bridge restart ---
+# --- 3b. Slack bridge start ---
 if ! $NO_RESTART && $DO_SYMPHONY; then
-  SLACK_CTL="$SCRIPT_DIR/slack-bridge-ctl"
-  SLACK_PLIST="$HOME/Library/LaunchAgents/com.slack-bridge.plist"
-
   if [[ ! -x "$SLACK_CTL" ]]; then
     info "slack-bridge-ctl not found — skipping"
   elif [[ ! -f "$SLACK_PLIST" ]]; then
@@ -310,12 +321,10 @@ if ! $NO_RESTART && $DO_SYMPHONY; then
     run_or_dry "$SLACK_CTL" install
     run_or_dry "$SLACK_CTL" start
     ok "Slack bridge reinstalled and started"
-  elif $SYMPHONY_UPDATED; then
-    info "Code updated — restarting slack bridge..."
-    run_or_dry "$SLACK_CTL" restart
-    ok "Slack bridge restarted"
   else
-    ok "No changes — slack bridge left as-is"
+    info "Starting slack bridge..."
+    run_or_dry "$SLACK_CTL" start
+    ok "Slack bridge started"
   fi
 
   echo ""

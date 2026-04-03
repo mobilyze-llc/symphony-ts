@@ -74,23 +74,24 @@ generate_env_dict() {
   echo "$env_dict"
 }
 
-# --- Commands ---
+# --- Helpers ---
 
-cmd_install() {
-  check_node
-  check_built
-  check_env_file
-  check_not_installed
+is_running() {
+  launchctl print "gui/$(id -u)/${SERVICE_LABEL}" &>/dev/null && \
+    launchctl print "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null | grep -q 'pid = [0-9]'
+}
 
-  info "Installing $SERVICE_LABEL ..."
+get_pid() {
+  launchctl print "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null | grep -oE 'pid = [0-9]+' | grep -oE '[0-9]+'
+}
 
-  mkdir -p "$LOG_DIR"
-  mkdir -p "$(dirname "$PLIST_PATH")"
+# --- plist generation ---
 
+generate_plist() {
   local env_dict
   env_dict="$(generate_env_dict)"
 
-  cat > "$PLIST_PATH" <<PLIST
+  cat <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -146,58 +147,154 @@ ${env_dict}    </dict>
 </dict>
 </plist>
 PLIST
+}
 
+# --- Commands ---
+
+cmd_install() {
+  check_node
+  check_built
+  check_env_file
+  check_not_installed
+
+  mkdir -p "$LOG_DIR"
+  mkdir -p "$(dirname "$PLIST_PATH")"
+
+  generate_plist > "$PLIST_PATH"
   ok "Plist written to $PLIST_PATH"
+
+  launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+  ok "Service registered: $SERVICE_LABEL"
   info "Run 'slack-bridge-ctl start' to start the service."
 }
 
 cmd_uninstall() {
   check_installed
-  cmd_stop 2>/dev/null || true
+
+  # Stop first if running
+  if launchctl print "gui/$(id -u)/${SERVICE_LABEL}" &>/dev/null; then
+    launchctl kill SIGTERM "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null || true
+    sleep 1
+  fi
+
+  launchctl bootout "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null || true
   rm -f "$PLIST_PATH"
-  ok "Service uninstalled."
+  ok "Service uninstalled: $SERVICE_LABEL"
 }
 
 cmd_start() {
   check_installed
-  launchctl load "$PLIST_PATH"
-  ok "Service started."
+
+  if is_running; then
+    warn "Service is already running."
+    return 0
+  fi
+
+  # Re-register if previously stopped via bootout
+  if ! launchctl print "gui/$(id -u)/${SERVICE_LABEL}" &>/dev/null; then
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+  fi
+
+  launchctl kickstart "gui/$(id -u)/${SERVICE_LABEL}"
+  ok "Service started: $SERVICE_LABEL"
+  info "Logs: $LOG_DIR/"
 }
 
 cmd_stop() {
   check_installed
-  launchctl unload "$PLIST_PATH" 2>/dev/null || true
-  ok "Service stopped."
+
+  if ! is_running; then
+    warn "Service is not running."
+    return 0
+  fi
+
+  # Must bootout (deregister) — plain SIGTERM/SIGKILL won't work because
+  # KeepAlive: SuccessfulExit: false makes launchd respawn immediately.
+  info "Stopping service (bootout)..."
+  launchctl bootout "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null || true
+
+  # Wait for process to actually die
+  local waited=0
+  while is_running && [[ $waited -lt 15 ]]; do
+    sleep 1
+    ((waited++))
+  done
+
+  ok "Service stopped: $SERVICE_LABEL"
 }
 
 cmd_restart() {
-  cmd_stop
-  cmd_start
+  check_installed
+
+  # Use kickstart -k for atomic kill+restart — avoids the race condition
+  # where KeepAlive respawns the process between stop and start.
+  if is_running; then
+    info "Restarting service..."
+    launchctl kickstart -k "gui/$(id -u)/${SERVICE_LABEL}"
+  else
+    launchctl kickstart "gui/$(id -u)/${SERVICE_LABEL}"
+  fi
+
+  sleep 2
+  if is_running; then
+    ok "Service restarted: $SERVICE_LABEL"
+    info "Logs: $LOG_DIR/"
+  else
+    die "Service failed to start after restart."
+  fi
 }
 
 cmd_status() {
-  if launchctl list "$SERVICE_LABEL" &>/dev/null; then
-    ok "Service is running."
-    launchctl list "$SERVICE_LABEL"
+  if [[ ! -f "$PLIST_PATH" ]]; then
+    info "Service not installed."
+    return 0
+  fi
+
+  echo ""
+  info "Service: $SERVICE_LABEL"
+  info "Plist:   $PLIST_PATH"
+  info "Logs:    $LOG_DIR/"
+  echo ""
+
+  if is_running; then
+    local pid
+    pid="$(get_pid)"
+    ok "Running (PID ${pid:-unknown})"
   else
-    warn "Service is not running."
+    warn "Not running"
+  fi
+
+  # Show last few lines of stderr if available
+  if [[ -f "$LOG_DIR/stderr.log" ]]; then
+    local size
+    size="$(wc -c < "$LOG_DIR/stderr.log" | tr -d ' ')"
+    if [[ "$size" -gt 0 ]]; then
+      echo ""
+      info "Last 5 lines of stderr.log:"
+      tail -5 "$LOG_DIR/stderr.log" | sed 's/^/  /'
+    fi
   fi
 }
 
 cmd_logs() {
-  if [[ -f "$LOG_DIR/stdout.log" ]]; then
-    cat "$LOG_DIR/stdout.log"
-  else
-    warn "No stdout log found at $LOG_DIR/stdout.log"
+  if [[ ! -d "$LOG_DIR" ]]; then
+    die "Log directory not found: $LOG_DIR"
   fi
-  if [[ -f "$LOG_DIR/stderr.log" ]]; then
-    echo "--- stderr ---"
-    cat "$LOG_DIR/stderr.log"
-  fi
+
+  local log_file="${1:-stderr}"
+  local log_path="$LOG_DIR/${log_file}.log"
+
+  [[ -f "$log_path" ]] || die "Log file not found: $log_path"
+  less +G "$log_path"
 }
 
 cmd_tail() {
-  tail -f "$LOG_DIR/stdout.log" "$LOG_DIR/stderr.log" 2>/dev/null || die "No log files found in $LOG_DIR"
+  if [[ ! -d "$LOG_DIR" ]]; then
+    die "Log directory not found: $LOG_DIR"
+  fi
+
+  info "Tailing stderr.log (Ctrl-C to stop)..."
+  tail -f "$LOG_DIR/stderr.log" "$LOG_DIR/stdout.log" 2>/dev/null
 }
 
 cmd_cleanup() {
@@ -215,7 +312,7 @@ case "${1:-}" in
   stop)      cmd_stop ;;
   restart)   cmd_restart ;;
   status)    cmd_status ;;
-  logs)      cmd_logs ;;
+  logs)      cmd_logs "${2:-stderr}" ;;
   tail)      cmd_tail ;;
   cleanup)   cmd_cleanup ;;
   *)
