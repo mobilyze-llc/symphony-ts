@@ -7,6 +7,10 @@ import type {
   TurnHistoryEntry,
 } from "../domain/model.js";
 import { formatEasternTimestamp } from "./format-timestamp.js";
+import {
+  type LoopTraceJournalPreviewResponse,
+  buildLoopTraceJournalPreview,
+} from "./loop-trace.js";
 import { getAggregateSecondsRunning } from "./session-metrics.js";
 
 export type HealthStatus = "green" | "yellow" | "red";
@@ -51,6 +55,7 @@ export interface RuntimeSnapshotRunningRow {
   failure_reason: string | null;
   health: HealthStatus;
   health_reason: string | null;
+  loop_trace_preview: LoopTraceJournalPreviewResponse;
 }
 
 export interface RuntimeSnapshotRetryRow {
@@ -179,6 +184,9 @@ export function buildRuntimeSnapshot(
         failure_reason: entry.failureReason ?? null,
         health,
         health_reason,
+        loop_trace_preview: buildLoopTraceJournalPreview(
+          state.loopTraceJournal[entry.issue.id] ?? [],
+        ),
       };
       if (reworkCount > 0) {
         row.rework_count = reworkCount;

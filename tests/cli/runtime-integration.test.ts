@@ -435,7 +435,43 @@ Implement {{ issue.identifier }} attempt={{ attempt }}
       method: "GET",
       path: "/api/v1/ISSUE-1",
     });
-    expect(issueDetail.statusCode).toBe(404);
+    expect(issueDetail.statusCode).toBe(200);
+    const issueDetailBody = JSON.parse(issueDetail.body) as {
+      issue_identifier: string;
+      status: string;
+      loop_trace_journal: {
+        path: string;
+        total_entries: number;
+        entries: Array<{
+          kind: string;
+          stage_transition?: { status: string } | null;
+        }>;
+      };
+    };
+    expect(issueDetailBody.issue_identifier).toBe("ISSUE-1");
+    expect(issueDetailBody.status).toBe("failed");
+    expect(issueDetailBody.loop_trace_journal.path).toBe(
+      join(workspaceRoot, ".symphony", "loop-traces", "issue-1.jsonl"),
+    );
+    expect(issueDetailBody.loop_trace_journal.total_entries).toBeGreaterThan(0);
+    expect(
+      issueDetailBody.loop_trace_journal.entries.map((entry) => entry.kind),
+    ).toEqual(
+      expect.arrayContaining([
+        "feedback_event",
+        "stage_transition",
+        "worker_exit",
+      ]),
+    );
+    expect(issueDetailBody.loop_trace_journal.entries).toHaveLength(
+      issueDetailBody.loop_trace_journal.total_entries,
+    );
+    expect(issueDetailBody.loop_trace_journal.entries.at(-1)).toMatchObject({
+      kind: "stage_transition",
+      stage_transition: {
+        status: "failed",
+      },
+    });
 
     await service.shutdown();
 

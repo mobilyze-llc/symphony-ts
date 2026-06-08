@@ -101,6 +101,70 @@ export interface RecentActivityEntry {
   totalTokens?: number;
 }
 
+export const LOOP_TRACE_EVENT_KINDS = [
+  "session_start",
+  "prompt_summary",
+  "tool_action",
+  "file_delta",
+  // Reserved for later dispatcher phases; readers should tolerate absence.
+  "test_result",
+  "feedback_event",
+  "stage_transition",
+  "gate_result",
+  "escalation",
+  "worker_exit",
+] as const;
+
+export type LoopTraceEventKind = (typeof LOOP_TRACE_EVENT_KINDS)[number];
+
+export interface LoopTracePromptSummary {
+  chars: number;
+  estimatedTokens: number | null;
+}
+
+export interface LoopTraceToolAction {
+  toolName: string;
+  context: string | null;
+  totalTokens: number | null;
+}
+
+export interface LoopTraceFileDelta {
+  files: string[];
+}
+
+export interface LoopTraceStageTransition {
+  from: string | null;
+  to: string | null;
+  status: string;
+}
+
+export interface LoopTraceWorkerExit {
+  outcome: "normal" | "abnormal";
+  reason: string | null;
+  durationMs: number;
+  turnCount: number;
+  totalTokens: number;
+}
+
+export interface LoopTraceEntry {
+  sequence: number;
+  timestamp: string;
+  kind: LoopTraceEventKind;
+  issueId: string;
+  issueIdentifier: string;
+  stage: string | null;
+  attempt: number | null;
+  sessionId: string | null;
+  summary: string;
+  prompt?: LoopTracePromptSummary;
+  toolAction?: LoopTraceToolAction;
+  fileDelta?: LoopTraceFileDelta;
+  stageTransition?: LoopTraceStageTransition;
+  workerExit?: LoopTraceWorkerExit;
+}
+
+export type LoopTraceJournal = LoopTraceEntry[];
+
 export interface LiveSession {
   sessionId: string | null;
   threadId: string | null;
@@ -193,6 +257,7 @@ export interface OrchestratorState {
   issuePassedStages: Record<string, string[]>;
   issueFirstDispatchedAt: Record<string, string>;
   issueExecutionHistory: Record<string, ExecutionHistory>;
+  loopTraceJournal: Record<string, LoopTraceJournal>;
 }
 
 export const FAILURE_CLASSES = [
@@ -300,5 +365,6 @@ export function createInitialOrchestratorState(input: {
     issuePassedStages: {},
     issueFirstDispatchedAt: {},
     issueExecutionHistory: {},
+    loopTraceJournal: {},
   };
 }

@@ -1,5 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -171,46 +177,71 @@ describe("OrchestratorRuntimeHost", () => {
   });
 
   it("cancels a reconciled worker and releases the claim when the issue is no longer eligible on retry", async () => {
-    const tracker = createTracker();
-    const fakeRunner = new FakeAgentRunner();
-    const host = new OrchestratorRuntimeHost({
-      config: createConfig(),
-      tracker,
-      createAgentRunner: ({ onEvent }) => {
-        fakeRunner.onEvent = onEvent;
-        return fakeRunner;
-      },
-      now: () => new Date("2026-03-06T00:00:05.000Z"),
-    });
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-loop-retry-"));
+    try {
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
 
-    await host.pollOnce();
-    tracker.setStateSnapshots([
-      { id: "1", identifier: "ISSUE-1", state: "Done" },
-    ]);
+      await host.pollOnce();
+      tracker.setStateSnapshots([
+        { id: "1", identifier: "ISSUE-1", state: "Done" },
+      ]);
 
-    const reconcileTick = await host.pollOnce();
-    expect(reconcileTick.stopRequests).toEqual([
-      {
-        issueId: "1",
-        issueIdentifier: "ISSUE-1",
-        cleanupWorkspace: true,
-        reason: "terminal_state",
-      },
-    ]);
-    await host.waitForIdle();
+      const reconcileTick = await host.pollOnce();
+      expect(reconcileTick.stopRequests).toEqual([
+        {
+          issueId: "1",
+          issueIdentifier: "ISSUE-1",
+          cleanupWorkspace: true,
+          reason: "terminal_state",
+        },
+      ]);
+      await host.waitForIdle();
 
-    expect(fakeRunner.abortReasons).toEqual(["Stopped due to terminal_state."]);
-    expect(Object.keys(host.getState().retryAttempts)).toEqual(["1"]);
+      expect(fakeRunner.abortReasons).toEqual([
+        "Stopped due to terminal_state.",
+      ]);
+      expect(Object.keys(host.getState().retryAttempts)).toEqual(["1"]);
 
-    tracker.setCandidates([]);
-    const retryResult = await host.runRetryTimer("1");
+      tracker.setCandidates([]);
+      const retryResult = await host.runRetryTimer("1");
 
-    expect(retryResult).toEqual({
-      dispatched: false,
-      released: true,
-      retryEntry: null,
-    });
-    expect([...host.getState().claimed]).toEqual([]);
+      expect(retryResult).toEqual({
+        dispatched: false,
+        released: true,
+        retryEntry: null,
+      });
+      await host.flushEvents();
+      expect([...host.getState().claimed]).toEqual([]);
+      expect(host.getState().loopTraceJournal["1"]).toBeUndefined();
+
+      const details = await host.getIssueDetails("ISSUE-1");
+
+      expect(details).toMatchObject({
+        issue_identifier: "ISSUE-1",
+        issue_id: "1",
+        status: "failed",
+      });
+      expect(details!.loop_trace_journal.entries.at(-1)).toMatchObject({
+        kind: "stage_transition",
+        stage_transition: {
+          status: "failed",
+        },
+      });
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
   });
 
   it("coalesces manual refresh requests onto a single queued poll", async () => {
@@ -370,6 +401,357 @@ describe("OrchestratorRuntimeHost", () => {
         message: null,
       },
     ]);
+  });
+
+  it("loads artifact-backed loop trace details after a cold restart", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-loop-trace-"));
+
+    try {
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const config = createStagedConfig({
+        workspace: {
+          root: workspaceRoot,
+        },
+      });
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      await host.pollOnce();
+
+      fakeRunner.emit("1", {
+        event: "session_started",
+        timestamp: "2026-03-06T00:00:01.000Z",
+        codexAppServerPid: "1001",
+        sessionId: "thread-1-turn-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        turnCount: 1,
+        promptChars: 480,
+        estimatedPromptTokens: 120,
+      });
+      await host.flushEvents();
+
+      fakeRunner.resolve("1", createNormalResult());
+      await host.waitForIdle();
+
+      expect(host.getState().loopTraceJournal["1"]).toBeUndefined();
+
+      const coldHost = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({
+          candidates: [],
+          stateSnapshots: [],
+        }),
+        agentRunner: new FakeAgentRunner(),
+        now: () => new Date("2026-03-06T00:00:06.000Z"),
+      });
+
+      const details = await coldHost.getIssueDetails("ISSUE-1");
+
+      expect(details).not.toBeNull();
+      expect(details).toMatchObject({
+        issue_identifier: "ISSUE-1",
+        status: "completed",
+        loop_trace_journal: {
+          path: `${workspaceRoot}/.symphony/loop-traces/1.jsonl`,
+          total_entries: 4,
+          stored_entries: 4,
+          truncated: false,
+        },
+      });
+      expect(
+        details!.loop_trace_journal.entries.map((entry) => entry.kind),
+      ).toEqual([
+        "session_start",
+        "prompt_summary",
+        "stage_transition",
+        "worker_exit",
+      ]);
+
+      const artifact = readFileSync(details!.loop_trace_journal.path, "utf8");
+      expect(artifact).toContain('"kind":"session_start"');
+      expect(artifact).toContain('"kind":"worker_exit"');
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("serves missing stored details when stored loop trace lookup fails", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-loop-trace-bad-"));
+
+    try {
+      mkdirSync(join(workspaceRoot, ".symphony"));
+      writeFileSync(
+        join(workspaceRoot, ".symphony", "loop-traces"),
+        "not a directory\n",
+      );
+      const config = createStagedConfig({
+        workspace: {
+          root: workspaceRoot,
+        },
+      });
+      const entries: StructuredLogEntry[] = [];
+      const logger = new StructuredLogger([
+        {
+          write(entry) {
+            entries.push(entry);
+          },
+        },
+      ]);
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({
+          candidates: [],
+          stateSnapshots: [],
+        }),
+        logger,
+        agentRunner: new FakeAgentRunner(),
+        now: () => new Date("2026-03-06T00:00:06.000Z"),
+      });
+
+      await expect(host.getIssueDetails("ISSUE-1")).resolves.toBeNull();
+      expect(entries).toContainEqual(
+        expect.objectContaining({
+          event: "loop_trace_hydration_failed",
+          level: "warn",
+          issue_identifier: "ISSUE-1",
+          workspace_root: workspaceRoot,
+        }),
+      );
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("shares in-flight loop trace hydration between details reads and agent events", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    let releaseRead!: () => void;
+    let markReadStarted!: () => void;
+    const readStarted = new Promise<void>((resolve) => {
+      markReadStarted = resolve;
+    });
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const readLoopTraceJournal = vi.fn(async () => {
+      markReadStarted();
+      await readGate;
+      return [];
+    });
+    const writeLoopTraceJournal = vi.fn(async () => {});
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      readLoopTraceJournal,
+      writeLoopTraceJournal,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const detailsPromise = host.getIssueDetails("ISSUE-1");
+    await readStarted;
+
+    fakeRunner.emit("1", {
+      event: "session_started",
+      timestamp: "2026-03-06T00:00:01.000Z",
+      codexAppServerPid: "1001",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+    const flushPromise = host.flushEvents();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(readLoopTraceJournal).toHaveBeenCalledTimes(1);
+
+    releaseRead();
+    await Promise.all([detailsPromise, flushPromise]);
+
+    const details = await host.getIssueDetails("ISSUE-1");
+    expect(
+      details!.loop_trace_journal.entries.map((entry) => entry.kind),
+    ).toEqual(["session_start"]);
+    expect(writeLoopTraceJournal).toHaveBeenCalledTimes(1);
+  });
+
+  it("serves issue details when loop trace hydration fails", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const readLoopTraceJournal = vi.fn(async () => {
+      throw new Error("permission denied");
+    });
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      readLoopTraceJournal,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const details = await host.getIssueDetails("ISSUE-1");
+
+    expect(details).toMatchObject({
+      issue_identifier: "ISSUE-1",
+      issue_id: "1",
+      status: "running",
+      loop_trace_journal: {
+        stored_entries: 0,
+        total_entries: 0,
+        entries: [],
+      },
+    });
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "loop_trace_hydration_failed",
+        level: "warn",
+        issue_id: "1",
+        reason: "permission denied",
+      }),
+    );
+  });
+
+  it("keeps structured agent-event logging when loop trace persistence fails", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const writeLoopTraceJournal = vi.fn(async () => {
+      throw new Error("disk full");
+    });
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      writeLoopTraceJournal,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.emit("1", {
+      event: "session_started",
+      timestamp: "2026-03-06T00:00:01.000Z",
+      codexAppServerPid: "1001",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+    await host.flushEvents();
+
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "session_started",
+        issue_id: "1",
+        issue_identifier: "ISSUE-1",
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "loop_trace_persist_failed",
+        level: "warn",
+        issue_id: "1",
+        reason: "disk full",
+      }),
+    );
+  });
+
+  it("records cancellation feedback and repo-relative file deltas in loop traces", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.emit("1", {
+      event: "approval_auto_approved",
+      timestamp: "2026-03-06T00:00:01.000Z",
+      codexAppServerPid: "1001",
+      raw: {
+        params: {
+          toolName: "Edit",
+          input: {
+            file_path: "/tmp/workspaces/1/src/features/trace.ts",
+          },
+        },
+      },
+    });
+    fakeRunner.emit("1", {
+      event: "turn_cancelled",
+      timestamp: "2026-03-06T00:00:02.000Z",
+      codexAppServerPid: "1001",
+      message: "turn cancelled by operator",
+    });
+    fakeRunner.emit("1", {
+      event: "other_message",
+      timestamp: "2026-03-06T00:00:03.000Z",
+      codexAppServerPid: "1001",
+      message: "server emitted keepalive",
+    });
+    await host.flushEvents();
+
+    const details = await host.getIssueDetails("ISSUE-1");
+
+    expect(
+      details!.loop_trace_journal.entries.map((entry) => ({
+        kind: entry.kind,
+        summary: entry.summary,
+        files: entry.file_delta?.files,
+      })),
+    ).toContainEqual({
+      kind: "file_delta",
+      summary: "Updated src/features/trace.ts.",
+      files: ["src/features/trace.ts"],
+    });
+    expect(
+      details!.loop_trace_journal.entries.map((entry) => entry.summary),
+    ).toEqual(
+      expect.arrayContaining([
+        "turn cancelled by operator",
+        "server emitted keepalive",
+      ]),
+    );
   });
 
   it("emits issue and session context for agent lifecycle logs", async () => {

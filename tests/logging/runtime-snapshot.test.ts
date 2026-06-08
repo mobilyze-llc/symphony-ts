@@ -42,6 +42,65 @@ describe("runtime snapshot", () => {
     expect(snapshot.running[0]!.activity_summary).toBe("Editing src/foo.ts");
   });
 
+  it("includes a loop trace preview for running rows", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    state.running["issue-1"] = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Editing src/foo.ts",
+      turnCount: 1,
+      codexInputTokens: 10,
+      codexOutputTokens: 5,
+      codexTotalTokens: 15,
+    });
+    state.loopTraceJournal["issue-1"] = [
+      {
+        sequence: 1,
+        timestamp: "2026-03-06T10:00:01.000Z",
+        kind: "session_start",
+        issueId: "issue-1",
+        issueIdentifier: "ABC-1",
+        stage: "implement",
+        attempt: null,
+        sessionId: "thread-a-turn-1",
+        summary: "Session started.",
+      },
+    ];
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running[0]!.loop_trace_preview).toEqual({
+      total_entries: 1,
+      stored_entries: 1,
+      truncated: false,
+      entries: [
+        {
+          sequence: 1,
+          at: "2026-03-06T10:00:01.000Z",
+          kind: "session_start",
+          summary: "Session started.",
+          stage: "implement",
+          attempt: null,
+          session_id: "thread-a-turn-1",
+          prompt: null,
+          tool_action: null,
+          file_delta: null,
+          stage_transition: null,
+          worker_exit: null,
+        },
+      ],
+    });
+  });
+
   it("includes rework_count in running row when greater than zero", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,

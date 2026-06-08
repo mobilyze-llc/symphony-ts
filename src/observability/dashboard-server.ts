@@ -20,6 +20,7 @@ import {
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
 } from "../config/defaults.js";
 import { ERROR_CODES } from "../errors/codes.js";
+import type { LoopTraceJournalResponse } from "../logging/loop-trace.js";
 import type { RuntimeSnapshot } from "../logging/runtime-snapshot.js";
 import { fetchClaudeUsageFromCli } from "./dashboard-claude-usage.js";
 import { toErrorMessage } from "./dashboard-format.js";
@@ -71,7 +72,14 @@ export interface IssueDetailRetryState {
 export interface IssueDetailResponse {
   issue_identifier: string;
   issue_id: string;
-  status: "claimed" | "released" | "retry_queued" | "running" | "unclaimed";
+  status:
+    | "claimed"
+    | "completed"
+    | "failed"
+    | "released"
+    | "retry_queued"
+    | "running"
+    | "unclaimed";
   workspace: {
     path: string;
   } | null;
@@ -93,6 +101,7 @@ export interface IssueDetailResponse {
     event: string;
     message: string | null;
   }>;
+  loop_trace_journal: LoopTraceJournalResponse;
   last_error: string | null;
   tracked: Record<string, unknown>;
   parent: {

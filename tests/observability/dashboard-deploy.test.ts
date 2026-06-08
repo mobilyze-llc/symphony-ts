@@ -373,6 +373,12 @@ function createSnapshot(): RuntimeSnapshot {
         failure_reason: null,
         health: "green",
         health_reason: null,
+        loop_trace_preview: {
+          total_entries: 0,
+          stored_entries: 0,
+          truncated: false,
+          entries: [],
+        },
       },
     ],
     retrying: [],
