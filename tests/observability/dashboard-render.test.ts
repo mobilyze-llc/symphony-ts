@@ -122,6 +122,69 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain("Symphony Observability");
   });
 
+  it("renders manager-run lane state and closeout evidence", () => {
+    const snapshot: RuntimeSnapshot = {
+      ...buildSnapshot({}),
+      manager_runs: [
+        {
+          run_id: "wave-2",
+          manager_thread_id: "019ea8a6-bc42-72a3-ade0-72be7663232e",
+          title: "Symphony Wave 2 manager run",
+          started_at: "2026-06-08T13:00:00.000Z",
+          counts: {
+            active_lanes: 1,
+            blocked_lanes: 1,
+            degraded_lanes: 1,
+            closed_lanes: 0,
+            spawned_follow_ups: 1,
+            missing_closeout_evidence: 1,
+          },
+          lanes: [
+            {
+              lane_id: "lane-mob-87",
+              issue_identifier: "MOB-87",
+              title: "Map manager-thread runs into Symphony run events",
+              status: "degraded",
+              worker_thread_id: "worker-thread-mob-87",
+              last_heartbeat_at: "2026-06-08T13:05:00.000Z",
+              blocked_by: [],
+              degraded_reasons: ["stale_heartbeat"],
+              pr_url: null,
+              pr_status: null,
+              validation_artifact_ids: ["artifact-mob-87-review-compensation"],
+              review_gate_ids: ["gate-mob-87-review"],
+              follow_up_issue_identifiers: ["SYMPH-262"],
+            },
+          ],
+          follow_ups: [
+            {
+              issue_identifier: "SYMPH-262",
+              title: "Backfill historical manager-run import CLI",
+              parent_issue_identifier: "MOB-87",
+              lane_id: "lane-mob-87",
+              url: "https://linear.app/mobilyze-llc/issue/SYMPH-262/backfill-historical-manager-run-import-cli",
+            },
+          ],
+          escalations: [],
+          model_checks: [],
+          missing_closeout_evidence: ["lane:lane-mob-87:pr"],
+          closeout_ready: false,
+        },
+      ],
+    };
+
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: true });
+
+    expect(html).toContain("Manager runs");
+    expect(html).toContain("Symphony Wave 2 manager run");
+    expect(html).toContain("MOB-87");
+    expect(html).toContain("Degraded 1");
+    expect(html).toContain("SYMPH-262");
+    expect(html).toContain("lane:lane-mob-87:pr");
+    expect(html).toContain("renderManagerRuns");
+    expect(html).toContain("next.manager_runs");
+  });
+
   it("activity column shows last_tool_call when present", () => {
     const snapshot = buildSnapshot({
       last_tool_call: "Read model.ts",

@@ -39,6 +39,7 @@ import type {
   Issue,
   LoopTraceEntry,
   LoopTraceJournal,
+  ManagerRunJournal,
   RetryEntry,
   RightSizingDecision,
   RunningEntry,
@@ -54,6 +55,7 @@ import {
   readLoopTraceJournal,
   writeLoopTraceJournal,
 } from "../logging/loop-trace.js";
+import { readManagerRunJournal } from "../logging/manager-run-journal.js";
 import {
   appendDispatcherRunJournalEntryToDisk,
   readDispatcherRunJournal,
@@ -100,6 +102,7 @@ import type {
 } from "./core.js";
 import { OrchestratorCore } from "./core.js";
 import { runEnsembleGate } from "./gate-handler.js";
+import { reduceManagerRunJournal } from "./manager-run.js";
 import type { PipelineNotificationSink } from "./pipeline-notifier.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
 
@@ -152,6 +155,7 @@ export interface RuntimeHostOptions {
   readDispatcherRunJournal?: (
     workspaceRoot: string,
   ) => Promise<DispatcherRunJournal>;
+  readManagerRunJournal?: (workspaceRoot: string) => Promise<ManagerRunJournal>;
   writeDispatcherRunJournalEntry?: (
     workspaceRoot: string,
     entry: DispatcherRunJournalEntry,
@@ -236,6 +240,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     workspaceRoot: string,
   ) => Promise<DispatcherRunJournal>;
 
+  private readonly readManagerRunJournal: (
+    workspaceRoot: string,
+  ) => Promise<ManagerRunJournal>;
+
   private readonly writeDispatcherRunJournalEntry: (
     workspaceRoot: string,
     entry: DispatcherRunJournalEntry,
@@ -276,6 +284,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private dispatcherRunJournalLoaded = false;
   private dispatcherRunJournalRoot: string | null = null;
   private readonly dispatcherLeaseRoots = new Map<string, string>();
+  private managerRunJournalHydrationTask: Promise<void> | null = null;
 
   constructor(options: RuntimeHostOptions) {
     this.config = options.config;
@@ -293,6 +302,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       options.writeLoopTraceJournal ?? writeLoopTraceJournal;
     this.readDispatcherRunJournal =
       options.readDispatcherRunJournal ?? readDispatcherRunJournal;
+    this.readManagerRunJournal =
+      options.readManagerRunJournal ?? readManagerRunJournal;
     this.writeDispatcherRunJournalEntry =
       options.writeDispatcherRunJournalEntry ??
       appendDispatcherRunJournalEntryToDisk;
@@ -494,6 +505,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       if (previousRoot !== this.workspaceManager.root) {
         this.handleDispatcherRunJournalRootSwap();
       }
+      this.managerRunJournalHydrationTask = null;
     }
 
     this.orchestrator.updateConfig(input.config);
@@ -585,6 +597,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   }
 
   async getRuntimeSnapshot(): Promise<RuntimeSnapshot> {
+    await this.refreshManagerRunJournalForSnapshot();
+    const state = this.orchestrator.getState();
+    state.managerRuns = reduceManagerRunJournal(state.managerRunJournal, {
+      now: this.now(),
+    });
     return buildRuntimeSnapshot(this.orchestrator.getState(), {
       now: this.now(),
     });
@@ -846,6 +863,45 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         },
       );
       throw error;
+    }
+  }
+
+  private async refreshManagerRunJournalForSnapshot(): Promise<void> {
+    if (this.managerRunJournalHydrationTask !== null) {
+      await this.managerRunJournalHydrationTask;
+      return;
+    }
+
+    const task = (async () => {
+      try {
+        const journal = await this.readManagerRunJournal(
+          this.workspaceManager.root,
+        );
+        const state = this.orchestrator.getState();
+        state.managerRunJournal = journal;
+        state.managerRuns = reduceManagerRunJournal(journal, {
+          now: this.now(),
+        });
+      } catch (error) {
+        await this.logger?.warn(
+          "manager_run_journal_hydration_failed",
+          "Failed to hydrate manager run journal.",
+          {
+            outcome: "degraded",
+            reason: toErrorMessage(error),
+            workspace_root: this.workspaceManager.root,
+          },
+        );
+        throw error;
+      }
+    })();
+    this.managerRunJournalHydrationTask = task;
+    try {
+      await task;
+    } finally {
+      if (this.managerRunJournalHydrationTask === task) {
+        this.managerRunJournalHydrationTask = null;
+      }
     }
   }
 

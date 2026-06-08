@@ -588,6 +588,50 @@ const DASHBOARD_STYLES = String.raw`
         font-size: 0.78rem;
         font-weight: 600;
       }
+      .manager-runs-grid {
+        display: grid;
+        gap: 0.85rem;
+        margin-top: 1rem;
+      }
+      .manager-run-panel {
+        display: grid;
+        gap: 0.8rem;
+        padding: 0.95rem;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: rgba(255, 255, 255, 0.025);
+      }
+      .manager-run-title {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+      }
+      .manager-run-title h3 {
+        margin: 0;
+        font-size: 0.98rem;
+      }
+      .manager-lane-grid {
+        display: grid;
+        gap: 0.45rem;
+      }
+      .manager-lane-row {
+        display: grid;
+        grid-template-columns: minmax(8rem, 1fr) auto;
+        gap: 0.55rem;
+        padding: 0.55rem 0;
+        border-top: 1px solid var(--line);
+        align-items: start;
+      }
+      .manager-lane-row:first-child {
+        border-top: none;
+      }
+      .manager-run-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+      }
 `;
 
 export function renderDashboardHtml(
@@ -672,6 +716,17 @@ ${DASHBOARD_STYLES}
             <p id="metric-runtime" class="metric-value numeric">${initialRuntimeLabel}</p>
             <p id="generated-at" class="metric-detail">Generated at ${escapeHtml(snapshot.generated_at)}</p>
           </article>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Manager runs</h2>
+              <p class="section-copy">Lane ledgers replayed as deterministic Symphony run state.</p>
+            </div>
+          </div>
+
+          <div id="manager-runs" class="manager-runs-grid">${renderManagerRuns(snapshot)}</div>
         </section>
 
         <section class="section-card">
@@ -898,6 +953,48 @@ function renderDashboardClientScript(
             '</div>';
         }
 
+        function renderManagerRuns(next) {
+          var runs = Array.isArray(next.manager_runs) ? next.manager_runs : [];
+          if (runs.length === 0) {
+            return '<p class="empty-state">No manager-run ledgers have been replayed.</p>';
+          }
+          return runs.map(function (run) {
+            var counts = run.counts || {};
+            var countTags = [
+              ['Active', counts.active_lanes || 0, 'state-badge-active'],
+              ['Blocked', counts.blocked_lanes || 0, 'state-badge-warning'],
+              ['Degraded', counts.degraded_lanes || 0, 'state-badge-danger'],
+              ['Follow-ups', counts.spawned_follow_ups || 0, 'state-badge'],
+              ['Missing evidence', counts.missing_closeout_evidence || 0, counts.missing_closeout_evidence > 0 ? 'state-badge-danger' : 'state-badge-active']
+            ].map(function (tag) {
+              return '<span class="state-badge ' + tag[2] + '">' + escapeHtml(tag[0]) + ' ' + formatInteger(tag[1]) + '</span>';
+            }).join('');
+            var lanes = Array.isArray(run.lanes) ? run.lanes : [];
+            var laneRows = lanes.length === 0
+              ? '<p class="empty-state">No worker lanes admitted.</p>'
+              : lanes.map(function (lane) {
+                  var details = [];
+                  if (lane.pr_url) details.push('PR ' + (lane.pr_status || 'linked'));
+                  if (Array.isArray(lane.blocked_by) && lane.blocked_by.length > 0) details.push('blocked by ' + lane.blocked_by.join(', '));
+                  if (Array.isArray(lane.degraded_reasons) && lane.degraded_reasons.length > 0) details.push(lane.degraded_reasons.join(', '));
+                  if (Array.isArray(lane.follow_up_issue_identifiers) && lane.follow_up_issue_identifiers.length > 0) details.push('spawned ' + lane.follow_up_issue_identifiers.join(', '));
+                  return '<div class="manager-lane-row">' +
+                    '<div class="issue-stack"><span class="issue-id">' + escapeHtml(lane.issue_identifier) + '</span><span class="muted issue-title">' + escapeHtml(lane.title || '') + '</span><span class="muted event-meta">' + escapeHtml(details.join(' · ') || 'ledger clean') + '</span></div>' +
+                    '<span class="' + stateBadgeClass(lane.status) + '">' + escapeHtml(lane.status) + '</span>' +
+                    '</div>';
+                }).join('');
+            var missing = Array.isArray(run.missing_closeout_evidence) && run.missing_closeout_evidence.length > 0
+              ? '<div class="manager-run-tags">' + run.missing_closeout_evidence.map(function (item) { return '<span class="state-badge state-badge-danger">' + escapeHtml(item) + '</span>'; }).join('') + '</div>'
+              : '<span class="state-badge state-badge-active">Closeout ready</span>';
+            return '<article class="manager-run-panel">' +
+              '<div class="manager-run-title"><h3>' + escapeHtml(run.title || run.run_id) + '</h3><span class="mono muted">' + escapeHtml(run.manager_thread_id || run.run_id) + '</span></div>' +
+              '<div class="manager-run-tags">' + countTags + '</div>' +
+              '<div class="manager-lane-grid">' + laneRows + '</div>' +
+              missing +
+              '</article>';
+          }).join('');
+        }
+
         function renderDetailPanel(row, rowId) {
           var contextItems = [];
           if (row.pipeline_stage != null) {
@@ -1052,6 +1149,7 @@ function renderDashboardClientScript(
           document.getElementById('metric-total').textContent = formatInteger(next.codex_totals.total_tokens);
           document.getElementById('metric-total-detail').textContent = 'In ' + formatInteger(next.codex_totals.input_tokens) + ' / Out ' + formatInteger(next.codex_totals.output_tokens);
           document.getElementById('metric-runtime').textContent = formatRuntimeSeconds(next.codex_totals.seconds_running);
+          document.getElementById('manager-runs').innerHTML = renderManagerRuns(next);
           // Preserve expand/collapse state before DOM replacement (SYMPH-37)
           var expandedIds = new Set();
           document.querySelectorAll('.expand-toggle[aria-expanded="true"]').forEach(function(btn) {
@@ -1194,6 +1292,106 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
             <tr id="${escapeHtml(detailId)}" class="detail-row" style="display:none;">
               <td colspan="7">${detailPanel}</td>
             </tr>`;
+    })
+    .join("");
+}
+
+function renderManagerRuns(snapshot: RuntimeSnapshot): string {
+  const managerRuns = snapshot.manager_runs ?? [];
+  if (managerRuns.length === 0) {
+    return '<p class="empty-state">No manager-run ledgers have been replayed.</p>';
+  }
+
+  return managerRuns
+    .map((run) => {
+      const tags = [
+        {
+          label: "Active",
+          value: run.counts.active_lanes,
+          className: "state-badge-active",
+        },
+        {
+          label: "Blocked",
+          value: run.counts.blocked_lanes,
+          className: "state-badge-warning",
+        },
+        {
+          label: "Degraded",
+          value: run.counts.degraded_lanes,
+          className: "state-badge-danger",
+        },
+        {
+          label: "Follow-ups",
+          value: run.counts.spawned_follow_ups,
+          className: "",
+        },
+        {
+          label: "Missing evidence",
+          value: run.counts.missing_closeout_evidence,
+          className:
+            run.counts.missing_closeout_evidence > 0
+              ? "state-badge-danger"
+              : "state-badge-active",
+        },
+      ]
+        .map(
+          (tag) =>
+            `<span class="state-badge ${tag.className}">${escapeHtml(tag.label)} ${formatInteger(tag.value)}</span>`,
+        )
+        .join("");
+
+      const laneRows =
+        run.lanes.length === 0
+          ? '<p class="empty-state">No worker lanes admitted.</p>'
+          : run.lanes
+              .map((lane) => {
+                const details: string[] = [];
+                if (lane.pr_url !== null) {
+                  details.push(`PR ${lane.pr_status ?? "linked"}`);
+                }
+                if (lane.blocked_by.length > 0) {
+                  details.push(`blocked by ${lane.blocked_by.join(", ")}`);
+                }
+                if (lane.degraded_reasons.length > 0) {
+                  details.push(lane.degraded_reasons.join(", "));
+                }
+                if (lane.follow_up_issue_identifiers.length > 0) {
+                  details.push(
+                    `spawned ${lane.follow_up_issue_identifiers.join(", ")}`,
+                  );
+                }
+                return `
+                  <div class="manager-lane-row">
+                    <div class="issue-stack">
+                      <span class="issue-id">${escapeHtml(lane.issue_identifier)}</span>
+                      <span class="muted issue-title">${escapeHtml(lane.title)}</span>
+                      <span class="muted event-meta">${escapeHtml(details.join(" · ") || "ledger clean")}</span>
+                    </div>
+                    <span class="${stateBadgeClass(lane.status)}">${escapeHtml(lane.status)}</span>
+                  </div>`;
+              })
+              .join("");
+
+      const missingEvidence =
+        run.missing_closeout_evidence.length === 0
+          ? '<span class="state-badge state-badge-active">Closeout ready</span>'
+          : `<div class="manager-run-tags">${run.missing_closeout_evidence
+              .map(
+                (item) =>
+                  `<span class="state-badge state-badge-danger">${escapeHtml(item)}</span>`,
+              )
+              .join("")}</div>`;
+
+      return `
+        <article class="manager-run-panel">
+          <div class="manager-run-title">
+            <h3>${escapeHtml(run.title ?? run.run_id)}</h3>
+            <span class="mono muted">${escapeHtml(run.manager_thread_id ?? run.run_id)}</span>
+          </div>
+          <div class="manager-run-tags">${tags}</div>
+          <div class="manager-lane-grid">${laneRows}</div>
+          ${missingEvidence}
+        </article>`;
     })
     .join("");
 }

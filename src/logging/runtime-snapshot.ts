@@ -66,6 +66,60 @@ export interface RuntimeSnapshotRetryRow {
   error: string | null;
 }
 
+export interface RuntimeSnapshotManagerLaneRow {
+  lane_id: string;
+  issue_identifier: string;
+  title: string;
+  status: "active" | "blocked" | "degraded" | "closed";
+  worker_thread_id: string;
+  last_heartbeat_at: string | null;
+  blocked_by: string[];
+  degraded_reasons: string[];
+  pr_url: string | null;
+  pr_status: "draft" | "open" | "merged" | "closed" | null;
+  validation_artifact_ids: string[];
+  review_gate_ids: string[];
+  follow_up_issue_identifiers: string[];
+}
+
+export interface RuntimeSnapshotManagerRun {
+  run_id: string;
+  manager_thread_id: string | null;
+  title: string | null;
+  started_at: string | null;
+  counts: {
+    active_lanes: number;
+    blocked_lanes: number;
+    degraded_lanes: number;
+    closed_lanes: number;
+    spawned_follow_ups: number;
+    missing_closeout_evidence: number;
+  };
+  lanes: RuntimeSnapshotManagerLaneRow[];
+  follow_ups: Array<{
+    issue_identifier: string;
+    title: string;
+    parent_issue_identifier: string | null;
+    lane_id: string | null;
+    url: string | null;
+  }>;
+  escalations: Array<{
+    lane_id: string | null;
+    kind: string;
+    severity: "warning" | "critical";
+    message: string;
+    raised_at: string;
+  }>;
+  model_checks: Array<{
+    reason: "ambiguity" | "decision_quality_check";
+    lane_id: string | null;
+    question: string;
+    requested_at: string;
+  }>;
+  missing_closeout_evidence: string[];
+  closeout_ready: boolean;
+}
+
 export interface RuntimeSnapshot {
   generated_at: string;
   counts: {
@@ -83,6 +137,7 @@ export interface RuntimeSnapshot {
     seconds_running: number;
   };
   rate_limits: CodexRateLimits;
+  manager_runs?: RuntimeSnapshotManagerRun[];
 }
 
 export function buildRuntimeSnapshot(
@@ -220,7 +275,82 @@ export function buildRuntimeSnapshot(
       getAggregateSecondsRunning(state, now),
     ),
     rate_limits: state.codexRateLimits,
+    manager_runs: buildManagerRunSnapshots(state),
   };
+}
+
+function buildManagerRunSnapshots(
+  state: OrchestratorState,
+): RuntimeSnapshotManagerRun[] {
+  return Object.values(state.managerRuns)
+    .slice()
+    .sort((left, right) => left.runId.localeCompare(right.runId, "en"))
+    .map((run) => {
+      const lanes = Object.values(run.lanes)
+        .slice()
+        .sort((left, right) =>
+          left.issueIdentifier.localeCompare(right.issueIdentifier, "en"),
+        )
+        .map((lane) => ({
+          lane_id: lane.laneId,
+          issue_identifier: lane.issueIdentifier,
+          title: lane.title,
+          status: lane.status,
+          worker_thread_id: lane.workerThreadId,
+          last_heartbeat_at: lane.lastHeartbeatAt,
+          blocked_by: lane.blockedBy,
+          degraded_reasons: lane.degradedReasons,
+          pr_url: lane.prUrl,
+          pr_status: lane.prStatus,
+          validation_artifact_ids: lane.validationArtifactIds,
+          review_gate_ids: lane.reviewGateIds,
+          follow_up_issue_identifiers: lane.followUpIssueIdentifiers,
+        }));
+      return {
+        run_id: run.runId,
+        manager_thread_id: run.managerThreadId,
+        title: run.title,
+        started_at: run.startedAt,
+        counts: {
+          active_lanes: lanes.filter((lane) => lane.status === "active").length,
+          blocked_lanes: lanes.filter((lane) => lane.status === "blocked")
+            .length,
+          degraded_lanes: lanes.filter((lane) => lane.status === "degraded")
+            .length,
+          closed_lanes: lanes.filter((lane) => lane.status === "closed").length,
+          spawned_follow_ups: Object.keys(run.followUps).length,
+          missing_closeout_evidence: run.closeout.missingEvidence.length,
+        },
+        lanes,
+        follow_ups: Object.values(run.followUps)
+          .slice()
+          .sort((left, right) =>
+            left.issueIdentifier.localeCompare(right.issueIdentifier, "en"),
+          )
+          .map((followUp) => ({
+            issue_identifier: followUp.issueIdentifier,
+            title: followUp.title,
+            parent_issue_identifier: followUp.parentIssueIdentifier,
+            lane_id: followUp.laneId,
+            url: followUp.url,
+          })),
+        escalations: run.escalations.map((escalation) => ({
+          lane_id: escalation.laneId,
+          kind: escalation.kind,
+          severity: escalation.severity,
+          message: escalation.message,
+          raised_at: escalation.raisedAt,
+        })),
+        model_checks: run.modelCallPolicy.pendingChecks.map((check) => ({
+          reason: check.reason,
+          lane_id: check.laneId,
+          question: check.question,
+          requested_at: check.requestedAt,
+        })),
+        missing_closeout_evidence: run.closeout.missingEvidence,
+        closeout_ready: run.closeout.ready,
+      };
+    });
 }
 
 function deriveLastToolCall(
