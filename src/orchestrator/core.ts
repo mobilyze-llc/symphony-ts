@@ -2057,15 +2057,11 @@ export class OrchestratorCore {
       });
     }
 
-    return this.scheduleRetry(
-      issueId,
-      nextRetryAttempt(runningEntry.retryAttempt),
-      {
-        identifier: runningEntry.identifier,
-        error: "continuous feedback requested inner-loop rework",
-        delayType: "failure",
-      },
-    );
+    return this.scheduleRetry(issueId, runningEntry.retryAttempt ?? 1, {
+      identifier: runningEntry.identifier,
+      error: "continuous feedback requested inner-loop rework",
+      delayType: "continuation",
+    });
   }
 
   private resolveWorkerLane(stageName: string | null): ContinuousFeedbackLane {

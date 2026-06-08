@@ -82,7 +82,7 @@ export interface RuntimeSnapshotContinuousFeedback {
     file: string | null;
     line: number | null;
     occurrences: number;
-    status: "open" | "bounced";
+    status: "open" | "resolved" | "bounced";
     first_seen_at: string;
     last_seen_at: string;
   }>;

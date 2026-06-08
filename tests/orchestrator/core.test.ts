@@ -1349,7 +1349,7 @@ describe("continuous feedback lane", () => {
     expect(retry).toMatchObject({
       issueId: "1",
       error: "continuous feedback requested inner-loop rework",
-      delayType: "failure",
+      delayType: "continuation",
     });
     expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
     expect(
@@ -1357,6 +1357,98 @@ describe("continuous feedback lane", () => {
     ).toBe("bounced");
     expect(comments[0]).toContain("non-authoritative");
     expect(comments[0]).toContain("Missing null check");
+  });
+
+  it("clears stale open findings after a later clean checkpoint before worker exit", async () => {
+    const results = [
+      {
+        summary: "One issue found.",
+        findings: [
+          {
+            signature: "src/core.ts:null-check",
+            title: "Missing null check",
+            detail: "Guard the optional reviewer output before dereferencing.",
+            severity: "blocking" as const,
+            file: "src/core.ts",
+            line: 42,
+          },
+        ],
+      },
+      {
+        summary: "No issues found.",
+        findings: [],
+      },
+    ];
+    const orchestrator = createOrchestrator({
+      config: createImplementThenGateConfig(),
+      runContinuousFeedback: () => results.shift() ?? results[0]!,
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.runContinuousFeedbackCheckpoint({
+      issueId: "1",
+      event: "checkpoint",
+    });
+    await orchestrator.runContinuousFeedbackCheckpoint({
+      issueId: "1",
+      event: "checkpoint",
+    });
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+    });
+
+    expect(
+      orchestrator.getState().continuousFeedback["1"]?.findings[0],
+    ).toMatchObject({
+      signature: "src/core.ts:null-check",
+      status: "resolved",
+    });
+    expect(retry).toMatchObject({
+      issueId: "1",
+      delayType: "continuation",
+    });
+    expect(orchestrator.getState().issueStages["1"]).toBe("review_gate");
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
+  });
+
+  it("keeps feedback bounce out of the normal failure retry budget", async () => {
+    const orchestrator = createOrchestrator({
+      config: createConfig({ agent: { maxRetryAttempts: 0 } }),
+      runContinuousFeedback: () => ({
+        summary: "One issue found.",
+        findings: [
+          {
+            signature: "src/core.ts:null-check",
+            title: "Missing null check",
+            detail: "Guard the optional reviewer output before dereferencing.",
+            severity: "warning" as const,
+            file: "src/core.ts",
+            line: 42,
+          },
+        ],
+      }),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.runContinuousFeedbackCheckpoint({
+      issueId: "1",
+      event: "checkpoint",
+    });
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+    });
+
+    expect(retry).toMatchObject({
+      issueId: "1",
+      delayType: "continuation",
+      error: "continuous feedback requested inner-loop rework",
+    });
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().retryAttempts["1"]).toMatchObject({
+      delayType: "continuation",
+    });
   });
 
   it("does not treat feedback pass as terminal gate approval", async () => {

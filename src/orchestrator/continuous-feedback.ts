@@ -53,7 +53,18 @@ export function mergeContinuousFeedbackCheckpoint(
   const existing = new Map(
     (previous?.findings ?? []).map((finding) => [finding.signature, finding]),
   );
-  const nextFindings = [...(previous?.findings ?? [])];
+  const nextFindings =
+    input.findings.length === 0
+      ? (previous?.findings ?? []).map((finding) =>
+          finding.status === "open"
+            ? {
+                ...finding,
+                status: "resolved" as const,
+                lastSeenAt: input.checkedAt,
+              }
+            : finding,
+        )
+      : [...(previous?.findings ?? [])];
 
   for (const rawFinding of input.findings) {
     const signature = normalizeFeedbackSignature(rawFinding);

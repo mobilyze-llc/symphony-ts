@@ -638,7 +638,7 @@ export interface RightSizingDecision {
 export type ContinuousFeedbackEvent = "commit" | "diff" | "checkpoint";
 export type ContinuousFeedbackStatus = "pass" | "finding";
 export type ContinuousFeedbackFindingSeverity = "info" | "warning" | "blocking";
-export type ContinuousFeedbackFindingStatus = "open" | "bounced";
+export type ContinuousFeedbackFindingStatus = "open" | "resolved" | "bounced";
 
 export interface ContinuousFeedbackLane {
   runner: string;

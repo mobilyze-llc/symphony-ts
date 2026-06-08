@@ -949,6 +949,113 @@ describe("OrchestratorRuntimeHost", () => {
     );
   });
 
+  it("runs the production continuous-feedback provider on checkpoint events", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const config = createConfig();
+    config.continuousFeedback = {
+      enabled: true,
+      events: ["checkpoint"],
+      runner: "pi",
+      model: "local-flash",
+      role: "continuous-feedback",
+      bounceOnFinding: true,
+    };
+    const commands: Array<{
+      command: string;
+      args: string[];
+      cwd: string;
+      prompt: string;
+    }> = [];
+    const host = new OrchestratorRuntimeHost({
+      config,
+      tracker,
+      runContinuousFeedbackCommand: async (input) => {
+        commands.push({
+          command: input.command,
+          args: input.args,
+          cwd: input.cwd,
+          prompt: input.prompt,
+        });
+        return {
+          exitCode: 0,
+          stderr: "",
+          stdout: JSON.stringify({
+            summary: "One checkpoint finding.",
+            findings: [
+              {
+                signature: "src/core.ts:null-check",
+                title: "Missing null check",
+                detail:
+                  "Guard the optional reviewer output before dereferencing.",
+                severity: "warning",
+                file: "src/core.ts",
+                line: 42,
+              },
+            ],
+          }),
+        };
+      },
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.emit("1", {
+      event: "turn_completed",
+      timestamp: "2026-03-06T00:00:02.000Z",
+      codexAppServerPid: "1001",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      message: "turn completed",
+    });
+    await host.flushEvents();
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0]).toMatchObject({
+      command: "pi",
+      cwd: "/tmp/workspaces/1",
+    });
+    expect(commands[0]?.args).toEqual(
+      expect.arrayContaining([
+        "--no-session",
+        "--print",
+        "--no-tools",
+        "--model",
+        "local-flash",
+      ]),
+    );
+    expect(commands[0]?.prompt).toContain("non-authoritative");
+
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.running[0]?.continuous_feedback).toMatchObject({
+      status: "finding",
+      reviewer_lane: {
+        runner: "pi",
+        model: "local-flash",
+        role: "continuous-feedback",
+      },
+      findings: [
+        expect.objectContaining({
+          signature: "src/core.ts:null-check",
+          status: "open",
+        }),
+      ],
+    });
+    const details = await host.getIssueDetails("ISSUE-1");
+    expect(details?.loop_trace_journal.entries.at(-1)).toMatchObject({
+      kind: "continuous_feedback",
+      continuous_feedback: {
+        status: "finding",
+        finding_signatures: ["src/core.ts:null-check"],
+      },
+    });
+  });
+
   it("keeps structured agent-event logging when loop trace persistence fails", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
@@ -3604,6 +3711,14 @@ function createConfig(): ResolvedWorkflowConfig {
     runner: {
       kind: "codex",
       model: null,
+    },
+    continuousFeedback: {
+      enabled: false,
+      events: ["checkpoint"],
+      runner: "pi",
+      model: "local-flash",
+      role: "continuous-feedback",
+      bounceOnFinding: true,
     },
     stages: null,
     escalationState: null,

@@ -95,6 +95,11 @@ import type { IssueTracker } from "../tracker/tracker.js";
 import { getDisplayVersion } from "../version.js";
 import { WorkspaceHookRunner } from "../workspace/hooks.js";
 import { WorkspaceManager } from "../workspace/workspace-manager.js";
+import {
+  type ContinuousFeedbackCommandExecutor,
+  createContinuousFeedbackProvider,
+  runContinuousFeedbackCommand,
+} from "./continuous-feedback-provider.js";
 import type {
   ContinuousFeedbackCheckpointResult,
   OrchestratorCoreOptions,
@@ -163,6 +168,7 @@ export interface RuntimeHostOptions {
     entry: DispatcherRunJournalEntry,
   ) => Promise<void>;
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
+  runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
   now?: () => Date;
 }
 
@@ -357,6 +363,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       },
     });
 
+    const runContinuousFeedback =
+      options.runContinuousFeedback ??
+      createContinuousFeedbackProvider({
+        resolveWorkspacePath: (issueId) =>
+          this.workspaceManager.resolveForIssue(issueId).workspacePath,
+        runCommand:
+          options.runContinuousFeedbackCommand ?? runContinuousFeedbackCommand,
+      });
+
     const orchestratorOptions: OrchestratorCoreOptions = {
       config: options.config,
       tracker: options.tracker,
@@ -365,9 +380,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       writeRunJournalEntry: async (entry) => {
         await this.persistDispatcherRunJournalEntry(entry);
       },
-      ...(options.runContinuousFeedback === undefined
-        ? {}
-        : { runContinuousFeedback: options.runContinuousFeedback }),
+      runContinuousFeedback,
       ...(this.tracker instanceof LinearTrackerClient
         ? {
             postComment: async (issueId: string, body: string) => {
