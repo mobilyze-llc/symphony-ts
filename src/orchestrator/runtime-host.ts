@@ -274,6 +274,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   >();
   private dispatcherRunJournalHydrationTask: Promise<void> | null = null;
   private dispatcherRunJournalLoaded = false;
+  private dispatcherRunJournalRoot: string | null = null;
+  private readonly dispatcherLeaseRoots = new Map<string, string>();
 
   constructor(options: RuntimeHostOptions) {
     this.config = options.config;
@@ -335,25 +337,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       now: this.now,
       timerScheduler,
       writeRunJournalEntry: async (entry) => {
-        try {
-          await this.writeDispatcherRunJournalEntry(
-            this.workspaceManager.root,
-            entry,
-          );
-        } catch (error) {
-          await this.logger?.warn(
-            "dispatcher_run_journal_persist_failed",
-            "Failed to persist dispatcher run journal entry.",
-            {
-              outcome: "degraded",
-              reason: toErrorMessage(error),
-              issue_id: entry.issueId,
-              issue_identifier: entry.issueIdentifier,
-              journal_kind: entry.kind,
-            },
-          );
-          throw error;
-        }
+        await this.persistDispatcherRunJournalEntry(entry);
       },
       ...(this.tracker instanceof LinearTrackerClient
         ? {
@@ -504,9 +488,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
 
     if (input.workspaceManager !== undefined) {
+      const previousRoot = this.workspaceManager.root;
       this.workspaceManager = input.workspaceManager;
-      this.dispatcherRunJournalLoaded = false;
       this.dispatcherRunJournalHydrationTask = null;
+      if (previousRoot !== this.workspaceManager.root) {
+        this.handleDispatcherRunJournalRootSwap();
+      }
     }
 
     this.orchestrator.updateConfig(input.config);
@@ -731,8 +718,21 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   }
 
   private async ensureDispatcherRunJournalLoaded(): Promise<void> {
+    const workspaceRoot = this.workspaceManager.root;
     if (this.dispatcherRunJournalLoaded) {
-      return;
+      if (this.dispatcherRunJournalRoot === workspaceRoot) {
+        return;
+      }
+      if (this.hasActiveDispatcherLeases()) {
+        await this.orchestrator.expireDispatcherLeases();
+      }
+      if (this.hasDispatcherRootOwnedWork()) {
+        throw new Error(
+          `Dispatcher run journal root swap from ${this.dispatcherRunJournalRoot ?? "unknown"} to ${workspaceRoot} is pending active leases or workers.`,
+        );
+      }
+      this.dispatcherRunJournalLoaded = false;
+      this.dispatcherRunJournalRoot = null;
     }
     if (this.dispatcherRunJournalHydrationTask !== null) {
       await this.dispatcherRunJournalHydrationTask;
@@ -741,10 +741,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     const task = (async () => {
       try {
-        const journal = await this.readDispatcherRunJournal(
-          this.workspaceManager.root,
-        );
+        const journal = await this.readDispatcherRunJournal(workspaceRoot);
         this.orchestrator.recoverFromRunJournal(journal);
+        this.rememberDispatcherRunJournalRoot(workspaceRoot, journal);
       } catch (error) {
         await this.logger?.warn(
           "dispatcher_run_journal_hydration_failed",
@@ -752,7 +751,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           {
             outcome: "degraded",
             reason: toErrorMessage(error),
-            workspace_root: this.workspaceManager.root,
+            workspace_root: workspaceRoot,
           },
         );
         throw error;
@@ -766,6 +765,87 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       if (this.dispatcherRunJournalHydrationTask === task) {
         this.dispatcherRunJournalHydrationTask = null;
       }
+    }
+  }
+
+  private handleDispatcherRunJournalRootSwap(): void {
+    if (!this.dispatcherRunJournalLoaded) {
+      this.dispatcherRunJournalRoot = null;
+      return;
+    }
+
+    if (this.hasDispatcherRootOwnedWork()) {
+      return;
+    }
+
+    this.dispatcherRunJournalLoaded = false;
+    this.dispatcherRunJournalRoot = null;
+  }
+
+  private hasActiveDispatcherLeases(): boolean {
+    return Object.values(this.orchestrator.getState().dispatcherLeases).some(
+      (lease) => lease.status === "active",
+    );
+  }
+
+  private hasDispatcherRootOwnedWork(): boolean {
+    return this.hasActiveDispatcherLeases() || this.workers.size > 0;
+  }
+
+  private rememberDispatcherRunJournalRoot(
+    workspaceRoot: string,
+    journal: DispatcherRunJournal,
+  ): void {
+    this.dispatcherRunJournalRoot = workspaceRoot;
+    for (const entry of journal) {
+      this.rememberDispatcherLeaseRoot(entry, workspaceRoot);
+    }
+  }
+
+  private rememberDispatcherLeaseRoot(
+    entry: DispatcherRunJournalEntry,
+    workspaceRoot: string,
+  ): void {
+    if (entry.lease === null) {
+      return;
+    }
+    this.dispatcherLeaseRoots.set(entry.lease.leaseId, workspaceRoot);
+  }
+
+  private getDispatcherRunJournalRootForEntry(
+    entry: DispatcherRunJournalEntry,
+  ): string {
+    if (entry.lease !== null && entry.lease.status !== "active") {
+      const leaseRoot = this.dispatcherLeaseRoots.get(entry.lease.leaseId);
+      if (leaseRoot !== undefined) {
+        return leaseRoot;
+      }
+    }
+
+    return this.dispatcherRunJournalRoot ?? this.workspaceManager.root;
+  }
+
+  private async persistDispatcherRunJournalEntry(
+    entry: DispatcherRunJournalEntry,
+  ): Promise<void> {
+    const workspaceRoot = this.getDispatcherRunJournalRootForEntry(entry);
+    try {
+      await this.writeDispatcherRunJournalEntry(workspaceRoot, entry);
+      this.rememberDispatcherLeaseRoot(entry, workspaceRoot);
+    } catch (error) {
+      await this.logger?.warn(
+        "dispatcher_run_journal_persist_failed",
+        "Failed to persist dispatcher run journal entry.",
+        {
+          outcome: "degraded",
+          reason: toErrorMessage(error),
+          issue_id: entry.issueId,
+          issue_identifier: entry.issueIdentifier,
+          journal_kind: entry.kind,
+          workspace_root: workspaceRoot,
+        },
+      );
+      throw error;
     }
   }
 

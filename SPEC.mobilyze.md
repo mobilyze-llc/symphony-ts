@@ -35,6 +35,8 @@ Dispatcher organs must write an append-only run journal before starting side eff
 
 Each in-flight dispatcher operation owns a lease with an owner id, issue id, stage, attempt, expiry, and status. On restart, Symphony replays the journal before polling Linear. Non-expired active leases keep the issue claimed and block duplicate dispatch, gate, tracker-write, or hard-stop side effects. Expired leases are journaled as expired and may be retried. Completed tracker-write and re-steer journal entries are idempotency barriers: the same side effect key must not run again after replay.
 
+Lease ownership is also workspace-root ownership. A lease that is admitted from workspace root A must write its completion or expiry back to root A's dispatcher journal even if runtime configuration later points at root B. Runtime reconfiguration with active dispatcher leases is fail-closed for polling: Symphony keeps the old root's journal mounted until those leases complete or expire, refuses to hydrate the new root while they are live, and only then replays the new root. Root swaps do not silently merge journals; any migration between roots must be explicit and provenance-checkable before replay.
+
 Recovery must preserve pause and escalation decisions. A crash after deterministic supervision emits a finding must not forget the finding; a crash during a gate must not run a second gate while the first lease is live; a crash during a tracker write must either observe the completed idempotency key or retry only after the lease expires.
 
 ## Reviewable Increment Boundaries

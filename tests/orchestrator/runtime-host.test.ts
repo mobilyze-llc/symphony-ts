@@ -16,7 +16,11 @@ import type {
   AgentRunnerEvent,
 } from "../../src/agent/runner.js";
 import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
-import type { Issue, LoopTraceJournal } from "../../src/domain/model.js";
+import type {
+  DispatcherRunJournal,
+  Issue,
+  LoopTraceJournal,
+} from "../../src/domain/model.js";
 import {
   type StructuredLogEntry,
   StructuredLogger,
@@ -33,6 +37,7 @@ import type {
   IssueStateSnapshot,
   IssueTracker,
 } from "../../src/tracker/tracker.js";
+import { WorkspaceManager } from "../../src/workspace/workspace-manager.js";
 
 beforeEach(() => {
   rmSync(join("/tmp/workspaces", ".symphony", "run-journals"), {
@@ -539,6 +544,74 @@ describe("OrchestratorRuntimeHost", () => {
       expect(coldHost.getState().claimed.has("1")).toBe(true);
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps worker-exit lease completion in the original root after workspace root swap", async () => {
+    const originalRoot = mkdtempSync(join(tmpdir(), "symph-run-root-a-"));
+    const swappedRoot = mkdtempSync(join(tmpdir(), "symph-run-root-b-"));
+
+    try {
+      const config = createConfig();
+      config.workspace.root = originalRoot;
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker(),
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      const firstTick = await host.pollOnce();
+
+      expect(firstTick.dispatchedIssueIds).toEqual(["1"]);
+      expect(readDispatcherJournal(originalRoot)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "admission",
+            lease: expect.objectContaining({ status: "active" }),
+          }),
+        ]),
+      );
+
+      const swappedConfig = {
+        ...config,
+        workspace: {
+          ...config.workspace,
+          root: swappedRoot,
+        },
+      };
+      host.updateConfig({
+        config: swappedConfig,
+        workspaceManager: new WorkspaceManager({ root: swappedRoot }),
+      });
+
+      await expect(host.pollOnce()).rejects.toThrow("pending active leases");
+      expect(fakeRunner.runs.size).toBe(1);
+
+      fakeRunner.resolve("1", createNormalResult());
+      await host.waitForIdle();
+
+      const originalJournal = readDispatcherJournal(originalRoot);
+      expect(originalJournal).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "admission",
+            lease: expect.objectContaining({ status: "completed" }),
+          }),
+        ]),
+      );
+      expect(readDispatcherJournal(swappedRoot)).toEqual([]);
+
+      const afterCompletionTick = await host.pollOnce();
+      expect(afterCompletionTick.dispatchedIssueIds).toEqual([]);
+      expect(fakeRunner.runs.size).toBe(0);
+    } finally {
+      rmSync(originalRoot, { recursive: true, force: true });
+      rmSync(swappedRoot, { recursive: true, force: true });
     }
   });
 
@@ -3301,6 +3374,34 @@ function createTracker(input?: {
   };
 
   return tracker;
+}
+
+function readDispatcherJournal(workspaceRoot: string): DispatcherRunJournal {
+  const journalPath = join(
+    workspaceRoot,
+    ".symphony",
+    "run-journals",
+    "dispatcher.jsonl",
+  );
+  let raw: string;
+  try {
+    raw = readFileSync(journalPath, "utf8");
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === "ENOENT"
+    ) {
+      return [];
+    }
+    throw error;
+  }
+  return raw
+    .trim()
+    .split("\n")
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line) as DispatcherRunJournal[number]);
 }
 
 function createIssue(overrides?: Partial<Issue>): Issue {
