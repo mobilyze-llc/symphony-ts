@@ -57,7 +57,9 @@ Do not commit secrets, tokens, or private board data. Keep local environment set
 
 ## Source of Truth
 
-Use `IMPLEMENTATION_PLAN.md` as the required development sequence: contributors should implement work in that order unless the plan is explicitly revised. Treat `SPEC.upstream.md` as the single source of truth for product behavior, feature scope, and acceptance criteria. If the plan, local notes, or code comments conflict with the spec, follow the spec and update the other artifacts to match it.
+This Mobilyze fork intentionally diverges from upstream Symphony where the local orchestration spine requires it. Use the Linear document **Crucible orchestration spine (canonical design)** as the source of truth for fork-specific product behavior: judgment-routed dispatch, blast-bounded work units, deterministic live supervision, right-sizing, agent-authored tracker work, and decorrelated gates.
+
+Treat `SPEC.upstream.md` as the upstream baseline and compatibility reference, not as a veto on local Mobilyze deltas. When fork behavior differs from upstream, keep the local guidance explicit and cite the spine decision instead of silently drifting. If local guidance, code comments, or tests conflict with the spine, follow the spine and update the stale artifact.
 
 ## Branching & Worktree Workflow
 
