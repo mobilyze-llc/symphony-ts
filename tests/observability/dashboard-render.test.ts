@@ -189,4 +189,138 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain("1,200");
     expect(html).toContain("300");
   });
+
+  it("detail panel renders compact loop trace entries without prompt bodies", () => {
+    const snapshot = buildSnapshot({
+      loop_trace_preview: {
+        total_entries: 2,
+        stored_entries: 2,
+        truncated: false,
+        entries: [
+          {
+            sequence: 1,
+            at: "2026-03-21T10:00:15.000Z",
+            kind: "prompt_summary",
+            summary: "Dispatch prompt summarized for the implement stage",
+            stage: "implement",
+            attempt: 1,
+            session_id: "session-abc",
+            prompt: {
+              chars: 1840,
+              estimated_tokens: 460,
+            },
+            tool_action: null,
+            file_delta: null,
+            stage_transition: null,
+            worker_exit: null,
+          },
+          {
+            sequence: 2,
+            at: "2026-03-21T10:01:00.000Z",
+            kind: "tool_action",
+            summary: "Read dashboard renderer and mobile dashboard",
+            stage: "implement",
+            attempt: 1,
+            session_id: "session-abc",
+            prompt: null,
+            tool_action: {
+              tool_name: "Read",
+              context: "dashboard-render.ts",
+              total_tokens: 1200,
+            },
+            file_delta: null,
+            stage_transition: null,
+            worker_exit: null,
+          },
+        ],
+      },
+    });
+
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+
+    expect(html).toContain("Loop trace");
+    expect(html).toContain("2 entries");
+    expect(html).toContain("Dispatch prompt summarized");
+    expect(html).toContain("prompt 1,840 chars, 460 est tokens");
+    expect(html).toContain("tool Read");
+  });
+
+  it("detail panel renders empty and truncated loop trace preview states", () => {
+    const emptyHtml = renderDashboardHtml(buildSnapshot({}), {
+      liveUpdatesEnabled: false,
+    });
+
+    expect(emptyHtml).toContain("Loop trace");
+    expect(emptyHtml).toContain("0 entries");
+    expect(emptyHtml).toContain("No loop trace entries yet.");
+
+    const truncatedHtml = renderDashboardHtml(
+      buildSnapshot({
+        loop_trace_preview: {
+          total_entries: 31,
+          stored_entries: 20,
+          truncated: true,
+          entries: [
+            {
+              sequence: 31,
+              at: "2026-03-21T10:02:00.000Z",
+              kind: "worker_exit",
+              summary: "Worker exited after review failure",
+              stage: null,
+              attempt: null,
+              session_id: null,
+              prompt: null,
+              tool_action: null,
+              file_delta: null,
+              stage_transition: null,
+              worker_exit: {
+                outcome: "abnormal",
+                reason: "review failure",
+                duration_ms: 12_000,
+                turn_count: 2,
+                total_tokens: 2048,
+              },
+            },
+          ],
+        },
+      }),
+      { liveUpdatesEnabled: false },
+    );
+
+    expect(truncatedHtml).toContain("31 entries · oldest entries archived");
+    expect(truncatedHtml).toContain("Worker exited after review failure");
+    expect(truncatedHtml).not.toContain("attempt null");
+    expect(truncatedHtml).not.toContain("session null");
+  });
+
+  it("detail panel falls back to generic loop trace kind when omitted", () => {
+    const snapshot = buildSnapshot({
+      loop_trace_preview: {
+        total_entries: 1,
+        stored_entries: 1,
+        truncated: false,
+        entries: [
+          {
+            sequence: 1,
+            at: "2026-03-21T10:00:15.000Z",
+            kind: "" as RuntimeSnapshot["running"][number]["loop_trace_preview"]["entries"][number]["kind"],
+            summary: "Trace event without a kind",
+            stage: null,
+            attempt: null,
+            session_id: null,
+            prompt: null,
+            tool_action: null,
+            file_delta: null,
+            stage_transition: null,
+            worker_exit: null,
+          },
+        ],
+      },
+    });
+
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+
+    expect(html).toContain(">event</span>");
+    expect(html).toContain("Trace event without a kind");
+  });
 });

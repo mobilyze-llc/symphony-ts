@@ -486,6 +486,40 @@ const DASHBOARD_STYLES = String.raw`
         border-top: 1px solid var(--line);
         vertical-align: top;
       }
+      .loop-trace-list {
+        display: grid;
+        gap: 0.4rem;
+        max-height: 11rem;
+        overflow-y: auto;
+      }
+      .loop-trace-entry {
+        display: grid;
+        gap: 0.18rem;
+        padding: 0.42rem 0;
+        border-top: 1px solid var(--line);
+      }
+      .loop-trace-entry:first-child {
+        border-top: none;
+        padding-top: 0;
+      }
+      .loop-trace-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.3rem 0.55rem;
+        color: var(--muted);
+        font-size: 0.74rem;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      }
+      .loop-trace-kind {
+        color: var(--accent-ink);
+        font-weight: 700;
+      }
+      .loop-trace-summary {
+        color: var(--ink);
+        font-size: 0.84rem;
+        line-height: 1.35;
+        word-break: break-word;
+      }
       @media (max-width: 860px) {
         .app-shell {
           padding: 1rem 0.85rem 2rem;
@@ -824,6 +858,46 @@ function renderDashboardClientScript(
           return escapeHtml(outcome);
         }
 
+        function renderLoopTraceJournalPreview(trace) {
+          var totalEntries = Number(trace && trace.total_entries) || 0;
+          var entries = Array.isArray(trace && trace.entries) ? trace.entries : [];
+          var empty = entries.length === 0
+            ? '<div class="muted">No loop trace entries yet.</div>'
+            : entries.map(renderLoopTraceEntry).join('');
+          var countLabel = totalEntries === 1 ? '1 entry' : formatInteger(totalEntries) + ' entries';
+          var truncatedLabel = trace && trace.truncated ? ' · oldest entries archived' : '';
+          return '<div class="detail-section">' +
+            '<p class="detail-section-title">Loop trace</p>' +
+            '<div class="loop-trace-list">' +
+            '<div class="muted">' + escapeHtml(countLabel + truncatedLabel) + '</div>' +
+            empty +
+            '</div></div>';
+        }
+
+        function renderLoopTraceEntry(entry) {
+          var meta = ['#' + formatInteger(entry.sequence), entry.kind || 'event'];
+          if (entry.stage) meta.push('stage ' + entry.stage);
+          if (entry.attempt != null) meta.push('attempt ' + formatInteger(entry.attempt));
+          if (entry.session_id) meta.push('session ' + entry.session_id);
+          if (entry.prompt) {
+            var tokenLabel = entry.prompt.estimated_tokens == null ? 'unknown tokens' : formatInteger(entry.prompt.estimated_tokens) + ' est tokens';
+            meta.push('prompt ' + formatInteger(entry.prompt.chars) + ' chars, ' + tokenLabel);
+          }
+          if (entry.tool_action && entry.tool_action.tool_name) meta.push('tool ' + entry.tool_action.tool_name);
+          if (entry.file_delta && Array.isArray(entry.file_delta.files) && entry.file_delta.files.length > 0) {
+            meta.push(formatInteger(entry.file_delta.files.length) + ' files');
+          }
+          return '<div class="loop-trace-entry">' +
+            '<div class="loop-trace-meta">' +
+            meta.map(function (item, index) {
+              var cls = index === 1 ? ' class="loop-trace-kind"' : '';
+              return '<span' + cls + '>' + escapeHtml(item) + '</span>';
+            }).join('') +
+            '</div>' +
+            '<div class="loop-trace-summary">' + escapeHtml(entry.summary || '') + '</div>' +
+            '</div>';
+        }
+
         function renderDetailPanel(row, rowId) {
           var contextItems = [];
           if (row.pipeline_stage != null) {
@@ -897,7 +971,9 @@ function renderDashboardClientScript(
             '<tbody>' + execRows + '</tbody></table>' +
             '</div>';
 
-          return '<div class="detail-panel">' + contextSection + '<div class="detail-grid">' + tokenBreakdown + recentActivity + executionHistory + '</div></div>';
+          const loopTrace = renderLoopTraceJournalPreview(row.loop_trace_preview);
+
+          return '<div class="detail-panel">' + contextSection + '<div class="detail-grid">' + tokenBreakdown + recentActivity + executionHistory + loopTrace + '</div></div>';
         }
 
         function renderRunningRows(next) {
@@ -1240,7 +1316,70 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
       </table>
     </div>`;
 
-  return `<div class="detail-panel">${contextSection}<div class="detail-grid">${tokenBreakdown}${recentActivity}${executionHistory}</div></div>`;
+  const loopTrace = renderLoopTraceJournalPreview(row.loop_trace_preview);
+
+  return `<div class="detail-panel">${contextSection}<div class="detail-grid">${tokenBreakdown}${recentActivity}${executionHistory}${loopTrace}</div></div>`;
+}
+
+function renderLoopTraceJournalPreview(
+  trace: RuntimeSnapshot["running"][number]["loop_trace_preview"],
+): string {
+  const countLabel =
+    trace.total_entries === 1
+      ? "1 entry"
+      : `${formatInteger(trace.total_entries)} entries`;
+  const truncatedLabel = trace.truncated ? " · oldest entries archived" : "";
+  const entries =
+    trace.entries.length === 0
+      ? '<div class="muted">No loop trace entries yet.</div>'
+      : trace.entries.map(renderLoopTraceEntry).join("");
+
+  return `
+    <div class="detail-section">
+      <p class="detail-section-title">Loop trace</p>
+      <div class="loop-trace-list">
+        <div class="muted">${escapeHtml(countLabel + truncatedLabel)}</div>
+        ${entries}
+      </div>
+    </div>`;
+}
+
+function renderLoopTraceEntry(
+  entry: RuntimeSnapshot["running"][number]["loop_trace_preview"]["entries"][number],
+): string {
+  const meta = [`#${formatInteger(entry.sequence)}`, entry.kind || "event"];
+  if (entry.stage !== null) meta.push(`stage ${entry.stage}`);
+  if (entry.attempt !== null)
+    meta.push(`attempt ${formatInteger(entry.attempt)}`);
+  if (entry.session_id !== null) meta.push(`session ${entry.session_id}`);
+  if (entry.prompt !== null) {
+    const tokenLabel =
+      entry.prompt.estimated_tokens === null
+        ? "unknown tokens"
+        : `${formatInteger(entry.prompt.estimated_tokens)} est tokens`;
+    meta.push(
+      `prompt ${formatInteger(entry.prompt.chars)} chars, ${tokenLabel}`,
+    );
+  }
+  if (entry.tool_action !== null) {
+    meta.push(`tool ${entry.tool_action.tool_name}`);
+  }
+  if (entry.file_delta !== null && entry.file_delta.files.length > 0) {
+    meta.push(`${formatInteger(entry.file_delta.files.length)} files`);
+  }
+
+  return `
+    <div class="loop-trace-entry">
+      <div class="loop-trace-meta">
+        ${meta
+          .map(
+            (item, index) =>
+              `<span${index === 1 ? ' class="loop-trace-kind"' : ""}>${escapeHtml(item)}</span>`,
+          )
+          .join("")}
+      </div>
+      <div class="loop-trace-summary">${escapeHtml(entry.summary)}</div>
+    </div>`;
 }
 
 function renderRetryRows(snapshot: RuntimeSnapshot): string {

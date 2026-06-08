@@ -1,6 +1,12 @@
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+
+const require = createRequire(import.meta.url);
+const { JSDOM } = require("jsdom") as {
+  JSDOM: new (...args: unknown[]) => { window: Record<string, unknown> };
+};
 
 describe("mobile-dashboard.html", () => {
   const htmlPath = resolve(
@@ -8,6 +14,76 @@ describe("mobile-dashboard.html", () => {
     "../../.symphony/reports/mobile-dashboard.html",
   );
   const html = readFileSync(htmlPath, "utf-8");
+  const emptySnapshot = {
+    counts: { running: 0, retrying: 0, completed: 0, failed: 0 },
+    running: [],
+    retrying: [],
+    codex_totals: {
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      seconds_running: 0,
+    },
+    rate_limits: {},
+  };
+  const usageSnapshot = {
+    five_hour: { utilization: 0, resets_at: "2026-03-21T15:00:00.000Z" },
+    seven_day: { utilization: 0, resets_at: "2026-03-28T15:00:00.000Z" },
+    active_account: { email: "test@example.com", org: "Mobilyze" },
+  };
+
+  function createDashboardDom() {
+    const marker = "\n})();\n</script>";
+    expect(html).toContain(marker);
+
+    const testHtml = html.replace(
+      marker,
+      "\nwindow.__mobileDashboardTest = { buildLoopTraceSection };\n})();\n</script>",
+    );
+
+    return new JSDOM(testHtml, {
+      runScripts: "dangerously",
+      url: "http://127.0.0.1:8090/mobile-dashboard.html",
+      beforeParse(window: {
+        [key: string]: unknown;
+        EventSource?: unknown;
+        fetch?: unknown;
+        prompt?: unknown;
+        setInterval?: unknown;
+      }) {
+        class FakeEventSource {
+          onerror: (() => void) | null = null;
+
+          addEventListener() {}
+          close() {}
+        }
+
+        Object.defineProperty(window, "EventSource", {
+          configurable: true,
+          value: FakeEventSource,
+        });
+        Object.defineProperty(window, "fetch", {
+          configurable: true,
+          value: async (input: unknown) => ({
+            ok: true,
+            status: 200,
+            json: async () =>
+              String(input).includes("/api/v1/claude/usage")
+                ? usageSnapshot
+                : emptySnapshot,
+          }),
+        });
+        Object.defineProperty(window, "setInterval", {
+          configurable: true,
+          value: () => 0,
+        });
+        Object.defineProperty(window, "prompt", {
+          configurable: true,
+          value: () => null,
+        });
+      },
+    });
+  }
 
   it("is a valid HTML document", () => {
     expect(html).toContain("<!DOCTYPE html>");
@@ -214,6 +290,78 @@ describe("mobile-dashboard.html", () => {
     const scriptSection = html.slice(html.indexOf("<script>"));
     expect(scriptSection).toContain("Parent Spec");
     expect(scriptSection).toContain("parent_url");
+  });
+
+  it("wires loop trace sections into running and API fallback detail views", () => {
+    const scriptSection = html.slice(html.indexOf("<script>"));
+    expect(html).toContain("loop-trace-section");
+    expect(html).toContain("loop-trace-entry");
+    expect(scriptSection).toContain(
+      "buildLoopTraceSection(issue.loop_trace_preview)",
+    );
+    expect(scriptSection).toContain(
+      "buildLoopTraceSection(data.loop_trace_journal)",
+    );
+    expect(scriptSection).toContain("prompt ${fmtNum(entry.prompt.chars)}");
+  });
+
+  it("renders mobile loop trace preview states with escaping and fallbacks", async () => {
+    const dom = createDashboardDom();
+
+    try {
+      const api = dom.window.__mobileDashboardTest as
+        | {
+            buildLoopTraceSection(trace: unknown): string;
+          }
+        | undefined;
+
+      expect(api).toBeDefined();
+
+      const emptyHtml = api?.buildLoopTraceSection({
+        total_entries: 0,
+        stored_entries: 0,
+        truncated: false,
+        entries: [],
+      });
+      expect(emptyHtml).toContain("0 entries");
+      expect(emptyHtml).toContain("No loop trace entries yet.");
+
+      const traceHtml = api?.buildLoopTraceSection({
+        total_entries: 31,
+        stored_entries: 20,
+        truncated: true,
+        entries: [
+          {
+            sequence: 31,
+            at: "2026-03-21T10:02:00.000Z",
+            kind: "",
+            summary: "<script>unsafe</script>",
+            stage: null,
+            attempt: null,
+            session_id: null,
+            prompt: {
+              chars: 1840,
+              estimated_tokens: null,
+            },
+            tool_action: null,
+            file_delta: null,
+            stage_transition: null,
+            worker_exit: null,
+          },
+        ],
+      });
+
+      expect(traceHtml).toContain("31 entries · oldest entries archived");
+      expect(traceHtml).toContain(">event</span>");
+      expect(traceHtml).toContain("prompt 1,840 chars, unknown tokens");
+      expect(traceHtml).toContain("&lt;script&gt;unsafe&lt;/script&gt;");
+      expect(traceHtml).not.toContain("<script>unsafe</script>");
+      expect(traceHtml).not.toContain("attempt null");
+      expect(traceHtml).not.toContain("session null");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      (dom.window.close as () => void)();
+    }
   });
 
   it("report links use port 8090 on the current host", () => {

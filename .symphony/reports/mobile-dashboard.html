@@ -267,6 +267,25 @@ body {
   font-family: var(--font-mono); font-size: 11px;
   color: var(--accent-ink); font-weight: 500;
 }
+.loop-trace-section { padding: 0 16px 16px; }
+.loop-trace-list {
+  background: var(--page-soft); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 10px 12px;
+}
+.loop-trace-meta {
+  display: flex; flex-wrap: wrap; gap: 4px 8px;
+  color: var(--muted); font-family: var(--font-mono); font-size: 11px;
+}
+.loop-trace-kind { color: var(--accent-ink); font-weight: 600; }
+.loop-trace-entry {
+  padding: 9px 0; border-top: 1px solid var(--line);
+}
+.loop-trace-entry:first-child { border-top: none; padding-top: 0; }
+.loop-trace-summary {
+  margin-top: 4px; color: var(--ink-secondary);
+  font-size: 13px; line-height: 1.4; word-break: break-word;
+}
+.loop-trace-empty { color: var(--muted); font-size: 13px; padding: 4px 0; }
 
 /* Deep Links */
 .deep-links {
@@ -1041,6 +1060,7 @@ body {
     const stageBarHtml = buildStageBar(issue);
     const metricsHtml = buildMetrics(issue);
     const activityHtml = buildActivityFeed(issue);
+    const loopTraceHtml = buildLoopTraceSection(issue.loop_trace_preview);
 
     container.innerHTML = `
       <div class="detail-header">
@@ -1057,6 +1077,7 @@ body {
 
       ${stageBarHtml}
       ${metricsHtml}
+      ${loopTraceHtml}
 
       <div class="section-title" style="padding:0 16px 8px">Activity</div>
       <div class="activity-section">${activityHtml}</div>
@@ -1192,6 +1213,49 @@ body {
     }).join('');
   }
 
+  function buildLoopTraceSection(trace) {
+    const totalEntries = Number(trace && trace.total_entries) || 0;
+    const entries = Array.isArray(trace && trace.entries) ? trace.entries : [];
+    const countLabel = totalEntries === 1 ? '1 entry' : `${fmtNum(totalEntries)} entries`;
+    const archivedLabel = trace && trace.truncated ? ' · oldest entries archived' : '';
+    const body = entries.length === 0
+      ? `<div class="loop-trace-empty">No loop trace entries yet.</div>`
+      : entries.map(buildLoopTraceEntry).join('');
+
+    return `
+      <div class="section-title" style="padding:0 16px 8px">Loop Trace</div>
+      <div class="loop-trace-section">
+        <div class="loop-trace-list">
+          <div class="loop-trace-meta">${esc(countLabel + archivedLabel)}</div>
+          ${body}
+        </div>
+      </div>`;
+  }
+
+  function buildLoopTraceEntry(entry) {
+    const meta = [`#${fmtNum(entry.sequence)}`, entry.kind || 'event'];
+    if (entry.stage) meta.push(`stage ${entry.stage}`);
+    if (entry.attempt !== null && entry.attempt !== undefined) meta.push(`attempt ${fmtNum(entry.attempt)}`);
+    if (entry.session_id) meta.push(`session ${entry.session_id}`);
+    if (entry.prompt) {
+      const tokenLabel = entry.prompt.estimated_tokens === null || entry.prompt.estimated_tokens === undefined
+        ? 'unknown tokens'
+        : `${fmtNum(entry.prompt.estimated_tokens)} est tokens`;
+      meta.push(`prompt ${fmtNum(entry.prompt.chars)} chars, ${tokenLabel}`);
+    }
+    if (entry.tool_action && entry.tool_action.tool_name) meta.push(`tool ${entry.tool_action.tool_name}`);
+    if (entry.file_delta && Array.isArray(entry.file_delta.files) && entry.file_delta.files.length > 0) {
+      meta.push(`${fmtNum(entry.file_delta.files.length)} files`);
+    }
+    return `
+      <div class="loop-trace-entry">
+        <div class="loop-trace-meta">
+          ${meta.map((item, idx) => `<span${idx === 1 ? ' class="loop-trace-kind"' : ''}>${esc(item)}</span>`).join('')}
+        </div>
+        <div class="loop-trace-summary">${esc(entry.summary || '')}</div>
+      </div>`;
+  }
+
   async function fetchIssueDetail(issueIdentifier) {
     const container = $('#screen-detail');
     try {
@@ -1210,6 +1274,7 @@ body {
 
   function renderDetailFromApi(container, data) {
     const linearUrl = `https://linear.app/mobilyze-llc/issue/${encodeURIComponent(data.issue_identifier)}`;
+    const loopTraceHtml = buildLoopTraceSection(data.loop_trace_journal);
 
     let activityHtml = '';
     if (data.recent_events && data.recent_events.length > 0) {
@@ -1255,6 +1320,7 @@ body {
       ${metricsHtml}
       <div class="section-title" style="padding:0 16px 8px">Events</div>
       <div class="activity-section">${activityHtml}</div>
+      ${loopTraceHtml}
       <div class="section-title" style="padding:0 16px 8px">Links</div>
       <div class="deep-links">
         <a class="deep-link" href="${linearUrl}" target="_blank" rel="noopener">
