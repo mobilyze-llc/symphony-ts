@@ -75,6 +75,10 @@ export type ReadWorkspaceChangedFiles = (
   workspacePath: string,
 ) => Promise<string[]>;
 
+export type ReadWorkspaceBaseRevision = (
+  workspacePath: string,
+) => Promise<string | null>;
+
 export interface RuntimeHostOptions {
   config: ResolvedWorkflowConfig;
   tracker: IssueTracker;
@@ -86,6 +90,7 @@ export interface RuntimeHostOptions {
   workspaceManager?: WorkspaceManager;
   notifier?: PipelineNotificationSink | null;
   readWorkspaceChangedFiles?: ReadWorkspaceChangedFiles;
+  readWorkspaceBaseRevision?: ReadWorkspaceBaseRevision;
   now?: () => Date;
 }
 
@@ -151,10 +156,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   private readonly readWorkspaceChangedFiles: ReadWorkspaceChangedFiles;
 
+  private readonly readWorkspaceBaseRevision: ReadWorkspaceBaseRevision;
+
   static readonly PRUNE_DEBOUNCE_MS = 300_000;
 
   #lastPruneAt = 0;
   private readonly workers = new Map<string, WorkerExecution>();
+  private readonly expectedBaseRevisions = new Map<string, string | null>();
 
   private readonly orchestrator: OrchestratorCore;
 
@@ -180,6 +188,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.logger = options.logger ?? null;
     this.readWorkspaceChangedFiles =
       options.readWorkspaceChangedFiles ?? readGitChangedFiles;
+    this.readWorkspaceBaseRevision =
+      options.readWorkspaceBaseRevision ?? readGitBaseRevision;
     this.workspaceManager =
       options.workspaceManager ??
       createWorkspaceManagerFromConfig(options.config, this.logger);
@@ -497,12 +507,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       entry.issue.id,
     ).workspacePath;
     let changedFiles: string[] = [];
+    let currentBaseRevision: string | null = null;
     try {
       changedFiles = await this.readWorkspaceChangedFiles(workspacePath);
     } catch (error) {
       await this.logger?.warn(
         "supervision_snapshot_failed",
-        "Failed to collect workspace changed files for supervision.",
+        "Failed to collect workspace supervision snapshot.",
         {
           outcome: "degraded",
           reason: toErrorMessage(error),
@@ -512,10 +523,34 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         },
       );
     }
+    try {
+      currentBaseRevision = await this.readWorkspaceBaseRevision(workspacePath);
+    } catch (error) {
+      await this.logger?.warn(
+        "supervision_snapshot_failed",
+        "Failed to collect workspace supervision snapshot.",
+        {
+          outcome: "degraded",
+          reason: toErrorMessage(error),
+          issue_id: entry.issue.id,
+          issue_identifier: entry.identifier,
+          workspace_path: workspacePath,
+          snapshot_component: "base_revision",
+        },
+      );
+    }
+
+    const previousExpectedBaseRevision =
+      this.expectedBaseRevisions.get(entry.issue.id) ?? null;
+    const expectedBaseRevision =
+      previousExpectedBaseRevision ?? currentBaseRevision;
+    this.expectedBaseRevisions.set(entry.issue.id, expectedBaseRevision);
 
     return createIssueSupervisionSnapshot(entry.issue, {
       workerId: entry.issue.id,
       changedFiles,
+      expectedBaseRevision,
+      currentBaseRevision,
     });
   }
 
@@ -777,6 +812,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     },
   ): Promise<void> {
     this.workers.delete(execution.issueId);
+    this.expectedBaseRevisions.delete(execution.issueId);
 
     // Kill orphaned child processes (vitest, pnpm, bash) that survive the abort signal.
     // On stall_timeout, the CC subprocess is killed but its children are not — they
@@ -1615,6 +1651,36 @@ async function readGitChangedFiles(workspacePath: string): Promise<string[]> {
         .filter((file) => file.length > 0),
     ),
   ];
+}
+
+async function readGitBaseRevision(
+  workspacePath: string,
+): Promise<string | null> {
+  let baseRef = "origin/main";
+  try {
+    const { stdout: headRefStdout } = await execFileAsync(
+      "git",
+      ["-C", workspacePath, "symbolic-ref", "refs/remotes/origin/HEAD"],
+      {
+        timeout: 5000,
+      },
+    );
+    const headRef = String(headRefStdout).trim();
+    if (headRef.length > 0) {
+      baseRef = headRef;
+    }
+  } catch {
+    // Fall back to origin/main when origin/HEAD is unavailable.
+  }
+  const { stdout } = await execFileAsync(
+    "git",
+    ["-C", workspacePath, "merge-base", "HEAD", baseRef],
+    {
+      timeout: 5000,
+    },
+  );
+  const revision = String(stdout).trim();
+  return revision.length > 0 ? revision : null;
 }
 
 export function createWorkspaceHookLogger(logger: StructuredLogger): (entry: {

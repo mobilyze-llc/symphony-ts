@@ -457,6 +457,50 @@ describe("OrchestratorRuntimeHost", () => {
     );
   });
 
+  it("logs a triggered re-steer when a worker branch base changes after admission", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const readWorkspaceBaseRevision = vi
+      .fn<(_: string) => Promise<string | null>>()
+      .mockResolvedValueOnce("base-a")
+      .mockResolvedValueOnce("base-b");
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      readWorkspaceBaseRevision,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.pollOnce();
+    await host.pollOnce();
+
+    expect(readWorkspaceBaseRevision).toHaveBeenCalledWith("/tmp/workspaces/1");
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "supervision_resteer_requested",
+        level: "warn",
+        phase: "running",
+        finding_count: 1,
+        finding_kinds: ["branch_divergence"],
+        issue_identifiers: ["ISSUE-1"],
+      }),
+    );
+  });
+
   it("logs turn_number, prompt_chars, and estimated_prompt_tokens for turn_completed events", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
