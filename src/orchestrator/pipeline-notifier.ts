@@ -5,7 +5,7 @@
  * Failures are logged and swallowed — never affect pipeline correctness.
  */
 
-import type { ExecutionHistory } from "../domain/model.js";
+import type { ExecutionHistory, RightSizingDecision } from "../domain/model.js";
 import { getDisplayVersion } from "../version.js";
 
 // ---------------------------------------------------------------------------
@@ -114,6 +114,7 @@ export interface IssueDispatchedEvent {
   issueUrl: string | null;
   stageName: string | null;
   reworkCount: number;
+  rightSizingDecision?: RightSizingDecision;
 }
 
 export interface IssueDroppedEvent {

@@ -205,6 +205,54 @@ export interface RetryEntry {
   delayType: "continuation" | "failure";
 }
 
+export const RIGHT_SIZING_MODES = ["prototype", "thin", "full"] as const;
+export type RightSizingMode = (typeof RIGHT_SIZING_MODES)[number];
+
+export const RIGHT_SIZING_IMPACT_SURFACES = [
+  "narrow",
+  "shared",
+  "wide",
+] as const;
+export type RightSizingImpactSurface =
+  (typeof RIGHT_SIZING_IMPACT_SURFACES)[number];
+
+export const RIGHT_SIZING_BUDGETS = ["low", "medium", "high"] as const;
+export type RightSizingBudget = (typeof RIGHT_SIZING_BUDGETS)[number];
+
+export interface RightSizingSignals {
+  explicitModeHint: RightSizingMode | null;
+  declaredScopeFiles: string[];
+  changedFiles: string[];
+  impactSurface: RightSizingImpactSurface;
+  highRiskFiles: string[];
+  stageCount: number;
+  gateCount: number;
+  reviewerCount: number;
+  humanGateCount: number;
+  blockedByCount: number;
+  retryCount: number;
+  priority: number | null;
+  labels: string[];
+  plannedTurns: number;
+  budget: RightSizingBudget;
+}
+
+export interface RightSizingModelRouting {
+  allowed: boolean;
+  reason: "not_needed" | "ambiguous_routing" | "risk_trigger";
+}
+
+export interface RightSizingDecision {
+  classifier: "deterministic-v1";
+  mode: RightSizingMode;
+  stageName: string | null;
+  reason: string;
+  rationale: string[];
+  triggerHits: string[];
+  signals: RightSizingSignals;
+  modelRouting: RightSizingModelRouting;
+}
+
 export interface CodexTotals {
   inputTokens: number;
   outputTokens: number;
