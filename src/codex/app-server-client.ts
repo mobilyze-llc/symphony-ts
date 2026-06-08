@@ -206,15 +206,12 @@ export class CodexAppServerClient {
       return;
     }
 
-    if (child.exitCode === null && child.signalCode === null) {
+    const childExited = child.exitCode !== null || child.signalCode !== null;
+    if (!childExited) {
       child.kill("SIGTERM");
     }
 
-    await new Promise<void>((resolve) => {
-      child.once("exit", () => {
-        resolve();
-      });
-    });
+    await waitForChildExit(child);
   }
 
   private async ensureStarted(): Promise<void> {
@@ -1191,6 +1188,20 @@ function clearTimeoutIfPresent(timer: NodeJS.Timeout | null): void {
   if (timer !== null) {
     clearTimeout(timer);
   }
+}
+
+async function waitForChildExit(
+  child: ChildProcessWithoutNullStreams,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    child.once("exit", () => {
+      resolve();
+    });
+  });
 }
 
 function toErrorMessage(error: unknown): string {

@@ -14,12 +14,18 @@ import { createLinearGraphqlDynamicTool } from "../../src/codex/linear-graphql-t
 import { ERROR_CODES } from "../../src/errors/codes.js";
 
 const roots: string[] = [];
+const clients: CodexAppServerClient[] = [];
 const fixturePath = join(
   dirname(fileURLToPath(import.meta.url)),
   "../fixtures/codex-fake-server.mjs",
 );
 
 afterEach(async () => {
+  await Promise.allSettled(
+    clients.splice(0).map(async (client) => {
+      await client.close();
+    }),
+  );
   await Promise.allSettled(
     roots.splice(0).map(async (root) => {
       await rm(root, { recursive: true, force: true });
@@ -349,7 +355,7 @@ function createClient(
     >;
   }>,
 ): CodexAppServerClient {
-  return new CodexAppServerClient({
+  const client = new CodexAppServerClient({
     command: `${process.execPath} "${fixturePath}" ${scenario}`,
     cwd: workspace,
     approvalPolicy: "full-auto",
@@ -367,6 +373,8 @@ function createClient(
       events.push(event);
     },
   });
+  clients.push(client);
+  return client;
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

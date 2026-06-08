@@ -23,6 +23,7 @@ import type { PollTickResult } from "../../src/orchestrator/core.js";
 import {
   OrchestratorRuntimeHost,
   type RuntimeHostStartupError,
+  type RuntimeServiceHandle,
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
 import type {
@@ -31,12 +32,18 @@ import type {
 } from "../../src/tracker/tracker.js";
 
 const tempDirs: string[] = [];
+const services: RuntimeServiceHandle[] = [];
 const codexFixturePath = join(
   dirname(fileURLToPath(import.meta.url)),
   "../fixtures/codex-fake-server.mjs",
 );
 
 afterEach(async () => {
+  await Promise.allSettled(
+    services.splice(0).map(async (service) => {
+      await service.shutdown();
+    }),
+  );
   await Promise.allSettled(
     tempDirs.splice(0).map(async (directory) => {
       await rm(directory, { recursive: true, force: true });
@@ -61,20 +68,22 @@ describe("runtime integration", () => {
       candidates: [],
     });
     const stdout = new PassThrough();
-    const service = await startRuntimeService({
-      config: createConfig({
-        workspace: {
-          root: workspaceRoot,
-        },
-        server: {
-          port: 0,
-          slackNotifyChannel: null,
-        },
+    const service = await trackService(
+      startRuntimeService({
+        config: createConfig({
+          workspace: {
+            root: workspaceRoot,
+          },
+          server: {
+            port: 0,
+            slackNotifyChannel: null,
+          },
+        }),
+        logsRoot,
+        tracker,
+        stdout,
       }),
-      logsRoot,
-      tracker,
-      stdout,
-    });
+    );
 
     expect(service.dashboard).not.toBeNull();
     expect(service.dashboard?.port ?? 0).toBeGreaterThan(0);
@@ -145,13 +154,15 @@ Prompt body
             tracker,
           });
 
-          return await startRuntimeService({
-            config: runtime.config,
-            logsRoot: runtime.logsRoot,
-            tracker,
-            runtimeHost,
-            stdout: new PassThrough(),
-          });
+          return await trackService(
+            startRuntimeService({
+              config: runtime.config,
+              logsRoot: runtime.logsRoot,
+              tracker,
+              runtimeHost,
+              stdout: new PassThrough(),
+            }),
+          );
         },
       },
     );
@@ -206,14 +217,16 @@ Prompt body
         startHost: async ({ runtime }) => {
           observed.config = runtime.config;
           observed.logsRoot = runtime.logsRoot;
-          const host = await startRuntimeService({
-            config: runtime.config,
-            logsRoot: runtime.logsRoot,
-            tracker: createTracker({
-              candidates: [],
+          const host = await trackService(
+            startRuntimeService({
+              config: runtime.config,
+              logsRoot: runtime.logsRoot,
+              tracker: createTracker({
+                candidates: [],
+              }),
+              stdout: new PassThrough(),
             }),
-            stdout: new PassThrough(),
-          });
+          );
           setTimeout(() => {
             void host.shutdown();
           }, 10);
@@ -263,17 +276,19 @@ Prompt body
       output += chunk;
     });
 
-    const service = await startRuntimeService({
-      config: createConfig({
-        polling: {
-          intervalMs: 60_000,
-        },
+    const service = await trackService(
+      startRuntimeService({
+        config: createConfig({
+          polling: {
+            intervalMs: 60_000,
+          },
+        }),
+        tracker: createTracker({
+          candidatesError: new Error("tracker unavailable"),
+        }),
+        stdout,
       }),
-      tracker: createTracker({
-        candidatesError: new Error("tracker unavailable"),
-      }),
-      stdout,
-    });
+    );
 
     await vi.waitFor(() => {
       expect(output).toContain('"event":"candidate_issue_fetch_failed"');
@@ -306,14 +321,16 @@ Prompt v1
       "utf8",
     );
     const config = await resolveRuntimeConfig(workflowPath);
-    const service = await startRuntimeService({
-      config,
-      logsRoot,
-      tracker: createTracker({
-        candidates: [],
+    const service = await trackService(
+      startRuntimeService({
+        config,
+        logsRoot,
+        tracker: createTracker({
+          candidates: [],
+        }),
+        stdout: new PassThrough(),
       }),
-      stdout: new PassThrough(),
-    });
+    );
 
     await writeFile(
       workflowPath,
@@ -400,12 +417,14 @@ Implement {{ issue.identifier }} attempt={{ attempt }}
     );
     const tracker = new EndToEndTracker();
     const config = await resolveRuntimeConfig(workflowPath);
-    const service = await startRuntimeService({
-      config,
-      logsRoot,
-      tracker,
-      stdout: new PassThrough(),
-    });
+    const service = await trackService(
+      startRuntimeService({
+        config,
+        logsRoot,
+        tracker,
+        stdout: new PassThrough(),
+      }),
+    );
 
     const workspacePath = join(workspaceRoot, "issue-1");
     await vi.waitFor(async () => {
@@ -431,12 +450,7 @@ Implement {{ issue.identifier }} attempt={{ attempt }}
       expect([...service.runtimeHost.getState().claimed]).toEqual([]);
     });
 
-    const issueDetail = await sendRequest(service.dashboard?.port ?? 0, {
-      method: "GET",
-      path: "/api/v1/ISSUE-1",
-    });
-    expect(issueDetail.statusCode).toBe(200);
-    const issueDetailBody = JSON.parse(issueDetail.body) as {
+    type IssueDetailBody = {
       issue_identifier: string;
       status: string;
       loop_trace_journal: {
@@ -448,6 +462,21 @@ Implement {{ issue.identifier }} attempt={{ attempt }}
         }>;
       };
     };
+    const issueDetailBody = await vi.waitFor(async () => {
+      const issueDetail = await sendRequest(service.dashboard?.port ?? 0, {
+        method: "GET",
+        path: "/api/v1/ISSUE-1",
+      });
+      expect(issueDetail.statusCode).toBe(200);
+      const body = JSON.parse(issueDetail.body) as IssueDetailBody;
+      expect(body.loop_trace_journal.entries.at(-1)).toMatchObject({
+        kind: "stage_transition",
+        stage_transition: {
+          status: "failed",
+        },
+      });
+      return body;
+    });
     expect(issueDetailBody.issue_identifier).toBe("ISSUE-1");
     expect(issueDetailBody.status).toBe("failed");
     expect(issueDetailBody.loop_trace_journal.path).toBe(
@@ -466,12 +495,6 @@ Implement {{ issue.identifier }} attempt={{ attempt }}
     expect(issueDetailBody.loop_trace_journal.entries).toHaveLength(
       issueDetailBody.loop_trace_journal.total_entries,
     );
-    expect(issueDetailBody.loop_trace_journal.entries.at(-1)).toMatchObject({
-      kind: "stage_transition",
-      stage_transition: {
-        status: "failed",
-      },
-    });
 
     await service.shutdown();
 
@@ -651,6 +674,14 @@ async function createTempDir(prefix: string): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), prefix));
   tempDirs.push(directory);
   return directory;
+}
+
+async function trackService(
+  servicePromise: Promise<RuntimeServiceHandle>,
+): Promise<RuntimeServiceHandle> {
+  const service = await servicePromise;
+  services.push(service);
+  return service;
 }
 
 async function resolveRuntimeConfig(
