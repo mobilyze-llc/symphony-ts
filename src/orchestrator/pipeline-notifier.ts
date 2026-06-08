@@ -183,9 +183,10 @@ function formatRightSizingRouting(decision: RightSizingDecision): string {
   return `${prefix} (${decision.modelRouting.reason})`;
 }
 
-function buildRightSizingLines(
-  decision: RightSizingDecision,
-): { textLines: string[]; fields: SlackTextObject[] } {
+function buildRightSizingLines(decision: RightSizingDecision): {
+  textLines: string[];
+  fields: SlackTextObject[];
+} {
   const textLines = [
     `Mode: ${decision.mode}`,
     `Model routing: ${formatRightSizingRouting(decision)}`,
@@ -554,7 +555,9 @@ export function formatNotification(
         parts.push(`Rework #${event.reworkCount}`);
       }
       if (event.rightSizingDecision !== undefined) {
-        parts.push(...buildRightSizingLines(event.rightSizingDecision).textLines);
+        parts.push(
+          ...buildRightSizingLines(event.rightSizingDecision).textLines,
+        );
       }
       parts.push(version);
       const text = parts.join("\n");
