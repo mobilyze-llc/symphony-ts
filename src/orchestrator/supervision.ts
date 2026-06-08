@@ -334,16 +334,53 @@ function extractFileScopeSection(
 }
 
 function parseMarkdownHeading(line: string): string | null {
-  const match = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/.exec(line);
-  return match?.[1] ?? null;
+  let index = 0;
+  while (index < line.length && line[index] === " ") {
+    index += 1;
+  }
+  if (index > 3) {
+    return null;
+  }
+
+  let hashCount = 0;
+  while (line[index] === "#" && hashCount < 6) {
+    hashCount += 1;
+    index += 1;
+  }
+  if (hashCount === 0 || !isWhitespace(line[index])) {
+    return null;
+  }
+
+  while (isWhitespace(line[index])) {
+    index += 1;
+  }
+
+  let content = line.slice(index).trim();
+  while (content.endsWith("#")) {
+    content = content.slice(0, -1).trimEnd();
+  }
+
+  return content.length === 0 ? null : content;
 }
 
 function normalizeHeading(heading: string): string {
-  return heading
-    .trim()
-    .toLowerCase()
-    .replaceAll(/[`*_:\-[\]()]/g, " ")
-    .replaceAll(/\s+/g, " ");
+  let normalized = "";
+  let previousWasSpace = true;
+
+  for (const char of heading.trim().toLowerCase()) {
+    if (isHeadingSeparator(char)) {
+      if (!previousWasSpace) {
+        normalized += " ";
+        previousWasSpace = true;
+      }
+      continue;
+    }
+
+    normalized += char;
+    previousWasSpace = false;
+  }
+
+  return normalized.trim();
 }
 
 function extractFilePathsFromLine(line: string): string[] {
@@ -354,23 +391,151 @@ function extractFilePathsFromLine(line: string): string[] {
     return codePaths;
   }
 
-  const normalizedLine = line
-    .trim()
-    .replace(/^[-*+]\s+/, "")
-    .replace(/^\d+[.)]\s+/, "")
-    .replace(/^\[[ xX]\]\s+/, "");
-  const matches = normalizedLine.match(
-    /(?:\.{1,2}\/)?(?:(?:[A-Za-z0-9_.@-]+\/)+[A-Za-z0-9_.@-]*(?:\.[A-Za-z0-9_.-]+)?|[A-Za-z0-9_.@-]+\.[A-Za-z0-9_.-]+)/g,
+  return extractPathTokens(stripMarkdownListPrefix(line));
+}
+
+function stripMarkdownListPrefix(line: string): string {
+  let value = line.trim();
+  const firstChar = value[0];
+  if (
+    (firstChar === "-" || firstChar === "*" || firstChar === "+") &&
+    isWhitespace(value[1])
+  ) {
+    value = value.slice(2).trimStart();
+  }
+
+  let digitIndex = 0;
+  while (isAsciiDigit(value[digitIndex])) {
+    digitIndex += 1;
+  }
+  if (
+    digitIndex > 0 &&
+    (value[digitIndex] === "." || value[digitIndex] === ")") &&
+    isWhitespace(value[digitIndex + 1])
+  ) {
+    value = value.slice(digitIndex + 2).trimStart();
+  }
+
+  if (
+    value[0] === "[" &&
+    (value[1] === " " || value[1] === "x" || value[1] === "X") &&
+    value[2] === "]" &&
+    isWhitespace(value[3])
+  ) {
+    value = value.slice(4).trimStart();
+  }
+
+  return value;
+}
+
+function extractPathTokens(text: string): string[] {
+  const tokens: string[] = [];
+  let index = 0;
+
+  while (index < text.length) {
+    while (index < text.length && !isPathTokenChar(text[index])) {
+      index += 1;
+    }
+
+    const start = index;
+    while (index < text.length && isPathTokenChar(text[index])) {
+      index += 1;
+    }
+
+    if (start === index) {
+      break;
+    }
+
+    const token = trimTrailingPathPunctuation(text.slice(start, index));
+    if (isLikelyFilePath(token)) {
+      tokens.push(token);
+    }
+  }
+
+  return tokens;
+}
+
+function trimTrailingPathPunctuation(value: string): string {
+  let end = value.length;
+  while (end > 0 && ".,;:)".includes(value[end - 1] ?? "")) {
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
+function isLikelyFilePath(value: string): boolean {
+  if (value.length === 0) {
+    return false;
+  }
+
+  const normalized = value.replaceAll("\\", "/");
+  if (normalized.includes("/")) {
+    return true;
+  }
+
+  const finalSegment = normalized.split("/").at(-1) ?? normalized;
+  return finalSegment.includes(".") && !finalSegment.startsWith(".");
+}
+
+function isPathTokenChar(char: string | undefined): boolean {
+  return (
+    char !== undefined &&
+    (isAsciiLetter(char) ||
+      isAsciiDigit(char) ||
+      char === "." ||
+      char === "_" ||
+      char === "-" ||
+      char === "@" ||
+      char === "/" ||
+      char === "\\" ||
+      char === "*")
   );
-  return matches ?? [];
+}
+
+function isHeadingSeparator(char: string): boolean {
+  return (
+    isWhitespace(char) ||
+    char === "`" ||
+    char === "*" ||
+    char === "_" ||
+    char === ":" ||
+    char === "-" ||
+    char === "[" ||
+    char === "]" ||
+    char === "(" ||
+    char === ")"
+  );
+}
+
+function isWhitespace(char: string | undefined): boolean {
+  return char === " " || char === "\t";
+}
+
+function isAsciiLetter(char: string | undefined): boolean {
+  if (char === undefined || char.length !== 1) {
+    return false;
+  }
+  const code = char.charCodeAt(0);
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isAsciiDigit(char: string | undefined): boolean {
+  if (char === undefined || char.length !== 1) {
+    return false;
+  }
+  const code = char.charCodeAt(0);
+  return code >= 48 && code <= 57;
 }
 
 function normalizeFilePath(file: string): string {
-  return file
-    .trim()
-    .replaceAll("\\", "/")
-    .replace(/^\.\/+/, "")
-    .replaceAll(/\/{2,}/g, "/");
+  let normalized = file.trim().replaceAll("\\", "/");
+  while (normalized.startsWith("./")) {
+    normalized = normalized.slice(2);
+  }
+  return normalized
+    .split("/")
+    .filter((segment) => segment.length > 0)
+    .join("/");
 }
 
 function normalizeNullableString(value: string | null): string | null {
