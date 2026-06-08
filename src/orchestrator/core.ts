@@ -6,6 +6,10 @@ import type {
   StageDefinition,
 } from "../config/types.js";
 import {
+  type DispatcherLease,
+  type DispatcherOperation,
+  type DispatcherRunJournal,
+  type DispatcherRunJournalEntry,
   type FailureClass,
   type Issue,
   type LiveSession,
@@ -20,6 +24,10 @@ import {
   parseFailureSignal,
 } from "../domain/model.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
+import {
+  appendDispatcherRunJournalEntry,
+  rebuildDispatcherLeases,
+} from "../logging/run-journal.js";
 import {
   addEndedSessionRuntime,
   addPipelineActivity,
@@ -43,6 +51,7 @@ import {
 
 const CONTINUATION_RETRY_DELAY_MS = 1_000;
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
+const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 
 export type WorkerExitOutcome =
   | "normal"
@@ -103,6 +112,12 @@ export interface TimerScheduler {
   clear(handle: ReturnType<typeof setTimeout> | null): void;
 }
 
+interface ScheduledRetryContext {
+  attempt: number;
+  identifier: string | null;
+  delayType: "continuation" | "failure";
+}
+
 export interface OrchestratorCoreOptions {
   config: ResolvedWorkflowConfig;
   tracker: IssueTracker;
@@ -150,6 +165,12 @@ export interface OrchestratorCoreOptions {
   ) => Promise<void> | void;
   timerScheduler?: TimerScheduler;
   now?: () => Date;
+  runJournal?: DispatcherRunJournal;
+  leaseOwnerId?: string;
+  leaseTtlMs?: number;
+  writeRunJournalEntry?: (
+    entry: DispatcherRunJournalEntry,
+  ) => Promise<void> | void;
 }
 
 export class OrchestratorCore {
@@ -181,6 +202,12 @@ export class OrchestratorCore {
 
   private readonly state: OrchestratorState;
 
+  private readonly leaseOwnerId: string;
+
+  private readonly leaseTtlMs: number;
+
+  private readonly writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
+
   private readonly reportedSupervisionFindings = new Set<string>();
 
   /**
@@ -209,14 +236,49 @@ export class OrchestratorCore {
     this.requestSupervisionResteer = options.requestSupervisionResteer;
     this.timerScheduler = options.timerScheduler ?? defaultTimerScheduler();
     this.now = options.now ?? (() => new Date());
+    this.leaseOwnerId = options.leaseOwnerId ?? "orchestrator-core";
+    this.leaseTtlMs = options.leaseTtlMs ?? DEFAULT_DISPATCHER_LEASE_TTL_MS;
+    this.writeRunJournalEntry = options.writeRunJournalEntry;
     this.state = createInitialOrchestratorState({
       pollIntervalMs: options.config.polling.intervalMs,
       maxConcurrentAgents: options.config.agent.maxConcurrentAgents,
     });
+    this.recoverFromRunJournal(options.runJournal ?? []);
   }
 
   getState(): OrchestratorState {
     return this.state;
+  }
+
+  recoverFromRunJournal(journal: DispatcherRunJournal): void {
+    this.state.dispatcherRunJournal = [...journal].sort(
+      (left, right) => left.sequence - right.sequence,
+    );
+    this.state.dispatcherLeases = rebuildDispatcherLeases(
+      this.state.dispatcherRunJournal,
+    );
+    this.reportedSupervisionFindings.clear();
+
+    const nowMs = this.now().getTime();
+    for (const entry of this.state.dispatcherRunJournal) {
+      if (
+        entry.kind === "re_steer_request" &&
+        entry.metadata.status === "completed" &&
+        typeof entry.metadata.signature === "string"
+      ) {
+        this.reportedSupervisionFindings.add(entry.metadata.signature);
+      }
+    }
+
+    for (const lease of Object.values(this.state.dispatcherLeases)) {
+      if (
+        lease.status === "active" &&
+        lease.operation !== "tracker_write" &&
+        Date.parse(lease.expiresAt) > nowMs
+      ) {
+        this.state.claimed.add(lease.issueId);
+      }
+    }
   }
 
   /**
@@ -284,7 +346,8 @@ export class OrchestratorCore {
     if (
       !activeStates.has(normalizedState) ||
       terminalStates.has(normalizedState) ||
-      this.state.running[issue.id] !== undefined
+      this.state.running[issue.id] !== undefined ||
+      this.hasBlockingDispatcherLease(issue.id)
     ) {
       return false;
     }
@@ -329,6 +392,7 @@ export class OrchestratorCore {
 
   async pollTick(): Promise<PollTickResult> {
     this.syncStateFromConfig();
+    await this.expireDispatcherLeases();
 
     const reconcileResult = await this.reconcileRunningIssues();
     await this.superviseRunningWorkers();
@@ -419,6 +483,8 @@ export class OrchestratorCore {
   }
 
   async onRetryTimer(issueId: string): Promise<RetryTimerResult> {
+    await this.expireDispatcherLeases();
+
     const retryEntry = this.state.retryAttempts[issueId];
     if (retryEntry === undefined) {
       return {
@@ -553,20 +619,46 @@ export class OrchestratorCore {
     };
   }
 
-  onWorkerExit(input: {
+  async onWorkerExit(input: {
     issueId: string;
     outcome: WorkerExitOutcome;
     reason?: string;
     endedAt?: Date;
     agentMessage?: string;
-  }): RetryEntry | null {
+  }): Promise<RetryEntry | null> {
     const runningEntry = this.state.running[input.issueId];
     if (runningEntry === undefined) {
       return null;
     }
 
-    delete this.state.running[input.issueId];
     const endedAt = input.endedAt ?? this.now();
+    const exitedStageName = this.state.issueStages[input.issueId] ?? null;
+    await this.completeDispatcherLease({
+      leaseId: createDispatcherLeaseId({
+        operation: "dispatcher",
+        issueId: input.issueId,
+        stage: exitedStageName,
+        attempt: runningEntry.retryAttempt,
+      }),
+      idempotencyKey: `${createDispatcherLeaseId({
+        operation: "dispatcher",
+        issueId: input.issueId,
+        stage: exitedStageName,
+        attempt: runningEntry.retryAttempt,
+      })}:worker_exit`,
+      kind: "admission",
+      issueId: input.issueId,
+      issueIdentifier: runningEntry.identifier,
+      operation: "dispatcher",
+      stage: exitedStageName,
+      attempt: runningEntry.retryAttempt,
+      summary: `Worker lease completed for ${runningEntry.identifier}.`,
+      metadata: {
+        outcome: input.outcome,
+      },
+    });
+
+    delete this.state.running[input.issueId];
     addEndedSessionRuntime(this.state, runningEntry.startedAt, endedAt);
 
     // Classify "abnormal" into a more descriptive outcome for stage records
@@ -1193,6 +1285,9 @@ export class OrchestratorCore {
   private async handleEnsembleGate(
     issue: Issue,
     stage: StageDefinition,
+    leaseId: string,
+    stageName: string | null,
+    attempt: number | null,
   ): Promise<void> {
     try {
       // biome-ignore lint/style/noNonNullAssertion: runEnsembleGate is guaranteed to be set when this method is called
@@ -1251,8 +1346,54 @@ export class OrchestratorCore {
           }
         }
       }
+      await this.completeDispatcherLease({
+        leaseId,
+        idempotencyKey: `${leaseId}:result`,
+        kind: "gate_result",
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        operation: "gate",
+        stage: stageName,
+        attempt,
+        summary: `Gate completed with ${result.aggregate} verdict.`,
+        metadata: {
+          aggregate: result.aggregate,
+        },
+      });
     } catch {
       // Gate handler failure — release claim so the issue can be retried on next poll.
+      await this.recordRunJournalEntry({
+        idempotencyKey: `${leaseId}:error:${this.now().toISOString()}`,
+        timestamp: this.now().toISOString(),
+        kind: "gate_result",
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        operation: "gate",
+        stage: stageName,
+        attempt,
+        ownerId: this.leaseOwnerId,
+        lease: {
+          ...(this.state.dispatcherLeases[leaseId] ?? {
+            leaseId,
+            issueId: issue.id,
+            issueIdentifier: issue.identifier,
+            operation: "gate" as const,
+            ownerId: this.leaseOwnerId,
+            acquiredAt: this.now().toISOString(),
+            expiresAt: this.now().toISOString(),
+            completedAt: null,
+            stage: stageName,
+            attempt,
+            lastJournalSequence: 0,
+          }),
+          status: "expired",
+          completedAt: this.now().toISOString(),
+        },
+        summary: "Gate handler failed before producing a durable verdict.",
+        metadata: {
+          status: "failed",
+        },
+      });
       this.releaseClaim(issue.id);
     }
   }
@@ -1416,6 +1557,275 @@ export class OrchestratorCore {
     return null;
   }
 
+  private async acquireDispatcherLease(input: {
+    leaseId: string;
+    idempotencyKey: string;
+    kind: DispatcherRunJournalEntry["kind"];
+    issueId: string;
+    issueIdentifier: string;
+    operation: DispatcherOperation;
+    stage: string | null;
+    attempt: number | null;
+    summary: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<DispatcherLease | null> {
+    const activeLease = this.getActiveDispatcherLease(input.leaseId);
+    if (activeLease !== null) {
+      return null;
+    }
+
+    const acquiredAt = this.now().toISOString();
+    const lease: DispatcherLease = {
+      leaseId: input.leaseId,
+      issueId: input.issueId,
+      issueIdentifier: input.issueIdentifier,
+      operation: input.operation,
+      ownerId: this.leaseOwnerId,
+      status: "active",
+      acquiredAt,
+      expiresAt: new Date(this.now().getTime() + this.leaseTtlMs).toISOString(),
+      completedAt: null,
+      stage: input.stage,
+      attempt: input.attempt,
+      lastJournalSequence: 0,
+    };
+
+    const entry = await this.recordRunJournalEntry({
+      idempotencyKey: input.idempotencyKey,
+      timestamp: acquiredAt,
+      kind: input.kind,
+      issueId: input.issueId,
+      issueIdentifier: input.issueIdentifier,
+      operation: input.operation,
+      stage: input.stage,
+      attempt: input.attempt,
+      ownerId: this.leaseOwnerId,
+      lease,
+      summary: input.summary,
+      metadata: {
+        status: "started",
+        ...(input.metadata ?? {}),
+      },
+    });
+    return entry.lease;
+  }
+
+  private async completeDispatcherLease(input: {
+    leaseId: string;
+    idempotencyKey: string;
+    kind: DispatcherRunJournalEntry["kind"];
+    issueId: string;
+    issueIdentifier: string;
+    operation: DispatcherOperation;
+    stage: string | null;
+    attempt: number | null;
+    summary: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<void> {
+    const lease = this.state.dispatcherLeases[input.leaseId];
+    if (lease === undefined) {
+      return;
+    }
+
+    const completedAt = this.now().toISOString();
+    await this.recordRunJournalEntry({
+      idempotencyKey: input.idempotencyKey,
+      timestamp: completedAt,
+      kind: input.kind,
+      issueId: input.issueId,
+      issueIdentifier: input.issueIdentifier,
+      operation: input.operation,
+      stage: input.stage,
+      attempt: input.attempt,
+      ownerId: this.leaseOwnerId,
+      lease: {
+        ...lease,
+        status: "completed",
+        completedAt,
+      },
+      summary: input.summary,
+      metadata: {
+        status: "completed",
+        ...(input.metadata ?? {}),
+      },
+    });
+  }
+
+  private async recordRunJournalEntry(
+    entry: Omit<DispatcherRunJournalEntry, "sequence">,
+  ): Promise<DispatcherRunJournalEntry> {
+    const result = appendDispatcherRunJournalEntry(
+      this.state.dispatcherRunJournal,
+      entry,
+    );
+    if (!result.appended) {
+      return result.entry;
+    }
+
+    if (result.entry.lease !== null) {
+      result.entry.lease.lastJournalSequence = result.entry.sequence;
+    }
+    await this.writeRunJournalEntry?.(result.entry);
+    this.state.dispatcherRunJournal = result.journal;
+    if (result.entry.lease !== null) {
+      this.state.dispatcherLeases[result.entry.lease.leaseId] =
+        result.entry.lease;
+      if (
+        result.entry.lease.status === "active" &&
+        result.entry.lease.operation !== "tracker_write"
+      ) {
+        this.state.claimed.add(result.entry.lease.issueId);
+      } else {
+        this.releaseRecoveredClaimIfIdle(result.entry.lease.issueId);
+      }
+    }
+    return result.entry;
+  }
+
+  private async expireDispatcherLeases(): Promise<void> {
+    const nowMs = this.now().getTime();
+    for (const lease of Object.values(this.state.dispatcherLeases)) {
+      if (lease.status !== "active") {
+        continue;
+      }
+      if (Date.parse(lease.expiresAt) > nowMs) {
+        continue;
+      }
+
+      const expiredAt = this.now().toISOString();
+      await this.recordRunJournalEntry({
+        idempotencyKey: `lease:${lease.leaseId}:expired:${lease.expiresAt}`,
+        timestamp: expiredAt,
+        kind:
+          lease.operation === "gate"
+            ? "gate_result"
+            : lease.operation === "tracker_write"
+              ? "tracker_write"
+              : lease.operation === "supervisor"
+                ? "re_steer_request"
+                : "admission",
+        issueId: lease.issueId,
+        issueIdentifier: lease.issueIdentifier,
+        operation: lease.operation,
+        stage: lease.stage,
+        attempt: lease.attempt,
+        ownerId: this.leaseOwnerId,
+        lease: {
+          ...lease,
+          status: "expired",
+          completedAt: expiredAt,
+        },
+        summary: "Dispatcher lease expired during recovery.",
+        metadata: {
+          status: "expired",
+        },
+      });
+    }
+  }
+
+  private getActiveDispatcherLease(leaseId: string): DispatcherLease | null {
+    const lease = this.state.dispatcherLeases[leaseId];
+    if (lease === undefined || lease.status !== "active") {
+      return null;
+    }
+
+    if (Date.parse(lease.expiresAt) <= this.now().getTime()) {
+      return null;
+    }
+
+    return lease;
+  }
+
+  private hasBlockingDispatcherLease(issueId: string): boolean {
+    return Object.values(this.state.dispatcherLeases).some(
+      (lease) =>
+        lease.issueId === issueId &&
+        lease.operation !== "tracker_write" &&
+        lease.status === "active" &&
+        Date.parse(lease.expiresAt) > this.now().getTime(),
+    );
+  }
+
+  private hasCompletedJournalEntry(idempotencyKey: string): boolean {
+    return this.state.dispatcherRunJournal.some(
+      (entry) =>
+        entry.idempotencyKey === idempotencyKey &&
+        entry.metadata.status === "completed",
+    );
+  }
+
+  private releaseRecoveredClaimIfIdle(issueId: string): void {
+    if (
+      this.state.running[issueId] !== undefined ||
+      this.state.retryAttempts[issueId] !== undefined
+    ) {
+      return;
+    }
+    if (this.hasBlockingDispatcherLease(issueId)) {
+      return;
+    }
+    this.state.claimed.delete(issueId);
+  }
+
+  private async runTrackerWriteOnce(
+    input: {
+      idempotencyKey: string;
+      issue: Issue;
+      stage: string | null;
+      attempt: number | null;
+      action: "update_issue_state";
+      summary: string;
+    },
+    write: () => Promise<void>,
+  ): Promise<{ skipped: boolean }> {
+    const completedKey = `${input.idempotencyKey}:completed`;
+    if (this.hasCompletedJournalEntry(completedKey)) {
+      return { skipped: true };
+    }
+
+    const leaseId = createDispatcherLeaseId({
+      operation: "tracker_write",
+      issueId: input.issue.id,
+      stage: input.stage,
+      attempt: input.attempt,
+      suffix: input.idempotencyKey,
+    });
+    const lease = await this.acquireDispatcherLease({
+      leaseId,
+      idempotencyKey: `${input.idempotencyKey}:started`,
+      kind: "tracker_write",
+      issueId: input.issue.id,
+      issueIdentifier: input.issue.identifier,
+      operation: "tracker_write",
+      stage: input.stage,
+      attempt: input.attempt,
+      summary: input.summary,
+      metadata: {
+        action: input.action,
+      },
+    });
+    if (lease === null) {
+      return { skipped: true };
+    }
+
+    await write();
+    await this.completeDispatcherLease({
+      leaseId,
+      idempotencyKey: completedKey,
+      kind: "tracker_write",
+      issueId: input.issue.id,
+      issueIdentifier: input.issue.identifier,
+      operation: "tracker_write",
+      stage: input.stage,
+      attempt: input.attempt,
+      summary: input.summary,
+      metadata: {
+        action: input.action,
+      },
+    });
+    return { skipped: false };
+  }
+
   private syncStateFromConfig(): void {
     this.state.pollIntervalMs = this.config.polling.intervalMs;
     this.state.maxConcurrentAgents = this.config.agent.maxConcurrentAgents;
@@ -1457,7 +1867,8 @@ export class OrchestratorCore {
     if (
       !activeStates.has(normalizedState) ||
       terminalStates.has(normalizedState) ||
-      this.state.running[issue.id] !== undefined
+      this.state.running[issue.id] !== undefined ||
+      this.hasBlockingDispatcherLease(issue.id)
     ) {
       return false;
     }
@@ -1489,6 +1900,7 @@ export class OrchestratorCore {
     const stagesConfig = this.config.stages;
     let stage: StageDefinition | null = null;
     let stageName: string | null = null;
+    const attemptKey = formatAttemptKey(attempt);
 
     if (stagesConfig !== null) {
       const cachedStage = this.state.issueStages[issue.id];
@@ -1517,10 +1929,20 @@ export class OrchestratorCore {
         delete this.state.loopTraceJournal[issue.id];
         // Fire linearState update for the terminal stage (e.g., move to "Done")
         if (stage.linearState !== null && this.updateIssueState !== undefined) {
-          void this.updateIssueState(
-            issue.id,
-            issue.identifier,
-            stage.linearState,
+          const linearState = stage.linearState;
+          const updateIssueState = this.updateIssueState;
+          void this.runTrackerWriteOnce(
+            {
+              idempotencyKey: `tracker_write:${issue.id}:terminal:${stageName}:${linearState}`,
+              issue,
+              stage: stageName,
+              attempt,
+              action: "update_issue_state",
+              summary: `Move ${issue.identifier} to terminal state ${linearState}.`,
+            },
+            async () => {
+              await updateIssueState(issue.id, issue.identifier, linearState);
+            },
           ).catch((err) => {
             console.warn(
               `[orchestrator] Failed to update terminal state for ${issue.identifier}:`,
@@ -1535,15 +1957,51 @@ export class OrchestratorCore {
       }
 
       if (stage !== null && stage.type === "gate") {
+        const gateLeaseId = createDispatcherLeaseId({
+          operation: "gate",
+          issueId: issue.id,
+          stage: stageName,
+          attempt,
+        });
+        const gateLease = await this.acquireDispatcherLease({
+          leaseId: gateLeaseId,
+          idempotencyKey: `${gateLeaseId}:started`,
+          kind: "gate_started",
+          issueId: issue.id,
+          issueIdentifier: issue.identifier,
+          operation: "gate",
+          stage: stageName,
+          attempt,
+          summary: `Gate ${stageName ?? "unnamed"} started for ${issue.identifier}.`,
+          metadata: {
+            gateType: stage.gateType,
+          },
+        });
+        if (gateLease === null) {
+          return {
+            dispatched: false,
+            rightSizingDecision: null,
+          };
+        }
         this.state.issueStages[issue.id] = stageName;
         this.state.claimed.add(issue.id);
 
         if (stage.linearState !== null && this.updateIssueState !== undefined) {
+          const linearState = stage.linearState;
+          const updateIssueState = this.updateIssueState;
           try {
-            await this.updateIssueState(
-              issue.id,
-              issue.identifier,
-              stage.linearState,
+            await this.runTrackerWriteOnce(
+              {
+                idempotencyKey: `tracker_write:${issue.id}:gate:${stageName}:${linearState}`,
+                issue,
+                stage: stageName,
+                attempt,
+                action: "update_issue_state",
+                summary: `Move ${issue.identifier} to gate state ${linearState}.`,
+              },
+              async () => {
+                await updateIssueState(issue.id, issue.identifier, linearState);
+              },
             );
           } catch (err) {
             console.warn(
@@ -1558,7 +2016,13 @@ export class OrchestratorCore {
           this.runEnsembleGate !== undefined
         ) {
           // Fire ensemble gate asynchronously — resolve transitions on completion.
-          void this.handleEnsembleGate(issue, stage);
+          void this.handleEnsembleGate(
+            issue,
+            stage,
+            gateLeaseId,
+            stageName,
+            attempt,
+          );
         }
         // Human gates (or ensemble gates without handler): stay in gate state.
         return {
@@ -1569,25 +2033,6 @@ export class OrchestratorCore {
 
       // Track the issue's current stage
       this.state.issueStages[issue.id] = stageName;
-
-      if (
-        stage?.linearState !== null &&
-        stage?.linearState !== undefined &&
-        this.updateIssueState !== undefined
-      ) {
-        try {
-          await this.updateIssueState(
-            issue.id,
-            issue.identifier,
-            stage.linearState,
-          );
-        } catch (err) {
-          console.warn(
-            `[orchestrator] Failed to update issue state for ${issue.identifier}:`,
-            err,
-          );
-        }
-      }
     }
 
     const isFirstDispatch = !this.state.issueFirstDispatchedAt[issue.id];
@@ -1603,6 +2048,79 @@ export class OrchestratorCore {
       stageName,
       attempt,
     });
+    const dispatchLeaseId = createDispatcherLeaseId({
+      operation: "dispatcher",
+      issueId: issue.id,
+      stage: stageName,
+      attempt,
+    });
+    const dispatchLease = await this.acquireDispatcherLease({
+      leaseId: dispatchLeaseId,
+      idempotencyKey: `${dispatchLeaseId}:admission`,
+      kind: "admission",
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      operation: "dispatcher",
+      stage: stageName,
+      attempt,
+      summary: `Admitted ${issue.identifier} for worker dispatch.`,
+      metadata: {
+        attemptKey,
+      },
+    });
+    if (dispatchLease === null) {
+      return {
+        dispatched: false,
+        rightSizingDecision: null,
+      };
+    }
+    await this.recordRunJournalEntry({
+      idempotencyKey: `${dispatchLeaseId}:right_sizing`,
+      timestamp: this.now().toISOString(),
+      kind: "right_sizing",
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      operation: "dispatcher",
+      stage: stageName,
+      attempt,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Right-sized ${issue.identifier} as ${rightSizingDecision.mode}.`,
+      metadata: {
+        mode: rightSizingDecision.mode,
+        classifier: rightSizingDecision.classifier,
+        modelRoutingReason: rightSizingDecision.modelRouting.reason,
+      },
+    });
+
+    if (
+      stage?.linearState !== null &&
+      stage?.linearState !== undefined &&
+      this.updateIssueState !== undefined
+    ) {
+      const linearState = stage.linearState;
+      const updateIssueState = this.updateIssueState;
+      try {
+        await this.runTrackerWriteOnce(
+          {
+            idempotencyKey: `tracker_write:${issue.id}:stage:${stageName}:${linearState}:${attemptKey}`,
+            issue,
+            stage: stageName,
+            attempt,
+            action: "update_issue_state",
+            summary: `Move ${issue.identifier} to stage state ${linearState}.`,
+          },
+          async () => {
+            await updateIssueState(issue.id, issue.identifier, linearState);
+          },
+        );
+      } catch (err) {
+        console.warn(
+          `[orchestrator] Failed to update issue state for ${issue.identifier}:`,
+          err,
+        );
+      }
+    }
 
     try {
       const reworkCount = this.state.issueReworkCounts[issue.id] ?? 0;
@@ -1658,6 +2176,20 @@ export class OrchestratorCore {
         identifier: issue.identifier,
         error: errorMessage,
         delayType: "failure",
+      });
+      await this.completeDispatcherLease({
+        leaseId: dispatchLeaseId,
+        idempotencyKey: `${dispatchLeaseId}:spawn_failed`,
+        kind: "admission",
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        operation: "dispatcher",
+        stage: stageName,
+        attempt,
+        summary: `Worker dispatch failed for ${issue.identifier}.`,
+        metadata: {
+          error: errorMessage,
+        },
       });
       delete this.state.running[issue.id];
       return {
@@ -1860,10 +2392,6 @@ export class OrchestratorCore {
     phase: SupervisionResteerRequest["phase"],
     findings: readonly SupervisionFinding[],
   ): Promise<void> {
-    if (this.requestSupervisionResteer === undefined) {
-      return;
-    }
-
     const freshFindings = findings.filter((finding) => {
       const signature = formatSupervisionFindingSignature(phase, finding);
       if (this.reportedSupervisionFindings.has(signature)) {
@@ -1876,6 +2404,62 @@ export class OrchestratorCore {
       return;
     }
 
+    for (const finding of freshFindings) {
+      const signature = formatSupervisionFindingSignature(phase, finding);
+      await this.recordRunJournalEntry({
+        idempotencyKey: `supervision_finding:${signature}`,
+        timestamp: this.now().toISOString(),
+        kind: "supervision_finding",
+        issueId: finding.workerIds[0] ?? "unknown",
+        issueIdentifier: finding.issueIdentifiers[0] ?? "unknown",
+        operation: "supervisor",
+        stage: null,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary: finding.message,
+        metadata: {
+          phase,
+          signature,
+          findingKind: finding.kind,
+          action: finding.action,
+          workerIds: finding.workerIds,
+          issueIdentifiers: finding.issueIdentifiers,
+          files: finding.files,
+        },
+      });
+    }
+
+    if (this.requestSupervisionResteer === undefined) {
+      return;
+    }
+
+    const resteerSignature = freshFindings
+      .map((finding) => formatSupervisionFindingSignature(phase, finding))
+      .join("|");
+    const resteerKey = `re_steer_request:${phase}:${resteerSignature}`;
+    if (this.hasCompletedJournalEntry(`${resteerKey}:completed`)) {
+      return;
+    }
+    const lease = await this.acquireDispatcherLease({
+      leaseId: resteerKey,
+      idempotencyKey: `${resteerKey}:started`,
+      kind: "re_steer_request",
+      issueId: freshFindings[0]?.workerIds[0] ?? "unknown",
+      issueIdentifier: freshFindings[0]?.issueIdentifiers[0] ?? "unknown",
+      operation: "supervisor",
+      stage: null,
+      attempt: null,
+      summary: `Re-steer requested for ${freshFindings.length} supervision finding(s).`,
+      metadata: {
+        phase,
+        signature: resteerSignature,
+      },
+    });
+    if (lease === null) {
+      return;
+    }
+
     await this.requestSupervisionResteer({
       phase,
       findings: freshFindings,
@@ -1883,6 +2467,21 @@ export class OrchestratorCore {
         phase,
         findings: freshFindings,
       }),
+    });
+    await this.completeDispatcherLease({
+      leaseId: resteerKey,
+      idempotencyKey: `${resteerKey}:completed`,
+      kind: "re_steer_request",
+      issueId: freshFindings[0]?.workerIds[0] ?? "unknown",
+      issueIdentifier: freshFindings[0]?.issueIdentifiers[0] ?? "unknown",
+      operation: "supervisor",
+      stage: null,
+      attempt: null,
+      summary: "Re-steer request side effect completed.",
+      metadata: {
+        phase,
+        signature: resteerSignature,
+      },
     });
   }
 
@@ -1898,12 +2497,52 @@ export class OrchestratorCore {
       reason,
     };
 
-    await this.stopRunningIssue?.({
+    const leaseId = createDispatcherLeaseId({
+      operation: "dispatcher",
       issueId: runningEntry.issue.id,
-      runningEntry,
-      cleanupWorkspace,
-      reason,
+      stage: this.state.issueStages[runningEntry.issue.id] ?? null,
+      attempt: runningEntry.retryAttempt,
+      suffix: `hard_stop:${reason}`,
     });
+    const lease = await this.acquireDispatcherLease({
+      leaseId,
+      idempotencyKey: `${leaseId}:started`,
+      kind: "hard_stop_trigger",
+      issueId: runningEntry.issue.id,
+      issueIdentifier: runningEntry.identifier,
+      operation: "dispatcher",
+      stage: this.state.issueStages[runningEntry.issue.id] ?? null,
+      attempt: runningEntry.retryAttempt,
+      summary: `Hard-stop requested for ${runningEntry.identifier}: ${reason}.`,
+      metadata: {
+        cleanupWorkspace,
+        reason,
+      },
+    });
+
+    if (lease !== null) {
+      await this.stopRunningIssue?.({
+        issueId: runningEntry.issue.id,
+        runningEntry,
+        cleanupWorkspace,
+        reason,
+      });
+      await this.completeDispatcherLease({
+        leaseId,
+        idempotencyKey: `${leaseId}:completed`,
+        kind: "hard_stop_trigger",
+        issueId: runningEntry.issue.id,
+        issueIdentifier: runningEntry.identifier,
+        operation: "dispatcher",
+        stage: this.state.issueStages[runningEntry.issue.id] ?? null,
+        attempt: runningEntry.retryAttempt,
+        summary: `Hard-stop completed for ${runningEntry.identifier}: ${reason}.`,
+        metadata: {
+          cleanupWorkspace,
+          reason,
+        },
+      });
+    }
 
     return stopRequest;
   }
@@ -1949,7 +2588,11 @@ export class OrchestratorCore {
           );
     const dueAtMs = this.now().getTime() + delayMs;
     const timerHandle = this.timerScheduler.set(() => {
-      void this.onRetryTimer(issueId);
+      void this.runScheduledRetryTimer(issueId, {
+        attempt,
+        identifier: input.identifier,
+        delayType: input.delayType,
+      });
     }, delayMs);
 
     const retryEntry: RetryEntry = {
@@ -1965,6 +2608,25 @@ export class OrchestratorCore {
     this.state.claimed.add(issueId);
     this.state.retryAttempts[issueId] = retryEntry;
     return retryEntry;
+  }
+
+  private async runScheduledRetryTimer(
+    issueId: string,
+    retryContext: ScheduledRetryContext,
+  ): Promise<void> {
+    try {
+      await this.onRetryTimer(issueId);
+    } catch (error) {
+      const errorMessage = formatUnknownError(error);
+      console.warn(
+        `[orchestrator] Retry timer failed for ${retryContext.identifier ?? issueId}: ${errorMessage}`,
+      );
+      this.scheduleRetry(issueId, retryContext.attempt + 1, {
+        identifier: retryContext.identifier,
+        error: `retry timer failed: ${errorMessage}`,
+        delayType: retryContext.delayType,
+      });
+    }
   }
 
   private clearRetryEntry(issueId: string): void {
@@ -2011,6 +2673,32 @@ export function computeFailureRetryDelayMs(
 
 export function nextRetryAttempt(attempt: number | null): number {
   return attempt === null ? 1 : attempt + 1;
+}
+
+function createDispatcherLeaseId(input: {
+  operation: DispatcherOperation;
+  issueId: string;
+  stage: string | null;
+  attempt: number | null;
+  suffix?: string;
+}): string {
+  return [
+    input.operation,
+    input.issueId,
+    input.stage ?? "no-stage",
+    formatAttemptKey(input.attempt),
+    input.suffix ?? "lease",
+  ]
+    .map(sanitizeJournalKeyPart)
+    .join(":");
+}
+
+function formatAttemptKey(attempt: number | null): string {
+  return attempt === null ? "initial" : `attempt-${attempt}`;
+}
+
+function sanitizeJournalKeyPart(part: string): string {
+  return part.replace(/[^A-Za-z0-9._-]+/g, "_");
 }
 
 function normalizeRetryAttempt(attempt: number | null): number | null {
@@ -2068,6 +2756,10 @@ function formatSupervisionFindingSignature(
     ...finding.workerIds,
     ...finding.files,
   ].join("\0");
+}
+
+function formatUnknownError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function classifyExitOutcome(

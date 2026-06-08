@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   AgentRunResult,
@@ -33,6 +33,13 @@ import type {
   IssueStateSnapshot,
   IssueTracker,
 } from "../../src/tracker/tracker.js";
+
+beforeEach(() => {
+  rmSync(join("/tmp/workspaces", ".symphony", "run-journals"), {
+    recursive: true,
+    force: true,
+  });
+});
 
 describe("OrchestratorRuntimeHost", () => {
   it("retains untracked files when HEAD-based git diffs fail in a fresh repo", async () => {
@@ -483,6 +490,109 @@ describe("OrchestratorRuntimeHost", () => {
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
     }
+  });
+
+  it("hydrates dispatcher run journal from disk before dispatch on restart", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-run-journal-"));
+
+    try {
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const firstRunner = new FakeAgentRunner();
+      const firstHost = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker(),
+        createAgentRunner: ({ onEvent }) => {
+          firstRunner.onEvent = onEvent;
+          return firstRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      const firstTick = await firstHost.pollOnce();
+
+      expect(firstTick.dispatchedIssueIds).toEqual(["1"]);
+      const journalPath = join(
+        workspaceRoot,
+        ".symphony",
+        "run-journals",
+        "dispatcher.jsonl",
+      );
+      const artifact = readFileSync(journalPath, "utf8");
+      expect(artifact).toContain('"kind":"admission"');
+
+      const coldRunner = new FakeAgentRunner();
+      const coldHost = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker(),
+        createAgentRunner: ({ onEvent }) => {
+          coldRunner.onEvent = onEvent;
+          return coldRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:06.000Z"),
+      });
+
+      const coldTick = await coldHost.pollOnce();
+
+      expect(coldTick.dispatchedIssueIds).toEqual([]);
+      expect(coldRunner.runs.size).toBe(0);
+      expect(coldHost.getState().claimed.has("1")).toBe(true);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("fails dispatch before side effects when dispatcher journal cannot be persisted", async () => {
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker: createTracker(),
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      writeDispatcherRunJournalEntry: async () => {
+        throw new Error("journal disk unavailable");
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await expect(host.pollOnce()).rejects.toThrow("journal disk unavailable");
+    expect(fakeRunner.runs.size).toBe(0);
+    expect(host.getState().dispatcherRunJournal).toEqual([]);
+    expect(host.getState().claimed.has("1")).toBe(false);
+  });
+
+  it("fails closed and retries hydration when dispatcher journal cannot be read", async () => {
+    const fakeRunner = new FakeAgentRunner();
+    let readCalls = 0;
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker: createTracker(),
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => {
+        readCalls += 1;
+        if (readCalls === 1) {
+          throw new Error("journal read unavailable");
+        }
+        return [];
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await expect(host.pollOnce()).rejects.toThrow("journal read unavailable");
+    expect(fakeRunner.runs.size).toBe(0);
+    expect(host.getState().dispatcherRunJournal).toEqual([]);
+    expect(host.getState().claimed.has("1")).toBe(false);
+
+    const tick = await host.pollOnce();
+
+    expect(readCalls).toBe(2);
+    expect(tick.dispatchedIssueIds).toEqual(["1"]);
+    expect(fakeRunner.runs.size).toBe(1);
   });
 
   it("serves missing stored details when stored loop trace lookup fails", async () => {

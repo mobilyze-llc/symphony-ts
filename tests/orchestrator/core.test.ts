@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
-import type { Issue } from "../../src/domain/model.js";
+import type { DispatcherRunJournal, Issue } from "../../src/domain/model.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
@@ -324,7 +324,7 @@ describe("orchestrator core", () => {
     const orchestrator = createOrchestrator({ timerScheduler: timers });
 
     await orchestrator.pollTick();
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:00:05.000Z"),
@@ -340,6 +340,37 @@ describe("orchestrator core", () => {
     expect(timers.scheduled[0]?.delayMs).toBe(1_000);
   });
 
+  it("keeps worker running state when dispatcher lease completion cannot be persisted", async () => {
+    const timers = createFakeTimerScheduler();
+    const orchestrator = createOrchestrator({
+      timerScheduler: timers,
+      writeRunJournalEntry: async (entry) => {
+        if (entry.lease?.status === "completed") {
+          throw new Error("journal disk unavailable");
+        }
+      },
+    });
+
+    await orchestrator.pollTick();
+
+    await expect(
+      orchestrator.onWorkerExit({
+        issueId: "1",
+        outcome: "normal",
+        endedAt: new Date("2026-03-06T00:00:05.000Z"),
+      }),
+    ).rejects.toThrow("journal disk unavailable");
+
+    const state = orchestrator.getState();
+    expect(state.running["1"]).toBeDefined();
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) => entry.lease?.status === "completed",
+      ),
+    ).toBe(false);
+    expect(timers.scheduled).toEqual([]);
+  });
+
   it("schedules exponential backoff retries for abnormal exits and caps the delay", async () => {
     const timers = createFakeTimerScheduler();
     const orchestrator = createOrchestrator({
@@ -350,7 +381,7 @@ describe("orchestrator core", () => {
     });
 
     await orchestrator.pollTick();
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "turn failed",
@@ -441,6 +472,57 @@ describe("orchestrator core", () => {
       identifier: "ISSUE-1",
       error: "no available orchestrator slots",
     });
+  });
+
+  it("reschedules timer-fired retry failures when lease expiry persistence fails", async () => {
+    const timers = createFakeTimerScheduler();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const orchestrator = createOrchestrator({
+      timerScheduler: timers,
+      writeRunJournalEntry: async (entry) => {
+        if (entry.lease?.status === "expired") {
+          throw new Error("journal disk unavailable");
+        }
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: "worker failed",
+    });
+    expect(retryEntry).toMatchObject({ attempt: 1, delayType: "failure" });
+
+    orchestrator.getState().dispatcherLeases["dispatcher:stale:lease"] = {
+      leaseId: "dispatcher:stale:lease",
+      issueId: "stale",
+      issueIdentifier: "STALE-1",
+      operation: "dispatcher",
+      ownerId: "previous-runtime",
+      status: "active",
+      acquiredAt: "2026-03-06T00:00:00.000Z",
+      expiresAt: "2026-03-06T00:00:01.000Z",
+      completedAt: null,
+      stage: null,
+      attempt: null,
+      lastJournalSequence: 1,
+    };
+
+    timers.scheduled[0]?.callback();
+
+    await vi.waitFor(() => {
+      expect(orchestrator.getState().retryAttempts["1"]).toMatchObject({
+        attempt: 2,
+        delayType: "failure",
+        error: "retry timer failed: journal disk unavailable",
+      });
+    });
+    expect(orchestrator.getState().claimed.has("1")).toBe(true);
+    expect(warn).toHaveBeenCalledWith(
+      "[orchestrator] Retry timer failed for ISSUE-1: journal disk unavailable",
+    );
+    warn.mockRestore();
   });
 
   it("requests stop for stalled sessions before tracker refresh", async () => {
@@ -1034,6 +1116,115 @@ describe("retry timer pipeline-halt guard", () => {
   });
 });
 
+describe("dispatcher run journal restart recovery", () => {
+  it("restart recovery prevents duplicate dispatch after crash between decision emission and side effect", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const orchestrator = new OrchestratorCore({
+      config: createConfig(),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "dispatcher:1:no-stage:initial:lease:admission",
+          kind: "admission",
+          operation: "dispatcher",
+          leaseId: "dispatcher:1:no-stage:initial:lease",
+          leaseStatus: "active",
+          expiresAt: "2026-03-06T00:20:00.000Z",
+        }),
+      ],
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+    expect(orchestrator.getState().claimed.has("1")).toBe(true);
+  });
+
+  it("restart recovery avoids duplicate gate side effect after crash during gate", async () => {
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "pass" as const,
+      results: [],
+      comment: "pass",
+    }));
+    const orchestrator = new OrchestratorCore({
+      config: createGateConfig(),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      runEnsembleGate,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "gate:1:review_gate:initial:lease:started",
+          kind: "gate_started",
+          operation: "gate",
+          stage: "review_gate",
+          leaseId: "gate:1:review_gate:initial:lease",
+          leaseStatus: "active",
+          expiresAt: "2026-03-06T00:20:00.000Z",
+        }),
+      ],
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(runEnsembleGate).not.toHaveBeenCalled();
+    expect(orchestrator.getState().claimed.has("1")).toBe(true);
+  });
+
+  it("restart recovery skips completed tracker write after crash during tracker write", async () => {
+    const updateIssueState = vi.fn(async () => {});
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const orchestrator = new OrchestratorCore({
+      config: createLinearStateStageConfig(),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      }),
+      spawnWorker,
+      updateIssueState,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey:
+            "tracker_write:1:stage:implement:In Progress:initial:completed",
+          kind: "tracker_write",
+          operation: "tracker_write",
+          stage: "implement",
+          leaseId:
+            "tracker_write:1:implement:initial:tracker_write_1_stage_implement_In_Progress_initial",
+          leaseStatus: "completed",
+          completedAt: "2026-03-06T00:00:03.000Z",
+        }),
+      ],
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(updateIssueState).not.toHaveBeenCalled();
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("orchestrator core integration flows", () => {
   it("redispatches a retried issue through a fake runner boundary after an abnormal exit", async () => {
     const harness = createIntegrationHarness();
@@ -1050,7 +1241,7 @@ describe("orchestrator core integration flows", () => {
     ]);
     expect([...harness.orchestrator.getState().claimed]).toEqual(["1"]);
 
-    const retryEntry = harness.orchestrator.onWorkerExit({
+    const retryEntry = await harness.orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "turn failed",
@@ -1113,7 +1304,7 @@ describe("orchestrator core integration flows", () => {
       },
     ]);
 
-    harness.orchestrator.onWorkerExit({
+    await harness.orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "stopped after terminal reconciliation",
@@ -1162,7 +1353,7 @@ describe("orchestrator core integration flows", () => {
       reason: "stall_timeout",
     });
 
-    harness.orchestrator.onWorkerExit({
+    await harness.orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "stalled",
@@ -1198,7 +1389,7 @@ describe("max retry safety net", () => {
 
     await orchestrator.pollTick();
     // Simulate abnormal exit — attempt will be 1 (under limit of 3)
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "turn failed",
@@ -1244,7 +1435,7 @@ describe("max retry safety net", () => {
     await orchestrator.pollTick();
 
     // Simulate: attempt 1 (under limit of 2)
-    const retry1 = orchestrator.onWorkerExit({
+    const retry1 = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "turn failed",
@@ -1256,7 +1447,7 @@ describe("max retry safety net", () => {
     const retryResult = await orchestrator.onRetryTimer("1");
     expect(retryResult.dispatched).toBe(true);
 
-    const retry2 = orchestrator.onWorkerExit({
+    const retry2 = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "turn failed again",
@@ -1268,7 +1459,7 @@ describe("max retry safety net", () => {
     const retryResult2 = await orchestrator.onRetryTimer("1");
     expect(retryResult2.dispatched).toBe(true);
 
-    const retry3 = orchestrator.onWorkerExit({
+    const retry3 = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "turn failed yet again",
@@ -1346,7 +1537,7 @@ describe("max retry safety net", () => {
     await orchestrator.pollTick();
 
     // Normal exit with no failure signal → continuation retry with attempt=1
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:00:05.000Z"),
@@ -1390,7 +1581,7 @@ describe("max retry safety net", () => {
     await orchestrator.pollTick();
 
     // First exit with verify failure → attempt 1 (at limit, still OK)
-    const retry1 = orchestrator.onWorkerExit({
+    const retry1 = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: verify]",
@@ -1402,7 +1593,7 @@ describe("max retry safety net", () => {
     const retryResult = await orchestrator.onRetryTimer("1");
     expect(retryResult.dispatched).toBe(true);
 
-    const retry2 = orchestrator.onWorkerExit({
+    const retry2 = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: verify]",
@@ -1441,7 +1632,7 @@ describe("max retry safety net", () => {
     await orchestrator.pollTick();
 
     // First exit with infra failure → attempt 1 (at limit)
-    const retry1 = orchestrator.onWorkerExit({
+    const retry1 = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: infra]",
@@ -1452,7 +1643,7 @@ describe("max retry safety net", () => {
     expect(retryResult.dispatched).toBe(true);
 
     // Second exit with infra failure → attempt 2 (exceeds limit=1)
-    const retry2 = orchestrator.onWorkerExit({
+    const retry2 = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: infra]",
@@ -1795,7 +1986,7 @@ describe("execution history stage records", () => {
     // Set the issue to the investigate stage
     orchestrator.getState().issueStages["1"] = "investigate";
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:00:10.000Z"),
@@ -1843,7 +2034,7 @@ describe("execution history stage records", () => {
     const startedAt = orchestrator.getState().running["1"]?.startedAt;
     expect(startedAt).toBeDefined();
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -1886,7 +2077,7 @@ describe("execution history stage records", () => {
       },
     });
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -1910,7 +2101,7 @@ describe("execution history stage records", () => {
     await orchestrator.pollTick();
     orchestrator.getState().issueStages["1"] = "investigate";
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:00.000Z"),
@@ -1927,7 +2118,7 @@ describe("execution history stage records", () => {
     await orchestrator.onRetryTimer("1");
     orchestrator.getState().issueStages["1"] = "implement";
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       endedAt: new Date("2026-03-06T00:02:00.000Z"),
@@ -1947,7 +2138,7 @@ describe("execution history stage records", () => {
     await orchestrator.pollTick();
     // No issueStages entry — no stage configured
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:00.000Z"),
@@ -2042,7 +2233,7 @@ describe("execution report on terminal state", () => {
     await orchestrator.pollTick();
     orchestrator.getState().issueStages["1"] = "merge";
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -2087,7 +2278,7 @@ describe("execution report on terminal state", () => {
     ];
     orchestrator.getState().issueStages["1"] = "merge";
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -2153,7 +2344,7 @@ describe("execution report on terminal state", () => {
     ];
     orchestrator.getState().issueStages["1"] = "merge";
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -2192,7 +2383,7 @@ describe("execution report on terminal state", () => {
     orchestrator.getState().issueStages["1"] = "merge";
     orchestrator.getState().issueReworkCounts["1"] = 1;
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -2267,7 +2458,7 @@ describe("execution report on terminal state", () => {
     orchestrator.getState().issueStages["1"] = "merge";
     orchestrator.getState().issueReworkCounts["1"] = 1;
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -2310,7 +2501,7 @@ describe("execution report on terminal state", () => {
     await orchestrator.pollTick();
     orchestrator.getState().issueStages["1"] = "merge";
 
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -2351,7 +2542,7 @@ describe("execution report on terminal state", () => {
       },
     ];
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -2384,7 +2575,7 @@ describe("execution report on terminal state", () => {
     await orchestrator.pollTick();
     orchestrator.getState().issueStages["1"] = "merge";
 
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -2443,7 +2634,7 @@ describe("execution report on terminal state", () => {
     ];
     orchestrator.getState().issueStages["1"] = "merge";
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -2559,7 +2750,7 @@ describe("review findings comment on agent review failure", () => {
     await orchestrator.pollTick();
     orchestrator.getState().issueStages["1"] = "review";
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage:
@@ -2598,7 +2789,7 @@ describe("review findings comment on agent review failure", () => {
     await orchestrator.pollTick();
     orchestrator.getState().issueStages["1"] = "review";
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage:
@@ -2633,7 +2824,7 @@ describe("review findings comment on agent review failure", () => {
     await orchestrator.pollTick();
     orchestrator.getState().issueStages["1"] = "review";
 
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage:
@@ -2668,7 +2859,7 @@ describe("review findings comment on agent review failure", () => {
     await orchestrator.pollTick();
     orchestrator.getState().issueStages["1"] = "review";
 
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review] Some failure",
@@ -2703,7 +2894,7 @@ describe("review findings comment on agent review failure", () => {
     // Should not throw — error must be swallowed
     let threw = false;
     try {
-      orchestrator.onWorkerExit({
+      await orchestrator.onWorkerExit({
         issueId: "1",
         outcome: "normal",
         agentMessage: "[STAGE_FAILED: review] Some failure",
@@ -2736,7 +2927,7 @@ describe("review findings comment on agent review failure", () => {
     await orchestrator.pollTick();
     orchestrator.getState().issueStages["1"] = "review";
 
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review] Some failure",
@@ -2777,7 +2968,7 @@ describe("review findings comment on agent review failure", () => {
     // Already used 1 rework — next failure should trigger escalation
     orchestrator.getState().issueReworkCounts["1"] = 1;
 
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review] Another null check failure",
@@ -2824,7 +3015,7 @@ describe("review findings comment on agent review failure", () => {
     orchestrator.getState().issueStages["1"] = "review";
     orchestrator.getState().issueReworkCounts["1"] = 1;
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review] Another null check failure",
@@ -2916,7 +3107,7 @@ describe("auto-close parent", () => {
     await orchestrator.pollTick();
     orchestrator.getState().issueStages["1"] = "implement";
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -3014,7 +3205,7 @@ describe("auto-close parent", () => {
     await orchestrator.pollTick();
     orchestrator.getState().issueStages["1"] = "implement";
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -3055,7 +3246,7 @@ describe("auto-close parent", () => {
     await orchestrator.pollTick();
     orchestrator.getState().issueStages["1"] = "implement";
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -3091,7 +3282,7 @@ describe("auto-close parent", () => {
     orchestrator.getState().issueStages["1"] = "implement";
 
     // Should not throw even without autoCloseParentIssue callback
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
@@ -3431,6 +3622,7 @@ function createOrchestrator(overrides?: {
   onIssueDropped?: OrchestratorCoreOptions["onIssueDropped"];
   getRunningSupervisionSnapshots?: OrchestratorCoreOptions["getRunningSupervisionSnapshots"];
   requestSupervisionResteer?: OrchestratorCoreOptions["requestSupervisionResteer"];
+  writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
   now?: () => Date;
 }) {
   const tracker =
@@ -3448,6 +3640,10 @@ function createOrchestrator(overrides?: {
     }),
     now: overrides?.now ?? (() => new Date("2026-03-06T00:00:05.000Z")),
   };
+
+  if (overrides?.writeRunJournalEntry !== undefined) {
+    options.writeRunJournalEntry = overrides.writeRunJournalEntry;
+  }
 
   if (overrides?.stopRunningIssue !== undefined) {
     options.stopRunningIssue = overrides.stopRunningIssue;
@@ -3553,6 +3749,129 @@ function createConfig(overrides?: {
     },
     stages: null,
     escalationState: null,
+  };
+}
+
+function createGateConfig(): ResolvedWorkflowConfig {
+  const config = createConfig();
+  config.stages = {
+    initialStage: "review_gate",
+    fastTrack: null,
+    stages: {
+      review_gate: {
+        type: "gate",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: "ensemble",
+        maxRework: 1,
+        reviewers: [],
+        transitions: {
+          onComplete: null,
+          onApprove: "done",
+          onRework: null,
+        },
+        linearState: null,
+      },
+      done: {
+        type: "terminal",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: null,
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: "Done",
+      },
+    },
+  };
+  return config;
+}
+
+function createLinearStateStageConfig(): ResolvedWorkflowConfig {
+  const config = createConfig();
+  config.stages = {
+    initialStage: "implement",
+    fastTrack: null,
+    stages: {
+      implement: {
+        type: "agent",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: null,
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: "In Progress",
+      },
+    },
+  };
+  return config;
+}
+
+function createJournalEntry(input: {
+  sequence: number;
+  idempotencyKey: string;
+  kind: DispatcherRunJournal[number]["kind"];
+  operation: DispatcherRunJournal[number]["operation"];
+  leaseId: string;
+  leaseStatus: "active" | "completed" | "expired";
+  stage?: string | null;
+  expiresAt?: string;
+  completedAt?: string | null;
+}): DispatcherRunJournal[number] {
+  const stage = input.stage ?? null;
+  const completedAt =
+    input.completedAt ??
+    (input.leaseStatus === "active" ? null : (input.expiresAt ?? null));
+  return {
+    sequence: input.sequence,
+    idempotencyKey: input.idempotencyKey,
+    timestamp: "2026-03-06T00:00:00.000Z",
+    kind: input.kind,
+    issueId: "1",
+    issueIdentifier: "ISSUE-1",
+    operation: input.operation,
+    stage,
+    attempt: null,
+    ownerId: "previous-runtime",
+    lease: {
+      leaseId: input.leaseId,
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      operation: input.operation,
+      ownerId: "previous-runtime",
+      status: input.leaseStatus,
+      acquiredAt: "2026-03-06T00:00:00.000Z",
+      expiresAt: input.expiresAt ?? "2026-03-06T00:10:00.000Z",
+      completedAt,
+      stage,
+      attempt: null,
+      lastJournalSequence: input.sequence,
+    },
+    summary: "journal fixture",
+    metadata: {
+      status: input.leaseStatus === "active" ? "started" : input.leaseStatus,
+    },
   };
 }
 
@@ -3837,7 +4156,7 @@ describe("onIssueDropped callback", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "stopped",
@@ -3870,7 +4189,7 @@ describe("onIssueDropped callback", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "stopped",
@@ -3926,7 +4245,7 @@ describe("isFirstDispatch flag", () => {
     expect(dispatches[0]!.isFirstDispatch).toBe(true);
 
     // Abnormal exit -> retry
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "error",

@@ -19,7 +19,7 @@ describe("failure signal routing in onWorkerExit", () => {
     await orchestrator.pollTick();
     expect(orchestrator.getState().issueStages["1"]).toBe("investigate");
 
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_COMPLETE]",
@@ -34,7 +34,7 @@ describe("failure signal routing in onWorkerExit", () => {
     const orchestrator = createStagedOrchestrator();
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
     });
@@ -46,7 +46,7 @@ describe("failure signal routing in onWorkerExit", () => {
     const orchestrator = createStagedOrchestrator();
 
     await orchestrator.pollTick();
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "Tests failed.\n[STAGE_FAILED: verify]\nSee logs.",
@@ -62,7 +62,7 @@ describe("failure signal routing in onWorkerExit", () => {
     const orchestrator = createStagedOrchestrator();
 
     await orchestrator.pollTick();
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: infra]",
@@ -77,7 +77,7 @@ describe("failure signal routing in onWorkerExit", () => {
     const orchestrator = createStagedOrchestrator();
 
     await orchestrator.pollTick();
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: spec]",
@@ -110,7 +110,7 @@ describe("failure signal routing in onWorkerExit", () => {
     await orchestrator.pollTick();
     // Simulate escalation side-effect moving issue to Blocked
     issueState = "Blocked";
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: spec]",
@@ -137,7 +137,7 @@ describe("failure signal routing in onWorkerExit", () => {
 
     await orchestrator.pollTick();
     issueState = "Blocked";
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: spec]",
@@ -160,7 +160,7 @@ describe("failure signal routing in onWorkerExit", () => {
     await orchestrator.pollTick();
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
 
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -188,7 +188,7 @@ describe("failure signal routing in onWorkerExit", () => {
     await orchestrator.pollTick();
 
     // First review failure — rework (count 1 of max 1)
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -200,7 +200,7 @@ describe("failure signal routing in onWorkerExit", () => {
     await orchestrator.onRetryTimer("1");
 
     // Second review failure — should escalate (count would exceed max)
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -216,7 +216,7 @@ describe("failure signal routing in onWorkerExit", () => {
     const orchestrator = createStagedOrchestrator({ stages: null });
 
     await orchestrator.pollTick();
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -231,7 +231,7 @@ describe("failure signal routing in onWorkerExit", () => {
     const orchestrator = createStagedOrchestrator();
 
     await orchestrator.pollTick();
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -246,7 +246,7 @@ describe("failure signal routing in onWorkerExit", () => {
     const orchestrator = createStagedOrchestrator();
 
     await orchestrator.pollTick();
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "process crashed",
@@ -267,7 +267,7 @@ describe("failure signal routing in onWorkerExit", () => {
     await orchestrator.pollTick();
 
     // First review failure
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -278,7 +278,7 @@ describe("failure signal routing in onWorkerExit", () => {
     await orchestrator.onRetryTimer("1");
 
     // Second review failure
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -301,7 +301,7 @@ describe("failure signal routing in onWorkerExit", () => {
     expect(spawnCalls[0]!.reworkCount).toBe(0);
 
     // First review failure → rework
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -311,7 +311,7 @@ describe("failure signal routing in onWorkerExit", () => {
     expect(spawnCalls[1]!.reworkCount).toBe(1);
 
     // Second review failure → rework
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -332,7 +332,7 @@ describe("failure signal routing in onWorkerExit", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: spec]",
@@ -369,7 +369,7 @@ describe("failure signal routing in onWorkerExit", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -394,7 +394,7 @@ describe("failure signal routing in onWorkerExit", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: spec]",
@@ -418,14 +418,14 @@ describe("agent-type review stage rework routing", () => {
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
 
     // Normal exit advances to "review" (agent-type with onRework)
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
     // Re-dispatch review agent
     await orchestrator.onRetryTimer("1");
 
     // Review agent reports failure
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -446,11 +446,11 @@ describe("agent-type review stage rework routing", () => {
     await orchestrator.pollTick();
 
     // Advance through implement → review
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // First review failure
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -460,11 +460,11 @@ describe("agent-type review stage rework routing", () => {
 
     // Re-dispatch implement, advance back to review
     await orchestrator.onRetryTimer("1");
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Second review failure
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -496,11 +496,11 @@ describe("agent-type review stage rework routing", () => {
     await orchestrator.pollTick();
 
     // Advance to review
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // First review failure — rework (count 1 of max 1)
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -510,11 +510,11 @@ describe("agent-type review stage rework routing", () => {
 
     // Re-dispatch implement, advance back to review
     await orchestrator.onRetryTimer("1");
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Second review failure — should escalate (count would exceed max)
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -546,7 +546,7 @@ describe("agent-type review stage rework routing", () => {
 
     // Implement agent reports [STAGE_FAILED: review] — should find downstream
     // agent-type review stage via findDownstreamGate and use its onRework
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -564,7 +564,7 @@ describe("agent-type review stage rework routing", () => {
     const orchestrator = createStagedOrchestrator();
 
     await orchestrator.pollTick();
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -595,13 +595,13 @@ describe("agent-type review stage rework routing", () => {
     expect(spawnCalls[0]!.stageName).toBe("implement");
 
     // Advance to review
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
     expect(spawnCalls).toHaveLength(2);
     expect(spawnCalls[1]!.stageName).toBe("review");
 
     // Review fails → rework to implement
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -627,12 +627,12 @@ describe("review findings comment posting on agent review failure", () => {
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
 
     // Advance to review stage
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
     await orchestrator.onRetryTimer("1");
 
     // Review agent reports failure with message
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage:
@@ -659,11 +659,11 @@ describe("review findings comment posting on agent review failure", () => {
     await orchestrator.pollTick();
 
     // Advance to review stage
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Review agent reports failure with specific message
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage:
@@ -690,11 +690,11 @@ describe("review findings comment posting on agent review failure", () => {
     await orchestrator.pollTick();
 
     // Advance to review stage
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Review agent reports failure
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage:
@@ -728,11 +728,11 @@ describe("review findings comment posting on agent review failure", () => {
     await orchestrator.pollTick();
 
     // Advance to review stage
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Review agent reports failure — comment posting will fail
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -760,11 +760,11 @@ describe("review findings comment posting on agent review failure", () => {
     await orchestrator.pollTick();
 
     // Advance to review stage
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Review agent reports failure — comment will fail to post
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -792,13 +792,13 @@ describe("review findings comment posting on agent review failure", () => {
     await orchestrator.pollTick();
 
     // Advance to review stage
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Review fails — postComment will throw
     let thrownError: unknown = null;
     try {
-      orchestrator.onWorkerExit({
+      await orchestrator.onWorkerExit({
         issueId: "1",
         outcome: "normal",
         agentMessage: "[STAGE_FAILED: review]",
@@ -826,11 +826,11 @@ describe("review findings comment posting on agent review failure", () => {
     await orchestrator.pollTick();
 
     // Advance to review stage
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Review agent reports failure — no postComment configured
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -865,21 +865,21 @@ describe("review findings comment posting on agent review failure", () => {
     await orchestrator.pollTick();
 
     // Advance to review
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // First review failure — rework (count 1 of max 1)
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
     });
     await orchestrator.onRetryTimer("1");
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Second review failure — should escalate
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -919,11 +919,11 @@ describe("review findings comment posting on agent review failure", () => {
     await orchestrator.pollTick();
 
     // Advance to review
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // First review failure — rework
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -934,11 +934,11 @@ describe("review findings comment posting on agent review failure", () => {
     postComment.mockClear();
 
     await orchestrator.onRetryTimer("1");
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Second review failure — escalation (max exceeded)
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -971,12 +971,12 @@ describe("rebase failure signal routing", () => {
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
 
     // Advance implement → merge
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("merge");
     await orchestrator.onRetryTimer("1");
 
     // Merge agent reports rebase failure
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: rebase]",
@@ -997,11 +997,11 @@ describe("rebase failure signal routing", () => {
     await orchestrator.pollTick();
 
     // Advance to merge
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // First rebase failure
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: rebase]",
@@ -1010,11 +1010,11 @@ describe("rebase failure signal routing", () => {
 
     // Re-dispatch implement, advance back to merge
     await orchestrator.onRetryTimer("1");
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Second rebase failure
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: rebase]",
@@ -1045,11 +1045,11 @@ describe("rebase failure signal routing", () => {
     await orchestrator.pollTick();
 
     // Advance to merge
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // First rebase failure — rework (count 1 of max 1)
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: rebase]",
@@ -1058,11 +1058,11 @@ describe("rebase failure signal routing", () => {
 
     // Re-dispatch implement, advance back to merge
     await orchestrator.onRetryTimer("1");
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Second rebase failure — should escalate
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: rebase]",
@@ -1094,11 +1094,11 @@ describe("rebase failure signal routing", () => {
     await orchestrator.pollTick();
 
     // Advance to merge
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Merge agent reports rebase failure with message
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "Merge conflict in src/handler.ts\n[STAGE_FAILED: rebase]",
@@ -1118,7 +1118,7 @@ describe("rebase failure signal routing", () => {
     const orchestrator = createStagedOrchestrator();
 
     await orchestrator.pollTick();
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: rebase]",
@@ -1133,7 +1133,7 @@ describe("rebase failure signal routing", () => {
     const orchestrator = createStagedOrchestrator({ stages: null });
 
     await orchestrator.pollTick();
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: rebase]",
@@ -1186,11 +1186,11 @@ describe("rebase failure signal routing", () => {
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
 
     // Advance implement → review
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Two review failures (rework count goes to 2)
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -1198,10 +1198,10 @@ describe("rebase failure signal routing", () => {
     expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
 
     await orchestrator.onRetryTimer("1");
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: review]",
@@ -1210,13 +1210,13 @@ describe("rebase failure signal routing", () => {
 
     // Now advance through review → merge
     await orchestrator.onRetryTimer("1");
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     await orchestrator.onRetryTimer("1");
 
     // Rebase failure should escalate because total rework count (3) exceeds max (2)
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       agentMessage: "[STAGE_FAILED: rebase]",

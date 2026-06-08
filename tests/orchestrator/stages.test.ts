@@ -43,7 +43,7 @@ describe("orchestrator stage machine", () => {
     expect(orchestrator.getState().issueStages["1"]).toBe("investigate");
 
     // Normal exit from investigate stage
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
     });
@@ -61,7 +61,7 @@ describe("orchestrator stage machine", () => {
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
 
     // Normal exit advances to "done" (terminal)
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
     });
@@ -86,7 +86,7 @@ describe("orchestrator stage machine", () => {
     expect(spawnCalls).toHaveLength(1);
 
     // Normal exit advances to "review" (gate stage)
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
     });
@@ -104,7 +104,7 @@ describe("orchestrator stage machine", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
     // Approve the gate
@@ -119,7 +119,7 @@ describe("orchestrator stage machine", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
     // Reject (rework) the gate
@@ -142,7 +142,7 @@ describe("orchestrator stage machine", () => {
     const orchestrator = createStagedOrchestrator({ stages });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
 
     // Rework 1
     orchestrator.reworkGate("1");
@@ -187,7 +187,7 @@ describe("orchestrator stage machine", () => {
     const orchestrator = createStagedOrchestrator({ stages: null });
 
     await orchestrator.pollTick();
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
     });
@@ -210,7 +210,7 @@ describe("orchestrator stage machine", () => {
     expect(orchestrator.getState().issueStages["2"]).toBe("investigate");
 
     // Advance issue 1 only
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
     expect(orchestrator.getState().issueStages["2"]).toBe("investigate");
   });
@@ -221,7 +221,7 @@ describe("orchestrator stage machine", () => {
     await orchestrator.pollTick();
     expect(orchestrator.getState().issueStages["1"]).toBe("investigate");
 
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "crashed",
@@ -237,7 +237,7 @@ describe("orchestrator stage machine", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
     // Dispatch review agent
@@ -274,21 +274,21 @@ describe("orchestrator stage machine", () => {
     expect(orchestrator.getState().issueStages["1"]).toBe("investigate");
 
     // investigate → implement
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
 
     // Dispatch implement
     await orchestrator.onRetryTimer("1");
 
     // implement → review
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
     // Dispatch review
     await orchestrator.onRetryTimer("1");
 
     // review → merge (review passes — recorded in passedStages)
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("merge");
     expect(orchestrator.getState().issuePassedStages["1"]).toContain("review");
 
@@ -306,7 +306,7 @@ describe("orchestrator stage machine", () => {
     await orchestrator.onRetryTimer("1");
 
     // implement completes again → should SKIP review and go to merge
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("merge");
   });
 
@@ -322,7 +322,7 @@ describe("orchestrator stage machine", () => {
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
 
     // implement → review
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
     // Dispatch review
@@ -336,7 +336,7 @@ describe("orchestrator stage machine", () => {
     await orchestrator.onRetryTimer("1");
 
     // implement completes again → should go to review (NOT skip it)
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
   });
 
@@ -346,7 +346,7 @@ describe("orchestrator stage machine", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
 
     expect(orchestrator.getState().issuePassedStages["1"]).toBeUndefined();
   });
@@ -361,7 +361,7 @@ describe("orchestrator stage machine", () => {
     // Set a rework count to verify cleanup
     orchestrator.getState().issueReworkCounts["1"] = 2;
 
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
 
     expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
     expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
@@ -418,7 +418,7 @@ describe("updateIssueState integration", () => {
     );
 
     // Normal exit advances to "review" (gate stage)
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
     // Retry timer fires — gate stage dispatch should call updateIssueState with "In Review"
@@ -452,7 +452,7 @@ describe("updateIssueState integration", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
 
     // Retry timer fires — gate stage runs ensemble gate which fails → escalates
     await orchestrator.onRetryTimer("1");
@@ -487,7 +487,7 @@ describe("updateIssueState integration", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
 
     await orchestrator.onRetryTimer("1");
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -532,7 +532,7 @@ describe("updateIssueState integration", () => {
     await orchestrator.pollTick();
 
     // Normal exit from implement → done (terminal with linearState "Done")
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
 
     // Wait for the async updateIssueState call to complete
     await new Promise((resolve) => setTimeout(resolve, 50));
@@ -560,7 +560,7 @@ describe("updateIssueState integration", () => {
     updateIssueState.mockClear();
 
     // Normal exit from implement → done (terminal with no linearState)
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
 
     await new Promise((resolve) => setTimeout(resolve, 50));
 
@@ -578,7 +578,7 @@ describe("updateIssueState integration", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
     // Approve the gate — sets issue to "done" (terminal with linearState "Done")

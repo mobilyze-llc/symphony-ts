@@ -52,7 +52,7 @@ describe("issueFirstDispatchedAt tracking", () => {
     );
 
     // Worker exits, stage advances to "implement"
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
 
     // Advance time to T2 before second dispatch
@@ -75,7 +75,7 @@ describe("issueFirstDispatchedAt tracking", () => {
     expect(orchestrator.getState().issueFirstDispatchedAt["1"]).toBeDefined();
 
     // Normal exit advances to "done" (terminal) — triggers cleanup
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
 
     expect(orchestrator.getState().issueFirstDispatchedAt["1"]).toBeUndefined();
     expect(orchestrator.getState().completed.has("1")).toBe(true);

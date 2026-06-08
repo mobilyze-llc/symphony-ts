@@ -537,7 +537,7 @@ describe("ensemble gate orchestrator integration", () => {
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
 
     // Normal exit advances to "review" (ensemble gate)
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
     // Retry timer dispatches gate — ensemble handler runs
@@ -575,7 +575,7 @@ describe("ensemble gate orchestrator integration", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
     await orchestrator.onRetryTimer("1");
@@ -618,7 +618,7 @@ describe("ensemble gate orchestrator integration", () => {
 
     // Exhaust max_rework (3) by cycling through rework loops
     for (let i = 0; i < 3; i++) {
-      orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+      await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
       expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
       await orchestrator.onRetryTimer("1");
@@ -633,7 +633,7 @@ describe("ensemble gate orchestrator integration", () => {
     }
 
     // 4th cycle — this should trigger escalation
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
     await orchestrator.onRetryTimer("1");
@@ -673,7 +673,7 @@ describe("ensemble gate orchestrator integration", () => {
     });
 
     await orchestrator.pollTick();
-    orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
     expect(orchestrator.getState().issueStages["1"]).toBe("review");
 
     // Retry timer — human gate should not run ensemble handler
