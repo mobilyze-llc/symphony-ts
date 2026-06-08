@@ -2,6 +2,7 @@ import type {
   CodexRateLimits,
   CodexTotals,
   ContinuousFeedbackIssueState,
+  DecorrelatedGateOutcome,
   OrchestratorState,
   RecentActivityEntry,
   StageRecord,
@@ -96,6 +97,32 @@ export interface RuntimeSnapshotRetryRow {
   error: string | null;
 }
 
+export interface RuntimeSnapshotDecorrelatedGateOutcome {
+  issue_id: string;
+  issue_identifier: string;
+  gate_stage: string | null;
+  mode: "prototype" | "thin" | "full";
+  status: "passed" | "failed" | "blocked" | "skipped_prototype";
+  aggregate: "pass" | "fail" | null;
+  checked_at: string;
+  worker_lane: {
+    runner: string;
+    model: string | null;
+    role: string;
+    stage_name: string | null;
+  };
+  reviewer_lanes: Array<{
+    runner: string;
+    model: string | null;
+    role: string;
+    stage_name: string | null;
+  }>;
+  verifier_separated: boolean;
+  authoritative: boolean;
+  rework_target: string | null;
+  summary: string;
+}
+
 export interface RuntimeSnapshotManagerLaneRow {
   lane_id: string;
   issue_identifier: string;
@@ -167,6 +194,7 @@ export interface RuntimeSnapshot {
     seconds_running: number;
   };
   rate_limits: CodexRateLimits;
+  decorrelated_gates?: RuntimeSnapshotDecorrelatedGateOutcome[];
   manager_runs?: RuntimeSnapshotManagerRun[];
 }
 
@@ -310,7 +338,51 @@ export function buildRuntimeSnapshot(
       getAggregateSecondsRunning(state, now),
     ),
     rate_limits: state.codexRateLimits,
+    decorrelated_gates: buildDecorrelatedGateSnapshots(state),
     manager_runs: buildManagerRunSnapshots(state),
+  };
+}
+
+function buildDecorrelatedGateSnapshots(
+  state: OrchestratorState,
+): RuntimeSnapshotDecorrelatedGateOutcome[] {
+  return Object.values(state.decorrelatedGateOutcomes)
+    .flat()
+    .sort((left, right) =>
+      left.checkedAt === right.checkedAt
+        ? left.issueIdentifier.localeCompare(right.issueIdentifier, "en")
+        : left.checkedAt.localeCompare(right.checkedAt),
+    )
+    .map(toSnapshotDecorrelatedGateOutcome);
+}
+
+function toSnapshotDecorrelatedGateOutcome(
+  outcome: DecorrelatedGateOutcome,
+): RuntimeSnapshotDecorrelatedGateOutcome {
+  return {
+    issue_id: outcome.issueId,
+    issue_identifier: outcome.issueIdentifier,
+    gate_stage: outcome.gateStage,
+    mode: outcome.mode,
+    status: outcome.status,
+    aggregate: outcome.aggregate,
+    checked_at: outcome.checkedAt,
+    worker_lane: {
+      runner: outcome.workerLane.runner,
+      model: outcome.workerLane.model,
+      role: outcome.workerLane.role,
+      stage_name: outcome.workerLane.stageName,
+    },
+    reviewer_lanes: outcome.reviewerLanes.map((lane) => ({
+      runner: lane.runner,
+      model: lane.model,
+      role: lane.role,
+      stage_name: lane.stageName,
+    })),
+    verifier_separated: outcome.verifierSeparated,
+    authoritative: outcome.authoritative,
+    rework_target: outcome.reworkTarget,
+    summary: outcome.summary,
   };
 }
 

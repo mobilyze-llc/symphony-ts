@@ -16,6 +16,7 @@ import type {
 import {
   type ContinuousFeedbackEvent,
   type ContinuousFeedbackLane,
+  type DecorrelatedGateLane,
   type DispatcherLease,
   type DispatcherOperation,
   type DispatcherRunJournal,
@@ -26,6 +27,7 @@ import {
   type OrchestratorState,
   type RetryEntry,
   type RightSizingDecision,
+  type RightSizingMode,
   type RunningEntry,
   type StageRecord,
   createEmptyLiveSession,
@@ -131,6 +133,14 @@ export interface SupervisionResteerRequest {
   phase: "dispatch" | "running";
   findings: readonly SupervisionFinding[];
   comment: string;
+}
+
+interface DecorrelatedGateContext {
+  mode: RightSizingMode;
+  explicitModeHint: RightSizingMode | null;
+  workerLane: DecorrelatedGateLane;
+  reviewerLanes: DecorrelatedGateLane[];
+  verifierSeparated: boolean;
 }
 
 export interface TimerScheduler {
@@ -308,6 +318,16 @@ export class OrchestratorCore {
         typeof entry.metadata.signature === "string"
       ) {
         this.reportedSupervisionFindings.add(entry.metadata.signature);
+      }
+
+      if (
+        entry.kind === "gate_result" &&
+        entry.operation === "gate" &&
+        entry.metadata.status === "skipped_prototype"
+      ) {
+        this.state.completed.add(entry.issueId);
+        this.releaseClaim(entry.issueId);
+        this.clearTerminalIssueRuntimeState(entry.issueId);
       }
     }
 
@@ -581,6 +601,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       this.onIssueDropped?.({
@@ -605,6 +626,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       this.onIssueDropped?.({
@@ -834,6 +856,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       return "completed";
@@ -847,6 +870,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       return "completed";
@@ -874,6 +898,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       // Fire linearState update for the terminal stage (e.g., move to "Done")
@@ -959,6 +984,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       void this.fireEscalationSideEffects(
@@ -1353,10 +1379,12 @@ export class OrchestratorCore {
     leaseId: string,
     stageName: string | null,
     attempt: number | null,
+    gateContext: DecorrelatedGateContext | null,
   ): Promise<void> {
     try {
       // biome-ignore lint/style/noNonNullAssertion: runEnsembleGate is guaranteed to be set when this method is called
       const result = await this.runEnsembleGate!({ issue, stage });
+      let reworkTarget: string | null = null;
 
       if (result.aggregate === "pass") {
         const nextStage = this.approveGate(issue.id);
@@ -1368,7 +1396,7 @@ export class OrchestratorCore {
           });
         }
       } else {
-        const reworkTarget = this.reworkGate(issue.id);
+        reworkTarget = this.reworkGate(issue.id);
         if (reworkTarget !== null && reworkTarget !== "escalated") {
           this.scheduleRetry(issue.id, 1, {
             identifier: issue.identifier,
@@ -1411,6 +1439,17 @@ export class OrchestratorCore {
           }
         }
       }
+      if (gateContext !== null) {
+        this.recordDecorrelatedGateOutcome({
+          issue,
+          stageName,
+          gateContext,
+          status: result.aggregate === "pass" ? "passed" : "failed",
+          aggregate: result.aggregate,
+          reworkTarget: reworkTarget === "escalated" ? null : reworkTarget,
+          summary: `Decorrelated gate ${stageName ?? "unnamed"} ${result.aggregate === "pass" ? "passed" : "failed"} for ${issue.identifier}.`,
+        });
+      }
       await this.completeDispatcherLease({
         leaseId,
         idempotencyKey: `${leaseId}:result`,
@@ -1423,6 +1462,12 @@ export class OrchestratorCore {
         summary: `Gate completed with ${result.aggregate} verdict.`,
         metadata: {
           aggregate: result.aggregate,
+          mode: gateContext?.mode ?? null,
+          workerLane: gateContext?.workerLane ?? null,
+          reviewerLanes: gateContext?.reviewerLanes ?? [],
+          verifierSeparated: gateContext?.verifierSeparated ?? null,
+          authoritative:
+            gateContext === null ? null : gateContext.mode !== "prototype",
         },
       });
     } catch {
@@ -1461,6 +1506,247 @@ export class OrchestratorCore {
       });
       this.releaseClaim(issue.id);
     }
+  }
+
+  private async handlePrototypeGateBoundary(input: {
+    issue: Issue;
+    stageName: string | null;
+    attempt: number | null;
+    gateContext: DecorrelatedGateContext;
+    leaseId: string;
+  }): Promise<void> {
+    const summary = `Prototype boundary reached for ${input.issue.identifier}; promotion requires a new gated production unit.`;
+    this.recordDecorrelatedGateOutcome({
+      issue: input.issue,
+      stageName: input.stageName,
+      gateContext: input.gateContext,
+      status: "skipped_prototype",
+      aggregate: null,
+      reworkTarget: null,
+      summary,
+    });
+    if (this.postComment !== undefined) {
+      try {
+        await this.postComment(
+          input.issue.id,
+          [
+            "## Prototype promotion boundary",
+            "",
+            summary,
+            "",
+            "Prototype output is a runnable artifact plus recorded decision only. To merge, promote the decision into a new `thin` or `full` production unit and run the decorrelated acceptance gate there.",
+          ].join("\n"),
+        );
+      } catch (err) {
+        console.warn(
+          `[orchestrator] Failed to post prototype boundary comment for ${input.issue.identifier}:`,
+          err,
+        );
+      }
+    }
+    this.state.completed.add(input.issue.id);
+    this.releaseClaim(input.issue.id);
+    this.clearTerminalIssueRuntimeState(input.issue.id);
+    await this.completeDispatcherLease({
+      leaseId: input.leaseId,
+      idempotencyKey: `${input.leaseId}:prototype_boundary`,
+      kind: "gate_result",
+      issueId: input.issue.id,
+      issueIdentifier: input.issue.identifier,
+      operation: "gate",
+      stage: input.stageName,
+      attempt: input.attempt,
+      summary,
+      metadata: {
+        aggregate: null,
+        mode: input.gateContext.mode,
+        workerLane: input.gateContext.workerLane,
+        reviewerLanes: input.gateContext.reviewerLanes,
+        verifierSeparated: input.gateContext.verifierSeparated,
+        authoritative: false,
+        status: "skipped_prototype",
+      },
+    });
+  }
+
+  private async handleUndecorrelatedGate(input: {
+    issue: Issue;
+    stageName: string | null;
+    stage: StageDefinition;
+    attempt: number | null;
+    gateContext: DecorrelatedGateContext;
+    leaseId: string;
+  }): Promise<void> {
+    const reworkTarget = this.reworkGate(input.issue.id);
+    const blockReason =
+      input.gateContext.reviewerLanes.length === 0
+        ? "no decorrelated verifier lane is configured"
+        : "a reviewer lane matches the worker lane";
+    const summary = `Gate ${input.stageName ?? "unnamed"} blocked because ${blockReason}.`;
+    this.recordDecorrelatedGateOutcome({
+      issue: input.issue,
+      stageName: input.stageName,
+      gateContext: input.gateContext,
+      status: "blocked",
+      aggregate: "fail",
+      reworkTarget: reworkTarget === "escalated" ? null : reworkTarget,
+      summary,
+    });
+    if (this.postComment !== undefined) {
+      try {
+        await this.postComment(
+          input.issue.id,
+          [
+            "## Decorrelated gate blocked",
+            "",
+            summary,
+            "",
+            `Worker lane: ${formatGateLane(input.gateContext.workerLane)}`,
+            `Reviewer lanes: ${
+              input.gateContext.reviewerLanes.length === 0
+                ? "(none configured)"
+                : input.gateContext.reviewerLanes.map(formatGateLane).join(", ")
+            }`,
+            "",
+            "Configure an independent verifier lane, or promote the unit through a production gate with a different reviewer role/tool/model.",
+          ].join("\n"),
+        );
+      } catch (err) {
+        console.warn(
+          `[orchestrator] Failed to post undecorrelated gate comment for ${input.issue.identifier}:`,
+          err,
+        );
+      }
+    }
+    if (reworkTarget !== null && reworkTarget !== "escalated") {
+      this.scheduleRetry(input.issue.id, 1, {
+        identifier: input.issue.identifier,
+        error: `Decorrelated gate blocked: ${blockReason}`,
+        delayType: "continuation",
+      });
+    } else if (reworkTarget === "escalated") {
+      await this.fireEscalationSideEffects(
+        input.issue.id,
+        input.issue.identifier,
+        `Decorrelated gate: max rework attempts (${input.stage.maxRework ?? 0}) exceeded after verifier-lane separation failure.`,
+      );
+    }
+    await this.completeDispatcherLease({
+      leaseId: input.leaseId,
+      idempotencyKey: `${input.leaseId}:blocked`,
+      kind: "gate_result",
+      issueId: input.issue.id,
+      issueIdentifier: input.issue.identifier,
+      operation: "gate",
+      stage: input.stageName,
+      attempt: input.attempt,
+      summary,
+      metadata: {
+        aggregate: "fail",
+        mode: input.gateContext.mode,
+        workerLane: input.gateContext.workerLane,
+        reviewerLanes: input.gateContext.reviewerLanes,
+        verifierSeparated: false,
+        authoritative: true,
+        status: "blocked",
+      },
+    });
+  }
+
+  private recordDecorrelatedGateOutcome(input: {
+    issue: Issue;
+    stageName: string | null;
+    gateContext: DecorrelatedGateContext;
+    status: "passed" | "failed" | "blocked" | "skipped_prototype";
+    aggregate: "pass" | "fail" | null;
+    reworkTarget: string | null;
+    summary: string;
+  }): void {
+    const outcomes = this.state.decorrelatedGateOutcomes[input.issue.id] ?? [];
+    this.state.decorrelatedGateOutcomes[input.issue.id] = [
+      ...outcomes,
+      {
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier,
+        gateStage: input.stageName,
+        mode: input.gateContext.mode,
+        status: input.status,
+        aggregate: input.aggregate,
+        checkedAt: this.now().toISOString(),
+        workerLane: input.gateContext.workerLane,
+        reviewerLanes: input.gateContext.reviewerLanes,
+        verifierSeparated: input.gateContext.verifierSeparated,
+        authoritative: input.status !== "skipped_prototype",
+        reworkTarget: input.reworkTarget,
+        summary: input.summary,
+      },
+    ];
+  }
+
+  private clearTerminalIssueRuntimeState(issueId: string): void {
+    delete this.state.issueStages[issueId];
+    delete this.state.issueReworkCounts[issueId];
+    delete this.state.issuePassedStages[issueId];
+    delete this.state.issueExecutionHistory[issueId];
+    delete this.state.issueFirstDispatchedAt[issueId];
+    delete this.state.issueRightSizingDecisions[issueId];
+    delete this.state.loopTraceJournal[issueId];
+    delete this.state.continuousFeedback[issueId];
+  }
+
+  private resolveDecorrelatedGateContext(
+    issueId: string,
+    stageName: string | null,
+    stage: StageDefinition,
+  ): DecorrelatedGateContext | null {
+    const rightSizingDecision = this.state.issueRightSizingDecisions[issueId];
+    if (rightSizingDecision === undefined) {
+      return null;
+    }
+
+    const workerLane = this.resolveGateWorkerLane(issueId, stage);
+    const reviewerLanes = stage.reviewers.map((reviewer) => ({
+      runner: reviewer.runner,
+      model: reviewer.model,
+      role: reviewer.role,
+      stageName,
+    }));
+    const verifierSeparated =
+      reviewerLanes.length > 0 &&
+      reviewerLanes.every(
+        (reviewerLane) => !sameGateLane(reviewerLane, workerLane),
+      );
+
+    return {
+      mode: rightSizingDecision.mode,
+      explicitModeHint: rightSizingDecision.signals.explicitModeHint,
+      workerLane,
+      reviewerLanes,
+      verifierSeparated,
+    };
+  }
+
+  private resolveGateWorkerLane(
+    issueId: string,
+    gateStage: StageDefinition,
+  ): DecorrelatedGateLane {
+    const stagesConfig = this.config.stages;
+    const reworkStageName = gateStage.transitions.onRework;
+    const history = this.state.issueExecutionHistory[issueId] ?? [];
+    const lastHistoryStageName = history.at(-1)?.stageName ?? null;
+    const workerStageName =
+      reworkStageName !== null ? reworkStageName : lastHistoryStageName;
+    const workerStage =
+      stagesConfig !== null && workerStageName !== null
+        ? stagesConfig.stages[workerStageName]
+        : undefined;
+
+    return {
+      runner: workerStage?.runner ?? this.config.runner.kind,
+      model: workerStage?.model ?? this.config.runner.model,
+      role: "worker",
+      stageName: workerStageName,
+    };
   }
 
   /**
@@ -1541,6 +1827,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       this.state.failed.add(issueId);
@@ -2248,6 +2535,7 @@ export class OrchestratorCore {
         delete this.state.issueReworkCounts[issue.id];
         delete this.state.issuePassedStages[issue.id];
         delete this.state.issueFirstDispatchedAt[issue.id];
+        delete this.state.issueRightSizingDecisions[issue.id];
         delete this.state.loopTraceJournal[issue.id];
         delete this.state.continuousFeedback[issue.id];
         // Fire linearState update for the terminal stage (e.g., move to "Done")
@@ -2280,6 +2568,11 @@ export class OrchestratorCore {
       }
 
       if (stage !== null && stage.type === "gate") {
+        const gateContext = this.resolveDecorrelatedGateContext(
+          issue.id,
+          stageName,
+          stage,
+        );
         const gateLeaseId = createDispatcherLeaseId({
           operation: "gate",
           issueId: issue.id,
@@ -2298,6 +2591,12 @@ export class OrchestratorCore {
           summary: `Gate ${stageName ?? "unnamed"} started for ${issue.identifier}.`,
           metadata: {
             gateType: stage.gateType,
+            mode: gateContext?.mode ?? null,
+            workerLane: gateContext?.workerLane ?? null,
+            reviewerLanes: gateContext?.reviewerLanes ?? [],
+            verifierSeparated: gateContext?.verifierSeparated ?? null,
+            authoritative:
+              gateContext === null ? null : gateContext.mode !== "prototype",
           },
         });
         if (gateLease === null) {
@@ -2308,6 +2607,40 @@ export class OrchestratorCore {
         }
         this.state.issueStages[issue.id] = stageName;
         this.state.claimed.add(issue.id);
+
+        if (gateContext?.explicitModeHint === "prototype") {
+          await this.handlePrototypeGateBoundary({
+            issue,
+            stageName,
+            attempt,
+            gateContext,
+            leaseId: gateLeaseId,
+          });
+          return {
+            dispatched: false,
+            rightSizingDecision: null,
+          };
+        }
+
+        if (
+          gateContext !== null &&
+          stage.gateType === "ensemble" &&
+          gateContext.mode !== "prototype" &&
+          !gateContext.verifierSeparated
+        ) {
+          await this.handleUndecorrelatedGate({
+            issue,
+            stageName,
+            stage,
+            attempt,
+            gateContext,
+            leaseId: gateLeaseId,
+          });
+          return {
+            dispatched: false,
+            rightSizingDecision: null,
+          };
+        }
 
         if (stage.linearState !== null && this.updateIssueState !== undefined) {
           const linearState = stage.linearState;
@@ -2345,6 +2678,7 @@ export class OrchestratorCore {
             gateLeaseId,
             stageName,
             attempt,
+            gateContext,
           );
         }
         // Human gates (or ensemble gates without handler): stay in gate state.
@@ -2363,6 +2697,7 @@ export class OrchestratorCore {
       this.state.issueFirstDispatchedAt[issue.id] = formatEasternTimestamp(
         this.now(),
       );
+      this.state.decorrelatedGateOutcomes[issue.id] = [];
     }
 
     const rightSizingDecision = createRightSizingDecision({
@@ -2371,6 +2706,7 @@ export class OrchestratorCore {
       stageName,
       attempt,
     });
+    this.state.issueRightSizingDecisions[issue.id] = rightSizingDecision;
     const dispatchLeaseId = createDispatcherLeaseId({
       operation: "dispatcher",
       issueId: issue.id,
@@ -2891,6 +3227,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       void this.fireEscalationSideEffects(
@@ -3084,6 +3421,21 @@ function formatSupervisionFindingSignature(
 
 function formatUnknownError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function sameGateLane(
+  left: DecorrelatedGateLane,
+  right: DecorrelatedGateLane,
+): boolean {
+  return (
+    left.runner === right.runner &&
+    left.model === right.model &&
+    left.role === right.role
+  );
+}
+
+function formatGateLane(lane: DecorrelatedGateLane): string {
+  return `${lane.runner}${lane.model === null ? "" : `/${lane.model}`} (${lane.role})`;
 }
 
 export function classifyExitOutcome(

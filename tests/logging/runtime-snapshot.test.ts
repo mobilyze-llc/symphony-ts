@@ -213,6 +213,76 @@ describe("runtime snapshot", () => {
     });
   });
 
+  it("projects decorrelated gate outcomes", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    state.decorrelatedGateOutcomes["issue-1"] = [
+      {
+        issueId: "issue-1",
+        issueIdentifier: "ABC-1",
+        gateStage: "review_gate",
+        mode: "full",
+        status: "failed",
+        aggregate: "fail",
+        checkedAt: "2026-03-06T10:00:05.000Z",
+        workerLane: {
+          runner: "codex",
+          model: null,
+          role: "worker",
+          stageName: "implement",
+        },
+        reviewerLanes: [
+          {
+            runner: "pi",
+            model: "local-flash",
+            role: "decorrelated-reviewer",
+            stageName: "review_gate",
+          },
+        ],
+        verifierSeparated: true,
+        authoritative: true,
+        reworkTarget: "implement",
+        summary: "Decorrelated gate review_gate failed for ABC-1.",
+      },
+    ];
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.decorrelated_gates).toEqual([
+      {
+        issue_id: "issue-1",
+        issue_identifier: "ABC-1",
+        gate_stage: "review_gate",
+        mode: "full",
+        status: "failed",
+        aggregate: "fail",
+        checked_at: "2026-03-06T10:00:05.000Z",
+        worker_lane: {
+          runner: "codex",
+          model: null,
+          role: "worker",
+          stage_name: "implement",
+        },
+        reviewer_lanes: [
+          {
+            runner: "pi",
+            model: "local-flash",
+            role: "decorrelated-reviewer",
+            stage_name: "review_gate",
+          },
+        ],
+        verifier_separated: true,
+        authoritative: true,
+        rework_target: "implement",
+        summary: "Decorrelated gate review_gate failed for ABC-1.",
+      },
+    ]);
+  });
+
   it("includes a loop trace preview for running rows", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,
