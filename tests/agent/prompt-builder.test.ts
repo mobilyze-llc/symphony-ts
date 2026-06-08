@@ -10,6 +10,7 @@ import {
 import type { PromptTemplateError } from "../../src/agent/prompt-builder.js";
 import type { Issue } from "../../src/domain/model.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
+import { createModeScopedPermissionPolicy } from "../../src/policy/hard-stops.js";
 
 const ISSUE_FIXTURE: Issue = {
   id: "issue-1",
@@ -129,6 +130,31 @@ describe("prompt builder", () => {
     expect(second).not.toContain("Initial ABC-123 attempt=3");
   });
 
+  it("prepends a mode permission envelope to first-turn prompts when policy denies PRs", async () => {
+    const prompt = await renderPrompt({
+      workflow: {
+        promptTemplate:
+          "Implement the issue and open a PR with `gh pr create`.",
+      },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      modePolicy: createModeScopedPermissionPolicy({
+        mode: "prototype",
+        configuredApprovalPolicy: "full-auto",
+        configuredThreadSandbox: "workspace-write",
+        configuredTurnSandboxPolicy: { type: "workspace-write" },
+        maxBudgetUsd: 50,
+      }),
+    });
+
+    expect(prompt).toContain("## Mode Permission Envelope");
+    expect(prompt).toContain("Mode: prototype");
+    expect(prompt).toContain("Pull requests: denied");
+    expect(prompt).toContain("Auto-merge: denied");
+    expect(prompt).toContain("Gate bypass: denied");
+    expect(prompt).toContain("open a PR with `gh pr create`");
+  });
+
   it("builds continuation guidance with issue and attempt context", () => {
     const prompt = buildContinuationPrompt({
       issue: ISSUE_FIXTURE,
@@ -201,6 +227,29 @@ describe("prompt builder", () => {
     expect(prompt).toContain("Current stage: implement.");
     expect(prompt).toContain("IMPLEMENT stage");
     expect(prompt).toContain("[STAGE_COMPLETE]");
+  });
+
+  it("wraps continuation prompts with full-mode PR allowance but merge/bypass denials", () => {
+    const prompt = buildContinuationPrompt({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      turnNumber: 2,
+      maxTurns: 5,
+      stageName: "merge",
+      modePolicy: createModeScopedPermissionPolicy({
+        mode: "full",
+        configuredApprovalPolicy: "full-auto",
+        configuredThreadSandbox: "workspace-write",
+        configuredTurnSandboxPolicy: { type: "workspace-write" },
+        maxBudgetUsd: 50,
+      }),
+    });
+
+    expect(prompt).toContain("Mode: full");
+    expect(prompt).toContain("Pull requests: allowed");
+    expect(prompt).toContain("Auto-merge: denied");
+    expect(prompt).toContain("Gate bypass: denied");
+    expect(prompt).toContain("You are in the MERGE stage");
   });
 
   it("does not include STAGE_COMPLETE in continuation when stageName is null", () => {

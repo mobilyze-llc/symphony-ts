@@ -33,6 +33,7 @@ import {
   addPipelineActivity,
   applyCodexEventToOrchestratorState,
 } from "../logging/session-metrics.js";
+import type { HardStopDecision } from "../policy/hard-stops.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 import {
   type EnsembleGateResult,
@@ -625,6 +626,7 @@ export class OrchestratorCore {
     reason?: string;
     endedAt?: Date;
     agentMessage?: string;
+    hardStop?: HardStopDecision | null;
   }): Promise<RetryEntry | null> {
     const runningEntry = this.state.running[input.issueId];
     if (runningEntry === undefined) {
@@ -695,6 +697,14 @@ export class OrchestratorCore {
     }
 
     if (input.outcome === "normal") {
+      if (input.hardStop !== undefined && input.hardStop !== null) {
+        await this.handleHardStopTrigger(input.issueId, runningEntry, {
+          hardStop: input.hardStop,
+          stageName: exitedStageName,
+        });
+        return null;
+      }
+
       const failureSignal = parseFailureSignal(input.agentMessage);
       if (failureSignal !== null) {
         return this.handleFailureSignal(
@@ -1765,6 +1775,58 @@ export class OrchestratorCore {
       return;
     }
     this.state.claimed.delete(issueId);
+  }
+
+  private async handleHardStopTrigger(
+    issueId: string,
+    runningEntry: RunningEntry,
+    input: {
+      hardStop: HardStopDecision;
+      stageName: string | null;
+    },
+  ): Promise<void> {
+    await this.recordRunJournalEntry({
+      idempotencyKey: `hard_stop:${issueId}:${input.stageName ?? "no-stage"}:${formatAttemptKey(runningEntry.retryAttempt)}:${input.hardStop.trigger}:${input.hardStop.turnCount}`,
+      timestamp: this.now().toISOString(),
+      kind: "hard_stop_trigger",
+      issueId,
+      issueIdentifier: runningEntry.identifier,
+      operation: "dispatcher",
+      stage: input.stageName,
+      attempt: runningEntry.retryAttempt,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Hard stop ${input.hardStop.outcome} triggered for ${runningEntry.identifier}: ${input.hardStop.reason}`,
+      metadata: {
+        status: "completed",
+        outcome: input.hardStop.outcome,
+        trigger: input.hardStop.trigger,
+        reason: input.hardStop.reason,
+        turnCount: input.hardStop.turnCount,
+        totalTokens: input.hardStop.totalTokens,
+        estimatedCostUsd: input.hardStop.estimatedCostUsd,
+      },
+    });
+
+    this.state.failed.add(issueId);
+    this.releaseClaim(issueId);
+
+    const comment = [
+      `Hard stop outcome: ${input.hardStop.outcome}`,
+      `Trigger: ${input.hardStop.trigger}`,
+      `Reason: ${input.hardStop.reason}`,
+      `Turns: ${input.hardStop.turnCount}`,
+      `Total tokens: ${input.hardStop.totalTokens}`,
+      `Estimated cost: $${input.hardStop.estimatedCostUsd.toFixed(2)}`,
+      "",
+      "The worker has paused instead of continuing silently. Move the issue to Todo or Resume after human review to requeue it.",
+    ].join("\n");
+
+    await this.fireEscalationSideEffects(
+      issueId,
+      runningEntry.identifier,
+      comment,
+    );
   }
 
   private async runTrackerWriteOnce(

@@ -2,6 +2,8 @@ import { Liquid } from "liquidjs";
 
 import type { Issue, WorkflowDefinition } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
+import type { ModeScopedPermissionPolicy } from "../policy/hard-stops.js";
+import { withModePermissionEnvelope } from "../policy/hard-stops.js";
 
 export const DEFAULT_WORKFLOW_PROMPT =
   "You are working on an issue from Linear.";
@@ -37,6 +39,7 @@ export interface RenderPromptInput {
   attempt: number | null;
   stageName?: string | null;
   reworkCount?: number;
+  modePolicy?: ModeScopedPermissionPolicy | null;
 }
 
 export interface BuildTurnPromptInput extends RenderPromptInput {
@@ -56,11 +59,16 @@ export async function renderPrompt(input: RenderPromptInput): Promise<string> {
   try {
     const parsedTemplate = liquidEngine.parse(template);
 
-    return await liquidEngine.render(parsedTemplate, {
+    const rendered = await liquidEngine.render(parsedTemplate, {
       issue: toTemplateIssue(input.issue),
       attempt: input.attempt,
       stageName: input.stageName ?? null,
       reworkCount: input.reworkCount ?? 0,
+    });
+
+    return withModePermissionEnvelope({
+      prompt: rendered,
+      policy: input.modePolicy ?? null,
     });
   } catch (error) {
     throw toPromptTemplateError(error);
@@ -80,6 +88,7 @@ export async function buildTurnPrompt(
     turnNumber: input.turnNumber,
     maxTurns: input.maxTurns,
     stageName: input.stageName ?? null,
+    modePolicy: input.modePolicy ?? null,
   });
 }
 
@@ -89,6 +98,7 @@ export function buildContinuationPrompt(input: {
   turnNumber: number;
   maxTurns: number;
   stageName?: string | null;
+  modePolicy?: ModeScopedPermissionPolicy | null;
 }): string {
   const attemptLine =
     input.attempt === null
@@ -116,12 +126,12 @@ export function buildContinuationPrompt(input: {
         break;
       case "implement":
         lines.push(
-          "You are in the IMPLEMENT stage. Focus on implementing the code changes, running tests, and opening a PR. When you have opened a PR and all verify commands pass, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
+          "You are in the IMPLEMENT stage. Focus on implementing the code changes and running tests. Open a PR only when the Mode Permission Envelope allows PR creation; otherwise stop after verification and report BLOCKED-needs-human if a PR is required. When the permitted implement work is complete and all verify commands pass, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
         );
         break;
       case "merge":
         lines.push(
-          "You are in the MERGE stage. Merge the PR and verify the merge succeeded. When you have successfully merged the PR, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
+          "You are in the MERGE stage. Verify merge readiness, but do not run PR merge, auto-merge, admin, or bypass commands unless the Mode Permission Envelope explicitly allows them. Current mode policies deny auto-merge and gate bypass; report BLOCKED-needs-human when a denied merge action is required. When the permitted merge-stage work is complete, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
         );
         break;
       default:
@@ -132,7 +142,10 @@ export function buildContinuationPrompt(input: {
     }
   }
 
-  return lines.join("\n");
+  return withModePermissionEnvelope({
+    prompt: lines.join("\n"),
+    policy: input.modePolicy ?? null,
+  });
 }
 
 function toTemplateIssue(issue: Issue): Record<string, unknown> {

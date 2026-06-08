@@ -1,5 +1,6 @@
 import type { AgentRunnerCodexClient } from "../agent/runner.js";
 import type { CodexClientEvent } from "../codex/app-server-client.js";
+import type { ModeScopedPermissionPolicy } from "../policy/hard-stops.js";
 
 export type RunnerKind = "codex" | "claude-code" | "gemini";
 
@@ -18,6 +19,7 @@ export interface RunnerFactoryInput {
   config: RunnerConfig;
   cwd: string;
   onEvent: (event: CodexClientEvent) => void;
+  modePolicy?: ModeScopedPermissionPolicy;
 }
 
 export type { AgentRunnerCodexClient as Runner };

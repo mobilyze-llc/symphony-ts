@@ -2,6 +2,11 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 
 import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
+import {
+  type ModeScopedPermissionPolicy,
+  detectModePermissionAction,
+  evaluateModePermission,
+} from "../policy/hard-stops.js";
 import { VERSION } from "../version.js";
 
 const DEFAULT_CLIENT_INFO = Object.freeze({
@@ -80,6 +85,7 @@ export interface CodexAppServerClientOptions {
   capabilities?: Record<string, unknown>;
   tools?: CodexDynamicToolDefinition[];
   dynamicTools?: CodexDynamicTool[];
+  modePolicy?: ModeScopedPermissionPolicy;
   maxLineBytes?: number;
   onEvent?: (event: CodexClientEvent) => void;
 }
@@ -486,6 +492,30 @@ export class CodexAppServerClient {
     }
 
     if (isApprovalRequest(parsed, method)) {
+      const permissionDenial = this.evaluateModePermissionForApproval(parsed);
+      if (permissionDenial !== null) {
+        if (responseId !== null) {
+          this.send({
+            id: parsed.id,
+            result: {
+              approved: false,
+              reason: permissionDenial.reason,
+            },
+          });
+        }
+        this.emit({
+          event: "unsupported_tool_call",
+          sessionId: this.currentTurn?.sessionId ?? null,
+          threadId: this.currentTurn?.threadId ?? this.threadId,
+          turnId: this.currentTurn?.turnId ?? null,
+          toolName: permissionDenial.toolName,
+          message: permissionDenial.reason,
+          raw: parsed,
+          ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+        });
+        return;
+      }
+
       if (responseId !== null) {
         this.send({
           id: parsed.id,
@@ -823,6 +853,37 @@ export class CodexAppServerClient {
     return (
       this.options.dynamicTools?.find((tool) => tool.name === name) ?? null
     );
+  }
+
+  private evaluateModePermissionForApproval(message: JsonObject): {
+    toolName: string | null;
+    reason: string;
+  } | null {
+    if (this.options.modePolicy === undefined) {
+      return null;
+    }
+
+    const toolName = extractToolName(message);
+    const action = detectModePermissionAction({
+      toolName,
+      toolInput: extractToolInput(message) ?? message,
+    });
+    if (action === null) {
+      return null;
+    }
+
+    const permission = evaluateModePermission({
+      policy: this.options.modePolicy,
+      action,
+    });
+    if (permission.allowed) {
+      return null;
+    }
+
+    return {
+      toolName,
+      reason: permission.hardStop.reason,
+    };
   }
 
   private async handleDynamicToolCall(

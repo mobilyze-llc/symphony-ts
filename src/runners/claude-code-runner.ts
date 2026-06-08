@@ -11,6 +11,13 @@ import type {
   CodexUsage,
 } from "../codex/app-server-client.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
+import {
+  type ClaudePermissionMode,
+  type ModeScopedPermissionPolicy,
+  detectModePermissionAction,
+  evaluateModePermission,
+  withModePermissionEnvelope,
+} from "../policy/hard-stops.js";
 
 // ai-sdk-provider-claude-code uses short model names, not full Anthropic IDs.
 // Map standard names to provider-expected short names.
@@ -33,6 +40,9 @@ export interface ClaudeCodeRunnerOptions {
   onEvent?: (event: CodexClientEvent) => void;
   /** Interval in ms for workspace file-change heartbeat polling. Defaults to 5000. Set to 0 to disable. */
   heartbeatIntervalMs?: number;
+  permissionMode?: ClaudePermissionMode;
+  maxBudgetUsd?: number;
+  modePolicy?: ModeScopedPermissionPolicy;
 }
 
 export class ClaudeCodeRunner implements AgentRunnerCodexClient {
@@ -187,13 +197,17 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
       }
 
       const resolvedModel = resolveClaudeModelId(this.options.model);
+      const effectivePrompt = withModePermissionEnvelope({
+        prompt,
+        policy: this.options.modePolicy ?? null,
+      });
       const result = await generateText({
         model: claudeCode(resolvedModel, {
           cwd: this.options.cwd,
-          permissionMode: "bypassPermissions",
+          permissionMode: this.options.permissionMode ?? "bypassPermissions",
           env: { SYMPHONY_PIPELINE: "1" },
           settingSources: ["user", "project"],
-          maxBudgetUsd: 50,
+          maxBudgetUsd: this.options.maxBudgetUsd ?? 50,
           streamingInput: "always",
           hooks: {
             PreToolUse: [
@@ -208,6 +222,39 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
                         !Array.isArray(arg)
                       ) {
                         const input = arg as Record<string, unknown>;
+                        const permissionDenial =
+                          this.evaluateModePermissionForToolUse(input);
+                        if (permissionDenial !== null) {
+                          try {
+                            this.emit({
+                              event: "unsupported_tool_call",
+                              sessionId: fullSessionId,
+                              threadId,
+                              turnId,
+                              raw: {
+                                params: {
+                                  name: permissionDenial.toolName,
+                                  input: input.tool_input ?? null,
+                                },
+                              },
+                              toolName: permissionDenial.toolName,
+                              message: permissionDenial.reason,
+                            });
+                          } catch {
+                            // Observation failures must not weaken policy denial.
+                          }
+
+                          return {
+                            continue: true,
+                            reason: permissionDenial.reason,
+                            hookSpecificOutput: {
+                              hookEventName: "PreToolUse",
+                              permissionDecision: "deny",
+                              permissionDecisionReason: permissionDenial.reason,
+                            },
+                          };
+                        }
+
                         const toolName = input.tool_name;
                         if (typeof toolName === "string") {
                           this.emit({
@@ -235,7 +282,7 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
             ],
           },
         }),
-        prompt,
+        prompt: effectivePrompt,
         abortSignal: controller.signal,
       });
 
@@ -317,6 +364,38 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
       timestamp: formatEasternTimestamp(new Date()),
       codexAppServerPid: null,
     });
+  }
+
+  private evaluateModePermissionForToolUse(input: Record<string, unknown>): {
+    toolName: string | null;
+    reason: string;
+  } | null {
+    if (this.options.modePolicy === undefined) {
+      return null;
+    }
+
+    const toolName =
+      typeof input.tool_name === "string" ? input.tool_name : null;
+    const action = detectModePermissionAction({
+      toolName,
+      toolInput: input.tool_input ?? input,
+    });
+    if (action === null) {
+      return null;
+    }
+
+    const permission = evaluateModePermission({
+      policy: this.options.modePolicy,
+      action,
+    });
+    if (permission.allowed) {
+      return null;
+    }
+
+    return {
+      toolName,
+      reason: permission.hardStop.reason,
+    };
   }
 }
 

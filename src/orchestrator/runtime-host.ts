@@ -19,6 +19,14 @@ import type {
 } from "../agent/runner.js";
 import { AgentRunner } from "../agent/runner.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
+import {
+  DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+  DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
+  DEFAULT_HARD_STOP_MAX_ITERATIONS,
+  DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
+  DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
+  DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
+} from "../config/defaults.js";
 import type {
   ResolvedWorkflowConfig,
   StageDefinition,
@@ -32,6 +40,7 @@ import type {
   LoopTraceEntry,
   LoopTraceJournal,
   RetryEntry,
+  RightSizingDecision,
   RunningEntry,
 } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
@@ -72,6 +81,10 @@ import {
   type StopIssueResponse,
   startDashboardServer,
 } from "../observability/dashboard-server.js";
+import {
+  createModeScopedPermissionPolicy,
+  resolveHardStopsConfig,
+} from "../policy/hard-stops.js";
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
@@ -89,6 +102,16 @@ import { OrchestratorCore } from "./core.js";
 import { runEnsembleGate } from "./gate-handler.js";
 import type { PipelineNotificationSink } from "./pipeline-notifier.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
+
+const DEFAULT_RUNTIME_HARD_STOPS_CONFIG = {
+  maxIterations: DEFAULT_HARD_STOP_MAX_ITERATIONS,
+  noProgressTurns: DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
+  maxTokensPerUnit: DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
+  maxDollarBudgetUsd: DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
+  premiumBudgetPauseRatio: DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
+  estimatedCostPer1kTokensUsd:
+    DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+};
 
 export interface AgentRunnerLike {
   run(input: AgentRunInput): Promise<AgentRunResult>;
@@ -396,6 +419,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           stage,
           stageName,
           reworkCount,
+          rightSizingDecision,
         );
       },
       onIssueDropped: ({ identifier, title, url, reason }) => {
@@ -1272,9 +1296,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private async spawnWorkerExecution(
     issue: Issue,
     attempt: number | null,
-    stage: StageDefinition | null = null,
-    stageName: string | null = null,
-    reworkCount = 0,
+    stage: StageDefinition | null,
+    stageName: string | null,
+    reworkCount: number,
+    rightSizingDecision: RightSizingDecision,
   ): Promise<{
     workerHandle: WorkerExecution;
     monitorHandle: Promise<void>;
@@ -1318,6 +1343,16 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         stage,
         stageName,
         reworkCount,
+        modePolicy: createModeScopedPermissionPolicy({
+          mode: rightSizingDecision.mode,
+          configuredApprovalPolicy: this.config.codex.approvalPolicy,
+          configuredThreadSandbox: this.config.codex.threadSandbox,
+          configuredTurnSandboxPolicy: this.config.codex.turnSandboxPolicy,
+          maxBudgetUsd: resolveHardStopsConfig(
+            this.config.hardStops,
+            DEFAULT_RUNTIME_HARD_STOPS_CONFIG,
+          ).maxDollarBudgetUsd,
+        }),
       })
       .then(async (result) => {
         execution.lastResult = result;
@@ -1503,6 +1538,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       ...(agentMessage === undefined || agentMessage === null
         ? {}
         : { agentMessage }),
+      hardStop: execution.lastResult?.hardStop ?? null,
     });
     if (
       preLoopTraceJournal !== undefined &&
