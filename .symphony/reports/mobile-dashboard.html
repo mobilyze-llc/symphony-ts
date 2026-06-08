@@ -169,6 +169,50 @@ body {
 }
 .issue-meta-item { display: flex; align-items: center; gap: 4px; }
 
+/* ── Manager Run Cards ── */
+.manager-run-card {
+  background: var(--card); border-radius: var(--radius);
+  padding: 14px 16px; margin-bottom: 8px;
+  border: 1px solid var(--line);
+}
+.manager-run-header {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px; margin-bottom: 10px;
+}
+.manager-run-id {
+  font-family: var(--font-mono); font-size: 12px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.manager-run-title { font-size: 14px; font-weight: 600; color: var(--ink); }
+.manager-run-tags {
+  display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0;
+}
+.manager-run-tag {
+  font-size: 11px; font-weight: 600; border-radius: 999px;
+  padding: 4px 8px; background: var(--page-soft); color: var(--ink-secondary);
+  border: 1px solid var(--line);
+}
+.manager-run-tag.active { background: var(--green-soft); color: var(--green); }
+.manager-run-tag.blocked { background: var(--yellow-soft); color: var(--yellow); }
+.manager-run-tag.degraded,
+.manager-run-tag.missing { background: var(--red-soft); color: var(--red); }
+.manager-lane-card {
+  display: grid; grid-template-columns: 1fr auto; gap: 10px;
+  padding: 9px 0; border-top: 1px solid var(--line);
+}
+.manager-lane-status {
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.manager-lane-status.active { color: var(--green); }
+.manager-lane-status.blocked { color: var(--yellow); }
+.manager-lane-status.degraded { color: var(--red); }
+.manager-lane-status.closed { color: var(--muted); }
+.manager-lane-meta {
+  font-size: 12px; color: var(--muted); margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
 /* ── Retry Cards ── */
 .retry-card {
   background: var(--card); border-radius: var(--radius);
@@ -965,6 +1009,14 @@ body {
 
     // Build content
     let html = '';
+    const managerRuns = Array.isArray(snapshot.manager_runs) ? snapshot.manager_runs : [];
+
+    if (managerRuns.length > 0) {
+      html += `<div class="section-title">Manager Runs</div>`;
+      for (const run of managerRuns) {
+        html += renderManagerRunCard(run);
+      }
+    }
 
     // Running issues
     if (snapshot.running.length > 0) {
@@ -983,7 +1035,7 @@ body {
     }
 
     // Empty state
-    if (snapshot.running.length === 0 && snapshot.retrying.length === 0) {
+    if (snapshot.running.length === 0 && snapshot.retrying.length === 0 && managerRuns.length === 0) {
       html += `
         <div class="empty-state">
           <div class="empty-state-icon">✓</div>
@@ -999,6 +1051,54 @@ body {
         navigateTo('detail', card.dataset.issueIdentifier);
       });
     });
+  }
+
+  function renderManagerRunCard(run) {
+    const counts = run.counts || {};
+    const lanes = Array.isArray(run.lanes) ? run.lanes : [];
+    const missing = Array.isArray(run.missing_closeout_evidence) ? run.missing_closeout_evidence : [];
+    const laneHtml = lanes.length === 0
+      ? `<div class="manager-lane-meta">No worker lanes admitted.</div>`
+      : lanes.map(renderManagerLaneCard).join('');
+    const missingHtml = missing.length === 0
+      ? `<span class="manager-run-tag active">Closeout ready</span>`
+      : missing.slice(0, 4).map(item => `<span class="manager-run-tag missing">${esc(item)}</span>`).join('');
+
+    return `
+      <div class="manager-run-card">
+        <div class="manager-run-header">
+          <div>
+            <div class="manager-run-title">${esc(run.title || run.run_id)}</div>
+            <div class="manager-run-id">${esc(run.manager_thread_id || run.run_id)}</div>
+          </div>
+          <span class="manager-run-tag ${run.closeout_ready ? 'active' : 'missing'}">${run.closeout_ready ? 'ready' : 'missing'}</span>
+        </div>
+        <div class="manager-run-tags">
+          <span class="manager-run-tag active">Active ${fmtNum(counts.active_lanes || 0)}</span>
+          <span class="manager-run-tag blocked">Blocked ${fmtNum(counts.blocked_lanes || 0)}</span>
+          <span class="manager-run-tag degraded">Degraded ${fmtNum(counts.degraded_lanes || 0)}</span>
+          <span class="manager-run-tag">Follow-ups ${fmtNum(counts.spawned_follow_ups || 0)}</span>
+          ${missingHtml}
+        </div>
+        ${laneHtml}
+      </div>`;
+  }
+
+  function renderManagerLaneCard(lane) {
+    const details = [];
+    if (lane.pr_url) details.push(`PR ${lane.pr_status || 'linked'}`);
+    if (Array.isArray(lane.blocked_by) && lane.blocked_by.length > 0) details.push(`blocked by ${lane.blocked_by.join(', ')}`);
+    if (Array.isArray(lane.degraded_reasons) && lane.degraded_reasons.length > 0) details.push(lane.degraded_reasons.join(', '));
+    if (Array.isArray(lane.follow_up_issue_identifiers) && lane.follow_up_issue_identifiers.length > 0) details.push(`spawned ${lane.follow_up_issue_identifiers.join(', ')}`);
+    return `
+      <div class="manager-lane-card">
+        <div>
+          <div class="issue-id">${esc(lane.issue_identifier)}</div>
+          <div class="issue-title">${esc(lane.title || '')}</div>
+          <div class="manager-lane-meta">${esc(details.join(' · ') || 'ledger clean')}</div>
+        </div>
+        <div class="manager-lane-status ${esc(lane.status)}">${esc(lane.status)}</div>
+      </div>`;
   }
 
   function renderIssueCard(issue) {

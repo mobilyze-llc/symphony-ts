@@ -115,6 +115,8 @@ describe("domain model", () => {
     });
     expect(state.codexRateLimits).toBeNull();
     expect(state.issueExecutionHistory).toEqual({});
+    expect(state.managerRunJournal).toEqual([]);
+    expect(state.managerRuns).toEqual({});
   });
 });
 

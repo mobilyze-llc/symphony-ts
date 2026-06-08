@@ -38,7 +38,7 @@ describe("mobile-dashboard.html", () => {
 
     const testHtml = html.replace(
       marker,
-      "\nwindow.__mobileDashboardTest = { buildLoopTraceSection };\n})();\n</script>",
+      "\nwindow.__mobileDashboardTest = { buildLoopTraceSection, renderManagerRunCard };\n})();\n</script>",
     );
 
     return new JSDOM(testHtml, {
@@ -128,6 +128,9 @@ describe("mobile-dashboard.html", () => {
     expect(html).toContain("issue-title");
     // Retry section
     expect(html).toContain("retry-card");
+    // Manager-run section
+    expect(html).toContain("manager-run-card");
+    expect(html).toContain("renderManagerRunCard");
   });
 
   it("includes issue detail screen elements", () => {
@@ -358,6 +361,57 @@ describe("mobile-dashboard.html", () => {
       expect(traceHtml).not.toContain("<script>unsafe</script>");
       expect(traceHtml).not.toContain("attempt null");
       expect(traceHtml).not.toContain("session null");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      (dom.window.close as () => void)();
+    }
+  });
+
+  it("renders mobile manager-run cards with lane status and missing evidence", async () => {
+    const dom = createDashboardDom();
+
+    try {
+      const api = dom.window.__mobileDashboardTest as
+        | {
+            renderManagerRunCard(run: unknown): string;
+          }
+        | undefined;
+
+      expect(api).toBeDefined();
+
+      const managerRunHtml = api?.renderManagerRunCard({
+        run_id: "wave-2",
+        manager_thread_id: "019ea8a6-bc42-72a3-ade0-72be7663232e",
+        title: "Symphony Wave 2 manager run",
+        closeout_ready: false,
+        counts: {
+          active_lanes: 1,
+          blocked_lanes: 1,
+          degraded_lanes: 1,
+          spawned_follow_ups: 1,
+        },
+        missing_closeout_evidence: ["lane:lane-mob-87:pr"],
+        lanes: [
+          {
+            issue_identifier: "MOB-87",
+            title: "<script>unsafe</script>",
+            status: "degraded",
+            pr_url: null,
+            pr_status: null,
+            blocked_by: [],
+            degraded_reasons: ["stale_heartbeat"],
+            follow_up_issue_identifiers: ["SYMPH-262"],
+          },
+        ],
+      });
+
+      expect(managerRunHtml).toContain("Symphony Wave 2 manager run");
+      expect(managerRunHtml).toContain("MOB-87");
+      expect(managerRunHtml).toContain("Degraded 1");
+      expect(managerRunHtml).toContain("SYMPH-262");
+      expect(managerRunHtml).toContain("lane:lane-mob-87:pr");
+      expect(managerRunHtml).toContain("&lt;script&gt;unsafe&lt;/script&gt;");
+      expect(managerRunHtml).not.toContain("<script>unsafe</script>");
       await new Promise((resolve) => setTimeout(resolve, 0));
     } finally {
       (dom.window.close as () => void)();

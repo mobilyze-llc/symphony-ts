@@ -223,6 +223,318 @@ export interface DispatcherRunJournalEntry {
 
 export type DispatcherRunJournal = DispatcherRunJournalEntry[];
 
+export const MANAGER_RUN_EVENT_TYPES = [
+  "manager_run_started",
+  "worker_lane_admitted",
+  "issue_linked",
+  "pr_linked",
+  "dependency_declared",
+  "dependency_unblocked",
+  "review_gate_started",
+  "review_gate_result",
+  "validation_artifact_added",
+  "follow_up_spawned",
+  "ownership_lease_acquired",
+  "ownership_lease_released",
+  "heartbeat_recorded",
+  "escalation_raised",
+  "terminal_condition_reported",
+  "model_check_requested",
+] as const;
+
+export type ManagerRunEventType = (typeof MANAGER_RUN_EVENT_TYPES)[number];
+
+export type ManagerWorkerLaneStatus =
+  | "active"
+  | "blocked"
+  | "degraded"
+  | "closed";
+
+export type ManagerReviewGateStatus =
+  | "started"
+  | "passed"
+  | "failed"
+  | "degraded";
+
+export type ManagerModelCheckReason = "ambiguity" | "decision_quality_check";
+
+interface ManagerRunJournalBaseEntry {
+  sequence: number;
+  idempotencyKey: string;
+  timestamp: string;
+  runId: string;
+  sourceSessionId: string | null;
+  summary: string;
+}
+
+export interface ManagerRunStartedEntry extends ManagerRunJournalBaseEntry {
+  type: "manager_run_started";
+  managerThreadId: string;
+  title: string;
+}
+
+export interface ManagerWorkerLaneAdmittedEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "worker_lane_admitted";
+  laneId: string;
+  workerThreadId: string;
+  issueIdentifier: string;
+  title: string;
+}
+
+export interface ManagerIssueLinkedEntry extends ManagerRunJournalBaseEntry {
+  type: "issue_linked";
+  laneId: string;
+  issueId: string | null;
+  issueIdentifier: string;
+  url: string | null;
+}
+
+export interface ManagerPrLinkedEntry extends ManagerRunJournalBaseEntry {
+  type: "pr_linked";
+  laneId: string;
+  prNumber: number | null;
+  url: string;
+  status: "draft" | "open" | "merged" | "closed";
+}
+
+export interface ManagerDependencyDeclaredEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "dependency_declared";
+  laneId: string;
+  dependencyId: string;
+  dependsOnLaneId: string | null;
+  dependsOnIssueIdentifier: string | null;
+  reason: string;
+}
+
+export interface ManagerDependencyUnblockedEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "dependency_unblocked";
+  dependencyId: string;
+}
+
+export interface ManagerReviewGateStartedEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "review_gate_started";
+  laneId: string;
+  gateId: string;
+  reviewer: string;
+}
+
+export interface ManagerReviewGateResultEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "review_gate_result";
+  laneId: string;
+  gateId: string;
+  status: Exclude<ManagerReviewGateStatus, "started">;
+  evidenceArtifactId: string | null;
+  compensationRequired: boolean;
+}
+
+export interface ManagerValidationArtifactAddedEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "validation_artifact_added";
+  laneId: string | null;
+  artifactId: string;
+  kind:
+    | "test"
+    | "build"
+    | "lint"
+    | "typecheck"
+    | "review_compensation"
+    | "report"
+    | "other";
+  label: string;
+  url: string | null;
+}
+
+export interface ManagerFollowUpSpawnedEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "follow_up_spawned";
+  laneId: string | null;
+  issueIdentifier: string;
+  title: string;
+  parentIssueIdentifier: string | null;
+  url: string | null;
+}
+
+export interface ManagerOwnershipLeaseAcquiredEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "ownership_lease_acquired";
+  leaseId: string;
+  laneId: string;
+  ownerThreadId: string;
+  expiresAt: string;
+}
+
+export interface ManagerOwnershipLeaseReleasedEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "ownership_lease_released";
+  leaseId: string;
+  outcome: "completed" | "expired" | "transferred";
+}
+
+export interface ManagerHeartbeatRecordedEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "heartbeat_recorded";
+  laneId: string;
+  workerThreadId: string;
+  status: "active" | "blocked" | "degraded" | "closing";
+  note: string | null;
+}
+
+export interface ManagerEscalationRaisedEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "escalation_raised";
+  laneId: string | null;
+  kind:
+    | "stale_worker"
+    | "missing_evidence"
+    | "review_gate_degraded"
+    | "dependency_blocked"
+    | "ownership_conflict";
+  severity: "warning" | "critical";
+  message: string;
+}
+
+export interface ManagerTerminalConditionReportedEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "terminal_condition_reported";
+  laneId: string | null;
+  condition: "lane_closed" | "manager_closeout";
+  requiredEvidence: string[];
+  providedEvidence: string[];
+}
+
+export interface ManagerModelCheckRequestedEntry
+  extends ManagerRunJournalBaseEntry {
+  type: "model_check_requested";
+  reason: ManagerModelCheckReason;
+  laneId: string | null;
+  question: string;
+}
+
+export type ManagerRunJournalEntry =
+  | ManagerRunStartedEntry
+  | ManagerWorkerLaneAdmittedEntry
+  | ManagerIssueLinkedEntry
+  | ManagerPrLinkedEntry
+  | ManagerDependencyDeclaredEntry
+  | ManagerDependencyUnblockedEntry
+  | ManagerReviewGateStartedEntry
+  | ManagerReviewGateResultEntry
+  | ManagerValidationArtifactAddedEntry
+  | ManagerFollowUpSpawnedEntry
+  | ManagerOwnershipLeaseAcquiredEntry
+  | ManagerOwnershipLeaseReleasedEntry
+  | ManagerHeartbeatRecordedEntry
+  | ManagerEscalationRaisedEntry
+  | ManagerTerminalConditionReportedEntry
+  | ManagerModelCheckRequestedEntry;
+
+export type ManagerRunJournal = ManagerRunJournalEntry[];
+
+export interface ManagerRunDependencyState {
+  dependencyId: string;
+  laneId: string;
+  dependsOnLaneId: string | null;
+  dependsOnIssueIdentifier: string | null;
+  reason: string;
+  unblocked: boolean;
+}
+
+export interface ManagerRunReviewGateState {
+  gateId: string;
+  laneId: string;
+  reviewer: string | null;
+  status: ManagerReviewGateStatus;
+  evidenceArtifactId: string | null;
+  compensationRequired: boolean;
+  compensated: boolean;
+}
+
+export interface ManagerRunValidationArtifactState {
+  artifactId: string;
+  laneId: string | null;
+  kind: ManagerValidationArtifactAddedEntry["kind"];
+  label: string;
+  url: string | null;
+}
+
+export interface ManagerRunFollowUpState {
+  issueIdentifier: string;
+  title: string;
+  parentIssueIdentifier: string | null;
+  laneId: string | null;
+  url: string | null;
+}
+
+export interface ManagerRunOwnershipLeaseState {
+  leaseId: string;
+  laneId: string;
+  ownerThreadId: string;
+  status: "active" | "completed" | "expired" | "transferred";
+  expiresAt: string;
+}
+
+export interface ManagerRunEscalationState {
+  laneId: string | null;
+  kind: ManagerEscalationRaisedEntry["kind"];
+  severity: ManagerEscalationRaisedEntry["severity"];
+  message: string;
+  raisedAt: string;
+}
+
+export interface ManagerRunModelCheckState {
+  reason: ManagerModelCheckReason;
+  laneId: string | null;
+  question: string;
+  requestedAt: string;
+}
+
+export interface ManagerRunLaneState {
+  laneId: string;
+  workerThreadId: string;
+  issueIdentifier: string;
+  title: string;
+  status: ManagerWorkerLaneStatus;
+  blockedBy: string[];
+  degradedReasons: string[];
+  lastHeartbeatAt: string | null;
+  prUrl: string | null;
+  prStatus: "draft" | "open" | "merged" | "closed" | null;
+  validationArtifactIds: string[];
+  reviewGateIds: string[];
+  followUpIssueIdentifiers: string[];
+}
+
+export interface ManagerRunCloseoutState {
+  ready: boolean;
+  missingEvidence: string[];
+}
+
+export interface ManagerRunState {
+  runId: string;
+  managerThreadId: string | null;
+  title: string | null;
+  startedAt: string | null;
+  lanes: Record<string, ManagerRunLaneState>;
+  dependencies: Record<string, ManagerRunDependencyState>;
+  reviewGates: Record<string, ManagerRunReviewGateState>;
+  validationArtifacts: Record<string, ManagerRunValidationArtifactState>;
+  followUps: Record<string, ManagerRunFollowUpState>;
+  ownershipLeases: Record<string, ManagerRunOwnershipLeaseState>;
+  escalations: ManagerRunEscalationState[];
+  modelCallPolicy: {
+    ledgerIsSourceOfTruth: true;
+    allowedReasons: ManagerModelCheckReason[];
+    pendingChecks: ManagerRunModelCheckState[];
+  };
+  closeout: ManagerRunCloseoutState;
+  journal: ManagerRunJournal;
+}
+
 export interface LiveSession {
   sessionId: string | null;
   threadId: string | null;
@@ -366,6 +678,8 @@ export interface OrchestratorState {
   loopTraceJournal: Record<string, LoopTraceJournal>;
   dispatcherRunJournal: DispatcherRunJournal;
   dispatcherLeases: Record<string, DispatcherLease>;
+  managerRunJournal: ManagerRunJournal;
+  managerRuns: Record<string, ManagerRunState>;
 }
 
 export const FAILURE_CLASSES = [
@@ -476,5 +790,7 @@ export function createInitialOrchestratorState(input: {
     loopTraceJournal: {},
     dispatcherRunJournal: [],
     dispatcherLeases: {},
+    managerRunJournal: [],
+    managerRuns: {},
   };
 }

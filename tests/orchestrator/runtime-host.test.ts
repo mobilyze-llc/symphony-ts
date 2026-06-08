@@ -20,6 +20,7 @@ import type {
   DispatcherRunJournal,
   Issue,
   LoopTraceJournal,
+  ManagerRunJournal,
 } from "../../src/domain/model.js";
 import {
   type StructuredLogEntry,
@@ -613,6 +614,61 @@ describe("OrchestratorRuntimeHost", () => {
       rmSync(originalRoot, { recursive: true, force: true });
       rmSync(swappedRoot, { recursive: true, force: true });
     }
+  });
+
+  it("hydrates manager-run journal only for snapshot projection", async () => {
+    const journal: ManagerRunJournal = [
+      {
+        sequence: 1,
+        idempotencyKey: "run:start",
+        timestamp: "2026-06-08T12:00:00.000Z",
+        runId: "run-1",
+        sourceSessionId: "019ea700-80b7-7032-8ef5-dd8e638f0205",
+        summary: "Manager run started.",
+        type: "manager_run_started",
+        managerThreadId: "manager-thread",
+        title: "Wave run",
+      },
+      {
+        sequence: 2,
+        idempotencyKey: "run:lane",
+        timestamp: "2026-06-08T12:01:00.000Z",
+        runId: "run-1",
+        sourceSessionId: "019ea700-80b7-7032-8ef5-dd8e638f0205",
+        summary: "Lane admitted.",
+        type: "worker_lane_admitted",
+        laneId: "lane-1",
+        workerThreadId: "worker-thread",
+        issueIdentifier: "MOB-87",
+        title: "Map manager-thread runs",
+      },
+    ];
+    const readManagerRunJournal = vi.fn(async () => journal);
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker: createTracker({ candidates: [] }),
+      agentRunner: fakeRunner,
+      readManagerRunJournal,
+      now: () => new Date("2026-06-08T12:02:00.000Z"),
+    });
+
+    const snapshot = await host.getRuntimeSnapshot();
+
+    expect(readManagerRunJournal).toHaveBeenCalledTimes(1);
+    expect(fakeRunner.runs.size).toBe(0);
+    expect(host.getState().managerRunJournal).toEqual(journal);
+    expect(snapshot.manager_runs).toEqual([
+      expect.objectContaining({
+        run_id: "run-1",
+        lanes: [
+          expect.objectContaining({
+            issue_identifier: "MOB-87",
+            status: "active",
+          }),
+        ],
+      }),
+    ]);
   });
 
   it("fails dispatch before side effects when dispatcher journal cannot be persisted", async () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type ManagerRunJournal,
   type RunningEntry,
   createEmptyLiveSession,
   createInitialOrchestratorState,
@@ -11,8 +12,90 @@ import {
   buildRuntimeSnapshot,
   getStallThreshold,
 } from "../../src/logging/runtime-snapshot.js";
+import { reduceManagerRunJournal } from "../../src/orchestrator/manager-run.js";
 
 describe("runtime snapshot", () => {
+  it("projects manager-run aggregates for dashboard inspection", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    const journal: ManagerRunJournal = [
+      {
+        sequence: 1,
+        idempotencyKey: "run:start",
+        timestamp: "2026-06-08T12:00:00.000Z",
+        runId: "run-1",
+        sourceSessionId: "019ea700-80b7-7032-8ef5-dd8e638f0205",
+        summary: "Manager run started.",
+        type: "manager_run_started",
+        managerThreadId: "manager-thread",
+        title: "Wave run",
+      },
+      {
+        sequence: 2,
+        idempotencyKey: "run:lane",
+        timestamp: "2026-06-08T12:01:00.000Z",
+        runId: "run-1",
+        sourceSessionId: "019ea700-80b7-7032-8ef5-dd8e638f0205",
+        summary: "Lane admitted.",
+        type: "worker_lane_admitted",
+        laneId: "lane-1",
+        workerThreadId: "worker-thread",
+        issueIdentifier: "MOB-87",
+        title: "Map manager-thread runs",
+      },
+      {
+        sequence: 3,
+        idempotencyKey: "run:follow-up",
+        timestamp: "2026-06-08T12:02:00.000Z",
+        runId: "run-1",
+        sourceSessionId: "019ea700-80b7-7032-8ef5-dd8e638f0205",
+        summary: "Follow-up spawned.",
+        type: "follow_up_spawned",
+        laneId: "lane-1",
+        issueIdentifier: "SYMPH-262",
+        title: "Backfill historical manager-run import CLI",
+        parentIssueIdentifier: "MOB-87",
+        url: "https://linear.app/mobilyze-llc/issue/SYMPH-262/backfill-historical-manager-run-import-cli",
+      },
+    ];
+    state.managerRunJournal = journal;
+    state.managerRuns = reduceManagerRunJournal(journal, {
+      now: new Date("2026-06-08T12:03:00.000Z"),
+    });
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-06-08T12:03:00.000Z"),
+    });
+
+    expect(snapshot.manager_runs).toEqual([
+      expect.objectContaining({
+        run_id: "run-1",
+        manager_thread_id: "manager-thread",
+        counts: expect.objectContaining({
+          active_lanes: 1,
+          spawned_follow_ups: 1,
+          missing_closeout_evidence: 3,
+        }),
+        lanes: [
+          expect.objectContaining({
+            lane_id: "lane-1",
+            issue_identifier: "MOB-87",
+            status: "active",
+            follow_up_issue_identifiers: ["SYMPH-262"],
+          }),
+        ],
+        follow_ups: [
+          expect.objectContaining({
+            issue_identifier: "SYMPH-262",
+            parent_issue_identifier: "MOB-87",
+          }),
+        ],
+      }),
+    ]);
+  });
+
   it("includes pipeline_stage and activity_summary in running rows", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,
