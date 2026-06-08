@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import {
   LOOP_TRACE_EVENT_KINDS,
@@ -14,9 +14,23 @@ import {
 
 export const LOOP_TRACE_JOURNAL_MAX_ENTRIES = 200;
 export const LOOP_TRACE_PREVIEW_MAX_ENTRIES = 5;
+export const LOOP_TRACE_ARTIFACT_RETENTION_MAX_FILES = 500;
 
 const LOOP_TRACE_ARTIFACT_DIR = join(".symphony", "loop-traces");
+const LOOP_TRACE_INDEX_FILENAME = "issue-index.json";
 const LOOP_TRACE_SUMMARY_MAX_LENGTH = 200;
+const loopTraceIssueIndexTasks = new Map<string, Promise<void>>();
+
+interface LoopTraceIssueIndex {
+  version: 1;
+  entries: Record<string, LoopTraceIssueIndexEntry>;
+}
+
+interface LoopTraceIssueIndexEntry {
+  issueId: string;
+  artifact: string;
+  updatedAt: string;
+}
 
 export interface LoopTraceArtifactLocator {
   workspaceKey: string;
@@ -135,6 +149,14 @@ export function getLoopTraceArtifactPath(
   );
 }
 
+export function getLoopTraceIssueIndexPath(workspaceRoot: string): string {
+  return join(
+    workspaceRoot,
+    LOOP_TRACE_ARTIFACT_DIR,
+    LOOP_TRACE_INDEX_FILENAME,
+  );
+}
+
 export async function readLoopTraceJournal(
   locator: LoopTraceArtifactLocator,
 ): Promise<LoopTraceJournal> {
@@ -173,13 +195,22 @@ export async function writeLoopTraceJournal(
   journal: LoopTraceJournal,
 ): Promise<void> {
   const artifactPath = getLoopTraceArtifactPath(locator);
-  await fs.mkdir(join(locator.workspaceRoot, LOOP_TRACE_ARTIFACT_DIR), {
-    recursive: true,
-  });
+  const traceDirectory = join(locator.workspaceRoot, LOOP_TRACE_ARTIFACT_DIR);
+  await fs.mkdir(traceDirectory, { recursive: true });
   const body = `${trimLoopTraceJournal(journal)
     .map((entry) => JSON.stringify(entry))
     .join("\n")}\n`;
   await fs.writeFile(artifactPath, body, "utf8");
+  await withLoopTraceIssueIndexLock(locator.workspaceRoot, async () => {
+    await updateLoopTraceIssueIndex(
+      locator.workspaceRoot,
+      artifactPath,
+      journal,
+    );
+    await pruneLoopTraceArtifacts(locator.workspaceRoot, {
+      keepArtifactPath: artifactPath,
+    });
+  });
 }
 
 export async function findLoopTraceJournalByIssueIdentifier(
@@ -189,34 +220,191 @@ export async function findLoopTraceJournalByIssueIdentifier(
   artifactPath: string;
   journal: LoopTraceJournal;
 } | null> {
+  const index = await readLoopTraceIssueIndex(workspaceRoot);
+  const indexed = index.entries[issueIdentifier];
+  if (indexed === undefined || !isSafeLoopTraceArtifactName(indexed.artifact)) {
+    return null;
+  }
+
+  const artifactPath = join(
+    workspaceRoot,
+    LOOP_TRACE_ARTIFACT_DIR,
+    indexed.artifact,
+  );
+  const journal = await readLoopTraceJournal({
+    workspaceRoot,
+    workspaceKey: indexed.artifact.slice(0, -".jsonl".length),
+  });
+  if (journal.some((entry) => entry.issueIdentifier === issueIdentifier)) {
+    return {
+      artifactPath,
+      journal,
+    };
+  }
+
+  return null;
+}
+
+async function updateLoopTraceIssueIndex(
+  workspaceRoot: string,
+  artifactPath: string,
+  journal: LoopTraceJournal,
+): Promise<void> {
+  const identifiers = [
+    ...new Set(
+      journal
+        .map((entry) => entry.issueIdentifier)
+        .filter((identifier) => identifier.length > 0),
+    ),
+  ];
+  if (identifiers.length === 0) {
+    return;
+  }
+
+  const index = await readLoopTraceIssueIndex(workspaceRoot);
+  const updatedAt = journal.at(-1)?.timestamp ?? new Date().toISOString();
+  const artifact = basename(artifactPath);
+  if (!isSafeLoopTraceArtifactName(artifact)) {
+    return;
+  }
+
+  for (const issueIdentifier of identifiers) {
+    const latestEntry = findLatestEntryForIssueIdentifier(
+      journal,
+      issueIdentifier,
+    );
+    if (latestEntry === null) {
+      continue;
+    }
+    index.entries[issueIdentifier] = {
+      issueId: latestEntry.issueId,
+      artifact,
+      updatedAt,
+    };
+  }
+
+  await writeLoopTraceIssueIndex(workspaceRoot, index);
+}
+
+async function pruneLoopTraceArtifacts(
+  workspaceRoot: string,
+  options: { keepArtifactPath: string },
+): Promise<void> {
   const traceDirectory = join(workspaceRoot, LOOP_TRACE_ARTIFACT_DIR);
-  let files: string[];
+  const keepArtifact = basename(options.keepArtifactPath);
+  const files = await fs.readdir(traceDirectory, { withFileTypes: true });
+  const artifacts = await Promise.all(
+    files
+      .filter(
+        (file) =>
+          file.isFile() &&
+          isSafeLoopTraceArtifactName(file.name) &&
+          file.name !== keepArtifact,
+      )
+      .map(async (file) => {
+        const path = join(traceDirectory, file.name);
+        const stats = await fs.stat(path);
+        return { name: file.name, path, mtimeMs: stats.mtimeMs };
+      }),
+  );
+
+  const removableCount =
+    artifacts.length + 1 - LOOP_TRACE_ARTIFACT_RETENTION_MAX_FILES;
+  if (removableCount <= 0) {
+    return;
+  }
+
+  const removed = new Set<string>();
+  for (const artifact of artifacts
+    .sort((left, right) => left.mtimeMs - right.mtimeMs)
+    .slice(0, removableCount)) {
+    await fs.rm(artifact.path, { force: true });
+    removed.add(artifact.name);
+  }
+
+  if (removed.size === 0) {
+    return;
+  }
+
+  const index = await readLoopTraceIssueIndex(workspaceRoot);
+  for (const [issueIdentifier, entry] of Object.entries(index.entries)) {
+    if (removed.has(entry.artifact)) {
+      delete index.entries[issueIdentifier];
+    }
+  }
+  await writeLoopTraceIssueIndex(workspaceRoot, index);
+}
+
+async function readLoopTraceIssueIndex(
+  workspaceRoot: string,
+): Promise<LoopTraceIssueIndex> {
+  let raw: string;
   try {
-    files = await fs.readdir(traceDirectory);
+    raw = await fs.readFile(getLoopTraceIssueIndexPath(workspaceRoot), "utf8");
   } catch (error) {
     if (isMissingPathError(error)) {
-      return null;
+      return emptyLoopTraceIssueIndex();
     }
     throw error;
   }
 
-  for (const filename of files.sort()) {
-    if (!filename.endsWith(".jsonl")) {
-      continue;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return sanitizeLoopTraceIssueIndex(parsed);
+  } catch {
+    // Treat a corrupt index as empty; artifact lookup remains best-effort.
+  }
+  return emptyLoopTraceIssueIndex();
+}
+
+async function writeLoopTraceIssueIndex(
+  workspaceRoot: string,
+  index: LoopTraceIssueIndex,
+): Promise<void> {
+  await fs.writeFile(
+    getLoopTraceIssueIndexPath(workspaceRoot),
+    `${JSON.stringify({
+      version: 1,
+      entries: Object.fromEntries(
+        Object.entries(index.entries).sort(([left], [right]) =>
+          left.localeCompare(right),
+        ),
+      ),
+    })}\n`,
+    "utf8",
+  );
+}
+
+async function withLoopTraceIssueIndexLock<T>(
+  workspaceRoot: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  const previous =
+    loopTraceIssueIndexTasks.get(workspaceRoot) ?? Promise.resolve();
+  const run = previous.catch(() => undefined).then(action);
+  const current = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  loopTraceIssueIndexTasks.set(workspaceRoot, current);
+  void current.finally(() => {
+    if (loopTraceIssueIndexTasks.get(workspaceRoot) === current) {
+      loopTraceIssueIndexTasks.delete(workspaceRoot);
     }
-    const artifactPath = join(traceDirectory, filename);
-    const journal = await readLoopTraceJournal({
-      workspaceRoot,
-      workspaceKey: filename.slice(0, -".jsonl".length),
-    });
-    if (journal.some((entry) => entry.issueIdentifier === issueIdentifier)) {
-      return {
-        artifactPath,
-        journal,
-      };
+  });
+  return await run;
+}
+
+function findLatestEntryForIssueIdentifier(
+  journal: LoopTraceJournal,
+  issueIdentifier: string,
+): LoopTraceEntry | null {
+  for (let index = journal.length - 1; index >= 0; index -= 1) {
+    const entry = journal[index];
+    if (entry?.issueIdentifier === issueIdentifier) {
+      return entry;
     }
   }
-
   return null;
 }
 
@@ -323,6 +511,46 @@ function isLoopTraceEntry(value: unknown): value is LoopTraceEntry {
     isOptional(candidate.fileDelta, isLoopTraceFileDelta) &&
     isOptional(candidate.stageTransition, isLoopTraceStageTransition) &&
     isOptional(candidate.workerExit, isLoopTraceWorkerExit)
+  );
+}
+
+function emptyLoopTraceIssueIndex(): LoopTraceIssueIndex {
+  return { version: 1, entries: {} };
+}
+
+function sanitizeLoopTraceIssueIndex(value: unknown): LoopTraceIssueIndex {
+  if (!isRecord(value) || value.version !== 1 || !isRecord(value.entries)) {
+    return emptyLoopTraceIssueIndex();
+  }
+
+  const entries: Record<string, LoopTraceIssueIndexEntry> = {};
+  for (const [issueIdentifier, entry] of Object.entries(value.entries)) {
+    if (isLoopTraceIssueIndexEntry(entry)) {
+      entries[issueIdentifier] = entry;
+    }
+  }
+
+  return { version: 1, entries };
+}
+
+function isLoopTraceIssueIndexEntry(
+  value: unknown,
+): value is LoopTraceIssueIndexEntry {
+  return (
+    isRecord(value) &&
+    typeof value.issueId === "string" &&
+    typeof value.artifact === "string" &&
+    isSafeLoopTraceArtifactName(value.artifact) &&
+    typeof value.updatedAt === "string"
+  );
+}
+
+function isSafeLoopTraceArtifactName(filename: string): boolean {
+  return (
+    filename.endsWith(".jsonl") &&
+    basename(filename) === filename &&
+    !filename.includes("..") &&
+    filename !== LOOP_TRACE_INDEX_FILENAME
   );
 }
 

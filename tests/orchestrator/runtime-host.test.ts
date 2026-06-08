@@ -16,7 +16,7 @@ import type {
   AgentRunnerEvent,
 } from "../../src/agent/runner.js";
 import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
-import type { Issue } from "../../src/domain/model.js";
+import type { Issue, LoopTraceJournal } from "../../src/domain/model.js";
 import {
   type StructuredLogEntry,
   StructuredLogger,
@@ -479,6 +479,7 @@ describe("OrchestratorRuntimeHost", () => {
       const artifact = readFileSync(details!.loop_trace_journal.path, "utf8");
       expect(artifact).toContain('"kind":"session_start"');
       expect(artifact).toContain('"kind":"worker_exit"');
+      await expect(coldHost.getIssueDetails("MISSING-1")).resolves.toBeNull();
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
     }
@@ -688,6 +689,134 @@ describe("OrchestratorRuntimeHost", () => {
         reason: "disk full",
       }),
     );
+  });
+
+  it("coalesces queued loop trace persistence writes for the latest journal", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-loop-coalesce-"));
+    try {
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const persistedJournals: LoopTraceJournal[] = [];
+      const writeLoopTraceJournal = vi.fn(async (_locator, journal) => {
+        persistedJournals.push(journal);
+      });
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker,
+        writeLoopTraceJournal,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      await host.pollOnce();
+      fakeRunner.emit("1", {
+        event: "session_started",
+        timestamp: "2026-03-06T00:00:01.000Z",
+        codexAppServerPid: "1001",
+        sessionId: "thread-1-turn-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+      });
+      fakeRunner.emit("1", {
+        event: "turn_completed",
+        timestamp: "2026-03-06T00:00:02.000Z",
+        codexAppServerPid: "1001",
+        sessionId: "thread-1-turn-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        usage: {
+          inputTokens: 10,
+          outputTokens: 5,
+          totalTokens: 15,
+        },
+      });
+      await host.flushEvents();
+
+      expect(writeLoopTraceJournal).toHaveBeenCalledTimes(1);
+      expect(persistedJournals[0]?.map((entry) => entry.kind)).toEqual([
+        "session_start",
+        "feedback_event",
+      ]);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps terminal loop trace details in memory when final persistence fails", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-loop-persist-"));
+    try {
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const entries: StructuredLogEntry[] = [];
+      const logger = new StructuredLogger([
+        {
+          write(entry) {
+            entries.push(entry);
+          },
+        },
+      ]);
+      const writeLoopTraceJournal = vi.fn(async () => {
+        throw new Error("disk full");
+      });
+      const host = new OrchestratorRuntimeHost({
+        config: createStagedConfig({
+          workspace: {
+            root: workspaceRoot,
+          },
+        }),
+        tracker,
+        logger,
+        writeLoopTraceJournal,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      await host.pollOnce();
+      fakeRunner.emit("1", {
+        event: "session_started",
+        timestamp: "2026-03-06T00:00:01.000Z",
+        codexAppServerPid: "1001",
+        sessionId: "thread-1-turn-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+      });
+      fakeRunner.resolve("1", createNormalResult());
+      await host.waitForIdle();
+
+      expect(host.getState().loopTraceJournal["1"]).toBeDefined();
+      const details = await host.getIssueDetails("ISSUE-1");
+      expect(details).toMatchObject({
+        issue_identifier: "ISSUE-1",
+        status: "completed",
+      });
+      expect(
+        details!.loop_trace_journal.entries.map((entry) => entry.kind),
+      ).toEqual(
+        expect.arrayContaining([
+          "session_start",
+          "stage_transition",
+          "worker_exit",
+        ]),
+      );
+      expect(entries).toContainEqual(
+        expect.objectContaining({
+          event: "loop_trace_persist_failed",
+          level: "warn",
+          issue_id: "1",
+          reason: "disk full",
+        }),
+      );
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
   });
 
   it("records cancellation feedback and repo-relative file deltas in loop traces", async () => {

@@ -219,7 +219,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private readonly lastNotifiedReworkCount = new Map<string, number>();
 
   private readonly loopTraceHydrationTasks = new Map<string, Promise<void>>();
-  private readonly loopTracePersistenceTasks = new Map<string, Promise<void>>();
+  private readonly loopTracePersistenceTasks = new Map<
+    string,
+    Promise<boolean>
+  >();
+  private readonly loopTracePendingJournals = new Map<
+    string,
+    { locator: LoopTraceArtifactLocator; journal: LoopTraceJournal }
+  >();
 
   constructor(options: RuntimeHostOptions) {
     this.config = options.config;
@@ -551,6 +558,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       );
     }
 
+    const inMemoryTrace =
+      this.findInMemoryLoopTraceByIssueIdentifier(issueIdentifier);
+    if (inMemoryTrace !== null) {
+      return toStoredIssueDetail(issueIdentifier, inMemoryTrace);
+    }
+
     const storedTrace =
       await this.findStoredLoopTraceByIssueIdentifierBestEffort(
         issueIdentifier,
@@ -559,6 +572,25 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       return toStoredIssueDetail(issueIdentifier, storedTrace);
     }
 
+    return null;
+  }
+
+  private findInMemoryLoopTraceByIssueIdentifier(
+    issueIdentifier: string,
+  ): StoredLoopTrace | null {
+    for (const [issueId, journal] of Object.entries(
+      this.orchestrator.getState().loopTraceJournal,
+    )) {
+      if (journal.some((entry) => entry.issueIdentifier === issueIdentifier)) {
+        return {
+          artifactPath: buildLoopTraceJournalResponse(
+            journal,
+            this.getLoopTraceLocator(issueId),
+          ).path,
+          journal,
+        };
+      }
+    }
     return null;
   }
 
@@ -712,13 +744,37 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const journal = [
       ...(this.orchestrator.getState().loopTraceJournal[issueId] ?? []),
     ];
-    const previous =
-      this.loopTracePersistenceTasks.get(issueId) ?? Promise.resolve();
-    const task = previous
-      .then(async () => {
-        await this.writeLoopTraceJournal(locator, journal);
-      })
-      .catch(async (error) => {
+    this.loopTracePendingJournals.set(issueId, { locator, journal });
+    if (this.loopTracePersistenceTasks.has(issueId)) {
+      return;
+    }
+
+    const task = this.persistLatestLoopTraceJournal(issueId).finally(() => {
+      if (this.loopTracePersistenceTasks.get(issueId) === task) {
+        this.loopTracePersistenceTasks.delete(issueId);
+      }
+    });
+    this.loopTracePersistenceTasks.set(issueId, task);
+  }
+
+  private async persistLatestLoopTraceJournal(
+    issueId: string,
+  ): Promise<boolean> {
+    let lastPersistSucceeded = true;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    while (true) {
+      const pending = this.loopTracePendingJournals.get(issueId);
+      if (pending === undefined) {
+        return lastPersistSucceeded;
+      }
+      this.loopTracePendingJournals.delete(issueId);
+
+      try {
+        await this.writeLoopTraceJournal(pending.locator, pending.journal);
+        lastPersistSucceeded = true;
+      } catch (error) {
+        lastPersistSucceeded = false;
         try {
           await this.logger?.warn(
             "loop_trace_persist_failed",
@@ -727,20 +783,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               outcome: "degraded",
               reason: toErrorMessage(error),
               issue_id: issueId,
-              workspace_key: locator.workspaceKey,
-              workspace_root: locator.workspaceRoot,
+              workspace_key: pending.locator.workspaceKey,
+              workspace_root: pending.locator.workspaceRoot,
             },
           );
         } catch {
           // Persistence is best-effort; logging failure should not reject callers.
         }
-      })
-      .finally(() => {
-        if (this.loopTracePersistenceTasks.get(issueId) === task) {
-          this.loopTracePersistenceTasks.delete(issueId);
-        }
-      });
-    this.loopTracePersistenceTasks.set(issueId, task);
+      }
+    }
   }
 
   private async flushLoopTracePersistence(): Promise<void> {
@@ -752,6 +803,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private forgetLoopTraceJournal(issueId: string): void {
     delete this.orchestrator.getState().loopTraceJournal[issueId];
     this.loopTraceHydrationTasks.delete(issueId);
+    this.loopTracePendingJournals.delete(issueId);
   }
 
   private forgetLoopTraceJournalAfterPersistence(issueId: string): void {
@@ -761,8 +813,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       return;
     }
 
-    void task.finally(() => {
-      if (this.loopTracePersistenceTasks.get(issueId) === undefined) {
+    void task.then((persisted) => {
+      if (
+        persisted &&
+        this.loopTracePersistenceTasks.get(issueId) === undefined
+      ) {
         this.forgetLoopTraceJournal(issueId);
       }
     });
