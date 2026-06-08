@@ -378,15 +378,6 @@ export class AgentRunner {
           ...(lastTurn.message === null ? {} : { message: lastTurn.message }),
         });
 
-        hardStop = evaluateBudgetHardStop({
-          config: hardStops,
-          turnCount: liveSession.turnCount,
-          totalTokens: liveSession.totalStageTotalTokens,
-        });
-        if (hardStop !== null) {
-          break;
-        }
-
         // Early exit: agent signaled stage completion or failure
         if (lastTurn.message?.trimEnd().endsWith("[STAGE_COMPLETE]")) {
           break;
@@ -412,6 +403,15 @@ export class AgentRunner {
             runAttempt: { ...runAttempt },
             liveSession: { ...liveSession },
           });
+        }
+
+        hardStop = evaluateBudgetHardStop({
+          config: hardStops,
+          turnCount: liveSession.turnCount,
+          totalTokens: liveSession.totalStageTotalTokens,
+        });
+        if (hardStop !== null) {
+          break;
         }
 
         runAttempt.status = "finishing";

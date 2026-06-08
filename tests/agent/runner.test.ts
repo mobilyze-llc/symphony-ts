@@ -233,6 +233,11 @@ describe("AgentRunner", () => {
   it("pauses for a token budget ceiling before another continuation turn", async () => {
     const root = await createRoot();
     const prompts: string[] = [];
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
     const runner = new AgentRunner({
       config: {
         ...createConfig(root, "unused"),
@@ -245,11 +250,7 @@ describe("AgentRunner", () => {
           estimatedCostPer1kTokensUsd: 0.01,
         },
       },
-      tracker: createTracker({
-        refreshStates: [
-          { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
-        ],
-      }),
+      tracker,
       createCodexClient: (input) => createStubCodexClient(prompts, input),
     });
 
@@ -259,10 +260,51 @@ describe("AgentRunner", () => {
     });
 
     expect(prompts).toHaveLength(1);
+    expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
     expect(result.hardStop).toMatchObject({
       outcome: "PAUSED-budget",
       trigger: "token_budget",
     });
+  });
+
+  it("lets explicit stage completion win over a same-turn budget ceiling", async () => {
+    const root = await createRoot();
+    const prompts: string[] = [];
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 15,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+        },
+      },
+      tracker,
+      createCodexClient: (input) =>
+        createStubCodexClient(prompts, input, {
+          messages: ["Done with implementation.\n[STAGE_COMPLETE]"],
+        }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "implement",
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(result.turnsCompleted).toBe(1);
+    expect(result.lastTurn?.message).toContain("[STAGE_COMPLETE]");
+    expect(result.hardStop).toBeNull();
+    expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
   });
 
   it("passes mode-scoped approval and sandbox policy to the Codex client", async () => {
