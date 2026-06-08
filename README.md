@@ -207,7 +207,8 @@ operators stay focused on the work itself instead of supervising every agent tur
 ## Contributing
 
 If you are extending this Mobilyze fork, follow the repository workflow documented in
-[`AGENTS.md`](AGENTS.md). [`SPEC.upstream.md`](SPEC.upstream.md) is the upstream baseline; the
+[`AGENTS.md`](AGENTS.md). [`SPEC.mobilyze.md`](SPEC.mobilyze.md) is the fork behavior contract.
+[`SPEC.upstream.md`](SPEC.upstream.md) remains the upstream baseline for unchanged behavior; the
 fork intentionally diverges where the Mobilyze orchestration spine requires judgment-routed,
 blast-bounded, eval-gated dispatch behavior.
 

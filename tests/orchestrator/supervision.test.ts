@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   type WorkerSupervisionSnapshot,
   detectSupervisionFindings,
+  extractDeclaredFileScope,
+  extractEvalFileScope,
   hasBlockingSupervisionFindings,
 } from "../../src/orchestrator/supervision.js";
 
@@ -131,6 +133,34 @@ describe("deterministic supervision", () => {
         files: ["src/uncovered.ts"],
         message: "SYMPH-3 changed files outside its eval scope.",
       },
+    ]);
+  });
+
+  it("extracts declared and eval file scopes from markdown issue sections", () => {
+    const description = [
+      "Issue context.",
+      "",
+      "## Declared file scope",
+      "- `src/orchestrator/core.ts`",
+      "- ./src/orchestrator/runtime-host.ts - runtime snapshot wiring",
+      "- README.md",
+      "",
+      "## Eval file scope",
+      "1. `tests/orchestrator/core.test.ts`",
+      "2. tests/orchestrator/runtime-host.test.ts",
+      "",
+      "## Acceptance criteria",
+      "- This section should not be parsed as scope.",
+    ].join("\n");
+
+    expect(extractDeclaredFileScope(description)).toEqual([
+      "README.md",
+      "src/orchestrator/core.ts",
+      "src/orchestrator/runtime-host.ts",
+    ]);
+    expect(extractEvalFileScope(description)).toEqual([
+      "tests/orchestrator/core.test.ts",
+      "tests/orchestrator/runtime-host.test.ts",
     ]);
   });
 });

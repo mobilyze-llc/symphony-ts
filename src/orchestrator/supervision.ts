@@ -1,3 +1,5 @@
+import type { Issue } from "../domain/model.js";
+
 export type SupervisionFindingKind =
   | "declared_scope_overlap"
   | "actual_write_collision"
@@ -24,6 +26,15 @@ export interface SupervisionFinding {
   issueIdentifiers: string[];
   files: string[];
   message: string;
+}
+
+export interface IssueSupervisionSnapshotOptions {
+  workerId?: string;
+  changedFiles?: readonly string[];
+  declaredFileScope?: readonly string[];
+  evalFileScope?: readonly string[];
+  expectedBaseRevision?: string | null;
+  currentBaseRevision?: string | null;
 }
 
 const FINDING_ORDER: Record<SupervisionFindingKind, number> = {
@@ -71,6 +82,97 @@ export function hasBlockingSupervisionFindings(
   workers: readonly WorkerSupervisionSnapshot[],
 ): boolean {
   return detectSupervisionFindings(workers).length > 0;
+}
+
+export function createIssueSupervisionSnapshot(
+  issue: Issue,
+  options?: IssueSupervisionSnapshotOptions,
+): WorkerSupervisionSnapshot {
+  const snapshot: WorkerSupervisionSnapshot = {
+    workerId: options?.workerId ?? issue.id,
+    issueIdentifier: issue.identifier,
+    branchName: issue.branchName,
+    declaredFileScope:
+      options?.declaredFileScope ??
+      extractDeclaredFileScope(issue.description ?? ""),
+  };
+
+  if (options?.changedFiles !== undefined) {
+    snapshot.changedFiles = options.changedFiles;
+  }
+
+  const evalFileScope =
+    options?.evalFileScope ?? extractEvalFileScope(issue.description ?? "");
+  if (evalFileScope.length > 0) {
+    snapshot.evalFileScope = evalFileScope;
+  }
+
+  if (options?.expectedBaseRevision !== undefined) {
+    snapshot.expectedBaseRevision = options.expectedBaseRevision;
+  }
+
+  if (options?.currentBaseRevision !== undefined) {
+    snapshot.currentBaseRevision = options.currentBaseRevision;
+  }
+
+  return snapshot;
+}
+
+export function extractDeclaredFileScope(
+  description: string | null | undefined,
+): string[] {
+  return extractFileScopeSection(description, [
+    "declared file scope",
+    "file scope",
+    "files in scope",
+    "planned file scope",
+    "expected file scope",
+  ]);
+}
+
+export function extractEvalFileScope(
+  description: string | null | undefined,
+): string[] {
+  return extractFileScopeSection(description, [
+    "eval file scope",
+    "evaluation file scope",
+    "verification file scope",
+    "verify file scope",
+    "test file scope",
+  ]);
+}
+
+export function formatSupervisionFindingsComment(input: {
+  phase: "dispatch" | "running";
+  findings: readonly SupervisionFinding[];
+}): string {
+  const title =
+    input.phase === "dispatch"
+      ? "Deterministic dispatch supervision paused a co-run"
+      : "Deterministic runtime supervision found a live collision";
+  const lines = [
+    `## ${title}`,
+    "",
+    "Symphony detected this deterministically before asking any model to steer the work.",
+    "",
+  ];
+
+  for (const finding of input.findings) {
+    const fileSuffix =
+      finding.files.length === 0
+        ? ""
+        : ` Files: ${finding.files.map((file) => `\`${file}\``).join(", ")}.`;
+    lines.push(
+      `- ${finding.kind} -> ${finding.action}: ${finding.message}${fileSuffix}`,
+    );
+  }
+
+  lines.push(
+    "",
+    "Re-steer instruction: pause or redirect the affected work so each worker has a non-overlapping, reviewable scope before continuing.",
+  );
+
+  return lines.join("\n");
 }
 
 interface NormalizedWorker {
@@ -200,6 +302,67 @@ function normalizeFileSet(files: readonly string[]): string[] {
   return [
     ...new Set(files.map(normalizeFilePath).filter(isNonEmptyString)),
   ].sort(compareStrings);
+}
+
+function extractFileScopeSection(
+  description: string | null | undefined,
+  headings: readonly string[],
+): string[] {
+  if (description === null || description === undefined) {
+    return [];
+  }
+
+  const acceptedHeadings = new Set(headings.map(normalizeHeading));
+  const files: string[] = [];
+  let collecting = false;
+
+  for (const line of description.split(/\r?\n/)) {
+    const heading = parseMarkdownHeading(line);
+    if (heading !== null) {
+      collecting = acceptedHeadings.has(normalizeHeading(heading));
+      continue;
+    }
+
+    if (!collecting) {
+      continue;
+    }
+
+    files.push(...extractFilePathsFromLine(line));
+  }
+
+  return normalizeFileSet(files);
+}
+
+function parseMarkdownHeading(line: string): string | null {
+  const match = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/.exec(line);
+  return match?.[1] ?? null;
+}
+
+function normalizeHeading(heading: string): string {
+  return heading
+    .trim()
+    .toLowerCase()
+    .replaceAll(/[`*_:\-[\]()]/g, " ")
+    .replaceAll(/\s+/g, " ");
+}
+
+function extractFilePathsFromLine(line: string): string[] {
+  const codePaths = [...line.matchAll(/`([^`]+)`/g)]
+    .map((match) => match[1])
+    .filter((path): path is string => path !== undefined);
+  if (codePaths.length > 0) {
+    return codePaths;
+  }
+
+  const normalizedLine = line
+    .trim()
+    .replace(/^[-*+]\s+/, "")
+    .replace(/^\d+[.)]\s+/, "")
+    .replace(/^\[[ xX]\]\s+/, "");
+  const matches = normalizedLine.match(
+    /(?:\.{1,2}\/)?(?:(?:[A-Za-z0-9_.@-]+\/)+[A-Za-z0-9_.@-]*(?:\.[A-Za-z0-9_.-]+)?|[A-Za-z0-9_.@-]+\.[A-Za-z0-9_.-]+)/g,
+  );
+  return matches ?? [];
 }
 
 function normalizeFilePath(file: string): string {

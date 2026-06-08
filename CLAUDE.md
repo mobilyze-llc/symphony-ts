@@ -1,6 +1,6 @@
 # Symphony-ts
 
-Autonomous development pipeline orchestrator. Fork of OasAIStudio/symphony-ts, maintained at github.com/mobilyze-llc/symphony-ts. Symphony reads work items from Linear, creates isolated per-issue workspaces, runs coding agents (Claude Code, Codex, Gemini) inside those workspaces, and handles retries, state transitions, and operator observability. It is the scheduling layer in a 4-stage pipeline: investigate, implement, review, merge.
+Autonomous development pipeline orchestrator. Fork of OasAIStudio/symphony-ts, maintained at github.com/mobilyze-llc/symphony-ts. Symphony reads work items from Linear, creates isolated per-issue workspaces, runs coding agents (Claude Code, Codex, Gemini) inside those workspaces, and handles retries, state transitions, and operator observability. It is the scheduling layer in a 4-stage pipeline: investigate, implement, review, merge. Fork-specific behavior follows `SPEC.mobilyze.md`; `SPEC.upstream.md` is the upstream compatibility baseline.
 
 ## Project Overview
 

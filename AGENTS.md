@@ -12,6 +12,7 @@ This is a TypeScript monorepo with a full implementation. Key top-level paths:
 - `biome.json`: Biome lint and format configuration
 - `tsconfig.json` / `tsconfig.build.json`: TypeScript project configs
 - `vitest.config.ts`: test runner configuration
+- `SPEC.mobilyze.md`: Mobilyze fork behavior contract
 - `README.upstream.md` / `SPEC.upstream.md`: upstream reference docs
 
 Keep new source files under `src/`, tests under `tests/`, and additional apps under `apps/<name>/`. Store design assets and media under `docs/assets/` or `.github/media/`.
@@ -57,12 +58,12 @@ Do not commit secrets, tokens, or private board data. Keep local environment set
 
 ## Source of Truth
 
-This Mobilyze fork intentionally diverges from upstream Symphony where the local orchestration spine requires it. Use the Linear document **Crucible orchestration spine (canonical design)** as the source of truth for fork-specific product behavior: judgment-routed dispatch, blast-bounded work units, deterministic live supervision, right-sizing, agent-authored tracker work, and decorrelated gates.
+This Mobilyze fork intentionally diverges from upstream Symphony where the local orchestration spine requires it. Use [`SPEC.mobilyze.md`](SPEC.mobilyze.md) and the Linear document **Crucible orchestration spine (canonical design)** as the source of truth for fork-specific product behavior: judgment-routed dispatch, blast-bounded work units, deterministic live supervision, right-sizing, agent-authored tracker work, and decorrelated gates.
 
-Treat `SPEC.upstream.md` as the upstream baseline and compatibility reference, not as a veto on local Mobilyze deltas. When fork behavior differs from upstream, keep the local guidance explicit and cite the spine decision instead of silently drifting. If local guidance, code comments, or tests conflict with the spine, follow the spine and update the stale artifact.
+Treat `SPEC.upstream.md` as the upstream baseline and compatibility reference, not as a veto on local Mobilyze deltas. When fork behavior differs from upstream, keep the local guidance explicit and cite the spine decision instead of silently drifting. If local guidance, code comments, or tests conflict with `SPEC.mobilyze.md` or the spine, follow the fork contract and update the stale artifact.
 
 ## Branching & Worktree Workflow
 
 Tasks 1 and 2 may be developed directly in the main working copy. For every task after Task 2, create a dedicated worktree under `.worktrees/` and do the implementation on a separate branch. Complete the work there, push the branch, and open a pull request before merging. Example flow: `git worktree add .worktrees/task-3 -b task-3`, implement the change in that worktree, then submit a PR for review.
 
-After finishing any task, verify that the implementation matches `SPEC.upstream.md` without behavioral or scope drift. Once that check passes, open the pull request immediately rather than batching multiple tasks into one PR.
+After finishing any task, verify fork-specific behavior against `SPEC.mobilyze.md` and verify unchanged upstream behavior against `SPEC.upstream.md`. Once that check passes, open the pull request immediately rather than batching multiple tasks into one PR.

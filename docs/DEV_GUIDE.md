@@ -6,7 +6,7 @@
 
 ## What Is This Project
 
-Symphony-TS is a TypeScript implementation of the [Symphony](https://github.com/openai/symphony) specification.
+Symphony-TS is a TypeScript implementation of the [Symphony](https://github.com/openai/symphony) baseline with Mobilyze fork behavior documented in [`../SPEC.mobilyze.md`](../SPEC.mobilyze.md).
 
 **In one sentence**: A long-running daemon that polls a Linear board, creates isolated workspaces for each active issue, launches a Codex (OpenAI coding agent) subprocess per issue, and manages concurrency, retries, state reconciliation, and observability.
 

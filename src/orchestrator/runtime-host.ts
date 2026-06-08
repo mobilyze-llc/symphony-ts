@@ -59,15 +59,21 @@ import { WorkspaceManager } from "../workspace/workspace-manager.js";
 import type {
   OrchestratorCoreOptions,
   StopRequest,
+  SupervisionResteerRequest,
   TimerScheduler,
 } from "./core.js";
 import { OrchestratorCore } from "./core.js";
 import { runEnsembleGate } from "./gate-handler.js";
 import type { PipelineNotificationSink } from "./pipeline-notifier.js";
+import { createIssueSupervisionSnapshot } from "./supervision.js";
 
 export interface AgentRunnerLike {
   run(input: AgentRunInput): Promise<AgentRunResult>;
 }
+
+export type ReadWorkspaceChangedFiles = (
+  workspacePath: string,
+) => Promise<string[]>;
 
 export interface RuntimeHostOptions {
   config: ResolvedWorkflowConfig;
@@ -79,6 +85,7 @@ export interface RuntimeHostOptions {
   logger?: StructuredLogger;
   workspaceManager?: WorkspaceManager;
   notifier?: PipelineNotificationSink | null;
+  readWorkspaceChangedFiles?: ReadWorkspaceChangedFiles;
   now?: () => Date;
 }
 
@@ -117,6 +124,8 @@ interface WorkerExecution {
 /** Maximum ms to wait for idle workers during shutdown before forcing exit. */
 const SHUTDOWN_IDLE_TIMEOUT_MS = 30_000;
 
+const execFileAsync = promisify(execFile);
+
 export class RuntimeHostStartupError extends Error {
   readonly code: string;
 
@@ -139,6 +148,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private readonly now: () => Date;
 
   private readonly logger: StructuredLogger | null;
+
+  private readonly readWorkspaceChangedFiles: ReadWorkspaceChangedFiles;
 
   static readonly PRUNE_DEBOUNCE_MS = 300_000;
 
@@ -167,6 +178,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.notifier = options.notifier ?? null;
     this.now = options.now ?? (() => new Date());
     this.logger = options.logger ?? null;
+    this.readWorkspaceChangedFiles =
+      options.readWorkspaceChangedFiles ?? readGitChangedFiles;
     this.workspaceManager =
       options.workspaceManager ??
       createWorkspaceManagerFromConfig(options.config, this.logger);
@@ -286,6 +299,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           cleanupWorkspace: input.cleanupWorkspace,
           reason: input.reason,
         });
+      },
+      getRunningSupervisionSnapshots: async (runningEntries) =>
+        await Promise.all(
+          runningEntries.map(async (entry) =>
+            this.createRunningSupervisionSnapshot(entry),
+          ),
+        ),
+      requestSupervisionResteer: async (input) => {
+        await this.handleSupervisionResteer(input);
       },
       runEnsembleGate: async ({ issue, stage }) => {
         const workspaceInfo = this.workspaceManager.resolveForIssue(issue.id);
@@ -468,6 +490,85 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       stopped: true,
       reason: "manual_stop",
     };
+  }
+
+  private async createRunningSupervisionSnapshot(entry: RunningEntry) {
+    const workspacePath = this.workspaceManager.resolveForIssue(
+      entry.issue.id,
+    ).workspacePath;
+    let changedFiles: string[] = [];
+    try {
+      changedFiles = await this.readWorkspaceChangedFiles(workspacePath);
+    } catch (error) {
+      await this.logger?.warn(
+        "supervision_snapshot_failed",
+        "Failed to collect workspace changed files for supervision.",
+        {
+          outcome: "degraded",
+          reason: toErrorMessage(error),
+          issue_id: entry.issue.id,
+          issue_identifier: entry.identifier,
+          workspace_path: workspacePath,
+        },
+      );
+    }
+
+    return createIssueSupervisionSnapshot(entry.issue, {
+      workerId: entry.issue.id,
+      changedFiles,
+    });
+  }
+
+  private async handleSupervisionResteer(
+    input: SupervisionResteerRequest,
+  ): Promise<void> {
+    const issueIds = [
+      ...new Set(input.findings.flatMap((finding) => finding.workerIds)),
+    ];
+    const issueIdentifiers = [
+      ...new Set(input.findings.flatMap((finding) => finding.issueIdentifiers)),
+    ];
+    const files = [
+      ...new Set(input.findings.flatMap((finding) => finding.files)),
+    ];
+
+    await this.logger?.warn(
+      "supervision_resteer_requested",
+      "Deterministic supervision requested a bounded re-steer.",
+      {
+        outcome: "blocked",
+        phase: input.phase,
+        finding_count: input.findings.length,
+        finding_kinds: [
+          ...new Set(input.findings.map((finding) => finding.kind)),
+        ],
+        issue_identifiers: issueIdentifiers,
+        files,
+      },
+    );
+
+    if (!(this.tracker instanceof LinearTrackerClient)) {
+      return;
+    }
+
+    const tracker = this.tracker;
+    await Promise.all(
+      issueIds.map(async (issueId) => {
+        try {
+          await tracker.postComment(issueId, input.comment);
+        } catch (error) {
+          await this.logger?.warn(
+            "supervision_resteer_comment_failed",
+            "Failed to post deterministic supervision re-steer comment.",
+            {
+              outcome: "degraded",
+              reason: toErrorMessage(error),
+              issue_id: issueId,
+            },
+          );
+        }
+      }),
+    );
   }
 
   subscribeToSnapshots(listener: () => void): () => void {
@@ -832,8 +933,6 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     issueIdentifier: string,
   ): Promise<void> {
     try {
-      const execFileAsync = promisify(execFile);
-
       const { stdout } = await execFileAsync("lsof", ["-d", "cwd"], {
         timeout: 5000,
       });
@@ -1487,6 +1586,35 @@ function createQueuedTimerScheduler(input: {
       }
     },
   };
+}
+
+async function readGitChangedFiles(workspacePath: string): Promise<string[]> {
+  const commands = [
+    ["diff", "--name-only", "HEAD", "--"],
+    ["diff", "--name-only", "--cached", "--"],
+    ["ls-files", "--others", "--exclude-standard"],
+  ];
+  const outputs = await Promise.all(
+    commands.map(async (args) => {
+      const { stdout } = await execFileAsync(
+        "git",
+        ["-C", workspacePath, ...args],
+        {
+          timeout: 5000,
+        },
+      );
+      return String(stdout);
+    }),
+  );
+
+  return [
+    ...new Set(
+      outputs
+        .flatMap((output) => output.split(/\r?\n/))
+        .map((file) => file.trim())
+        .filter((file) => file.length > 0),
+    ),
+  ];
 }
 
 export function createWorkspaceHookLogger(logger: StructuredLogger): (entry: {

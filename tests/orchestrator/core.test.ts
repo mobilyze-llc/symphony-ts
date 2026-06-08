@@ -5,6 +5,7 @@ import type { Issue } from "../../src/domain/model.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
+  type SupervisionResteerRequest,
   classifyExitOutcome,
   computeFailureRetryDelayMs,
   sortIssuesForDispatch,
@@ -145,6 +146,52 @@ describe("orchestrator core", () => {
     expect(result.dispatchedIssueIds).toEqual(["1", "2"]);
     expect(Object.keys(orchestrator.getState().running)).toEqual(["1", "2"]);
     expect([...orchestrator.getState().claimed]).toEqual(["1", "2"]);
+  });
+
+  it("pauses dispatch when declared file scopes overlap a co-running worker", async () => {
+    const resteers: SupervisionResteerRequest[] = [];
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            description: "## Declared file scope\n- src/shared/config.ts",
+          }),
+          createIssue({
+            id: "2",
+            identifier: "ISSUE-2",
+            priority: 2,
+            description:
+              "## Declared file scope\n- `src/shared/config.ts`\n- src/features/two.ts",
+          }),
+        ],
+      }),
+      requestSupervisionResteer: (input) => {
+        resteers.push(input);
+      },
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(Object.keys(orchestrator.getState().running)).toEqual(["1"]);
+    expect(resteers).toHaveLength(1);
+    expect(resteers[0]).toMatchObject({
+      phase: "dispatch",
+      findings: [
+        {
+          kind: "declared_scope_overlap",
+          action: "pause",
+          workerIds: ["1", "2"],
+          issueIdentifiers: ["ISSUE-1", "ISSUE-2"],
+          files: ["src/shared/config.ts"],
+        },
+      ],
+    });
+    expect(resteers[0]!.comment).toContain(
+      "Deterministic dispatch supervision paused a co-run",
+    );
   });
 
   it("updates running issue state during reconciliation", async () => {
@@ -3347,6 +3394,8 @@ function createOrchestrator(overrides?: {
   timerScheduler?: ReturnType<typeof createFakeTimerScheduler>;
   stopRunningIssue?: OrchestratorCoreOptions["stopRunningIssue"];
   onIssueDropped?: OrchestratorCoreOptions["onIssueDropped"];
+  getRunningSupervisionSnapshots?: OrchestratorCoreOptions["getRunningSupervisionSnapshots"];
+  requestSupervisionResteer?: OrchestratorCoreOptions["requestSupervisionResteer"];
   now?: () => Date;
 }) {
   const tracker =
@@ -3371,6 +3420,15 @@ function createOrchestrator(overrides?: {
 
   if (overrides?.onIssueDropped !== undefined) {
     options.onIssueDropped = overrides.onIssueDropped;
+  }
+
+  if (overrides?.getRunningSupervisionSnapshots !== undefined) {
+    options.getRunningSupervisionSnapshots =
+      overrides.getRunningSupervisionSnapshots;
+  }
+
+  if (overrides?.requestSupervisionResteer !== undefined) {
+    options.requestSupervisionResteer = overrides.requestSupervisionResteer;
   }
 
   if (overrides?.timerScheduler !== undefined) {
