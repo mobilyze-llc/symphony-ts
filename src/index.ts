@@ -12,6 +12,7 @@ export * from "./config/workflow-watch.js";
 export * from "./domain/model.js";
 export * from "./errors/codes.js";
 export * from "./logging/fields.js";
+export * from "./logging/manager-run-import.js";
 export * from "./logging/manager-run-journal.js";
 export * from "./logging/runtime-snapshot.js";
 export * from "./logging/session-metrics.js";
