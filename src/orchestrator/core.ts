@@ -1692,7 +1692,7 @@ export class OrchestratorCore {
     return result.entry;
   }
 
-  private async expireDispatcherLeases(): Promise<void> {
+  async expireDispatcherLeases(): Promise<void> {
     const nowMs = this.now().getTime();
     for (const lease of Object.values(this.state.dispatcherLeases)) {
       if (lease.status !== "active") {
