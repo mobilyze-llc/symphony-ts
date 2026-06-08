@@ -7,6 +7,12 @@ import { ERROR_CODES } from "../errors/codes.js";
 import {
   DEFAULT_ACTIVE_STATES,
   DEFAULT_CODEX_COMMAND,
+  DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
+  DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
+  DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
+  DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
+  DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
+  DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
   DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
   DEFAULT_HARD_STOP_MAX_ITERATIONS,
@@ -44,6 +50,7 @@ import type {
   StageTransitions,
   StageType,
   StagesConfig,
+  WorkflowContinuousFeedbackEvent,
 } from "./types.js";
 import { GATE_TYPES, STAGE_TYPES } from "./types.js";
 
@@ -61,6 +68,7 @@ export function resolveWorkflowConfig(
   const agent = asRecord(config.agent);
   const hardStops = asRecord(config.hard_stops);
   const runner = asRecord(config.runner);
+  const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
   const server = asRecord(config.server);
   const observability = asRecord(config.observability);
@@ -142,6 +150,23 @@ export function resolveWorkflowConfig(
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,
       model: readString(runner.model),
+    },
+    continuousFeedback: {
+      enabled:
+        readBoolean(continuousFeedback.enabled) ??
+        DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
+      events: readContinuousFeedbackEvents(continuousFeedback.events),
+      runner:
+        readString(continuousFeedback.runner) ??
+        DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
+      model:
+        readString(continuousFeedback.model) ??
+        DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
+      role:
+        readString(continuousFeedback.role) ?? DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
+      bounceOnFinding:
+        readBoolean(continuousFeedback.bounce_on_finding) ??
+        DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
     },
     codex: {
       command: readString(codex.command) ?? DEFAULT_CODEX_COMMAND,
@@ -355,6 +380,22 @@ function readStringList(value: unknown, fallback: readonly string[]): string[] {
   }
 
   return [...fallback];
+}
+
+function readContinuousFeedbackEvents(
+  value: unknown,
+): WorkflowContinuousFeedbackEvent[] {
+  const valid = new Set<WorkflowContinuousFeedbackEvent>([
+    "commit",
+    "diff",
+    "checkpoint",
+  ]);
+  const items = readStringList(value, DEFAULT_CONTINUOUS_FEEDBACK_EVENTS)
+    .map((entry) => entry.toLowerCase())
+    .filter((entry): entry is WorkflowContinuousFeedbackEvent =>
+      valid.has(entry as WorkflowContinuousFeedbackEvent),
+    );
+  return items.length > 0 ? [...new Set(items)] : ["checkpoint"];
 }
 
 function readStateConcurrencyMap(

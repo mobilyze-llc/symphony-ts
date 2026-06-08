@@ -1,6 +1,7 @@
 import type {
   CodexRateLimits,
   CodexTotals,
+  ContinuousFeedbackIssueState,
   OrchestratorState,
   RecentActivityEntry,
   StageRecord,
@@ -49,6 +50,7 @@ export interface RuntimeSnapshotRunningRow {
     cache_write_tokens: number;
   };
   execution_history: StageRecord[];
+  continuous_feedback?: RuntimeSnapshotContinuousFeedback | null;
   turn_history: TurnHistoryEntry[];
   recent_activity: RecentActivityEntry[];
   last_tool_call: string | null;
@@ -56,6 +58,34 @@ export interface RuntimeSnapshotRunningRow {
   health: HealthStatus;
   health_reason: string | null;
   loop_trace_preview: LoopTraceJournalPreviewResponse;
+}
+
+export interface RuntimeSnapshotContinuousFeedback {
+  status: "pass" | "finding";
+  last_event: "commit" | "diff" | "checkpoint";
+  last_checked_at: string;
+  reviewer_lane: {
+    runner: string;
+    model: string | null;
+    role: string;
+  };
+  worker_lane: {
+    runner: string;
+    model: string | null;
+    role: string;
+  };
+  findings: Array<{
+    signature: string;
+    title: string;
+    detail: string;
+    severity: "info" | "warning" | "blocking";
+    file: string | null;
+    line: number | null;
+    occurrences: number;
+    status: "open" | "bounced";
+    first_seen_at: string;
+    last_seen_at: string;
+  }>;
 }
 
 export interface RuntimeSnapshotRetryRow {
@@ -163,6 +193,7 @@ export function buildRuntimeSnapshot(
         entry.turnCount > 0 ? entry.totalStageTotalTokens / entry.turnCount : 0;
       const executionHistory =
         state.issueExecutionHistory[entry.issue.id] ?? [];
+      const continuousFeedback = state.continuousFeedback[entry.issue.id];
       const completedStageTokens = executionHistory.reduce(
         (sum, stage) => sum + stage.totalTokens,
         0,
@@ -233,6 +264,10 @@ export function buildRuntimeSnapshot(
           cache_write_tokens: pipelineCacheWriteTokens,
         },
         execution_history: executionHistory,
+        continuous_feedback:
+          continuousFeedback === undefined
+            ? null
+            : toSnapshotContinuousFeedback(continuousFeedback),
         turn_history: entry.turnHistory,
         recent_activity: entry.recentActivity,
         last_tool_call: deriveLastToolCall(entry.recentActivity),
@@ -351,6 +386,30 @@ function buildManagerRunSnapshots(
         closeout_ready: run.closeout.ready,
       };
     });
+}
+
+function toSnapshotContinuousFeedback(
+  feedback: ContinuousFeedbackIssueState,
+): RuntimeSnapshotContinuousFeedback {
+  return {
+    status: feedback.status,
+    last_event: feedback.lastEvent,
+    last_checked_at: feedback.lastCheckedAt,
+    reviewer_lane: { ...feedback.reviewerLane },
+    worker_lane: { ...feedback.workerLane },
+    findings: feedback.findings.map((finding) => ({
+      signature: finding.signature,
+      title: finding.title,
+      detail: finding.detail,
+      severity: finding.severity,
+      file: finding.file,
+      line: finding.line,
+      occurrences: finding.occurrences,
+      status: finding.status,
+      first_seen_at: finding.firstSeenAt,
+      last_seen_at: finding.lastSeenAt,
+    })),
+  };
 }
 
 function deriveLastToolCall(

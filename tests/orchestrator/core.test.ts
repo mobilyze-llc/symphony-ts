@@ -1258,6 +1258,171 @@ describe("dispatcher run journal restart recovery", () => {
   });
 });
 
+describe("continuous feedback lane", () => {
+  it("records a non-authoritative feedback pass checkpoint", async () => {
+    const runContinuousFeedback = vi.fn(() => ({
+      summary: "No issues found.",
+      findings: [],
+    }));
+    const orchestrator = createOrchestrator({ runContinuousFeedback });
+
+    await orchestrator.pollTick();
+    const result = await orchestrator.runContinuousFeedbackCheckpoint({
+      issueId: "1",
+      event: "checkpoint",
+    });
+
+    expect(result).toMatchObject({
+      ran: true,
+      status: "pass",
+      findingSignatures: [],
+      reviewerLane: {
+        runner: "pi",
+        model: "local-flash",
+        role: "continuous-feedback",
+      },
+      workerLane: {
+        runner: "codex",
+        model: null,
+        role: "worker",
+      },
+    });
+    expect(orchestrator.getState().continuousFeedback["1"]).toMatchObject({
+      status: "pass",
+      findings: [],
+    });
+    expect(orchestrator.getState().dispatcherRunJournal.at(-1)).toMatchObject({
+      kind: "continuous_feedback",
+      operation: "feedback_lane",
+      metadata: {
+        status: "pass",
+        authoritative: false,
+      },
+    });
+  });
+
+  it("dedupes repeated findings and bounces the worker for inner-loop rework", async () => {
+    const comments: string[] = [];
+    const runContinuousFeedback = vi.fn(() => ({
+      summary: "One issue found.",
+      findings: [
+        {
+          signature: "src/core.ts:null-check",
+          title: "Missing null check",
+          detail: "Guard the optional reviewer output before dereferencing.",
+          severity: "blocking" as const,
+          file: "src/core.ts",
+          line: 42,
+        },
+      ],
+    }));
+    const orchestrator = createOrchestrator({
+      runContinuousFeedback,
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.runContinuousFeedbackCheckpoint({
+      issueId: "1",
+      event: "checkpoint",
+    });
+    await orchestrator.runContinuousFeedbackCheckpoint({
+      issueId: "1",
+      event: "checkpoint",
+    });
+
+    expect(orchestrator.getState().continuousFeedback["1"]?.findings).toEqual([
+      expect.objectContaining({
+        signature: "src/core.ts:null-check",
+        occurrences: 2,
+        status: "open",
+      }),
+    ]);
+
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+    });
+
+    expect(retry).toMatchObject({
+      issueId: "1",
+      error: "continuous feedback requested inner-loop rework",
+      delayType: "failure",
+    });
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+    expect(
+      orchestrator.getState().continuousFeedback["1"]?.findings[0]?.status,
+    ).toBe("bounced");
+    expect(comments[0]).toContain("non-authoritative");
+    expect(comments[0]).toContain("Missing null check");
+  });
+
+  it("does not treat feedback pass as terminal gate approval", async () => {
+    const orchestrator = createOrchestrator({
+      config: createImplementThenGateConfig(),
+      runContinuousFeedback: () => ({
+        summary: "Looks fine.",
+        findings: [],
+      }),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.runContinuousFeedbackCheckpoint({
+      issueId: "1",
+      event: "checkpoint",
+    });
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+    });
+
+    expect(retry).toMatchObject({
+      issueId: "1",
+      delayType: "continuation",
+    });
+    expect(orchestrator.getState().issueStages["1"]).toBe("review_gate");
+    expect(orchestrator.getState().completed.has("1")).toBe(false);
+    expect(orchestrator.getState().issuePassedStages["1"]).toEqual([
+      "implement",
+    ]);
+  });
+
+  it("uses a decorrelated reviewer lane when the worker already uses the cheap default", async () => {
+    const seen: Array<{
+      worker: { runner: string; model: string | null };
+      reviewer: { runner: string; model: string | null; role: string };
+    }> = [];
+    const orchestrator = createOrchestrator({
+      config: createConfig({
+        runner: { kind: "pi", model: "local-flash" },
+      }),
+      runContinuousFeedback: ({ workerLane, reviewerLane }) => {
+        seen.push({ worker: workerLane, reviewer: reviewerLane });
+        return { summary: "Pass.", findings: [] };
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.runContinuousFeedbackCheckpoint({
+      issueId: "1",
+      event: "checkpoint",
+    });
+
+    expect(seen).toEqual([
+      {
+        worker: { runner: "pi", model: "local-flash", role: "worker" },
+        reviewer: {
+          runner: "pi",
+          model: "local-flash-reviewer",
+          role: "continuous-feedback-decorrelated",
+        },
+      },
+    ]);
+  });
+});
+
 describe("orchestrator core integration flows", () => {
   it("redispatches a retried issue through a fake runner boundary after an abnormal exit", async () => {
     const harness = createIntegrationHarness();
@@ -3655,6 +3820,8 @@ function createOrchestrator(overrides?: {
   onIssueDropped?: OrchestratorCoreOptions["onIssueDropped"];
   getRunningSupervisionSnapshots?: OrchestratorCoreOptions["getRunningSupervisionSnapshots"];
   requestSupervisionResteer?: OrchestratorCoreOptions["requestSupervisionResteer"];
+  runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
+  postComment?: OrchestratorCoreOptions["postComment"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
   now?: () => Date;
 }) {
@@ -3695,6 +3862,14 @@ function createOrchestrator(overrides?: {
     options.requestSupervisionResteer = overrides.requestSupervisionResteer;
   }
 
+  if (overrides?.runContinuousFeedback !== undefined) {
+    options.runContinuousFeedback = overrides.runContinuousFeedback;
+  }
+
+  if (overrides?.postComment !== undefined) {
+    options.postComment = overrides.postComment;
+  }
+
   if (overrides?.timerScheduler !== undefined) {
     options.timerScheduler = overrides.timerScheduler;
   }
@@ -3724,6 +3899,8 @@ function createTracker(input?: {
 function createConfig(overrides?: {
   agent?: Partial<ResolvedWorkflowConfig["agent"]>;
   codex?: Partial<ResolvedWorkflowConfig["codex"]>;
+  runner?: Partial<ResolvedWorkflowConfig["runner"]>;
+  continuousFeedback?: ResolvedWorkflowConfig["continuousFeedback"];
 }): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
@@ -3779,6 +3956,15 @@ function createConfig(overrides?: {
     runner: {
       kind: "codex",
       model: null,
+      ...overrides?.runner,
+    },
+    continuousFeedback: overrides?.continuousFeedback ?? {
+      enabled: true,
+      events: ["checkpoint"],
+      runner: "pi",
+      model: "local-flash",
+      role: "continuous-feedback",
+      bounceOnFinding: true,
     },
     stages: null,
     escalationState: null,
@@ -3806,6 +3992,71 @@ function createGateConfig(): ResolvedWorkflowConfig {
           onComplete: null,
           onApprove: "done",
           onRework: null,
+        },
+        linearState: null,
+      },
+      done: {
+        type: "terminal",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: null,
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: "Done",
+      },
+    },
+  };
+  return config;
+}
+
+function createImplementThenGateConfig(): ResolvedWorkflowConfig {
+  const config = createConfig();
+  config.stages = {
+    initialStage: "implement",
+    fastTrack: null,
+    stages: {
+      implement: {
+        type: "agent",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "review_gate",
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: null,
+      },
+      review_gate: {
+        type: "gate",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: "ensemble",
+        maxRework: 1,
+        reviewers: [],
+        transitions: {
+          onComplete: null,
+          onApprove: "done",
+          onRework: "implement",
         },
         linearState: null,
       },

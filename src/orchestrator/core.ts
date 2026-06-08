@@ -1,11 +1,21 @@
 import type { CodexClientEvent } from "../codex/app-server-client.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
+import {
+  DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
+  DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
+  DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
+  DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
+  DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
+  DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
+} from "../config/defaults.js";
 import type {
   DispatchValidationResult,
   ResolvedWorkflowConfig,
   StageDefinition,
 } from "../config/types.js";
 import {
+  type ContinuousFeedbackEvent,
+  type ContinuousFeedbackLane,
   type DispatcherLease,
   type DispatcherOperation,
   type DispatcherRunJournal,
@@ -35,6 +45,14 @@ import {
 } from "../logging/session-metrics.js";
 import type { HardStopDecision } from "../policy/hard-stops.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
+import {
+  type ContinuousFeedbackReviewResult,
+  ensureDecorrelatedFeedbackLane,
+  formatContinuousFeedbackComment,
+  getOpenContinuousFeedbackFindings,
+  markContinuousFeedbackFindingsBounced,
+  mergeContinuousFeedbackCheckpoint,
+} from "./continuous-feedback.js";
 import {
   type EnsembleGateResult,
   formatExecutionReport,
@@ -97,6 +115,16 @@ export interface RetryTimerResult {
 
 export interface CodexEventResult {
   applied: boolean;
+}
+
+export interface ContinuousFeedbackCheckpointResult {
+  ran: boolean;
+  status: "pass" | "finding" | "skipped";
+  event: ContinuousFeedbackEvent;
+  reviewerLane: ContinuousFeedbackLane | null;
+  workerLane: ContinuousFeedbackLane | null;
+  findingSignatures: string[];
+  summary: string | null;
 }
 
 export interface SupervisionResteerRequest {
@@ -164,6 +192,15 @@ export interface OrchestratorCoreOptions {
   requestSupervisionResteer?: (
     input: SupervisionResteerRequest,
   ) => Promise<void> | void;
+  runContinuousFeedback?: (input: {
+    issue: Issue;
+    event: ContinuousFeedbackEvent;
+    stageName: string | null;
+    workerLane: ContinuousFeedbackLane;
+    reviewerLane: ContinuousFeedbackLane;
+  }) =>
+    | Promise<ContinuousFeedbackReviewResult>
+    | ContinuousFeedbackReviewResult;
   timerScheduler?: TimerScheduler;
   now?: () => Date;
   runJournal?: DispatcherRunJournal;
@@ -196,6 +233,8 @@ export class OrchestratorCore {
   private readonly getRunningSupervisionSnapshots?: OrchestratorCoreOptions["getRunningSupervisionSnapshots"];
 
   private readonly requestSupervisionResteer?: OrchestratorCoreOptions["requestSupervisionResteer"];
+
+  private readonly runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
 
   private readonly timerScheduler: TimerScheduler;
 
@@ -235,6 +274,7 @@ export class OrchestratorCore {
     this.getRunningSupervisionSnapshots =
       options.getRunningSupervisionSnapshots;
     this.requestSupervisionResteer = options.requestSupervisionResteer;
+    this.runContinuousFeedback = options.runContinuousFeedback;
     this.timerScheduler = options.timerScheduler ?? defaultTimerScheduler();
     this.now = options.now ?? (() => new Date());
     this.leaseOwnerId = options.leaseOwnerId ?? "orchestrator-core";
@@ -542,6 +582,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.loopTraceJournal[issueId];
+      delete this.state.continuousFeedback[issueId];
       this.onIssueDropped?.({
         issueId,
         identifier: retryEntry.identifier ?? issueId,
@@ -565,6 +606,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.loopTraceJournal[issueId];
+      delete this.state.continuousFeedback[issueId];
       this.onIssueDropped?.({
         issueId,
         identifier: issue.identifier,
@@ -715,6 +757,15 @@ export class OrchestratorCore {
         );
       }
 
+      const feedbackBounce = await this.handleContinuousFeedbackBounce(
+        input.issueId,
+        runningEntry,
+        exitedStageName,
+      );
+      if (feedbackBounce !== undefined) {
+        return feedbackBounce;
+      }
+
       const transition = this.advanceStage(
         input.issueId,
         runningEntry.identifier,
@@ -784,6 +835,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.loopTraceJournal[issueId];
+      delete this.state.continuousFeedback[issueId];
       return "completed";
     }
 
@@ -796,6 +848,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.loopTraceJournal[issueId];
+      delete this.state.continuousFeedback[issueId];
       return "completed";
     }
 
@@ -822,6 +875,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.loopTraceJournal[issueId];
+      delete this.state.continuousFeedback[issueId];
       // Fire linearState update for the terminal stage (e.g., move to "Done")
       if (
         nextStage.linearState !== null &&
@@ -906,6 +960,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.loopTraceJournal[issueId];
+      delete this.state.continuousFeedback[issueId];
       void this.fireEscalationSideEffects(
         issueId,
         runningEntry.identifier,
@@ -1487,6 +1542,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.loopTraceJournal[issueId];
+      delete this.state.continuousFeedback[issueId];
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
       return "escalated";
@@ -1519,6 +1575,121 @@ export class OrchestratorCore {
 
     applyCodexEventToOrchestratorState(this.state, runningEntry, input.event);
     return { applied: true };
+  }
+
+  async runContinuousFeedbackCheckpoint(input: {
+    issueId: string;
+    event: ContinuousFeedbackEvent;
+  }): Promise<ContinuousFeedbackCheckpointResult> {
+    const runningEntry = this.state.running[input.issueId];
+    const feedbackConfig = this.resolveContinuousFeedbackConfig();
+    if (
+      runningEntry === undefined ||
+      !feedbackConfig.enabled ||
+      !feedbackConfig.events.includes(input.event)
+    ) {
+      return {
+        ran: false,
+        status: "skipped",
+        event: input.event,
+        reviewerLane: null,
+        workerLane: null,
+        findingSignatures: [],
+        summary: null,
+      };
+    }
+
+    const stageName = this.state.issueStages[input.issueId] ?? null;
+    const workerLane = this.resolveWorkerLane(stageName);
+    const reviewerLane = ensureDecorrelatedFeedbackLane(
+      {
+        runner: feedbackConfig.runner,
+        model: feedbackConfig.model,
+        role: feedbackConfig.role,
+      },
+      workerLane,
+    );
+
+    if (this.runContinuousFeedback === undefined) {
+      return {
+        ran: false,
+        status: "skipped",
+        event: input.event,
+        reviewerLane,
+        workerLane,
+        findingSignatures: [],
+        summary: null,
+      };
+    }
+
+    const checkedAt = this.now().toISOString();
+    const result = await this.runContinuousFeedback({
+      issue: runningEntry.issue,
+      event: input.event,
+      stageName,
+      workerLane,
+      reviewerLane,
+    });
+    const feedbackState = mergeContinuousFeedbackCheckpoint(
+      this.state.continuousFeedback[input.issueId],
+      {
+        issueId: input.issueId,
+        issueIdentifier: runningEntry.identifier,
+        event: input.event,
+        checkedAt,
+        workerLane,
+        reviewerLane,
+        findings: result.findings,
+      },
+    );
+    this.state.continuousFeedback[input.issueId] = feedbackState;
+    const findingSignatures = result.findings.map(
+      (finding) =>
+        finding.signature ??
+        [
+          finding.severity ?? "warning",
+          finding.file ?? "nofile",
+          finding.line?.toString() ?? "noline",
+          finding.title.trim().toLowerCase(),
+        ].join(":"),
+    );
+    const status = result.findings.length === 0 ? "pass" : "finding";
+
+    await this.recordRunJournalEntry({
+      idempotencyKey: `continuous_feedback:${input.issueId}:${input.event}:${checkedAt}`,
+      timestamp: checkedAt,
+      kind: "continuous_feedback",
+      issueId: input.issueId,
+      issueIdentifier: runningEntry.identifier,
+      operation: "feedback_lane",
+      stage: stageName,
+      attempt: runningEntry.retryAttempt,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary:
+        status === "pass"
+          ? `Continuous feedback passed for ${runningEntry.identifier}.`
+          : `Continuous feedback found ${result.findings.length} issue(s) for ${runningEntry.identifier}.`,
+      metadata: {
+        event: input.event,
+        status,
+        reviewerLane,
+        workerLane,
+        findingSignatures,
+        summary: result.summary ?? null,
+        authoritative: false,
+      },
+    });
+
+    return {
+      ran: true,
+      status,
+      event: input.event,
+      reviewerLane,
+      workerLane,
+      findingSignatures,
+      summary: result.summary ?? null,
+    };
   }
 
   /**
@@ -1829,6 +2000,99 @@ export class OrchestratorCore {
     );
   }
 
+  private async handleContinuousFeedbackBounce(
+    issueId: string,
+    runningEntry: RunningEntry,
+    stageName: string | null,
+  ): Promise<RetryEntry | null | undefined> {
+    if (!this.resolveContinuousFeedbackConfig().bounceOnFinding) {
+      return undefined;
+    }
+    const feedback = this.state.continuousFeedback[issueId];
+    const openFindings = getOpenContinuousFeedbackFindings(feedback);
+    if (feedback === undefined || openFindings.length === 0) {
+      return undefined;
+    }
+
+    this.state.issueReworkCounts[issueId] =
+      (this.state.issueReworkCounts[issueId] ?? 0) + 1;
+    this.state.continuousFeedback[issueId] =
+      markContinuousFeedbackFindingsBounced(
+        feedback,
+        openFindings.map((finding) => finding.signature),
+      );
+
+    await this.recordRunJournalEntry({
+      idempotencyKey: `continuous_feedback:${issueId}:${stageName ?? "no-stage"}:${formatAttemptKey(runningEntry.retryAttempt)}:bounce:${openFindings.map((finding) => finding.signature).join("|")}`,
+      timestamp: this.now().toISOString(),
+      kind: "continuous_feedback",
+      issueId,
+      issueIdentifier: runningEntry.identifier,
+      operation: "feedback_lane",
+      stage: stageName,
+      attempt: runningEntry.retryAttempt,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Continuous feedback bounced ${runningEntry.identifier} for inner-loop rework.`,
+      metadata: {
+        status: "bounced",
+        findingSignatures: openFindings.map((finding) => finding.signature),
+        authoritative: false,
+      },
+    });
+
+    if (this.postComment !== undefined) {
+      void this.postComment(
+        issueId,
+        formatContinuousFeedbackComment({
+          issueIdentifier: runningEntry.identifier,
+          stageName,
+          findings: openFindings,
+        }),
+      ).catch((err) => {
+        console.warn(
+          `[orchestrator] Failed to post continuous feedback findings for ${runningEntry.identifier}:`,
+          err,
+        );
+      });
+    }
+
+    return this.scheduleRetry(
+      issueId,
+      nextRetryAttempt(runningEntry.retryAttempt),
+      {
+        identifier: runningEntry.identifier,
+        error: "continuous feedback requested inner-loop rework",
+        delayType: "failure",
+      },
+    );
+  }
+
+  private resolveWorkerLane(stageName: string | null): ContinuousFeedbackLane {
+    const stage =
+      stageName === null ? undefined : this.config.stages?.stages[stageName];
+    return {
+      runner: stage?.runner ?? this.config.runner.kind,
+      model: stage?.model ?? this.config.runner.model,
+      role: stageName ?? "worker",
+    };
+  }
+
+  private resolveContinuousFeedbackConfig(): NonNullable<
+    ResolvedWorkflowConfig["continuousFeedback"]
+  > {
+    return (
+      this.config.continuousFeedback ?? {
+        enabled: DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
+        events: [...DEFAULT_CONTINUOUS_FEEDBACK_EVENTS],
+        runner: DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
+        model: DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
+        role: DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
+        bounceOnFinding: DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
+      }
+    );
+  }
+
   private async runTrackerWriteOnce(
     input: {
       idempotencyKey: string;
@@ -1989,6 +2253,7 @@ export class OrchestratorCore {
         delete this.state.issuePassedStages[issue.id];
         delete this.state.issueFirstDispatchedAt[issue.id];
         delete this.state.loopTraceJournal[issue.id];
+        delete this.state.continuousFeedback[issue.id];
         // Fire linearState update for the terminal stage (e.g., move to "Done")
         if (stage.linearState !== null && this.updateIssueState !== undefined) {
           const linearState = stage.linearState;
@@ -2631,6 +2896,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.loopTraceJournal[issueId];
+      delete this.state.continuousFeedback[issueId];
       void this.fireEscalationSideEffects(
         issueId,
         input.identifier ?? issueId,

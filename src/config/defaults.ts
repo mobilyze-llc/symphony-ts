@@ -31,6 +31,12 @@ export const DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO = 0.8;
 export const DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD = 0.05;
 
 export const DEFAULT_RUNNER_KIND = "codex";
+export const DEFAULT_CONTINUOUS_FEEDBACK_ENABLED = true;
+export const DEFAULT_CONTINUOUS_FEEDBACK_EVENTS = ["checkpoint"] as const;
+export const DEFAULT_CONTINUOUS_FEEDBACK_RUNNER = "pi";
+export const DEFAULT_CONTINUOUS_FEEDBACK_MODEL = "local-flash";
+export const DEFAULT_CONTINUOUS_FEEDBACK_ROLE = "continuous-feedback";
+export const DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING = true;
 
 export const DEFAULT_CODEX_COMMAND = "codex app-server";
 export const DEFAULT_TURN_TIMEOUT_MS = 3_600_000;
@@ -81,6 +87,14 @@ export const SPEC_DEFAULTS = Object.freeze({
   },
   runner: {
     kind: DEFAULT_RUNNER_KIND,
+  },
+  continuousFeedback: {
+    enabled: DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
+    events: DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
+    runner: DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
+    model: DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
+    role: DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
+    bounceOnFinding: DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
   },
   codex: {
     command: DEFAULT_CODEX_COMMAND,

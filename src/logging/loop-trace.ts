@@ -3,6 +3,7 @@ import { basename, join } from "node:path";
 
 import {
   LOOP_TRACE_EVENT_KINDS,
+  type LoopTraceContinuousFeedback,
   type LoopTraceEntry,
   type LoopTraceFileDelta,
   type LoopTraceJournal,
@@ -48,6 +49,7 @@ export interface LoopTraceEntryResponse {
   prompt: LoopTracePromptSummaryResponse | null;
   tool_action: LoopTraceToolActionResponse | null;
   file_delta: LoopTraceFileDeltaResponse | null;
+  continuous_feedback?: LoopTraceContinuousFeedbackResponse | null;
   stage_transition: LoopTraceStageTransitionResponse | null;
   worker_exit: LoopTraceWorkerExitResponse | null;
 }
@@ -77,6 +79,14 @@ interface LoopTraceToolActionResponse {
 
 interface LoopTraceFileDeltaResponse {
   files: string[];
+}
+
+interface LoopTraceContinuousFeedbackResponse {
+  event: "commit" | "diff" | "checkpoint";
+  status: "pass" | "finding";
+  reviewer_runner: string;
+  reviewer_model: string | null;
+  finding_signatures: string[];
 }
 
 interface LoopTraceStageTransitionResponse {
@@ -463,6 +473,18 @@ function toLoopTraceEntryResponse(
         : {
             files: entry.fileDelta.files,
           },
+    ...(entry.continuousFeedback === undefined
+      ? {}
+      : {
+          continuous_feedback: {
+            event: entry.continuousFeedback.event,
+            status: entry.continuousFeedback.status,
+            reviewer_runner: entry.continuousFeedback.reviewerRunner,
+            reviewer_model: entry.continuousFeedback.reviewerModel,
+            finding_signatures:
+              entry.continuousFeedback.findingSignatures.slice(),
+          },
+        }),
     stage_transition:
       entry.stageTransition === undefined
         ? null
@@ -509,6 +531,7 @@ function isLoopTraceEntry(value: unknown): value is LoopTraceEntry {
     isOptional(candidate.prompt, isLoopTracePromptSummary) &&
     isOptional(candidate.toolAction, isLoopTraceToolAction) &&
     isOptional(candidate.fileDelta, isLoopTraceFileDelta) &&
+    isOptional(candidate.continuousFeedback, isLoopTraceContinuousFeedback) &&
     isOptional(candidate.stageTransition, isLoopTraceStageTransition) &&
     isOptional(candidate.workerExit, isLoopTraceWorkerExit)
   );
@@ -590,6 +613,22 @@ function isLoopTraceFileDelta(value: unknown): value is LoopTraceFileDelta {
     isRecord(value) &&
     Array.isArray(value.files) &&
     value.files.every((file) => typeof file === "string")
+  );
+}
+
+function isLoopTraceContinuousFeedback(
+  value: unknown,
+): value is LoopTraceContinuousFeedback {
+  return (
+    isRecord(value) &&
+    (value.event === "commit" ||
+      value.event === "diff" ||
+      value.event === "checkpoint") &&
+    (value.status === "pass" || value.status === "finding") &&
+    typeof value.reviewerRunner === "string" &&
+    (value.reviewerModel === null || typeof value.reviewerModel === "string") &&
+    Array.isArray(value.findingSignatures) &&
+    value.findingSignatures.every((signature) => typeof signature === "string")
   );
 }
 
