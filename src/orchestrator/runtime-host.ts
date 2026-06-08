@@ -323,6 +323,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         stageName,
         reworkCount,
         isFirstDispatch,
+        rightSizingDecision,
       }) => {
         const lastRework = this.lastNotifiedReworkCount.get(issue.id) ?? 0;
         const isNewRework = !isFirstDispatch && reworkCount > lastRework;
@@ -336,6 +337,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             issueUrl: issue.url ?? null,
             stageName,
             reworkCount,
+            rightSizingDecision,
           });
         }
         return this.spawnWorkerExecution(

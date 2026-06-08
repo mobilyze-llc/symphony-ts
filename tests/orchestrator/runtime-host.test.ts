@@ -1897,6 +1897,310 @@ describe("pipeline notifications", () => {
     };
   }
 
+  it("includes prototype right-sizing on issue_dispatched", async () => {
+    const tracker = createTracker({
+      candidates: [
+        createIssue({
+          priority: 3,
+          labels: ["trivial"],
+          description: "## Declared file scope\n- src/features/copy.ts\n",
+        }),
+      ],
+    });
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier,
+      agentRunner: new FakeAgentRunner(),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(notifier.events[0]).toMatchObject({
+      type: "issue_dispatched",
+      rightSizingDecision: {
+        classifier: "deterministic-v1",
+        mode: "prototype",
+        modelRouting: {
+          allowed: false,
+          reason: "not_needed",
+        },
+      },
+    });
+  });
+
+  it("includes thin right-sizing on issue_dispatched for a merge-path unit", async () => {
+    const tracker = createTracker({
+      candidates: [
+        createIssue({
+          description: "## Declared file scope\n- src/features/timeline.ts\n",
+        }),
+      ],
+    });
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: createStagedConfig({
+        stages: {
+          initialStage: "implement",
+          fastTrack: null,
+          stages: {
+            implement: {
+              type: "agent",
+              runner: null,
+              model: null,
+              prompt: null,
+              maxTurns: 18,
+              timeoutMs: null,
+              concurrency: null,
+              gateType: null,
+              maxRework: null,
+              reviewers: [],
+              transitions: {
+                onComplete: "review",
+                onApprove: null,
+                onRework: null,
+              },
+              linearState: null,
+            },
+            review: {
+              type: "gate",
+              runner: null,
+              model: null,
+              prompt: null,
+              maxTurns: null,
+              timeoutMs: null,
+              concurrency: null,
+              gateType: "ensemble",
+              maxRework: null,
+              reviewers: [
+                {
+                  runner: "codex",
+                  model: "reviewer-1",
+                  role: "reviewer-1",
+                  prompt: null,
+                },
+              ],
+              transitions: {
+                onComplete: null,
+                onApprove: "merge",
+                onRework: "implement",
+              },
+              linearState: null,
+            },
+            merge: {
+              type: "agent",
+              runner: null,
+              model: null,
+              prompt: null,
+              maxTurns: 10,
+              timeoutMs: null,
+              concurrency: null,
+              gateType: null,
+              maxRework: null,
+              reviewers: [],
+              transitions: {
+                onComplete: "done",
+                onApprove: null,
+                onRework: null,
+              },
+              linearState: null,
+            },
+            done: {
+              type: "terminal",
+              runner: null,
+              model: null,
+              prompt: null,
+              maxTurns: null,
+              timeoutMs: null,
+              concurrency: null,
+              gateType: null,
+              maxRework: null,
+              reviewers: [],
+              transitions: {
+                onComplete: null,
+                onApprove: null,
+                onRework: null,
+              },
+              linearState: null,
+            },
+          },
+        },
+      }),
+      tracker,
+      notifier,
+      agentRunner: new FakeAgentRunner(),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(notifier.events[0]).toMatchObject({
+      type: "issue_dispatched",
+      rightSizingDecision: {
+        classifier: "deterministic-v1",
+        mode: "thin",
+        stageName: "implement",
+        signals: {
+          gateCount: 1,
+          impactSurface: "narrow",
+        },
+      },
+    });
+  });
+
+  it("includes full right-sizing on issue_dispatched for a high-risk unit", async () => {
+    const tracker = createTracker({
+      candidates: [
+        createIssue({
+          priority: 1,
+          labels: ["risk:high"],
+          description:
+            "## Declared file scope\n- src/orchestrator/runtime-host.ts\n- src/config/config-resolver.ts\n",
+        }),
+      ],
+    });
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: createStagedConfig({
+        stages: {
+          initialStage: "investigate",
+          fastTrack: null,
+          stages: {
+            investigate: {
+              type: "agent",
+              runner: null,
+              model: null,
+              prompt: null,
+              maxTurns: 12,
+              timeoutMs: null,
+              concurrency: null,
+              gateType: null,
+              maxRework: null,
+              reviewers: [],
+              transitions: {
+                onComplete: "review",
+                onApprove: null,
+                onRework: null,
+              },
+              linearState: null,
+            },
+            review: {
+              type: "gate",
+              runner: null,
+              model: null,
+              prompt: null,
+              maxTurns: null,
+              timeoutMs: null,
+              concurrency: null,
+              gateType: "ensemble",
+              maxRework: null,
+              reviewers: [
+                {
+                  runner: "codex",
+                  model: "reviewer-1",
+                  role: "reviewer-1",
+                  prompt: null,
+                },
+                {
+                  runner: "codex",
+                  model: "reviewer-2",
+                  role: "reviewer-2",
+                  prompt: null,
+                },
+              ],
+              transitions: {
+                onComplete: null,
+                onApprove: "merge",
+                onRework: "investigate",
+              },
+              linearState: null,
+            },
+            merge: {
+              type: "agent",
+              runner: null,
+              model: null,
+              prompt: null,
+              maxTurns: 30,
+              timeoutMs: null,
+              concurrency: null,
+              gateType: null,
+              maxRework: null,
+              reviewers: [],
+              transitions: {
+                onComplete: "acceptance",
+                onApprove: null,
+                onRework: null,
+              },
+              linearState: null,
+            },
+            acceptance: {
+              type: "gate",
+              runner: null,
+              model: null,
+              prompt: null,
+              maxTurns: null,
+              timeoutMs: null,
+              concurrency: null,
+              gateType: "human",
+              maxRework: null,
+              reviewers: [],
+              transitions: {
+                onComplete: null,
+                onApprove: "done",
+                onRework: "investigate",
+              },
+              linearState: null,
+            },
+            done: {
+              type: "terminal",
+              runner: null,
+              model: null,
+              prompt: null,
+              maxTurns: null,
+              timeoutMs: null,
+              concurrency: null,
+              gateType: null,
+              maxRework: null,
+              reviewers: [],
+              transitions: {
+                onComplete: null,
+                onApprove: null,
+                onRework: null,
+              },
+              linearState: null,
+            },
+          },
+        },
+      }),
+      tracker,
+      notifier,
+      agentRunner: new FakeAgentRunner(),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(notifier.events[0]).toMatchObject({
+      type: "issue_dispatched",
+      rightSizingDecision: {
+        classifier: "deterministic-v1",
+        mode: "full",
+        modelRouting: {
+          allowed: true,
+          reason: "risk_trigger",
+        },
+        triggerHits: expect.arrayContaining([
+          "heavy_gate_requirements",
+          "high_cost_budget",
+          "high_risk_files",
+          "priority_high",
+        ]),
+      },
+    });
+  });
+
   it("fires issue_completed on terminal completion", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();

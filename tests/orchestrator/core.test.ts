@@ -148,6 +148,41 @@ describe("orchestrator core", () => {
     expect([...orchestrator.getState().claimed]).toEqual(["1", "2"]);
   });
 
+  it("emits a structured right-sizing decision from pollTick", async () => {
+    const orchestrator = createOrchestrator({
+      config: createConfig(),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            priority: 3,
+            labels: ["trivial"],
+            description: "## Declared file scope\n- src/features/copy.ts\n",
+          }),
+        ],
+      }),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.modeDecisions).toEqual([
+      expect.objectContaining({
+        classifier: "deterministic-v1",
+        mode: "prototype",
+        modelRouting: {
+          allowed: false,
+          reason: "not_needed",
+        },
+        signals: expect.objectContaining({
+          declaredScopeFiles: ["src/features/copy.ts"],
+          impactSurface: "narrow",
+          labels: ["trivial"],
+        }),
+      }),
+    ]);
+  });
+
   it("pauses dispatch when declared file scopes overlap a co-running worker", async () => {
     const resteers: SupervisionResteerRequest[] = [];
     const orchestrator = createOrchestrator({

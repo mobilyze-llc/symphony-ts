@@ -11,6 +11,7 @@ import {
   type LiveSession,
   type OrchestratorState,
   type RetryEntry,
+  type RightSizingDecision,
   type RunningEntry,
   type StageRecord,
   createEmptyLiveSession,
@@ -31,6 +32,7 @@ import {
   formatRebaseComment,
   formatReviewFindingsComment,
 } from "./gate-handler.js";
+import { createRightSizingDecision } from "./right-sizing.js";
 import {
   type SupervisionFinding,
   type WorkerSupervisionSnapshot,
@@ -70,6 +72,7 @@ export interface StopRequest {
 export interface PollTickResult {
   validation: DispatchValidationResult;
   dispatchedIssueIds: string[];
+  modeDecisions: RightSizingDecision[];
   stopRequests: StopRequest[];
   trackerFetchFailed: boolean;
   reconciliationFetchFailed: boolean;
@@ -110,6 +113,7 @@ export interface OrchestratorCoreOptions {
     stageName: string | null;
     reworkCount: number;
     isFirstDispatch: boolean;
+    rightSizingDecision: RightSizingDecision;
   }) => Promise<SpawnWorkerResult> | SpawnWorkerResult;
   onIssueDropped?: (input: {
     issueId: string;
@@ -333,6 +337,7 @@ export class OrchestratorCore {
       return {
         validation,
         dispatchedIssueIds: [],
+        modeDecisions: [],
         stopRequests: reconcileResult.stopRequests,
         trackerFetchFailed: false,
         reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
@@ -347,6 +352,7 @@ export class OrchestratorCore {
       return {
         validation,
         dispatchedIssueIds: [],
+        modeDecisions: [],
         stopRequests: reconcileResult.stopRequests,
         trackerFetchFailed: true,
         reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
@@ -363,6 +369,7 @@ export class OrchestratorCore {
       return {
         validation,
         dispatchedIssueIds: [],
+        modeDecisions: [],
         stopRequests: reconcileResult.stopRequests,
         trackerFetchFailed: false,
         reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
@@ -371,6 +378,7 @@ export class OrchestratorCore {
     }
 
     const dispatchedIssueIds: string[] = [];
+    const modeDecisions: RightSizingDecision[] = [];
     const admittedSnapshots = this.buildRunningAdmissionSnapshots();
     for (const issue of sortIssuesForDispatch(issues)) {
       if (this.availableSlots() <= 0) {
@@ -391,9 +399,10 @@ export class OrchestratorCore {
         continue;
       }
 
-      const dispatched = await this.dispatchIssue(issue, null);
-      if (dispatched) {
+      const dispatchResult = await this.dispatchIssue(issue, null);
+      if (dispatchResult.dispatched) {
         dispatchedIssueIds.push(issue.id);
+        modeDecisions.push(dispatchResult.rightSizingDecision);
         admittedSnapshots.push(candidateSnapshot);
       }
     }
@@ -401,6 +410,7 @@ export class OrchestratorCore {
     return {
       validation,
       dispatchedIssueIds,
+      modeDecisions,
       stopRequests: reconcileResult.stopRequests,
       trackerFetchFailed: false,
       reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
@@ -535,9 +545,9 @@ export class OrchestratorCore {
       };
     }
 
-    const dispatched = await this.dispatchIssue(issue, retryEntry.attempt);
+    const dispatchResult = await this.dispatchIssue(issue, retryEntry.attempt);
     return {
-      dispatched,
+      dispatched: dispatchResult.dispatched,
       released: false,
       retryEntry: null,
     };
@@ -1466,7 +1476,16 @@ export class OrchestratorCore {
   private async dispatchIssue(
     issue: Issue,
     attempt: number | null,
-  ): Promise<boolean> {
+  ): Promise<
+    | {
+        dispatched: boolean;
+        rightSizingDecision: RightSizingDecision;
+      }
+    | {
+        dispatched: false;
+        rightSizingDecision: RightSizingDecision | null;
+      }
+  > {
     const stagesConfig = this.config.stages;
     let stage: StageDefinition | null = null;
     let stageName: string | null = null;
@@ -1509,7 +1528,10 @@ export class OrchestratorCore {
             );
           });
         }
-        return false;
+        return {
+          dispatched: false,
+          rightSizingDecision: null,
+        };
       }
 
       if (stage !== null && stage.type === "gate") {
@@ -1539,7 +1561,10 @@ export class OrchestratorCore {
           void this.handleEnsembleGate(issue, stage);
         }
         // Human gates (or ensemble gates without handler): stay in gate state.
-        return false;
+        return {
+          dispatched: false,
+          rightSizingDecision: null,
+        };
       }
 
       // Track the issue's current stage
@@ -1572,6 +1597,13 @@ export class OrchestratorCore {
       );
     }
 
+    const rightSizingDecision = createRightSizingDecision({
+      issue,
+      config: this.config,
+      stageName,
+      attempt,
+    });
+
     try {
       const reworkCount = this.state.issueReworkCounts[issue.id] ?? 0;
       const spawned = await this.spawnWorker({
@@ -1581,6 +1613,7 @@ export class OrchestratorCore {
         stageName,
         reworkCount,
         isFirstDispatch,
+        rightSizingDecision,
       });
       const runEntry: RunningEntry = {
         ...createEmptyLiveSession(),
@@ -1595,7 +1628,10 @@ export class OrchestratorCore {
       this.state.running[issue.id] = runEntry;
       this.state.claimed.add(issue.id);
       this.clearRetryEntry(issue.id);
-      return true;
+      return {
+        dispatched: true,
+        rightSizingDecision,
+      };
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
@@ -1624,7 +1660,10 @@ export class OrchestratorCore {
         delayType: "failure",
       });
       delete this.state.running[issue.id];
-      return false;
+      return {
+        dispatched: false,
+        rightSizingDecision: null,
+      };
     }
   }
 

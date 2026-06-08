@@ -18,6 +18,7 @@ export * from "./logging/structured-logger.js";
 export * from "./observability/dashboard-server.js";
 export * from "./orchestrator/core.js";
 export * from "./orchestrator/gate-handler.js";
+export * from "./orchestrator/right-sizing.js";
 export * from "./orchestrator/runtime-host.js";
 export * from "./orchestrator/supervision.js";
 export * from "./workspace/hooks.js";

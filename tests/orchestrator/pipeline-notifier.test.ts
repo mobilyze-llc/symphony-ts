@@ -325,6 +325,29 @@ describe("formatNotification", () => {
     expect(result.text).toContain("Stage: implement");
   });
 
+  it("formats issue_dispatched with right-sizing details in text", () => {
+    const result = formatNotification({
+      type: "issue_dispatched",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      stageName: "implement",
+      reworkCount: 0,
+      rightSizingDecision: createRightSizingDecision({
+        mode: "thin",
+        modelRouting: {
+          allowed: true,
+          reason: "ambiguous_routing",
+        },
+        triggerHits: ["merge_path", "scope_overlap"],
+      }),
+    });
+
+    expect(result.text).toContain("Mode: thin");
+    expect(result.text).toContain("Model routing: allowed (ambiguous_routing)");
+    expect(result.text).toContain("Triggers: merge_path, scope_overlap");
+  });
+
   it("formats issue_dropped", () => {
     const result = formatNotification({
       type: "issue_dropped",
@@ -641,6 +664,48 @@ describe("formatNotification", () => {
     expect(fieldsBlock.fields).toHaveLength(2);
     expect(fieldsBlock.fields[0]?.text).toContain("Stage: implement");
     expect(fieldsBlock.fields[1]?.text).toContain("Rework #2");
+  });
+
+  it("issue_dispatched includes right-sizing fields when present", () => {
+    const result = formatNotification({
+      type: "issue_dispatched",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      stageName: "implement",
+      reworkCount: 1,
+      rightSizingDecision: createRightSizingDecision({
+        mode: "full",
+        modelRouting: {
+          allowed: true,
+          reason: "risk_trigger",
+        },
+        triggerHits: ["high_risk_files", "repeat_retry"],
+      }),
+    });
+    const blocks = result.blocks!;
+    const fieldsBlock = blocks[2] as {
+      type: "section";
+      fields: Array<{ text: string }>;
+    };
+
+    expect(fieldsBlock.fields).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: expect.stringContaining("Mode: full"),
+        }),
+        expect.objectContaining({
+          text: expect.stringContaining(
+            "Model routing: allowed (risk_trigger)",
+          ),
+        }),
+        expect.objectContaining({
+          text: expect.stringContaining(
+            "Triggers:* high_risk_files, repeat_retry",
+          ),
+        }),
+      ]),
+    );
   });
 
   it("issue_dispatched without rework omits rework field", () => {
@@ -1121,7 +1186,77 @@ describe("PipelineNotifier", () => {
     expect(poster.calls[0]?.blocks).toBeDefined();
     expect(Array.isArray(poster.calls[0]?.blocks)).toBe(true);
   });
+
+  it("delivers right-sizing details through the notifier post payload", async () => {
+    const poster = createMockPoster();
+    const notifier = new PipelineNotifier({
+      channel: "C12345",
+      poster,
+    });
+
+    notifier.notify({
+      type: "issue_dispatched",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      stageName: "implement",
+      reworkCount: 0,
+      rightSizingDecision: createRightSizingDecision({
+        mode: "prototype",
+        modelRouting: {
+          allowed: false,
+          reason: "not_needed",
+        },
+        triggerHits: [],
+      }),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(poster.calls).toHaveLength(1);
+    expect(poster.calls[0]?.text).toContain("Mode: prototype");
+    expect(poster.calls[0]?.text).toContain("Model routing: off (not_needed)");
+    expect(JSON.stringify(poster.calls[0]?.blocks ?? [])).toContain(
+      "Mode: prototype",
+    );
+  });
 });
+
+function createRightSizingDecision(input: {
+  mode: "prototype" | "thin" | "full";
+  modelRouting: {
+    allowed: boolean;
+    reason: "not_needed" | "ambiguous_routing" | "risk_trigger";
+  };
+  triggerHits: string[];
+}) {
+  return {
+    classifier: "deterministic-v1" as const,
+    mode: input.mode,
+    stageName: "implement",
+    reason: `Selected ${input.mode}`,
+    rationale: [`${input.mode} rationale`],
+    triggerHits: input.triggerHits,
+    signals: {
+      explicitModeHint: null,
+      declaredScopeFiles: ["src/features/example.ts"],
+      changedFiles: ["src/features/example.ts"],
+      impactSurface: "narrow" as const,
+      highRiskFiles: [],
+      stageCount: 2,
+      gateCount: 0,
+      reviewerCount: 0,
+      humanGateCount: 0,
+      blockedByCount: 0,
+      retryCount: 0,
+      priority: null,
+      labels: [],
+      plannedTurns: 8,
+      budget: "low" as const,
+    },
+    modelRouting: input.modelRouting,
+  };
+}
 
 describe("formatTokensCompact", () => {
   it("formats tokens below 1k as plain numbers", () => {

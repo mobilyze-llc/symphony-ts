@@ -5,7 +5,7 @@
  * Failures are logged and swallowed — never affect pipeline correctness.
  */
 
-import type { ExecutionHistory } from "../domain/model.js";
+import type { ExecutionHistory, RightSizingDecision } from "../domain/model.js";
 import { getDisplayVersion } from "../version.js";
 
 // ---------------------------------------------------------------------------
@@ -114,6 +114,7 @@ export interface IssueDispatchedEvent {
   issueUrl: string | null;
   stageName: string | null;
   reworkCount: number;
+  rightSizingDecision?: RightSizingDecision;
 }
 
 export interface IssueDroppedEvent {
@@ -175,6 +176,42 @@ export function formatTokensCompact(tokens: number): string {
   if (tokens >= 1_000_000) return formatCompactUnit(tokens / 1_000_000, "M");
   if (tokens >= 1_000) return formatCompactUnit(tokens / 1_000, "k");
   return `${tokens}`;
+}
+
+function formatRightSizingRouting(decision: RightSizingDecision): string {
+  const prefix = decision.modelRouting.allowed ? "allowed" : "off";
+  return `${prefix} (${decision.modelRouting.reason})`;
+}
+
+function buildRightSizingLines(decision: RightSizingDecision): {
+  textLines: string[];
+  fields: SlackTextObject[];
+} {
+  const textLines = [
+    `Mode: ${decision.mode}`,
+    `Model routing: ${formatRightSizingRouting(decision)}`,
+  ];
+  const fields: SlackTextObject[] = [
+    {
+      type: "mrkdwn",
+      text: `:straight_ruler: *Mode: ${decision.mode}*`,
+    },
+    {
+      type: "mrkdwn",
+      text: `:compass: *Model routing: ${formatRightSizingRouting(decision)}*`,
+    },
+  ];
+
+  if (decision.triggerHits.length > 0) {
+    const triggers = decision.triggerHits.join(", ");
+    textLines.push(`Triggers: ${triggers}`);
+    fields.push({
+      type: "mrkdwn",
+      text: `:triangular_flag_on_post: *Triggers:* ${triggers}`,
+    });
+  }
+
+  return { textLines, fields };
 }
 
 // ---------------------------------------------------------------------------
@@ -517,6 +554,11 @@ export function formatNotification(
       if (event.reworkCount > 0) {
         parts.push(`Rework #${event.reworkCount}`);
       }
+      if (event.rightSizingDecision !== undefined) {
+        parts.push(
+          ...buildRightSizingLines(event.rightSizingDecision).textLines,
+        );
+      }
       parts.push(version);
       const text = parts.join("\n");
 
@@ -552,6 +594,9 @@ export function formatNotification(
           type: "mrkdwn",
           text: `:repeat: *Rework #${event.reworkCount}*`,
         });
+      }
+      if (event.rightSizingDecision !== undefined) {
+        fields.push(...buildRightSizingLines(event.rightSizingDecision).fields);
       }
       if (fields.length > 0) {
         blocks.push({ type: "section", fields });
