@@ -109,6 +109,7 @@ export const LOOP_TRACE_EVENT_KINDS = [
   // Reserved for later dispatcher phases; readers should tolerate absence.
   "test_result",
   "feedback_event",
+  "continuous_feedback",
   "stage_transition",
   "gate_result",
   "escalation",
@@ -146,6 +147,14 @@ export interface LoopTraceWorkerExit {
   totalTokens: number;
 }
 
+export interface LoopTraceContinuousFeedback {
+  event: "commit" | "diff" | "checkpoint";
+  status: "pass" | "finding";
+  reviewerRunner: string;
+  reviewerModel: string | null;
+  findingSignatures: string[];
+}
+
 export interface LoopTraceEntry {
   sequence: number;
   timestamp: string;
@@ -159,6 +168,7 @@ export interface LoopTraceEntry {
   prompt?: LoopTracePromptSummary;
   toolAction?: LoopTraceToolAction;
   fileDelta?: LoopTraceFileDelta;
+  continuousFeedback?: LoopTraceContinuousFeedback;
   stageTransition?: LoopTraceStageTransition;
   workerExit?: LoopTraceWorkerExit;
 }
@@ -174,6 +184,7 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "gate_result",
   "tracker_write",
   "hard_stop_trigger",
+  "continuous_feedback",
 ] as const;
 
 export type DispatcherRunJournalEventKind =
@@ -182,6 +193,7 @@ export type DispatcherRunJournalEventKind =
 export const DISPATCHER_OPERATIONS = [
   "dispatcher",
   "supervisor",
+  "feedback_lane",
   "tracker_write",
   "gate",
 ] as const;
@@ -623,6 +635,40 @@ export interface RightSizingDecision {
   modelRouting: RightSizingModelRouting;
 }
 
+export type ContinuousFeedbackEvent = "commit" | "diff" | "checkpoint";
+export type ContinuousFeedbackStatus = "pass" | "finding";
+export type ContinuousFeedbackFindingSeverity = "info" | "warning" | "blocking";
+export type ContinuousFeedbackFindingStatus = "open" | "resolved" | "bounced";
+
+export interface ContinuousFeedbackLane {
+  runner: string;
+  model: string | null;
+  role: string;
+}
+
+export interface ContinuousFeedbackFinding {
+  signature: string;
+  title: string;
+  detail: string;
+  severity: ContinuousFeedbackFindingSeverity;
+  file: string | null;
+  line: number | null;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  occurrences: number;
+  status: ContinuousFeedbackFindingStatus;
+  reviewerLane: ContinuousFeedbackLane;
+}
+
+export interface ContinuousFeedbackIssueState {
+  status: ContinuousFeedbackStatus;
+  lastEvent: ContinuousFeedbackEvent;
+  lastCheckedAt: string;
+  reviewerLane: ContinuousFeedbackLane;
+  workerLane: ContinuousFeedbackLane;
+  findings: ContinuousFeedbackFinding[];
+}
+
 export interface CodexTotals {
   inputTokens: number;
   outputTokens: number;
@@ -676,6 +722,7 @@ export interface OrchestratorState {
   issueFirstDispatchedAt: Record<string, string>;
   issueExecutionHistory: Record<string, ExecutionHistory>;
   loopTraceJournal: Record<string, LoopTraceJournal>;
+  continuousFeedback: Record<string, ContinuousFeedbackIssueState>;
   dispatcherRunJournal: DispatcherRunJournal;
   dispatcherLeases: Record<string, DispatcherLease>;
   managerRunJournal: ManagerRunJournal;
@@ -788,6 +835,7 @@ export function createInitialOrchestratorState(input: {
     issueFirstDispatchedAt: {},
     issueExecutionHistory: {},
     loopTraceJournal: {},
+    continuousFeedback: {},
     dispatcherRunJournal: [],
     dispatcherLeases: {},
     managerRunJournal: [],

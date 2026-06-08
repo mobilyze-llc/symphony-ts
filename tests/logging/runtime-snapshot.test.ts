@@ -125,6 +125,94 @@ describe("runtime snapshot", () => {
     expect(snapshot.running[0]!.activity_summary).toBe("Editing src/foo.ts");
   });
 
+  it("projects continuous feedback status and deduped findings", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    state.running["issue-1"] = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Feedback checkpoint",
+      turnCount: 1,
+      codexInputTokens: 10,
+      codexOutputTokens: 5,
+      codexTotalTokens: 15,
+    });
+    state.continuousFeedback["issue-1"] = {
+      status: "finding",
+      lastEvent: "checkpoint",
+      lastCheckedAt: "2026-03-06T10:00:05.000Z",
+      reviewerLane: {
+        runner: "pi",
+        model: "local-flash",
+        role: "continuous-feedback",
+      },
+      workerLane: {
+        runner: "codex",
+        model: null,
+        role: "implement",
+      },
+      findings: [
+        {
+          signature: "src/core.ts:null-check",
+          title: "Missing null check",
+          detail: "Guard optional reviewer output.",
+          severity: "blocking",
+          file: "src/core.ts",
+          line: 42,
+          firstSeenAt: "2026-03-06T10:00:01.000Z",
+          lastSeenAt: "2026-03-06T10:00:05.000Z",
+          occurrences: 2,
+          status: "bounced",
+          reviewerLane: {
+            runner: "pi",
+            model: "local-flash",
+            role: "continuous-feedback",
+          },
+        },
+      ],
+    };
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running[0]!.continuous_feedback).toEqual({
+      status: "finding",
+      last_event: "checkpoint",
+      last_checked_at: "2026-03-06T10:00:05.000Z",
+      reviewer_lane: {
+        runner: "pi",
+        model: "local-flash",
+        role: "continuous-feedback",
+      },
+      worker_lane: {
+        runner: "codex",
+        model: null,
+        role: "implement",
+      },
+      findings: [
+        {
+          signature: "src/core.ts:null-check",
+          title: "Missing null check",
+          detail: "Guard optional reviewer output.",
+          severity: "blocking",
+          file: "src/core.ts",
+          line: 42,
+          occurrences: 2,
+          status: "bounced",
+          first_seen_at: "2026-03-06T10:00:01.000Z",
+          last_seen_at: "2026-03-06T10:00:05.000Z",
+        },
+      ],
+    });
+  });
+
   it("includes a loop trace preview for running rows", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,

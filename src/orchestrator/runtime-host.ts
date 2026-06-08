@@ -33,6 +33,7 @@ import type {
 } from "../config/types.js";
 import { WorkflowWatcher } from "../config/workflow-watch.js";
 import type {
+  ContinuousFeedbackEvent,
   DispatcherRunJournal,
   DispatcherRunJournalEntry,
   ExecutionHistory,
@@ -94,7 +95,13 @@ import type { IssueTracker } from "../tracker/tracker.js";
 import { getDisplayVersion } from "../version.js";
 import { WorkspaceHookRunner } from "../workspace/hooks.js";
 import { WorkspaceManager } from "../workspace/workspace-manager.js";
+import {
+  type ContinuousFeedbackCommandExecutor,
+  createContinuousFeedbackProvider,
+  runContinuousFeedbackCommand,
+} from "./continuous-feedback-provider.js";
 import type {
+  ContinuousFeedbackCheckpointResult,
   OrchestratorCoreOptions,
   StopRequest,
   SupervisionResteerRequest,
@@ -160,6 +167,8 @@ export interface RuntimeHostOptions {
     workspaceRoot: string,
     entry: DispatcherRunJournalEntry,
   ) => Promise<void>;
+  runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
+  runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
   now?: () => Date;
 }
 
@@ -318,6 +327,18 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         });
         await logAgentEvent(this.logger, event);
         await this.recordLoopTraceForAgentEvent(event);
+        const feedbackEvent = toContinuousFeedbackEvent(event);
+        if (feedbackEvent !== null) {
+          const feedbackResult =
+            await this.orchestrator.runContinuousFeedbackCheckpoint({
+              issueId: event.issueId,
+              event: feedbackEvent,
+            });
+          await this.recordLoopTraceForContinuousFeedback(
+            event,
+            feedbackResult,
+          );
+        }
       });
     };
     this.managesAgentRunner =
@@ -342,6 +363,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       },
     });
 
+    const runContinuousFeedback =
+      options.runContinuousFeedback ??
+      createContinuousFeedbackProvider({
+        resolveWorkspacePath: (issueId) =>
+          this.workspaceManager.resolveForIssue(issueId).workspacePath,
+        runCommand:
+          options.runContinuousFeedbackCommand ?? runContinuousFeedbackCommand,
+      });
+
     const orchestratorOptions: OrchestratorCoreOptions = {
       config: options.config,
       tracker: options.tracker,
@@ -350,6 +380,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       writeRunJournalEntry: async (entry) => {
         await this.persistDispatcherRunJournalEntry(entry);
       },
+      runContinuousFeedback,
       ...(this.tracker instanceof LinearTrackerClient
         ? {
             postComment: async (issueId: string, body: string) => {
@@ -1225,6 +1256,39 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
 
     await this.appendLoopTraceEntries(event.issueId, entries);
+  }
+
+  private async recordLoopTraceForContinuousFeedback(
+    event: AgentRunnerEvent,
+    result: ContinuousFeedbackCheckpointResult,
+  ): Promise<void> {
+    if (!result.ran) {
+      return;
+    }
+    const stage =
+      this.orchestrator.getState().issueStages[event.issueId] ?? null;
+    await this.appendLoopTraceEntries(event.issueId, [
+      {
+        timestamp: event.timestamp,
+        issueId: event.issueId,
+        issueIdentifier: event.issueIdentifier,
+        stage,
+        attempt: event.attempt,
+        sessionId: event.sessionId ?? null,
+        kind: "continuous_feedback",
+        summary:
+          result.status === "pass"
+            ? "Continuous feedback passed."
+            : `Continuous feedback found ${result.findingSignatures.length} issue(s).`,
+        continuousFeedback: {
+          event: result.event,
+          status: result.status === "finding" ? "finding" : "pass",
+          reviewerRunner: result.reviewerLane?.runner ?? "unknown",
+          reviewerModel: result.reviewerLane?.model ?? null,
+          findingSignatures: result.findingSignatures,
+        },
+      },
+    ]);
   }
 
   private async createRunningSupervisionSnapshot(entry: RunningEntry) {
@@ -2796,6 +2860,12 @@ function getIssueTraceStatus(
     return "claimed";
   }
   return "released";
+}
+
+function toContinuousFeedbackEvent(
+  event: AgentRunnerEvent,
+): ContinuousFeedbackEvent | null {
+  return event.event === "turn_completed" ? "checkpoint" : null;
 }
 
 function shouldForgetLoopTraceJournal(

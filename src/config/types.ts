@@ -53,6 +53,17 @@ export interface WorkflowRunnerConfig {
   model: string | null;
 }
 
+export type WorkflowContinuousFeedbackEvent = "commit" | "diff" | "checkpoint";
+
+export interface WorkflowContinuousFeedbackConfig {
+  enabled: boolean;
+  events: WorkflowContinuousFeedbackEvent[];
+  runner: string;
+  model: string | null;
+  role: string;
+  bounceOnFinding: boolean;
+}
+
 export interface WorkflowCodexConfig {
   command: string;
   approvalPolicy: unknown;
@@ -129,6 +140,7 @@ export interface ResolvedWorkflowConfig {
   agent: WorkflowAgentConfig;
   hardStops?: WorkflowHardStopsConfig;
   runner: WorkflowRunnerConfig;
+  continuousFeedback?: WorkflowContinuousFeedbackConfig;
   codex: WorkflowCodexConfig;
   server: WorkflowServerConfig;
   observability: WorkflowObservabilityConfig;
