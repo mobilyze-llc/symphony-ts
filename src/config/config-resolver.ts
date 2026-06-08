@@ -7,6 +7,12 @@ import { ERROR_CODES } from "../errors/codes.js";
 import {
   DEFAULT_ACTIVE_STATES,
   DEFAULT_CODEX_COMMAND,
+  DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+  DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
+  DEFAULT_HARD_STOP_MAX_ITERATIONS,
+  DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
+  DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
+  DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
   DEFAULT_HOOK_TIMEOUT_MS,
   DEFAULT_LINEAR_ENDPOINT,
   DEFAULT_LINEAR_NETWORK_TIMEOUT_MS,
@@ -53,6 +59,7 @@ export function resolveWorkflowConfig(
   const workspace = asRecord(config.workspace);
   const hooks = asRecord(config.hooks);
   const agent = asRecord(config.agent);
+  const hardStops = asRecord(config.hard_stops);
   const runner = asRecord(config.runner);
   const codex = asRecord(config.codex);
   const server = asRecord(config.server);
@@ -111,6 +118,26 @@ export function resolveWorkflowConfig(
       maxConcurrentAgentsByState: readStateConcurrencyMap(
         agent.max_concurrent_agents_by_state,
       ),
+    },
+    hardStops: {
+      maxIterations:
+        readPositiveInteger(hardStops.max_iterations) ??
+        DEFAULT_HARD_STOP_MAX_ITERATIONS,
+      noProgressTurns:
+        readNonNegativeInteger(hardStops.no_progress_turns) ??
+        DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
+      maxTokensPerUnit:
+        readPositiveInteger(hardStops.max_tokens_per_unit) ??
+        DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
+      maxDollarBudgetUsd:
+        readPositiveNumber(hardStops.max_dollar_budget_usd) ??
+        DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
+      premiumBudgetPauseRatio:
+        readRatio(hardStops.premium_budget_pause_ratio) ??
+        DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
+      estimatedCostPer1kTokensUsd:
+        readPositiveNumber(hardStops.estimated_cost_per_1k_tokens_usd) ??
+        DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
     },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,
@@ -267,6 +294,15 @@ function readPositiveInteger(value: unknown): number | null {
   return parsed;
 }
 
+function readPositiveNumber(value: unknown): number | null {
+  const parsed = readNumber(value);
+  if (parsed === null || parsed <= 0) {
+    return null;
+  }
+
+  return parsed;
+}
+
 function readNonNegativeInteger(value: unknown): number | null {
   const parsed = readInteger(value);
   if (parsed === null || parsed < 0) {
@@ -274,6 +310,28 @@ function readNonNegativeInteger(value: unknown): number | null {
   }
 
   return parsed;
+}
+
+function readRatio(value: unknown): number | null {
+  const parsed = readNumber(value);
+  if (parsed === null || parsed <= 0 || parsed > 1) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function readNumber(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
 }
 
 function readStringList(value: unknown, fallback: readonly string[]): string[] {

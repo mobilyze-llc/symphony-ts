@@ -340,6 +340,39 @@ describe("orchestrator core", () => {
     expect(timers.scheduled[0]?.delayMs).toBe(1_000);
   });
 
+  it("records a hard_stop_trigger journal entry and does not continue a paused unit", async () => {
+    const orchestrator = createOrchestrator();
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "premium_spend_near_ceiling",
+        reason: "Estimated premium spend is near ceiling.",
+        turnCount: 2,
+        totalTokens: 150_000,
+        estimatedCostUsd: 40,
+      },
+    });
+
+    expect(retry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "hard_stop_trigger" &&
+            entry.issueId === "1" &&
+            entry.metadata.outcome === "PAUSED-budget" &&
+            entry.metadata.trigger === "premium_spend_near_ceiling",
+        ),
+    ).toBe(true);
+  });
+
   it("keeps worker running state when dispatcher lease completion cannot be persisted", async () => {
     const timers = createFakeTimerScheduler();
     const orchestrator = createOrchestrator({

@@ -8,6 +8,14 @@ import {
 } from "../codex/app-server-client.js";
 import { createLinearGraphqlDynamicTool } from "../codex/linear-graphql-tool.js";
 import { createWorkpadSyncDynamicTool } from "../codex/workpad-sync-tool.js";
+import {
+  DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+  DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
+  DEFAULT_HARD_STOP_MAX_ITERATIONS,
+  DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
+  DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
+  DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
+} from "../config/defaults.js";
 import type {
   ResolvedWorkflowConfig,
   StageDefinition,
@@ -24,6 +32,14 @@ import {
 } from "../domain/model.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import { applyCodexEventToSession } from "../logging/session-metrics.js";
+import {
+  type HardStopDecision,
+  type ModeScopedPermissionPolicy,
+  evaluateBudgetHardStop,
+  evaluateIterationHardStop,
+  evaluateNoProgressHardStop,
+  resolveHardStopsConfig,
+} from "../policy/hard-stops.js";
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import type { IssueTracker } from "../tracker/tracker.js";
@@ -64,6 +80,7 @@ export interface AgentRunnerCodexClientFactoryInput {
   turnTimeoutMs: number;
   stallTimeoutMs: number;
   dynamicTools: CodexDynamicTool[];
+  modePolicy?: ModeScopedPermissionPolicy;
   onEvent: (event: CodexClientEvent) => void;
 }
 
@@ -86,6 +103,7 @@ export interface AgentRunInput {
   stage?: StageDefinition | null;
   stageName?: string | null;
   reworkCount?: number;
+  modePolicy?: ModeScopedPermissionPolicy;
 }
 
 export interface AgentRunResult {
@@ -96,6 +114,7 @@ export interface AgentRunResult {
   turnsCompleted: number;
   lastTurn: CodexTurnResult | null;
   rateLimits: Record<string, unknown> | null;
+  hardStop?: HardStopDecision | null;
 }
 
 export class AgentRunnerError extends Error {
@@ -193,8 +212,18 @@ export class AgentRunner {
     const effectiveRunnerKind = (stage?.runner ??
       this.config.runner.kind) as RunnerKind;
     const effectiveModel = stage?.model ?? this.config.runner.model;
-    const effectiveMaxTurns = stage?.maxTurns ?? this.config.agent.maxTurns;
+    const hardStops = resolveHardStopsConfig(
+      this.config.hardStops,
+      DEFAULT_HARD_STOPS_CONFIG,
+    );
+    const effectiveMaxTurns = Math.min(
+      stage?.maxTurns ?? this.config.agent.maxTurns,
+      hardStops.maxIterations,
+    );
     const effectivePromptTemplate = stage?.prompt ?? this.config.promptTemplate;
+    let hardStop: HardStopDecision | null = null;
+    let previousProgressSignature: string | null = null;
+    let repeatedNoProgressTurns = 0;
 
     try {
       abortController.throwIfAborted({
@@ -249,18 +278,28 @@ export class AgentRunner {
               config: { kind: effectiveRunnerKind, model: effectiveModel },
               cwd: factoryInput.cwd,
               onEvent: factoryInput.onEvent,
+              ...(factoryInput.modePolicy === undefined
+                ? {}
+                : { modePolicy: factoryInput.modePolicy }),
             })
         : this.createCodexClient;
       client = effectiveClientFactory({
         command: this.config.codex.command,
         cwd: workspace.path,
-        approvalPolicy: this.config.codex.approvalPolicy,
-        threadSandbox: this.config.codex.threadSandbox,
-        turnSandboxPolicy: this.config.codex.turnSandboxPolicy,
+        approvalPolicy:
+          input.modePolicy?.approvalPolicy ?? this.config.codex.approvalPolicy,
+        threadSandbox:
+          input.modePolicy?.threadSandbox ?? this.config.codex.threadSandbox,
+        turnSandboxPolicy:
+          input.modePolicy?.turnSandboxPolicy ??
+          this.config.codex.turnSandboxPolicy,
         readTimeoutMs: this.config.codex.readTimeoutMs,
         turnTimeoutMs: this.config.codex.turnTimeoutMs,
         stallTimeoutMs: this.config.codex.stallTimeoutMs,
         dynamicTools: this.createDynamicTools(),
+        ...(input.modePolicy === undefined
+          ? {}
+          : { modePolicy: input.modePolicy }),
         onEvent: (event) => {
           applyCodexEventToSession(liveSession, event);
           if (
@@ -339,6 +378,15 @@ export class AgentRunner {
           ...(lastTurn.message === null ? {} : { message: lastTurn.message }),
         });
 
+        hardStop = evaluateBudgetHardStop({
+          config: hardStops,
+          turnCount: liveSession.turnCount,
+          totalTokens: liveSession.totalStageTotalTokens,
+        });
+        if (hardStop !== null) {
+          break;
+        }
+
         // Early exit: agent signaled stage completion or failure
         if (lastTurn.message?.trimEnd().endsWith("[STAGE_COMPLETE]")) {
           break;
@@ -371,6 +419,33 @@ export class AgentRunner {
         if (!this.isIssueStillActive(issue)) {
           break;
         }
+
+        const progressSignature = createProgressSignature(issue, lastTurn);
+        if (progressSignature === previousProgressSignature) {
+          repeatedNoProgressTurns += 1;
+        } else {
+          previousProgressSignature = progressSignature;
+          repeatedNoProgressTurns = 1;
+        }
+
+        hardStop = evaluateNoProgressHardStop({
+          config: hardStops,
+          repeatedNoProgressTurns,
+          turnCount: liveSession.turnCount,
+          totalTokens: liveSession.totalStageTotalTokens,
+        });
+        if (hardStop !== null) {
+          break;
+        }
+
+        hardStop = evaluateIterationHardStop({
+          config: hardStops,
+          turnCount: liveSession.turnCount,
+          totalTokens: liveSession.totalStageTotalTokens,
+        });
+        if (hardStop !== null) {
+          break;
+        }
       }
 
       runAttempt.status = "succeeded";
@@ -383,6 +458,7 @@ export class AgentRunner {
         turnsCompleted: liveSession.turnCount,
         lastTurn,
         rateLimits,
+        hardStop,
       };
     } catch (error) {
       const wrapped = this.toAgentRunnerError({
@@ -534,6 +610,9 @@ function createDefaultClientFactory(
         config: { kind, model: runnerModel },
         cwd: input.cwd,
         onEvent: input.onEvent,
+        ...(input.modePolicy === undefined
+          ? {}
+          : { modePolicy: input.modePolicy }),
       });
   }
 
@@ -583,6 +662,26 @@ function cloneIssue(issue: Issue): Issue {
     labels: [...issue.labels],
     blockedBy: issue.blockedBy.map((blocker) => ({ ...blocker })),
   };
+}
+
+const DEFAULT_HARD_STOPS_CONFIG = {
+  maxIterations: DEFAULT_HARD_STOP_MAX_ITERATIONS,
+  noProgressTurns: DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
+  maxTokensPerUnit: DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
+  maxDollarBudgetUsd: DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
+  premiumBudgetPauseRatio: DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
+  estimatedCostPer1kTokensUsd:
+    DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+};
+
+function createProgressSignature(issue: Issue, turn: CodexTurnResult): string {
+  return JSON.stringify({
+    state: normalizeIssueState(issue.state),
+    title: issue.title,
+    updatedAt: issue.updatedAt,
+    status: turn.status,
+    message: turn.message?.trim() ?? null,
+  });
 }
 
 function createAgentAbortController(signal: AbortSignal | undefined): {

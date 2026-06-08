@@ -11,6 +11,7 @@ import type {
   CodexUsage,
 } from "../codex/app-server-client.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
+import type { ClaudePermissionMode } from "../policy/hard-stops.js";
 
 // ai-sdk-provider-claude-code uses short model names, not full Anthropic IDs.
 // Map standard names to provider-expected short names.
@@ -33,6 +34,8 @@ export interface ClaudeCodeRunnerOptions {
   onEvent?: (event: CodexClientEvent) => void;
   /** Interval in ms for workspace file-change heartbeat polling. Defaults to 5000. Set to 0 to disable. */
   heartbeatIntervalMs?: number;
+  permissionMode?: ClaudePermissionMode;
+  maxBudgetUsd?: number;
 }
 
 export class ClaudeCodeRunner implements AgentRunnerCodexClient {
@@ -190,10 +193,10 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
       const result = await generateText({
         model: claudeCode(resolvedModel, {
           cwd: this.options.cwd,
-          permissionMode: "bypassPermissions",
+          permissionMode: this.options.permissionMode ?? "bypassPermissions",
           env: { SYMPHONY_PIPELINE: "1" },
           settingSources: ["user", "project"],
-          maxBudgetUsd: 50,
+          maxBudgetUsd: this.options.maxBudgetUsd ?? 50,
           streamingInput: "always",
           hooks: {
             PreToolUse: [

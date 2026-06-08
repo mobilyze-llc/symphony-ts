@@ -23,6 +23,12 @@ export const DEFAULT_MAX_RETRY_ATTEMPTS = 5;
 export const DEFAULT_MAX_CONCURRENT_AGENTS_BY_STATE = Object.freeze(
   {},
 ) as Readonly<Record<string, number>>;
+export const DEFAULT_HARD_STOP_MAX_ITERATIONS = DEFAULT_MAX_TURNS;
+export const DEFAULT_HARD_STOP_NO_PROGRESS_TURNS = 3;
+export const DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT = 200_000;
+export const DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD = 50;
+export const DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO = 0.8;
+export const DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD = 0.05;
 
 export const DEFAULT_RUNNER_KIND = "codex";
 
@@ -63,6 +69,15 @@ export const SPEC_DEFAULTS = Object.freeze({
     maxRetryBackoffMs: DEFAULT_MAX_RETRY_BACKOFF_MS,
     maxRetryAttempts: DEFAULT_MAX_RETRY_ATTEMPTS,
     maxConcurrentAgentsByState: DEFAULT_MAX_CONCURRENT_AGENTS_BY_STATE,
+  },
+  hardStops: {
+    maxIterations: DEFAULT_HARD_STOP_MAX_ITERATIONS,
+    noProgressTurns: DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
+    maxTokensPerUnit: DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
+    maxDollarBudgetUsd: DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
+    premiumBudgetPauseRatio: DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
+    estimatedCostPer1kTokensUsd:
+      DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
   },
   runner: {
     kind: DEFAULT_RUNNER_KIND,

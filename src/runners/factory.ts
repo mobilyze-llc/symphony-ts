@@ -21,6 +21,12 @@ export function createRunnerFromConfig(
         cwd,
         model,
         onEvent,
+        ...(input.modePolicy === undefined
+          ? {}
+          : {
+              permissionMode: input.modePolicy.claudePermissionMode,
+              maxBudgetUsd: input.modePolicy.maxBudgetUsd,
+            }),
       });
 
     case "gemini":

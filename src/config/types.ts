@@ -39,6 +39,15 @@ export interface WorkflowAgentConfig {
   maxConcurrentAgentsByState: Readonly<Record<string, number>>;
 }
 
+export interface WorkflowHardStopsConfig {
+  maxIterations: number;
+  noProgressTurns: number;
+  maxTokensPerUnit: number;
+  maxDollarBudgetUsd: number;
+  premiumBudgetPauseRatio: number;
+  estimatedCostPer1kTokensUsd: number;
+}
+
 export interface WorkflowRunnerConfig {
   kind: string;
   model: string | null;
@@ -118,6 +127,7 @@ export interface ResolvedWorkflowConfig {
   workspace: WorkflowWorkspaceConfig;
   hooks: WorkflowHooksConfig;
   agent: WorkflowAgentConfig;
+  hardStops?: WorkflowHardStopsConfig;
   runner: WorkflowRunnerConfig;
   codex: WorkflowCodexConfig;
   server: WorkflowServerConfig;

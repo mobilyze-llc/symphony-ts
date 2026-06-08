@@ -185,6 +185,12 @@ issue to "In Review" and leave a comment summarizing what you did.
 | `agent.max_turns` | Max Codex turns per run | `20` |
 | `agent.max_retry_backoff_ms` | Max retry back-off delay in ms (exponential cap) | `300000` |
 | `agent.max_concurrent_agents_by_state` | Per-state concurrency overrides (map of state → limit) | `{}` |
+| `hard_stops.max_iterations` | Per-unit turn cap before `STALLED` | `20` |
+| `hard_stops.no_progress_turns` | Repeated unchanged turns before `STALLED`; `0` disables | `3` |
+| `hard_stops.max_tokens_per_unit` | Token ceiling before `PAUSED-budget` | `200000` |
+| `hard_stops.max_dollar_budget_usd` | Estimated dollar ceiling before `PAUSED-budget` | `50` |
+| `hard_stops.premium_budget_pause_ratio` | Early pause threshold as a share of dollar ceiling | `0.8` |
+| `hard_stops.estimated_cost_per_1k_tokens_usd` | Fallback cost estimate for token-only providers | `0.05` |
 | `codex.command` | Shell command to launch Codex | `codex app-server` |
 | `codex.approval_policy` | Codex approval policy, passed through to the installed Codex schema | Inherits Codex default |
 | `codex.thread_sandbox` | Thread-level sandbox mode (e.g. `workspace-write`) | `null` |

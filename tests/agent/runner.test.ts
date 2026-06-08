@@ -154,6 +154,156 @@ describe("AgentRunner", () => {
     expect(prompts[1]).not.toContain("Initial prompt for ABC-123 attempt=2");
   });
 
+  it("returns a hard-stop result when the iteration cap is reached", async () => {
+    const root = await createRoot();
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 2,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 10_000,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+        },
+      },
+      tracker: createTracker({
+        refreshStates: [
+          { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+          { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+        ],
+      }),
+      createCodexClient: (input) =>
+        createStubCodexClient([], input, {
+          messages: ["still working", "still working more"],
+        }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(result.turnsCompleted).toBe(2);
+    expect(result.hardStop).toMatchObject({
+      outcome: "STALLED",
+      trigger: "iteration_cap",
+    });
+  });
+
+  it("returns a hard-stop result after repeated no-progress turns", async () => {
+    const root = await createRoot();
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 2,
+          maxTokensPerUnit: 10_000,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+        },
+      },
+      tracker: createTracker({
+        refreshStates: [
+          { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+          { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+        ],
+      }),
+      createCodexClient: (input) =>
+        createStubCodexClient([], input, {
+          messages: ["same output", "same output"],
+        }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(result.turnsCompleted).toBe(2);
+    expect(result.hardStop).toMatchObject({
+      outcome: "STALLED",
+      trigger: "no_progress",
+    });
+  });
+
+  it("pauses for a token budget ceiling before another continuation turn", async () => {
+    const root = await createRoot();
+    const prompts: string[] = [];
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 15,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+        },
+      },
+      tracker: createTracker({
+        refreshStates: [
+          { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+        ],
+      }),
+      createCodexClient: (input) => createStubCodexClient(prompts, input),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(result.hardStop).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "token_budget",
+    });
+  });
+
+  it("passes mode-scoped approval and sandbox policy to the Codex client", async () => {
+    const root = await createRoot();
+    const factoryInputs: AgentRunnerCodexClientFactoryInput[] = [];
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker: createTracker({
+        refreshStates: [
+          { id: "issue-1", identifier: "ABC-123", state: "Done" },
+        ],
+      }),
+      createCodexClient: (input) => {
+        factoryInputs.push(input);
+        return createStubCodexClient([], input);
+      },
+    });
+
+    await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      modePolicy: {
+        mode: "prototype",
+        approvalPolicy: "never",
+        threadSandbox: "workspace-write",
+        turnSandboxPolicy: { type: "workspace-write", networkAccess: false },
+        claudePermissionMode: "acceptEdits",
+        canOpenPullRequest: false,
+        canAutoMerge: false,
+        canBypassGates: false,
+        maxBudgetUsd: 5,
+      },
+    });
+
+    expect(factoryInputs[0]).toMatchObject({
+      approvalPolicy: "never",
+      threadSandbox: "workspace-write",
+      turnSandboxPolicy: { type: "workspace-write", networkAccess: false },
+    });
+  });
+
   it("emits promptChars and estimatedPromptTokens on agent events, with turn 1 larger than turn 2 for a long template", async () => {
     const root = await createRoot();
     const prompts: string[] = [];

@@ -91,6 +91,35 @@ agent:
   max_concurrent_agents_by_state: {}
 
 # ============================================================
+# hard_stops — Per-unit loop ceilings
+# ============================================================
+hard_stops:
+  # Maximum turns allowed before the unit is marked STALLED.
+  # Default: 20
+  max_iterations: 20
+
+  # Repeated unchanged turns allowed before no-progress STALLED.
+  # Set 0 to disable no-progress detection.
+  # Default: 3
+  no_progress_turns: 3
+
+  # Maximum cumulative tokens before PAUSED-budget.
+  # Default: 200000
+  max_tokens_per_unit: 200000
+
+  # Maximum estimated dollar spend before PAUSED-budget.
+  # Default: 50
+  max_dollar_budget_usd: 50
+
+  # Pause early when premium spend reaches this share of the dollar ceiling.
+  # Default: 0.8
+  premium_budget_pause_ratio: 0.8
+
+  # Estimated cost used when providers report tokens but not dollars.
+  # Default: 0.05
+  estimated_cost_per_1k_tokens_usd: 0.05
+
+# ============================================================
 # codex — Codex app-server process configuration
 # ============================================================
 codex:

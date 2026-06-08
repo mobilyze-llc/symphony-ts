@@ -11,6 +11,12 @@ import {
 } from "../../src/config/config-resolver.js";
 import {
   DEFAULT_CODEX_COMMAND,
+  DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+  DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
+  DEFAULT_HARD_STOP_MAX_ITERATIONS,
+  DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
+  DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
+  DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
   DEFAULT_HOOK_TIMEOUT_MS,
   DEFAULT_MAX_CONCURRENT_AGENTS,
   DEFAULT_MAX_RETRY_BACKOFF_MS,
@@ -52,6 +58,15 @@ describe("config-resolver", () => {
     );
     expect(resolved.agent.maxTurns).toBe(DEFAULT_MAX_TURNS);
     expect(resolved.agent.maxRetryBackoffMs).toBe(DEFAULT_MAX_RETRY_BACKOFF_MS);
+    expect(resolved.hardStops).toEqual({
+      maxIterations: DEFAULT_HARD_STOP_MAX_ITERATIONS,
+      noProgressTurns: DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
+      maxTokensPerUnit: DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
+      maxDollarBudgetUsd: DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
+      premiumBudgetPauseRatio: DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
+      estimatedCostPer1kTokensUsd:
+        DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+    });
     expect(resolved.codex.command).toBe(DEFAULT_CODEX_COMMAND);
     expect(resolved.codex.turnTimeoutMs).toBe(DEFAULT_TURN_TIMEOUT_MS);
     expect(resolved.codex.readTimeoutMs).toBe(DEFAULT_READ_TIMEOUT_MS);
@@ -98,6 +113,14 @@ describe("config-resolver", () => {
               Done: 0,
             },
           },
+          hard_stops: {
+            max_iterations: "6",
+            no_progress_turns: "2",
+            max_tokens_per_unit: "50000",
+            max_dollar_budget_usd: "12.5",
+            premium_budget_pause_ratio: "0.75",
+            estimated_cost_per_1k_tokens_usd: "0.08",
+          },
           codex: {
             command: "codex app-server --stdio",
             turn_timeout_ms: "90000",
@@ -135,6 +158,14 @@ describe("config-resolver", () => {
     expect(resolved.agent.maxRetryBackoffMs).toBe(120_000);
     expect(resolved.agent.maxConcurrentAgentsByState).toEqual({
       "in progress": 2,
+    });
+    expect(resolved.hardStops).toEqual({
+      maxIterations: 6,
+      noProgressTurns: 2,
+      maxTokensPerUnit: 50_000,
+      maxDollarBudgetUsd: 12.5,
+      premiumBudgetPauseRatio: 0.75,
+      estimatedCostPer1kTokensUsd: 0.08,
     });
     expect(resolved.codex.command).toBe("codex app-server --stdio");
     expect(resolved.codex.turnTimeoutMs).toBe(90_000);
