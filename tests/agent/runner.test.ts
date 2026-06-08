@@ -309,6 +309,7 @@ describe("AgentRunner", () => {
 
   it("passes mode-scoped approval and sandbox policy to the Codex client", async () => {
     const root = await createRoot();
+    const prompts: string[] = [];
     const factoryInputs: AgentRunnerCodexClientFactoryInput[] = [];
     const runner = new AgentRunner({
       config: createConfig(root, "unused"),
@@ -319,7 +320,7 @@ describe("AgentRunner", () => {
       }),
       createCodexClient: (input) => {
         factoryInputs.push(input);
-        return createStubCodexClient([], input);
+        return createStubCodexClient(prompts, input);
       },
     });
 
@@ -344,6 +345,9 @@ describe("AgentRunner", () => {
       threadSandbox: "workspace-write",
       turnSandboxPolicy: { type: "workspace-write", networkAccess: false },
     });
+    expect(prompts[0]).toContain("## Mode Permission Envelope");
+    expect(prompts[0]).toContain("Mode: prototype");
+    expect(prompts[0]).toContain("Pull requests: denied");
   });
 
   it("emits promptChars and estimatedPromptTokens on agent events, with turn 1 larger than turn 2 for a long template", async () => {

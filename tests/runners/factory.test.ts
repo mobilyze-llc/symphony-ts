@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { CodexClientEvent } from "../../src/codex/app-server-client.js";
+import { createModeScopedPermissionPolicy } from "../../src/policy/hard-stops.js";
 import { ClaudeCodeRunner } from "../../src/runners/claude-code-runner.js";
 import {
   createRunnerFromConfig,
@@ -64,6 +65,28 @@ describe("createRunnerFromConfig", () => {
 
     // Default model for claude-code is "sonnet"
     expect(runner).toBeInstanceOf(ClaudeCodeRunner);
+  });
+
+  it("passes mode policy through to the claude-code runner", () => {
+    const modePolicy = createModeScopedPermissionPolicy({
+      mode: "thin",
+      configuredApprovalPolicy: "full-auto",
+      configuredThreadSandbox: "workspace-write",
+      configuredTurnSandboxPolicy: { type: "workspace-write" },
+      maxBudgetUsd: 50,
+    });
+
+    const runner = createRunnerFromConfig({
+      config: { kind: "claude-code", model: "opus" },
+      cwd: "/tmp/workspace",
+      onEvent: vi.fn(),
+      modePolicy,
+    });
+
+    expect(
+      (runner as unknown as { options: { modePolicy?: unknown } }).options
+        .modePolicy,
+    ).toBe(modePolicy);
   });
 });
 

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   createModeScopedPermissionPolicy,
+  describeModePermissionEnvelope,
+  detectModePermissionAction,
   evaluateBudgetHardStop,
   evaluateIterationHardStop,
   evaluateModePermission,
@@ -122,5 +124,62 @@ describe("hard-stop policy", () => {
         trigger: "permission_denied",
       },
     });
+  });
+
+  it("classifies PR creation, auto-merge, and bypass commands for active runner enforcement", () => {
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "gh pr create --fill" },
+      }),
+    ).toBe("open_pull_request");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "gh pr merge 270 --auto" },
+      }),
+    ).toBe("auto_merge");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "gh pr merge 270 --admin" },
+      }),
+    ).toBe("bypass_gates");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "git push --force-with-lease" },
+      }),
+    ).toBe("bypass_gates");
+  });
+
+  it("renders mode envelopes that deny thin/prototype PRs and all merge bypass actions", () => {
+    const thinPolicy = createModeScopedPermissionPolicy({
+      mode: "thin",
+      configuredApprovalPolicy: "full-auto",
+      configuredThreadSandbox: "workspace-write",
+      configuredTurnSandboxPolicy: { type: "workspace-write" },
+      maxBudgetUsd: 50,
+    });
+    const fullPolicy = createModeScopedPermissionPolicy({
+      mode: "full",
+      configuredApprovalPolicy: "full-auto",
+      configuredThreadSandbox: "workspace-write",
+      configuredTurnSandboxPolicy: { type: "workspace-write" },
+      maxBudgetUsd: 50,
+    });
+
+    expect(describeModePermissionEnvelope(thinPolicy)).toContain(
+      "Pull requests: denied",
+    );
+    expect(describeModePermissionEnvelope(fullPolicy)).toContain(
+      "Pull requests: allowed",
+    );
+    expect(describeModePermissionEnvelope(fullPolicy)).toContain(
+      "Auto-merge: denied",
+    );
+    expect(describeModePermissionEnvelope(fullPolicy)).toContain(
+      "Gate bypass: denied",
+    );
   });
 });

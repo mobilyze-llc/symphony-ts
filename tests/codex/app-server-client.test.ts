@@ -12,6 +12,7 @@ import {
 } from "../../src/codex/app-server-client.js";
 import { createLinearGraphqlDynamicTool } from "../../src/codex/linear-graphql-tool.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
+import { createModeScopedPermissionPolicy } from "../../src/policy/hard-stops.js";
 
 const roots: string[] = [];
 const clients: CodexAppServerClient[] = [];
@@ -86,6 +87,39 @@ describe("CodexAppServerClient", () => {
           totalTokens: 18,
         },
       } satisfies Partial<CodexClientEvent>),
+    );
+
+    await client.close();
+  });
+
+  it("denies PR creation approvals when prototype mode cannot open pull requests", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("denied-pr", workspace, events, {
+      modePolicy: createModeScopedPermissionPolicy({
+        mode: "prototype",
+        configuredApprovalPolicy: "full-auto",
+        configuredThreadSandbox: "workspace-write",
+        configuredTurnSandboxPolicy: { type: "workspace-write" },
+        maxBudgetUsd: 50,
+      }),
+    });
+
+    const result = await client.startSession({
+      prompt: "Implement the ticket",
+      title: "ABC-123: Example",
+    });
+
+    expect(result.message).toBe("PR command denied by mode policy");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "unsupported_tool_call",
+        toolName: "Bash",
+        message: expect.stringContaining("open_pull_request is not allowed"),
+      } satisfies Partial<CodexClientEvent>),
+    );
+    expect(events.map((event) => event.event)).not.toContain(
+      "approval_auto_approved",
     );
 
     await client.close();
@@ -350,6 +384,9 @@ function createClient(
     readTimeoutMs: number;
     turnTimeoutMs: number;
     stallTimeoutMs: number;
+    modePolicy: ConstructorParameters<
+      typeof CodexAppServerClient
+    >[0]["modePolicy"];
     dynamicTools: NonNullable<
       ConstructorParameters<typeof CodexAppServerClient>[0]["dynamicTools"]
     >;
@@ -366,6 +403,9 @@ function createClient(
     readTimeoutMs: overrides?.readTimeoutMs ?? 750,
     turnTimeoutMs: overrides?.turnTimeoutMs ?? 500,
     stallTimeoutMs: overrides?.stallTimeoutMs ?? 1_000,
+    ...(overrides?.modePolicy === undefined
+      ? {}
+      : { modePolicy: overrides.modePolicy }),
     ...(overrides?.dynamicTools === undefined
       ? {}
       : { dynamicTools: overrides.dynamicTools }),

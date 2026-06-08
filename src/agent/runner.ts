@@ -344,6 +344,7 @@ export class AgentRunner {
           attempt: input.attempt,
           stageName: input.stageName ?? null,
           reworkCount: input.reworkCount ?? 0,
+          modePolicy: input.modePolicy ?? null,
           turnNumber,
           maxTurns: effectiveMaxTurns,
         });
@@ -632,6 +633,7 @@ function createDefaultCodexClient(
     turnTimeoutMs: input.turnTimeoutMs,
     stallTimeoutMs: input.stallTimeoutMs,
     dynamicTools: input.dynamicTools,
+    ...(input.modePolicy === undefined ? {} : { modePolicy: input.modePolicy }),
     onEvent: input.onEvent,
   });
 }

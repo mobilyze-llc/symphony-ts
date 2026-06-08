@@ -30,8 +30,9 @@ Labels: {{ issue.labels | join: ", " }}
 4. Write tests as needed — for UI scenarios, write Playwright test files; for API scenarios, verify commands run directly.
 5. Run all `# Verify:` commands from the spec. You are not done until every verify command exits 0.
 6. Commit your changes with message format: `feat({{ issue.identifier }}): <description>`.
-7. Open a PR targeting this repo (not its upstream fork parent) via `gh pr create --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")` with the issue description in the PR body.
-8. Link the PR to the Linear issue by including `{{ issue.identifier }}` in the PR title or body.
+7. If the Mode Permission Envelope allows PR creation, open a PR targeting this repo (not its upstream fork parent) via `gh pr create --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")` with the issue description in the PR body.
+8. If PR creation is denied by the Mode Permission Envelope, do not run PR creation commands. Stop after local verification and report `BLOCKED-needs-human` if a PR is required to finish the issue.
+9. When a PR is allowed and opened, link it to the Linear issue by including `{{ issue.identifier }}` in the PR title or body.
 
 ## Verify Line Rules
 

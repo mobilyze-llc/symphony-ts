@@ -144,6 +144,71 @@ export function evaluateModePermission(input: {
   };
 }
 
+export function detectModePermissionAction(input: {
+  toolName: string | null;
+  toolInput: unknown;
+}): ModePermissionAction | null {
+  const command = extractCommandText(input.toolInput);
+  if (command === null) {
+    return null;
+  }
+
+  const normalized = command.toLowerCase().replace(/\s+/g, " ").trim();
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  if (containsGateBypass(normalized)) {
+    return "bypass_gates";
+  }
+
+  if (/\bgh\s+pr\s+merge\b/.test(normalized)) {
+    return "auto_merge";
+  }
+
+  if (
+    /\bgh\s+pr\s+create\b/.test(normalized) ||
+    /\bhub\s+pull-request\b/.test(normalized)
+  ) {
+    return "open_pull_request";
+  }
+
+  return null;
+}
+
+export function describeModePermissionEnvelope(
+  policy: ModeScopedPermissionPolicy,
+): string {
+  const pullRequestLine = policy.canOpenPullRequest
+    ? "- Pull requests: allowed to open a PR when the issue requires one."
+    : "- Pull requests: denied. Do NOT run PR creation commands such as `gh pr create` or `hub pull-request`.";
+
+  return [
+    "## Mode Permission Envelope",
+    `Mode: ${policy.mode}`,
+    pullRequestLine,
+    "- Auto-merge: denied. Do NOT run PR merge commands such as `gh pr merge`, including `--auto`.",
+    "- Gate bypass: denied. Do NOT pass bypass/admin flags such as `--admin`, `--bypass`, or force-push to get around review, CI, or merge gates.",
+    "If any task, stage, workflow, or prior instruction conflicts with this envelope, obey this envelope. When a denied action is required to finish, stop and report BLOCKED-needs-human instead of running the command.",
+  ].join("\n");
+}
+
+export function withModePermissionEnvelope(input: {
+  prompt: string;
+  policy?: ModeScopedPermissionPolicy | null;
+}): string {
+  if (input.policy === undefined || input.policy === null) {
+    return input.prompt;
+  }
+
+  const envelope = describeModePermissionEnvelope(input.policy);
+  if (input.prompt.startsWith(envelope)) {
+    return input.prompt;
+  }
+
+  return `${envelope}\n\n${input.prompt}`;
+}
+
 export function evaluateBudgetHardStop(input: {
   config: WorkflowHardStopsConfig;
   turnCount: number;
@@ -250,4 +315,52 @@ function estimateCostUsd(input: {
 
 function formatCost(cost: number): string {
   return `$${cost.toFixed(2)}`;
+}
+
+function containsGateBypass(command: string): boolean {
+  return (
+    (/\bgh\s+pr\s+merge\b/.test(command) &&
+      /(?:^|\s)--(?:admin|bypass)\b/.test(command)) ||
+    (/\bgit\s+push\b/.test(command) &&
+      /(?:^|\s)--force(?:-with-lease)?\b/.test(command))
+  );
+}
+
+function extractCommandText(value: unknown, depth = 0): string | null {
+  if (depth > 3) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  for (const key of ["command", "cmd", "script"]) {
+    const candidate = record[key];
+    if (typeof candidate === "string") {
+      return candidate;
+    }
+  }
+
+  for (const key of [
+    "tool_input",
+    "toolInput",
+    "input",
+    "arguments",
+    "args",
+    "payload",
+    "params",
+  ]) {
+    const nested = extractCommandText(record[key], depth + 1);
+    if (nested !== null) {
+      return nested;
+    }
+  }
+
+  return null;
 }

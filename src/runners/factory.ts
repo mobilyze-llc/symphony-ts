@@ -26,6 +26,7 @@ export function createRunnerFromConfig(
           : {
               permissionMode: input.modePolicy.claudePermissionMode,
               maxBudgetUsd: input.modePolicy.maxBudgetUsd,
+              modePolicy: input.modePolicy,
             }),
       });
 

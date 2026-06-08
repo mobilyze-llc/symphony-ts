@@ -183,9 +183,18 @@ async function handleMessage(message) {
               scenario === "payload-variants"
                 ? "turn/approval_required"
                 : "approval/request",
-            params: {
-              kind: "command_execution",
-            },
+            params:
+              scenario === "denied-pr"
+                ? {
+                    kind: "command_execution",
+                    toolName: "Bash",
+                    input: {
+                      command: "gh pr create --fill",
+                    },
+                  }
+                : {
+                    kind: "command_execution",
+                  },
           });
         }, 10);
       }, 10);
@@ -234,6 +243,29 @@ async function handleMessage(message) {
   }
 
   if (message.id === "approval-1") {
+    if (scenario === "denied-pr") {
+      assertEqual(
+        message.result?.approved,
+        false,
+        "forbidden PR approval must be denied",
+      );
+
+      setTimeout(() => {
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "PR command denied by mode policy",
+            usage: {
+              inputTokens: 14,
+              outputTokens: 9,
+              totalTokens: 23,
+            },
+          },
+        });
+      }, 10);
+      return;
+    }
+
     assertEqual(
       message.result?.approved,
       true,

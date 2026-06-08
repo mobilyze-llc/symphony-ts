@@ -28,11 +28,28 @@ vi.mock("node:fs", () => ({
 import { readdirSync, statSync } from "node:fs";
 import { generateText } from "ai";
 import { claudeCode } from "ai-sdk-provider-claude-code";
+import { createModeScopedPermissionPolicy } from "../../src/policy/hard-stops.js";
 
 const mockGenerateText = vi.mocked(generateText);
 const mockClaudeCode = vi.mocked(claudeCode);
 const mockStatSync = vi.mocked(statSync);
 const mockReaddirSync = vi.mocked(readdirSync);
+
+function getLatestPreToolUseCallback(): (
+  input: Record<string, unknown>,
+) => Promise<unknown> {
+  const claudeCodeArgs = mockClaudeCode.mock.calls.at(-1)![1] as Record<
+    string,
+    unknown
+  >;
+  const hooks = claudeCodeArgs.hooks as Record<
+    string,
+    Array<{
+      hooks: Array<(input: Record<string, unknown>) => Promise<unknown>>;
+    }>
+  >;
+  return hooks.PreToolUse![0]!.hooks[0]!;
+}
 
 describe("ClaudeCodeRunner", () => {
   it("implements AgentRunnerCodexClient interface (startSession, continueTurn, close)", () => {
@@ -310,6 +327,150 @@ describe("ClaudeCodeRunner", () => {
 
     expect(result).toEqual({});
   });
+
+  it("prepends the mode permission envelope before sending prompts to claude-code", async () => {
+    mockGenerateText.mockResolvedValueOnce({
+      text: "Done",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        totalTokens: 15,
+      },
+    } as never);
+
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      modePolicy: createModeScopedPermissionPolicy({
+        mode: "thin",
+        configuredApprovalPolicy: "full-auto",
+        configuredThreadSandbox: "workspace-write",
+        configuredTurnSandboxPolicy: { type: "workspace-write" },
+        maxBudgetUsd: 50,
+      }),
+    });
+
+    await runner.startSession({
+      prompt: "Implement and open a PR.",
+      title: "ABC-123",
+    });
+
+    expect(mockGenerateText).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining("## Mode Permission Envelope"),
+      }),
+    );
+    const prompt = String(mockGenerateText.mock.calls.at(-1)![0]!.prompt);
+    expect(prompt).toContain("Mode: thin");
+    expect(prompt).toContain("Pull requests: denied");
+    expect(prompt).toContain("Implement and open a PR.");
+  });
+
+  it("denies prototype and thin PR creation in the claude-code PreToolUse hook", async () => {
+    mockGenerateText.mockResolvedValueOnce({
+      text: "Done",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        totalTokens: 15,
+      },
+    } as never);
+
+    const events: CodexClientEvent[] = [];
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      onEvent: (event) => events.push(event),
+      modePolicy: createModeScopedPermissionPolicy({
+        mode: "thin",
+        configuredApprovalPolicy: "full-auto",
+        configuredThreadSandbox: "workspace-write",
+        configuredTurnSandboxPolicy: { type: "workspace-write" },
+        maxBudgetUsd: 50,
+      }),
+    });
+
+    await runner.startSession({ prompt: "test", title: "test" });
+
+    const preToolUseCallback = getLatestPreToolUseCallback();
+    const result = await preToolUseCallback({
+      tool_name: "Bash",
+      tool_input: { command: "gh pr create --fill" },
+      tool_use_id: "toolu_pr",
+    });
+
+    expect(result).toMatchObject({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: expect.stringContaining(
+          "open_pull_request is not allowed in thin mode",
+        ),
+      },
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "unsupported_tool_call",
+        toolName: "Bash",
+      } satisfies Partial<CodexClientEvent>),
+    );
+  });
+
+  it("denies all auto-merge and gate-bypass commands in full claude-code mode", async () => {
+    mockGenerateText.mockResolvedValueOnce({
+      text: "Done",
+      usage: {
+        inputTokens: 10,
+        outputTokens: 5,
+        totalTokens: 15,
+      },
+    } as never);
+
+    const runner = new ClaudeCodeRunner({
+      cwd: "/tmp/workspace",
+      model: "sonnet",
+      modePolicy: createModeScopedPermissionPolicy({
+        mode: "full",
+        configuredApprovalPolicy: "full-auto",
+        configuredThreadSandbox: "workspace-write",
+        configuredTurnSandboxPolicy: { type: "workspace-write" },
+        maxBudgetUsd: 50,
+      }),
+    });
+
+    await runner.startSession({ prompt: "test", title: "test" });
+
+    const preToolUseCallback = getLatestPreToolUseCallback();
+    await expect(
+      preToolUseCallback({
+        tool_name: "Bash",
+        tool_input: { command: "gh pr merge 270 --auto" },
+        tool_use_id: "toolu_merge",
+      }),
+    ).resolves.toMatchObject({
+      hookSpecificOutput: {
+        permissionDecision: "deny",
+        permissionDecisionReason: expect.stringContaining(
+          "auto_merge is not allowed in full mode",
+        ),
+      },
+    });
+    await expect(
+      preToolUseCallback({
+        tool_name: "Bash",
+        tool_input: { command: "gh pr merge 270 --admin" },
+        tool_use_id: "toolu_admin",
+      }),
+    ).resolves.toMatchObject({
+      hookSpecificOutput: {
+        permissionDecision: "deny",
+        permissionDecisionReason: expect.stringContaining(
+          "bypass_gates is not allowed in full mode",
+        ),
+      },
+    });
+  });
+
   it("emits turn_failed on error and returns failed status", async () => {
     mockGenerateText.mockRejectedValueOnce(new Error("Rate limit exceeded"));
 
