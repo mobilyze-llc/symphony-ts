@@ -1669,6 +1669,51 @@ describe("decorrelated terminal gates", () => {
     expect(comments[0]).toContain("Decorrelated gate blocked");
   });
 
+  it("fails closed when a production gate has no verifier lanes", async () => {
+    const config = createImplementThenGateConfigWithReviewers([]);
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "pass" as const,
+      results: [],
+      comment: "should not run",
+    }));
+    const comments: string[] = [];
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["mode:thin"],
+          }),
+        ],
+      }),
+      runEnsembleGate,
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    expect(runEnsembleGate).not.toHaveBeenCalled();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().decorrelatedGateOutcomes["1"]).toEqual([
+      expect.objectContaining({
+        mode: "thin",
+        status: "blocked",
+        aggregate: "fail",
+        reviewerLanes: [],
+        verifierSeparated: false,
+        authoritative: true,
+        reworkTarget: "implement",
+      }),
+    ]);
+    expect(comments[0]).toContain("no decorrelated verifier lane");
+  });
+
   it("keeps prototype mode out of the merge path and records promotion boundary", async () => {
     const config = createImplementThenGateConfigWithReviewers();
     const runEnsembleGate = vi.fn(async () => ({
@@ -1711,6 +1756,65 @@ describe("decorrelated terminal gates", () => {
     ]);
     expect(comments[0]).toContain("Prototype promotion boundary");
     expect(comments[0]).toContain("new `thin` or `full` production unit");
+  });
+
+  it("replays prototype boundary completion as terminal after restart", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runJournal: DispatcherRunJournal = [];
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "pass" as const,
+      results: [],
+      comment: "should not run",
+    }));
+    const tracker = createTracker({
+      candidates: [
+        createIssue({
+          id: "1",
+          identifier: "ISSUE-1",
+          labels: ["mode:prototype"],
+          state: "In Progress",
+        }),
+      ],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const firstOrchestrator = createOrchestrator({
+      config,
+      tracker,
+      runEnsembleGate,
+      writeRunJournalEntry: async (entry) => {
+        runJournal.push(entry);
+      },
+    });
+
+    await firstOrchestrator.pollTick();
+    await firstOrchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await firstOrchestrator.onRetryTimer("1");
+
+    expect(firstOrchestrator.getState().completed.has("1")).toBe(true);
+    expect(runJournal).toContainEqual(
+      expect.objectContaining({
+        kind: "gate_result",
+        issueId: "1",
+        metadata: expect.objectContaining({
+          status: "skipped_prototype",
+          authoritative: false,
+        }),
+      }),
+    );
+
+    const restartedOrchestrator = createOrchestrator({
+      config,
+      tracker,
+      runJournal,
+      runEnsembleGate,
+    });
+
+    const result = await restartedOrchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(runEnsembleGate).not.toHaveBeenCalled();
+    expect(restartedOrchestrator.getState().completed.has("1")).toBe(true);
+    expect(restartedOrchestrator.getState().issueStages["1"]).toBeUndefined();
   });
 });
 
@@ -4116,6 +4220,7 @@ function createOrchestrator(overrides?: {
   postComment?: OrchestratorCoreOptions["postComment"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
   now?: () => Date;
+  runJournal?: DispatcherRunJournal;
 }) {
   const tracker =
     overrides?.tracker ??
@@ -4132,6 +4237,10 @@ function createOrchestrator(overrides?: {
     }),
     now: overrides?.now ?? (() => new Date("2026-03-06T00:00:05.000Z")),
   };
+
+  if (overrides?.runJournal !== undefined) {
+    options.runJournal = overrides.runJournal;
+  }
 
   if (overrides?.writeRunJournalEntry !== undefined) {
     options.writeRunJournalEntry = overrides.writeRunJournalEntry;

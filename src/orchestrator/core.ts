@@ -319,6 +319,16 @@ export class OrchestratorCore {
       ) {
         this.reportedSupervisionFindings.add(entry.metadata.signature);
       }
+
+      if (
+        entry.kind === "gate_result" &&
+        entry.operation === "gate" &&
+        entry.metadata.status === "skipped_prototype"
+      ) {
+        this.state.completed.add(entry.issueId);
+        this.releaseClaim(entry.issueId);
+        this.clearTerminalIssueRuntimeState(entry.issueId);
+      }
     }
 
     for (const lease of Object.values(this.state.dispatcherLeases)) {
@@ -1536,14 +1546,7 @@ export class OrchestratorCore {
     }
     this.state.completed.add(input.issue.id);
     this.releaseClaim(input.issue.id);
-    delete this.state.issueStages[input.issue.id];
-    delete this.state.issueReworkCounts[input.issue.id];
-    delete this.state.issuePassedStages[input.issue.id];
-    delete this.state.issueExecutionHistory[input.issue.id];
-    delete this.state.issueFirstDispatchedAt[input.issue.id];
-    delete this.state.issueRightSizingDecisions[input.issue.id];
-    delete this.state.loopTraceJournal[input.issue.id];
-    delete this.state.continuousFeedback[input.issue.id];
+    this.clearTerminalIssueRuntimeState(input.issue.id);
     await this.completeDispatcherLease({
       leaseId: input.leaseId,
       idempotencyKey: `${input.leaseId}:prototype_boundary`,
@@ -1575,7 +1578,11 @@ export class OrchestratorCore {
     leaseId: string;
   }): Promise<void> {
     const reworkTarget = this.reworkGate(input.issue.id);
-    const summary = `Gate ${input.stageName ?? "unnamed"} blocked because a reviewer lane matches the worker lane.`;
+    const blockReason =
+      input.gateContext.reviewerLanes.length === 0
+        ? "no decorrelated verifier lane is configured"
+        : "a reviewer lane matches the worker lane";
+    const summary = `Gate ${input.stageName ?? "unnamed"} blocked because ${blockReason}.`;
     this.recordDecorrelatedGateOutcome({
       issue: input.issue,
       stageName: input.stageName,
@@ -1595,7 +1602,11 @@ export class OrchestratorCore {
             summary,
             "",
             `Worker lane: ${formatGateLane(input.gateContext.workerLane)}`,
-            `Reviewer lanes: ${input.gateContext.reviewerLanes.map(formatGateLane).join(", ")}`,
+            `Reviewer lanes: ${
+              input.gateContext.reviewerLanes.length === 0
+                ? "(none configured)"
+                : input.gateContext.reviewerLanes.map(formatGateLane).join(", ")
+            }`,
             "",
             "Configure an independent verifier lane, or promote the unit through a production gate with a different reviewer role/tool/model.",
           ].join("\n"),
@@ -1610,7 +1621,7 @@ export class OrchestratorCore {
     if (reworkTarget !== null && reworkTarget !== "escalated") {
       this.scheduleRetry(input.issue.id, 1, {
         identifier: input.issue.identifier,
-        error: "Decorrelated gate blocked: verifier lane matches worker lane",
+        error: `Decorrelated gate blocked: ${blockReason}`,
         delayType: "continuation",
       });
     } else if (reworkTarget === "escalated") {
@@ -1672,6 +1683,17 @@ export class OrchestratorCore {
     ];
   }
 
+  private clearTerminalIssueRuntimeState(issueId: string): void {
+    delete this.state.issueStages[issueId];
+    delete this.state.issueReworkCounts[issueId];
+    delete this.state.issuePassedStages[issueId];
+    delete this.state.issueExecutionHistory[issueId];
+    delete this.state.issueFirstDispatchedAt[issueId];
+    delete this.state.issueRightSizingDecisions[issueId];
+    delete this.state.loopTraceJournal[issueId];
+    delete this.state.continuousFeedback[issueId];
+  }
+
   private resolveDecorrelatedGateContext(
     issueId: string,
     stageName: string | null,
@@ -1690,7 +1712,7 @@ export class OrchestratorCore {
       stageName,
     }));
     const verifierSeparated =
-      reviewerLanes.length === 0 ||
+      reviewerLanes.length > 0 &&
       reviewerLanes.every(
         (reviewerLane) => !sameGateLane(reviewerLane, workerLane),
       );
@@ -2603,6 +2625,7 @@ export class OrchestratorCore {
         if (
           gateContext !== null &&
           stage.gateType === "ensemble" &&
+          gateContext.mode !== "prototype" &&
           !gateContext.verifierSeparated
         ) {
           await this.handleUndecorrelatedGate({

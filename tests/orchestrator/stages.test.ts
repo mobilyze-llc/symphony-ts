@@ -894,7 +894,14 @@ function createGateWorkflowConfigWithLinearStates(): StagesConfig {
         concurrency: null,
         gateType: "ensemble",
         maxRework: 3,
-        reviewers: [],
+        reviewers: [
+          {
+            runner: "pi",
+            model: "local-flash",
+            role: "decorrelated-reviewer",
+            prompt: null,
+          },
+        ],
         transitions: {
           onComplete: null,
           onApprove: "merge",
