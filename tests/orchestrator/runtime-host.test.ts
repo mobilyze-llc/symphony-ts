@@ -1,3 +1,8 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -15,6 +20,7 @@ import {
   OrchestratorRuntimeHost,
   createWorkspaceHookLogger,
   extractProductName,
+  readGitChangedFiles,
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
 import type {
@@ -23,6 +29,20 @@ import type {
 } from "../../src/tracker/tracker.js";
 
 describe("OrchestratorRuntimeHost", () => {
+  it("retains untracked files when HEAD-based git diffs fail in a fresh repo", async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "symphony-read-git-"));
+    try {
+      execFileSync("git", ["init", repoPath]);
+      writeFileSync(join(repoPath, "new-file.ts"), "export {};\n");
+
+      await expect(readGitChangedFiles(repoPath)).resolves.toEqual([
+        "new-file.ts",
+      ]);
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
   it("feeds codex events into orchestrator state and schedules continuation retry after a normal worker exit", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
@@ -398,6 +418,105 @@ describe("OrchestratorRuntimeHost", () => {
         issue_id: "1",
         issue_identifier: "ISSUE-1",
         session_id: "thread-1-turn-1",
+      }),
+    );
+  });
+
+  it("logs a triggered re-steer when live worker writes collide", async () => {
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2", priority: 2 }),
+      ],
+      stateSnapshots: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const readWorkspaceChangedFiles = vi.fn(async (workspacePath: string) =>
+      workspacePath.endsWith("/1")
+        ? ["src/shared/config.ts"]
+        : ["./src/shared/config.ts", "src/features/two.ts"],
+    );
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      readWorkspaceChangedFiles,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.pollOnce();
+
+    expect(readWorkspaceChangedFiles).toHaveBeenCalledWith("/tmp/workspaces/1");
+    expect(readWorkspaceChangedFiles).toHaveBeenCalledWith("/tmp/workspaces/2");
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "supervision_resteer_requested",
+        level: "warn",
+        phase: "running",
+        finding_count: 1,
+        finding_kinds: ["actual_write_collision"],
+        issue_identifiers: ["ISSUE-1", "ISSUE-2"],
+        files: ["src/shared/config.ts"],
+      }),
+    );
+  });
+
+  it("logs a triggered re-steer when a worker branch base changes after admission", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const readWorkspaceBaseRevision = vi
+      .fn<(_: string) => Promise<string | null>>()
+      .mockResolvedValueOnce("base-a")
+      .mockResolvedValueOnce("base-b");
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      readWorkspaceBaseRevision,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.pollOnce();
+    await host.pollOnce();
+
+    expect(readWorkspaceBaseRevision).toHaveBeenCalledWith("/tmp/workspaces/1");
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "supervision_resteer_requested",
+        level: "warn",
+        phase: "running",
+        finding_count: 1,
+        finding_kinds: ["branch_divergence"],
+        issue_identifiers: ["ISSUE-1"],
       }),
     );
   });
@@ -2232,9 +2351,12 @@ class FakeAgentRunner {
   }
 }
 
-function createTracker(input?: { candidates?: Issue[] }) {
+function createTracker(input?: {
+  candidates?: Issue[];
+  stateSnapshots?: IssueStateSnapshot[];
+}) {
   let candidates = input?.candidates ?? [createIssue()];
-  let stateSnapshots: IssueStateSnapshot[] = [
+  let stateSnapshots: IssueStateSnapshot[] = input?.stateSnapshots ?? [
     { id: "1", identifier: "ISSUE-1", state: "In Progress" },
   ];
 

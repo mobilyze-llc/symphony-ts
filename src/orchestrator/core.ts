@@ -31,6 +31,13 @@ import {
   formatRebaseComment,
   formatReviewFindingsComment,
 } from "./gate-handler.js";
+import {
+  type SupervisionFinding,
+  type WorkerSupervisionSnapshot,
+  createIssueSupervisionSnapshot,
+  detectSupervisionFindings,
+  formatSupervisionFindingsComment,
+} from "./supervision.js";
 
 const CONTINUATION_RETRY_DELAY_MS = 1_000;
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
@@ -79,6 +86,12 @@ export interface CodexEventResult {
   applied: boolean;
 }
 
+export interface SupervisionResteerRequest {
+  phase: "dispatch" | "running";
+  findings: readonly SupervisionFinding[];
+  comment: string;
+}
+
 export interface TimerScheduler {
   set(
     callback: () => void,
@@ -125,6 +138,12 @@ export interface OrchestratorCoreOptions {
     issueId: string,
     issueIdentifier: string,
   ) => Promise<void>;
+  getRunningSupervisionSnapshots?: (
+    runningEntries: readonly RunningEntry[],
+  ) => Promise<WorkerSupervisionSnapshot[]> | WorkerSupervisionSnapshot[];
+  requestSupervisionResteer?: (
+    input: SupervisionResteerRequest,
+  ) => Promise<void> | void;
   timerScheduler?: TimerScheduler;
   now?: () => Date;
 }
@@ -148,11 +167,17 @@ export class OrchestratorCore {
 
   private readonly autoCloseParentIssue?: OrchestratorCoreOptions["autoCloseParentIssue"];
 
+  private readonly getRunningSupervisionSnapshots?: OrchestratorCoreOptions["getRunningSupervisionSnapshots"];
+
+  private readonly requestSupervisionResteer?: OrchestratorCoreOptions["requestSupervisionResteer"];
+
   private readonly timerScheduler: TimerScheduler;
 
   private readonly now: () => Date;
 
   private readonly state: OrchestratorState;
+
+  private readonly reportedSupervisionFindings = new Set<string>();
 
   /**
    * Snapshot of execution history captured after the final stage record is
@@ -175,6 +200,9 @@ export class OrchestratorCore {
     this.postComment = options.postComment;
     this.updateIssueState = options.updateIssueState;
     this.autoCloseParentIssue = options.autoCloseParentIssue;
+    this.getRunningSupervisionSnapshots =
+      options.getRunningSupervisionSnapshots;
+    this.requestSupervisionResteer = options.requestSupervisionResteer;
     this.timerScheduler = options.timerScheduler ?? defaultTimerScheduler();
     this.now = options.now ?? (() => new Date());
     this.state = createInitialOrchestratorState({
@@ -299,6 +327,7 @@ export class OrchestratorCore {
     this.syncStateFromConfig();
 
     const reconcileResult = await this.reconcileRunningIssues();
+    await this.superviseRunningWorkers();
     const validation = validateDispatchConfig(this.config);
     if (!validation.ok) {
       return {
@@ -342,6 +371,7 @@ export class OrchestratorCore {
     }
 
     const dispatchedIssueIds: string[] = [];
+    const admittedSnapshots = this.buildRunningAdmissionSnapshots();
     for (const issue of sortIssuesForDispatch(issues)) {
       if (this.availableSlots() <= 0) {
         break;
@@ -351,9 +381,20 @@ export class OrchestratorCore {
         continue;
       }
 
+      const candidateSnapshot = createIssueSupervisionSnapshot(issue);
+      const findings = this.detectDispatchAdmissionFindings(
+        admittedSnapshots,
+        candidateSnapshot,
+      );
+      if (findings.length > 0) {
+        await this.reportSupervisionFindings("dispatch", findings);
+        continue;
+      }
+
       const dispatched = await this.dispatchIssue(issue, null);
       if (dispatched) {
         dispatchedIssueIds.push(issue.id);
+        admittedSnapshots.push(candidateSnapshot);
       }
     }
 
@@ -469,6 +510,24 @@ export class OrchestratorCore {
         retryEntry: this.scheduleRetry(issueId, retryEntry.attempt + 1, {
           identifier: issue.identifier,
           error: "no available orchestrator slots",
+          delayType: retryEntry.delayType,
+        }),
+      };
+    }
+
+    const candidateSnapshot = createIssueSupervisionSnapshot(issue);
+    const findings = this.detectDispatchAdmissionFindings(
+      this.buildRunningAdmissionSnapshots(),
+      candidateSnapshot,
+    );
+    if (findings.length > 0) {
+      await this.reportSupervisionFindings("dispatch", findings);
+      return {
+        dispatched: false,
+        released: false,
+        retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
+          identifier: issue.identifier,
+          error: "dispatch paused by deterministic supervision",
           delayType: retryEntry.delayType,
         }),
       };
@@ -1705,6 +1764,81 @@ export class OrchestratorCore {
     return stopRequests;
   }
 
+  private async superviseRunningWorkers(): Promise<void> {
+    const runningEntries = Object.values(this.state.running);
+    if (runningEntries.length === 0) {
+      return;
+    }
+
+    const snapshots =
+      this.getRunningSupervisionSnapshots === undefined
+        ? runningEntries.map((entry) =>
+            createIssueSupervisionSnapshot(entry.issue, {
+              workerId: entry.issue.id,
+            }),
+          )
+        : await this.getRunningSupervisionSnapshots(runningEntries);
+    const findings = detectSupervisionFindings(snapshots);
+    if (findings.length === 0) {
+      return;
+    }
+
+    await this.reportSupervisionFindings("running", findings);
+  }
+
+  private buildRunningAdmissionSnapshots(): WorkerSupervisionSnapshot[] {
+    return Object.values(this.state.running).map((entry) =>
+      createIssueSupervisionSnapshot(entry.issue, {
+        workerId: entry.issue.id,
+      }),
+    );
+  }
+
+  private detectDispatchAdmissionFindings(
+    admittedSnapshots: readonly WorkerSupervisionSnapshot[],
+    candidateSnapshot: WorkerSupervisionSnapshot,
+  ): SupervisionFinding[] {
+    return detectSupervisionFindings([
+      ...admittedSnapshots,
+      candidateSnapshot,
+    ]).filter(
+      (finding) =>
+        finding.workerIds.includes(candidateSnapshot.workerId) &&
+        (finding.kind === "declared_scope_overlap" ||
+          finding.kind === "branch_divergence"),
+    );
+  }
+
+  private async reportSupervisionFindings(
+    phase: SupervisionResteerRequest["phase"],
+    findings: readonly SupervisionFinding[],
+  ): Promise<void> {
+    if (this.requestSupervisionResteer === undefined) {
+      return;
+    }
+
+    const freshFindings = findings.filter((finding) => {
+      const signature = formatSupervisionFindingSignature(phase, finding);
+      if (this.reportedSupervisionFindings.has(signature)) {
+        return false;
+      }
+      this.reportedSupervisionFindings.add(signature);
+      return true;
+    });
+    if (freshFindings.length === 0) {
+      return;
+    }
+
+    await this.requestSupervisionResteer({
+      phase,
+      findings: freshFindings,
+      comment: formatSupervisionFindingsComment({
+        phase,
+        findings: freshFindings,
+      }),
+    });
+  }
+
   private async requestStop(
     runningEntry: RunningEntry,
     cleanupWorkspace: boolean,
@@ -1872,6 +2006,20 @@ function parseEventTimestamp(
 
 function toNormalizedStateSet(states: readonly string[]): Set<string> {
   return new Set(states.map((state) => normalizeIssueState(state)));
+}
+
+function formatSupervisionFindingSignature(
+  phase: SupervisionResteerRequest["phase"],
+  finding: SupervisionFinding,
+): string {
+  return [
+    phase,
+    finding.kind,
+    finding.action,
+    ...finding.issueIdentifiers,
+    ...finding.workerIds,
+    ...finding.files,
+  ].join("\0");
 }
 
 export function classifyExitOutcome(
