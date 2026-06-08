@@ -1,3 +1,8 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -15,6 +20,7 @@ import {
   OrchestratorRuntimeHost,
   createWorkspaceHookLogger,
   extractProductName,
+  readGitChangedFiles,
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
 import type {
@@ -23,6 +29,20 @@ import type {
 } from "../../src/tracker/tracker.js";
 
 describe("OrchestratorRuntimeHost", () => {
+  it("retains untracked files when HEAD-based git diffs fail in a fresh repo", async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "symphony-read-git-"));
+    try {
+      execFileSync("git", ["init", repoPath]);
+      writeFileSync(join(repoPath, "new-file.ts"), "export {};\n");
+
+      await expect(readGitChangedFiles(repoPath)).resolves.toEqual([
+        "new-file.ts",
+      ]);
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
   it("feeds codex events into orchestrator state and schedules continuation retry after a normal worker exit", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();

@@ -1624,13 +1624,15 @@ function createQueuedTimerScheduler(input: {
   };
 }
 
-async function readGitChangedFiles(workspacePath: string): Promise<string[]> {
+export async function readGitChangedFiles(
+  workspacePath: string,
+): Promise<string[]> {
   const commands = [
     ["diff", "--name-only", "HEAD", "--"],
     ["diff", "--name-only", "--cached", "--"],
     ["ls-files", "--others", "--exclude-standard"],
   ];
-  const outputs = await Promise.all(
+  const results = await Promise.allSettled(
     commands.map(async (args) => {
       const { stdout } = await execFileAsync(
         "git",
@@ -1642,6 +1644,17 @@ async function readGitChangedFiles(workspacePath: string): Promise<string[]> {
       return String(stdout);
     }),
   );
+  const outputs = results.flatMap((result) =>
+    result.status === "fulfilled" ? [result.value] : [],
+  );
+  if (outputs.length === 0) {
+    const rejectedResult = results.find(
+      (result) => result.status === "rejected",
+    );
+    throw rejectedResult?.status === "rejected"
+      ? rejectedResult.reason
+      : new Error("Failed to collect git changed files.");
+  }
 
   return [
     ...new Set(
