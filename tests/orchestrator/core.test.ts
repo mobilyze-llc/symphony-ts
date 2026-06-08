@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
+import type {
+  ResolvedWorkflowConfig,
+  ReviewerDefinition,
+} from "../../src/config/types.js";
 import type { DispatcherRunJournal, Issue } from "../../src/domain/model.js";
 import {
   OrchestratorCore,
@@ -1512,6 +1515,202 @@ describe("continuous feedback lane", () => {
         },
       },
     ]);
+  });
+});
+
+describe("decorrelated terminal gates", () => {
+  it("records an authoritative thin-mode gate pass with separated verifier lanes", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "pass" as const,
+      results: [],
+      comment: "gate passed",
+    }));
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["mode:thin"],
+          }),
+        ],
+      }),
+      runEnsembleGate,
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+    await waitForGateOutcome(orchestrator, "1");
+
+    expect(runEnsembleGate).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().decorrelatedGateOutcomes["1"]).toEqual([
+      expect.objectContaining({
+        mode: "thin",
+        status: "passed",
+        aggregate: "pass",
+        verifierSeparated: true,
+        authoritative: true,
+        reworkTarget: null,
+        workerLane: expect.objectContaining({
+          runner: "codex",
+          model: null,
+          role: "worker",
+          stageName: "implement",
+        }),
+        reviewerLanes: [
+          expect.objectContaining({
+            runner: "pi",
+            model: "local-flash",
+            role: "decorrelated-reviewer",
+          }),
+        ],
+      }),
+    ]);
+    expect(orchestrator.getState().dispatcherRunJournal.at(-1)).toMatchObject({
+      kind: "gate_result",
+      metadata: {
+        aggregate: "pass",
+        mode: "thin",
+        verifierSeparated: true,
+        authoritative: true,
+      },
+    });
+  });
+
+  it("records a full-mode gate failure and routes the unit back to rework", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "fail" as const,
+      results: [],
+      comment: "blocking review finding",
+    }));
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["mode:full"],
+          }),
+        ],
+      }),
+      runEnsembleGate,
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+    await waitForGateOutcome(orchestrator, "1");
+
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+    expect(orchestrator.getState().decorrelatedGateOutcomes["1"]).toEqual([
+      expect.objectContaining({
+        mode: "full",
+        status: "failed",
+        aggregate: "fail",
+        verifierSeparated: true,
+        authoritative: true,
+        reworkTarget: "implement",
+      }),
+    ]);
+  });
+
+  it("blocks a production gate when the verifier lane matches the worker lane", async () => {
+    const config = createImplementThenGateConfigWithReviewers([
+      {
+        runner: "codex",
+        model: null,
+        role: "worker",
+        prompt: null,
+      },
+    ]);
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "pass" as const,
+      results: [],
+      comment: "should not run",
+    }));
+    const comments: string[] = [];
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["mode:full"],
+          }),
+        ],
+      }),
+      runEnsembleGate,
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    expect(runEnsembleGate).not.toHaveBeenCalled();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().decorrelatedGateOutcomes["1"]).toEqual([
+      expect.objectContaining({
+        status: "blocked",
+        aggregate: "fail",
+        verifierSeparated: false,
+        reworkTarget: "implement",
+      }),
+    ]);
+    expect(comments[0]).toContain("Decorrelated gate blocked");
+  });
+
+  it("keeps prototype mode out of the merge path and records promotion boundary", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "pass" as const,
+      results: [],
+      comment: "should not run",
+    }));
+    const comments: string[] = [];
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["mode:prototype"],
+          }),
+        ],
+      }),
+      runEnsembleGate,
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+
+    expect(runEnsembleGate).not.toHaveBeenCalled();
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+    expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
+    expect(orchestrator.getState().decorrelatedGateOutcomes["1"]).toEqual([
+      expect.objectContaining({
+        mode: "prototype",
+        status: "skipped_prototype",
+        aggregate: null,
+        authoritative: false,
+      }),
+    ]);
+    expect(comments[0]).toContain("Prototype promotion boundary");
+    expect(comments[0]).toContain("new `thin` or `full` production unit");
   });
 });
 
@@ -3912,6 +4111,7 @@ function createOrchestrator(overrides?: {
   onIssueDropped?: OrchestratorCoreOptions["onIssueDropped"];
   getRunningSupervisionSnapshots?: OrchestratorCoreOptions["getRunningSupervisionSnapshots"];
   requestSupervisionResteer?: OrchestratorCoreOptions["requestSupervisionResteer"];
+  runEnsembleGate?: OrchestratorCoreOptions["runEnsembleGate"];
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   postComment?: OrchestratorCoreOptions["postComment"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
@@ -3954,6 +4154,10 @@ function createOrchestrator(overrides?: {
     options.requestSupervisionResteer = overrides.requestSupervisionResteer;
   }
 
+  if (overrides?.runEnsembleGate !== undefined) {
+    options.runEnsembleGate = overrides.runEnsembleGate;
+  }
+
   if (overrides?.runContinuousFeedback !== undefined) {
     options.runContinuousFeedback = overrides.runContinuousFeedback;
   }
@@ -3967,6 +4171,21 @@ function createOrchestrator(overrides?: {
   }
 
   return new OrchestratorCore(options);
+}
+
+async function waitForGateOutcome(
+  orchestrator: OrchestratorCore,
+  issueId: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (
+      (orchestrator.getState().decorrelatedGateOutcomes[issueId] ?? []).length >
+      0
+    ) {
+      return;
+    }
+    await Promise.resolve();
+  }
 }
 
 function createTracker(input?: {
@@ -4172,6 +4391,29 @@ function createImplementThenGateConfig(): ResolvedWorkflowConfig {
       },
     },
   };
+  return config;
+}
+
+function createImplementThenGateConfigWithReviewers(
+  reviewers: ReviewerDefinition[] = [
+    {
+      runner: "pi",
+      model: "local-flash",
+      role: "decorrelated-reviewer",
+      prompt: null,
+    },
+  ],
+): ResolvedWorkflowConfig {
+  const config = createImplementThenGateConfig();
+  const implement = config.stages?.stages.implement;
+  const reviewGate = config.stages?.stages.review_gate;
+  if (implement === undefined || reviewGate === undefined) {
+    throw new Error("Expected implement and review_gate stages.");
+  }
+
+  implement.runner = "codex";
+  implement.model = null;
+  reviewGate.reviewers = reviewers;
   return config;
 }
 

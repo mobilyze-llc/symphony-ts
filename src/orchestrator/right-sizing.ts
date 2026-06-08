@@ -57,19 +57,36 @@ export function createRightSizingDecision(
 ): RightSizingDecision {
   const signals = collectSignals(input);
   const triggerHits = collectTriggerHits(signals);
+  if (signals.explicitModeHint !== null) {
+    return {
+      classifier: "deterministic-v1",
+      mode: signals.explicitModeHint,
+      stageName: input.stageName,
+      reason: `Issue metadata explicitly selects ${signals.explicitModeHint} mode.`,
+      rationale: [
+        `Issue metadata explicitly selects ${signals.explicitModeHint} mode.`,
+      ],
+      triggerHits,
+      signals,
+      modelRouting:
+        triggerHits.length > 0
+          ? {
+              allowed: true,
+              reason: "risk_trigger",
+            }
+          : {
+              allowed: false,
+              reason: "not_needed",
+            },
+    };
+  }
+
   const scores = {
     prototype: 0,
     thin: 0,
     full: 0,
   };
   const rationale: string[] = [];
-
-  if (signals.explicitModeHint !== null) {
-    scores[signals.explicitModeHint] += 4;
-    rationale.push(
-      `Issue metadata explicitly hints ${signals.explicitModeHint} mode.`,
-    );
-  }
 
   switch (signals.impactSurface) {
     case "narrow": {

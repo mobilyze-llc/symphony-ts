@@ -635,6 +635,35 @@ export interface RightSizingDecision {
   modelRouting: RightSizingModelRouting;
 }
 
+export interface DecorrelatedGateLane {
+  runner: string;
+  model: string | null;
+  role: string;
+  stageName: string | null;
+}
+
+export type DecorrelatedGateStatus =
+  | "passed"
+  | "failed"
+  | "blocked"
+  | "skipped_prototype";
+
+export interface DecorrelatedGateOutcome {
+  issueId: string;
+  issueIdentifier: string;
+  gateStage: string | null;
+  mode: RightSizingMode;
+  status: DecorrelatedGateStatus;
+  aggregate: "pass" | "fail" | null;
+  checkedAt: string;
+  workerLane: DecorrelatedGateLane;
+  reviewerLanes: DecorrelatedGateLane[];
+  verifierSeparated: boolean;
+  authoritative: boolean;
+  reworkTarget: string | null;
+  summary: string;
+}
+
 export type ContinuousFeedbackEvent = "commit" | "diff" | "checkpoint";
 export type ContinuousFeedbackStatus = "pass" | "finding";
 export type ContinuousFeedbackFindingSeverity = "info" | "warning" | "blocking";
@@ -721,6 +750,8 @@ export interface OrchestratorState {
   issuePassedStages: Record<string, string[]>;
   issueFirstDispatchedAt: Record<string, string>;
   issueExecutionHistory: Record<string, ExecutionHistory>;
+  issueRightSizingDecisions: Record<string, RightSizingDecision>;
+  decorrelatedGateOutcomes: Record<string, DecorrelatedGateOutcome[]>;
   loopTraceJournal: Record<string, LoopTraceJournal>;
   continuousFeedback: Record<string, ContinuousFeedbackIssueState>;
   dispatcherRunJournal: DispatcherRunJournal;
@@ -834,6 +865,8 @@ export function createInitialOrchestratorState(input: {
     issuePassedStages: {},
     issueFirstDispatchedAt: {},
     issueExecutionHistory: {},
+    issueRightSizingDecisions: {},
+    decorrelatedGateOutcomes: {},
     loopTraceJournal: {},
     continuousFeedback: {},
     dispatcherRunJournal: [],
