@@ -112,6 +112,12 @@ export interface TimerScheduler {
   clear(handle: ReturnType<typeof setTimeout> | null): void;
 }
 
+interface ScheduledRetryContext {
+  attempt: number;
+  identifier: string | null;
+  delayType: "continuation" | "failure";
+}
+
 export interface OrchestratorCoreOptions {
   config: ResolvedWorkflowConfig;
   tracker: IssueTracker;
@@ -2582,7 +2588,11 @@ export class OrchestratorCore {
           );
     const dueAtMs = this.now().getTime() + delayMs;
     const timerHandle = this.timerScheduler.set(() => {
-      void this.onRetryTimer(issueId).catch(() => undefined);
+      void this.runScheduledRetryTimer(issueId, {
+        attempt,
+        identifier: input.identifier,
+        delayType: input.delayType,
+      });
     }, delayMs);
 
     const retryEntry: RetryEntry = {
@@ -2598,6 +2608,25 @@ export class OrchestratorCore {
     this.state.claimed.add(issueId);
     this.state.retryAttempts[issueId] = retryEntry;
     return retryEntry;
+  }
+
+  private async runScheduledRetryTimer(
+    issueId: string,
+    retryContext: ScheduledRetryContext,
+  ): Promise<void> {
+    try {
+      await this.onRetryTimer(issueId);
+    } catch (error) {
+      const errorMessage = formatUnknownError(error);
+      console.warn(
+        `[orchestrator] Retry timer failed for ${retryContext.identifier ?? issueId}: ${errorMessage}`,
+      );
+      this.scheduleRetry(issueId, retryContext.attempt + 1, {
+        identifier: retryContext.identifier,
+        error: `retry timer failed: ${errorMessage}`,
+        delayType: retryContext.delayType,
+      });
+    }
   }
 
   private clearRetryEntry(issueId: string): void {
@@ -2727,6 +2756,10 @@ function formatSupervisionFindingSignature(
     ...finding.workerIds,
     ...finding.files,
   ].join("\0");
+}
+
+function formatUnknownError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function classifyExitOutcome(

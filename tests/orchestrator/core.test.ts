@@ -474,6 +474,57 @@ describe("orchestrator core", () => {
     });
   });
 
+  it("reschedules timer-fired retry failures when lease expiry persistence fails", async () => {
+    const timers = createFakeTimerScheduler();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const orchestrator = createOrchestrator({
+      timerScheduler: timers,
+      writeRunJournalEntry: async (entry) => {
+        if (entry.lease?.status === "expired") {
+          throw new Error("journal disk unavailable");
+        }
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: "worker failed",
+    });
+    expect(retryEntry).toMatchObject({ attempt: 1, delayType: "failure" });
+
+    orchestrator.getState().dispatcherLeases["dispatcher:stale:lease"] = {
+      leaseId: "dispatcher:stale:lease",
+      issueId: "stale",
+      issueIdentifier: "STALE-1",
+      operation: "dispatcher",
+      ownerId: "previous-runtime",
+      status: "active",
+      acquiredAt: "2026-03-06T00:00:00.000Z",
+      expiresAt: "2026-03-06T00:00:01.000Z",
+      completedAt: null,
+      stage: null,
+      attempt: null,
+      lastJournalSequence: 1,
+    };
+
+    timers.scheduled[0]?.callback();
+
+    await vi.waitFor(() => {
+      expect(orchestrator.getState().retryAttempts["1"]).toMatchObject({
+        attempt: 2,
+        delayType: "failure",
+        error: "retry timer failed: journal disk unavailable",
+      });
+    });
+    expect(orchestrator.getState().claimed.has("1")).toBe(true);
+    expect(warn).toHaveBeenCalledWith(
+      "[orchestrator] Retry timer failed for ISSUE-1: journal disk unavailable",
+    );
+    warn.mockRestore();
+  });
+
   it("requests stop for stalled sessions before tracker refresh", async () => {
     const stopCalls: Array<{ issueId: string; reason: string }> = [];
     const tracker = createTracker({
