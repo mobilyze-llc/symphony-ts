@@ -11,6 +11,12 @@ import {
 } from "../../src/config/config-resolver.js";
 import {
   DEFAULT_CODEX_COMMAND,
+  DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
+  DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
+  DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
+  DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
+  DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
+  DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
   DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
   DEFAULT_HARD_STOP_MAX_ITERATIONS,
@@ -71,6 +77,14 @@ describe("config-resolver", () => {
     expect(resolved.codex.turnTimeoutMs).toBe(DEFAULT_TURN_TIMEOUT_MS);
     expect(resolved.codex.readTimeoutMs).toBe(DEFAULT_READ_TIMEOUT_MS);
     expect(resolved.codex.stallTimeoutMs).toBe(DEFAULT_STALL_TIMEOUT_MS);
+    expect(resolved.continuousFeedback).toEqual({
+      enabled: DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
+      events: [...DEFAULT_CONTINUOUS_FEEDBACK_EVENTS],
+      runner: DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
+      model: DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
+      role: DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
+      bounceOnFinding: DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
+    });
     expect(resolved.observability.dashboardEnabled).toBe(
       DEFAULT_OBSERVABILITY_ENABLED,
     );
@@ -175,6 +189,46 @@ describe("config-resolver", () => {
     expect(resolved.observability.dashboardEnabled).toBe(false);
     expect(resolved.observability.refreshMs).toBe(2_500);
     expect(resolved.observability.renderIntervalMs).toBe(33);
+  });
+
+  it("projects explicit continuous_feedback event, runner, and model settings", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        continuous_feedback: {
+          enabled: "false",
+          events: ["commit", "diff", "checkpoint", "unsupported", "diff"],
+          runner: "claude",
+          model: "sonnet",
+          role: "cheap-reviewer",
+          bounce_on_finding: "false",
+        },
+      },
+    });
+
+    expect(resolved.continuousFeedback).toEqual({
+      enabled: false,
+      events: ["commit", "diff", "checkpoint"],
+      runner: "claude",
+      model: "sonnet",
+      role: "cheap-reviewer",
+      bounceOnFinding: false,
+    });
+  });
+
+  it("falls back to checkpoint when continuous_feedback events are invalid", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        continuous_feedback: {
+          events: ["unsupported"],
+        },
+      },
+    });
+
+    expect(resolved.continuousFeedback?.events).toEqual(["checkpoint"]);
   });
 
   it("accepts server.port zero for ephemeral listener binding", () => {
