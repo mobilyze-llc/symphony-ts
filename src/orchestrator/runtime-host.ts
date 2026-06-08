@@ -25,6 +25,8 @@ import type {
 } from "../config/types.js";
 import { WorkflowWatcher } from "../config/workflow-watch.js";
 import type {
+  DispatcherRunJournal,
+  DispatcherRunJournalEntry,
   ExecutionHistory,
   Issue,
   LoopTraceEntry,
@@ -43,6 +45,10 @@ import {
   readLoopTraceJournal,
   writeLoopTraceJournal,
 } from "../logging/loop-trace.js";
+import {
+  appendDispatcherRunJournalEntryToDisk,
+  readDispatcherRunJournal,
+} from "../logging/run-journal.js";
 import {
   type RuntimeSnapshot,
   buildRuntimeSnapshot,
@@ -120,6 +126,13 @@ export interface RuntimeHostOptions {
     locator: LoopTraceArtifactLocator,
     journal: LoopTraceJournal,
   ) => Promise<void>;
+  readDispatcherRunJournal?: (
+    workspaceRoot: string,
+  ) => Promise<DispatcherRunJournal>;
+  writeDispatcherRunJournalEntry?: (
+    workspaceRoot: string,
+    entry: DispatcherRunJournalEntry,
+  ) => Promise<void>;
   now?: () => Date;
 }
 
@@ -196,6 +209,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     journal: LoopTraceJournal,
   ) => Promise<void>;
 
+  private readonly readDispatcherRunJournal: (
+    workspaceRoot: string,
+  ) => Promise<DispatcherRunJournal>;
+
+  private readonly writeDispatcherRunJournalEntry: (
+    workspaceRoot: string,
+    entry: DispatcherRunJournalEntry,
+  ) => Promise<void>;
+
   static readonly PRUNE_DEBOUNCE_MS = 300_000;
 
   #lastPruneAt = 0;
@@ -227,6 +249,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     string,
     { locator: LoopTraceArtifactLocator; journal: LoopTraceJournal }
   >();
+  private dispatcherRunJournalHydrationTask: Promise<void> | null = null;
+  private dispatcherRunJournalLoaded = false;
 
   constructor(options: RuntimeHostOptions) {
     this.config = options.config;
@@ -242,6 +266,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       options.readLoopTraceJournal ?? readLoopTraceJournal;
     this.writeLoopTraceJournal =
       options.writeLoopTraceJournal ?? writeLoopTraceJournal;
+    this.readDispatcherRunJournal =
+      options.readDispatcherRunJournal ?? readDispatcherRunJournal;
+    this.writeDispatcherRunJournalEntry =
+      options.writeDispatcherRunJournalEntry ??
+      appendDispatcherRunJournalEntryToDisk;
     this.workspaceManager =
       options.workspaceManager ??
       createWorkspaceManagerFromConfig(options.config, this.logger);
@@ -282,6 +311,26 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       tracker: options.tracker,
       now: this.now,
       timerScheduler,
+      writeRunJournalEntry: async (entry) => {
+        try {
+          await this.writeDispatcherRunJournalEntry(
+            this.workspaceManager.root,
+            entry,
+          );
+        } catch (error) {
+          await this.logger?.warn(
+            "dispatcher_run_journal_persist_failed",
+            "Failed to persist dispatcher run journal entry.",
+            {
+              outcome: "degraded",
+              reason: toErrorMessage(error),
+              issue_id: entry.issueId,
+              issue_identifier: entry.issueIdentifier,
+              journal_kind: entry.kind,
+            },
+          );
+        }
+      },
       ...(this.tracker instanceof LinearTrackerClient
         ? {
             postComment: async (issueId: string, body: string) => {
@@ -431,6 +480,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     if (input.workspaceManager !== undefined) {
       this.workspaceManager = input.workspaceManager;
+      this.dispatcherRunJournalLoaded = false;
+      this.dispatcherRunJournalHydrationTask = null;
     }
 
     this.orchestrator.updateConfig(input.config);
@@ -458,11 +509,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   }
 
   async pollOnce() {
-    return this.enqueue(async () => this.orchestrator.pollTick());
+    return this.enqueue(async () => {
+      await this.ensureDispatcherRunJournalLoaded();
+      return await this.orchestrator.pollTick();
+    });
   }
 
   async runRetryTimer(issueId: string) {
     return this.enqueue(async () => {
+      await this.ensureDispatcherRunJournalLoaded();
       const state = this.orchestrator.getState();
       const retryEntry = state.retryAttempts[issueId];
       const preStage = state.issueStages[issueId] ?? null;
@@ -617,6 +672,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     if (!coalesced) {
       void this.enqueue(async () => {
+        await this.ensureDispatcherRunJournalLoaded();
         this.refreshQueued = false;
         await this.orchestrator.pollTick();
       });
@@ -631,6 +687,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   }
 
   async requestIssueStop(issueIdentifier: string): Promise<StopIssueResponse> {
+    await this.ensureDispatcherRunJournalLoaded();
     const stopRequest =
       await this.orchestrator.requestStopByIdentifier(issueIdentifier);
     if (stopRequest === null) {
@@ -646,6 +703,45 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       stopped: true,
       reason: "manual_stop",
     };
+  }
+
+  private async ensureDispatcherRunJournalLoaded(): Promise<void> {
+    if (this.dispatcherRunJournalLoaded) {
+      return;
+    }
+    if (this.dispatcherRunJournalHydrationTask !== null) {
+      await this.dispatcherRunJournalHydrationTask;
+      return;
+    }
+
+    const task = (async () => {
+      try {
+        const journal = await this.readDispatcherRunJournal(
+          this.workspaceManager.root,
+        );
+        this.orchestrator.recoverFromRunJournal(journal);
+      } catch (error) {
+        await this.logger?.warn(
+          "dispatcher_run_journal_hydration_failed",
+          "Failed to hydrate dispatcher run journal.",
+          {
+            outcome: "degraded",
+            reason: toErrorMessage(error),
+            workspace_root: this.workspaceManager.root,
+          },
+        );
+      } finally {
+        this.dispatcherRunJournalLoaded = true;
+      }
+    })();
+    this.dispatcherRunJournalHydrationTask = task;
+    try {
+      await task;
+    } finally {
+      if (this.dispatcherRunJournalHydrationTask === task) {
+        this.dispatcherRunJournalHydrationTask = null;
+      }
+    }
   }
 
   private getLoopTraceLocator(issueId: string): LoopTraceArtifactLocator {

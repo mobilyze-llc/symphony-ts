@@ -165,6 +165,64 @@ export interface LoopTraceEntry {
 
 export type LoopTraceJournal = LoopTraceEntry[];
 
+export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
+  "admission",
+  "right_sizing",
+  "supervision_finding",
+  "re_steer_request",
+  "gate_started",
+  "gate_result",
+  "tracker_write",
+  "hard_stop_trigger",
+] as const;
+
+export type DispatcherRunJournalEventKind =
+  (typeof DISPATCHER_RUN_JOURNAL_EVENT_KINDS)[number];
+
+export const DISPATCHER_OPERATIONS = [
+  "dispatcher",
+  "supervisor",
+  "tracker_write",
+  "gate",
+] as const;
+
+export type DispatcherOperation = (typeof DISPATCHER_OPERATIONS)[number];
+
+export type DispatcherLeaseStatus = "active" | "completed" | "expired";
+
+export interface DispatcherLease {
+  leaseId: string;
+  issueId: string;
+  issueIdentifier: string;
+  operation: DispatcherOperation;
+  ownerId: string;
+  status: DispatcherLeaseStatus;
+  acquiredAt: string;
+  expiresAt: string;
+  completedAt: string | null;
+  stage: string | null;
+  attempt: number | null;
+  lastJournalSequence: number;
+}
+
+export interface DispatcherRunJournalEntry {
+  sequence: number;
+  idempotencyKey: string;
+  timestamp: string;
+  kind: DispatcherRunJournalEventKind;
+  issueId: string;
+  issueIdentifier: string;
+  operation: DispatcherOperation;
+  stage: string | null;
+  attempt: number | null;
+  ownerId: string | null;
+  lease: DispatcherLease | null;
+  summary: string;
+  metadata: Record<string, unknown>;
+}
+
+export type DispatcherRunJournal = DispatcherRunJournalEntry[];
+
 export interface LiveSession {
   sessionId: string | null;
   threadId: string | null;
@@ -306,6 +364,8 @@ export interface OrchestratorState {
   issueFirstDispatchedAt: Record<string, string>;
   issueExecutionHistory: Record<string, ExecutionHistory>;
   loopTraceJournal: Record<string, LoopTraceJournal>;
+  dispatcherRunJournal: DispatcherRunJournal;
+  dispatcherLeases: Record<string, DispatcherLease>;
 }
 
 export const FAILURE_CLASSES = [
@@ -414,5 +474,7 @@ export function createInitialOrchestratorState(input: {
     issueFirstDispatchedAt: {},
     issueExecutionHistory: {},
     loopTraceJournal: {},
+    dispatcherRunJournal: [],
+    dispatcherLeases: {},
   };
 }

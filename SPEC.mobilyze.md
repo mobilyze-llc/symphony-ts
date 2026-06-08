@@ -29,6 +29,14 @@ Required local behavior:
 - Decorrelated gates review agent work with independent tools or models. The agent that produced the work does not grade its own completion.
 - Work units stay reviewable. Right-sizing, agent-authored tracker work, supervision, and gate decorrelation ship as focused increments rather than one broad organ graft.
 
+## Dispatcher Resume Contract
+
+Dispatcher organs must write an append-only run journal before starting side effects that can duplicate work. The durable journal lives under `.symphony/run-journals/dispatcher.jsonl` in the configured workspace root and records admission, right-sizing, supervision findings, re-steer requests, gate starts/results, tracker writes, and hard-stop triggers.
+
+Each in-flight dispatcher operation owns a lease with an owner id, issue id, stage, attempt, expiry, and status. On restart, Symphony replays the journal before polling Linear. Non-expired active leases keep the issue claimed and block duplicate dispatch, gate, tracker-write, or hard-stop side effects. Expired leases are journaled as expired and may be retried. Completed tracker-write and re-steer journal entries are idempotency barriers: the same side effect key must not run again after replay.
+
+Recovery must preserve pause and escalation decisions. A crash after deterministic supervision emits a finding must not forget the finding; a crash during a gate must not run a second gate while the first lease is live; a crash during a tracker write must either observe the completed idempotency key or retry only after the lease expires.
+
 ## Reviewable Increment Boundaries
 
 Keep the full orchestration graft split into small PRs:

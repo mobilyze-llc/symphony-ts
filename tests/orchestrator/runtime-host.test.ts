@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   AgentRunResult,
@@ -33,6 +33,13 @@ import type {
   IssueStateSnapshot,
   IssueTracker,
 } from "../../src/tracker/tracker.js";
+
+beforeEach(() => {
+  rmSync(join("/tmp/workspaces", ".symphony", "run-journals"), {
+    recursive: true,
+    force: true,
+  });
+});
 
 describe("OrchestratorRuntimeHost", () => {
   it("retains untracked files when HEAD-based git diffs fail in a fresh repo", async () => {
@@ -480,6 +487,56 @@ describe("OrchestratorRuntimeHost", () => {
       expect(artifact).toContain('"kind":"session_start"');
       expect(artifact).toContain('"kind":"worker_exit"');
       await expect(coldHost.getIssueDetails("MISSING-1")).resolves.toBeNull();
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("hydrates dispatcher run journal from disk before dispatch on restart", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-run-journal-"));
+
+    try {
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const firstRunner = new FakeAgentRunner();
+      const firstHost = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker(),
+        createAgentRunner: ({ onEvent }) => {
+          firstRunner.onEvent = onEvent;
+          return firstRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      const firstTick = await firstHost.pollOnce();
+
+      expect(firstTick.dispatchedIssueIds).toEqual(["1"]);
+      const journalPath = join(
+        workspaceRoot,
+        ".symphony",
+        "run-journals",
+        "dispatcher.jsonl",
+      );
+      const artifact = readFileSync(journalPath, "utf8");
+      expect(artifact).toContain('"kind":"admission"');
+
+      const coldRunner = new FakeAgentRunner();
+      const coldHost = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker(),
+        createAgentRunner: ({ onEvent }) => {
+          coldRunner.onEvent = onEvent;
+          return coldRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:06.000Z"),
+      });
+
+      const coldTick = await coldHost.pollOnce();
+
+      expect(coldTick.dispatchedIssueIds).toEqual([]);
+      expect(coldRunner.runs.size).toBe(0);
+      expect(coldHost.getState().claimed.has("1")).toBe(true);
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
     }

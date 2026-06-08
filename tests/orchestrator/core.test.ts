@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
-import type { Issue } from "../../src/domain/model.js";
+import type { DispatcherRunJournal, Issue } from "../../src/domain/model.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
@@ -1031,6 +1031,115 @@ describe("retry timer pipeline-halt guard", () => {
       error: "pipeline halted: SYMPH-99",
     });
     expect(spawnCalls).toEqual([]);
+  });
+});
+
+describe("dispatcher run journal restart recovery", () => {
+  it("restart recovery prevents duplicate dispatch after crash between decision emission and side effect", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const orchestrator = new OrchestratorCore({
+      config: createConfig(),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "dispatcher:1:no-stage:initial:lease:admission",
+          kind: "admission",
+          operation: "dispatcher",
+          leaseId: "dispatcher:1:no-stage:initial:lease",
+          leaseStatus: "active",
+          expiresAt: "2026-03-06T00:20:00.000Z",
+        }),
+      ],
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+    expect(orchestrator.getState().claimed.has("1")).toBe(true);
+  });
+
+  it("restart recovery avoids duplicate gate side effect after crash during gate", async () => {
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "pass" as const,
+      results: [],
+      comment: "pass",
+    }));
+    const orchestrator = new OrchestratorCore({
+      config: createGateConfig(),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      runEnsembleGate,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "gate:1:review_gate:initial:lease:started",
+          kind: "gate_started",
+          operation: "gate",
+          stage: "review_gate",
+          leaseId: "gate:1:review_gate:initial:lease",
+          leaseStatus: "active",
+          expiresAt: "2026-03-06T00:20:00.000Z",
+        }),
+      ],
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(runEnsembleGate).not.toHaveBeenCalled();
+    expect(orchestrator.getState().claimed.has("1")).toBe(true);
+  });
+
+  it("restart recovery skips completed tracker write after crash during tracker write", async () => {
+    const updateIssueState = vi.fn(async () => {});
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const orchestrator = new OrchestratorCore({
+      config: createLinearStateStageConfig(),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      }),
+      spawnWorker,
+      updateIssueState,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey:
+            "tracker_write:1:stage:implement:In Progress:initial:completed",
+          kind: "tracker_write",
+          operation: "tracker_write",
+          stage: "implement",
+          leaseId:
+            "tracker_write:1:implement:initial:tracker_write_1_stage_implement_In_Progress_initial",
+          leaseStatus: "completed",
+          completedAt: "2026-03-06T00:00:03.000Z",
+        }),
+      ],
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(updateIssueState).not.toHaveBeenCalled();
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -3553,6 +3662,129 @@ function createConfig(overrides?: {
     },
     stages: null,
     escalationState: null,
+  };
+}
+
+function createGateConfig(): ResolvedWorkflowConfig {
+  const config = createConfig();
+  config.stages = {
+    initialStage: "review_gate",
+    fastTrack: null,
+    stages: {
+      review_gate: {
+        type: "gate",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: "ensemble",
+        maxRework: 1,
+        reviewers: [],
+        transitions: {
+          onComplete: null,
+          onApprove: "done",
+          onRework: null,
+        },
+        linearState: null,
+      },
+      done: {
+        type: "terminal",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: null,
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: "Done",
+      },
+    },
+  };
+  return config;
+}
+
+function createLinearStateStageConfig(): ResolvedWorkflowConfig {
+  const config = createConfig();
+  config.stages = {
+    initialStage: "implement",
+    fastTrack: null,
+    stages: {
+      implement: {
+        type: "agent",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: null,
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: "In Progress",
+      },
+    },
+  };
+  return config;
+}
+
+function createJournalEntry(input: {
+  sequence: number;
+  idempotencyKey: string;
+  kind: DispatcherRunJournal[number]["kind"];
+  operation: DispatcherRunJournal[number]["operation"];
+  leaseId: string;
+  leaseStatus: "active" | "completed" | "expired";
+  stage?: string | null;
+  expiresAt?: string;
+  completedAt?: string | null;
+}): DispatcherRunJournal[number] {
+  const stage = input.stage ?? null;
+  const completedAt =
+    input.completedAt ??
+    (input.leaseStatus === "active" ? null : (input.expiresAt ?? null));
+  return {
+    sequence: input.sequence,
+    idempotencyKey: input.idempotencyKey,
+    timestamp: "2026-03-06T00:00:00.000Z",
+    kind: input.kind,
+    issueId: "1",
+    issueIdentifier: "ISSUE-1",
+    operation: input.operation,
+    stage,
+    attempt: null,
+    ownerId: "previous-runtime",
+    lease: {
+      leaseId: input.leaseId,
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      operation: input.operation,
+      ownerId: "previous-runtime",
+      status: input.leaseStatus,
+      acquiredAt: "2026-03-06T00:00:00.000Z",
+      expiresAt: input.expiresAt ?? "2026-03-06T00:10:00.000Z",
+      completedAt,
+      stage,
+      attempt: null,
+      lastJournalSequence: input.sequence,
+    },
+    summary: "journal fixture",
+    metadata: {
+      status: input.leaseStatus === "active" ? "started" : input.leaseStatus,
+    },
   };
 }
 
