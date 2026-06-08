@@ -1,0 +1,44 @@
+{
+  "decisionId": "fixture:fp:admission",
+  "category": "admission",
+  "classifier": "deterministic-disjointness-v1",
+  "issueId": "issue-fp",
+  "issueIdentifier": "MOB-FP",
+  "operation": "dispatcher",
+  "stage": "implement",
+  "attempt": null,
+  "timestamp": "2026-06-08T12:05:00.000Z",
+  "context": {
+    "reason": "A declared overlap looked riskier than it was.",
+    "triggerHits": [],
+    "findingKinds": ["declared_scope_overlap"],
+    "files": ["docs/notes.md"],
+    "workerIds": ["issue-fp"],
+    "details": {
+      "phase": "dispatch"
+    }
+  },
+  "expectedOutcome": {
+    "decision": "pause",
+    "classification": "positive",
+    "rationale": "Pause the co-run.",
+    "costWeight": "medium"
+  },
+  "observedOutcome": {
+    "decision": "pause",
+    "classification": "positive",
+    "rationale": "Dispatch did pause at first.",
+    "costWeight": "medium"
+  },
+  "operatorCorrection": {
+    "outcome": {
+      "decision": "admit",
+      "classification": "negative",
+      "rationale": "The work was actually disjoint enough to proceed.",
+      "costWeight": "low"
+    },
+    "source": "operator",
+    "recordedAt": "2026-06-08T12:06:00.000Z",
+    "note": "Human review cleared the overlap."
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "decisionId": "fixture:tp:admission",
+  "category": "admission",
+  "classifier": "deterministic-disjointness-v1",
+  "issueId": "issue-tp",
+  "issueIdentifier": "MOB-TP",
+  "operation": "dispatcher",
+  "stage": "implement",
+  "attempt": null,
+  "timestamp": "2026-06-08T12:00:00.000Z",
+  "context": {
+    "reason": "Overlapping file scope should pause admission.",
+    "triggerHits": [],
+    "findingKinds": ["declared_scope_overlap"],
+    "files": ["src/shared/config.ts"],
+    "workerIds": ["issue-tp"],
+    "details": {
+      "phase": "dispatch"
+    }
+  },
+  "expectedOutcome": {
+    "decision": "pause",
+    "classification": "positive",
+    "rationale": "Overlap requires a pause.",
+    "costWeight": "medium"
+  },
+  "observedOutcome": {
+    "decision": "pause",
+    "classification": "positive",
+    "rationale": "Dispatch stayed paused.",
+    "costWeight": "medium"
+  },
+  "operatorCorrection": null
+}

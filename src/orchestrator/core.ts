@@ -17,6 +17,11 @@ import {
   type ContinuousFeedbackEvent,
   type ContinuousFeedbackLane,
   type DecorrelatedGateLane,
+  type DispatcherDecisionCategory,
+  type DispatcherDecisionClassification,
+  type DispatcherDecisionCostWeight,
+  type DispatcherDecisionEvent,
+  type DispatcherDecisionOutcome,
   type DispatcherLease,
   type DispatcherOperation,
   type DispatcherRunJournal,
@@ -520,6 +525,43 @@ export class OrchestratorCore {
         candidateSnapshot,
       );
       if (findings.length > 0) {
+        await this.recordDispatcherDecisionEvent({
+          decisionId: `${issue.id}:dispatch:${formatAttemptKey(null)}:admission`,
+          category: "admission",
+          classifier: "deterministic-disjointness-v1",
+          issueId: issue.id,
+          issueIdentifier: issue.identifier,
+          operation: "dispatcher",
+          stage: null,
+          attempt: null,
+          summary: `Measured admission paused ${issue.identifier} due to deterministic overlap findings.`,
+          context: {
+            reason:
+              "Deterministic dispatch supervision found overlapping scope before admission.",
+            triggerHits: [],
+            findingKinds: findings.map((finding) => finding.kind),
+            files: findings.flatMap((finding) => finding.files),
+            workerIds: findings.flatMap((finding) => finding.workerIds),
+            details: {
+              phase: "dispatch",
+              issueState: issue.state,
+            },
+          },
+          expectedOutcome: {
+            decision: "pause",
+            classification: "positive",
+            rationale:
+              "Admission must block co-runs when deterministic overlap exists.",
+            costWeight: "medium",
+          },
+          observedOutcome: {
+            decision: "pause",
+            classification: "positive",
+            rationale:
+              "Dispatch remained paused after deterministic admission findings.",
+            costWeight: "medium",
+          },
+        });
         await this.reportSupervisionFindings("dispatch", findings);
         continue;
       }
@@ -664,6 +706,43 @@ export class OrchestratorCore {
       candidateSnapshot,
     );
     if (findings.length > 0) {
+      await this.recordDispatcherDecisionEvent({
+        decisionId: `${issue.id}:dispatch:${formatAttemptKey(retryEntry.attempt)}:admission`,
+        category: "admission",
+        classifier: "deterministic-disjointness-v1",
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        operation: "dispatcher",
+        stage: null,
+        attempt: retryEntry.attempt,
+        summary: `Measured retry admission paused ${issue.identifier} due to deterministic overlap findings.`,
+        context: {
+          reason:
+            "Deterministic dispatch supervision found overlapping scope before retry admission.",
+          triggerHits: [],
+          findingKinds: findings.map((finding) => finding.kind),
+          files: findings.flatMap((finding) => finding.files),
+          workerIds: findings.flatMap((finding) => finding.workerIds),
+          details: {
+            phase: "dispatch",
+            issueState: issue.state,
+          },
+        },
+        expectedOutcome: {
+          decision: "pause",
+          classification: "positive",
+          rationale:
+            "Retry admission must block co-runs when deterministic overlap exists.",
+          costWeight: "medium",
+        },
+        observedOutcome: {
+          decision: "pause",
+          classification: "positive",
+          rationale:
+            "Retry dispatch remained paused after deterministic admission findings.",
+          costWeight: "medium",
+        },
+      });
       await this.reportSupervisionFindings("dispatch", findings);
       return {
         dispatched: false,
@@ -2025,6 +2104,56 @@ export class OrchestratorCore {
     return null;
   }
 
+  private async recordDispatcherDecisionEvent(input: {
+    decisionId: string;
+    category: DispatcherDecisionCategory;
+    classifier: string | null;
+    issueId: string;
+    issueIdentifier: string;
+    operation: DispatcherOperation;
+    stage: string | null;
+    attempt: number | null;
+    summary: string;
+    context: DispatcherDecisionEvent["context"];
+    expectedOutcome: DispatcherDecisionOutcome;
+    observedOutcome?: DispatcherDecisionOutcome | null;
+    operatorCorrection?: DispatcherDecisionEvent["operatorCorrection"];
+  }): Promise<void> {
+    const event: DispatcherDecisionEvent = {
+      decisionId: input.decisionId,
+      category: input.category,
+      classifier: input.classifier,
+      issueId: input.issueId,
+      issueIdentifier: input.issueIdentifier,
+      operation: input.operation,
+      stage: input.stage,
+      attempt: input.attempt,
+      timestamp: this.now().toISOString(),
+      context: input.context,
+      expectedOutcome: input.expectedOutcome,
+      observedOutcome: input.observedOutcome ?? null,
+      operatorCorrection: input.operatorCorrection ?? null,
+    };
+
+    await this.recordRunJournalEntry({
+      idempotencyKey: `dispatcher_decision:${input.decisionId}`,
+      timestamp: event.timestamp,
+      kind: "dispatcher_decision",
+      issueId: input.issueId,
+      issueIdentifier: input.issueIdentifier,
+      operation: input.operation,
+      stage: input.stage,
+      attempt: input.attempt,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: input.summary,
+      metadata: {
+        status: "completed",
+        decisionEvent: event,
+      },
+    });
+  }
+
   private async acquireDispatcherLease(input: {
     leaseId: string;
     idempotencyKey: string;
@@ -2733,6 +2862,43 @@ export class OrchestratorCore {
         rightSizingDecision: null,
       };
     }
+    await this.recordDispatcherDecisionEvent({
+      decisionId: `${issue.id}:${stageName ?? "no-stage"}:${attemptKey}:admission`,
+      category: "admission",
+      classifier: "deterministic-disjointness-v1",
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      operation: "dispatcher",
+      stage: stageName,
+      attempt,
+      summary: `Measured admission accepted ${issue.identifier} for dispatch.`,
+      context: {
+        reason:
+          "Issue passed deterministic eligibility and disjointness checks.",
+        triggerHits: [],
+        findingKinds: [],
+        files:
+          createIssueSupervisionSnapshot(issue).declaredFileScope?.slice() ??
+          [],
+        workerIds: [issue.id],
+        details: {
+          issueState: issue.state,
+        },
+      },
+      expectedOutcome: {
+        decision: "admit",
+        classification: "negative",
+        rationale:
+          "Dispatch can proceed when no deterministic admission findings exist.",
+        costWeight: "low",
+      },
+      observedOutcome: {
+        decision: "admit",
+        classification: "negative",
+        rationale: "Issue was admitted and leased for worker dispatch.",
+        costWeight: "low",
+      },
+    });
     await this.recordRunJournalEntry({
       idempotencyKey: `${dispatchLeaseId}:right_sizing`,
       timestamp: this.now().toISOString(),
@@ -2749,6 +2915,75 @@ export class OrchestratorCore {
         mode: rightSizingDecision.mode,
         classifier: rightSizingDecision.classifier,
         modelRoutingReason: rightSizingDecision.modelRouting.reason,
+      },
+    });
+    await this.recordDispatcherDecisionEvent({
+      decisionId: `${issue.id}:${stageName ?? "no-stage"}:${attemptKey}:right_sizing`,
+      category: "right_sizing",
+      classifier: rightSizingDecision.classifier,
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      operation: "dispatcher",
+      stage: stageName,
+      attempt,
+      summary: `Measured right-sizing selected ${rightSizingDecision.mode} for ${issue.identifier}.`,
+      context: {
+        reason: rightSizingDecision.reason,
+        triggerHits: rightSizingDecision.triggerHits,
+        findingKinds: [],
+        files: rightSizingDecision.signals.declaredScopeFiles,
+        workerIds: [issue.id],
+        details: {
+          impactSurface: rightSizingDecision.signals.impactSurface,
+          budget: rightSizingDecision.signals.budget,
+          labels: rightSizingDecision.signals.labels,
+          retryCount: rightSizingDecision.signals.retryCount,
+          stageCount: rightSizingDecision.signals.stageCount,
+          gateCount: rightSizingDecision.signals.gateCount,
+          reviewerCount: rightSizingDecision.signals.reviewerCount,
+        },
+      },
+      expectedOutcome: {
+        decision: rightSizingDecision.mode,
+        classification: classifyRightSizingDecision(rightSizingDecision.mode),
+        rationale: rightSizingDecision.reason,
+        costWeight: budgetToDecisionCostWeight(
+          rightSizingDecision.signals.budget,
+        ),
+      },
+    });
+    await this.recordDispatcherDecisionEvent({
+      decisionId: `${issue.id}:${stageName ?? "no-stage"}:${attemptKey}:model_routing`,
+      category: "model_routing",
+      classifier: rightSizingDecision.classifier,
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      operation: "dispatcher",
+      stage: stageName,
+      attempt,
+      summary: `Measured model routing decided ${rightSizingDecision.modelRouting.allowed ? "route_to_strong" : "stay_deterministic"} for ${issue.identifier}.`,
+      context: {
+        reason: `Routing decision derived from ${rightSizingDecision.modelRouting.reason}.`,
+        triggerHits: rightSizingDecision.triggerHits,
+        findingKinds: [],
+        files: rightSizingDecision.signals.declaredScopeFiles,
+        workerIds: [issue.id],
+        details: {
+          mode: rightSizingDecision.mode,
+          routingReason: rightSizingDecision.modelRouting.reason,
+        },
+      },
+      expectedOutcome: {
+        decision: rightSizingDecision.modelRouting.allowed
+          ? "route_to_strong"
+          : "stay_deterministic",
+        classification: rightSizingDecision.modelRouting.allowed
+          ? "positive"
+          : "negative",
+        rationale: `Routing reason: ${rightSizingDecision.modelRouting.reason}.`,
+        costWeight: budgetToDecisionCostWeight(
+          rightSizingDecision.signals.budget,
+        ),
       },
     });
 
@@ -3089,13 +3324,55 @@ export class OrchestratorCore {
       });
     }
 
+    const resteerSignature = freshFindings
+      .map((finding) => formatSupervisionFindingSignature(phase, finding))
+      .join("|");
+    await this.recordDispatcherDecisionEvent({
+      decisionId: `re_steer:${phase}:${resteerSignature}`,
+      category: "re_steer",
+      classifier: "deterministic-supervision-v1",
+      issueId: freshFindings[0]?.workerIds[0] ?? "unknown",
+      issueIdentifier: freshFindings[0]?.issueIdentifiers[0] ?? "unknown",
+      operation: "supervisor",
+      stage: null,
+      attempt: null,
+      summary: `Measured re-steer decision for ${freshFindings.length} supervision finding(s).`,
+      context: {
+        reason:
+          "Fresh deterministic supervision findings require bounded re-steer or escalation.",
+        triggerHits: [],
+        findingKinds: freshFindings.map((finding) => finding.kind),
+        files: freshFindings.flatMap((finding) => finding.files),
+        workerIds: freshFindings.flatMap((finding) => finding.workerIds),
+        details: {
+          phase,
+          signature: resteerSignature,
+          actions: freshFindings.map((finding) => finding.action),
+        },
+      },
+      expectedOutcome: {
+        decision: "request_re_steer",
+        classification: "positive",
+        rationale:
+          "Fresh supervision findings should trigger a bounded re-steer request.",
+        costWeight: "high",
+      },
+      observedOutcome:
+        this.requestSupervisionResteer === undefined
+          ? null
+          : {
+              decision: "request_re_steer",
+              classification: "positive",
+              rationale:
+                "A re-steer side effect is available and was requested.",
+              costWeight: "high",
+            },
+    });
+
     if (this.requestSupervisionResteer === undefined) {
       return;
     }
 
-    const resteerSignature = freshFindings
-      .map((finding) => formatSupervisionFindingSignature(phase, finding))
-      .join("|");
     const resteerKey = `re_steer_request:${phase}:${resteerSignature}`;
     if (this.hasCompletedJournalEntry(`${resteerKey}:completed`)) {
       return;
@@ -3356,6 +3633,25 @@ function createDispatcherLeaseId(input: {
 
 function formatAttemptKey(attempt: number | null): string {
   return attempt === null ? "initial" : `attempt-${attempt}`;
+}
+
+function classifyRightSizingDecision(
+  mode: RightSizingDecision["mode"],
+): DispatcherDecisionClassification {
+  return mode === "prototype" ? "negative" : "positive";
+}
+
+function budgetToDecisionCostWeight(
+  budget: RightSizingDecision["signals"]["budget"],
+): DispatcherDecisionCostWeight {
+  switch (budget) {
+    case "low":
+      return "low";
+    case "medium":
+      return "medium";
+    case "high":
+      return "high";
+  }
 }
 
 function sanitizeJournalKeyPart(part: string): string {

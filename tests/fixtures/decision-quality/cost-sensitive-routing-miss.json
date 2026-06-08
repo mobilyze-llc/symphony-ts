@@ -1,0 +1,45 @@
+{
+  "decisionId": "fixture:miss:model-routing",
+  "category": "model_routing",
+  "classifier": "deterministic-v1",
+  "issueId": "issue-route-miss",
+  "issueIdentifier": "MOB-ROUTE",
+  "operation": "dispatcher",
+  "stage": "investigate",
+  "attempt": 1,
+  "timestamp": "2026-06-08T12:20:00.000Z",
+  "context": {
+    "reason": "A cheap route was chosen for an ambiguous high-risk unit.",
+    "triggerHits": ["high_risk_files", "ambiguous_routing"],
+    "findingKinds": [],
+    "files": ["src/orchestrator/runtime-host.ts"],
+    "workerIds": ["issue-route-miss"],
+    "details": {
+      "mode": "thin",
+      "routingReason": "not_needed"
+    }
+  },
+  "expectedOutcome": {
+    "decision": "stay_deterministic",
+    "classification": "negative",
+    "rationale": "The router stayed on the cheap path.",
+    "costWeight": "medium"
+  },
+  "observedOutcome": {
+    "decision": "stay_deterministic",
+    "classification": "negative",
+    "rationale": "No strong model was used initially.",
+    "costWeight": "medium"
+  },
+  "operatorCorrection": {
+    "outcome": {
+      "decision": "route_to_strong",
+      "classification": "positive",
+      "rationale": "The issue needed stronger routing to avoid a miss.",
+      "costWeight": "high"
+    },
+    "source": "operator",
+    "recordedAt": "2026-06-08T12:24:00.000Z",
+    "note": "A stronger model fixed the miss."
+  }
+}

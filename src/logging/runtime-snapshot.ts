@@ -3,11 +3,16 @@ import type {
   CodexTotals,
   ContinuousFeedbackIssueState,
   DecorrelatedGateOutcome,
+  DispatcherDecisionQualitySummary,
   OrchestratorState,
   RecentActivityEntry,
   StageRecord,
   TurnHistoryEntry,
 } from "../domain/model.js";
+import {
+  evaluateDispatcherDecisionQuality,
+  extractDispatcherDecisionEvents,
+} from "../orchestrator/decision-quality.js";
 import { formatEasternTimestamp } from "./format-timestamp.js";
 import {
   type LoopTraceJournalPreviewResponse,
@@ -195,6 +200,7 @@ export interface RuntimeSnapshot {
   };
   rate_limits: CodexRateLimits;
   decorrelated_gates?: RuntimeSnapshotDecorrelatedGateOutcome[];
+  decision_quality?: DispatcherDecisionQualitySummary;
   manager_runs?: RuntimeSnapshotManagerRun[];
 }
 
@@ -339,6 +345,9 @@ export function buildRuntimeSnapshot(
     ),
     rate_limits: state.codexRateLimits,
     decorrelated_gates: buildDecorrelatedGateSnapshots(state),
+    decision_quality: evaluateDispatcherDecisionQuality(
+      extractDispatcherDecisionEvents(state.dispatcherRunJournal),
+    ),
     manager_runs: buildManagerRunSnapshots(state),
   };
 }

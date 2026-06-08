@@ -122,6 +122,90 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain("Symphony Observability");
   });
 
+  it("renders dispatcher decision-quality metrics and category table", () => {
+    const snapshot: RuntimeSnapshot = {
+      ...buildSnapshot({}),
+      decision_quality: {
+        total: 4,
+        measured: 3,
+        pending: 1,
+        exactMatches: 2,
+        corrected: 1,
+        truePositive: 1,
+        falsePositive: 1,
+        falseNegative: 1,
+        trueNegative: 0,
+        unclassified: 0,
+        costSensitiveRoutingMisses: 1,
+        latestEventAt: "2026-06-08T12:24:00.000Z",
+        categories: {
+          right_sizing: {
+            total: 1,
+            measured: 0,
+            pending: 1,
+            exactMatches: 0,
+            corrected: 0,
+            truePositive: 0,
+            falsePositive: 0,
+            falseNegative: 0,
+            trueNegative: 0,
+            unclassified: 0,
+            costSensitiveRoutingMisses: 0,
+          },
+          admission: {
+            total: 2,
+            measured: 2,
+            pending: 0,
+            exactMatches: 1,
+            corrected: 1,
+            truePositive: 1,
+            falsePositive: 1,
+            falseNegative: 0,
+            trueNegative: 0,
+            unclassified: 0,
+            costSensitiveRoutingMisses: 0,
+          },
+          re_steer: {
+            total: 0,
+            measured: 0,
+            pending: 0,
+            exactMatches: 0,
+            corrected: 0,
+            truePositive: 0,
+            falsePositive: 0,
+            falseNegative: 0,
+            trueNegative: 0,
+            unclassified: 0,
+            costSensitiveRoutingMisses: 0,
+          },
+          model_routing: {
+            total: 1,
+            measured: 1,
+            pending: 0,
+            exactMatches: 1,
+            corrected: 0,
+            truePositive: 0,
+            falsePositive: 0,
+            falseNegative: 1,
+            trueNegative: 0,
+            unclassified: 0,
+            costSensitiveRoutingMisses: 1,
+          },
+        },
+      },
+    };
+
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: true });
+
+    expect(html).toContain("Decision quality");
+    expect(html).toContain("Measured decisions");
+    expect(html).toContain("Routing misses");
+    expect(html).toContain("model routing");
+    expect(html).toContain("Latest decision: 2026-06-08T12:24:00.000Z");
+    expect(html).toContain("renderDecisionQuality");
+    expect(html).toContain("next.decision_quality");
+  });
+
   it("renders manager-run lane state and closeout evidence", () => {
     const snapshot: RuntimeSnapshot = {
       ...buildSnapshot({}),

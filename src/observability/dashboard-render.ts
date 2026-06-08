@@ -721,6 +721,17 @@ ${DASHBOARD_STYLES}
         <section class="section-card">
           <div class="section-header">
             <div>
+              <h2 class="section-title">Decision quality</h2>
+              <p class="section-copy">Measured dispatcher decisions, pending outcomes, and routing misses from the dispatcher journal.</p>
+            </div>
+          </div>
+
+          <div id="decision-quality">${renderDecisionQuality(snapshot)}</div>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
               <h2 class="section-title">Manager runs</h2>
               <p class="section-copy">Lane ledgers replayed as deterministic Symphony run state.</p>
             </div>
@@ -995,6 +1006,41 @@ function renderDashboardClientScript(
           }).join('');
         }
 
+        function renderDecisionQuality(next) {
+          var summary = next.decision_quality;
+          if (!summary || !summary.total) {
+            return '<p class="empty-state">No measured dispatcher decisions yet.</p>';
+          }
+          var cards = [
+            ['Measured decisions', summary.total, 'Journaled dispatcher decisions with a quality envelope.'],
+            ['Measured outcomes', summary.measured, 'Decisions with observed outcomes or operator corrections.'],
+            ['Pending outcomes', summary.pending, 'Decisions still waiting on a measured outcome.'],
+            ['Exact matches', summary.exactMatches, 'Measured outcomes that still match the original dispatcher choice.'],
+            ['False positives', summary.falsePositive, 'Interventions the later evidence says were too strong.'],
+            ['False negatives', summary.falseNegative, 'Missed interventions later corrected by evidence or operators.'],
+            ['Routing misses', summary.costSensitiveRoutingMisses, 'Stay-cheap routes later corrected to strong routing.'],
+            ['Corrections', summary.corrected, 'Decisions with an explicit operator or meta-eval correction.']
+          ].map(function (card) {
+            return '<article class="metric-card"><p class="metric-label">' + escapeHtml(card[0]) + '</p><p class="metric-value numeric">' + formatInteger(card[1]) + '</p><p class="metric-detail">' + escapeHtml(card[2]) + '</p></article>';
+          }).join('');
+          var categories = ['right_sizing', 'admission', 're_steer', 'model_routing'];
+          var rows = categories.map(function (category) {
+            var bucket = summary.categories && summary.categories[category] ? summary.categories[category] : {};
+            return '<tr>' +
+              '<td>' + escapeHtml(category.replaceAll('_', ' ')) + '</td>' +
+              '<td class="numeric">' + formatInteger(bucket.total || 0) + '</td>' +
+              '<td class="numeric">' + formatInteger(bucket.measured || 0) + '</td>' +
+              '<td class="numeric">' + formatInteger(bucket.falsePositive || 0) + '</td>' +
+              '<td class="numeric">' + formatInteger(bucket.falseNegative || 0) + '</td>' +
+              '<td class="numeric">' + formatInteger(bucket.costSensitiveRoutingMisses || 0) + '</td>' +
+              '</tr>';
+          }).join('');
+          var latest = summary.latestEventAt ? '<p class="metric-detail">Latest decision: ' + escapeHtml(summary.latestEventAt) + '</p>' : '';
+          return '<div class="metric-grid">' + cards + '</div>' +
+            latest +
+            '<div class="table-wrap"><table class="data-table" style="min-width: 640px;"><thead><tr><th>Category</th><th>Total</th><th>Measured</th><th>False positives</th><th>False negatives</th><th>Routing misses</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+        }
+
         function renderDetailPanel(row, rowId) {
           var contextItems = [];
           if (row.pipeline_stage != null) {
@@ -1149,6 +1195,7 @@ function renderDashboardClientScript(
           document.getElementById('metric-total').textContent = formatInteger(next.codex_totals.total_tokens);
           document.getElementById('metric-total-detail').textContent = 'In ' + formatInteger(next.codex_totals.input_tokens) + ' / Out ' + formatInteger(next.codex_totals.output_tokens);
           document.getElementById('metric-runtime').textContent = formatRuntimeSeconds(next.codex_totals.seconds_running);
+          document.getElementById('decision-quality').innerHTML = renderDecisionQuality(next);
           document.getElementById('manager-runs').innerHTML = renderManagerRuns(next);
           // Preserve expand/collapse state before DOM replacement (SYMPH-37)
           var expandedIds = new Set();
@@ -1294,6 +1341,106 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
             </tr>`;
     })
     .join("");
+}
+
+function renderDecisionQuality(snapshot: RuntimeSnapshot): string {
+  const summary = snapshot.decision_quality;
+  if (summary === undefined || summary.total === 0) {
+    return '<p class="empty-state">No measured dispatcher decisions yet.</p>';
+  }
+
+  const cards = [
+    {
+      label: "Measured decisions",
+      value: summary.total,
+      detail: "Journaled dispatcher decisions with a quality envelope.",
+    },
+    {
+      label: "Measured outcomes",
+      value: summary.measured,
+      detail: "Decisions with observed outcomes or operator corrections.",
+    },
+    {
+      label: "Pending outcomes",
+      value: summary.pending,
+      detail: "Decisions still waiting on a measured outcome.",
+    },
+    {
+      label: "Exact matches",
+      value: summary.exactMatches,
+      detail: "Measured outcomes that still match the original choice.",
+    },
+    {
+      label: "False positives",
+      value: summary.falsePositive,
+      detail: "Interventions later shown to be too strong.",
+    },
+    {
+      label: "False negatives",
+      value: summary.falseNegative,
+      detail: "Missed interventions later corrected by evidence.",
+    },
+    {
+      label: "Routing misses",
+      value: summary.costSensitiveRoutingMisses,
+      detail: "Cheap routes later corrected to stronger routing.",
+    },
+    {
+      label: "Corrections",
+      value: summary.corrected,
+      detail: "Explicit operator or meta-eval corrections.",
+    },
+  ]
+    .map(
+      (card) => `
+        <article class="metric-card">
+          <p class="metric-label">${escapeHtml(card.label)}</p>
+          <p class="metric-value numeric">${formatInteger(card.value)}</p>
+          <p class="metric-detail">${escapeHtml(card.detail)}</p>
+        </article>`,
+    )
+    .join("");
+
+  const categoryRows = (
+    ["right_sizing", "admission", "re_steer", "model_routing"] as const
+  )
+    .map((category) => {
+      const bucket = summary.categories[category];
+      return `
+        <tr>
+          <td>${escapeHtml(category.replaceAll("_", " "))}</td>
+          <td class="numeric">${formatInteger(bucket.total)}</td>
+          <td class="numeric">${formatInteger(bucket.measured)}</td>
+          <td class="numeric">${formatInteger(bucket.falsePositive)}</td>
+          <td class="numeric">${formatInteger(bucket.falseNegative)}</td>
+          <td class="numeric">${formatInteger(bucket.costSensitiveRoutingMisses)}</td>
+        </tr>`;
+    })
+    .join("");
+
+  const latest =
+    summary.latestEventAt === null
+      ? ""
+      : `<p class="metric-detail">Latest decision: ${escapeHtml(summary.latestEventAt)}</p>`;
+
+  return `
+    <div class="metric-grid">${cards}</div>
+    ${latest}
+    <div class="table-wrap">
+      <table class="data-table" style="min-width: 640px;">
+        <thead>
+          <tr>
+            <th>Category</th>
+            <th>Total</th>
+            <th>Measured</th>
+            <th>False positives</th>
+            <th>False negatives</th>
+            <th>Routing misses</th>
+          </tr>
+        </thead>
+        <tbody>${categoryRows}</tbody>
+      </table>
+    </div>`;
 }
 
 function renderManagerRuns(snapshot: RuntimeSnapshot): string {
