@@ -41,7 +41,7 @@ describe("onRetryTimer preserves delayType from retry entry", () => {
     await orchestrator.pollTick();
 
     // Normal exit -> continuation retry (attempt=1, delayType="continuation")
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:00:05.000Z"),
@@ -109,7 +109,7 @@ describe("onRetryTimer preserves delayType from retry entry", () => {
     await orchestrator.pollTick();
 
     // Abnormal exit -> failure retry (attempt=1, delayType="failure")
-    const retryEntry = orchestrator.onWorkerExit({
+    const retryEntry = await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "turn failed",
@@ -231,7 +231,7 @@ describe("onRetryTimer preserves delayType from retry entry", () => {
     await orchestrator.pollTick();
 
     // Normal exit -> continuation retry (attempt=1)
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
       endedAt: new Date("2026-03-06T00:00:05.000Z"),
@@ -300,7 +300,7 @@ describe("onRetryTimer preserves delayType from retry entry", () => {
     await orchestrator.pollTick();
 
     // Abnormal exit -> failure retry (attempt=1)
-    orchestrator.onWorkerExit({
+    await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "abnormal",
       reason: "turn failed",

@@ -329,6 +329,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               journal_kind: entry.kind,
             },
           );
+          throw error;
         }
       },
       ...(this.tracker instanceof LinearTrackerClient
@@ -730,9 +731,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             workspace_root: this.workspaceManager.root,
           },
         );
-      } finally {
-        this.dispatcherRunJournalLoaded = true;
+        throw error;
       }
+      this.dispatcherRunJournalLoaded = true;
     })();
     this.dispatcherRunJournalHydrationTask = task;
     try {
@@ -1494,7 +1495,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const capturedFirstDispatchedAt =
       state.issueFirstDispatchedAt[execution.issueId] ?? null;
 
-    this.orchestrator.onWorkerExit({
+    await this.orchestrator.onWorkerExit({
       issueId: execution.issueId,
       outcome: input.outcome,
       ...(input.reason === undefined ? {} : { reason: input.reason }),

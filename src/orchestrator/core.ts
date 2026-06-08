@@ -613,23 +613,21 @@ export class OrchestratorCore {
     };
   }
 
-  onWorkerExit(input: {
+  async onWorkerExit(input: {
     issueId: string;
     outcome: WorkerExitOutcome;
     reason?: string;
     endedAt?: Date;
     agentMessage?: string;
-  }): RetryEntry | null {
+  }): Promise<RetryEntry | null> {
     const runningEntry = this.state.running[input.issueId];
     if (runningEntry === undefined) {
       return null;
     }
 
-    delete this.state.running[input.issueId];
     const endedAt = input.endedAt ?? this.now();
-    addEndedSessionRuntime(this.state, runningEntry.startedAt, endedAt);
     const exitedStageName = this.state.issueStages[input.issueId] ?? null;
-    this.completeDispatcherLeaseSync({
+    await this.completeDispatcherLease({
       leaseId: createDispatcherLeaseId({
         operation: "dispatcher",
         issueId: input.issueId,
@@ -653,6 +651,9 @@ export class OrchestratorCore {
         outcome: input.outcome,
       },
     });
+
+    delete this.state.running[input.issueId];
+    addEndedSessionRuntime(this.state, runningEntry.startedAt, endedAt);
 
     // Classify "abnormal" into a more descriptive outcome for stage records
     const classifiedOutcome = classifyExitOutcome(
@@ -1644,47 +1645,6 @@ export class OrchestratorCore {
     });
   }
 
-  private completeDispatcherLeaseSync(input: {
-    leaseId: string;
-    idempotencyKey: string;
-    kind: DispatcherRunJournalEntry["kind"];
-    issueId: string;
-    issueIdentifier: string;
-    operation: DispatcherOperation;
-    stage: string | null;
-    attempt: number | null;
-    summary: string;
-    metadata?: Record<string, unknown>;
-  }): void {
-    const lease = this.state.dispatcherLeases[input.leaseId];
-    if (lease === undefined) {
-      return;
-    }
-
-    const completedAt = this.now().toISOString();
-    void this.recordRunJournalEntry({
-      idempotencyKey: input.idempotencyKey,
-      timestamp: completedAt,
-      kind: input.kind,
-      issueId: input.issueId,
-      issueIdentifier: input.issueIdentifier,
-      operation: input.operation,
-      stage: input.stage,
-      attempt: input.attempt,
-      ownerId: this.leaseOwnerId,
-      lease: {
-        ...lease,
-        status: "completed",
-        completedAt,
-      },
-      summary: input.summary,
-      metadata: {
-        status: "completed",
-        ...(input.metadata ?? {}),
-      },
-    });
-  }
-
   private async recordRunJournalEntry(
     entry: Omit<DispatcherRunJournalEntry, "sequence">,
   ): Promise<DispatcherRunJournalEntry> {
@@ -1699,6 +1659,7 @@ export class OrchestratorCore {
     if (result.entry.lease !== null) {
       result.entry.lease.lastJournalSequence = result.entry.sequence;
     }
+    await this.writeRunJournalEntry?.(result.entry);
     this.state.dispatcherRunJournal = result.journal;
     if (result.entry.lease !== null) {
       this.state.dispatcherLeases[result.entry.lease.leaseId] =
@@ -1712,7 +1673,6 @@ export class OrchestratorCore {
         this.releaseRecoveredClaimIfIdle(result.entry.lease.issueId);
       }
     }
-    await this.writeRunJournalEntry?.(result.entry);
     return result.entry;
   }
 
@@ -2622,7 +2582,7 @@ export class OrchestratorCore {
           );
     const dueAtMs = this.now().getTime() + delayMs;
     const timerHandle = this.timerScheduler.set(() => {
-      void this.onRetryTimer(issueId);
+      void this.onRetryTimer(issueId).catch(() => undefined);
     }, delayMs);
 
     const retryEntry: RetryEntry = {
