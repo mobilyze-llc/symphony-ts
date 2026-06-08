@@ -14,7 +14,8 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "symphony": "./dist/src/cli/main.js"
+    "symphony": "./dist/src/cli/main.js",
+    "symphony-manager-run-import": "./dist/src/cli/manager-run-import.js"
   },
   "files": ["dist/src", "README.md"],
   "publishConfig": {
