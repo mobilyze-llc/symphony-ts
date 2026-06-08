@@ -56,7 +56,17 @@ describe("dashboard server", () => {
         running: 1,
         retrying: 1,
       },
-      running: [{ issue_identifier: "ABC-123" }],
+      running: [
+        {
+          issue_identifier: "ABC-123",
+          loop_trace_preview: {
+            total_entries: 0,
+            stored_entries: 0,
+            truncated: false,
+            entries: [],
+          },
+        },
+      ],
     });
   });
 
@@ -99,6 +109,13 @@ describe("dashboard server", () => {
       status: "running",
       workspace: {
         path: "/tmp/symphony/ABC-123",
+      },
+      loop_trace_journal: {
+        path: "/tmp/symphony/loop-traces/issue-1.jsonl",
+        total_entries: 0,
+        stored_entries: 0,
+        truncated: false,
+        entries: [],
       },
     });
 
@@ -743,6 +760,12 @@ function createSnapshot(): RuntimeSnapshot {
         failure_reason: null,
         health: "green",
         health_reason: null,
+        loop_trace_preview: {
+          total_entries: 0,
+          stored_entries: 0,
+          truncated: false,
+          entries: [],
+        },
       },
     ],
     retrying: [
@@ -809,6 +832,13 @@ function createIssueDetail(): IssueDetailResponse {
         message: "Working on tests",
       },
     ],
+    loop_trace_journal: {
+      path: "/tmp/symphony/loop-traces/issue-1.jsonl",
+      total_entries: 0,
+      stored_entries: 0,
+      truncated: false,
+      entries: [],
+    },
     last_error: null,
     tracked: {},
     parent: null,

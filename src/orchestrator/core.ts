@@ -464,6 +464,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.loopTraceJournal[issueId];
       this.onIssueDropped?.({
         issueId,
         identifier: retryEntry.identifier ?? issueId,
@@ -486,6 +487,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.loopTraceJournal[issueId];
       this.onIssueDropped?.({
         issueId,
         identifier: issue.identifier,
@@ -669,6 +671,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.loopTraceJournal[issueId];
       return "completed";
     }
 
@@ -680,6 +683,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.loopTraceJournal[issueId];
       return "completed";
     }
 
@@ -705,6 +709,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.loopTraceJournal[issueId];
       // Fire linearState update for the terminal stage (e.g., move to "Done")
       if (
         nextStage.linearState !== null &&
@@ -788,6 +793,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.loopTraceJournal[issueId];
       void this.fireEscalationSideEffects(
         issueId,
         runningEntry.identifier,
@@ -1319,6 +1325,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.loopTraceJournal[issueId];
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
       return "escalated";
@@ -1488,6 +1495,7 @@ export class OrchestratorCore {
         delete this.state.issueReworkCounts[issue.id];
         delete this.state.issuePassedStages[issue.id];
         delete this.state.issueFirstDispatchedAt[issue.id];
+        delete this.state.loopTraceJournal[issue.id];
         // Fire linearState update for the terminal stage (e.g., move to "Done")
         if (stage.linearState !== null && this.updateIssueState !== undefined) {
           void this.updateIssueState(
@@ -1882,6 +1890,7 @@ export class OrchestratorCore {
       delete this.state.issuePassedStages[issueId];
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
+      delete this.state.loopTraceJournal[issueId];
       void this.fireEscalationSideEffects(
         issueId,
         input.identifier ?? issueId,

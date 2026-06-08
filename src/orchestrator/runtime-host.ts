@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { access, mkdir } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { promisify } from "node:util";
 
@@ -27,15 +27,32 @@ import { WorkflowWatcher } from "../config/workflow-watch.js";
 import type {
   ExecutionHistory,
   Issue,
+  LoopTraceEntry,
+  LoopTraceJournal,
   RetryEntry,
   RunningEntry,
 } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
+  type LoopTraceArtifactLocator,
+  appendLoopTraceJournalEntry,
+  buildLoopTraceJournalResponse,
+  buildLoopTraceJournalResponseForPath,
+  findLoopTraceJournalByIssueIdentifier,
+  readLoopTraceJournal,
+  writeLoopTraceJournal,
+} from "../logging/loop-trace.js";
+import {
   type RuntimeSnapshot,
   buildRuntimeSnapshot,
 } from "../logging/runtime-snapshot.js";
+import {
+  buildActivityContext,
+  extractToolInputFromRaw,
+  extractToolNameFromRaw,
+  summarizeCodexEvent,
+} from "../logging/session-metrics.js";
 import {
   StructuredLogger,
   createJsonLineSink,
@@ -79,6 +96,11 @@ export type ReadWorkspaceBaseRevision = (
   workspacePath: string,
 ) => Promise<string | null>;
 
+interface StoredLoopTrace {
+  artifactPath: string;
+  journal: LoopTraceEntry[];
+}
+
 export interface RuntimeHostOptions {
   config: ResolvedWorkflowConfig;
   tracker: IssueTracker;
@@ -91,6 +113,13 @@ export interface RuntimeHostOptions {
   notifier?: PipelineNotificationSink | null;
   readWorkspaceChangedFiles?: ReadWorkspaceChangedFiles;
   readWorkspaceBaseRevision?: ReadWorkspaceBaseRevision;
+  readLoopTraceJournal?: (
+    locator: LoopTraceArtifactLocator,
+  ) => Promise<LoopTraceJournal>;
+  writeLoopTraceJournal?: (
+    locator: LoopTraceArtifactLocator,
+    journal: LoopTraceJournal,
+  ) => Promise<void>;
   now?: () => Date;
 }
 
@@ -158,6 +187,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   private readonly readWorkspaceBaseRevision: ReadWorkspaceBaseRevision;
 
+  private readonly readLoopTraceJournal: (
+    locator: LoopTraceArtifactLocator,
+  ) => Promise<LoopTraceJournal>;
+
+  private readonly writeLoopTraceJournal: (
+    locator: LoopTraceArtifactLocator,
+    journal: LoopTraceJournal,
+  ) => Promise<void>;
+
   static readonly PRUNE_DEBOUNCE_MS = 300_000;
 
   #lastPruneAt = 0;
@@ -180,6 +218,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   private readonly lastNotifiedReworkCount = new Map<string, number>();
 
+  private readonly loopTraceHydrationTasks = new Map<string, Promise<void>>();
+  private readonly loopTracePersistenceTasks = new Map<string, Promise<void>>();
+
   constructor(options: RuntimeHostOptions) {
     this.config = options.config;
     this.tracker = options.tracker;
@@ -190,6 +231,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       options.readWorkspaceChangedFiles ?? readGitChangedFiles;
     this.readWorkspaceBaseRevision =
       options.readWorkspaceBaseRevision ?? readGitBaseRevision;
+    this.readLoopTraceJournal =
+      options.readLoopTraceJournal ?? readLoopTraceJournal;
+    this.writeLoopTraceJournal =
+      options.writeLoopTraceJournal ?? writeLoopTraceJournal;
     this.workspaceManager =
       options.workspaceManager ??
       createWorkspaceManagerFromConfig(options.config, this.logger);
@@ -200,6 +245,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           event,
         });
         await logAgentEvent(this.logger, event);
+        await this.recordLoopTraceForAgentEvent(event);
       });
     };
     this.managesAgentRunner =
@@ -407,19 +453,59 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   }
 
   async runRetryTimer(issueId: string) {
-    return this.enqueue(async () => this.orchestrator.onRetryTimer(issueId));
+    return this.enqueue(async () => {
+      const state = this.orchestrator.getState();
+      const retryEntry = state.retryAttempts[issueId];
+      const preStage = state.issueStages[issueId] ?? null;
+      const preLoopTraceJournal = state.loopTraceJournal[issueId];
+      const result = await this.orchestrator.onRetryTimer(issueId);
+
+      if (retryEntry !== undefined && result.released) {
+        if (
+          preLoopTraceJournal !== undefined &&
+          state.loopTraceJournal[issueId] === undefined
+        ) {
+          state.loopTraceJournal[issueId] = preLoopTraceJournal;
+        }
+        const postStatus = getIssueTraceStatus(state, issueId);
+        await this.appendLoopTraceEntries(issueId, [
+          {
+            timestamp: this.now().toISOString(),
+            kind: "stage_transition",
+            issueId,
+            issueIdentifier: retryEntry.identifier ?? issueId,
+            stage: preStage,
+            attempt: retryEntry.attempt,
+            sessionId: null,
+            summary:
+              "Retry queue released the issue from active runtime state.",
+            stageTransition: {
+              from: preStage,
+              to: null,
+              status: postStatus,
+            },
+          },
+        ]);
+        this.forgetLoopTraceJournalAfterPersistence(issueId);
+      }
+
+      return result;
+    });
   }
 
   async flushEvents(): Promise<void> {
     await this.eventQueue;
+    await this.flushLoopTracePersistence();
   }
 
   async waitForIdle(): Promise<void> {
     await this.eventQueue;
+    await this.flushLoopTracePersistence();
     await Promise.allSettled(
       [...this.workers.values()].map((worker) => worker.completion),
     );
     await this.eventQueue;
+    await this.flushLoopTracePersistence();
   }
 
   async getRuntimeSnapshot(): Promise<RuntimeSnapshot> {
@@ -435,16 +521,42 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       (entry) => entry.identifier === issueIdentifier,
     );
     if (running !== undefined) {
+      await this.ensureLoopTraceJournalLoadedBestEffort(running.issue.id);
       const parent = await this.fetchParentSafe(running.issue.id);
-      return toRunningIssueDetail(running, this.workspaceManager, parent);
+      return toRunningIssueDetail(
+        running,
+        this.workspaceManager,
+        parent,
+        buildLoopTraceJournalResponse(
+          this.orchestrator.getState().loopTraceJournal[running.issue.id] ?? [],
+          this.getLoopTraceLocator(running.issue.id),
+        ),
+      );
     }
 
     const retry = Object.values(
       this.orchestrator.getState().retryAttempts,
     ).find((entry) => entry.identifier === issueIdentifier);
     if (retry !== undefined) {
+      await this.ensureLoopTraceJournalLoadedBestEffort(retry.issueId);
       const parent = await this.fetchParentSafe(retry.issueId);
-      return toRetryIssueDetail(issueIdentifier, retry, parent);
+      return toRetryIssueDetail(
+        issueIdentifier,
+        retry,
+        parent,
+        buildLoopTraceJournalResponse(
+          this.orchestrator.getState().loopTraceJournal[retry.issueId] ?? [],
+          this.getLoopTraceLocator(retry.issueId),
+        ),
+      );
+    }
+
+    const storedTrace =
+      await this.findStoredLoopTraceByIssueIdentifierBestEffort(
+        issueIdentifier,
+      );
+    if (storedTrace !== null) {
+      return toStoredIssueDetail(issueIdentifier, storedTrace);
     }
 
     return null;
@@ -500,6 +612,305 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       stopped: true,
       reason: "manual_stop",
     };
+  }
+
+  private getLoopTraceLocator(issueId: string): LoopTraceArtifactLocator {
+    const { workspaceKey, workspaceRoot } =
+      this.workspaceManager.resolveForIssue(issueId);
+    return {
+      workspaceKey,
+      workspaceRoot,
+    };
+  }
+
+  private async findStoredLoopTraceByIssueIdentifierBestEffort(
+    issueIdentifier: string,
+  ): Promise<StoredLoopTrace | null> {
+    try {
+      return await findLoopTraceJournalByIssueIdentifier(
+        this.workspaceManager.root,
+        issueIdentifier,
+      );
+    } catch (error) {
+      try {
+        await this.logger?.warn(
+          "loop_trace_hydration_failed",
+          "Failed to hydrate stored loop trace journal.",
+          {
+            outcome: "degraded",
+            reason: toErrorMessage(error),
+            issue_identifier: issueIdentifier,
+            workspace_root: this.workspaceManager.root,
+          },
+        );
+      } catch {
+        // Trace hydration is best-effort; logging failure should not reject callers.
+      }
+      return null;
+    }
+  }
+
+  private async ensureLoopTraceJournalLoadedBestEffort(
+    issueId: string,
+  ): Promise<void> {
+    try {
+      await this.ensureLoopTraceJournalLoaded(issueId);
+    } catch (error) {
+      const locator = this.getLoopTraceLocator(issueId);
+      try {
+        await this.logger?.warn(
+          "loop_trace_hydration_failed",
+          "Failed to hydrate loop trace journal.",
+          {
+            outcome: "degraded",
+            reason: toErrorMessage(error),
+            issue_id: issueId,
+            workspace_key: locator.workspaceKey,
+            workspace_root: locator.workspaceRoot,
+          },
+        );
+      } catch {
+        // Trace hydration is best-effort; logging failure should not reject callers.
+      }
+    }
+  }
+
+  private async ensureLoopTraceJournalLoaded(issueId: string): Promise<void> {
+    if (this.orchestrator.getState().loopTraceJournal[issueId] !== undefined) {
+      return;
+    }
+
+    const existingTask = this.loopTraceHydrationTasks.get(issueId);
+    if (existingTask !== undefined) {
+      await existingTask;
+      return;
+    }
+
+    const task = (async () => {
+      const journal = await this.readLoopTraceJournal(
+        this.getLoopTraceLocator(issueId),
+      );
+      if (
+        this.orchestrator.getState().loopTraceJournal[issueId] === undefined
+      ) {
+        this.orchestrator.getState().loopTraceJournal[issueId] = journal;
+      }
+    })();
+    this.loopTraceHydrationTasks.set(issueId, task);
+
+    try {
+      await task;
+    } finally {
+      if (this.loopTraceHydrationTasks.get(issueId) === task) {
+        this.loopTraceHydrationTasks.delete(issueId);
+      }
+    }
+  }
+
+  private scheduleLoopTraceJournalPersist(issueId: string): void {
+    const locator = this.getLoopTraceLocator(issueId);
+    const journal = [
+      ...(this.orchestrator.getState().loopTraceJournal[issueId] ?? []),
+    ];
+    const previous =
+      this.loopTracePersistenceTasks.get(issueId) ?? Promise.resolve();
+    const task = previous
+      .then(async () => {
+        await this.writeLoopTraceJournal(locator, journal);
+      })
+      .catch(async (error) => {
+        try {
+          await this.logger?.warn(
+            "loop_trace_persist_failed",
+            "Failed to persist loop trace journal.",
+            {
+              outcome: "degraded",
+              reason: toErrorMessage(error),
+              issue_id: issueId,
+              workspace_key: locator.workspaceKey,
+              workspace_root: locator.workspaceRoot,
+            },
+          );
+        } catch {
+          // Persistence is best-effort; logging failure should not reject callers.
+        }
+      })
+      .finally(() => {
+        if (this.loopTracePersistenceTasks.get(issueId) === task) {
+          this.loopTracePersistenceTasks.delete(issueId);
+        }
+      });
+    this.loopTracePersistenceTasks.set(issueId, task);
+  }
+
+  private async flushLoopTracePersistence(): Promise<void> {
+    while (this.loopTracePersistenceTasks.size > 0) {
+      await Promise.allSettled([...this.loopTracePersistenceTasks.values()]);
+    }
+  }
+
+  private forgetLoopTraceJournal(issueId: string): void {
+    delete this.orchestrator.getState().loopTraceJournal[issueId];
+    this.loopTraceHydrationTasks.delete(issueId);
+  }
+
+  private forgetLoopTraceJournalAfterPersistence(issueId: string): void {
+    const task = this.loopTracePersistenceTasks.get(issueId);
+    if (task === undefined) {
+      this.forgetLoopTraceJournal(issueId);
+      return;
+    }
+
+    void task.finally(() => {
+      if (this.loopTracePersistenceTasks.get(issueId) === undefined) {
+        this.forgetLoopTraceJournal(issueId);
+      }
+    });
+  }
+
+  private async appendLoopTraceEntries(
+    issueId: string,
+    entries: Array<Omit<LoopTraceEntry, "sequence">>,
+  ): Promise<void> {
+    if (entries.length === 0) {
+      return;
+    }
+
+    try {
+      await this.ensureLoopTraceJournalLoaded(issueId);
+      let journal =
+        this.orchestrator.getState().loopTraceJournal[issueId] ?? [];
+      for (const entry of entries) {
+        journal = appendLoopTraceJournalEntry(journal, entry);
+      }
+      this.orchestrator.getState().loopTraceJournal[issueId] = journal;
+      this.scheduleLoopTraceJournalPersist(issueId);
+    } catch (error) {
+      try {
+        await this.logger?.warn(
+          "loop_trace_record_failed",
+          "Failed to record loop trace entries.",
+          {
+            outcome: "degraded",
+            reason: toErrorMessage(error),
+            issue_id: issueId,
+          },
+        );
+      } catch {
+        // Trace recording is best-effort; sink failures should not reject callers.
+      }
+    }
+  }
+
+  private async recordLoopTraceForAgentEvent(
+    event: AgentRunnerEvent,
+  ): Promise<void> {
+    const stage =
+      this.orchestrator.getState().issueStages[event.issueId] ?? null;
+    const base = {
+      timestamp: event.timestamp,
+      issueId: event.issueId,
+      issueIdentifier: event.issueIdentifier,
+      stage,
+      attempt: event.attempt,
+      sessionId: event.sessionId ?? null,
+    } satisfies Omit<LoopTraceEntry, "sequence" | "kind" | "summary">;
+    const entries: Array<Omit<LoopTraceEntry, "sequence">> = [];
+
+    if (event.event === "session_started") {
+      entries.push({
+        ...base,
+        kind: "session_start",
+        summary: "Session started.",
+      });
+
+      if (
+        (event.promptChars ?? 0) > 0 ||
+        (event.estimatedPromptTokens ?? 0) > 0
+      ) {
+        entries.push({
+          ...base,
+          kind: "prompt_summary",
+          summary: truncateTraceText(
+            `Prompt prepared (${event.promptChars ?? 0} chars, ~${event.estimatedPromptTokens ?? 0} tokens).`,
+          ),
+          prompt: {
+            chars: Math.max(0, event.promptChars ?? 0),
+            estimatedTokens: event.estimatedPromptTokens ?? null,
+          },
+        });
+      }
+    }
+
+    if (
+      (event.event === "approval_auto_approved" ||
+        event.event === "unsupported_tool_call") &&
+      isRecord(event.raw)
+    ) {
+      const toolName =
+        extractToolNameFromRaw(event.raw) ??
+        (typeof event.toolName === "string" ? event.toolName : null);
+      if (toolName !== null) {
+        const toolInput = extractToolInputFromRaw(event.raw);
+        const context = buildActivityContext(toolName, toolInput);
+        entries.push({
+          ...base,
+          kind: "tool_action",
+          summary: truncateTraceText(
+            context === null
+              ? `${toolName} invoked.`
+              : `${toolName} invoked: ${context}`,
+          ),
+          toolAction: {
+            toolName,
+            context: context === null ? null : truncateTraceText(context, 160),
+            totalTokens: event.usage?.totalTokens ?? null,
+          },
+        });
+
+        if (
+          toolName.toLowerCase() === "edit" ||
+          toolName.toLowerCase() === "write"
+        ) {
+          const filePath = extractTraceFilePath(toolInput, event.workspacePath);
+          if (filePath !== null) {
+            entries.push({
+              ...base,
+              kind: "file_delta",
+              summary: `Updated ${filePath}.`,
+              fileDelta: {
+                files: [filePath],
+              },
+            });
+          }
+        }
+      }
+    }
+
+    if (
+      event.event === "notification" ||
+      event.event === "turn_completed" ||
+      event.event === "turn_failed" ||
+      event.event === "turn_cancelled" ||
+      event.event === "turn_ended_with_error" ||
+      event.event === "turn_input_required" ||
+      event.event === "startup_failed" ||
+      event.event === "other_message" ||
+      event.event === "malformed"
+    ) {
+      const baseSummary = summarizeCodexEvent(event);
+      const tokenSuffix =
+        event.usage?.totalTokens !== undefined
+          ? ` (${event.usage.totalTokens} tokens)`
+          : "";
+      entries.push({
+        ...base,
+        kind: "feedback_event",
+        summary: truncateTraceText(`${baseSummary}${tokenSuffix}`),
+      });
+    }
+
+    await this.appendLoopTraceEntries(event.issueId, entries);
   }
 
   private async createRunningSupervisionSnapshot(entry: RunningEntry) {
@@ -851,6 +1262,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     // Pre-capture data that advanceStage() deletes during onWorkerExit()
     const state = this.orchestrator.getState();
     const runningEntry = state.running[execution.issueId];
+    const preStage = state.issueStages[execution.issueId] ?? null;
+    const preLoopTraceJournal = state.loopTraceJournal[execution.issueId];
 
     // Compute durationMs using runAttempt.startedAt if available (normal completion case),
     // falling back to runningEntry.startedAt for abnormal cases (stall timeout where runAttempt is null).
@@ -937,6 +1350,52 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ? {}
         : { agentMessage }),
     });
+    if (
+      preLoopTraceJournal !== undefined &&
+      state.loopTraceJournal[execution.issueId] === undefined
+    ) {
+      state.loopTraceJournal[execution.issueId] = preLoopTraceJournal;
+    }
+
+    const postStatus = getIssueTraceStatus(
+      this.orchestrator.getState(),
+      execution.issueId,
+    );
+    const stageTransitionEntry = buildStageTransitionTraceEntry({
+      endedAt: input.endedAt ?? this.now(),
+      execution,
+      preStage,
+      postStage:
+        this.orchestrator.getState().issueStages[execution.issueId] ?? null,
+      postStatus,
+    });
+    await this.appendLoopTraceEntries(execution.issueId, [
+      ...(stageTransitionEntry === null ? [] : [stageTransitionEntry]),
+      {
+        timestamp: (input.endedAt ?? this.now()).toISOString(),
+        kind: "worker_exit",
+        issueId: execution.issueId,
+        issueIdentifier: execution.issueIdentifier,
+        stage: preStage,
+        attempt: runningEntry?.retryAttempt ?? null,
+        sessionId: liveSession?.sessionId ?? null,
+        summary: truncateTraceText(
+          input.outcome === "normal"
+            ? "Worker exited normally."
+            : `Worker exited abnormally: ${input.reason ?? "worker failed"}.`,
+        ),
+        workerExit: {
+          outcome: input.outcome,
+          reason: input.reason ?? null,
+          durationMs: Math.max(0, durationMs),
+          turnCount: liveSession?.turnCount ?? 0,
+          totalTokens: liveSession?.codexTotalTokens ?? 0,
+        },
+      },
+    ]);
+    if (shouldForgetLoopTraceJournal(postStatus)) {
+      this.forgetLoopTraceJournalAfterPersistence(execution.issueId);
+    }
 
     // Use the history snapshot captured inside onWorkerExit (after the stage
     // record push but before advanceStage deletes issueExecutionHistory for
@@ -1835,6 +2294,7 @@ function toRunningIssueDetail(
   running: RunningEntry,
   workspaceManager: WorkspaceManager,
   parent: { identifier: string; title: string; url: string } | null,
+  loopTraceJournal: IssueDetailResponse["loop_trace_journal"],
 ): IssueDetailResponse {
   return {
     issue_identifier: running.identifier,
@@ -1870,6 +2330,7 @@ function toRunningIssueDetail(
       event: entry.toolName,
       message: entry.context,
     })),
+    loop_trace_journal: loopTraceJournal,
     last_error: null,
     tracked: {},
     parent,
@@ -1880,6 +2341,7 @@ function toRetryIssueDetail(
   issueIdentifier: string,
   retry: RetryEntry,
   parent: { identifier: string; title: string; url: string } | null,
+  loopTraceJournal: IssueDetailResponse["loop_trace_journal"],
 ): IssueDetailResponse {
   return {
     issue_identifier: issueIdentifier,
@@ -1900,10 +2362,199 @@ function toRetryIssueDetail(
       codex_session_logs: [],
     },
     recent_events: [],
+    loop_trace_journal: loopTraceJournal,
     last_error: retry.error,
     tracked: {},
     parent,
   };
+}
+
+function toStoredIssueDetail(
+  issueIdentifier: string,
+  storedTrace: StoredLoopTrace,
+): IssueDetailResponse | null {
+  const issueEntry = findLatestTraceEntryForIdentifier(
+    storedTrace.journal,
+    issueIdentifier,
+  );
+  if (issueEntry === null) {
+    return null;
+  }
+  const latest = storedTrace.journal.at(-1) ?? null;
+  const status = deriveStoredIssueStatus(storedTrace.journal);
+  return {
+    issue_identifier: issueIdentifier,
+    issue_id: issueEntry.issueId,
+    status,
+    workspace: null,
+    attempts: {
+      restart_count: latest?.attempt ?? 0,
+      current_retry_attempt: null,
+    },
+    running: null,
+    retry: null,
+    logs: {
+      codex_session_logs: [],
+    },
+    recent_events: storedTrace.journal.slice(-10).map((entry) => ({
+      at: entry.timestamp,
+      event: entry.kind,
+      message: truncateTraceText(entry.summary),
+    })),
+    loop_trace_journal: buildLoopTraceJournalResponseForPath(
+      storedTrace.journal,
+      storedTrace.artifactPath,
+    ),
+    last_error:
+      latest?.workerExit?.outcome === "abnormal"
+        ? latest.workerExit.reason
+        : null,
+    tracked: {},
+    parent: null,
+  };
+}
+
+function buildStageTransitionTraceEntry(input: {
+  endedAt: Date;
+  execution: WorkerExecution;
+  preStage: string | null;
+  postStage: string | null;
+  postStatus: IssueDetailResponse["status"];
+}): Omit<LoopTraceEntry, "sequence"> | null {
+  const { preStage, postStage, postStatus } = input;
+  if (preStage === postStage && postStatus === "running") {
+    return null;
+  }
+
+  let summary: string;
+  if (preStage !== postStage && postStage !== null) {
+    summary = `Stage transitioned from ${preStage ?? "unassigned"} to ${postStage}.`;
+  } else {
+    summary = `Stage ${preStage ?? "unassigned"} moved to ${postStatus}.`;
+  }
+
+  return {
+    timestamp: input.endedAt.toISOString(),
+    kind: "stage_transition",
+    issueId: input.execution.issueId,
+    issueIdentifier: input.execution.issueIdentifier,
+    stage: postStage ?? preStage,
+    attempt: null,
+    sessionId: input.execution.lastResult?.liveSession.sessionId ?? null,
+    summary,
+    stageTransition: {
+      from: preStage,
+      to: postStage,
+      status: postStatus,
+    },
+  };
+}
+
+function getIssueTraceStatus(
+  state: ReturnType<OrchestratorRuntimeHost["getState"]>,
+  issueId: string,
+): IssueDetailResponse["status"] {
+  if (state.running[issueId] !== undefined) {
+    return "running";
+  }
+  if (state.retryAttempts[issueId] !== undefined) {
+    return "retry_queued";
+  }
+  if (state.failed.has(issueId)) {
+    return "failed";
+  }
+  if (state.completed.has(issueId)) {
+    return "completed";
+  }
+  if (state.claimed.has(issueId)) {
+    return "claimed";
+  }
+  return "released";
+}
+
+function shouldForgetLoopTraceJournal(
+  status: IssueDetailResponse["status"],
+): boolean {
+  return status === "completed" || status === "failed" || status === "released";
+}
+
+function deriveStoredIssueStatus(
+  journal: LoopTraceEntry[],
+): IssueDetailResponse["status"] {
+  for (let index = journal.length - 1; index >= 0; index -= 1) {
+    const entry = journal[index];
+    if (
+      entry?.stageTransition !== undefined &&
+      isStoredIssueTraceStatus(entry.stageTransition.status)
+    ) {
+      return entry.stageTransition.status;
+    }
+  }
+
+  const latest = journal.at(-1);
+  if (latest?.workerExit?.outcome === "abnormal") {
+    return "failed";
+  }
+  return "released";
+}
+
+function findLatestTraceEntryForIdentifier(
+  journal: LoopTraceEntry[],
+  issueIdentifier: string,
+): LoopTraceEntry | null {
+  for (let index = journal.length - 1; index >= 0; index -= 1) {
+    const entry = journal[index];
+    if (entry?.issueIdentifier === issueIdentifier) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+function extractTraceFilePath(
+  toolInput: unknown,
+  workspacePath: string,
+): string | null {
+  if (!isRecord(toolInput)) {
+    return null;
+  }
+
+  const rawPath = toolInput.file_path;
+  if (typeof rawPath !== "string") {
+    return null;
+  }
+
+  const trimmed = rawPath.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  if (!isAbsolute(trimmed)) {
+    return trimmed;
+  }
+
+  const relativePath = relative(workspacePath, trimmed);
+  return relativePath.startsWith("..") || isAbsolute(relativePath)
+    ? trimmed
+    : relativePath;
+}
+
+function truncateTraceText(text: string, maxLength = 200): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxLength) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, maxLength)}...`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isStoredIssueTraceStatus(
+  value: string,
+): value is "completed" | "failed" | "released" {
+  return value === "completed" || value === "failed" || value === "released";
 }
 
 function installSignalHandlers(

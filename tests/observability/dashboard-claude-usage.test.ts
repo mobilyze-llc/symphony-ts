@@ -184,6 +184,13 @@ function createIssueDetail(): IssueDetailResponse {
     retry: null,
     logs: { codex_session_logs: [] },
     recent_events: [],
+    loop_trace_journal: {
+      path: "/tmp/symphony/loop-traces/issue-1.jsonl",
+      total_entries: 0,
+      stored_entries: 0,
+      truncated: false,
+      entries: [],
+    },
     last_error: null,
     tracked: {},
     parent: null,
