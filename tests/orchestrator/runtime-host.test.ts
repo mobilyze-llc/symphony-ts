@@ -671,6 +671,79 @@ describe("OrchestratorRuntimeHost", () => {
     ]);
   });
 
+  it("refreshes manager-run journal snapshots after external appends", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-manager-run-"));
+    try {
+      const journalDir = join(workspaceRoot, ".symphony", "run-journals");
+      const journalPath = join(journalDir, "manager-runs.jsonl");
+      mkdirSync(journalDir, { recursive: true });
+      const firstEntry: ManagerRunJournal[number] = {
+        sequence: 1,
+        idempotencyKey: "run:start",
+        timestamp: "2026-06-08T12:00:00.000Z",
+        runId: "run-1",
+        sourceSessionId: "019ea700-80b7-7032-8ef5-dd8e638f0205",
+        summary: "Manager run started.",
+        type: "manager_run_started",
+        managerThreadId: "019ea8a6-bc42-72a3-ade0-72be7663232e",
+        title: "Wave run",
+      };
+      writeFileSync(journalPath, `${JSON.stringify(firstEntry)}\n`);
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({ candidates: [] }),
+        agentRunner: new FakeAgentRunner(),
+        now: () => new Date("2026-06-08T12:02:00.000Z"),
+      });
+
+      const firstSnapshot = await host.getRuntimeSnapshot();
+
+      expect(firstSnapshot.manager_runs).toEqual([
+        expect.objectContaining({
+          run_id: "run-1",
+          lanes: [],
+        }),
+      ]);
+
+      const appendedEntry: ManagerRunJournal[number] = {
+        sequence: 2,
+        idempotencyKey: "run:lane",
+        timestamp: "2026-06-08T12:01:00.000Z",
+        runId: "run-1",
+        sourceSessionId: "019ea700-80b7-7032-8ef5-dd8e638f0205",
+        summary: "Lane admitted after first snapshot.",
+        type: "worker_lane_admitted",
+        laneId: "lane-1",
+        workerThreadId: "worker-thread",
+        issueIdentifier: "MOB-87",
+        title: "Map manager-thread runs",
+      };
+      writeFileSync(journalPath, `${JSON.stringify(appendedEntry)}\n`, {
+        flag: "a",
+      });
+
+      const secondSnapshot = await host.getRuntimeSnapshot();
+
+      expect(secondSnapshot.manager_runs).toEqual([
+        expect.objectContaining({
+          run_id: "run-1",
+          lanes: [
+            expect.objectContaining({
+              lane_id: "lane-1",
+              issue_identifier: "MOB-87",
+              status: "active",
+            }),
+          ],
+        }),
+      ]);
+      expect(host.getState().managerRunJournal).toHaveLength(2);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("fails dispatch before side effects when dispatcher journal cannot be persisted", async () => {
     const fakeRunner = new FakeAgentRunner();
     const host = new OrchestratorRuntimeHost({
