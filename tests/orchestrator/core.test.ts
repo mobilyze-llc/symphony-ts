@@ -461,6 +461,9 @@ describe("orchestrator core", () => {
     expect(comments.at(-1)).toContain(
       "Headless Codex requested operator input",
     );
+    expect(comments.at(-1)).toContain(
+      "Move the issue to Resume after human review to requeue it.",
+    );
     expect(
       orchestrator
         .getState()
@@ -479,6 +482,93 @@ describe("orchestrator core", () => {
     const resumed = await orchestrator.pollTick();
     expect(resumed.dispatchedIssueIds).toEqual(["1"]);
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("instructs out-of-and-back-into Resume when input-required pause hits an issue already in Resume", async () => {
+    let issueState = "Resume";
+    const comments: string[] = [];
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "In Progress", "Resume"];
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: `${ERROR_CODES.codexUserInputRequired}: Codex requested operator input during a turn.`,
+    });
+
+    expect(retry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(comments.at(-1)).toContain("already in Resume when it paused");
+    expect(comments.at(-1)).toContain(
+      "move it out of Resume (if it is still there) and back into Resume",
+    );
+
+    // Staying in Resume must not requeue: the guard demands a fresh transition.
+    const stillResume = await orchestrator.pollTick();
+    expect(stillResume.dispatchedIssueIds).toEqual([]);
+
+    // The out-of-and-back-into dance the comment instructs actually requeues.
+    issueState = "Blocked";
+    const observedOut = await orchestrator.pollTick();
+    expect(observedOut.dispatchedIssueIds).toEqual([]);
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("instructs out-of-and-back-into Resume when a hard stop pauses an issue already in Resume", async () => {
+    const comments: string[] = [];
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "In Progress", "Resume"];
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: "Resume" }),
+        ],
+      }),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "premium_spend_near_ceiling",
+        reason: "Estimated premium spend is near ceiling.",
+        turnCount: 2,
+        totalTokens: 150_000,
+        estimatedCostUsd: 40,
+      },
+    });
+
+    expect(retry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(comments.at(-1)).toContain(
+      "The worker has paused instead of continuing silently.",
+    );
+    expect(comments.at(-1)).toContain("already in Resume when it paused");
+    expect(comments.at(-1)).toContain(
+      "move it out of Resume (if it is still there) and back into Resume",
+    );
   });
 
   it("preserves stage continuity while a paused unit waits for explicit Resume", async () => {

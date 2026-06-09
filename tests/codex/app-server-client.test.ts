@@ -5,6 +5,8 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,6 +19,7 @@ import {
   CodexAppServerClient,
   type CodexAppServerClientError,
   type CodexClientEvent,
+  sweepStaleCodexHomes,
 } from "../../src/codex/app-server-client.js";
 import { createLinearGraphqlDynamicTool } from "../../src/codex/linear-graphql-tool.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
@@ -990,3 +993,83 @@ async function waitForEvent(
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
+
+describe("sweepStaleCodexHomes", () => {
+  const MAX_AGE_MS = 48 * 60 * 60 * 1000;
+
+  async function backdate(path: string, ageMs: number): Promise<void> {
+    const past = new Date(Date.now() - ageMs);
+    await utimes(path, past, past);
+  }
+
+  it("removes only stale symphony-codex-home directories", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-sweep-test-"));
+    roots.push(root);
+    const stale = join(root, "symphony-codex-home-stale");
+    const fresh = join(root, "symphony-codex-home-fresh");
+    const unrelated = join(root, "unrelated-dir");
+    await mkdir(join(stale, "sessions"), { recursive: true });
+    await writeFile(join(stale, "config.toml"), "");
+    await mkdir(fresh, { recursive: true });
+    await mkdir(unrelated, { recursive: true });
+    await backdate(stale, MAX_AGE_MS + 60 * 60 * 1000);
+    await backdate(unrelated, MAX_AGE_MS + 60 * 60 * 1000);
+
+    const removed = await sweepStaleCodexHomes({
+      root,
+      maxAgeMs: MAX_AGE_MS,
+      now: () => Date.now(),
+    });
+
+    expect(removed).toEqual([stale]);
+    await expect(access(stale)).rejects.toThrow();
+    await expect(access(fresh)).resolves.toBeUndefined();
+    await expect(access(unrelated)).resolves.toBeUndefined();
+  });
+
+  it("treats age exactly equal to maxAgeMs as fresh", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-sweep-test-"));
+    roots.push(root);
+    const boundary = join(root, "symphony-codex-home-boundary");
+    await mkdir(boundary, { recursive: true });
+    await backdate(boundary, MAX_AGE_MS);
+    // Pin the injected clock to the dir's actual mtime so the delta is
+    // exactly maxAgeMs — the real clock would drift past the boundary.
+    const mtimeMs = (await stat(boundary)).mtimeMs;
+
+    const removed = await sweepStaleCodexHomes({
+      root,
+      maxAgeMs: MAX_AGE_MS,
+      now: () => mtimeMs + MAX_AGE_MS,
+    });
+
+    expect(removed).toEqual([]);
+    await expect(access(boundary)).resolves.toBeUndefined();
+  });
+
+  it("ignores plain files that match the prefix", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-sweep-test-"));
+    roots.push(root);
+    const file = join(root, "symphony-codex-home-file");
+    await writeFile(file, "");
+    await backdate(file, MAX_AGE_MS + 60 * 60 * 1000);
+
+    const removed = await sweepStaleCodexHomes({
+      root,
+      maxAgeMs: MAX_AGE_MS,
+      now: () => Date.now(),
+    });
+
+    expect(removed).toEqual([]);
+    await expect(access(file)).resolves.toBeUndefined();
+  });
+
+  it("returns empty for a missing root", async () => {
+    const removed = await sweepStaleCodexHomes({
+      root: join(tmpdir(), "symphony-sweep-test-does-not-exist"),
+      maxAgeMs: MAX_AGE_MS,
+      now: () => Date.now(),
+    });
+    expect(removed).toEqual([]);
+  });
+});
