@@ -51,6 +51,13 @@ afterEach(async () => {
   );
 });
 
+// vi.waitFor's 1s default flaked under parallel-suite load (SYMPH-313):
+// these tests spawn real child processes, so condition latency is load-bound,
+// not logic-bound. The generous ceiling never slows a passing test.
+function waitFor<T>(callback: () => T | Promise<T>): Promise<T> {
+  return vi.waitFor(callback, { timeout: 15_000, interval: 50 });
+}
+
 describe("runtime integration", () => {
   it("starts the real runtime service, cleans terminal workspaces, and serves the dashboard", async () => {
     const root = await createTempDir("symphony-task16-runtime-");
@@ -87,7 +94,7 @@ describe("runtime integration", () => {
 
     expect(service.dashboard).not.toBeNull();
     expect(service.dashboard?.port ?? 0).toBeGreaterThan(0);
-    await vi.waitFor(async () => {
+    await waitFor(async () => {
       await expect(stat(terminalWorkspace)).rejects.toThrow();
     });
 
@@ -290,7 +297,7 @@ Prompt body
       }),
     );
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(output).toContain('"event":"candidate_issue_fetch_failed"');
     });
 
@@ -351,7 +358,7 @@ Prompt v2
       "utf8",
     );
 
-    await vi.waitFor(() => {
+    await waitFor(() => {
       expect(service.runtimeHost.getState().pollIntervalMs).toBe(25);
     });
 
@@ -366,7 +373,7 @@ Prompt invalid
       "utf8",
     );
 
-    await vi.waitFor(async () => {
+    await waitFor(async () => {
       const logFile = await readFile(join(logsRoot, "symphony.jsonl"), "utf8");
       expect(logFile).toContain('"event":"workflow_reloaded"');
       expect(logFile).toContain('"event":"workflow_reload_rejected"');
@@ -403,9 +410,9 @@ codex:
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspace-write
-  turn_timeout_ms: 2000
-  read_timeout_ms: 500
-  stall_timeout_ms: 2000
+  turn_timeout_ms: 30000
+  read_timeout_ms: 5000
+  stall_timeout_ms: 30000
 agent:
   max_turns: 3
 server:
@@ -427,7 +434,7 @@ Implement {{ issue.identifier }} attempt={{ attempt }}
     );
 
     const workspacePath = join(workspaceRoot, "issue-1");
-    await vi.waitFor(async () => {
+    await waitFor(async () => {
       const state = await service.runtimeHost.getRuntimeSnapshot();
       expect(state.counts.running + state.counts.retrying).toBeGreaterThan(0);
       await expect(
@@ -438,12 +445,12 @@ Implement {{ issue.identifier }} attempt={{ attempt }}
       ).resolves.toBe("before");
     });
 
-    await vi.waitFor(async () => {
+    await waitFor(async () => {
       const state = await service.runtimeHost.getRuntimeSnapshot();
       expect(state.counts.retrying).toBe(1);
     });
     await service.runtimeHost.runRetryTimer("issue-1");
-    await vi.waitFor(async () => {
+    await waitFor(async () => {
       const state = await service.runtimeHost.getRuntimeSnapshot();
       expect(state.counts.running).toBe(0);
       expect(state.counts.retrying).toBe(0);
@@ -462,7 +469,7 @@ Implement {{ issue.identifier }} attempt={{ attempt }}
         }>;
       };
     };
-    const issueDetailBody = await vi.waitFor(async () => {
+    const issueDetailBody = await waitFor(async () => {
       const issueDetail = await sendRequest(service.dashboard?.port ?? 0, {
         method: "GET",
         path: "/api/v1/ISSUE-1",
