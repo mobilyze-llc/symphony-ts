@@ -62,6 +62,12 @@ describe("parseCouncilReviewGateArgs", () => {
     ).toThrow("--timeout-seconds must be a positive integer");
   });
 
+  it("shows required flags in help", () => {
+    expect(() => parseCouncilReviewGateArgs(["--help"], "/cwd")).toThrow(
+      /--issue-id ISSUE[\s\S]*--artifact-dir DIR/,
+    );
+  });
+
   it("recognizes direct bin execution through symlink paths", async () => {
     const root = await mkdtemp(join(tmpdir(), "symphony-council-cli-"));
     const realBin = join(root, "real bin.js");

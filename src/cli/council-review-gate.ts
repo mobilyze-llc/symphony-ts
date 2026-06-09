@@ -161,6 +161,8 @@ function renderUsage(): string {
     "Usage: symphony-council-review-gate --issue-id ISSUE --artifact-dir DIR [options]",
     "",
     "Options:",
+    "  --issue-id ISSUE              Required Linear/source issue identifier",
+    "  --artifact-dir DIR            Required directory for review artifacts",
     "  --repo OWNER/REPO              GitHub repository for PR review",
     "  --pr NUMBER                   GitHub PR number; requires --repo",
     "  --workspace DIR               Workspace path (default: current directory)",

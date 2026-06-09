@@ -8,10 +8,36 @@ import {
   type CommandResult,
   type CommandRunner,
   type HeadlessReviewerLaneConfig,
+  defaultReviewerLanes,
+  execFileCommand,
   runHeadlessCouncilGate,
 } from "../../src/review/headless-council-gate.js";
 
 describe("runHeadlessCouncilGate", () => {
+  it("allows default reviewer lane models to be overridden by environment", () => {
+    expect(
+      defaultReviewerLanes({
+        SYMPHONY_COUNCIL_CLAUDE_MODEL: "opus-test",
+        SYMPHONY_COUNCIL_PI_PROVIDER: "alt-provider",
+        SYMPHONY_COUNCIL_PI_MODEL: "alt-model",
+        SYMPHONY_COUNCIL_PI_THINKING: "medium",
+        SYMPHONY_COUNCIL_PI_TOOLS: "read,grep",
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        laneId: "claude-opus",
+        model: "opus-test",
+      }),
+      expect.objectContaining({
+        laneId: "pi-deepseek",
+        provider: "alt-provider",
+        model: "alt-model",
+        thinking: "medium",
+        tools: "read,grep",
+      }),
+    ]);
+  });
+
   it("runs Claude, Pi, and Codex lead through cmux-spawn and writes artifacts", async () => {
     const harness = await createHarness();
     const result = await runHeadlessCouncilGate(
@@ -708,6 +734,33 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("fails closed when the Codex lead lane throws", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "codex-high-lead": { reject: new Error("codex adapter crashed") },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "codex-high-lead"),
+    ).toMatchObject({
+      state: "error",
+      verdict: "error",
+      message: "Codex lead execution failed: codex adapter crashed",
+    });
+  });
+
   it("adds hard process timeouts around cmux-spawn lanes", async () => {
     const harness = await createHarness();
     await runHeadlessCouncilGate(
@@ -754,6 +807,19 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.verdict).toBe("pass");
     expect(result.lanes).toHaveLength(1);
     expect(result.degradedConditions).toContain("codex-lead-disabled");
+  });
+});
+
+describe("execFileCommand", () => {
+  it("preserves signal-based child exits in stderr", async () => {
+    const result = await execFileCommand(
+      process.execPath,
+      ["-e", "process.kill(process.pid, 'SIGTERM')"],
+      { cwd: process.cwd(), env: process.env },
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("signal SIGTERM");
   });
 });
 
