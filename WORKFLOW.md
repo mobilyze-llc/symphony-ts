@@ -28,7 +28,7 @@ continuous_feedback:
   role: continuous-feedback
   bounce_on_finding: true
 codex:
-  command: codex app-server
+  command: codex --config 'model_reasoning_effort="low"' app-server
   approval_policy: never
   stall_timeout_ms: 900000
 server:

@@ -66,12 +66,11 @@ PROMPT_FILES=(
   "global.liquid"
   "investigate.liquid"
   "implement.liquid"
-  "review-adversarial.liquid"
-  "review-security.liquid"
   "merge.liquid"
 )
 
-# Also extract prompt file references from YAML
+# Also extract prompt file references from YAML so newly-added stage prompts are
+# validated without requiring this script to know every product-specific prompt.
 YAML_PROMPTS=$(echo "$YAML_CONTENT" | grep -oE 'prompts/[a-z-]+\.liquid' | sort -u)
 
 for prompt in "${PROMPT_FILES[@]}"; do
@@ -85,6 +84,18 @@ done
 
 # Check any YAML-referenced prompts that aren't in our expected list
 for yaml_prompt in $YAML_PROMPTS; do
+  prompt_name="${yaml_prompt#prompts/}"
+  already_checked=0
+  for prompt in "${PROMPT_FILES[@]}"; do
+    if [ "$prompt_name" = "$prompt" ]; then
+      already_checked=1
+      break
+    fi
+  done
+  if [ "$already_checked" -eq 1 ]; then
+    continue
+  fi
+
   if [ -f "$SCRIPT_DIR/$yaml_prompt" ]; then
     echo "  OK: $yaml_prompt (referenced in YAML)"
   else
