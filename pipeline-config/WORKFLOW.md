@@ -27,7 +27,7 @@ agent:
     in review: 2
 
 codex:
-  command: codex --config 'model_reasoning_effort="low"' app-server
+  command: codex --disable plugins --config 'model_reasoning_effort="low"' app-server
   stall_timeout_ms: 3600000
 
 runner:

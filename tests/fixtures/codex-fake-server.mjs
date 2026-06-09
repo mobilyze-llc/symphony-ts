@@ -201,6 +201,66 @@ async function handleMessage(message) {
       return;
     }
 
+    if (scenario === "usage-then-noisy-notification") {
+      setTimeout(() => {
+        writeJson({
+          method: "thread/tokenUsage/updated",
+          params: {
+            usage: {
+              inputTokens: 100,
+              outputTokens: 50,
+              totalTokens: 150,
+            },
+          },
+        });
+        writeJson({
+          method: "item/started",
+          params: {
+            item: {
+              type: "tool_call",
+              name: "Bash",
+            },
+          },
+        });
+        writeJson({
+          method: "account/rateLimits/updated",
+          params: {
+            rateLimits: {
+              requestsRemaining: 7,
+            },
+          },
+        });
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "Noisy turn finished",
+          },
+        });
+      }, 10);
+      return;
+    }
+
+    if (scenario === "usage-reset-between-turns" && turnCount === 2) {
+      setTimeout(() => {
+        writeJson({
+          method: "item/started",
+          params: {
+            item: {
+              type: "tool_call",
+              name: "Bash",
+            },
+          },
+        });
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "Second turn without usage",
+          },
+        });
+      }, 10);
+      return;
+    }
+
     if (scenario === "user-input") {
       setTimeout(() => {
         writeJson({

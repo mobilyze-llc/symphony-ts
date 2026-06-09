@@ -237,6 +237,101 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
+  it("does not attach cached usage to non-telemetry notifications", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient(
+      "usage-then-noisy-notification",
+      workspace,
+      events,
+    );
+
+    const result = await client.startSession({
+      prompt: "Run a tiny task",
+      title: "ABC-123: Example",
+    });
+
+    expect(result.usage).toEqual({
+      inputTokens: 100,
+      outputTokens: 50,
+      totalTokens: 150,
+    });
+    expect(result.rateLimits).toEqual({
+      requestsRemaining: 7,
+    });
+
+    const usageNotification = events.find(
+      (event) =>
+        event.event === "notification" &&
+        event.message === "thread/tokenUsage/updated",
+    );
+    expect(usageNotification).toMatchObject({
+      usage: {
+        inputTokens: 100,
+        outputTokens: 50,
+        totalTokens: 150,
+      },
+    } satisfies Partial<CodexClientEvent>);
+
+    const noisyNotification = events.find(
+      (event) =>
+        event.event === "notification" && event.message === "item/started",
+    );
+    expect(noisyNotification?.usage).toBeUndefined();
+
+    const rateLimitNotification = events.find(
+      (event) =>
+        event.event === "notification" &&
+        event.message === "account/rateLimits/updated",
+    );
+    expect(rateLimitNotification?.usage).toBeUndefined();
+    expect(rateLimitNotification?.rateLimits).toEqual({
+      requestsRemaining: 7,
+    });
+
+    const completed = events.find((event) => event.event === "turn_completed");
+    expect(completed).toMatchObject({
+      usage: {
+        inputTokens: 100,
+        outputTokens: 50,
+        totalTokens: 150,
+      },
+    } satisfies Partial<CodexClientEvent>);
+
+    await client.close();
+  });
+
+  it("does not carry prior turn usage into a new turn without fresh usage", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("usage-reset-between-turns", workspace, events);
+
+    const first = await client.startSession({
+      prompt: "First prompt",
+      title: "ABC-123: Example",
+    });
+    const second = await client.continueTurn(
+      "Continue without usage",
+      "ABC-123: Example",
+    );
+
+    expect(first.usage).toMatchObject({
+      inputTokens: 14,
+      outputTokens: 9,
+      totalTokens: 23,
+    });
+    expect(second.usage).toBeNull();
+
+    const secondTurnEvents = events.filter(
+      (event) => event.turnId === "turn-2",
+    );
+    expect(secondTurnEvents.some((event) => event.usage !== undefined)).toBe(
+      false,
+    );
+
+    await client.close();
+  });
+
   it("fails the turn when user-input-required is emitted through a compatible variant", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];

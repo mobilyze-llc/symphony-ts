@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { renderPrompt } from "../../src/agent/prompt-builder.js";
@@ -13,6 +14,15 @@ const PIPELINE_WORKFLOW_PATH = resolve(
   import.meta.dirname,
   "../../pipeline-config/WORKFLOW.md",
 );
+const CODEX_LOW_APP_SERVER_COMMAND =
+  "codex --disable plugins --config 'model_reasoning_effort=\"low\"' app-server";
+const SHIPPED_CODEX_WORKFLOW_CONFIGS = [
+  "../../pipeline-config/WORKFLOW.md",
+  "../../pipeline-config/WORKFLOW-staged.md",
+  "../../pipeline-config/WORKFLOW-flat.md",
+  "../../pipeline-config/WORKFLOW-instrumentation.md",
+  "../../pipeline-config/templates/WORKFLOW-template.md",
+].map((path) => resolve(import.meta.dirname, path));
 
 const DESCRIPTION_SENTINEL = "DESCRIPTION_SENTINEL: do not leak to merge";
 
@@ -40,9 +50,7 @@ const resolvedConfig = resolveWorkflowConfig(workflow, {
 describe("WORKFLOW-symphony.md smoke tests", () => {
   it("uses Codex low effort as the primary workflow runner", () => {
     expect(resolvedConfig.runner).toEqual({ kind: "codex", model: null });
-    expect(resolvedConfig.codex.command).toBe(
-      "codex --config 'model_reasoning_effort=\"low\"' app-server",
-    );
+    expect(resolvedConfig.codex.command).toBe(CODEX_LOW_APP_SERVER_COMMAND);
 
     const stages = resolvedConfig.stages;
     expect(stages).not.toBeNull();
@@ -53,6 +61,14 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(stages?.stages.review?.model).toBeNull();
     expect(stages?.stages.review?.maxTurns).toBe(8);
     expect(resolvedConfig.codex.stallTimeoutMs).toBe(3_600_000);
+  });
+
+  it("disables Codex plugins in shipped low-effort workflow configs", async () => {
+    for (const configPath of SHIPPED_CODEX_WORKFLOW_CONFIGS) {
+      const config = await readFile(configPath, "utf8");
+
+      expect(config).toContain(`command: ${CODEX_LOW_APP_SERVER_COMMAND}`);
+    }
   });
 
   it("keeps the primary review gate stall budget above the council timeout", async () => {
