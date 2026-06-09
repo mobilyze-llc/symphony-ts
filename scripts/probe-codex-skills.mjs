@@ -111,7 +111,9 @@ async function buildEphemeralHome(input) {
 }
 
 function runProbe(command, codexHome, cwd) {
-  return spawnSync("sh", ["-c", command], {
+  // bash -lc mirrors the production worker spawn exactly (app-server-client
+  // launches via spawn("bash", ["-lc", ...])) so shell semantics cannot drift.
+  return spawnSync("bash", ["-lc", command], {
     cwd,
     env: { ...process.env, CODEX_HOME: codexHome },
     encoding: "utf8",
@@ -122,7 +124,6 @@ function runProbe(command, codexHome, cwd) {
 
 function evaluate(label, result) {
   const failures = [];
-  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
   if (result.error !== undefined) {
     failures.push(`codex failed to run: ${result.error.message}`);
   } else if (result.status !== 0) {
@@ -132,18 +133,21 @@ function evaluate(label, result) {
         : ` (signal ${result.signal})`;
     failures.push(`codex exited with status ${result.status}${signalSuffix}`);
   }
+  // Content assertions run against stdout only: that is the rendered prompt
+  // (the model-visible surface). stderr diagnostics can mention skill paths
+  // without those skills being advertised to the model.
   const stdout = result.stdout ?? "";
   if (stdout.trim().length < 200) {
     failures.push(
       `suspiciously short prompt output (${stdout.trim().length} chars) — codex may not have rendered the prompt`,
     );
   }
-  if (/### Available skills/i.test(output)) {
+  if (/### Available skills/i.test(stdout)) {
     failures.push(
       "prompt still advertises a skills inventory (`### Available skills`)",
     );
   }
-  if (/hindsight/i.test(output)) {
+  if (/hindsight/i.test(stdout)) {
     failures.push("prompt still contains a Hindsight memory block");
   }
   const status = failures.length === 0 ? "PASS" : "FAIL";
