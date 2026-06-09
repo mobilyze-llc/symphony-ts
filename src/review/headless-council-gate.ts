@@ -392,7 +392,7 @@ async function loadReviewContext(
       prNumber: input.prNumber,
       baseRef: pr.baseRefName ?? input.baseRef ?? "main",
       headRef: pr.headRefName ?? input.headRef ?? "HEAD",
-      diff: diff.stdout,
+      diff: assertDiffWithinLimit(diff.stdout, "GitHub PR diff"),
     };
   }
 
@@ -416,7 +416,7 @@ async function loadReviewContext(
     prNumber: input.prNumber ?? null,
     baseRef,
     headRef,
-    diff: diff.stdout,
+    diff: assertDiffWithinLimit(diff.stdout, "git diff"),
   };
 }
 
@@ -430,6 +430,7 @@ async function runReviewerLane(input: {
   runCommand: CommandRunner;
   env: NodeJS.ProcessEnv;
 }): Promise<HeadlessLaneResult> {
+  const phase = `headless-council-review-${input.lane.laneId}`;
   const promptPath = `${input.artifactDir}/${input.lane.laneId}.prompt.md`;
   const cliJsonPath = `${input.artifactDir}/${input.lane.laneId}.cli.json`;
   const stderrPath = `${input.artifactDir}/${input.lane.laneId}.cli.stderr`;
@@ -453,7 +454,7 @@ async function runReviewerLane(input: {
     "--lane-id",
     input.lane.laneId,
     "--phase",
-    "headless-council-review",
+    phase,
     "--timeout-seconds",
     String(input.timeoutSeconds),
     ...laneAgentArgs(input.lane),
@@ -491,6 +492,7 @@ async function runCodexLeadLane(input: {
   env: NodeJS.ProcessEnv;
 }): Promise<HeadlessLaneResult> {
   const laneId = "codex-xhigh-lead";
+  const phase = `headless-council-triage-${laneId}`;
   const promptPath = `${input.artifactDir}/${laneId}.prompt.md`;
   const cliJsonPath = `${input.artifactDir}/${laneId}.cli.json`;
   const stderrPath = `${input.artifactDir}/${laneId}.cli.stderr`;
@@ -516,7 +518,7 @@ async function runCodexLeadLane(input: {
       "--lane-id",
       laneId,
       "--phase",
-      "headless-council-triage",
+      phase,
       "--timeout-seconds",
       String(input.timeoutSeconds),
       "--read-only",
@@ -628,9 +630,10 @@ async function parseLaneResult(input: {
 }
 
 function parseArtifactVerdict(artifact: string): ParsedArtifactVerdict {
+  const trimmedArtifact = artifact.trimStart();
   const verdictMatch =
-    artifact.match(/^## Verdict\s*\n\s*(PASS|FINDINGS|FAIL)\b/im) ??
-    artifact.match(/^Verdict:\s*(PASS|FINDINGS|FAIL)\b/im);
+    trimmedArtifact.match(/^## Verdict\s*\n\s*(PASS|FINDINGS|FAIL)\b/i) ??
+    trimmedArtifact.match(/^Verdict:\s*(PASS|FINDINGS|FAIL)\b/i);
 
   if (verdictMatch === null) {
     return {
@@ -871,6 +874,16 @@ async function readBoundedDiffFile(path: string): Promise<string> {
     );
   }
   return await readFile(path, "utf-8");
+}
+
+function assertDiffWithinLimit(diff: string, source: string): string {
+  const byteLength = Buffer.byteLength(diff, "utf-8");
+  if (byteLength > MAX_DIFF_BYTES) {
+    throw new Error(
+      `${source} exceeds ${MAX_DIFF_BYTES} byte review limit: ${byteLength} bytes`,
+    );
+  }
+  return diff;
 }
 
 function commandTimeoutMs(timeoutSeconds: number): number {
