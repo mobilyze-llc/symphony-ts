@@ -23,6 +23,10 @@ const SHIPPED_CODEX_WORKFLOW_CONFIGS = [
   "../../pipeline-config/WORKFLOW-instrumentation.md",
   "../../pipeline-config/templates/WORKFLOW-template.md",
 ].map((path) => resolve(import.meta.dirname, path));
+const RESOLVED_CODEX_WORKFLOW_CONFIGS = [
+  ...SHIPPED_CODEX_WORKFLOW_CONFIGS,
+  WORKFLOW_PATH,
+];
 
 const DESCRIPTION_SENTINEL = "DESCRIPTION_SENTINEL: do not leak to merge";
 
@@ -128,6 +132,23 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     );
   });
 
+  it("configures shipped headless workers with workspace network access", async () => {
+    for (const configPath of RESOLVED_CODEX_WORKFLOW_CONFIGS) {
+      const workflowConfig = await loadWorkflowDefinition(configPath);
+      const resolved = resolveWorkflowConfig(workflowConfig, {
+        LINEAR_API_KEY: "test-token",
+        LINEAR_PROJECT_SLUG: "test-project",
+      });
+
+      expect(resolved.codex.approvalPolicy).toBe("never");
+      expect(resolved.codex.threadSandbox).toBe("workspace-write");
+      expect(resolved.codex.turnSandboxPolicy).toEqual({
+        type: "workspace-write",
+        network_access: true,
+      });
+    }
+  });
+
   it("investigate stage contains description and no merge prohibitions", async () => {
     const output = await renderPrompt({
       workflow: { promptTemplate },
@@ -217,5 +238,6 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain("Put generated markdown docs");
     expect(output).toContain("Linear Docs");
     expect(output).toContain("linear document create/update");
+    expect(output).toContain("Do not request sandbox, network");
   });
 });

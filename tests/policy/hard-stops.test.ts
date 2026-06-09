@@ -126,6 +126,42 @@ describe("hard-stop policy", () => {
     });
   });
 
+  it("preserves configured network-enabled sandbox for thin and full workers", () => {
+    const turnSandboxPolicy = {
+      type: "workspace-write",
+      network_access: true,
+    };
+
+    const thinPolicy = createModeScopedPermissionPolicy({
+      mode: "thin",
+      configuredApprovalPolicy: "never",
+      configuredThreadSandbox: "workspace-write",
+      configuredTurnSandboxPolicy: turnSandboxPolicy,
+      maxBudgetUsd: 50,
+    });
+    const fullPolicy = createModeScopedPermissionPolicy({
+      mode: "full",
+      configuredApprovalPolicy: "never",
+      configuredThreadSandbox: "workspace-write",
+      configuredTurnSandboxPolicy: turnSandboxPolicy,
+      maxBudgetUsd: 50,
+    });
+    const prototypePolicy = createModeScopedPermissionPolicy({
+      mode: "prototype",
+      configuredApprovalPolicy: "never",
+      configuredThreadSandbox: "workspace-write",
+      configuredTurnSandboxPolicy: turnSandboxPolicy,
+      maxBudgetUsd: 50,
+    });
+
+    expect(thinPolicy.turnSandboxPolicy).toBe(turnSandboxPolicy);
+    expect(fullPolicy.turnSandboxPolicy).toBe(turnSandboxPolicy);
+    expect(prototypePolicy.turnSandboxPolicy).toEqual({
+      type: "workspace-write",
+      networkAccess: false,
+    });
+  });
+
   it("classifies PR creation, auto-merge, and bypass commands for active runner enforcement", () => {
     expect(
       detectModePermissionAction({

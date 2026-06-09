@@ -369,6 +369,11 @@ async function handleMessage(message) {
   if (message.id === "approval-1") {
     if (scenario === "denied-pr") {
       assertEqual(
+        message.result?.decision,
+        "decline",
+        "forbidden PR approval must send the Codex decision field",
+      );
+      assertEqual(
         message.result?.approved,
         false,
         "forbidden PR approval must be denied",
@@ -390,6 +395,11 @@ async function handleMessage(message) {
       return;
     }
 
+    assertEqual(
+      message.result?.decision,
+      "accept",
+      "approval must send the Codex decision field",
+    );
     assertEqual(
       message.result?.approved,
       true,
