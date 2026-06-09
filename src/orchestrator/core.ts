@@ -1630,6 +1630,37 @@ export class OrchestratorCore {
         );
       }
     }
+    if (this.requestTrackerIssueWrite !== undefined) {
+      try {
+        await this.runTrackerWriteOnce(
+          {
+            idempotencyKey: `tracker_write:promotion_boundary:${input.issue.id}:${input.stageName ?? "unnamed"}`,
+            issueId: input.issue.id,
+            issueIdentifier: input.issue.identifier,
+            stage: input.stageName,
+            attempt: input.attempt,
+            action: "upsert_issue",
+            summary:
+              "Upsert tracker follow-up for prototype promotion boundary.",
+          },
+          async () => {
+            await this.requestTrackerIssueWrite?.({
+              boundary: {
+                type: "promotion_boundary",
+                label: `prototype promotion for ${input.issue.identifier}`,
+                summary,
+                sourceIssueIds: [input.issue.id],
+              },
+            });
+          },
+        );
+      } catch (error) {
+        console.warn(
+          `[orchestrator] Failed to upsert tracker follow-up for prototype boundary ${input.issue.identifier}:`,
+          error,
+        );
+      }
+    }
     this.state.completed.add(input.issue.id);
     this.releaseClaim(input.issue.id);
     this.clearTerminalIssueRuntimeState(input.issue.id);

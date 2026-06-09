@@ -133,7 +133,7 @@ async function upsertTrackerIssueFromBoundary(input: {
   }
 
   const parent = resolveCommonParent(sourceIssues);
-  const labelNames = resolveRelevantLabels(sourceIssues);
+  const labelNames = resolveRelevantLabels(input.request, sourceIssues);
   const resolvedLabelIds = (
     await input.client.resolveLabelIdsByNames(labelNames, primaryIssue.teamId)
   ).map((label) => label.id);
@@ -222,12 +222,20 @@ function summarizeTrackerWriteRequest(request: TrackerIssueWriteRequest): {
 }
 
 function resolveRelevantLabels(
+  request: TrackerIssueWriteRequest,
   sourceIssues: readonly TrackerIssueReference[],
 ): string[] {
   const sourceRiskLabels = sourceIssues.flatMap((issue) =>
     issue.labels.filter((label) => label.startsWith("risk:")),
   );
-  return [...new Set(["supervision", ...sourceRiskLabels])].sort();
+  if (request.boundary.type === "explicit_finding") {
+    return [...new Set(["supervision", ...sourceRiskLabels])].sort();
+  }
+
+  const sourceModeLabels = sourceIssues.flatMap((issue) =>
+    issue.labels.filter((label) => label.startsWith("mode:")),
+  );
+  return [...new Set([...sourceModeLabels, ...sourceRiskLabels])].sort();
 }
 
 function resolveCommonParent(

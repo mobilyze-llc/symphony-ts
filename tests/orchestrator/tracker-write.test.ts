@@ -153,6 +153,89 @@ describe("writeTrackerIssueFromBoundary", () => {
     expect(client.updateIssue).not.toHaveBeenCalled();
   });
 
+  it("creates a bounded follow-up issue for prototype promotion boundaries", async () => {
+    const createIssue = vi.fn(async () => ({
+      id: "follow-up-2",
+      identifier: "SYMPH-201",
+      title: "Dispatcher follow-up: prototype promotion for ISSUE-1",
+    }));
+    const client = createClient({
+      createIssue,
+      sourceIssues: [
+        createSourceIssue({
+          labels: ["mode:prototype", "risk:high"],
+        }),
+      ],
+    });
+
+    const result = await writeTrackerIssueFromBoundary({
+      client,
+      request: createPromotionBoundaryRequest(),
+      terminalStates: ["Done", "Canceled"],
+      now: () => new Date("2026-06-09T00:20:00.000Z"),
+    });
+
+    expect(result).toEqual({
+      operation: "created",
+      issueTitle: "Dispatcher follow-up: prototype promotion for ISSUE-1",
+      issueIdentifier: "SYMPH-201",
+      parentIdentifier: "MOB-52",
+    });
+    expect(createIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        teamId: "team-1",
+        projectId: "project-1",
+        parentId: "parent-1",
+        labelIds: expect.arrayContaining([
+          "label-mode-prototype",
+          "label-risk-high",
+        ]),
+        title: "Dispatcher follow-up: prototype promotion for ISSUE-1",
+        description: expect.stringContaining(
+          "Prototype boundary reached for ISSUE-1; promotion requires a new gated production unit.",
+        ),
+      }),
+    );
+  });
+
+  it("updates an existing open promotion-boundary follow-up instead of creating a duplicate", async () => {
+    const updateIssue = vi.fn(async () => ({
+      id: "follow-up-2",
+      identifier: "SYMPH-201",
+      title: "Dispatcher follow-up: prototype promotion for ISSUE-1",
+    }));
+    const client = createClient({
+      updateIssue,
+      openIssuesByTitle: [
+        createSourceIssue({
+          id: "follow-up-2",
+          identifier: "SYMPH-201",
+          title: "Dispatcher follow-up: prototype promotion for ISSUE-1",
+          description: [
+            "<!-- symphony-tracker-write -->",
+            "<!-- boundary:promotion_boundary:prototype promotion for ISSUE-1 -->",
+            "<!-- source-issue-ids:1 -->",
+          ].join("\n"),
+          projectId: "project-1",
+          teamId: "team-1",
+          parent: null,
+          labels: [],
+          url: "https://linear.app/mobilyze-llc/issue/SYMPH-201",
+        }),
+      ],
+    });
+
+    const result = await writeTrackerIssueFromBoundary({
+      client,
+      request: createPromotionBoundaryRequest(),
+      terminalStates: ["Done", "Canceled"],
+    });
+
+    expect(result.operation).toBe("updated");
+    expect(updateIssue).toHaveBeenCalledTimes(1);
+    expect(client.createIssue).not.toHaveBeenCalled();
+  });
+
   it("reports failures with request context before rethrowing", async () => {
     const onFailure = vi.fn();
     const client = createClient({
@@ -223,6 +306,9 @@ function createClient(overrides?: {
           if (label === "supervision") {
             return [{ id: "label-supervision", name: label }];
           }
+          if (label === "mode:prototype") {
+            return [{ id: "label-mode-prototype", name: label }];
+          }
           if (label === "risk:high") {
             return [{ id: "label-risk-high", name: label }];
           }
@@ -247,6 +333,18 @@ function createRequest(): TrackerIssueWriteRequest {
         files: ["src/shared/config.ts"],
         message: "ISSUE-1 and ISSUE-2 changed the same file set.",
       },
+    },
+  };
+}
+
+function createPromotionBoundaryRequest(): TrackerIssueWriteRequest {
+  return {
+    boundary: {
+      type: "promotion_boundary",
+      label: "prototype promotion for ISSUE-1",
+      summary:
+        "Prototype boundary reached for ISSUE-1; promotion requires a new gated production unit.",
+      sourceIssueIds: ["1"],
     },
   };
 }

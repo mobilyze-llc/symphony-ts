@@ -1743,6 +1743,7 @@ describe("decorrelated terminal gates", () => {
       comment: "should not run",
     }));
     const comments: string[] = [];
+    const trackerWrites: TrackerIssueWriteRequest[] = [];
     const orchestrator = createOrchestrator({
       config,
       tracker: createTracker({
@@ -1757,6 +1758,9 @@ describe("decorrelated terminal gates", () => {
       runEnsembleGate,
       postComment: async (_issueId, body) => {
         comments.push(body);
+      },
+      requestTrackerIssueWrite: (input) => {
+        trackerWrites.push(input);
       },
     });
 
@@ -1777,6 +1781,17 @@ describe("decorrelated terminal gates", () => {
     ]);
     expect(comments[0]).toContain("Prototype promotion boundary");
     expect(comments[0]).toContain("new `thin` or `full` production unit");
+    expect(trackerWrites).toEqual([
+      {
+        boundary: {
+          type: "promotion_boundary",
+          label: "prototype promotion for ISSUE-1",
+          summary:
+            "Prototype boundary reached for ISSUE-1; promotion requires a new gated production unit.",
+          sourceIssueIds: ["1"],
+        },
+      },
+    ]);
   });
 
   it("replays prototype boundary completion as terminal after restart", async () => {
