@@ -172,7 +172,18 @@ function renderUsage(): string {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  runCouncilReviewGateCli(process.argv.slice(2)).then((code) => {
-    process.exitCode = code;
-  });
+  runCouncilReviewGateCli(process.argv.slice(2))
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((error) => {
+      process.stderr.write(
+        `symphony-council-review-gate failed: ${formatError(error)}\n`,
+      );
+      process.exitCode = 1;
+    });
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
