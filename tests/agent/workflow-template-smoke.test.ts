@@ -27,6 +27,7 @@ const RESOLVED_CODEX_WORKFLOW_CONFIGS = [
   ...SHIPPED_CODEX_WORKFLOW_CONFIGS,
   WORKFLOW_PATH,
 ];
+const OBSERVED_CODEX_LOW_FIRST_TURN_TOKENS = 233_719;
 
 const DESCRIPTION_SENTINEL = "DESCRIPTION_SENTINEL: do not leak to merge";
 
@@ -109,7 +110,20 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     );
 
     expect(template).toContain("hard_stops:");
-    expect(template).toContain("max_tokens_per_unit: 200000");
+    expect(template).toContain("max_tokens_per_unit: 1000000");
+
+    const { hardStops } = resolvedConfig;
+    expect(hardStops).toBeDefined();
+    if (hardStops === undefined) {
+      throw new Error("Expected resolved workflow hard stops");
+    }
+
+    expect(hardStops.maxTokensPerUnit).toBe(1_000_000);
+    expect(hardStops.maxTokensPerUnit).toBeGreaterThan(
+      OBSERVED_CODEX_LOW_FIRST_TURN_TOKENS,
+    );
+    expect(hardStops.maxDollarBudgetUsd).toBe(50);
+    expect(hardStops.premiumBudgetPauseRatio).toBe(0.8);
   });
 
   it("creates bare-clone worker worktrees from refreshed origin/main", async () => {
