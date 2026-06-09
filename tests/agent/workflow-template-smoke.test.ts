@@ -108,6 +108,26 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(template).toContain("max_tokens_per_unit: 200000");
   });
 
+  it("creates bare-clone worker worktrees from refreshed origin/main", async () => {
+    const template = await readFile(
+      resolve(
+        import.meta.dirname,
+        "../../pipeline-config/templates/WORKFLOW-template.md",
+      ),
+      "utf8",
+    );
+
+    expect(template).toContain("+refs/heads/*:refs/remotes/origin/*");
+    expect(template).toContain(
+      "+refs/heads/$BASE_BRANCH:refs/heads/$BASE_BRANCH",
+    );
+    expect(template).not.toContain("fetch --prune origin");
+    expect(template).toContain('WORKTREE_BASE="origin/$BASE_BRANCH"');
+    expect(template).toContain(
+      'git -C "$BARE_CLONE" worktree add "$WORKSPACE_DIR" -b "$BRANCH_NAME" "$WORKTREE_BASE"',
+    );
+  });
+
   it("investigate stage contains description and no merge prohibitions", async () => {
     const output = await renderPrompt({
       workflow: { promptTemplate },

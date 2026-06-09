@@ -2614,10 +2614,48 @@ export async function readGitChangedFiles(
   ];
 }
 
-async function readGitBaseRevision(
+export async function readGitBaseRevision(
+  workspacePath: string,
+): Promise<string> {
+  const originHeadRef = await readGitOriginHeadRef(workspacePath);
+  const baseRefs = createGitBaseRefCandidates({
+    configuredBaseBranch: process.env.SYMPHONY_BASE_BRANCH,
+    originHeadRef,
+  });
+  const failures: string[] = [];
+
+  for (const baseRef of baseRefs) {
+    if (!(await gitRefExists(workspacePath, baseRef))) {
+      failures.push(`${baseRef}: ref not found`);
+      continue;
+    }
+
+    try {
+      const { stdout } = await execFileAsync(
+        "git",
+        ["-C", workspacePath, "merge-base", "HEAD", baseRef],
+        {
+          timeout: 5000,
+        },
+      );
+      const revision = String(stdout).trim();
+      if (revision.length > 0) {
+        return revision;
+      }
+      failures.push(`${baseRef}: empty merge-base`);
+    } catch (error) {
+      failures.push(`${baseRef}: ${toErrorMessage(error)}`);
+    }
+  }
+
+  throw new Error(
+    `Failed to resolve git base revision for ${workspacePath}; tried ${failures.join("; ")}`,
+  );
+}
+
+async function readGitOriginHeadRef(
   workspacePath: string,
 ): Promise<string | null> {
-  let baseRef = "origin/main";
   try {
     const { stdout: headRefStdout } = await execFileAsync(
       "git",
@@ -2627,21 +2665,80 @@ async function readGitBaseRevision(
       },
     );
     const headRef = String(headRefStdout).trim();
-    if (headRef.length > 0) {
-      baseRef = headRef;
-    }
+    return headRef.length > 0 ? headRef : null;
   } catch {
-    // Fall back to origin/main when origin/HEAD is unavailable.
+    return null;
   }
-  const { stdout } = await execFileAsync(
-    "git",
-    ["-C", workspacePath, "merge-base", "HEAD", baseRef],
-    {
-      timeout: 5000,
-    },
+}
+
+function createGitBaseRefCandidates(input: {
+  configuredBaseBranch: string | undefined;
+  originHeadRef: string | null;
+}): string[] {
+  const candidates: string[] = [];
+  const configuredBaseBranch = normalizeGitBranchName(
+    input.configuredBaseBranch,
   );
-  const revision = String(stdout).trim();
-  return revision.length > 0 ? revision : null;
+  if (configuredBaseBranch !== null) {
+    candidates.push(`origin/${configuredBaseBranch}`, configuredBaseBranch);
+  }
+
+  const originHeadRef = normalizeGitRef(input.originHeadRef);
+  if (originHeadRef !== null) {
+    candidates.push(originHeadRef);
+  }
+
+  candidates.push("origin/main", "main", "origin/master", "master");
+  return [...new Set(candidates)];
+}
+
+function normalizeGitBranchName(value: string | undefined): string | null {
+  const normalized = normalizeGitRef(value);
+  if (normalized === null) {
+    return null;
+  }
+  return normalized.startsWith("origin/")
+    ? normalized.slice("origin/".length)
+    : normalized;
+}
+
+function normalizeGitRef(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (trimmed === undefined || trimmed.length === 0) {
+    return null;
+  }
+  if (trimmed.startsWith("refs/remotes/")) {
+    return trimmed.slice("refs/remotes/".length);
+  }
+  if (trimmed.startsWith("refs/heads/")) {
+    return trimmed.slice("refs/heads/".length);
+  }
+  return trimmed;
+}
+
+async function gitRefExists(
+  workspacePath: string,
+  ref: string,
+): Promise<boolean> {
+  try {
+    await execFileAsync(
+      "git",
+      [
+        "-C",
+        workspacePath,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `${ref}^{commit}`,
+      ],
+      {
+        timeout: 1000,
+      },
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function createWorkspaceHookLogger(logger: StructuredLogger): (entry: {

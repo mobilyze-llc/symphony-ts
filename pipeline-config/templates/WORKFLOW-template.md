@@ -75,7 +75,21 @@ hooks:
     fi
 
     # --- Fetch latest refs into bare clone ---
-    git -C "$BARE_CLONE" fetch origin 2>/dev/null || echo "WARNING: fetch failed, using cached refs" >&2
+    BASE_BRANCH="${SYMPHONY_BASE_BRANCH:-main}"
+    if ! git -C "$BARE_CLONE" fetch origin \
+      "+refs/heads/$BASE_BRANCH:refs/heads/$BASE_BRANCH" \
+      "+refs/heads/*:refs/remotes/origin/*" 2>/dev/null; then
+      echo "WARNING: fetch failed, using cached refs" >&2
+    fi
+
+    if git -C "$BARE_CLONE" show-ref --verify --quiet "refs/remotes/origin/$BASE_BRANCH"; then
+      WORKTREE_BASE="origin/$BASE_BRANCH"
+    elif git -C "$BARE_CLONE" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
+      WORKTREE_BASE="$BASE_BRANCH"
+    else
+      echo "ERROR: Could not resolve base branch $BASE_BRANCH in $BARE_CLONE" >&2
+      exit 1
+    fi
 
     # --- Clean up stale branch from previous failed attempt (idempotency) ---
     if git -C "$BARE_CLONE" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
@@ -88,8 +102,8 @@ hooks:
     fi
 
     # --- Create worktree for this issue ---
-    echo "Creating worktree for $ISSUE_KEY on branch $BRANCH_NAME..."
-    git -C "$BARE_CLONE" worktree add "$WORKSPACE_DIR" -b "$BRANCH_NAME" main
+    echo "Creating worktree for $ISSUE_KEY on branch $BRANCH_NAME from $WORKTREE_BASE..."
+    git -C "$BARE_CLONE" worktree add "$WORKSPACE_DIR" -b "$BRANCH_NAME" "$WORKTREE_BASE"
 
     # --- Install dependencies ---
     if [ -f package.json ]; then
