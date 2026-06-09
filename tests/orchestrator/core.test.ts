@@ -4427,7 +4427,11 @@ describe("fast-track label-based stage routing", () => {
       ...createConfig(),
       stages: {
         initialStage: "investigate",
-        fastTrack: { label: "trivial", initialStage: "implement" },
+        fastTrack: {
+          label: "trivial",
+          labels: ["trivial", "kind:test"],
+          initialStage: "implement",
+        },
         stages: Object.freeze({
           investigate: {
             type: "agent",
@@ -4496,6 +4500,36 @@ describe("fast-track label-based stage routing", () => {
             identifier: "ISSUE-1",
             state: "Todo",
             labels: ["trivial"],
+          }),
+        ],
+      }),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStageNames.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+
+    expect(spawnedStageNames).toEqual(["implement"]);
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+  });
+
+  it("fast-track: kind:test issue starts at fast-track initial stage", async () => {
+    const spawnedStageNames: Array<string | null> = [];
+    const orchestrator = new OrchestratorCore({
+      config: createFastTrackConfig(),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            state: "Todo",
+            labels: ["kind:test"],
           }),
         ],
       }),

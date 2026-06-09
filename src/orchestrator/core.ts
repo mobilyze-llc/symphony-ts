@@ -2825,14 +2825,18 @@ export class OrchestratorCore {
       const cachedStage = this.state.issueStages[issue.id];
       if (cachedStage !== undefined) {
         stageName = cachedStage;
-      } else if (
-        stagesConfig.fastTrack != null &&
-        issue.labels.includes(stagesConfig.fastTrack.label)
-      ) {
-        stageName = stagesConfig.fastTrack.initialStage;
-        console.log(
-          `[orchestrator] Fast-tracking ${issue.identifier} to ${stageName} (label: ${stagesConfig.fastTrack.label})`,
+      } else if (stagesConfig.fastTrack != null) {
+        const matchedFastTrackLabel = stagesConfig.fastTrack.labels.find(
+          (label) => issue.labels.includes(label),
         );
+        if (matchedFastTrackLabel === undefined) {
+          stageName = stagesConfig.initialStage;
+        } else {
+          stageName = stagesConfig.fastTrack.initialStage;
+          console.log(
+            `[orchestrator] Fast-tracking ${issue.identifier} to ${stageName} (label: ${matchedFastTrackLabel})`,
+          );
+        }
       } else {
         stageName = stagesConfig.initialStage;
       }
