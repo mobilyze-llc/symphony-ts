@@ -20,19 +20,6 @@ import type { CodexDynamicTool } from "./app-server-client.js";
 const LINEAR_GRAPHQL_DESCRIPTION =
   "Execute one GraphQL query or mutation against the configured Linear workspace using Symphony-managed auth. Linear body/description writes must use GraphQL variables.";
 
-const LINEAR_CONTENT_WRITE_MUTATIONS = new Set([
-  "commentCreate",
-  "commentUpdate",
-  "documentCreate",
-  "documentUpdate",
-  "issueCreate",
-  "issueUpdate",
-  "projectCreate",
-  "projectMilestoneCreate",
-  "projectMilestoneUpdate",
-  "projectUpdate",
-]);
-
 const LINEAR_CONTENT_FIELD_NAMES = new Set(["body", "content", "description"]);
 
 type JsonObject = Record<string, unknown>;
@@ -333,10 +320,6 @@ function collectInlineContentFieldsInSelectionSet(
         }
       }
 
-      continue;
-    }
-
-    if (!LINEAR_CONTENT_WRITE_MUTATIONS.has(selection.name.value)) {
       continue;
     }
 

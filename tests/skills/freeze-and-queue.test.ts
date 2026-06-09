@@ -115,10 +115,6 @@ elif [[ "$query" == *"issueLabels"* ]]; then
 elif [[ "$query" == *"issue(id:"* ]]; then
   printf '%s\\n' '{"data":{"issue":{"project":{"slugId":"fdba14472043"},"parent":null}}}'
 elif [[ -n "$description_file" ]]; then
-  if [[ -z "$description_file" ]]; then
-    echo "expected description=@file variable" >&2
-    exit 65
-  fi
   cat "$description_file" > "$FAKE_LINEAR_CAPTURE"
   printf '%s\\n' '{"data":{"issueCreate":{"success":true,"issue":{"id":"issue-1","identifier":"SYMPH-999","url":"https://linear.app/mobilyze-llc/issue/SYMPH-999"}}}}'
 else

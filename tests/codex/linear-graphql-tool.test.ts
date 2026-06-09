@@ -99,6 +99,9 @@ describe("createLinearGraphqlDynamicTool", () => {
       'mutation UpdateDocument { documentUpdate(id: "doc-1", input: { content: "echo `$TOKEN`" }) { success } }',
       'mutation CreateMilestone { projectMilestoneCreate(input: { projectId: "project-1", name: "M", description: "echo `$TOKEN`" }) { success } }',
       'mutation UpdateMilestone { projectMilestoneUpdate(id: "milestone-1", input: { description: "echo `$TOKEN`" }) { success } }',
+      'mutation CreateProjectUpdate { projectUpdateCreate(input: { projectId: "project-1", body: "echo `$TOKEN`" }) { success } }',
+      'mutation CreateInitiative { initiativeCreate(input: { name: "I", description: "echo `$TOKEN`" }) { success } }',
+      'mutation UpdateRoadmap { roadmapUpdate(id: "roadmap-1", input: { description: "echo `$TOKEN`" }) { success } }',
     ];
 
     for (const query of unsafeMutations) {
@@ -194,6 +197,34 @@ describe("createLinearGraphqlDynamicTool", () => {
     expect(request.variables.body).toBe(payload);
   });
 
+  it("allows content fields in read selections", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issue: {
+            description: "run $(later)",
+          },
+        },
+      }),
+    );
+    const tool = createLinearGraphqlDynamicTool({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "linear-token",
+      fetchFn,
+    });
+
+    await expect(
+      tool.execute({
+        query:
+          'query ReadIssue { issue(id: "issue-1") { description comments { nodes { body } } } }',
+      }),
+    ).resolves.toMatchObject({
+      success: true,
+    });
+
+    expect(fetchFn).toHaveBeenCalledOnce();
+  });
+
   it("allows variable-backed content writes for every guarded field kind", async () => {
     const payload =
       'echo "$SYMPHONY_INPUT"\nrun-step "$(linear issue view SYMPH-123 --raw)"';
@@ -244,6 +275,13 @@ describe("createLinearGraphqlDynamicTool", () => {
           "mutation UpdateDocument($documentId: String!, $content: String!) { documentUpdate(id: $documentId, input: { content: $content }) { success } }",
         variables: { documentId: "document-1", content: payload },
         field: "content",
+      },
+      {
+        name: "projectUpdateCreate body",
+        query:
+          "mutation CreateProjectUpdate($projectId: String!, $body: String!) { projectUpdateCreate(input: { projectId: $projectId, body: $body }) { success } }",
+        variables: { projectId: "project-1", body: payload },
+        field: "body",
       },
     ];
 
