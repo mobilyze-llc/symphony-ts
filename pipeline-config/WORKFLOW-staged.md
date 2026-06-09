@@ -402,7 +402,7 @@ You maintain a single persistent `## Workpad` comment on the Linear issue. This 
   - Search comments: `query { issue(id: "<issue_id>") { comments { nodes { id body } } } }`
   - Create comments with GraphQL variables only: `mutation Create($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { comment { id } } }`
   - Update comments with GraphQL variables only: `mutation Update($commentId: String!, $body: String!) { commentUpdate(id: $commentId, input: { body: $body }) { comment { id } } }`
-  - Never inline markdown into `body:` or `description:` literals. Put the markdown in `variables.body` / `variables.description` so shell snippets like `$VAR`, `${VAR}`, `$(cmd)`, and backticks stay literal.
+  - Never inline markdown into `body:`, `description:`, or `content:` literals. Put the markdown in variables so shell snippets like `$VAR`, `${VAR}`, `$(cmd)`, and backticks stay literal.
 - **Never use `__type` or `__schema` introspection queries** against the Linear API. Use the exact patterns above.
 
 ## Media in Workpads (fileUpload)

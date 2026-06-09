@@ -80,7 +80,43 @@ describe("createLinearGraphqlDynamicTool", () => {
     });
   });
 
-  it("rejects inline Linear body and description write literals", async () => {
+  it("rejects inline Linear content write literals", async () => {
+    const fetchFn = vi.fn<typeof fetch>();
+    const tool = createLinearGraphqlDynamicTool({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "linear-token",
+      fetchFn,
+    });
+
+    const unsafeMutations = [
+      'mutation CreateComment { commentCreate(input: { issueId: "issue-1", body: "run $(danger)" }) { success } }',
+      'mutation UpdateComment { commentUpdate(id: "comment-1", input: { body: "run $(danger)" }) { success } }',
+      'mutation CreateIssue { issueCreate(input: { teamId: "team-1", title: "T", description: "echo `$TOKEN`" }) { success } }',
+      'mutation UpdateIssue { issueUpdate(id: "issue-1", input: { description: "echo `$TOKEN`" }) { success } }',
+      'mutation CreateProject { projectCreate(input: { name: "P", teamIds: ["team-1"], description: "echo `$TOKEN`" }) { success } }',
+      'mutation UpdateProject { projectUpdate(id: "project-1", input: { description: "echo `$TOKEN`" }) { success } }',
+      'mutation CreateDocument { documentCreate(input: { title: "Doc", content: "echo `$TOKEN`" }) { success } }',
+      'mutation UpdateDocument { documentUpdate(id: "doc-1", input: { content: "echo `$TOKEN`" }) { success } }',
+      'mutation CreateMilestone { projectMilestoneCreate(input: { projectId: "project-1", name: "M", description: "echo `$TOKEN`" }) { success } }',
+      'mutation UpdateMilestone { projectMilestoneUpdate(id: "milestone-1", input: { description: "echo `$TOKEN`" }) { success } }',
+    ];
+
+    for (const query of unsafeMutations) {
+      await expect(tool.execute({ query })).resolves.toMatchObject({
+        success: false,
+        error: {
+          code: "invalid_input",
+          message: expect.stringContaining(
+            "content fields must use GraphQL variables",
+          ),
+        },
+      });
+    }
+
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("rejects inline content writes hidden behind fragments", async () => {
     const fetchFn = vi.fn<typeof fetch>();
     const tool = createLinearGraphqlDynamicTool({
       endpoint: "https://api.linear.app/graphql",
@@ -91,30 +127,24 @@ describe("createLinearGraphqlDynamicTool", () => {
     await expect(
       tool.execute({
         query:
-          'mutation CreateComment { commentCreate(input: { issueId: "issue-1", body: "run $(danger)" }) { success } }',
+          'mutation Wrapped { ... on Mutation { commentUpdate(id: "comment-1", input: { body: "run $(danger)" }) { success } } }',
       }),
     ).resolves.toMatchObject({
       success: false,
       error: {
         code: "invalid_input",
-        message: expect.stringContaining(
-          "linear_graphql.body must use a GraphQL variable",
-        ),
       },
     });
 
     await expect(
       tool.execute({
         query:
-          'mutation UpdateIssue { issueUpdate(id: "issue-1", input: { description: "echo `$TOKEN`" }) { success } }',
+          'mutation Spread { ...InlineWrite } fragment InlineWrite on Mutation { issueUpdate(id: "issue-1", input: { description: "run $(danger)" }) { success } }',
       }),
     ).resolves.toMatchObject({
       success: false,
       error: {
         code: "invalid_input",
-        message: expect.stringContaining(
-          "linear_graphql.description must use a GraphQL variable",
-        ),
       },
     });
 
@@ -162,6 +192,83 @@ describe("createLinearGraphqlDynamicTool", () => {
       variables: { body: string };
     };
     expect(request.variables.body).toBe(payload);
+  });
+
+  it("allows variable-backed content writes for every guarded field kind", async () => {
+    const payload =
+      'echo "$SYMPHONY_INPUT"\nrun-step "$(linear issue view SYMPH-123 --raw)"';
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async () =>
+      jsonResponse({
+        data: {
+          ok: true,
+        },
+      }),
+    );
+    const tool = createLinearGraphqlDynamicTool({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "linear-token",
+      fetchFn,
+    });
+    const safeWrites = [
+      {
+        name: "commentCreate body",
+        query:
+          "mutation CreateComment($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success } }",
+        variables: { issueId: "issue-1", body: payload },
+        field: "body",
+      },
+      {
+        name: "commentUpdate body",
+        query:
+          "mutation UpdateComment($commentId: String!, $body: String!) { commentUpdate(id: $commentId, input: { body: $body }) { success } }",
+        variables: { commentId: "comment-1", body: payload },
+        field: "body",
+      },
+      {
+        name: "issueCreate description",
+        query:
+          'mutation CreateIssue($teamId: String!, $description: String!) { issueCreate(input: { teamId: $teamId, title: "T", description: $description }) { success } }',
+        variables: { teamId: "team-1", description: payload },
+        field: "description",
+      },
+      {
+        name: "issueUpdate description",
+        query:
+          "mutation UpdateIssue($issueId: String!, $description: String!) { issueUpdate(id: $issueId, input: { description: $description }) { success } }",
+        variables: { issueId: "issue-1", description: payload },
+        field: "description",
+      },
+      {
+        name: "documentUpdate content",
+        query:
+          "mutation UpdateDocument($documentId: String!, $content: String!) { documentUpdate(id: $documentId, input: { content: $content }) { success } }",
+        variables: { documentId: "document-1", content: payload },
+        field: "content",
+      },
+    ];
+
+    for (const safeWrite of safeWrites) {
+      const result = await tool.execute({
+        query: safeWrite.query,
+        variables: safeWrite.variables,
+      });
+      expect(
+        result,
+        `${safeWrite.name}: ${JSON.stringify(result)}`,
+      ).toMatchObject({
+        success: true,
+      });
+    }
+
+    expect(fetchFn).toHaveBeenCalledTimes(safeWrites.length);
+    safeWrites.forEach((safeWrite, index) => {
+      const request = JSON.parse(
+        fetchFn.mock.calls[index]![1]?.body as string,
+      ) as {
+        variables: Record<string, string>;
+      };
+      expect(request.variables[safeWrite.field]).toBe(payload);
+    });
   });
 
   it("preserves top-level GraphQL errors with success=false", async () => {

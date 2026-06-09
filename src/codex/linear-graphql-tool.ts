@@ -1,8 +1,10 @@
 import {
   type DocumentNode,
   type FieldNode,
+  type FragmentDefinitionNode,
   Kind,
   type OperationDefinitionNode,
+  type SelectionSetNode,
   type ValueNode,
   parse,
 } from "graphql";
@@ -21,11 +23,17 @@ const LINEAR_GRAPHQL_DESCRIPTION =
 const LINEAR_CONTENT_WRITE_MUTATIONS = new Set([
   "commentCreate",
   "commentUpdate",
+  "documentCreate",
+  "documentUpdate",
   "issueCreate",
   "issueUpdate",
+  "projectCreate",
+  "projectMilestoneCreate",
+  "projectMilestoneUpdate",
+  "projectUpdate",
 ]);
 
-const LINEAR_CONTENT_FIELD_NAMES = new Set(["body", "description"]);
+const LINEAR_CONTENT_FIELD_NAMES = new Set(["body", "content", "description"]);
 
 type JsonObject = Record<string, unknown>;
 
@@ -243,10 +251,10 @@ function validateDocument(input: {
     );
   }
 
-  const unsafeContentWrite = findInlineLinearContentWrite(document);
-  if (unsafeContentWrite !== null) {
+  const unsafeContentWrites = findInlineLinearContentWrites(document);
+  if (unsafeContentWrites.length > 0) {
     return invalidInput(
-      `linear_graphql.${unsafeContentWrite} must use a GraphQL variable, not an inline string literal. Use variables or sync_workpad so markdown with $, backticks, and $(...) remains literal.`,
+      `linear_graphql content fields must use GraphQL variables, not inline string literals (found: ${unsafeContentWrites.join(", ")}). Use variables or sync_workpad so markdown with $, backticks, and $(...) remains literal.`,
     );
   }
 
@@ -257,7 +265,15 @@ function validateDocument(input: {
   };
 }
 
-function findInlineLinearContentWrite(document: DocumentNode): string | null {
+function findInlineLinearContentWrites(document: DocumentNode): string[] {
+  const fragments = new Map<string, FragmentDefinitionNode>();
+  for (const definition of document.definitions) {
+    if (definition.kind === Kind.FRAGMENT_DEFINITION) {
+      fragments.set(definition.name.value, definition);
+    }
+  }
+
+  const violations = new Set<string>();
   for (const definition of document.definitions) {
     if (
       definition.kind !== Kind.OPERATION_DEFINITION ||
@@ -266,20 +282,57 @@ function findInlineLinearContentWrite(document: DocumentNode): string | null {
       continue;
     }
 
-    const inlineField = findInlineContentFieldInMutation(definition);
-    if (inlineField !== null) {
-      return inlineField;
-    }
+    collectInlineContentFieldsInMutation(definition, fragments, violations);
   }
 
-  return null;
+  return [...violations].sort();
 }
 
-function findInlineContentFieldInMutation(
+function collectInlineContentFieldsInMutation(
   definition: OperationDefinitionNode,
-): string | null {
-  for (const selection of definition.selectionSet.selections) {
+  fragments: ReadonlyMap<string, FragmentDefinitionNode>,
+  violations: Set<string>,
+): void {
+  collectInlineContentFieldsInSelectionSet(
+    definition.selectionSet,
+    fragments,
+    violations,
+    new Set(),
+  );
+}
+
+function collectInlineContentFieldsInSelectionSet(
+  selectionSet: SelectionSetNode,
+  fragments: ReadonlyMap<string, FragmentDefinitionNode>,
+  violations: Set<string>,
+  visitedFragments: Set<string>,
+): void {
+  for (const selection of selectionSet.selections) {
     if (selection.kind !== Kind.FIELD) {
+      if (selection.kind === Kind.INLINE_FRAGMENT) {
+        collectInlineContentFieldsInSelectionSet(
+          selection.selectionSet,
+          fragments,
+          violations,
+          visitedFragments,
+        );
+      }
+
+      if (selection.kind === Kind.FRAGMENT_SPREAD) {
+        const fragmentName = selection.name.value;
+        const fragment = fragments.get(fragmentName);
+        if (fragment !== undefined && !visitedFragments.has(fragmentName)) {
+          visitedFragments.add(fragmentName);
+          collectInlineContentFieldsInSelectionSet(
+            fragment.selectionSet,
+            fragments,
+            violations,
+            visitedFragments,
+          );
+          visitedFragments.delete(fragmentName);
+        }
+      }
+
       continue;
     }
 
@@ -287,53 +340,41 @@ function findInlineContentFieldInMutation(
       continue;
     }
 
-    const inlineField = findInlineContentFieldInField(selection);
-    if (inlineField !== null) {
-      return inlineField;
-    }
+    collectInlineContentFieldsInField(selection, violations);
   }
-
-  return null;
 }
 
-function findInlineContentFieldInField(field: FieldNode): string | null {
+function collectInlineContentFieldsInField(
+  field: FieldNode,
+  violations: Set<string>,
+): void {
   for (const argument of field.arguments ?? []) {
-    const inlineField = findInlineContentFieldInValue(argument.value);
-    if (inlineField !== null) {
-      return inlineField;
-    }
+    collectInlineContentFieldsInValue(argument.value, violations);
   }
-
-  return null;
 }
 
-function findInlineContentFieldInValue(value: ValueNode): string | null {
+function collectInlineContentFieldsInValue(
+  value: ValueNode,
+  violations: Set<string>,
+): void {
   if (value.kind === Kind.OBJECT) {
     for (const field of value.fields) {
       if (
         LINEAR_CONTENT_FIELD_NAMES.has(field.name.value) &&
         field.value.kind === Kind.STRING
       ) {
-        return field.name.value;
+        violations.add(field.name.value);
       }
 
-      const nested = findInlineContentFieldInValue(field.value);
-      if (nested !== null) {
-        return nested;
-      }
+      collectInlineContentFieldsInValue(field.value, violations);
     }
   }
 
   if (value.kind === Kind.LIST) {
     for (const nestedValue of value.values) {
-      const nested = findInlineContentFieldInValue(nestedValue);
-      if (nested !== null) {
-        return nested;
-      }
+      collectInlineContentFieldsInValue(nestedValue, violations);
     }
   }
-
-  return null;
 }
 
 function extractGraphqlErrors(body: unknown): unknown[] | null {

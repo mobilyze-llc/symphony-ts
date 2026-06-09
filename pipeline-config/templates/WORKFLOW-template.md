@@ -694,7 +694,7 @@ You maintain a single persistent `## Workpad` comment on the Linear issue. This 
   linear issue comment update <COMMENT_UUID> --body-file workpad.md  # Update existing
   ```
   Note: `add` and `list` take the issue identifier (e.g. SYMPH-246). `update` takes a comment UUID (from `list --json` output).
-- **Never inline markdown into Linear GraphQL `body:` or `description:` literals.** Use `sync_workpad`, `--body-file`, `--description-file`, or GraphQL variables so shell snippets like `$VAR`, `${VAR}`, `$(cmd)`, and backticks stay literal.
+- **Never inline markdown into Linear GraphQL `body:`, `description:`, or `content:` literals.** Use `sync_workpad`, file-backed CLI flags, or GraphQL variables so shell snippets like `$VAR`, `${VAR}`, `$(cmd)`, and backticks stay literal.
 
 ## Media in Workpads (fileUpload)
 
