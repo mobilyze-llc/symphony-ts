@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -145,6 +145,30 @@ describe("runHeadlessCouncilGate", () => {
     expect(reviewerPrompt).toContain("DIFF_DATA diff --git");
     expect(reviewerPrompt).toContain("DIFF_DATA +const ok = true;");
     expect(reviewerPrompt).not.toContain("```diff");
+  });
+
+  it("does not leave a machine PASS artifact when report writing fails", async () => {
+    const harness = await createHarness();
+    await mkdir(join(harness.artifactDir, "council-report.md"), {
+      recursive: true,
+    });
+
+    await expect(
+      runHeadlessCouncilGate(
+        {
+          issueId: "MOB-88",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          cmuxSpawnBin: "/tmp/cmux-spawn",
+        },
+        { runCommand: harness.runCommand },
+      ),
+    ).rejects.toThrow();
+
+    await expect(
+      readFile(join(harness.artifactDir, "review-result.json"), "utf-8"),
+    ).rejects.toThrow();
   });
 
   it("loads review context from GitHub PR mode", async () => {
@@ -599,6 +623,35 @@ describe("runHeadlessCouncilGate", () => {
         "claude-opus": {
           artifact:
             "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n### P2: Should Fix:\n- Bug",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "fail",
+      message:
+        "Artifact verdict was PASS but P1/P2 findings sections were not empty.",
+    });
+  });
+
+  it("does not pass when a PASS artifact contains a colon-adjacent blocking heading", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n### P2:Should Fix\n- Bug",
         },
       },
     });

@@ -800,7 +800,7 @@ function artifactSectionHeadingPattern(heading: string): RegExp {
   const escapedWords = heading
     .split(/\s+/)
     .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const headingPattern = escapedWords.join("\\s*:?\\s+");
+  const headingPattern = escapedWords.join("(?:\\s+:?\\s*|\\s*:\\s*)");
   return new RegExp(`^#{2,3}\\s+${headingPattern}\\s*:?\\s*$`, "im");
 }
 
@@ -860,12 +860,12 @@ async function writeResult(
   result: HeadlessCouncilGateResult,
 ): Promise<HeadlessCouncilGateResult> {
   await writeFile(
-    result.artifactPaths.resultJson,
-    `${JSON.stringify(result, null, 2)}\n`,
-  );
-  await writeFile(
     result.artifactPaths.councilReport,
     formatCouncilReport(result),
+  );
+  await writeFile(
+    result.artifactPaths.resultJson,
+    `${JSON.stringify(result, null, 2)}\n`,
   );
   return result;
 }
