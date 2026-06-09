@@ -1,4 +1,11 @@
-import { type DocumentNode, parse } from "graphql";
+import {
+  type DocumentNode,
+  type FieldNode,
+  Kind,
+  type OperationDefinitionNode,
+  type ValueNode,
+  parse,
+} from "graphql";
 
 import { ERROR_CODES } from "../errors/codes.js";
 import { TrackerError } from "../tracker/errors.js";
@@ -9,7 +16,16 @@ import {
 import type { CodexDynamicTool } from "./app-server-client.js";
 
 const LINEAR_GRAPHQL_DESCRIPTION =
-  "Execute one GraphQL query or mutation against the configured Linear workspace using Symphony-managed auth.";
+  "Execute one GraphQL query or mutation against the configured Linear workspace using Symphony-managed auth. Linear body/description writes must use GraphQL variables.";
+
+const LINEAR_CONTENT_WRITE_MUTATIONS = new Set([
+  "commentCreate",
+  "commentUpdate",
+  "issueCreate",
+  "issueUpdate",
+]);
+
+const LINEAR_CONTENT_FIELD_NAMES = new Set(["body", "description"]);
 
 type JsonObject = Record<string, unknown>;
 
@@ -227,11 +243,97 @@ function validateDocument(input: {
     );
   }
 
+  const unsafeContentWrite = findInlineLinearContentWrite(document);
+  if (unsafeContentWrite !== null) {
+    return invalidInput(
+      `linear_graphql.${unsafeContentWrite} must use a GraphQL variable, not an inline string literal. Use variables or sync_workpad so markdown with $, backticks, and $(...) remains literal.`,
+    );
+  }
+
   return {
     success: true,
     query: input.query,
     variables: input.variables,
   };
+}
+
+function findInlineLinearContentWrite(document: DocumentNode): string | null {
+  for (const definition of document.definitions) {
+    if (
+      definition.kind !== Kind.OPERATION_DEFINITION ||
+      definition.operation !== "mutation"
+    ) {
+      continue;
+    }
+
+    const inlineField = findInlineContentFieldInMutation(definition);
+    if (inlineField !== null) {
+      return inlineField;
+    }
+  }
+
+  return null;
+}
+
+function findInlineContentFieldInMutation(
+  definition: OperationDefinitionNode,
+): string | null {
+  for (const selection of definition.selectionSet.selections) {
+    if (selection.kind !== Kind.FIELD) {
+      continue;
+    }
+
+    if (!LINEAR_CONTENT_WRITE_MUTATIONS.has(selection.name.value)) {
+      continue;
+    }
+
+    const inlineField = findInlineContentFieldInField(selection);
+    if (inlineField !== null) {
+      return inlineField;
+    }
+  }
+
+  return null;
+}
+
+function findInlineContentFieldInField(field: FieldNode): string | null {
+  for (const argument of field.arguments ?? []) {
+    const inlineField = findInlineContentFieldInValue(argument.value);
+    if (inlineField !== null) {
+      return inlineField;
+    }
+  }
+
+  return null;
+}
+
+function findInlineContentFieldInValue(value: ValueNode): string | null {
+  if (value.kind === Kind.OBJECT) {
+    for (const field of value.fields) {
+      if (
+        LINEAR_CONTENT_FIELD_NAMES.has(field.name.value) &&
+        field.value.kind === Kind.STRING
+      ) {
+        return field.name.value;
+      }
+
+      const nested = findInlineContentFieldInValue(field.value);
+      if (nested !== null) {
+        return nested;
+      }
+    }
+  }
+
+  if (value.kind === Kind.LIST) {
+    for (const nestedValue of value.values) {
+      const nested = findInlineContentFieldInValue(nestedValue);
+      if (nested !== null) {
+        return nested;
+      }
+    }
+  }
+
+  return null;
 }
 
 function extractGraphqlErrors(body: unknown): unknown[] | null {

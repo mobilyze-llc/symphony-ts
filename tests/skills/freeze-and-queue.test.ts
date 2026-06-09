@@ -234,4 +234,54 @@ Scenario: B works
     expect(output).toContain("blocked by Task 1");
     expect(output).toContain("Sequential chain: 1 relations");
   });
+
+  it("preserves shell expansion syntax literally in generated issue bodies", () => {
+    const spec = [
+      "# Expansion Fixture",
+      "",
+      "## Scenarios",
+      "",
+      "```gherkin",
+      "Scenario: Literal shell snippets survive",
+      "    Given a ticket body with shell syntax",
+      "    When freeze-and-queue builds issue descriptions",
+      "    Then the snippets stay literal",
+      '    # Verify: echo "$SYMPHONY_INPUT"',
+      "    # Verify: printf '%s\\n' \"${EXPANSION_HEAVY_VALUE}\"",
+      '    # Verify: run-step "$(linear issue view SYMPH-123 --raw)"',
+      "    # Verify: echo `date`",
+      "    # Verify: cat <<'SCRIPT'",
+      '    # Verify: echo "do not expand me now"',
+      "    # Verify: SCRIPT",
+      "```",
+      "",
+      "## Tasks",
+      "",
+      "### Task 1: Preserve body syntax",
+      "",
+      "**Priority**: 1",
+      "**Scope**: `src/preserve.ts`",
+      "**Scenarios**: Literal shell snippets survive",
+      "",
+      "Implementation notes:",
+      "",
+      "```bash",
+      'echo "$SYMPHONY_INPUT"',
+      "printf '%s\\n' \"${EXPANSION_HEAVY_VALUE}\"",
+      'run-step "$(linear issue view SYMPH-123 --raw)"',
+      "echo `date`",
+      "cat <<'SCRIPT'",
+      'echo "do not expand me now"',
+      "SCRIPT",
+      "```",
+    ].join("\n");
+
+    const output = runDryRun(spec);
+
+    expect(output).toContain('echo "$SYMPHONY_INPUT"');
+    expect(output).toContain("printf '%s\\n' \"${EXPANSION_HEAVY_VALUE}\"");
+    expect(output).toContain('run-step "$(linear issue view SYMPH-123 --raw)"');
+    expect(output).toContain("echo `date`");
+    expect(output).toContain("cat <<'SCRIPT'");
+  });
 });

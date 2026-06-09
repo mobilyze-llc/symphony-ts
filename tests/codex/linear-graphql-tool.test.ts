@@ -80,6 +80,90 @@ describe("createLinearGraphqlDynamicTool", () => {
     });
   });
 
+  it("rejects inline Linear body and description write literals", async () => {
+    const fetchFn = vi.fn<typeof fetch>();
+    const tool = createLinearGraphqlDynamicTool({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "linear-token",
+      fetchFn,
+    });
+
+    await expect(
+      tool.execute({
+        query:
+          'mutation CreateComment { commentCreate(input: { issueId: "issue-1", body: "run $(danger)" }) { success } }',
+      }),
+    ).resolves.toMatchObject({
+      success: false,
+      error: {
+        code: "invalid_input",
+        message: expect.stringContaining(
+          "linear_graphql.body must use a GraphQL variable",
+        ),
+      },
+    });
+
+    await expect(
+      tool.execute({
+        query:
+          'mutation UpdateIssue { issueUpdate(id: "issue-1", input: { description: "echo `$TOKEN`" }) { success } }',
+      }),
+    ).resolves.toMatchObject({
+      success: false,
+      error: {
+        code: "invalid_input",
+        message: expect.stringContaining(
+          "linear_graphql.description must use a GraphQL variable",
+        ),
+      },
+    });
+
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("allows variable-backed Linear body writes and preserves shell syntax literally", async () => {
+    const payload = [
+      'echo "$SYMPHONY_INPUT"',
+      "printf '%s\\n' \"${EXPANSION_HEAVY_VALUE}\"",
+      'run-step "$(linear issue view SYMPH-123 --raw)"',
+      "echo `date`",
+      "cat <<'SCRIPT'",
+      'echo "do not expand me now"',
+      "SCRIPT",
+    ].join("\n");
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          commentCreate: {
+            success: true,
+            comment: { id: "comment-1" },
+          },
+        },
+      }),
+    );
+    const tool = createLinearGraphqlDynamicTool({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "linear-token",
+      fetchFn,
+    });
+
+    await expect(
+      tool.execute({
+        query:
+          "mutation CreateComment($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success comment { id } } }",
+        variables: {
+          issueId: "issue-1",
+          body: payload,
+        },
+      }),
+    ).resolves.toMatchObject({ success: true });
+
+    const request = JSON.parse(fetchFn.mock.calls[0]![1]?.body as string) as {
+      variables: { body: string };
+    };
+    expect(request.variables.body).toBe(payload);
+  });
+
   it("preserves top-level GraphQL errors with success=false", async () => {
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({

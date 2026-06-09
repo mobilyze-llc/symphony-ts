@@ -328,7 +328,10 @@ hooks:
 
 ### linear_graphql Dynamic Tool
 
-Every Codex agent run automatically gets a `linear_graphql` tool injected, allowing the agent to read and write Linear directly:
+Every Codex agent run automatically gets a `linear_graphql` tool injected, allowing the agent to read and write Linear directly.
+
+For issue/comment body writes, pass markdown through GraphQL variables or use `sync_workpad`.
+Symphony rejects inline `body: "..."` and `description: "..."` literals on Linear write mutations so shell-sensitive snippets such as `$VAR`, `${VAR}`, `$(cmd)`, and backticks remain literal data.
 
 ```graphql
 # Example mutation an agent might run to update issue state

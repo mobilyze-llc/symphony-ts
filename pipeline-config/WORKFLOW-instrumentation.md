@@ -420,8 +420,9 @@ You maintain a single persistent `## Workpad` comment on the Linear issue. This 
 - **Prefer `sync_workpad` over raw GraphQL.** Write your workpad content to a local `workpad.md` file, then call `sync_workpad` with `issue_id`, `file_path`, and optionally `comment_id` (returned from the first sync). This keeps the workpad body out of your conversation context and saves tokens. Fall back to `linear_graphql` only if `sync_workpad` is unavailable.
 - **`linear_graphql` fallback patterns** (use only if `sync_workpad` is unavailable):
   - Search comments: `query { issue(id: "<issue_id>") { comments { nodes { id body } } } }`
-  - Create comment: `mutation { commentCreate(input: { issueId: "<issue_id>", body: "<markdown>" }) { comment { id } } }`
-  - Update comment: `mutation { commentUpdate(id: "<comment_id>", input: { body: "<markdown>" }) { comment { id } } }`
+  - Create comments with GraphQL variables only: `mutation Create($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { comment { id } } }`
+  - Update comments with GraphQL variables only: `mutation Update($commentId: String!, $body: String!) { commentUpdate(id: $commentId, input: { body: $body }) { comment { id } } }`
+  - Never inline markdown into `body:` or `description:` literals. Put the markdown in `variables.body` / `variables.description` so shell snippets like `$VAR`, `${VAR}`, `$(cmd)`, and backticks stay literal.
 - **Never use `__type` or `__schema` introspection queries** against the Linear API. Use the exact patterns above.
 
 ## Media in Workpads (fileUpload)
