@@ -26,6 +26,7 @@ export * from "./orchestrator/runtime-host.js";
 export * from "./orchestrator/supervision.js";
 export * from "./orchestrator/tracker-write.js";
 export * from "./policy/hard-stops.js";
+export * from "./review/headless-council-gate.js";
 export * from "./workspace/hooks.js";
 export * from "./tracker/errors.js";
 export * from "./tracker/linear-client.js";
