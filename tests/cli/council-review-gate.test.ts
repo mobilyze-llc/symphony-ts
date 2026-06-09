@@ -1,6 +1,14 @@
+import { mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
-import { parseCouncilReviewGateArgs } from "../../src/cli/council-review-gate.js";
+import {
+  isDirectRun,
+  parseCouncilReviewGateArgs,
+} from "../../src/cli/council-review-gate.js";
 
 describe("parseCouncilReviewGateArgs", () => {
   it("parses required inputs and PR context", () => {
@@ -52,5 +60,17 @@ describe("parseCouncilReviewGateArgs", () => {
         "/cwd",
       ),
     ).toThrow("--timeout-seconds must be a positive integer");
+  });
+
+  it("recognizes direct bin execution through symlink paths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-council-cli-"));
+    const realBin = join(root, "real bin.js");
+    const linkedBin = join(root, "linked-bin.js");
+    await writeFile(realBin, "");
+    await symlink(realBin, linkedBin);
+
+    expect(
+      isDirectRun(pathToFileURL(await realpath(realBin)).href, linkedBin),
+    ).toBe(true);
   });
 });

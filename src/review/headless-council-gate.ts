@@ -1,13 +1,16 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, stat, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { promisify } from "node:util";
 
 const DEFAULT_CMUX_SPAWN_BIN = "cmux-spawn";
 const DEFAULT_TIMEOUT_SECONDS = 1_800;
 const DEFAULT_PREFLIGHT_TIMEOUT_MS = 30_000;
 const DEFAULT_COMMAND_TIMEOUT_GRACE_SECONDS = 60;
 const MAX_DIFF_BYTES = 5 * 1024 * 1024;
+const MAX_COMMAND_BUFFER_BYTES = 20 * 1024 * 1024;
+const execFileAsync = promisify(execFile);
 
 export type HeadlessGateVerdict = "pass" | "fail" | "error";
 export type HeadlessLaneState =
@@ -638,15 +641,54 @@ function parseArtifactVerdict(artifact: string): ParsedArtifactVerdict {
   if (verdictMatch === null) {
     return {
       verdict: "fail",
-      message: "Artifact did not include a parseable Verdict section.",
+      message:
+        "Artifact did not start with a parseable Verdict section at the first non-whitespace line.",
     };
   }
 
   const token = verdictMatch[1]?.toUpperCase();
   if (token === "PASS") {
+    if (artifactHasBlockingSections(trimmedArtifact)) {
+      return {
+        verdict: "fail",
+        message:
+          "Artifact verdict was PASS but P1/P2 findings sections were not empty.",
+      };
+    }
     return { verdict: "pass", message: null };
   }
   return { verdict: "fail", message: `Reviewer verdict was ${token}.` };
+}
+
+function artifactHasBlockingSections(artifact: string): boolean {
+  return (
+    artifactSectionHasContent(artifact, "P1 Must Fix") ||
+    artifactSectionHasContent(artifact, "P2 Should Fix")
+  );
+}
+
+function artifactSectionHasContent(artifact: string, heading: string): boolean {
+  const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const sectionMatch = new RegExp(`^## ${escapedHeading}\\s*$`, "im").exec(
+    artifact,
+  );
+  if (sectionMatch === null) {
+    return false;
+  }
+
+  const sectionStart = sectionMatch.index + sectionMatch[0].length;
+  const sectionTail = artifact.slice(sectionStart);
+  const nextHeadingIndex = sectionTail.search(/^## /m);
+  const section =
+    nextHeadingIndex === -1
+      ? sectionTail
+      : sectionTail.slice(0, nextHeadingIndex);
+  const normalized = section
+    ?.split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "")
+    .join("\n");
+  return normalized !== undefined && !/^None\.?$/i.test(normalized);
 }
 
 function aggregateHeadlessVerdict(
@@ -864,16 +906,23 @@ async function fileHasContent(path: string): Promise<boolean> {
 }
 
 async function readBoundedDiffFile(path: string): Promise<string> {
-  const info = await stat(path);
-  if (!info.isFile()) {
-    throw new Error(`Diff path is not a file: ${path}`);
+  const file = await open(path, "r");
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) {
+      throw new Error(`Diff path is not a file: ${path}`);
+    }
+    const buffer = Buffer.alloc(MAX_DIFF_BYTES + 1);
+    const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > MAX_DIFF_BYTES) {
+      throw new Error(
+        `Diff file exceeds ${MAX_DIFF_BYTES} byte review limit: ${bytesRead} bytes`,
+      );
+    }
+    return buffer.subarray(0, bytesRead).toString("utf-8");
+  } finally {
+    await file.close();
   }
-  if (info.size > MAX_DIFF_BYTES) {
-    throw new Error(
-      `Diff file exceeds ${MAX_DIFF_BYTES} byte review limit: ${path}`,
-    );
-  }
-  return await readFile(path, "utf-8");
 }
 
 function assertDiffWithinLimit(diff: string, source: string): string {
@@ -899,36 +948,47 @@ function formatError(error: unknown): string {
 }
 
 export const execFileCommand: CommandRunner = async (command, args, options) =>
-  await new Promise<CommandResult>((resolveCommand) => {
-    execFile(
-      command,
-      [...args],
-      {
-        cwd: options.cwd,
-        env: options.env,
-        encoding: "utf-8",
-        maxBuffer: 20 * 1024 * 1024,
-        timeout: options.timeoutMs,
-      },
-      (error, stdout, stderr) => {
-        const maybeError = error as
-          | (Error & { code?: number | string | null })
-          | null;
-        const code =
-          maybeError === null
-            ? 0
-            : typeof maybeError.code === "number"
-              ? maybeError.code
-              : 1;
-        const stderrText =
-          stderr !== undefined && stderr.trim() !== ""
-            ? stderr
-            : (maybeError?.message ?? "");
-        resolveCommand({
-          exitCode: code,
-          stdout: stdout ?? "",
-          stderr: stderrText,
-        });
-      },
-    );
-  });
+  await execFileCommandWithPromise(command, args, options);
+
+async function execFileCommandWithPromise(
+  command: string,
+  args: readonly string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs?: number },
+): Promise<CommandResult> {
+  try {
+    const { stdout, stderr } = await execFileAsync(command, [...args], {
+      cwd: options.cwd,
+      env: options.env,
+      encoding: "utf-8",
+      maxBuffer: MAX_COMMAND_BUFFER_BYTES,
+      timeout: options.timeoutMs,
+    });
+    return {
+      exitCode: 0,
+      stdout: commandOutput(stdout),
+      stderr: commandOutput(stderr),
+    };
+  } catch (error) {
+    const commandError = error as Error & {
+      code?: number | string | null;
+      stdout?: unknown;
+      stderr?: unknown;
+    };
+    const stderr = commandOutput(commandError.stderr);
+    return {
+      exitCode: typeof commandError.code === "number" ? commandError.code : 1,
+      stdout: commandOutput(commandError.stdout),
+      stderr: stderr === "" ? commandError.message : stderr,
+    };
+  }
+}
+
+function commandOutput(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString("utf-8");
+  }
+  return value === undefined || value === null ? "" : String(value);
+}

@@ -1,5 +1,8 @@
 #!/usr/bin/env node
 
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
 import { runHeadlessCouncilGate } from "../review/headless-council-gate.js";
 
 interface ParsedArgs {
@@ -171,7 +174,21 @@ function renderUsage(): string {
   ].join("\n");
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+export function isDirectRun(
+  importMetaUrl: string,
+  argvPath: string | undefined,
+) {
+  if (argvPath === undefined) {
+    return false;
+  }
+  try {
+    return importMetaUrl === pathToFileURL(realpathSync(argvPath)).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectRun(import.meta.url, process.argv[1])) {
   runCouncilReviewGateCli(process.argv.slice(2))
     .then((code) => {
       process.exitCode = code;

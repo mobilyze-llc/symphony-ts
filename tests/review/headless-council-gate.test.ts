@@ -454,7 +454,8 @@ describe("runHeadlessCouncilGate", () => {
       result.lanes.find((lane) => lane.laneId === "claude-opus"),
     ).toMatchObject({
       verdict: "fail",
-      message: "Artifact did not include a parseable Verdict section.",
+      message:
+        "Artifact did not start with a parseable Verdict section at the first non-whitespace line.",
     });
   });
 
@@ -482,7 +483,37 @@ describe("runHeadlessCouncilGate", () => {
       result.lanes.find((lane) => lane.laneId === "claude-opus"),
     ).toMatchObject({
       verdict: "fail",
-      message: "Artifact did not include a parseable Verdict section.",
+      message:
+        "Artifact did not start with a parseable Verdict section at the first non-whitespace line.",
+    });
+  });
+
+  it("does not pass when a PASS artifact contains blocking sections", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\n- Bug",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "fail",
+      message:
+        "Artifact verdict was PASS but P1/P2 findings sections were not empty.",
     });
   });
 
