@@ -126,6 +126,16 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(hardStops.premiumBudgetPauseRatio).toBe(0.8);
   });
 
+  it("fast-tracks existing low-risk test labels in the shipped self-host template", () => {
+    const fastTrack = resolvedConfig.stages?.fastTrack;
+
+    expect(fastTrack).toEqual({
+      label: "trivial",
+      labels: ["trivial", "kind:test"],
+      initialStage: "implement",
+    });
+  });
+
   it("creates bare-clone worker worktrees from refreshed origin/main", async () => {
     const template = await readFile(
       resolve(

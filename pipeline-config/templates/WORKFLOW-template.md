@@ -264,6 +264,9 @@ stages:
   # Comment out this block to disable fast-track routing.
   fast_track:
     label: trivial
+    labels:
+      - trivial
+      - kind:test
     initial_stage: implement
 
   investigate:

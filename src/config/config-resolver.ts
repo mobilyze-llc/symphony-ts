@@ -580,11 +580,16 @@ export function resolveStagesConfig(value: unknown): StagesConfig | null {
   const initialStage = readString(raw.initial_stage) ?? firstStageName!;
 
   const fastTrackRaw = asRecord(raw.fast_track);
-  const fastTrackLabel = readString(fastTrackRaw.label);
+  const fastTrackLabels = readFastTrackLabels(fastTrackRaw);
+  const primaryFastTrackLabel = fastTrackLabels[0];
   const fastTrackInitialStage = readString(fastTrackRaw.initial_stage);
   const fastTrack: FastTrackConfig | null =
-    fastTrackLabel !== null && fastTrackInitialStage !== null
-      ? { label: fastTrackLabel, initialStage: fastTrackInitialStage }
+    primaryFastTrackLabel !== undefined && fastTrackInitialStage !== null
+      ? {
+          label: primaryFastTrackLabel,
+          labels: fastTrackLabels,
+          initialStage: fastTrackInitialStage,
+        }
       : null;
 
   return Object.freeze({
@@ -592,6 +597,20 @@ export function resolveStagesConfig(value: unknown): StagesConfig | null {
     fastTrack,
     stages: Object.freeze(stageEntries),
   });
+}
+
+function readFastTrackLabels(
+  fastTrackRaw: Record<string, unknown>,
+): readonly string[] {
+  const labels = new Set<string>();
+  const legacyLabel = readString(fastTrackRaw.label);
+  if (legacyLabel !== null && legacyLabel.trim() !== "") {
+    labels.add(legacyLabel.trim());
+  }
+  for (const label of readStringList(fastTrackRaw.labels, [])) {
+    labels.add(label);
+  }
+  return [...labels];
 }
 
 export interface StagesValidationResult {

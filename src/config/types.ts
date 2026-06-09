@@ -121,6 +121,7 @@ export interface StageDefinition {
 
 export interface FastTrackConfig {
   label: string;
+  labels: readonly string[];
   initialStage: string;
 }
 

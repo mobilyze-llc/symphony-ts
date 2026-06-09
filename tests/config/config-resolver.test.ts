@@ -546,6 +546,33 @@ describe("config-resolver fast_track", () => {
     expect(resolved.stages).not.toBeNull();
     expect(resolved.stages?.fastTrack).toEqual({
       label: "trivial",
+      labels: ["trivial"],
+      initialStage: "implement",
+    });
+  });
+
+  it("parses fast_track labels and keeps the legacy label as an alias", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        stages: {
+          initial_stage: "investigate",
+          fast_track: {
+            label: "trivial",
+            labels: ["trivial", "kind:test"],
+            initial_stage: "implement",
+          },
+          investigate: { type: "agent", on_complete: "implement" },
+          implement: { type: "agent", on_complete: "done" },
+          done: { type: "terminal" },
+        },
+      },
+    });
+
+    expect(resolved.stages?.fastTrack).toEqual({
+      label: "trivial",
+      labels: ["trivial", "kind:test"],
       initialStage: "implement",
     });
   });
