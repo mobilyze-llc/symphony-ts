@@ -2125,6 +2125,32 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       tracker: input.tracker,
       workspaceManager: input.workspaceManager,
       onEvent: this.agentEventSink,
+      workspaceBaseRefreshLogger: async (entry) => {
+        const failed =
+          entry.action === "fetch_failed" || entry.action === "refresh_failed";
+        await this.logger?.log(
+          failed ? "error" : "info",
+          "workspace_base_refresh",
+          "Checked reused workspace base before agent run.",
+          {
+            outcome: failed
+              ? "failed"
+              : entry.action === "current" || entry.action === "retry_preserved"
+                ? "unchanged"
+                : "completed",
+            action: entry.action,
+            issue_id: entry.issueId,
+            issue_identifier: entry.issueIdentifier,
+            workspace_path: entry.workspacePath,
+            stage_name: entry.stageName,
+            current_head: entry.currentHead,
+            desired_base: entry.desiredBase,
+            base_ref: entry.baseRef,
+            dirty: entry.dirty,
+            ...(entry.reason === undefined ? {} : { reason: entry.reason }),
+          },
+        );
+      },
     });
   }
 }

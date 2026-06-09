@@ -1,7 +1,16 @@
-import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -23,6 +32,7 @@ const fixturePath = join(
   dirname(fileURLToPath(import.meta.url)),
   "../fixtures/codex-fake-server.mjs",
 );
+const execFileAsync = promisify(execFile);
 
 const roots: string[] = [];
 
@@ -661,7 +671,7 @@ describe("AgentRunner", () => {
 
     const result = await runner.run({
       issue: ISSUE_FIXTURE,
-      attempt: null,
+      attempt: 1,
     });
 
     expect(result.runAttempt.status).toBe("succeeded");
@@ -795,7 +805,7 @@ describe("AgentRunner", () => {
     const createForIssue = vi.fn().mockResolvedValue({
       path: workspacePath,
       workspaceKey: "issue-1",
-      createdNow: false,
+      createdNow: true,
     });
     const mockWorkspaceManager = {
       root,
@@ -824,6 +834,138 @@ describe("AgentRunner", () => {
 
     expect(removeForIssue).not.toHaveBeenCalled();
     expect(createForIssue).toHaveBeenCalledWith("issue-1");
+  });
+
+  it("refreshes a reused stale workspace to the fetched base before dispatch", async () => {
+    const sandbox = await createRoot();
+    const remotePath = join(sandbox, "remote.git");
+    const seedPath = join(sandbox, "seed");
+    const workspaceRoot = join(sandbox, "workspaces");
+    const workspacePath = join(workspaceRoot, "issue-1");
+    await mkdir(workspaceRoot, { recursive: true });
+
+    await execFileAsync("git", ["init", "--bare", remotePath]);
+    await execFileAsync("git", ["init", seedPath]);
+    await git(seedPath, ["config", "user.email", "symphony@example.test"]);
+    await git(seedPath, ["config", "user.name", "Symphony Test"]);
+    await writeFile(join(seedPath, "README.md"), "first\n");
+    await writeFile(join(seedPath, "workpad.md"), "committed workpad\n");
+    await git(seedPath, ["add", "README.md", "workpad.md"]);
+    await git(seedPath, ["commit", "-m", "initial"]);
+    await git(seedPath, ["branch", "-M", "main"]);
+    await git(seedPath, ["remote", "add", "origin", remotePath]);
+    await git(seedPath, ["push", "-u", "origin", "main"]);
+    await execFileAsync("git", [
+      "-C",
+      remotePath,
+      "symbolic-ref",
+      "HEAD",
+      "refs/heads/main",
+    ]);
+    const staleHead = await git(seedPath, ["rev-parse", "HEAD"]);
+
+    await writeFile(join(seedPath, "README.md"), "second\n");
+    await git(seedPath, ["commit", "-am", "advance main"]);
+    await git(seedPath, ["push", "origin", "main"]);
+    const currentBase = await git(seedPath, ["rev-parse", "HEAD"]);
+
+    await execFileAsync("git", ["clone", remotePath, workspacePath]);
+    await git(workspacePath, ["checkout", "-b", "worker", staleHead]);
+    await writeFile(join(workspacePath, "workpad.md"), "local worker note\n");
+
+    const refreshLogs: unknown[] = [];
+    const config = createConfig(workspaceRoot, "unused");
+    config.stages = {
+      initialStage: "investigate",
+      fastTrack: null,
+      stages: {
+        investigate: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: 3,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "implement",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: 3,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: "done", onApprove: null, onRework: null },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: null,
+        },
+      },
+    };
+    const runner = new AgentRunner({
+      config,
+      tracker: createTracker({
+        refreshStates: [
+          { id: "issue-1", identifier: "ABC-123", state: "Done" },
+        ],
+      }),
+      workspaceBaseRefreshLogger: (entry) => {
+        refreshLogs.push(entry);
+      },
+      createCodexClient: (input) =>
+        createStubCodexClient([], input, {
+          statuses: ["completed"],
+        }),
+    });
+
+    await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "implement",
+    });
+
+    expect(await git(workspacePath, ["rev-parse", "HEAD"])).toBe(currentBase);
+    await expect(
+      readFile(join(workspacePath, "workpad.md"), "utf8"),
+    ).resolves.toBe("local worker note\n");
+    expect(refreshLogs).toContainEqual(
+      expect.objectContaining({
+        issueId: "issue-1",
+        issueIdentifier: "ABC-123",
+        workspacePath,
+        stageName: "implement",
+        currentHead: staleHead,
+        desiredBase: currentBase,
+        baseRef: "origin/main",
+        action: "rebase_autostash",
+        dirty: true,
+      }),
+    );
   });
 
   it("does NOT remove workspace on continuation (attempt !== null)", async () => {
@@ -1302,6 +1444,13 @@ async function createRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "symphony-task11-"));
   roots.push(root);
   return root;
+}
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
+    encoding: "utf8",
+  });
+  return stdout.trim();
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

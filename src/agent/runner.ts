@@ -1,4 +1,6 @@
+import { execFile } from "node:child_process";
 import { rm } from "node:fs/promises";
+import { promisify } from "node:util";
 
 import {
   CodexAppServerClient,
@@ -51,6 +53,9 @@ import {
   buildTurnPrompt,
 } from "./prompt-builder.js";
 
+const execFileAsync = promisify(execFile);
+const GIT_COMMAND_TIMEOUT_MS = 10_000;
+
 export interface AgentRunnerEvent extends CodexClientEvent {
   issueId: string;
   issueIdentifier: string;
@@ -89,6 +94,9 @@ export interface AgentRunnerOptions {
   tracker: IssueTracker;
   workspaceManager?: WorkspaceManager;
   hooks?: WorkspaceHookRunner;
+  workspaceBaseRefreshLogger?: (
+    entry: WorkspaceBaseRefreshLogEntry,
+  ) => void | Promise<void>;
   createCodexClient?: (
     input: AgentRunnerCodexClientFactoryInput,
   ) => AgentRunnerCodexClient;
@@ -115,6 +123,26 @@ export interface AgentRunResult {
   lastTurn: CodexTurnResult | null;
   rateLimits: Record<string, unknown> | null;
   hardStop?: HardStopDecision | null;
+}
+
+export interface WorkspaceBaseRefreshLogEntry {
+  issueId: string;
+  issueIdentifier: string;
+  workspacePath: string;
+  stageName: string | null;
+  currentHead: string | null;
+  desiredBase: string | null;
+  baseRef: string | null;
+  action:
+    | "current"
+    | "fetch_failed"
+    | "no_base_ref"
+    | "reset_hard"
+    | "rebase_autostash"
+    | "refresh_failed"
+    | "retry_preserved";
+  dirty: boolean | null;
+  reason?: string;
 }
 
 export class AgentRunnerError extends Error {
@@ -166,6 +194,10 @@ export class AgentRunner {
 
   private readonly onEvent: ((event: AgentRunnerEvent) => void) | undefined;
 
+  private readonly workspaceBaseRefreshLogger:
+    | ((entry: WorkspaceBaseRefreshLogEntry) => void | Promise<void>)
+    | undefined;
+
   constructor(options: AgentRunnerOptions) {
     this.config = options.config;
     this.tracker = options.tracker;
@@ -188,6 +220,7 @@ export class AgentRunner {
       );
     this.fetchFn = options.fetchFn;
     this.onEvent = options.onEvent;
+    this.workspaceBaseRefreshLogger = options.workspaceBaseRefreshLogger;
   }
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
@@ -262,6 +295,14 @@ export class AgentRunner {
       }
 
       workspace = await this.workspaceManager.createForIssue(issue.id);
+      if (!workspace.createdNow) {
+        await this.refreshReusedWorkspaceBase({
+          issue,
+          workspace,
+          stageName: input.stageName ?? null,
+          attempt: input.attempt,
+        });
+      }
       runAttempt.workspacePath = validateWorkspaceCwd({
         cwd: workspace.path,
         workspacePath: workspace.path,
@@ -584,6 +625,171 @@ export class AgentRunner {
     return activeStates.has(normalizeIssueState(issue.state));
   }
 
+  private async refreshReusedWorkspaceBase(input: {
+    issue: Issue;
+    workspace: Workspace;
+    stageName: string | null;
+    attempt: number | null;
+  }): Promise<void> {
+    if (input.attempt !== null) {
+      await this.logWorkspaceBaseRefresh({
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier,
+        workspacePath: input.workspace.path,
+        stageName: input.stageName,
+        currentHead: null,
+        desiredBase: null,
+        baseRef: null,
+        action: "retry_preserved",
+        dirty: null,
+        reason: "retry_attempt",
+      });
+      return;
+    }
+
+    let currentHead: string;
+    try {
+      currentHead = await readGitCommit(input.workspace.path, "HEAD");
+    } catch (error) {
+      await this.logWorkspaceBaseRefresh({
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier,
+        workspacePath: input.workspace.path,
+        stageName: input.stageName,
+        currentHead: null,
+        desiredBase: null,
+        baseRef: null,
+        action: "refresh_failed",
+        dirty: null,
+        reason: toErrorMessage(error),
+      });
+      throw error;
+    }
+    try {
+      await runGit(input.workspace.path, ["fetch", "--prune", "origin"], {
+        timeoutMs: 60_000,
+      });
+    } catch (error) {
+      await this.logWorkspaceBaseRefresh({
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier,
+        workspacePath: input.workspace.path,
+        stageName: input.stageName,
+        currentHead,
+        desiredBase: null,
+        baseRef: null,
+        action: "fetch_failed",
+        dirty: null,
+        reason: toErrorMessage(error),
+      });
+      throw error;
+    }
+
+    const base = await resolveWorkspaceBaseRevision(input.workspace.path);
+    if (base === null) {
+      await this.logWorkspaceBaseRefresh({
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier,
+        workspacePath: input.workspace.path,
+        stageName: input.stageName,
+        currentHead,
+        desiredBase: null,
+        baseRef: null,
+        action: "no_base_ref",
+        dirty: null,
+        reason: "no_candidate_base_ref_resolved",
+      });
+      return;
+    }
+
+    const dirty = await hasGitChanges(input.workspace.path);
+    if (currentHead === base.revision) {
+      await this.logWorkspaceBaseRefresh({
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier,
+        workspacePath: input.workspace.path,
+        stageName: input.stageName,
+        currentHead,
+        desiredBase: base.revision,
+        baseRef: base.ref,
+        action: "current",
+        dirty,
+      });
+      return;
+    }
+
+    const currentIsAncestor = await isGitAncestor(
+      input.workspace.path,
+      currentHead,
+      base.revision,
+    );
+    const action =
+      dirty || !currentIsAncestor ? "rebase_autostash" : "reset_hard";
+
+    try {
+      if (action === "reset_hard") {
+        await runGit(input.workspace.path, ["reset", "--hard", base.revision], {
+          timeoutMs: 30_000,
+        });
+      } else {
+        await runGit(
+          input.workspace.path,
+          ["rebase", "--autostash", base.revision],
+          {
+            timeoutMs: 60_000,
+          },
+        );
+      }
+
+      await this.logWorkspaceBaseRefresh({
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier,
+        workspacePath: input.workspace.path,
+        stageName: input.stageName,
+        currentHead,
+        desiredBase: base.revision,
+        baseRef: base.ref,
+        action,
+        dirty,
+      });
+    } catch (error) {
+      await runGit(input.workspace.path, ["rebase", "--abort"], {
+        timeoutMs: 10_000,
+      }).catch(() => undefined);
+      await this.logWorkspaceBaseRefresh({
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier,
+        workspacePath: input.workspace.path,
+        stageName: input.stageName,
+        currentHead,
+        desiredBase: base.revision,
+        baseRef: base.ref,
+        action: "refresh_failed",
+        dirty,
+        reason: toErrorMessage(error),
+      });
+      throw error;
+    }
+  }
+
+  private async logWorkspaceBaseRefresh(
+    entry: WorkspaceBaseRefreshLogEntry,
+  ): Promise<void> {
+    await this.workspaceBaseRefreshLogger?.(entry);
+    console.warn(
+      [
+        `[agent-runner] ${entry.issueIdentifier}: workspace base refresh`,
+        `action=${entry.action}`,
+        `workspace_path=${entry.workspacePath}`,
+        `current_head=${entry.currentHead ?? "unknown"}`,
+        `desired_base=${entry.desiredBase ?? "unknown"}`,
+        `base_ref=${entry.baseRef ?? "unknown"}`,
+        `dirty=${entry.dirty === null ? "unknown" : String(entry.dirty)}`,
+        ...(entry.reason === undefined ? [] : [`reason=${entry.reason}`]),
+      ].join(" "),
+    );
+  }
+
   private toAgentRunnerError(input: {
     error: unknown;
     issue: Issue;
@@ -638,6 +844,147 @@ async function cleanupWorkspaceArtifacts(workspacePath: string): Promise<void> {
     force: true,
     recursive: true,
   });
+}
+
+async function runGit(
+  workspacePath: string,
+  args: string[],
+  options: { timeoutMs?: number } = {},
+): Promise<string> {
+  const { stdout } = await execFileAsync(
+    "git",
+    ["-C", workspacePath, ...args],
+    {
+      encoding: "utf8",
+      timeout: options.timeoutMs ?? GIT_COMMAND_TIMEOUT_MS,
+    },
+  );
+  return stdout.trim();
+}
+
+async function readGitCommit(
+  workspacePath: string,
+  ref: string,
+): Promise<string> {
+  return await runGit(workspacePath, [
+    "rev-parse",
+    "--verify",
+    `${ref}^{commit}`,
+  ]);
+}
+
+async function hasGitChanges(workspacePath: string): Promise<boolean> {
+  const status = await runGit(workspacePath, [
+    "status",
+    "--porcelain=v1",
+    "--untracked-files=all",
+  ]);
+  return status.length > 0;
+}
+
+async function isGitAncestor(
+  workspacePath: string,
+  ancestor: string,
+  descendant: string,
+): Promise<boolean> {
+  try {
+    await runGit(workspacePath, [
+      "merge-base",
+      "--is-ancestor",
+      ancestor,
+      descendant,
+    ]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function resolveWorkspaceBaseRevision(
+  workspacePath: string,
+): Promise<{ ref: string; revision: string } | null> {
+  const originHeadRef = await readGitSymbolicRef(
+    workspacePath,
+    "refs/remotes/origin/HEAD",
+  );
+  for (const ref of createGitBaseRefCandidates({
+    configuredBaseBranch: process.env.SYMPHONY_BASE_BRANCH,
+    originHeadRef,
+  })) {
+    try {
+      return {
+        ref,
+        revision: await readGitCommit(workspacePath, ref),
+      };
+    } catch {
+      // Try the next candidate; stale workspaces may not carry every ref.
+    }
+  }
+  return null;
+}
+
+async function readGitSymbolicRef(
+  workspacePath: string,
+  ref: string,
+): Promise<string | null> {
+  try {
+    const value = await runGit(workspacePath, ["symbolic-ref", ref]);
+    return value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function createGitBaseRefCandidates(input: {
+  configuredBaseBranch: string | undefined;
+  originHeadRef: string | null;
+}): string[] {
+  const candidates: string[] = [];
+  const configuredBaseBranch = normalizeGitBranchName(
+    input.configuredBaseBranch,
+  );
+  if (configuredBaseBranch !== null) {
+    candidates.push(`origin/${configuredBaseBranch}`, configuredBaseBranch);
+  }
+
+  const originHeadRef = normalizeGitRef(input.originHeadRef);
+  if (originHeadRef !== null) {
+    candidates.push(originHeadRef);
+  }
+
+  candidates.push("origin/main", "main", "origin/master", "master");
+  return [...new Set(candidates)];
+}
+
+function normalizeGitBranchName(value: string | undefined): string | null {
+  const normalized = normalizeGitRef(value);
+  if (normalized === null) {
+    return null;
+  }
+  return normalized.startsWith("origin/")
+    ? normalized.slice("origin/".length)
+    : normalized;
+}
+
+function normalizeGitRef(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (trimmed === undefined || trimmed.length === 0) {
+    return null;
+  }
+  if (trimmed.startsWith("refs/remotes/")) {
+    return trimmed.slice("refs/remotes/".length);
+  }
+  if (trimmed.startsWith("refs/heads/")) {
+    return trimmed.slice("refs/heads/".length);
+  }
+  return trimmed;
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
 }
 
 function createDefaultClientFactory(
