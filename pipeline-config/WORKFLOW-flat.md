@@ -20,9 +20,11 @@ agent:
   max_turns: 30
   max_retry_backoff_ms: 300000
 
+codex:
+  command: codex --config 'model_reasoning_effort="low"' app-server
+
 runner:
-  kind: claude-code
-  model: claude-sonnet-4-5
+  kind: codex
 
 hooks:
   after_create: |
@@ -100,9 +102,8 @@ Labels: {{ issue.labels | join: ", " }}
 
 ## Documentation Maintenance
 
-- If you add a new module, API endpoint, or significant abstraction, update the relevant docs/ file and the AGENTS.md Documentation Map entry. If no relevant doc exists, create one following the docs/ conventions (# Title, > Last updated header).
-- If a docs/ file you reference during implementation is stale or missing, update/create it as part of your implementation. Include the update in the same PR as your code changes — never in a separate PR.
-- If you make a non-obvious architectural decision during implementation, create a design doc in docs/design-docs/ following the ADR format (numbered, with Status line). Add it to the AGENTS.md design docs table.
-- When you complete your implementation, update the > Last updated date on any docs/ file you modified.
-- Do not update docs/generated/ files — those are auto-generated and will be overwritten.
-- Commit doc updates in the same PR as code changes, not separately.
+- Put generated markdown docs, plans, handoffs, ADR-style notes, runbooks, and investigation briefs in Linear Docs, not repo-local markdown, unless the issue explicitly asks for checked-in documentation.
+- Use `linear document create/update --content-file <temp-file> --issue {{ issue.identifier }}` for issue-scoped markdown docs.
+- If a checked-in docs change is explicitly required by the issue, keep it scoped to that requirement and include it in the same PR as the code change.
+- If the markdown names durable follow-up work, search Linear first, then create or update the issue before mentioning it in the doc.
+- Do not update docs/generated/ files; those are auto-generated and will be overwritten.

@@ -26,9 +26,11 @@ agent:
     in progress: 3
     in review: 2
 
+codex:
+  command: codex --config 'model_reasoning_effort="low"' app-server
+
 runner:
-  kind: claude-code
-  model: claude-sonnet-4-5
+  kind: codex
 
 hooks:
   after_create: ./hooks/after-create.sh
@@ -47,40 +49,29 @@ stages:
 
   investigate:
     type: agent
-    runner: claude-code
-    model: claude-opus-4
+    runner: codex
     max_turns: 8
     prompt: prompts/investigate.liquid
     on_complete: implement
 
   implement:
     type: agent
-    runner: claude-code
-    model: claude-sonnet-4-5
+    runner: codex
     max_turns: 30
     prompt: prompts/implement.liquid
     on_complete: review
 
   review:
-    type: gate
-    gate_type: ensemble
+    type: agent
+    runner: codex
+    max_turns: 5
     max_rework: 3
-    reviewers:
-      - runner: codex
-        model: gpt-5.3-codex
-        role: adversarial-reviewer
-        prompt: prompts/review-adversarial.liquid
-      - runner: gemini
-        model: gemini-3-pro
-        role: security-reviewer
-        prompt: prompts/review-security.liquid
-    on_approve: merge
+    on_complete: merge
     on_rework: implement
 
   merge:
     type: agent
-    runner: claude-code
-    model: claude-sonnet-4-5
+    runner: codex
     max_turns: 5
     prompt: prompts/merge.liquid
     on_complete: done
@@ -97,4 +88,34 @@ You are working on Linear issue {{ issue.identifier }}: {{ issue.title }}.
 
 {% if issue.labels.size > 0 %}
 Labels: {{ issue.labels | join: ", " }}
+{% endif %}
+
+{% if stageName == "review" %}
+## Stage: Review
+You are the review-gate operator, not the reviewer. Every PR, including low-risk PRs, must pass the headless council gate before merge.
+
+Do NOT run `/self-moa-review`, `/codex-review`, direct `claude -p`, or any other direct Claude invocation. Claude must run through CMUX via `symphony-council-review-gate`.
+
+Run:
+
+```bash
+pnpm build
+PR_NUMBER=$(gh pr view --json number --jq '.number')
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-{{ issue.identifier }}-$(date +%s)"
+CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn}"
+node dist/src/cli/council-review-gate.js \
+  --issue-id {{ issue.identifier }} \
+  --artifact-dir "$ARTIFACT_DIR" \
+  --workspace "$PWD" \
+  --repo "$REPO" \
+  --pr "$PR_NUMBER" \
+  --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
+  --timeout-seconds 1800
+```
+
+Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`.
+
+If the gate reports `PASS`, output `[STAGE_COMPLETE]`.
+If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/malformed: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
 {% endif %}

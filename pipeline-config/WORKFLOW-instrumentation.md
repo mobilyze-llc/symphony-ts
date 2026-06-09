@@ -26,11 +26,11 @@ agent:
   max_retry_backoff_ms: 300000
 
 codex:
+  command: codex --config 'model_reasoning_effort="low"' app-server
   stall_timeout_ms: 1800000
 
 runner:
-  kind: claude-code
-  model: claude-sonnet-4-6
+  kind: codex
 
 hooks:
   after_create: |
@@ -138,8 +138,7 @@ stages:
 
   investigate:
     type: agent
-    runner: claude-code
-    model: claude-sonnet-4-6
+    runner: codex
     max_turns: 8
     linear_state: In Progress
     mcp_servers:
@@ -152,8 +151,7 @@ stages:
 
   implement:
     type: agent
-    runner: claude-code
-    model: claude-sonnet-4-6
+    runner: codex
     max_turns: 30
     mcp_servers:
       code-review-graph:
@@ -165,9 +163,8 @@ stages:
 
   review:
     type: agent
-    runner: claude-code
-    model: claude-opus-4-6
-    max_turns: 15
+    runner: codex
+    max_turns: 5
     max_rework: 3
     linear_state: In Review
     on_complete: merge
@@ -175,8 +172,7 @@ stages:
 
   merge:
     type: agent
-    runner: claude-code
-    model: claude-sonnet-4-6
+    runner: codex
     max_turns: 5
     on_complete: done
 
@@ -341,12 +337,32 @@ When you are done:
 
 {% if stageName == "review" %}
 ## Stage: Review
-You are a review agent. Load and execute the /self-moa-review skill.
+You are the review-gate operator, not the reviewer. Every PR, including low-risk PRs, must pass the headless council gate before merge.
 
-The PR for this issue is on the current branch. The issue description contains the frozen spec. The PR body contains Tool Output and SAST Output sections from the implementation agent.
+Do NOT run `/self-moa-review`, `/codex-review`, direct `claude -p`, or any other direct Claude invocation. Claude must run through CMUX via `symphony-council-review-gate`.
 
-If all findings are clean or only P3/theoretical: output `[STAGE_COMPLETE]`
-If surviving P1/P2 findings exist: post them as a `## Review Findings` comment on the Linear issue, then output `[STAGE_FAILED: review]` with a one-line summary.
+Run:
+
+```bash
+pnpm build
+PR_NUMBER=$(gh pr view --json number --jq '.number')
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-{{ issue.identifier }}-$(date +%s)"
+CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn}"
+node dist/src/cli/council-review-gate.js \
+  --issue-id {{ issue.identifier }} \
+  --artifact-dir "$ARTIFACT_DIR" \
+  --workspace "$PWD" \
+  --repo "$REPO" \
+  --pr "$PR_NUMBER" \
+  --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
+  --timeout-seconds 1800
+```
+
+Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`.
+
+If the gate reports `PASS`, output `[STAGE_COMPLETE]`.
+If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/malformed: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
 {% endif %}
 
 {% if stageName == "merge" %}
@@ -420,9 +436,8 @@ curl -X PUT -H "Content-Type: <contentType>" \
 
 ## Documentation Maintenance
 
-- If you add a new module, API endpoint, or significant abstraction, update the relevant docs/ file and the AGENTS.md Documentation Map entry. If no relevant doc exists, create one following the docs/ conventions (# Title, > Last updated header).
-- If a docs/ file you reference during implementation is stale or missing, update/create it as part of your implementation. Include the update in the same PR as your code changes — never in a separate PR.
-- If you make a non-obvious architectural decision during implementation, create a design doc in docs/design-docs/ following the ADR format (numbered, with Status line). Add it to the AGENTS.md design docs table.
-- When you complete your implementation, update the > Last updated date on any docs/ file you modified.
-- Do not update docs/generated/ files — those are auto-generated and will be overwritten.
-- Commit doc updates in the same PR as code changes, not separately.
+- Put generated markdown docs, plans, handoffs, ADR-style notes, runbooks, and investigation briefs in Linear Docs, not repo-local markdown, unless the issue explicitly asks for checked-in documentation.
+- Use `linear document create/update --content-file <temp-file> --issue {{ issue.identifier }}` for issue-scoped markdown docs.
+- If a checked-in docs change is explicitly required by the issue, keep it scoped to that requirement and include it in the same PR as the code change.
+- If the markdown names durable follow-up work, search Linear first, then create or update the issue before mentioning it in the doc.
+- Do not update docs/generated/ files; those are auto-generated and will be overwritten.

@@ -28,11 +28,11 @@ agent:
   max_retry_backoff_ms: 300000
 
 codex:
+  command: codex --config 'model_reasoning_effort="low"' app-server
   stall_timeout_ms: 3600000
 
 runner:
-  kind: claude-code
-  model: claude-opus-4-6
+  kind: codex
 
 hooks:
   after_create: |
@@ -241,8 +241,7 @@ stages:
 
   investigate:
     type: agent
-    runner: claude-code
-    model: claude-opus-4-6
+    runner: codex
     max_turns: 8
     linear_state: In Progress
     mcp_servers:
@@ -255,8 +254,7 @@ stages:
 
   implement:
     type: agent
-    runner: claude-code
-    model: claude-opus-4-6
+    runner: codex
     max_turns: 30
     mcp_servers:
       code-review-graph:
@@ -268,9 +266,8 @@ stages:
 
   review:
     type: agent
-    runner: claude-code
-    model: claude-opus-4-6
-    max_turns: 15
+    runner: codex
+    max_turns: 5
     max_rework: 3
     linear_state: In Review
     on_complete: merge
@@ -278,8 +275,7 @@ stages:
 
   merge:
     type: agent
-    runner: claude-code
-    model: claude-opus-4-6
+    runner: codex
     max_turns: 5
     on_complete: done
     on_rework: implement
@@ -523,40 +519,45 @@ When you are done:
 
 {% if stageName == "review" %}
 ## Stage: Review
-You are a review agent.
+You are the review-gate operator, not the reviewer. Every PR, including low-risk PRs, must pass the headless council gate before merge.
 
-### Diff Scope (CRITICAL)
-Only review changes that belong to THIS issue's PR. Use three-dot diff:
-```
-git diff main...HEAD
-```
-Do NOT use `git diff main` — after rebase, two-dot diff can include changes from other merged issues that were rebased into this branch. If a file appears in the diff but is not relevant to the issue description, SKIP it — it was pulled in via rebase and does not belong to this review.
+Do NOT run `/self-moa-review`, `/codex-review`, direct `claude -p`, or any other direct Claude invocation. Claude must run through CMUX via `symphony-council-review-gate`.
 
 {% if reworkCount > 0 %}
 ### Re-review After Rework (rework #{{ reworkCount }})
-This is a re-review after a rework cycle. Use the `/codex-review` skill (single-pass lightweight review) instead of the full council. Focus on:
-1. Verifying the specific findings from the previous review were addressed
-2. Checking that the fix did not introduce new issues
-Do NOT run `/self-moa-review` — the initial review already ran. Keep this lightweight.
-{% else %}
-### Step 1: Measure the diff
-Run `git diff main...HEAD --shortstat` to measure the change size. Parse the output to get the number of files changed and total lines (insertions + deletions).
-
-### Step 2: Choose review depth based on diff size
-
-**If the change touches ≤3 files AND ≤20 total lines changed** — run lightweight review:
-1. Load and execute the `/codex-review` skill. This runs a single Codex pass with Opus validation — no council, no cross-examination.
-
-**Otherwise (larger change)** — run full council review:
-1. Load and execute the `/self-moa-review` skill.
+This is a re-review after a rework cycle. Run the same headless council gate again and verify the previous `## Review Findings` are resolved.
 {% endif %}
+
+### Run the headless council gate
+
+1. Build the local CLI so `dist/src/cli/council-review-gate.js` matches this checkout:
+   ```bash
+   pnpm build
+   ```
+2. Resolve the PR and repository:
+   ```bash
+   PR_NUMBER=$(gh pr view --json number --jq '.number')
+   REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+   ```
+3. Run the gate through CMUX:
+   ```bash
+   ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-{{ issue.identifier }}-$(date +%s)"
+   CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn}"
+   node dist/src/cli/council-review-gate.js \
+     --issue-id {{ issue.identifier }} \
+     --artifact-dir "$ARTIFACT_DIR" \
+     --workspace "$PWD" \
+     --repo "$REPO" \
+     --pr "$PR_NUMBER" \
+     --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
+     --timeout-seconds 1800
+   ```
+4. Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`.
 
 ### Evaluate findings
 
-The PR for this issue is on the current branch. The issue description contains the frozen spec. The PR body contains Tool Output and SAST Output sections from the implementation agent.
-
-If all findings are clean or only P3/theoretical: output `[STAGE_COMPLETE]`
-If surviving P1/P2 findings exist: post them as a `## Review Findings` comment on the Linear issue, then output `[STAGE_FAILED: review]` with a one-line summary.
+If the gate reports `PASS`, post a short workpad note with the artifact directory and output `[STAGE_COMPLETE]`.
+If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/malformed: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
 {% endif %}
 
 {% if stageName == "merge" %}
@@ -709,9 +710,8 @@ curl -X PUT -H "Content-Type: <contentType>" \
 
 ## Documentation Maintenance
 
-- If you add a new module, API endpoint, or significant abstraction, update the relevant docs/ file and the AGENTS.md Documentation Map entry. If no relevant doc exists, create one following the docs/ conventions (# Title, > Last updated header).
-- If a docs/ file you reference during implementation is stale or missing, update/create it as part of your implementation. Include the update in the same PR as your code changes — never in a separate PR.
-- If you make a non-obvious architectural decision during implementation, create a design doc in docs/design-docs/ following the ADR format (numbered, with Status line). Add it to the AGENTS.md design docs table.
-- When you complete your implementation, update the > Last updated date on any docs/ file you modified.
-- Do not update docs/generated/ files — those are auto-generated and will be overwritten.
-- Commit doc updates in the same PR as code changes, not separately.
+- Put generated markdown docs, plans, handoffs, ADR-style notes, runbooks, and investigation briefs in Linear Docs, not repo-local markdown, unless the issue explicitly asks for checked-in documentation.
+- Use `linear document create/update --content-file <temp-file> --issue {{ issue.identifier }}` for issue-scoped markdown docs.
+- If a checked-in docs change is explicitly required by the issue, keep it scoped to that requirement and include it in the same PR as the code change.
+- If the markdown names durable follow-up work, search Linear first, then create or update the issue before mentioning it in the doc.
+- Do not update docs/generated/ files; those are auto-generated and will be overwritten.
