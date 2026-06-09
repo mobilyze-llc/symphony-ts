@@ -99,7 +99,6 @@ Do NOT run `/self-moa-review`, `/codex-review`, direct `claude -p`, or any other
 Run:
 
 ```bash
-pnpm build
 PR_NUMBER=$(gh pr view --json number --jq '.number')
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-{{ issue.identifier }}-$(date +%s)"
@@ -108,7 +107,22 @@ if [ -z "$CMUX_SPAWN_BIN" ] || [ ! -x "$CMUX_SPAWN_BIN" ]; then
   echo "Set CMUX_SPAWN_BIN to an executable cmux-spawn path or put cmux-spawn on PATH." >&2
   exit 1
 fi
-node dist/src/cli/council-review-gate.js \
+
+run_council_gate() {
+  if [ -n "${SYMPHONY_COUNCIL_REVIEW_GATE:-}" ]; then
+    "$SYMPHONY_COUNCIL_REVIEW_GATE" "$@"
+  elif command -v symphony-council-review-gate >/dev/null 2>&1; then
+    symphony-council-review-gate "$@"
+  elif [ -f dist/src/cli/council-review-gate.js ]; then
+    pnpm build
+    node dist/src/cli/council-review-gate.js "$@"
+  else
+    echo "Set SYMPHONY_COUNCIL_REVIEW_GATE to the Symphony gate executable, install symphony-council-review-gate on PATH, or run from a built symphony-ts checkout." >&2
+    return 1
+  fi
+}
+
+run_council_gate \
   --issue-id {{ issue.identifier }} \
   --artifact-dir "$ARTIFACT_DIR" \
   --workspace "$PWD" \

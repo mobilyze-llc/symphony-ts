@@ -87,9 +87,13 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     );
     expect(output).toContain("symphony-council-review-gate");
     expect(output).toContain("CMUX_SPAWN_BIN");
+    expect(output).toContain("SYMPHONY_COUNCIL_REVIEW_GATE");
     expect(output).toContain("command -v cmux-spawn");
+    expect(output).toContain("command -v symphony-council-review-gate");
+    expect(output).toContain("run_council_gate");
     expect(output).toContain("--timeout-seconds 1800");
     expect(output).toContain("Claude must run through CMUX");
+    expect(output).not.toContain("Build the local CLI");
     expect(output).not.toContain(
       "/Users/ericlitman/projects/crucible/bin/cmux-spawn",
     );

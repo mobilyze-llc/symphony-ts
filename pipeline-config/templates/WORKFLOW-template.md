@@ -530,16 +530,12 @@ This is a re-review after a rework cycle. Run the same headless council gate aga
 
 ### Run the headless council gate
 
-1. Build the local CLI so `dist/src/cli/council-review-gate.js` matches this checkout:
-   ```bash
-   pnpm build
-   ```
-2. Resolve the PR and repository:
+1. Resolve the PR and repository:
    ```bash
    PR_NUMBER=$(gh pr view --json number --jq '.number')
    REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
    ```
-3. Run the gate through CMUX:
+2. Run the gate through CMUX:
    ```bash
    ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-{{ issue.identifier }}-$(date +%s)"
    CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-$(command -v cmux-spawn || true)}"
@@ -547,7 +543,22 @@ This is a re-review after a rework cycle. Run the same headless council gate aga
      echo "Set CMUX_SPAWN_BIN to an executable cmux-spawn path or put cmux-spawn on PATH." >&2
      exit 1
    fi
-   node dist/src/cli/council-review-gate.js \
+
+   run_council_gate() {
+     if [ -n "${SYMPHONY_COUNCIL_REVIEW_GATE:-}" ]; then
+       "$SYMPHONY_COUNCIL_REVIEW_GATE" "$@"
+     elif command -v symphony-council-review-gate >/dev/null 2>&1; then
+       symphony-council-review-gate "$@"
+     elif [ -f dist/src/cli/council-review-gate.js ]; then
+       pnpm build
+       node dist/src/cli/council-review-gate.js "$@"
+     else
+       echo "Set SYMPHONY_COUNCIL_REVIEW_GATE to the Symphony gate executable, install symphony-council-review-gate on PATH, or run from a built symphony-ts checkout." >&2
+       return 1
+     fi
+   }
+
+   run_council_gate \
      --issue-id {{ issue.identifier }} \
      --artifact-dir "$ARTIFACT_DIR" \
      --workspace "$PWD" \
@@ -556,7 +567,7 @@ This is a re-review after a rework cycle. Run the same headless council gate aga
      --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
      --timeout-seconds 1800
    ```
-4. Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`.
+3. Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`.
 
 ### Evaluate findings
 
