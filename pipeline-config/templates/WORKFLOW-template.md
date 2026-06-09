@@ -37,6 +37,11 @@ hard_stops:
 
 codex:
   command: codex --disable plugins --config 'model_reasoning_effort="low"' app-server
+  approval_policy: never
+  thread_sandbox: workspace-write
+  turn_sandbox_policy:
+    type: workspace-write
+    network_access: true
   stall_timeout_ms: 3600000
 
 runner:
@@ -537,6 +542,10 @@ When you are done:
 - If you cannot resolve a verify failure after 3 attempts: output `[STAGE_FAILED: verify]` with the failing command and output
 - If the spec is ambiguous or contradictory: output `[STAGE_FAILED: spec]` with an explanation
 - If you hit infrastructure issues (API limits, network errors): output `[STAGE_FAILED: infra]` with details
+
+Headless worker permissions are preconfigured. Do not request sandbox, network,
+or permission escalation from the user. If a required command is still denied by
+policy, output `[STAGE_FAILED: infra]` with the exact denied command and error.
 {% endif %}
 
 {% if stageName == "review" %}

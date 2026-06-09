@@ -29,6 +29,11 @@ agent:
 
 codex:
   command: codex --disable plugins --config 'model_reasoning_effort="low"' app-server
+  approval_policy: never
+  thread_sandbox: workspace-write
+  turn_sandbox_policy:
+    type: workspace-write
+    network_access: true
   stall_timeout_ms: 3600000
 
 runner:

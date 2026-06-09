@@ -512,10 +512,7 @@ export class CodexAppServerClient {
         if (responseId !== null) {
           this.send({
             id: parsed.id,
-            result: {
-              approved: false,
-              reason: permissionDenial.reason,
-            },
+            result: createApprovalResponse(false, permissionDenial.reason),
           });
         }
         this.emit({
@@ -534,9 +531,7 @@ export class CodexAppServerClient {
       if (responseId !== null) {
         this.send({
           id: parsed.id,
-          result: {
-            approved: true,
-          },
+          result: createApprovalResponse(true),
         });
       }
       this.emit({
@@ -986,6 +981,17 @@ function normalizeCodexApprovalPolicy(value: unknown): unknown {
   }
 
   return value;
+}
+
+function createApprovalResponse(
+  approved: boolean,
+  reason?: string,
+): JsonObject {
+  return {
+    decision: approved ? "accept" : "decline",
+    approved,
+    ...(reason === undefined ? {} : { reason }),
+  };
 }
 
 // Codex exposes two sandbox shapes: thread/start takes a SandboxMode enum
