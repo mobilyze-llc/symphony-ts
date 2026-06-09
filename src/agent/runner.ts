@@ -132,7 +132,9 @@ export interface WorkspaceBaseRefreshLogEntry {
   stageName: string | null;
   currentHead: string | null;
   desiredBase: string | null;
+  previousDesiredBase?: string | null;
   baseRef: string | null;
+  fetchedBaseRef?: string | null;
   action:
     | "current"
     | "fetch_failed"
@@ -665,10 +667,12 @@ export class AgentRunner {
       });
       throw error;
     }
+    const previousBase = await resolveWorkspaceBaseRevision(
+      input.workspace.path,
+    );
+    let fetchedBaseRef: string | null = null;
     try {
-      await runGit(input.workspace.path, ["fetch", "--prune", "origin"], {
-        timeoutMs: 60_000,
-      });
+      fetchedBaseRef = await fetchWorkspaceBaseRef(input.workspace.path);
     } catch (error) {
       await this.logWorkspaceBaseRefresh({
         issueId: input.issue.id,
@@ -676,7 +680,8 @@ export class AgentRunner {
         workspacePath: input.workspace.path,
         stageName: input.stageName,
         currentHead,
-        desiredBase: null,
+        desiredBase: previousBase?.revision ?? null,
+        previousDesiredBase: previousBase?.revision ?? null,
         baseRef: null,
         action: "fetch_failed",
         dirty: null,
@@ -694,7 +699,9 @@ export class AgentRunner {
         stageName: input.stageName,
         currentHead,
         desiredBase: null,
+        previousDesiredBase: previousBase?.revision ?? null,
         baseRef: null,
+        fetchedBaseRef,
         action: "no_base_ref",
         dirty: null,
         reason: "no_candidate_base_ref_resolved",
@@ -711,7 +718,9 @@ export class AgentRunner {
         stageName: input.stageName,
         currentHead,
         desiredBase: base.revision,
+        previousDesiredBase: previousBase?.revision ?? null,
         baseRef: base.ref,
+        fetchedBaseRef,
         action: "current",
         dirty,
       });
@@ -748,7 +757,9 @@ export class AgentRunner {
         stageName: input.stageName,
         currentHead,
         desiredBase: base.revision,
+        previousDesiredBase: previousBase?.revision ?? null,
         baseRef: base.ref,
+        fetchedBaseRef,
         action,
         dirty,
       });
@@ -763,7 +774,9 @@ export class AgentRunner {
         stageName: input.stageName,
         currentHead,
         desiredBase: base.revision,
+        previousDesiredBase: previousBase?.revision ?? null,
         baseRef: base.ref,
+        fetchedBaseRef,
         action: "refresh_failed",
         dirty,
         reason: toErrorMessage(error),
@@ -783,7 +796,9 @@ export class AgentRunner {
         `workspace_path=${entry.workspacePath}`,
         `current_head=${entry.currentHead ?? "unknown"}`,
         `desired_base=${entry.desiredBase ?? "unknown"}`,
+        `previous_desired_base=${entry.previousDesiredBase ?? "unknown"}`,
         `base_ref=${entry.baseRef ?? "unknown"}`,
+        `fetched_base_ref=${entry.fetchedBaseRef ?? "unknown"}`,
         `dirty=${entry.dirty === null ? "unknown" : String(entry.dirty)}`,
         ...(entry.reason === undefined ? [] : [`reason=${entry.reason}`]),
       ].join(" "),
@@ -923,6 +938,60 @@ async function resolveWorkspaceBaseRevision(
   return null;
 }
 
+async function fetchWorkspaceBaseRef(
+  workspacePath: string,
+): Promise<string | null> {
+  const originHeadRef = await readGitSymbolicRef(
+    workspacePath,
+    "refs/remotes/origin/HEAD",
+  );
+  const failures: string[] = [];
+
+  for (const branch of createGitBaseBranchCandidates({
+    configuredBaseBranch: process.env.SYMPHONY_BASE_BRANCH,
+    originHeadRef,
+  })) {
+    try {
+      await runGit(
+        workspacePath,
+        [
+          "fetch",
+          "--prune",
+          "origin",
+          `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+        ],
+        { timeoutMs: 60_000 },
+      );
+
+      // Bare-clone worktrees sometimes rely on local branch refs as a
+      // fallback. Keep that ref fresh when it is safe, but do not let a checked
+      // out local branch reject the remote-tracking repair above.
+      await runGit(
+        workspacePath,
+        ["fetch", "origin", `+refs/heads/${branch}:refs/heads/${branch}`],
+        { timeoutMs: 60_000 },
+      ).catch(() => undefined);
+
+      return branch;
+    } catch (error) {
+      failures.push(`${branch}: ${toErrorMessage(error)}`);
+    }
+  }
+
+  try {
+    await runGit(workspacePath, ["fetch", "--prune", "origin"], {
+      timeoutMs: 60_000,
+    });
+    return null;
+  } catch (error) {
+    failures.push(`all refs: ${toErrorMessage(error)}`);
+  }
+
+  throw new Error(
+    `Failed to fetch configured workspace base ref; tried ${failures.join("; ")}`,
+  );
+}
+
 async function readGitSymbolicRef(
   workspacePath: string,
   ref: string,
@@ -953,6 +1022,27 @@ function createGitBaseRefCandidates(input: {
   }
 
   candidates.push("origin/main", "main", "origin/master", "master");
+  return [...new Set(candidates)];
+}
+
+function createGitBaseBranchCandidates(input: {
+  configuredBaseBranch: string | undefined;
+  originHeadRef: string | null;
+}): string[] {
+  const candidates: string[] = [];
+  const configuredBaseBranch = normalizeGitBranchName(
+    input.configuredBaseBranch,
+  );
+  if (configuredBaseBranch !== null) {
+    candidates.push(configuredBaseBranch);
+  }
+
+  const originHeadBranch = normalizeGitBranchName(input.originHeadRef ?? "");
+  if (originHeadBranch !== null) {
+    candidates.push(originHeadBranch);
+  }
+
+  candidates.push("main", "master");
   return [...new Set(candidates)];
 }
 

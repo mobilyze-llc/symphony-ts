@@ -1670,7 +1670,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             outcome: "abnormal",
             reason:
               execution.stopRequest === null
-                ? toErrorMessage(error)
+                ? formatWorkerErrorReason(error)
                 : `stopped after ${execution.stopRequest.reason}`,
           });
         });
@@ -1738,14 +1738,18 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             hard_stop_total_tokens: hardStop.totalTokens,
             hard_stop_estimated_cost_usd: hardStop.estimatedCostUsd,
           };
+    const inputRequiredPause =
+      hardStop === null &&
+      input.outcome === "abnormal" &&
+      isCodexUserInputRequiredReason(input.reason);
     const exitEvent =
-      hardStop !== null
+      hardStop !== null || inputRequiredPause
         ? "worker_exit_paused"
         : input.outcome === "normal"
           ? "worker_exit_normal"
           : "worker_exit_abnormal";
     const exitOutcome =
-      hardStop !== null
+      hardStop !== null || inputRequiredPause
         ? "paused"
         : input.outcome === "normal"
           ? "completed"
@@ -1753,12 +1757,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const exitMessage =
       hardStop !== null
         ? "Worker paused by hard stop."
-        : input.outcome === "normal"
-          ? "Worker completed normally."
-          : "Worker completed abnormally.";
+        : inputRequiredPause
+          ? "Worker paused because Codex requested operator input."
+          : input.outcome === "normal"
+            ? "Worker completed normally."
+            : "Worker completed abnormally.";
 
     await this.logger?.log(
-      hardStop !== null
+      hardStop !== null || inputRequiredPause
         ? "warn"
         : input.outcome === "normal"
           ? "info"
@@ -1773,6 +1779,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         issue_id: execution.issueId,
         issue_identifier: execution.issueIdentifier,
         session_id: execution.lastResult?.liveSession.sessionId ?? null,
+        ...(inputRequiredPause
+          ? { pause_reason: ERROR_CODES.codexUserInputRequired }
+          : {}),
         ...hardStopFields,
       },
     );
@@ -1794,13 +1803,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     const liveSession = execution.lastResult?.liveSession;
     await this.logger?.log(
-      hardStop !== null ? "warn" : "info",
+      hardStop !== null || inputRequiredPause ? "warn" : "info",
       "stage_completed",
       hardStop !== null
         ? "Stage paused by hard stop."
-        : input.outcome === "normal"
-          ? "Stage completed."
-          : "Stage failed.",
+        : inputRequiredPause
+          ? "Stage paused because Codex requested operator input."
+          : input.outcome === "normal"
+            ? "Stage completed."
+            : "Stage failed.",
       {
         issue_id: execution.issueId,
         issue_identifier: execution.issueIdentifier,
@@ -1834,11 +1845,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         turn_count: liveSession?.turnCount ?? 0,
         duration_ms: durationMs,
         outcome:
-          hardStop !== null
+          hardStop !== null || inputRequiredPause
             ? "paused"
             : input.outcome === "normal"
               ? "completed"
               : "failed",
+        ...(inputRequiredPause
+          ? { pause_reason: ERROR_CODES.codexUserInputRequired }
+          : {}),
         ...hardStopFields,
       },
     );
@@ -1914,9 +1928,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         attempt: runningEntry?.retryAttempt ?? null,
         sessionId: liveSession?.sessionId ?? null,
         summary: truncateTraceText(
-          input.outcome === "normal"
-            ? "Worker exited normally."
-            : `Worker exited abnormally: ${input.reason ?? "worker failed"}.`,
+          inputRequiredPause
+            ? `Worker paused for operator input: ${input.reason ?? "Codex requested input"}.`
+            : input.outcome === "normal"
+              ? "Worker exited normally."
+              : `Worker exited abnormally: ${input.reason ?? "worker failed"}.`,
         ),
         workerExit: {
           outcome: input.outcome,
@@ -2177,6 +2193,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       workspaceBaseRefreshLogger: async (entry) => {
         const failed =
           entry.action === "fetch_failed" || entry.action === "refresh_failed";
+        const repairedBaseRef =
+          entry.previousDesiredBase !== undefined &&
+          entry.previousDesiredBase !== null &&
+          entry.desiredBase !== null &&
+          entry.previousDesiredBase !== entry.desiredBase;
         await this.logger?.log(
           failed ? "error" : "info",
           "workspace_base_refresh",
@@ -2184,7 +2205,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           {
             outcome: failed
               ? "failed"
-              : entry.action === "current" || entry.action === "retry_preserved"
+              : (entry.action === "current" && !repairedBaseRef) ||
+                  entry.action === "retry_preserved"
                 ? "unchanged"
                 : "completed",
             action: entry.action,
@@ -2194,7 +2216,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             stage_name: entry.stageName,
             current_head: entry.currentHead,
             desired_base: entry.desiredBase,
+            ...(entry.previousDesiredBase === undefined
+              ? {}
+              : { previous_desired_base: entry.previousDesiredBase }),
             base_ref: entry.baseRef,
+            ...(entry.fetchedBaseRef === undefined
+              ? {}
+              : { fetched_base_ref: entry.fetchedBaseRef }),
             dirty: entry.dirty,
             ...(entry.reason === undefined ? {} : { reason: entry.reason }),
           },
@@ -3285,6 +3313,23 @@ function toErrorMessage(error: unknown): string {
   }
 
   return "worker failed";
+}
+
+function formatWorkerErrorReason(error: unknown): string {
+  const message = toErrorMessage(error);
+  const code = extractErrorCode(error);
+  return code === null ? message : `${code}: ${message}`;
+}
+
+function isCodexUserInputRequiredReason(reason: string | undefined): boolean {
+  if (reason === undefined) {
+    return false;
+  }
+  return (
+    reason.includes(ERROR_CODES.codexUserInputRequired) ||
+    reason.includes("turn_input_required") ||
+    reason.includes("Codex requested operator input")
+  );
 }
 
 function hasPipelineHaltLabel(issue: Issue): boolean {

@@ -41,6 +41,7 @@ import {
   normalizeIssueState,
   parseFailureSignal,
 } from "../domain/model.js";
+import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
   appendDispatcherRunJournalEntry,
@@ -340,6 +341,13 @@ export class OrchestratorCore {
         entry.metadata.status === "completed"
       ) {
         this.recoverHardStopTrigger(entry);
+      }
+
+      if (
+        entry.kind === "operator_input_required" &&
+        entry.metadata.status === "completed"
+      ) {
+        this.markIssueRequiresExplicitResume(entry.issueId);
       }
 
       if (isDispatcherAdmissionEntry(entry)) {
@@ -1005,6 +1013,14 @@ export class OrchestratorCore {
     const stopReason = parseStoppedAfterReason(input.reason);
     if (stopReason === "manual_stop" || stopReason === "inactive_state") {
       this.markIssueRequiresExplicitResume(input.issueId);
+      return null;
+    }
+
+    if (isCodexUserInputRequiredReason(input.reason)) {
+      await this.handleOperatorInputRequiredPause(input.issueId, runningEntry, {
+        reason: input.reason ?? ERROR_CODES.codexUserInputRequired,
+        stageName: exitedStageName,
+      });
       return null;
     }
 
@@ -2594,6 +2610,50 @@ export class OrchestratorCore {
     );
   }
 
+  private async handleOperatorInputRequiredPause(
+    issueId: string,
+    runningEntry: RunningEntry,
+    input: {
+      reason: string;
+      stageName: string | null;
+    },
+  ): Promise<void> {
+    await this.recordRunJournalEntry({
+      idempotencyKey: `operator_input_required:${issueId}:${input.stageName ?? "no-stage"}:${formatAttemptKey(runningEntry.retryAttempt)}`,
+      timestamp: this.now().toISOString(),
+      kind: "operator_input_required",
+      issueId,
+      issueIdentifier: runningEntry.identifier,
+      operation: "dispatcher",
+      stage: input.stageName,
+      attempt: runningEntry.retryAttempt,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Codex requested operator input for ${runningEntry.identifier}.`,
+      metadata: {
+        status: "completed",
+        reason: input.reason,
+        errorCode: ERROR_CODES.codexUserInputRequired,
+        issueState: runningEntry.issue.state,
+      },
+    });
+
+    this.markIssueRequiresExplicitResume(issueId);
+
+    const comment = [
+      "Headless Codex requested operator input during the worker turn.",
+      `Reason: ${input.reason}`,
+      "",
+      "The worker has paused instead of retrying silently. Move the issue to Resume after human review to requeue it.",
+    ].join("\n");
+
+    await this.fireEscalationSideEffects(
+      issueId,
+      runningEntry.identifier,
+      comment,
+    );
+  }
+
   private async handleContinuousFeedbackBounce(
     issueId: string,
     runningEntry: RunningEntry,
@@ -4091,6 +4151,9 @@ export function classifyExitOutcome(
     return outcome;
   }
   // Classify "abnormal" based on context
+  if (isCodexUserInputRequiredReason(reason)) {
+    return "input_required";
+  }
   if (turnCount === 0) {
     return "failed_to_start";
   }
@@ -4098,6 +4161,17 @@ export function classifyExitOutcome(
     return "timed_out";
   }
   return "error";
+}
+
+function isCodexUserInputRequiredReason(reason: string | undefined): boolean {
+  if (reason === undefined) {
+    return false;
+  }
+  return (
+    reason.includes(ERROR_CODES.codexUserInputRequired) ||
+    reason.includes("turn_input_required") ||
+    reason.includes("Codex requested operator input")
+  );
 }
 
 function parseStoppedAfterReason(

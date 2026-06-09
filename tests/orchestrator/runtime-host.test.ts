@@ -22,6 +22,7 @@ import type {
   LoopTraceJournal,
   ManagerRunJournal,
 } from "../../src/domain/model.js";
+import { ERROR_CODES } from "../../src/errors/codes.js";
 import {
   type StructuredLogEntry,
   StructuredLogger,
@@ -3474,6 +3475,64 @@ describe("pipeline notifications", () => {
         hard_stop_outcome: "PAUSED-budget",
         hard_stop_trigger: "token_budget",
         hard_stop_total_tokens: 250_000,
+      }),
+    );
+
+    const stillActive = await host.pollOnce();
+    expect(stillActive.dispatchedIssueIds).toEqual([]);
+  });
+
+  it("logs Codex input-required exits as paused and avoids retry burn", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const error = Object.assign(
+      new Error("Codex requested operator input during a turn."),
+      { code: ERROR_CODES.codexUserInputRequired },
+    );
+    fakeRunner.reject("1", error);
+    await host.waitForIdle();
+
+    expect(notifier.events).toEqual([
+      expect.objectContaining({ type: "issue_dispatched" }),
+    ]);
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.counts.failed).toBe(0);
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_exit_paused",
+        level: "warn",
+        outcome: "paused",
+        pause_reason: ERROR_CODES.codexUserInputRequired,
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "stage_completed",
+        level: "warn",
+        outcome: "paused",
+        pause_reason: ERROR_CODES.codexUserInputRequired,
       }),
     );
 
