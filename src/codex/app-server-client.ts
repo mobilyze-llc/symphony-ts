@@ -15,6 +15,8 @@ const DEFAULT_CLIENT_INFO = Object.freeze({
 });
 
 const DEFAULT_MAX_LINE_BYTES = 10 * 1024 * 1024;
+const SUPPORTED_CODEX_SANDBOX_TYPES =
+  "danger-full-access, dangerFullAccess, read-only, readOnly, workspace-write, workspaceWrite";
 
 type JsonObject = Record<string, unknown>;
 type JsonRpcId = string | number;
@@ -315,8 +317,10 @@ export class CodexAppServerClient {
       });
 
       const threadResult = await this.request("thread/start", {
-        approvalPolicy: this.options.approvalPolicy,
-        sandbox: this.options.threadSandbox,
+        approvalPolicy: normalizeCodexApprovalPolicy(
+          this.options.approvalPolicy,
+        ),
+        sandbox: normalizeCodexThreadSandbox(this.options.threadSandbox),
         cwd: this.options.cwd,
         tools: this.getAdvertisedTools(),
       });
@@ -375,8 +379,10 @@ export class CodexAppServerClient {
       ],
       cwd: this.options.cwd,
       title: input.title,
-      approvalPolicy: this.options.approvalPolicy,
-      sandboxPolicy: this.options.turnSandboxPolicy,
+      approvalPolicy: normalizeCodexApprovalPolicy(this.options.approvalPolicy),
+      sandboxPolicy: normalizeCodexSandboxPolicy(
+        this.options.turnSandboxPolicy,
+      ),
     });
 
     const turnId = extractNestedString(response, ["result", "turn", "id"]);
@@ -486,6 +492,14 @@ export class CodexAppServerClient {
       if (pending !== undefined) {
         clearTimeout(pending.timer);
         this.pendingRequests.delete(responseId);
+        const responseError = extractJsonRpcResponseError(
+          parsed,
+          pending.method,
+        );
+        if (responseError !== null) {
+          pending.reject(responseError);
+          return;
+        }
         pending.resolve(parsed);
         return;
       }
@@ -936,6 +950,242 @@ function normalizeJsonRpcId(value: unknown): string | null {
     return String(value);
   }
   return null;
+}
+
+function extractJsonRpcResponseError(
+  message: JsonObject,
+  method: string,
+): CodexAppServerClientError | null {
+  const error = message.error;
+  if (error === null || typeof error !== "object" || Array.isArray(error)) {
+    return null;
+  }
+
+  const errorObject = error as JsonObject;
+  const code =
+    typeof errorObject.code === "number" || typeof errorObject.code === "string"
+      ? String(errorObject.code)
+      : "unknown";
+  const responseMessage =
+    typeof errorObject.message === "string" && errorObject.message.length > 0
+      ? errorObject.message
+      : JSON.stringify(errorObject);
+
+  return new CodexAppServerClientError(
+    `Codex app-server ${method} error ${code}: ${responseMessage}`,
+    ERROR_CODES.codexProtocolError,
+  );
+}
+
+function normalizeCodexApprovalPolicy(value: unknown): unknown {
+  if (value === "full-auto") {
+    // Symphony's full-auto mode means no interactive approval prompts; current
+    // Codex app-server names that same behavior "never".
+    return "never";
+  }
+
+  return value;
+}
+
+// Codex exposes two sandbox shapes: thread/start takes a SandboxMode enum
+// serialized as kebab-case strings, while turn/start takes a SandboxPolicy
+// tagged union serialized with camelCase type discriminators.
+function normalizeCodexThreadSandbox(value: unknown): unknown {
+  if (typeof value === "string") {
+    return normalizeKnownCodexSandboxMode(value, "thread/start sandbox");
+  }
+
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+
+  const objectValue = value as JsonObject;
+  const type = objectValue.type;
+  if (typeof type !== "string") {
+    return value;
+  }
+
+  const unsupportedKeys = Object.keys(objectValue).filter(
+    (key) => key !== "type",
+  );
+  if (unsupportedKeys.length > 0) {
+    throw new CodexAppServerClientError(
+      `thread/start sandbox only accepts a mode; unsupported fields: ${unsupportedKeys.sort().join(", ")}. Expected one of: ${SUPPORTED_CODEX_SANDBOX_TYPES}.`,
+      ERROR_CODES.codexProtocolError,
+    );
+  }
+
+  return normalizeKnownCodexSandboxMode(type, "thread/start sandbox");
+}
+
+function normalizeKnownCodexSandboxMode(
+  value: string,
+  context: string,
+): string {
+  const normalized = normalizeCodexSandboxMode(value);
+  if (normalized === null) {
+    throw unsupportedSandboxTypeError(context, value);
+  }
+  return normalized;
+}
+
+function normalizeCodexSandboxMode(value: string): string | null {
+  switch (value) {
+    case "danger-full-access":
+    case "dangerFullAccess":
+      return "danger-full-access";
+    case "read-only":
+    case "readOnly":
+      return "read-only";
+    case "workspace-write":
+    case "workspaceWrite":
+      return "workspace-write";
+    default:
+      return null;
+  }
+}
+
+function normalizeCodexSandboxPolicy(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return normalizeCodexSandboxString(value);
+  }
+
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+
+  const objectValue = value as JsonObject;
+  const rawType = objectValue.type;
+  if (typeof rawType !== "string") {
+    return value;
+  }
+
+  const normalizedType = normalizeCodexSandboxType(rawType);
+  if (normalizedType === null) {
+    throw unsupportedSandboxTypeError("turn/start sandboxPolicy", rawType);
+  }
+
+  if (normalizedType === "dangerFullAccess") {
+    return {
+      type: normalizedType,
+    };
+  }
+
+  if (normalizedType === "readOnly") {
+    return {
+      type: normalizedType,
+      networkAccess: readBooleanAlias(objectValue, "networkAccess", false),
+    };
+  }
+
+  if (normalizedType === "workspaceWrite") {
+    return {
+      type: normalizedType,
+      writableRoots: readStringArrayAlias(objectValue, "writableRoots"),
+      networkAccess: readBooleanAlias(objectValue, "networkAccess", false),
+      excludeTmpdirEnvVar: readBooleanAlias(
+        objectValue,
+        "excludeTmpdirEnvVar",
+        false,
+      ),
+      excludeSlashTmp: readBooleanAlias(objectValue, "excludeSlashTmp", false),
+    };
+  }
+
+  return value;
+}
+
+function normalizeCodexSandboxString(value: string): unknown {
+  const normalizedType = normalizeCodexSandboxType(value);
+  if (normalizedType === null) {
+    throw unsupportedSandboxTypeError("turn/start sandboxPolicy", value);
+  }
+
+  if (normalizedType === "dangerFullAccess") {
+    return { type: normalizedType };
+  }
+  if (normalizedType === "readOnly") {
+    return { type: normalizedType, networkAccess: false };
+  }
+  if (normalizedType === "workspaceWrite") {
+    return {
+      type: normalizedType,
+      writableRoots: [],
+      networkAccess: false,
+      excludeTmpdirEnvVar: false,
+      excludeSlashTmp: false,
+    };
+  }
+
+  return value;
+}
+
+function normalizeCodexSandboxType(value: string): string | null {
+  switch (value) {
+    case "danger-full-access":
+    case "dangerFullAccess":
+      return "dangerFullAccess";
+    case "read-only":
+    case "readOnly":
+      return "readOnly";
+    case "workspace-write":
+    case "workspaceWrite":
+      return "workspaceWrite";
+    default:
+      return null;
+  }
+}
+
+function unsupportedSandboxTypeError(
+  context: string,
+  value: string,
+): CodexAppServerClientError {
+  return new CodexAppServerClientError(
+    `Unsupported Codex ${context} type "${value}". Expected one of: ${SUPPORTED_CODEX_SANDBOX_TYPES}.`,
+    ERROR_CODES.codexProtocolError,
+  );
+}
+
+function readBooleanAlias(
+  source: JsonObject,
+  camelKey: string,
+  fallback: boolean,
+): boolean {
+  const direct = source[camelKey];
+  if (typeof direct === "boolean") {
+    return direct;
+  }
+
+  const snake = source[toSnakeCase(camelKey)];
+  return typeof snake === "boolean" ? snake : fallback;
+}
+
+function readStringArrayAlias(source: JsonObject, camelKey: string): string[] {
+  const direct = source[camelKey];
+  if (isStringArray(direct)) {
+    return direct;
+  }
+
+  const snake = source[toSnakeCase(camelKey)];
+  return isStringArray(snake) ? snake : [];
+}
+
+function toSnakeCase(value: string): string {
+  return value.replace(/[A-Z]/g, (match) => `_${match.toLowerCase()}`);
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return (
+    Array.isArray(value) && value.every((entry) => typeof entry === "string")
+  );
 }
 
 function isApprovalRequest(
