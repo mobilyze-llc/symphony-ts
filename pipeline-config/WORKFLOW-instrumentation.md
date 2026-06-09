@@ -217,7 +217,7 @@ This issue was previously blocked. Check the issue comments for a `## Resume Con
 
 - Read the codebase to understand existing patterns and architecture
 - Identify which files need to change and what the approach should be
-- Post a comment on the Linear issue (via `gh`) with your investigation findings and proposed implementation plan
+- Post a workpad comment on the Linear issue with your investigation findings and proposed implementation plan
 - Do NOT implement code, create branches, or open PRs in this stage — investigation only
 
 ### Workpad (investigate)
@@ -425,6 +425,7 @@ You maintain a single persistent `## Workpad` comment on the Linear issue. This 
 - **Never create multiple workpad comments.** Always search for an existing comment with `## Workpad` in its body before creating a new one.
 - **Update at milestones only** — plan finalized, implementation done, validation complete. Do NOT sync after every minor change.
 - **Prefer `sync_workpad` over raw GraphQL.** Write your workpad content to a local `workpad.md` file, then call `sync_workpad` with `issue_id`, `file_path`, and optionally `comment_id` (returned from the first sync). This keeps the workpad body out of your conversation context and saves tokens. Fall back to `linear_graphql` only if `sync_workpad` is unavailable.
+- Do not use Codex app/connector MCP tools for Linear comments or documents in headless runs; they can request interactive elicitation and block the worker.
 - **`linear_graphql` fallback patterns** (use only if `sync_workpad` is unavailable):
   - Search comments: `query { issue(id: "<issue_id>") { comments { nodes { id body } } } }`
   - Create comments with GraphQL variables only: `mutation Create($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { comment { id } } }`
@@ -463,7 +464,7 @@ curl -X PUT -H "Content-Type: <contentType>" \
 ## Documentation Maintenance
 
 - Put generated markdown docs, plans, handoffs, ADR-style notes, runbooks, and investigation briefs in Linear Docs, not repo-local markdown, unless the issue explicitly asks for checked-in documentation.
-- Use `linear document create/update --content-file <temp-file> --issue {{ issue.identifier }}` for issue-scoped markdown docs.
+- Use `linear-pp-cli documents create/edit --content-file <temp-file> --issue {{ issue.identifier }} --agent` for issue-scoped markdown docs.
 - If a checked-in docs change is explicitly required by the issue, keep it scoped to that requirement and include it in the same PR as the code change.
 - If the markdown names durable follow-up work, search Linear first, then create or update the issue before mentioning it in the doc.
 - Do not update docs/generated/ files; those are auto-generated and will be overwritten.

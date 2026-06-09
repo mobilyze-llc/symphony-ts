@@ -551,6 +551,74 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
+  it("fails the turn when a headless MCP server requests elicitation", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("mcp-elicitation", workspace, events);
+
+    await expect(
+      client.startSession({
+        prompt: "Write a workpad.",
+        title: "ABC-123: Example",
+      }),
+    ).rejects.toMatchObject({
+      name: "CodexAppServerClientError",
+      code: ERROR_CODES.codexUserInputRequired,
+    } satisfies Partial<CodexAppServerClientError>);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "turn_input_required",
+        errorCode: ERROR_CODES.codexUserInputRequired,
+        raw: expect.objectContaining({
+          method: "mcpServer/elicitation/request",
+        }),
+      }),
+    );
+    await waitForEvent(
+      events,
+      (event) =>
+        event.event === "other_message" &&
+        event.message === "mcp-elicitation response received",
+    );
+
+    await client.close();
+  });
+
+  it("fails the turn when an MCP elicitation create request is emitted", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("mcp-elicitation-create", workspace, events);
+
+    await expect(
+      client.startSession({
+        prompt: "Write a workpad.",
+        title: "ABC-123: Example",
+      }),
+    ).rejects.toMatchObject({
+      name: "CodexAppServerClientError",
+      code: ERROR_CODES.codexUserInputRequired,
+    } satisfies Partial<CodexAppServerClientError>);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "turn_input_required",
+        errorCode: ERROR_CODES.codexUserInputRequired,
+        raw: expect.objectContaining({
+          method: "elicitation/create",
+        }),
+      }),
+    );
+    await waitForEvent(
+      events,
+      (event) =>
+        event.event === "other_message" &&
+        event.message === "mcp-elicitation-create response received",
+    );
+
+    await client.close();
+  });
+
   it("sends the required initialize, thread/start, and turn/start policy payloads", async () => {
     const workspace = await createWorkspace();
     const client = createClient("handshake", workspace, [], {
@@ -898,6 +966,25 @@ async function createWorkspace(): Promise<string> {
   await mkdir(workspace, { recursive: true });
   roots.push(root);
   return workspace;
+}
+
+async function waitForEvent(
+  events: CodexClientEvent[],
+  predicate: (event: CodexClientEvent) => boolean,
+  timeoutMs = 500,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (events.some(predicate)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(
+    `Timed out waiting for event. Seen events: ${events
+      .map((event) => event.event)
+      .join(", ")}`,
+  );
 }
 
 function shellQuote(value: string): string {

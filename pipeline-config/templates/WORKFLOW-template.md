@@ -358,22 +358,20 @@ This issue was previously blocked. Check the issue comments for a `## Resume Con
 
 - Read the codebase to understand existing patterns and architecture
 - Identify which files need to change and what the approach should be
-- Post a comment on the Linear issue (via `gh`) with your investigation findings and proposed implementation plan
+- Post a workpad comment on the Linear issue with your investigation findings and proposed implementation plan
 - Do NOT implement code, create branches, or open PRs in this stage — investigation only
 
 ### Workpad (investigate)
 After completing your investigation, create the workpad comment on this Linear issue.
-**Preferred**: Write the workpad content to a local `workpad.md` file and call `sync_workpad` with `issue_id` and `file_path`. Save the returned `comment_id` for future updates.
-**Fallback** (if `sync_workpad` is unavailable): Use the `linear` CLI:
+**Preferred**: Write the workpad content to a local `workpad.md` file and call the injected `sync_workpad` tool with `issue_id` and `file_path`. Save the returned `comment_id` for future updates.
+**Fallback** (if `sync_workpad` is unavailable): Use `linear_graphql` with GraphQL variables to search for an existing workpad comment and call `commentCreate` or `commentUpdate`. If shell CLI access is available, `linear-pp-cli` may do the file-backed write after `linear_graphql` gives you the existing comment UUID:
 ```bash
-# Check for existing workpad comment
-linear issue comment list {{ issue.identifier }} --json
-# Create new comment (if no workpad exists)
-linear issue comment add {{ issue.identifier }} --body-file workpad.md
-# Update existing comment (commentId is a UUID from the list output)
-linear issue comment update <COMMENT_UUID> --body-file workpad.md
+# If no existing workpad comment was found:
+linear-pp-cli comments add --issue {{ issue.identifier }} --body-file workpad.md --agent
+# If an existing workpad comment was found:
+linear-pp-cli comments edit <COMMENT_UUID> --body-file workpad.md --agent
 ```
-Note: `comment add` and `comment list` take the issue identifier (e.g. {{ issue.identifier }}). `comment update` takes a comment UUID.
+Do not use Codex app/connector MCP tools for Linear comments or documents in headless runs; they can request interactive elicitation and block the worker.
 3. Use this template for the workpad body:
    ```
    ## Workpad
@@ -520,13 +518,10 @@ Read ALL comments on this Linear issue starting with `## Review Findings`. These
 
 ### Workpad (implement)
 Update the workpad comment at these milestones during implementation.
-**Preferred**: Edit your local `workpad.md` file and call `sync_workpad` with `issue_id`, `file_path`, and `comment_id` (from the investigate stage).
-**Fallback** (if `sync_workpad` is unavailable): Use the `linear` CLI:
+**Preferred**: Edit your local `workpad.md` file and call the injected `sync_workpad` tool with `issue_id`, `file_path`, and `comment_id` (from the investigate stage).
+**Fallback** (if `sync_workpad` is unavailable): Use `linear_graphql` with GraphQL variables to find the existing `## Workpad` comment and call `commentUpdate`. If shell CLI access is available, `linear-pp-cli` may do the file-backed update after `linear_graphql` gives you the comment UUID:
 ```bash
-# Find existing workpad comment (look for body starting with "## Workpad")
-linear issue comment list {{ issue.identifier }} --json
-# Update it (commentId is a UUID from the list output)
-linear issue comment update <COMMENT_UUID> --body-file workpad.md
+linear-pp-cli comments edit <COMMENT_UUID> --body-file workpad.md --agent
 ```
 3. At each milestone, update the relevant sections:
    - **After starting implementation**: Check off Plan items as you complete them.
@@ -698,11 +693,10 @@ If the PR has merge conflicts (mergeable is "CONFLICTING" or mergeStateStatus in
 
 ### Workpad (merge)
 After merging the PR, update the workpad comment one final time.
-**Preferred**: Edit your local `workpad.md` file and call `sync_workpad` with `issue_id`, `file_path`, and `comment_id`.
-**Fallback** (if `sync_workpad` is unavailable): Use the `linear` CLI:
+**Preferred**: Edit your local `workpad.md` file and call the injected `sync_workpad` tool with `issue_id`, `file_path`, and `comment_id`.
+**Fallback** (if `sync_workpad` is unavailable): Use `linear_graphql` with GraphQL variables to find the existing `## Workpad` comment and call `commentUpdate`. If shell CLI access is available, `linear-pp-cli` may do the file-backed update after `linear_graphql` gives you the comment UUID:
 ```bash
-linear issue comment list {{ issue.identifier }} --json
-linear issue comment update <COMMENT_UUID> --body-file workpad.md
+linear-pp-cli comments edit <COMMENT_UUID> --body-file workpad.md --agent
 ```
 Update the workpad to:
 - Check off all remaining Plan and Acceptance Criteria items.
@@ -722,15 +716,18 @@ You maintain a single persistent `## Workpad` comment on the Linear issue. This 
 **Critical rules:**
 - **Never create multiple workpad comments.** Always search for an existing comment with `## Workpad` in its body before creating a new one.
 - **Update at milestones only** — plan finalized, implementation done, validation complete. Do NOT sync after every minor change.
-- **Prefer `sync_workpad` over raw GraphQL.** Write your workpad content to a local `workpad.md` file, then call `sync_workpad` with `issue_id`, `file_path`, and optionally `comment_id` (returned from the first sync). This keeps the workpad body out of your conversation context and saves tokens.
-- **`linear` CLI fallback** (if `sync_workpad` is unavailable):
+- **Prefer the injected headless tools.** Write your workpad content to a local `workpad.md` file, then call `sync_workpad` with `issue_id`, `file_path`, and optionally `comment_id` (returned from the first sync). This keeps the workpad body out of your conversation context and saves tokens.
+- **Headless-safe fallbacks** (if `sync_workpad` is unavailable):
+  - Use `linear_graphql` with GraphQL variables to search for the existing `## Workpad` comment and call `commentCreate` or `commentUpdate`.
+  - Use `linear-pp-cli comments add/edit --body-file ... --agent` only after you already know whether you are creating or updating.
+  - Do not use the old `linear` CLI or Codex app/connector MCP tools for Linear comments/documents in headless runs.
   ```bash
-  linear issue comment list <ISSUE_KEY> --json      # Find existing workpad comment
-  linear issue comment add <ISSUE_KEY> --body-file workpad.md   # Create new comment
-  linear issue comment update <COMMENT_UUID> --body-file workpad.md  # Update existing
+  # If no existing workpad comment was found:
+  linear-pp-cli comments add --issue <ISSUE_KEY> --body-file workpad.md --agent
+  # If an existing workpad comment was found:
+  linear-pp-cli comments edit <COMMENT_UUID> --body-file workpad.md --agent
   ```
-  Note: `add` and `list` take the issue identifier (e.g. SYMPH-246). `update` takes a comment UUID (from `list --json` output).
-- **Never inline markdown into Linear GraphQL `body:`, `description:`, or `content:` literals.** Use `sync_workpad`, file-backed CLI flags, or GraphQL variables so shell snippets like `$VAR`, `${VAR}`, `$(cmd)`, and backticks stay literal.
+- **Never inline markdown into Linear GraphQL `body:`, `description:`, or `content:` literals.** Use `sync_workpad`, `linear-pp-cli` file flags, or GraphQL variables so shell snippets like `$VAR`, `${VAR}`, `$(cmd)`, and backticks stay literal.
 
 ## Media in Workpads (fileUpload)
 
@@ -763,7 +760,7 @@ curl -X PUT -H "Content-Type: <contentType>" \
 ## Documentation Maintenance
 
 - Put generated markdown docs, plans, handoffs, ADR-style notes, runbooks, and investigation briefs in Linear Docs, not repo-local markdown, unless the issue explicitly asks for checked-in documentation.
-- Use `linear document create/update --content-file <temp-file> --issue {{ issue.identifier }}` for issue-scoped markdown docs.
+- Use `linear-pp-cli documents create/edit --content-file <temp-file> --issue {{ issue.identifier }} --agent` for issue-scoped markdown docs.
 - If a checked-in docs change is explicitly required by the issue, keep it scoped to that requirement and include it in the same PR as the code change.
 - If the markdown names durable follow-up work, search Linear first, then create or update the issue before mentioning it in the doc.
 - Do not update docs/generated/ files; those are auto-generated and will be overwritten.

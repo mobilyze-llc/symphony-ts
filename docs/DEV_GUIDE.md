@@ -332,7 +332,7 @@ hooks:
 
 Every Codex agent run automatically gets a `linear_graphql` tool injected, allowing the agent to read and write Linear directly.
 
-For issue/comment/document body writes, pass markdown through GraphQL variables or use `sync_workpad`.
+For issue/comment/document body writes, pass markdown through GraphQL variables, use `sync_workpad`, or use `linear-pp-cli` file-backed commands such as `comments add/edit --body-file` and `documents create/edit --content-file`. Do not use Codex app/connector MCP tools for Linear writes in headless runs because they can request interactive elicitation.
 Symphony rejects inline `body: "..."`, `description: "..."`, and `content: "..."` literals on Linear write mutations so shell-sensitive snippets such as `$VAR`, `${VAR}`, `$(cmd)`, and backticks remain literal data.
 
 ```graphql

@@ -713,6 +713,18 @@ export class CodexAppServerClient {
         "Codex requested operator input during a turn.",
         ERROR_CODES.codexUserInputRequired,
       );
+      if (responseId !== null) {
+        this.send({
+          id: parsed.id,
+          error: {
+            code: -32000,
+            message: error.message,
+            data: {
+              code: error.code,
+            },
+          },
+        });
+      }
       this.emit({
         event: "turn_input_required",
         sessionId: this.currentTurn?.sessionId ?? null,
@@ -1505,7 +1517,8 @@ function isUserInputRequired(
     const normalized = method.toLowerCase();
     if (
       (normalized.includes("input") && normalized.includes("required")) ||
-      (normalized.includes("user") && normalized.includes("input"))
+      (normalized.includes("user") && normalized.includes("input")) ||
+      normalized.includes("elicitation")
     ) {
       return true;
     }
