@@ -95,6 +95,19 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     }
   });
 
+  it("declares hard-stop budget rails in the shipped self-host template", async () => {
+    const template = await readFile(
+      resolve(
+        import.meta.dirname,
+        "../../pipeline-config/templates/WORKFLOW-template.md",
+      ),
+      "utf8",
+    );
+
+    expect(template).toContain("hard_stops:");
+    expect(template).toContain("max_tokens_per_unit: 200000");
+  });
+
   it("investigate stage contains description and no merge prohibitions", async () => {
     const output = await renderPrompt({
       workflow: { promptTemplate },

@@ -224,6 +224,19 @@ export class AgentRunner {
     let hardStop: HardStopDecision | null = null;
     let previousProgressSignature: string | null = null;
     let repeatedNoProgressTurns = 0;
+    const requestLiveBudgetStop = (decision: HardStopDecision): void => {
+      if (hardStop !== null) {
+        return;
+      }
+
+      hardStop = {
+        ...decision,
+        reason: `${decision.reason} Live token telemetry crossed the budget during an in-flight turn.`,
+      };
+      if (client !== null) {
+        void closeBestEffort(client);
+      }
+    };
 
     try {
       abortController.throwIfAborted({
@@ -301,7 +314,24 @@ export class AgentRunner {
           ? {}
           : { modePolicy: input.modePolicy }),
         onEvent: (event) => {
-          applyCodexEventToSession(liveSession, event);
+          const telemetry = applyCodexEventToSession(liveSession, event);
+          if (event.rateLimits !== undefined) {
+            rateLimits = event.rateLimits;
+          }
+          if (
+            isLiveUsageEvent(event) &&
+            telemetry.totalTokensDelta > 0 &&
+            hardStop === null
+          ) {
+            const liveHardStop = evaluateBudgetHardStop({
+              config: hardStops,
+              turnCount: liveSession.turnCount,
+              totalTokens: liveSession.totalStageTotalTokens,
+            });
+            if (liveHardStop !== null) {
+              requestLiveBudgetStop(liveHardStop);
+            }
+          }
           if (
             event.event === "session_started" &&
             "codexAppServerPid" in event
@@ -354,10 +384,18 @@ export class AgentRunner {
 
         runAttempt.status =
           turnNumber === 1 ? "initializing_session" : "streaming_turn";
-        lastTurn =
-          turnNumber === 1
-            ? await client.startSession({ prompt, title })
-            : await client.continueTurn(prompt, title);
+        lastTurn = null;
+        try {
+          lastTurn =
+            turnNumber === 1
+              ? await client.startSession({ prompt, title })
+              : await client.continueTurn(prompt, title);
+        } catch (error) {
+          if (hardStop !== null) {
+            break;
+          }
+          throw error;
+        }
         rateLimits = lastTurn.rateLimits;
 
         applyCodexEventToSession(liveSession, {
@@ -380,6 +418,9 @@ export class AgentRunner {
         });
 
         // Early exit: agent signaled stage completion or failure
+        if (hardStop !== null) {
+          break;
+        }
         if (lastTurn.message?.trimEnd().endsWith("[STAGE_COMPLETE]")) {
           break;
         }
@@ -684,6 +725,30 @@ function createProgressSignature(issue: Issue, turn: CodexTurnResult): string {
     status: turn.status,
     message: turn.message?.trim() ?? null,
   });
+}
+
+function isLiveUsageEvent(event: CodexClientEvent): boolean {
+  if (event.usage === undefined) {
+    return false;
+  }
+
+  switch (event.event) {
+    case "notification":
+    case "other_message":
+    case "unsupported_tool_call":
+      return true;
+    case "activity_heartbeat":
+    case "approval_auto_approved":
+    case "malformed":
+    case "session_started":
+    case "startup_failed":
+    case "turn_completed":
+    case "turn_failed":
+    case "turn_cancelled":
+    case "turn_ended_with_error":
+    case "turn_input_required":
+      return false;
+  }
 }
 
 function createAgentAbortController(signal: AbortSignal | undefined): {

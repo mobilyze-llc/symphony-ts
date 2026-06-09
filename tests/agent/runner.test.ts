@@ -267,6 +267,167 @@ describe("AgentRunner", () => {
     });
   });
 
+  it("pauses from in-flight token telemetry before the turn resolves", async () => {
+    const root = await createRoot();
+    const prompts: string[] = [];
+    const close = vi.fn().mockResolvedValue(undefined);
+    const continueTurn = vi.fn();
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 20,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+        },
+      },
+      tracker,
+      createCodexClient: (input) => ({
+        async startSession({ prompt }: { prompt: string; title: string }) {
+          prompts.push(prompt);
+          input.onEvent({
+            event: "session_started",
+            timestamp: new Date("2026-03-06T00:00:00.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+          });
+          input.onEvent({
+            event: "notification",
+            timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "live usage update",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+          });
+
+          const error = new Error(
+            "Codex session closed while a turn was running.",
+          ) as Error & { code: string };
+          error.code = ERROR_CODES.codexProtocolError;
+          throw error;
+        },
+        continueTurn,
+        close,
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(close).toHaveBeenCalled();
+    expect(continueTurn).not.toHaveBeenCalled();
+    expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
+    expect(result.turnsCompleted).toBe(1);
+    expect(result.lastTurn).toBeNull();
+    expect(result.hardStop).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "token_budget",
+      totalTokens: 21,
+    });
+    expect(result.hardStop?.reason).toContain("Live token telemetry");
+  });
+
+  it("does not use heartbeat telemetry as the live budget stop trigger", async () => {
+    const root = await createRoot();
+    const prompts: string[] = [];
+    const close = vi.fn().mockResolvedValue(undefined);
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 20,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+        },
+      },
+      tracker,
+      createCodexClient: (input) => ({
+        async startSession({ prompt }: { prompt: string; title: string }) {
+          prompts.push(prompt);
+          input.onEvent({
+            event: "session_started",
+            timestamp: new Date("2026-03-06T00:00:00.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+          });
+          input.onEvent({
+            event: "activity_heartbeat",
+            timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "workspace activity",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+          });
+          expect(close).not.toHaveBeenCalled();
+
+          return {
+            status: "completed" as const,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            sessionId: "thread-1-turn-1",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+            rateLimits: null,
+            message: "turn 1",
+          };
+        },
+        continueTurn: vi.fn(),
+        close,
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(result.hardStop).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "token_budget",
+      totalTokens: 21,
+    });
+    expect(result.hardStop?.reason).not.toContain("Live token telemetry");
+  });
+
   it("lets explicit stage completion win over a same-turn budget ceiling", async () => {
     const root = await createRoot();
     const prompts: string[] = [];
