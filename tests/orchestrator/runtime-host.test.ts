@@ -287,6 +287,143 @@ describe("OrchestratorRuntimeHost", () => {
     expect(tracker.fetchCandidateIssues).toHaveBeenCalledTimes(1);
   });
 
+  it("reports restart safe when the Pipeline queue and runtime lanes are drained", async () => {
+    const tracker = createLinearTrackerForPipelineStatus();
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockResolvedValue([]);
+    vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      agentRunner: new FakeAgentRunner(),
+    });
+
+    const status = await host.getPipelineStatus();
+
+    expect(tracker.fetchIssuesByStates).toHaveBeenCalledWith([
+      "Todo",
+      "In Progress",
+      "In Review",
+    ]);
+    expect(status).toMatchObject({
+      paused: false,
+      issues: [],
+      restart_safety: {
+        restart_safe: true,
+        reason: "drained",
+        running_lane_count: 0,
+        retrying_lane_count: 0,
+        active_issue_count: 0,
+        active_issues: [],
+      },
+    });
+  });
+
+  it("reports restart blocked when active Pipeline issues remain", async () => {
+    const tracker = createLinearTrackerForPipelineStatus();
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockResolvedValue([]);
+    vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([
+      createIssue({
+        id: "2",
+        identifier: "SYMPH-271",
+        title: "Add Pipeline queue drain guard",
+        state: "Todo",
+      }),
+      createIssue({
+        id: "halt",
+        identifier: "SYMPH-200",
+        title: "Pipeline Halt",
+        state: "Todo",
+        labels: ["pipeline-halt"],
+      }),
+    ]);
+
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      agentRunner: new FakeAgentRunner(),
+    });
+
+    const status = await host.getPipelineStatus();
+
+    expect(status.restart_safety).toMatchObject({
+      restart_safe: false,
+      reason: "active_pipeline_issues",
+      running_lane_count: 0,
+      retrying_lane_count: 0,
+      active_issue_count: 1,
+      active_issues: [
+        {
+          identifier: "SYMPH-271",
+          title: "Add Pipeline queue drain guard",
+          state: "Todo",
+        },
+      ],
+    });
+  });
+
+  it("reports restart blocked while a runtime lane is running", async () => {
+    const tracker = createLinearTrackerForPipelineStatus();
+    vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+      createIssue(),
+    ]);
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockResolvedValue([]);
+    vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+    vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+      { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+    ]);
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+    });
+
+    await host.pollOnce();
+
+    const status = await host.getPipelineStatus();
+
+    expect(status.restart_safety).toMatchObject({
+      restart_safe: false,
+      reason: "running_or_retrying_lanes",
+      running_lane_count: 1,
+      retrying_lane_count: 0,
+      active_issue_count: 0,
+    });
+
+    fakeRunner.resolve("1", createNormalResult());
+    await host.waitForIdle();
+  });
+
+  it("fails restart safety closed when Pipeline queue inspection fails", async () => {
+    const tracker = createLinearTrackerForPipelineStatus();
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockResolvedValue([]);
+    vi.spyOn(tracker, "fetchIssuesByStates").mockRejectedValue(
+      new Error("Linear unavailable"),
+    );
+
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      agentRunner: new FakeAgentRunner(),
+    });
+
+    const status = await host.getPipelineStatus();
+
+    expect(status.restart_safety).toMatchObject({
+      restart_safe: false,
+      reason: "queue_status_unavailable",
+      running_lane_count: 0,
+      retrying_lane_count: 0,
+      active_issue_count: 0,
+      active_issues: [],
+      error_message: "Linear unavailable",
+    });
+  });
+
   it("resolves running workspace details from issue id after identifier changes", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
@@ -3674,6 +3811,16 @@ function createTracker(input?: {
   };
 
   return tracker;
+}
+
+function createLinearTrackerForPipelineStatus(): LinearTrackerClient {
+  return new LinearTrackerClient({
+    endpoint: "https://api.linear.app/graphql",
+    apiKey: "token",
+    projectSlug: "pipeline",
+    activeStates: ["Todo", "In Progress", "In Review"],
+    fetchFn: vi.fn(),
+  });
 }
 
 function readDispatcherJournal(workspaceRoot: string): DispatcherRunJournal {

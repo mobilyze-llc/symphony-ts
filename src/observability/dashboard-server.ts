@@ -124,9 +124,32 @@ export interface StopIssueResponse {
   reason: string;
 }
 
+export type PipelineRestartSafetyReason =
+  | "drained"
+  | "active_pipeline_issues"
+  | "running_or_retrying_lanes"
+  | "runtime_and_queue_not_drained"
+  | "queue_status_unavailable";
+
+export interface PipelineRestartSafetyResponse {
+  restart_safe: boolean;
+  reason: PipelineRestartSafetyReason;
+  running_lane_count: number;
+  retrying_lane_count: number;
+  active_issue_count: number;
+  active_issues: Array<{
+    identifier: string;
+    title: string;
+    state: string;
+  }>;
+  guidance: string[];
+  error_message?: string;
+}
+
 export interface PipelineStatusResponse {
   paused: boolean;
   issues: Array<{ identifier: string; title: string }>;
+  restart_safety?: PipelineRestartSafetyResponse;
 }
 
 export interface DashboardServerHost {
