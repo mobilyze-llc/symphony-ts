@@ -327,9 +327,14 @@ if [[ "$TRIVIAL" == true ]]; then
   fi
 
   # Create issue via GraphQL — includes projectId and stateId at creation time
+  # Rich markdown descriptions must cross the shell boundary as file-backed
+  # GraphQL variables so snippets containing $, backticks, or $(...) stay data.
   TRIVIAL_GQL_TMPFILE=$(mktemp)
-  trap 'rm -f "$TRIVIAL_GQL_TMPFILE"' EXIT
+  TRIVIAL_DESC_TMPFILE=""
+  trap 'rm -f "$TRIVIAL_GQL_TMPFILE" ${TRIVIAL_DESC_TMPFILE:+"$TRIVIAL_DESC_TMPFILE"}' EXIT
   if [[ -n "$TRIVIAL_DESC" ]]; then
+    TRIVIAL_DESC_TMPFILE=$(mktemp)
+    printf '%s' "$TRIVIAL_DESC" > "$TRIVIAL_DESC_TMPFILE"
     cat > "$TRIVIAL_GQL_TMPFILE" <<GQLEOF
 mutation(\$title: String!, \$description: String, \$teamId: String!, \$stateId: String!, \$projectId: String!) {
   issueCreate(input: {
@@ -347,7 +352,7 @@ mutation(\$title: String!, \$description: String, \$teamId: String!, \$stateId: 
 GQLEOF
     result=$(run_with_timeout "creating trivial issue (with description)" $LINEAR_CLI api \
       --variable "title=$TRIVIAL_TITLE" \
-      --variable "description=$TRIVIAL_DESC" \
+      --variable "description=@$TRIVIAL_DESC_TMPFILE" \
       --variable "teamId=$TEAM_ID" \
       --variable "stateId=$TODO_STATE_ID" \
       --variable "projectId=$PROJECT_ID" \
@@ -868,7 +873,7 @@ echo "Todo state: ${TODO_STATE_NAME:-<default>} (ID: ${TODO_STATE_ID:-<default>}
 SPEC_TMPFILE=$(mktemp)
 GQL_TMPFILE=""
 trap 'rm -f "$SPEC_TMPFILE" ${GQL_TMPFILE:+"$GQL_TMPFILE"}' EXIT
-echo "$SPEC_CONTENT" > "$SPEC_TMPFILE"
+printf '%s' "$SPEC_CONTENT" > "$SPEC_TMPFILE"
 
 if [[ -n "$UPDATE_ISSUE_ID" ]]; then
   echo ""
@@ -1115,7 +1120,7 @@ for ((k=0; k<TOTAL; k++)); do
   [[ "$linear_priority" -gt 4 ]] && linear_priority=4
 
   # Write sub-issue body to temp file for description
-  echo "$sub_body" > "$SPEC_TMPFILE"
+  printf '%s' "$sub_body" > "$SPEC_TMPFILE"
 
   # Build sub-issue issueCreate mutation via temp file (title/description are user-provided strings)
   # projectId is deliberately OMITTED here — assigned after all relations are in place.
@@ -1302,12 +1307,20 @@ fi
 # Only reached when PARENT_ONLY=false (--parent-only exits earlier)
 
 echo ""
-# Transition parent to Backlog via issueUpdate GraphQL mutation using stateId
+# Transition parent to Backlog via issueUpdate GraphQL mutation using variables.
 GQL_TMPFILE=$(mktemp)
-cat > "$GQL_TMPFILE" <<GQLEOF
-mutation { issueUpdate(id: "${PARENT_ID}", input: { stateId: "${BACKLOG_STATE_ID}" }) { success issue { id } } }
+cat > "$GQL_TMPFILE" <<'GQLEOF'
+mutation($issueId: String!, $stateId: String!) {
+  issueUpdate(id: $issueId, input: { stateId: $stateId }) {
+    success
+    issue { id }
+  }
+}
 GQLEOF
-run_with_timeout "final parent update" $LINEAR_CLI api < "$GQL_TMPFILE" > /dev/null 2>&1 || true
+run_with_timeout "final parent update" $LINEAR_CLI api \
+  --variable "issueId=$PARENT_ID" \
+  --variable "stateId=$BACKLOG_STATE_ID" \
+  < "$GQL_TMPFILE" > /dev/null 2>&1 || true
 rm -f "$GQL_TMPFILE"; GQL_TMPFILE=""
 echo "Parent $PARENT_IDENTIFIER transitioned to Backlog"
 

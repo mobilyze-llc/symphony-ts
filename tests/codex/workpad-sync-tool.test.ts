@@ -87,6 +87,49 @@ describe("createWorkpadSyncDynamicTool", () => {
     expect(body.query).toContain("commentUpdate");
   });
 
+  it("preserves expansion-heavy markdown literally from the workpad file", async () => {
+    const expansionHeavyBody = [
+      "## Workpad",
+      "",
+      "```bash",
+      'echo "$SYMPHONY_INPUT"',
+      "printf '%s\\n' \"${EXPANSION_HEAVY_VALUE}\"",
+      'run-step "$(linear issue view SYMPH-123 --raw)"',
+      "echo `date`",
+      "cat <<'SCRIPT'",
+      'echo "do not expand me now"',
+      "SCRIPT",
+      "```",
+    ].join("\n");
+    await writeFile(workpadPath, expansionHeavyBody);
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          commentUpdate: {
+            success: true,
+          },
+        },
+      }),
+    );
+    const tool = createWorkpadSyncDynamicTool({
+      apiKey: "linear-token",
+      fetchFn,
+    });
+
+    const result = await tool.execute({
+      issue_id: "issue-1",
+      file_path: workpadPath,
+      comment_id: "comment-existing-456",
+    });
+
+    expect(result).toEqual({
+      success: true,
+      comment_id: "comment-existing-456",
+    });
+    const body = JSON.parse(fetchFn.mock.calls[0]![1]?.body as string);
+    expect(body.variables.body).toBe(expansionHeavyBody);
+  });
+
   it("returns file_read_error when file does not exist", async () => {
     const tool = createWorkpadSyncDynamicTool({
       apiKey: "linear-token",
