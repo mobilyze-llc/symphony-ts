@@ -1601,6 +1601,79 @@ describe("decorrelated terminal gates", () => {
     });
   });
 
+  it("replays a production gate pass as the approved continuation after restart", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runJournal: DispatcherRunJournal = [];
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "pass" as const,
+      results: [],
+      comment: "gate passed",
+    }));
+    const tracker = createTracker({
+      candidates: [
+        createIssue({
+          id: "1",
+          identifier: "ISSUE-1",
+          labels: ["mode:thin"],
+          state: "In Progress",
+        }),
+      ],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const firstOrchestrator = createOrchestrator({
+      config,
+      tracker,
+      runEnsembleGate,
+      writeRunJournalEntry: async (entry) => {
+        runJournal.push(entry);
+      },
+    });
+
+    await firstOrchestrator.pollTick();
+    await firstOrchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await firstOrchestrator.onRetryTimer("1");
+    await waitForGateOutcome(firstOrchestrator, "1");
+
+    expect(firstOrchestrator.getState().issueStages["1"]).toBe("done");
+    expect(runJournal).toContainEqual(
+      expect.objectContaining({
+        kind: "gate_result",
+        issueId: "1",
+        metadata: expect.objectContaining({
+          aggregate: "pass",
+          mode: "thin",
+          authoritative: true,
+        }),
+      }),
+    );
+
+    const restartedOrchestrator = createOrchestrator({
+      config,
+      tracker,
+      runJournal,
+      runEnsembleGate,
+    });
+
+    expect(restartedOrchestrator.getState().issueStages["1"]).toBe("done");
+    expect(
+      restartedOrchestrator.getState().decorrelatedGateOutcomes["1"],
+    ).toEqual([
+      expect.objectContaining({
+        mode: "thin",
+        status: "passed",
+        aggregate: "pass",
+        authoritative: true,
+      }),
+    ]);
+
+    const result = await restartedOrchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(runEnsembleGate).toHaveBeenCalledTimes(1);
+    expect(restartedOrchestrator.getState().completed.has("1")).toBe(true);
+    expect(restartedOrchestrator.getState().issueStages["1"]).toBeUndefined();
+  });
+
   it("records a full-mode gate failure and routes the unit back to rework", async () => {
     const config = createImplementThenGateConfigWithReviewers();
     const runEnsembleGate = vi.fn(async () => ({
@@ -1639,6 +1712,97 @@ describe("decorrelated terminal gates", () => {
         reworkTarget: "implement",
       }),
     ]);
+  });
+
+  it("replays max-rework production gate failure as terminal after restart", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runJournal: DispatcherRunJournal = [];
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "fail" as const,
+      results: [],
+      comment: "blocking review finding",
+    }));
+    const tracker = createTracker({
+      candidates: [
+        createIssue({
+          id: "1",
+          identifier: "ISSUE-1",
+          labels: ["mode:full"],
+          state: "In Progress",
+        }),
+      ],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const firstOrchestrator = createOrchestrator({
+      config,
+      tracker,
+      runEnsembleGate,
+      writeRunJournalEntry: async (entry) => {
+        runJournal.push(entry);
+      },
+    });
+
+    await firstOrchestrator.pollTick();
+    await firstOrchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await firstOrchestrator.onRetryTimer("1");
+    await waitForGateOutcomeCount(firstOrchestrator, "1", 1);
+
+    expect(firstOrchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(firstOrchestrator.getState().issueReworkCounts["1"]).toBe(1);
+
+    await firstOrchestrator.onRetryTimer("1");
+    await firstOrchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await firstOrchestrator.onRetryTimer("1");
+    await waitForGateOutcomeCount(firstOrchestrator, "1", 2);
+
+    const beforeRestart = firstOrchestrator.getState();
+    expect(beforeRestart.failed.has("1")).toBe(true);
+    expect(beforeRestart.issueStages["1"]).toBeUndefined();
+    expect(runEnsembleGate).toHaveBeenCalledTimes(2);
+
+    const gateResults = runJournal.filter(
+      (entry) => entry.kind === "gate_result" && entry.operation === "gate",
+    );
+    expect(gateResults).toHaveLength(2);
+    expect(new Set(gateResults.map((entry) => entry.idempotencyKey)).size).toBe(
+      2,
+    );
+    expect(gateResults.at(-1)).toMatchObject({
+      metadata: expect.objectContaining({
+        aggregate: "fail",
+        terminal: true,
+        terminalReason: "max_rework_exceeded",
+        reworkCount: 1,
+      }),
+    });
+
+    const restartedOrchestrator = createOrchestrator({
+      config,
+      tracker,
+      runJournal,
+      runEnsembleGate,
+    });
+
+    expect(restartedOrchestrator.getState().failed.has("1")).toBe(true);
+    expect(restartedOrchestrator.getState().issueStages["1"]).toBeUndefined();
+    expect(
+      restartedOrchestrator.getState().decorrelatedGateOutcomes["1"],
+    ).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        reworkTarget: "implement",
+      }),
+      expect.objectContaining({
+        status: "failed",
+        reworkTarget: null,
+      }),
+    ]);
+
+    const result = await restartedOrchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(restartedOrchestrator.getState().failed.has("1")).toBe(true);
+    expect(runEnsembleGate).toHaveBeenCalledTimes(2);
   });
 
   it("blocks a production gate when the verifier lane matches the worker lane", async () => {
@@ -4327,10 +4491,18 @@ async function waitForGateOutcome(
   orchestrator: OrchestratorCore,
   issueId: string,
 ): Promise<void> {
+  await waitForGateOutcomeCount(orchestrator, issueId, 1);
+}
+
+async function waitForGateOutcomeCount(
+  orchestrator: OrchestratorCore,
+  issueId: string,
+  count: number,
+): Promise<void> {
   for (let attempt = 0; attempt < 10; attempt += 1) {
     if (
-      (orchestrator.getState().decorrelatedGateOutcomes[issueId] ?? []).length >
-      0
+      (orchestrator.getState().decorrelatedGateOutcomes[issueId] ?? [])
+        .length >= count
     ) {
       return;
     }
