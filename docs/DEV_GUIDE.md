@@ -201,6 +201,8 @@ issue to "In Review" and leave a comment summarizing what you did.
 | `hard_stops.premium_budget_pause_ratio` | Early pause threshold as a share of dollar ceiling | `0.8` |
 | `hard_stops.estimated_cost_per_1k_tokens_usd` | Fallback cost estimate for token-only providers | `0.05` |
 | `codex.command` | Shell command to launch Codex | `codex app-server` |
+| `codex.ephemeral_home` | Launch Codex with a temporary `CODEX_HOME` that symlinks only operator auth | `false` |
+| `codex.disable_skills` | With `ephemeral_home`, write a generated `config.toml` that disables discovered Codex skills for the worker | `false` |
 | `codex.approval_policy` | Codex approval policy, passed through to the installed Codex schema | Inherits Codex default |
 | `codex.thread_sandbox` | Thread-level sandbox mode (e.g. `workspace-write`) | `null` |
 | `codex.turn_sandbox_policy` | Per-turn sandbox policy object | `null` |

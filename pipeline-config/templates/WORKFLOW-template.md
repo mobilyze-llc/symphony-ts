@@ -36,7 +36,9 @@ hard_stops:
   estimated_cost_per_1k_tokens_usd: 0.05
 
 codex:
-  command: codex --disable plugins --config 'model_reasoning_effort="low"' app-server
+  command: codex --disable plugins --disable hooks --disable plugin_hooks --config 'model_reasoning_effort="low"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server
+  ephemeral_home: true
+  disable_skills: true
   approval_policy: never
   thread_sandbox: workspace-write
   turn_sandbox_policy:

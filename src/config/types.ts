@@ -66,6 +66,8 @@ export interface WorkflowContinuousFeedbackConfig {
 
 export interface WorkflowCodexConfig {
   command: string;
+  ephemeralHome?: boolean;
+  disableSkills?: boolean;
   approvalPolicy: unknown;
   threadSandbox: unknown;
   turnSandboxPolicy: unknown;

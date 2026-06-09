@@ -15,7 +15,7 @@ const PIPELINE_WORKFLOW_PATH = resolve(
   "../../pipeline-config/WORKFLOW.md",
 );
 const CODEX_LOW_APP_SERVER_COMMAND =
-  "codex --disable plugins --config 'model_reasoning_effort=\"low\"' app-server";
+  "codex --disable plugins --disable hooks --disable plugin_hooks --config 'model_reasoning_effort=\"low\"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server";
 const SHIPPED_CODEX_WORKFLOW_CONFIGS = [
   "../../pipeline-config/WORKFLOW.md",
   "../../pipeline-config/WORKFLOW-staged.md",
@@ -56,6 +56,8 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
   it("uses Codex low effort as the primary workflow runner", () => {
     expect(resolvedConfig.runner).toEqual({ kind: "codex", model: null });
     expect(resolvedConfig.codex.command).toBe(CODEX_LOW_APP_SERVER_COMMAND);
+    expect(resolvedConfig.codex.ephemeralHome).toBe(true);
+    expect(resolvedConfig.codex.disableSkills).toBe(true);
 
     const stages = resolvedConfig.stages;
     expect(stages).not.toBeNull();
@@ -68,11 +70,13 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(resolvedConfig.codex.stallTimeoutMs).toBe(3_600_000);
   });
 
-  it("disables Codex plugins in shipped low-effort workflow configs", async () => {
+  it("uses bare Codex low-effort settings in shipped workflow configs", async () => {
     for (const configPath of SHIPPED_CODEX_WORKFLOW_CONFIGS) {
       const config = await readFile(configPath, "utf8");
 
       expect(config).toContain(`command: ${CODEX_LOW_APP_SERVER_COMMAND}`);
+      expect(config).toContain("ephemeral_home: true");
+      expect(config).toContain("disable_skills: true");
     }
   });
 

@@ -44,6 +44,8 @@ export const DEFAULT_CONTINUOUS_FEEDBACK_ROLE = "continuous-feedback";
 export const DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING = true;
 
 export const DEFAULT_CODEX_COMMAND = "codex app-server";
+export const DEFAULT_CODEX_EPHEMERAL_HOME = false;
+export const DEFAULT_CODEX_DISABLE_SKILLS = false;
 export const DEFAULT_TURN_TIMEOUT_MS = 3_600_000;
 export const DEFAULT_READ_TIMEOUT_MS = 5_000;
 export const DEFAULT_STALL_TIMEOUT_MS = 300_000;
@@ -103,6 +105,8 @@ export const SPEC_DEFAULTS = Object.freeze({
   },
   codex: {
     command: DEFAULT_CODEX_COMMAND,
+    ephemeralHome: DEFAULT_CODEX_EPHEMERAL_HOME,
+    disableSkills: DEFAULT_CODEX_DISABLE_SKILLS,
     turnTimeoutMs: DEFAULT_TURN_TIMEOUT_MS,
     readTimeoutMs: DEFAULT_READ_TIMEOUT_MS,
     stallTimeoutMs: DEFAULT_STALL_TIMEOUT_MS,
