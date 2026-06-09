@@ -925,11 +925,9 @@ export class OrchestratorCore {
     addEndedSessionRuntime(this.state, runningEntry.startedAt, endedAt);
 
     // Classify "abnormal" into a more descriptive outcome for stage records
-    const classifiedOutcome = classifyExitOutcome(
-      input.outcome,
-      runningEntry.turnCount,
-      input.reason,
-    );
+    const classifiedOutcome =
+      input.hardStop?.outcome ??
+      classifyExitOutcome(input.outcome, runningEntry.turnCount, input.reason);
 
     // Append a StageRecord to execution history for this completed stage.
     const stageName = this.state.issueStages[input.issueId];
