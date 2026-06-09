@@ -187,6 +187,16 @@ export async function runHeadlessCouncilGate(
       "No reviewer lanes were configured; review gate failed closed.",
     );
   }
+  const duplicateLaneIds = findDuplicateLaneIds(reviewerLanes);
+  if (duplicateLaneIds.length > 0) {
+    return await fail(
+      "error",
+      {},
+      [],
+      duplicateLaneIds.map((laneId) => `duplicate-reviewer-lane-id:${laneId}`),
+      `Duplicate reviewer lane IDs are not allowed: ${duplicateLaneIds.join(", ")}`,
+    );
+  }
 
   const preflight = await runCommand(
     cmuxSpawnBin,
@@ -319,7 +329,7 @@ export function defaultReviewerLanes(): HeadlessReviewerLaneConfig[] {
       role: "opus-direct-reviewer",
       model: "opus",
       allowedTools:
-        "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git status *),Bash(git ls-files *),Bash(find *),Bash(gh pr view *),Bash(gh pr diff *)",
+        "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git status *),Bash(git ls-files *),Bash(gh pr view *),Bash(gh pr diff *)",
     },
     {
       laneId: "pi-deepseek",
@@ -494,7 +504,7 @@ async function runCodexLeadLane(input: {
   runCommand: CommandRunner;
   env: NodeJS.ProcessEnv;
 }): Promise<HeadlessLaneResult> {
-  const laneId = "codex-xhigh-lead";
+  const laneId = "codex-high-lead";
   const phase = `headless-council-triage-${laneId}`;
   const promptPath = `${input.artifactDir}/${laneId}.prompt.md`;
   const cliJsonPath = `${input.artifactDir}/${laneId}.cli.json`;
@@ -541,7 +551,7 @@ async function runCodexLeadLane(input: {
     laneId,
     agent: "codex",
     role: "codex-lead-triage",
-    model: "codex-extra-high",
+    model: "codex-high",
     independentReviewer: false,
     promptPath,
     cliJsonPath,
@@ -570,6 +580,20 @@ function laneAgentArgs(lane: HeadlessReviewerLaneConfig): string[] {
     "--tools",
     lane.tools ?? "read,grep,find,ls",
   ];
+}
+
+function findDuplicateLaneIds(
+  lanes: readonly HeadlessReviewerLaneConfig[],
+): string[] {
+  const seen = new Set<string>();
+  const duplicates = new Set<string>();
+  for (const lane of lanes) {
+    if (seen.has(lane.laneId)) {
+      duplicates.add(lane.laneId);
+    }
+    seen.add(lane.laneId);
+  }
+  return [...duplicates].sort();
 }
 
 async function parseLaneResult(input: {
@@ -653,6 +677,13 @@ function parseArtifactVerdict(artifact: string): ParsedArtifactVerdict {
         verdict: "fail",
         message:
           "Artifact verdict was PASS but P1/P2 findings sections were not empty.",
+      };
+    }
+    if (artifactSectionHasContent(trimmedArtifact, "Triage")) {
+      return {
+        verdict: "fail",
+        message:
+          "Artifact verdict was PASS but the Triage section was not empty.",
       };
     }
     return { verdict: "pass", message: null };

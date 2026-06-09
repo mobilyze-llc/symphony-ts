@@ -28,7 +28,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.verdict).toBe("pass");
     expect(result.lanes).toHaveLength(3);
     expect(
-      result.lanes.find((lane) => lane.laneId === "codex-xhigh-lead"),
+      result.lanes.find((lane) => lane.laneId === "codex-high-lead"),
     ).toMatchObject({ independentReviewer: false, verdict: "pass" });
     expect(harness.commands).toEqual(
       expect.arrayContaining([
@@ -85,7 +85,7 @@ describe("runHeadlessCouncilGate", () => {
       "headless-council-review-pi-deepseek",
     );
     expect(readFlag(codexCommand.args, "--phase")).toBe(
-      "headless-council-triage-codex-xhigh-lead",
+      "headless-council-triage-codex-high-lead",
     );
 
     const resultJson = await readFile(result.artifactPaths.resultJson, "utf-8");
@@ -310,6 +310,30 @@ describe("runHeadlessCouncilGate", () => {
     expect(harness.commands).toEqual([]);
   });
 
+  it("fails closed when reviewer lane IDs are duplicated", async () => {
+    const harness = await createHarness();
+    const reviewerLanes: HeadlessReviewerLaneConfig[] = [
+      opusLane(),
+      opusLane(),
+    ];
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "duplicate-reviewer-lane-id:claude-opus",
+    );
+    expect(harness.commands).toEqual([]);
+  });
+
   it("fails closed on cmux preflight failure", async () => {
     const harness = await createHarness({
       preflight: { exitCode: 1, stdout: "{}", stderr: "cmux unavailable" },
@@ -517,6 +541,35 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("does not pass when a PASS artifact contains triage findings", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## Triage\nSurviving P2.\n\n## Track\nNone",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "fail",
+      message:
+        "Artifact verdict was PASS but the Triage section was not empty.",
+    });
+  });
+
   it("returns fail when a completed reviewer reports findings", async () => {
     const harness = await createHarness({
       laneBehavior: {
@@ -546,7 +599,7 @@ describe("runHeadlessCouncilGate", () => {
   it("returns fail when Codex lead triage alone reports findings", async () => {
     const harness = await createHarness({
       laneBehavior: {
-        "codex-xhigh-lead": {
+        "codex-high-lead": {
           artifact: "## Verdict\nFINDINGS\n\n## Triage\nSurviving P2.",
         },
       },
@@ -564,7 +617,7 @@ describe("runHeadlessCouncilGate", () => {
 
     expect(result.verdict).toBe("fail");
     expect(
-      result.lanes.find((lane) => lane.laneId === "codex-xhigh-lead"),
+      result.lanes.find((lane) => lane.laneId === "codex-high-lead"),
     ).toMatchObject({
       independentReviewer: false,
       verdict: "fail",
