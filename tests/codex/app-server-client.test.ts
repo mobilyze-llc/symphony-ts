@@ -264,7 +264,9 @@ describe("CodexAppServerClient", () => {
 
   it("sends the required initialize, thread/start, and turn/start policy payloads", async () => {
     const workspace = await createWorkspace();
-    const client = createClient("handshake", workspace, []);
+    const client = createClient("handshake", workspace, [], {
+      threadSandbox: { type: "workspaceWrite" },
+    });
 
     const result = await client.startSession({
       prompt: "Inspect startup payloads",
@@ -272,6 +274,141 @@ describe("CodexAppServerClient", () => {
     });
 
     expect(result.status).toBe("completed");
+
+    await client.close();
+  });
+
+  it("canonicalizes snake_case turn sandbox aliases before sending them", async () => {
+    const workspace = await createWorkspace();
+    const client = createClient("handshake-snake-aliases", workspace, [], {
+      turnSandboxPolicy: {
+        type: "workspace-write",
+        writable_roots: [workspace],
+        network_access: true,
+        exclude_tmpdir_env_var: true,
+        exclude_slash_tmp: true,
+      },
+    });
+
+    const result = await client.startSession({
+      prompt: "Inspect alias normalization",
+      title: "ABC-123: Example",
+    });
+
+    expect(result.status).toBe("completed");
+
+    await client.close();
+  });
+
+  it("rejects per-turn sandbox policy fields in thread sandbox objects", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("happy", workspace, events, {
+      threadSandbox: {
+        type: "workspace-write",
+        networkAccess: true,
+      },
+    });
+
+    await expect(
+      client.startSession({
+        prompt: "Start with an over-specified thread sandbox",
+        title: "ABC-123: Example",
+      }),
+    ).rejects.toMatchObject({
+      name: "CodexAppServerClientError",
+      code: ERROR_CODES.codexProtocolError,
+      message: expect.stringContaining(
+        "thread/start sandbox only accepts a mode",
+      ),
+    } satisfies Partial<CodexAppServerClientError>);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "startup_failed",
+        errorCode: ERROR_CODES.codexProtocolError,
+      } satisfies Partial<CodexClientEvent>),
+    );
+
+    await client.close();
+  });
+
+  it("rejects unknown thread sandbox modes before thread/start", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("happy", workspace, events, {
+      threadSandbox: "workspace-writes",
+    });
+
+    await expect(
+      client.startSession({
+        prompt: "Start with an unknown thread sandbox",
+        title: "ABC-123: Example",
+      }),
+    ).rejects.toMatchObject({
+      name: "CodexAppServerClientError",
+      code: ERROR_CODES.codexProtocolError,
+      message: expect.stringContaining(
+        'Unsupported Codex thread/start sandbox type "workspace-writes"',
+      ),
+    } satisfies Partial<CodexAppServerClientError>);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "startup_failed",
+        errorCode: ERROR_CODES.codexProtocolError,
+      } satisfies Partial<CodexClientEvent>),
+    );
+
+    await client.close();
+  });
+
+  it("rejects unknown turn sandbox policy modes before turn/start", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("happy", workspace, events, {
+      turnSandboxPolicy: {
+        type: "readOnlyy",
+      },
+    });
+
+    await expect(
+      client.startSession({
+        prompt: "Start with an unknown turn sandbox",
+        title: "ABC-123: Example",
+      }),
+    ).rejects.toMatchObject({
+      name: "CodexAppServerClientError",
+      code: ERROR_CODES.codexProtocolError,
+      message: expect.stringContaining(
+        'Unsupported Codex turn/start sandboxPolicy type "readOnlyy"',
+      ),
+    } satisfies Partial<CodexAppServerClientError>);
+
+    expect(events.map((event) => event.event)).not.toContain("session_started");
+
+    await client.close();
+  });
+
+  it("surfaces JSON-RPC response errors from the app-server", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("json-rpc-error", workspace, events);
+
+    await expect(
+      client.startSession({
+        prompt: "Start with a protocol error",
+        title: "ABC-123: Example",
+      }),
+    ).rejects.toMatchObject({
+      name: "CodexAppServerClientError",
+      code: ERROR_CODES.codexProtocolError,
+      message: expect.stringContaining(
+        "Codex app-server turn/start error -32600",
+      ),
+    } satisfies Partial<CodexAppServerClientError>);
+
+    expect(events.map((event) => event.event)).not.toContain("session_started");
 
     await client.close();
   });
@@ -415,6 +552,12 @@ function createClient(
       ConstructorParameters<typeof CodexAppServerClient>[0]["dynamicTools"]
     >;
     command: string;
+    threadSandbox: ConstructorParameters<
+      typeof CodexAppServerClient
+    >[0]["threadSandbox"];
+    turnSandboxPolicy: ConstructorParameters<
+      typeof CodexAppServerClient
+    >[0]["turnSandboxPolicy"];
   }>,
 ): CodexAppServerClient {
   const client = new CodexAppServerClient({
@@ -422,8 +565,8 @@ function createClient(
       overrides?.command ?? `${process.execPath} "${fixturePath}" ${scenario}`,
     cwd: workspace,
     approvalPolicy: "full-auto",
-    threadSandbox: "workspace-write",
-    turnSandboxPolicy: {
+    threadSandbox: overrides?.threadSandbox ?? "workspace-write",
+    turnSandboxPolicy: overrides?.turnSandboxPolicy ?? {
       type: "workspace-write",
     },
     readTimeoutMs: overrides?.readTimeoutMs ?? 750,

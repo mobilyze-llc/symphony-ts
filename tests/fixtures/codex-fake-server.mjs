@@ -3,6 +3,7 @@ import process from "node:process";
 import readline from "node:readline";
 
 const scenario = process.argv[2] ?? "happy";
+const handshakeScenario = scenario.startsWith("handshake");
 const requests = [];
 let turnCount = 0;
 
@@ -33,7 +34,7 @@ async function handleMessage(message) {
       return;
     }
 
-    if (scenario === "handshake") {
+    if (handshakeScenario) {
       assertEqual(
         message.params.clientInfo?.name,
         "symphony-ts",
@@ -75,10 +76,10 @@ async function handleMessage(message) {
         "thread/start must advertise linear_graphql",
       );
     }
-    if (scenario === "handshake") {
+    if (handshakeScenario) {
       assertEqual(
         message.params.approvalPolicy,
-        "full-auto",
+        "never",
         "thread/start must include approvalPolicy",
       );
       assertEqual(
@@ -111,17 +112,80 @@ async function handleMessage(message) {
       "text",
       "turn input must contain a single text item",
     );
-    if (scenario === "handshake") {
+    if (handshakeScenario) {
       assertEqual(
         message.params.approvalPolicy,
-        "full-auto",
+        "never",
         "turn/start must include approvalPolicy",
       );
       assertEqual(
         message.params.sandboxPolicy?.type,
-        "workspace-write",
+        "workspaceWrite",
         "turn/start must include per-turn sandbox policy",
       );
+      assertEqual(
+        Array.isArray(message.params.sandboxPolicy?.writableRoots),
+        true,
+        "turn/start workspace sandbox must include writableRoots",
+      );
+      assertEqual(
+        message.params.sandboxPolicy?.networkAccess,
+        scenario === "handshake-snake-aliases",
+        "turn/start workspace sandbox must include networkAccess",
+      );
+      if (scenario === "handshake-snake-aliases") {
+        assertEqual(
+          message.params.sandboxPolicy?.writableRoots?.[0],
+          message.params.cwd,
+          "turn/start workspace sandbox must canonicalize writableRoots",
+        );
+        assertEqual(
+          message.params.sandboxPolicy?.networkAccess,
+          true,
+          "turn/start workspace sandbox must canonicalize networkAccess",
+        );
+        assertEqual(
+          message.params.sandboxPolicy?.excludeTmpdirEnvVar,
+          true,
+          "turn/start workspace sandbox must canonicalize excludeTmpdirEnvVar",
+        );
+        assertEqual(
+          message.params.sandboxPolicy?.excludeSlashTmp,
+          true,
+          "turn/start workspace sandbox must canonicalize excludeSlashTmp",
+        );
+        assertEqual(
+          "writable_roots" in message.params.sandboxPolicy,
+          false,
+          "turn/start workspace sandbox must strip writable_roots",
+        );
+        assertEqual(
+          "network_access" in message.params.sandboxPolicy,
+          false,
+          "turn/start workspace sandbox must strip network_access",
+        );
+        assertEqual(
+          "exclude_tmpdir_env_var" in message.params.sandboxPolicy,
+          false,
+          "turn/start workspace sandbox must strip exclude_tmpdir_env_var",
+        );
+        assertEqual(
+          "exclude_slash_tmp" in message.params.sandboxPolicy,
+          false,
+          "turn/start workspace sandbox must strip exclude_slash_tmp",
+        );
+      }
+    }
+
+    if (scenario === "json-rpc-error") {
+      writeJson({
+        id: message.id,
+        error: {
+          code: -32600,
+          message: "Invalid request: unknown variant `workspace-write`",
+        },
+      });
+      return;
     }
 
     writeJson({
