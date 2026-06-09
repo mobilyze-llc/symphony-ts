@@ -2048,6 +2048,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       return;
     }
 
+    if (state.resumeRequired.has(execution.issueId)) {
+      return;
+    }
+
     // Infra error — abnormal exit with 0 turns (agent never started)
     if (input.outcome === "abnormal" && captured.capturedTurnCount === 0) {
       notifier.notify({

@@ -8,6 +8,7 @@ tracker:
     - In Progress
     - In Review
     - Rework
+    - Resume
   terminal_states:
     - Done
     - Cancelled

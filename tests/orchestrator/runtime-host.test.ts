@@ -3203,6 +3203,80 @@ describe("pipeline notifications", () => {
     });
   });
 
+  it("does not emit issue_failed for an intentional manual stop", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponse = await host.requestIssueStop("ISSUE-1");
+    await host.waitForIdle();
+
+    expect(stopResponse).toMatchObject({
+      stopped: true,
+      reason: "manual_stop",
+    });
+    expect(notifier.events).toEqual([
+      expect.objectContaining({ type: "issue_dispatched" }),
+    ]);
+
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.counts.failed).toBe(0);
+
+    const stillActive = await host.pollOnce();
+    expect(stillActive.dispatchedIssueIds).toEqual([]);
+  });
+
+  it("does not emit issue_failed for a budget hard stop pause", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.resolve("1", {
+      ...createNormalResult(),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250_000,
+        estimatedCostUsd: 3.21,
+      },
+    });
+    await host.waitForIdle();
+
+    expect(notifier.events).toEqual([
+      expect.objectContaining({ type: "issue_dispatched" }),
+    ]);
+
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.counts.failed).toBe(0);
+
+    const stillActive = await host.pollOnce();
+    expect(stillActive.dispatchedIssueIds).toEqual([]);
+  });
+
   it("fires stall_killed when a stall timeout aborts a worker", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();

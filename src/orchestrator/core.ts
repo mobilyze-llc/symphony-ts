@@ -80,6 +80,7 @@ import type { TrackerIssueWriteRequest } from "./tracker-write.js";
 const CONTINUATION_RETRY_DELAY_MS = 1_000;
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
+const EXPLICIT_RESUME_STATE = "resume";
 
 export type WorkerExitOutcome =
   | "normal"
@@ -335,6 +336,17 @@ export class OrchestratorCore {
       }
 
       if (
+        entry.kind === "hard_stop_trigger" &&
+        entry.metadata.status === "completed"
+      ) {
+        this.recoverHardStopTrigger(entry);
+      }
+
+      if (isDispatcherAdmissionEntry(entry)) {
+        this.state.resumeRequired.delete(entry.issueId);
+      }
+
+      if (
         entry.kind === "gate_result" &&
         entry.operation === "gate" &&
         entry.lease?.status === "completed"
@@ -359,6 +371,29 @@ export class OrchestratorCore {
       ) {
         this.state.claimed.add(lease.issueId);
       }
+    }
+  }
+
+  private recoverHardStopTrigger(entry: DispatcherRunJournalEntry): void {
+    const reason =
+      typeof entry.metadata.reason === "string" ? entry.metadata.reason : null;
+    const outcome =
+      typeof entry.metadata.outcome === "string"
+        ? entry.metadata.outcome
+        : null;
+
+    if (reason === "stall_timeout" || reason === "terminal_state") {
+      return;
+    }
+
+    // requestStop records manual/inactive stops in the same journal kind with
+    // StopReason codes; budget and cost hard stops use outcome-bearing entries.
+    if (
+      reason === "manual_stop" ||
+      reason === "inactive_state" ||
+      outcome !== null
+    ) {
+      this.markIssueRequiresExplicitResume(entry.issueId);
     }
   }
 
@@ -491,12 +526,22 @@ export class OrchestratorCore {
       return false;
     }
 
-    // Allow resumed issues: clear completed flag ONLY when a human has
-    // explicitly moved the issue to a resume-designated state ("Resume" or
-    // "Todo").  Issues still in operational states like "In Progress" or
-    // "In Review" stay completed — they haven't been deliberately requeued.
-    // Issues in the escalation state ("Blocked") also stay completed until
-    // a human explicitly moves them.
+    // Stop-like pauses are stricter than ordinary completions/failures:
+    // leaving the issue in Todo should not redispatch it after an operator or
+    // hard-stop policy asked for human review.
+    if (this.state.resumeRequired.has(issue.id)) {
+      if (normalizedState === EXPLICIT_RESUME_STATE) {
+        this.state.completed.delete(issue.id);
+        this.state.failed.delete(issue.id);
+        this.state.resumeRequired.delete(issue.id);
+      } else {
+        return false;
+      }
+    }
+
+    // Allow ordinary completed/failed issues to be rerun from a
+    // resume-designated state ("Resume" or "Todo"). Stop-like pauses are
+    // handled above and require the stricter explicit Resume state.
     if (this.state.completed.has(issue.id) || this.state.failed.has(issue.id)) {
       const resumeStates: ReadonlySet<string> = new Set(["resume", "todo"]);
       if (resumeStates.has(normalizedState)) {
@@ -957,6 +1002,12 @@ export class OrchestratorCore {
         error: null,
         delayType: "continuation",
       });
+    }
+
+    const stopReason = parseStoppedAfterReason(input.reason);
+    if (stopReason === "manual_stop" || stopReason === "inactive_state") {
+      this.markIssueRequiresExplicitResume(input.issueId);
+      return null;
     }
 
     return this.scheduleRetry(
@@ -1896,6 +1947,12 @@ export class OrchestratorCore {
     delete this.state.continuousFeedback[issueId];
   }
 
+  private markIssueRequiresExplicitResume(issueId: string): void {
+    this.state.resumeRequired.add(issueId);
+    this.releaseClaim(issueId);
+    this.clearRetryEntry(issueId);
+  }
+
   private resolveDecorrelatedGateContext(
     issueId: string,
     stageName: string | null,
@@ -2515,11 +2572,11 @@ export class OrchestratorCore {
         turnCount: input.hardStop.turnCount,
         totalTokens: input.hardStop.totalTokens,
         estimatedCostUsd: input.hardStop.estimatedCostUsd,
+        issueState: runningEntry.issue.state,
       },
     });
 
-    this.state.failed.add(issueId);
-    this.releaseClaim(issueId);
+    this.markIssueRequiresExplicitResume(issueId);
 
     const comment = [
       `Hard stop outcome: ${input.hardStop.outcome}`,
@@ -2529,7 +2586,7 @@ export class OrchestratorCore {
       `Total tokens: ${input.hardStop.totalTokens}`,
       `Estimated cost: $${input.hardStop.estimatedCostUsd.toFixed(2)}`,
       "",
-      "The worker has paused instead of continuing silently. Move the issue to Todo or Resume after human review to requeue it.",
+      "The worker has paused instead of continuing silently. Move the issue to Resume after human review to requeue it.",
     ].join("\n");
 
     await this.fireEscalationSideEffects(
@@ -3613,6 +3670,7 @@ export class OrchestratorCore {
       metadata: {
         cleanupWorkspace,
         reason,
+        issueState: runningEntry.issue.state,
       },
     });
 
@@ -3636,6 +3694,7 @@ export class OrchestratorCore {
         metadata: {
           cleanupWorkspace,
           reason,
+          issueState: runningEntry.issue.state,
         },
       });
     }
@@ -4037,6 +4096,39 @@ export function classifyExitOutcome(
     return "timed_out";
   }
   return "error";
+}
+
+function parseStoppedAfterReason(
+  reason: string | undefined,
+): StopReason | null {
+  if (reason === undefined) {
+    return null;
+  }
+
+  const prefix = "stopped after ";
+  if (!reason.startsWith(prefix)) {
+    return null;
+  }
+
+  const rawReason = reason.slice(prefix.length);
+  return isStopReason(rawReason) ? rawReason : null;
+}
+
+function isStopReason(value: string): value is StopReason {
+  return (
+    value === "terminal_state" ||
+    value === "inactive_state" ||
+    value === "stall_timeout" ||
+    value === "manual_stop"
+  );
+}
+
+function isDispatcherAdmissionEntry(entry: DispatcherRunJournalEntry): boolean {
+  return (
+    entry.kind === "admission" &&
+    entry.operation === "dispatcher" &&
+    entry.metadata.status === "started"
+  );
 }
 
 function defaultTimerScheduler(): TimerScheduler {
