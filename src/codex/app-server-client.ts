@@ -30,6 +30,12 @@ const DEFAULT_SYSTEM_SKILL_NAMES = Object.freeze([
   "skill-installer",
 ]);
 
+const EPHEMERAL_CODEX_HOME_PREFIX = "symphony-codex-home-";
+// Ephemeral homes leak when the process dies before close(); runs are bounded
+// well under an hour, so anything this old is orphaned.
+const STALE_EPHEMERAL_CODEX_HOME_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+let staleEphemeralCodexHomeSweepStarted = false;
+
 const DEFAULT_CLIENT_INFO = Object.freeze({
   name: "symphony-ts",
   version: VERSION,
@@ -405,8 +411,9 @@ export class CodexAppServerClient {
     }
 
     await this.cleanupEphemeralCodexHome();
+    this.sweepStaleEphemeralCodexHomesOnce();
     const sourceHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
-    const codexHome = await mkdtemp(join(tmpdir(), "symphony-codex-home-"));
+    const codexHome = await mkdtemp(join(tmpdir(), EPHEMERAL_CODEX_HOME_PREFIX));
     this.ephemeralCodexHome = codexHome;
 
     const sourceAuth = join(sourceHome, "auth.json");
@@ -437,6 +444,26 @@ export class CodexAppServerClient {
       ...process.env,
       CODEX_HOME: codexHome,
     };
+  }
+
+  private sweepStaleEphemeralCodexHomesOnce(): void {
+    if (staleEphemeralCodexHomeSweepStarted) {
+      return;
+    }
+    staleEphemeralCodexHomeSweepStarted = true;
+    // Fire-and-forget: orphan cleanup must never delay or fail a launch.
+    void sweepStaleCodexHomes({
+      root: tmpdir(),
+      maxAgeMs: STALE_EPHEMERAL_CODEX_HOME_MAX_AGE_MS,
+      now: () => Date.now(),
+    }).then((removed) => {
+      if (removed.length > 0) {
+        this.emit({
+          event: "other_message",
+          message: `Removed ${removed.length} stale ephemeral Codex home(s) from ${tmpdir()}.`,
+        });
+      }
+    });
   }
 
   private async cleanupEphemeralCodexHome(): Promise<void> {
@@ -1098,6 +1125,41 @@ async function discoverCodexSkillPaths(input: {
   }
 
   return [...paths].sort();
+}
+
+export async function sweepStaleCodexHomes(input: {
+  root: string;
+  maxAgeMs: number;
+  now: () => number;
+}): Promise<string[]> {
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await readdir(input.root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const removed: string[] = [];
+  for (const entry of entries) {
+    if (
+      !entry.name.startsWith(EPHEMERAL_CODEX_HOME_PREFIX) ||
+      !entry.isDirectory()
+    ) {
+      continue;
+    }
+    const path = join(input.root, entry.name);
+    try {
+      const stats = await stat(path);
+      if (input.now() - stats.mtimeMs <= input.maxAgeMs) {
+        continue;
+      }
+      await rm(path, { recursive: true, force: true });
+      removed.push(path);
+    } catch {
+      // Best-effort: a concurrently removed or unreadable entry is not an error.
+    }
+  }
+  return removed;
 }
 
 async function findSkillFiles(root: string): Promise<string[]> {
