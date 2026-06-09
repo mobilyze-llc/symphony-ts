@@ -2,7 +2,6 @@ import type { WorkflowHardStopsConfig } from "../config/types.js";
 import type { RightSizingMode } from "../domain/model.js";
 
 export type HardStopOutcome =
-  | "DONE"
   | "BLOCKED-needs-human"
   | "STALLED"
   | "PAUSED-budget";

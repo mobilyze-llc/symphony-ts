@@ -365,7 +365,22 @@ describe("orchestrator core", () => {
   });
 
   it("records a hard_stop_trigger journal entry and does not continue a paused unit", async () => {
-    const orchestrator = createOrchestrator();
+    let issueState = "Todo";
+    const config = createConfig();
+    config.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ];
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+    });
 
     await orchestrator.pollTick();
     const retry = await orchestrator.onWorkerExit({
@@ -382,7 +397,8 @@ describe("orchestrator core", () => {
     });
 
     expect(retry).toBeNull();
-    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
     expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
     expect(
       orchestrator
@@ -392,9 +408,166 @@ describe("orchestrator core", () => {
             entry.kind === "hard_stop_trigger" &&
             entry.issueId === "1" &&
             entry.metadata.outcome === "PAUSED-budget" &&
-            entry.metadata.trigger === "premium_spend_near_ceiling",
+            entry.metadata.trigger === "premium_spend_near_ceiling" &&
+            entry.metadata.issueState === "Todo",
         ),
     ).toBe(true);
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("preserves stage continuity while a paused unit waits for explicit Resume", async () => {
+    let issueState = "Todo";
+    const spawnedStageNames: Array<string | null> = [];
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    config.stages = {
+      initialStage: "investigate",
+      fastTrack: null,
+      stages: {
+        investigate: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "implement",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "done",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: "Done",
+        },
+      },
+    };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStageNames.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    expect(spawnedStageNames).toEqual(["investigate"]);
+    const firstDispatchedAt =
+      orchestrator.getState().issueFirstDispatchedAt["1"];
+
+    const continuation = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+    expect(continuation).toMatchObject({
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      delayType: "continuation",
+    });
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().issuePassedStages["1"]).toEqual([
+      "investigate",
+    ]);
+
+    const retryDispatch = await orchestrator.onRetryTimer("1");
+    expect(retryDispatch.dispatched).toBe(true);
+    expect(spawnedStageNames).toEqual(["investigate", "implement"]);
+    orchestrator.getState().issueReworkCounts["1"] = 2;
+
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:02:05.000Z"),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "premium_spend_near_ceiling",
+        reason: "Estimated premium spend is near ceiling.",
+        turnCount: 2,
+        totalTokens: 150_000,
+        estimatedCostUsd: 40,
+      },
+    });
+
+    expect(retry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().issuePassedStages["1"]).toEqual([
+      "investigate",
+    ]);
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(2);
+    expect(orchestrator.getState().issueFirstDispatchedAt["1"]).toBe(
+      firstDispatchedAt,
+    );
+    expect(
+      orchestrator
+        .getState()
+        .issueExecutionHistory["1"]?.map((record) => record.stageName),
+    ).toEqual(["investigate", "implement"]);
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnedStageNames).toEqual([
+      "investigate",
+      "implement",
+      "implement",
+    ]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
   });
 
   it("keeps worker running state when dispatcher lease completion cannot be persisted", async () => {
@@ -452,6 +625,59 @@ describe("orchestrator core", () => {
     });
     expect(timers.scheduled[0]?.delayMs).toBe(10_000);
     expect(computeFailureRetryDelayMs(3, 30_000)).toBe(30_000);
+  });
+
+  it("does not retry or redispatch a manually stopped issue until explicit Resume", async () => {
+    const timers = createFakeTimerScheduler();
+    const stopRunningIssue = vi.fn();
+    let issueState = "Todo";
+    const config = createConfig();
+    config.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ];
+    const orchestrator = createOrchestrator({
+      config,
+      timerScheduler: timers,
+      stopRunningIssue,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+    });
+
+    await orchestrator.pollTick();
+    const stopRequest = await orchestrator.requestStopByIdentifier("ISSUE-1");
+    expect(stopRequest).toMatchObject({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      reason: "manual_stop",
+    });
+    expect(stopRunningIssue).toHaveBeenCalledTimes(1);
+
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: "stopped after manual_stop",
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(timers.scheduled).toEqual([]);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
   });
 
   it("applies codex session events to the running entry and aggregate counters", async () => {
@@ -1204,6 +1430,112 @@ describe("dispatcher run journal restart recovery", () => {
     expect(result.dispatchedIssueIds).toEqual([]);
     expect(spawnWorker).not.toHaveBeenCalled();
     expect(orchestrator.getState().claimed.has("1")).toBe(true);
+  });
+
+  it("restart recovery preserves budget hard-stop pause until explicit Resume", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    let issueState = "Todo";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "hard_stop:1:investigate:initial:token_budget:1",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:investigate:initial:token_budget:1",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            outcome: "PAUSED-budget",
+            trigger: "token_budget",
+            reason: "Token budget exceeded: 300000 >= 200000.",
+            issueState: "Todo",
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("restart recovery does not re-block a hard-stop pause consumed by later dispatch", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["In Progress", "Resume"];
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: "In Progress" }),
+        ],
+      }),
+      spawnWorker,
+      now: () => new Date("2026-03-06T00:10:00.000Z"),
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "hard_stop:1:investigate:initial:token_budget:1",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:investigate:initial:token_budget:1",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            outcome: "PAUSED-budget",
+            trigger: "token_budget",
+            reason: "Token budget exceeded: 300000 >= 200000.",
+            issueState: "Todo",
+          },
+        }),
+        createJournalEntry({
+          sequence: 2,
+          idempotencyKey: "dispatcher:1:no-stage:initial:admission",
+          kind: "admission",
+          operation: "dispatcher",
+          leaseId: "dispatcher:1:no-stage:initial:lease",
+          leaseStatus: "active",
+          expiresAt: "2026-03-06T00:01:00.000Z",
+          metadata: {
+            status: "started",
+            attemptKey: "initial",
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+
+    const result = await orchestrator.pollTick();
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
   });
 
   it("restart recovery avoids duplicate gate side effect after crash during gate", async () => {
@@ -4512,11 +4844,13 @@ async function waitForGateOutcomeCount(
 
 function createTracker(input?: {
   candidates?: Issue[];
+  candidatesFn?: () => Issue[];
   statesById?: IssueStateSnapshot[];
 }): IssueTracker {
   return {
     async fetchCandidateIssues() {
       return (
+        input?.candidatesFn?.() ??
         input?.candidates ?? [createIssue({ id: "1", identifier: "ISSUE-1" })]
       );
     },
@@ -4778,6 +5112,7 @@ function createJournalEntry(input: {
   stage?: string | null;
   expiresAt?: string;
   completedAt?: string | null;
+  metadata?: Record<string, unknown>;
 }): DispatcherRunJournal[number] {
   const stage = input.stage ?? null;
   const completedAt =
@@ -4811,6 +5146,7 @@ function createJournalEntry(input: {
     summary: "journal fixture",
     metadata: {
       status: input.leaseStatus === "active" ? "started" : input.leaseStatus,
+      ...input.metadata,
     },
   };
 }

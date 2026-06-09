@@ -83,6 +83,18 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(primaryConfig.codex.stallTimeoutMs).toBeGreaterThan(1_800_000);
   });
 
+  it("keeps Resume active in shipped workflow configs", async () => {
+    for (const configPath of SHIPPED_CODEX_WORKFLOW_CONFIGS) {
+      const workflowConfig = await loadWorkflowDefinition(configPath);
+      const resolved = resolveWorkflowConfig(workflowConfig, {
+        LINEAR_API_KEY: "test-token",
+        LINEAR_PROJECT_SLUG: "test-project",
+      });
+
+      expect(resolved.tracker.activeStates).toContain("Resume");
+    }
+  });
+
   it("investigate stage contains description and no merge prohibitions", async () => {
     const output = await renderPrompt({
       workflow: { promptTemplate },

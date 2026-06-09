@@ -5,6 +5,7 @@ tracker:
   project_slug: 1fa66498be91
   active_states:
     - Todo
+    - Resume
   terminal_states:
     - Done
     - Cancelled
