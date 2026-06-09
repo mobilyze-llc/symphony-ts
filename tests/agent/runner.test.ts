@@ -134,6 +134,161 @@ describe("AgentRunner", () => {
     expect(result.runAttempt.workspacePath).toBe(join(root, "issue-1"));
   });
 
+  it("fetches the configured base ref before refreshing a reused workspace", async () => {
+    const root = await createRoot();
+    const source = join(root, "source");
+    const bare = join(root, "source.git");
+    const workspacePath = join(root, "issue-1");
+    const originalBaseBranch = process.env.SYMPHONY_BASE_BRANCH;
+    const refreshLogs: Array<{
+      action: string;
+      currentHead: string | null;
+      desiredBase: string | null;
+      previousDesiredBase?: string | null;
+      fetchedBaseRef?: string | null;
+    }> = [];
+
+    try {
+      await mkdir(source);
+      await execFileAsync("git", ["init", "-b", "main", source]);
+      await git(source, ["config", "user.email", "test@example.com"]);
+      await git(source, ["config", "user.name", "Test User"]);
+      await writeFile(join(source, "file.txt"), "old\n");
+      await git(source, ["add", "file.txt"]);
+      await git(source, ["commit", "-m", "old"]);
+      const oldRevision = await git(source, ["rev-parse", "HEAD"]);
+
+      await execFileAsync("git", ["clone", "--bare", source, bare]);
+      await git(bare, ["update-ref", "refs/remotes/origin/main", oldRevision]);
+      await execFileAsync("git", [
+        "-C",
+        bare,
+        "worktree",
+        "add",
+        workspacePath,
+        "-b",
+        "worktree/ABC-123",
+        "main",
+      ]);
+
+      await writeFile(join(source, "file.txt"), "new\n");
+      await git(source, ["commit", "-am", "new"]);
+      const newRevision = await git(source, ["rev-parse", "HEAD"]);
+      process.env.SYMPHONY_BASE_BRANCH = "main";
+
+      const runner = new AgentRunner({
+        config: createConfig(root, "unused"),
+        tracker: createTracker({
+          refreshStates: [
+            { id: "issue-1", identifier: "ABC-123", state: "Done" },
+          ],
+        }),
+        workspaceBaseRefreshLogger: (entry) => {
+          refreshLogs.push(entry);
+        },
+        createCodexClient: (input) =>
+          createStubCodexClient([], input, {
+            statuses: ["completed"],
+          }),
+      });
+
+      const result = await runner.run({
+        issue: ISSUE_FIXTURE,
+        attempt: null,
+      });
+
+      expect(result.workspace.createdNow).toBe(false);
+      expect(await git(workspacePath, ["rev-parse", "HEAD"])).toBe(newRevision);
+      expect(refreshLogs).toContainEqual(
+        expect.objectContaining({
+          action: "reset_hard",
+          currentHead: oldRevision,
+          desiredBase: newRevision,
+          previousDesiredBase: oldRevision,
+          fetchedBaseRef: "main",
+        }),
+      );
+    } finally {
+      if (originalBaseBranch === undefined) {
+        Reflect.deleteProperty(process.env, "SYMPHONY_BASE_BRANCH");
+      } else {
+        process.env.SYMPHONY_BASE_BRANCH = originalBaseBranch;
+      }
+    }
+  });
+
+  it("falls back to a broad fetch when targeted base candidates are absent", async () => {
+    const root = await createRoot();
+    const source = join(root, "source");
+    const bare = join(root, "source.git");
+    const workspacePath = join(root, "issue-1");
+    const originalBaseBranch = process.env.SYMPHONY_BASE_BRANCH;
+    const refreshLogs: Array<{
+      action: string;
+      fetchedBaseRef?: string | null;
+      reason?: string;
+    }> = [];
+
+    try {
+      Reflect.deleteProperty(process.env, "SYMPHONY_BASE_BRANCH");
+      await mkdir(source);
+      await execFileAsync("git", ["init", "-b", "trunk", source]);
+      await git(source, ["config", "user.email", "test@example.com"]);
+      await git(source, ["config", "user.name", "Test User"]);
+      await writeFile(join(source, "file.txt"), "content\n");
+      await git(source, ["add", "file.txt"]);
+      await git(source, ["commit", "-m", "initial"]);
+
+      await execFileAsync("git", ["clone", "--bare", source, bare]);
+      await execFileAsync("git", [
+        "-C",
+        bare,
+        "worktree",
+        "add",
+        workspacePath,
+        "-b",
+        "worktree/ABC-123",
+        "trunk",
+      ]);
+
+      const runner = new AgentRunner({
+        config: createConfig(root, "unused"),
+        tracker: createTracker({
+          refreshStates: [
+            { id: "issue-1", identifier: "ABC-123", state: "Done" },
+          ],
+        }),
+        workspaceBaseRefreshLogger: (entry) => {
+          refreshLogs.push(entry);
+        },
+        createCodexClient: (input) =>
+          createStubCodexClient([], input, {
+            statuses: ["completed"],
+          }),
+      });
+
+      const result = await runner.run({
+        issue: ISSUE_FIXTURE,
+        attempt: null,
+      });
+
+      expect(result.workspace.createdNow).toBe(false);
+      expect(refreshLogs).toContainEqual(
+        expect.objectContaining({
+          action: "no_base_ref",
+          fetchedBaseRef: null,
+          reason: "no_candidate_base_ref_resolved",
+        }),
+      );
+    } finally {
+      if (originalBaseBranch === undefined) {
+        Reflect.deleteProperty(process.env, "SYMPHONY_BASE_BRANCH");
+      } else {
+        process.env.SYMPHONY_BASE_BRANCH = originalBaseBranch;
+      }
+    }
+  });
+
   it("sends the rendered workflow prompt first and continuation guidance afterwards", async () => {
     const root = await createRoot();
     const prompts: string[] = [];

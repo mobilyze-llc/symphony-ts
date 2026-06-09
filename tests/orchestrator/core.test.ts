@@ -5,6 +5,7 @@ import type {
   ReviewerDefinition,
 } from "../../src/config/types.js";
 import type { DispatcherRunJournal, Issue } from "../../src/domain/model.js";
+import { ERROR_CODES } from "../../src/errors/codes.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
@@ -421,6 +422,62 @@ describe("orchestrator core", () => {
     const resumed = await orchestrator.pollTick();
     expect(resumed.dispatchedIssueIds).toEqual(["1"]);
     expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("pauses for headless Codex input-required exits until explicit Resume", async () => {
+    let issueState = "Todo";
+    const comments: string[] = [];
+    const config = createConfig();
+    config.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ];
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: `${ERROR_CODES.codexUserInputRequired}: Codex requested operator input during a turn.`,
+    });
+
+    expect(retry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(comments.at(-1)).toContain(
+      "Headless Codex requested operator input",
+    );
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "operator_input_required" &&
+            entry.issueId === "1" &&
+            entry.metadata.errorCode === ERROR_CODES.codexUserInputRequired,
+        ),
+    ).toBe(true);
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
   });
 
@@ -1468,6 +1525,55 @@ describe("dispatcher run journal restart recovery", () => {
             outcome: "PAUSED-budget",
             trigger: "token_budget",
             reason: "Token budget exceeded: 300000 >= 200000.",
+            issueState: "Todo",
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("restart recovery preserves input-required pause until explicit Resume", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    let issueState = "Todo";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "operator_input_required:1:investigate:initial",
+          kind: "operator_input_required",
+          operation: "dispatcher",
+          leaseId: "operator_input_required:1:investigate:initial",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            reason: `${ERROR_CODES.codexUserInputRequired}: Codex requested operator input during a turn.`,
+            errorCode: ERROR_CODES.codexUserInputRequired,
             issueState: "Todo",
           },
         }),
@@ -5317,6 +5423,22 @@ describe("classifyExitOutcome", () => {
   it("classifies abnormal exit without stall_timeout as error", () => {
     expect(classifyExitOutcome("abnormal", 3, "some error message")).toBe(
       "error",
+    );
+  });
+
+  it("classifies Codex input-required exits as input_required", () => {
+    expect(
+      classifyExitOutcome(
+        "abnormal",
+        2,
+        `${ERROR_CODES.codexUserInputRequired}: Codex requested operator input during a turn.`,
+      ),
+    ).toBe("input_required");
+    expect(classifyExitOutcome("abnormal", 2, "turn_input_required")).toBe(
+      "input_required",
+    );
+    expect(classifyExitOutcome("abnormal", 0, "turn_input_required")).toBe(
+      "input_required",
     );
   });
 

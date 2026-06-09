@@ -186,6 +186,7 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "gate_result",
   "tracker_write",
   "hard_stop_trigger",
+  "operator_input_required",
   "continuous_feedback",
 ] as const;
 
