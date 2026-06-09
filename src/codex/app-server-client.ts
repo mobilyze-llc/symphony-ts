@@ -1,4 +1,17 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { constants, statSync } from "node:fs";
+import {
+  access,
+  mkdtemp,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join, parse } from "node:path";
 
 import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
@@ -8,6 +21,14 @@ import {
   evaluateModePermission,
 } from "../policy/hard-stops.js";
 import { VERSION } from "../version.js";
+
+const DEFAULT_SYSTEM_SKILL_NAMES = Object.freeze([
+  "imagegen",
+  "openai-docs",
+  "plugin-creator",
+  "skill-creator",
+  "skill-installer",
+]);
 
 const DEFAULT_CLIENT_INFO = Object.freeze({
   name: "symphony-ts",
@@ -73,6 +94,8 @@ export interface CodexDynamicTool extends CodexDynamicToolDefinition {
 
 export interface CodexAppServerClientOptions {
   command: string;
+  ephemeralHome?: boolean;
+  disableSkills?: boolean;
   cwd: string;
   approvalPolicy: unknown;
   threadSandbox: unknown;
@@ -148,6 +171,8 @@ export class CodexAppServerClient {
   private startPromise: Promise<void> | null = null;
   private stderrBuffer = "";
   private closed = false;
+  private ephemeralCodexHome: string | null = null;
+  private ephemeralCodexHomeCleanup: Promise<void> | null = null;
 
   constructor(options: CodexAppServerClientOptions) {
     this.options = options;
@@ -211,6 +236,7 @@ export class CodexAppServerClient {
     const child = this.child;
     this.child = null;
     if (child === null) {
+      await this.cleanupEphemeralCodexHome();
       return;
     }
 
@@ -220,6 +246,7 @@ export class CodexAppServerClient {
     }
 
     await waitForChildExit(child);
+    await this.cleanupEphemeralCodexHome();
   }
 
   private async ensureStarted(): Promise<void> {
@@ -242,11 +269,14 @@ export class CodexAppServerClient {
 
   private async spawnAndInitialize(): Promise<void> {
     try {
-      this.child = spawn("bash", ["-lc", this.options.command], {
+      const env = await this.createSpawnEnvironment();
+      this.child = spawn("bash", ["-lc", this.renderSpawnCommand(env)], {
         cwd: this.options.cwd,
+        env,
         stdio: "pipe",
       });
     } catch (error) {
+      await this.cleanupEphemeralCodexHomeBestEffort();
       const wrapped = new CodexAppServerClientError(
         `Failed to launch Codex app-server: ${toErrorMessage(error)}`,
         ERROR_CODES.codexLaunchFailed,
@@ -304,6 +334,12 @@ export class CodexAppServerClient {
         });
       }
       this.child = null;
+      void this.cleanupEphemeralCodexHome().catch((cleanupError) => {
+        this.emit({
+          event: "other_message",
+          message: `Failed to clean up ephemeral Codex home: ${toErrorMessage(cleanupError)}`,
+        });
+      });
     });
 
     try {
@@ -354,6 +390,101 @@ export class CodexAppServerClient {
       });
       await this.close();
       throw wrapped;
+    }
+  }
+
+  private async createSpawnEnvironment(): Promise<NodeJS.ProcessEnv> {
+    if (this.options.ephemeralHome !== true) {
+      if (this.options.disableSkills === true) {
+        throw new CodexAppServerClientError(
+          "codex.disable_skills requires codex.ephemeral_home so Symphony does not mutate the operator Codex config.",
+          ERROR_CODES.codexLaunchFailed,
+        );
+      }
+      return { ...process.env };
+    }
+
+    await this.cleanupEphemeralCodexHome();
+    const sourceHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
+    const codexHome = await mkdtemp(join(tmpdir(), "symphony-codex-home-"));
+    this.ephemeralCodexHome = codexHome;
+
+    const sourceAuth = join(sourceHome, "auth.json");
+    try {
+      await access(sourceAuth, constants.R_OK);
+    } catch (error) {
+      throw new CodexAppServerClientError(
+        `Ephemeral Codex home requested, but no readable auth.json was found at ${sourceAuth}.`,
+        ERROR_CODES.codexLaunchFailed,
+        { cause: error },
+      );
+    }
+    await symlink(sourceAuth, join(codexHome, "auth.json"));
+
+    if (this.options.disableSkills === true) {
+      const skillPaths = await discoverCodexSkillPaths({
+        codexHome,
+        cwd: this.options.cwd,
+        sourceHome,
+      });
+      await writeFile(
+        join(codexHome, "config.toml"),
+        renderDisabledSkillsConfig(skillPaths),
+      );
+    }
+
+    return {
+      ...process.env,
+      CODEX_HOME: codexHome,
+    };
+  }
+
+  private async cleanupEphemeralCodexHome(): Promise<void> {
+    if (this.ephemeralCodexHomeCleanup !== null) {
+      await this.ephemeralCodexHomeCleanup;
+      return;
+    }
+
+    const codexHome = this.ephemeralCodexHome;
+    if (codexHome === null) {
+      return;
+    }
+    this.ephemeralCodexHome = null;
+    const cleanup = rm(codexHome, { recursive: true, force: true }).finally(
+      () => {
+        if (this.ephemeralCodexHomeCleanup === cleanup) {
+          this.ephemeralCodexHomeCleanup = null;
+        }
+      },
+    );
+    this.ephemeralCodexHomeCleanup = cleanup;
+    await cleanup;
+  }
+
+  private renderSpawnCommand(env: NodeJS.ProcessEnv): string {
+    if (this.options.ephemeralHome !== true) {
+      return this.options.command;
+    }
+
+    const codexHome = env.CODEX_HOME;
+    if (codexHome === undefined || codexHome.length === 0) {
+      throw new CodexAppServerClientError(
+        "Ephemeral Codex home requested, but no CODEX_HOME was prepared.",
+        ERROR_CODES.codexLaunchFailed,
+      );
+    }
+
+    return `export CODEX_HOME=${quoteShellString(codexHome)}; ${this.options.command}`;
+  }
+
+  private async cleanupEphemeralCodexHomeBestEffort(): Promise<void> {
+    try {
+      await this.cleanupEphemeralCodexHome();
+    } catch (cleanupError) {
+      this.emit({
+        event: "other_message",
+        message: `Failed to clean up ephemeral Codex home: ${toErrorMessage(cleanupError)}`,
+      });
     }
   }
 
@@ -920,6 +1051,141 @@ export class CodexAppServerClient {
       });
     }
   }
+}
+
+async function discoverCodexSkillPaths(input: {
+  codexHome: string;
+  cwd: string;
+  sourceHome: string;
+}): Promise<string[]> {
+  const paths = new Set<string>();
+  const systemSkillNames = new Set(DEFAULT_SYSTEM_SKILL_NAMES);
+  for (const skillPath of await findSkillFiles(
+    join(input.sourceHome, "skills", ".system"),
+  )) {
+    systemSkillNames.add(basename(dirname(skillPath)));
+  }
+  for (const name of systemSkillNames) {
+    paths.add(join(input.codexHome, "skills", ".system", name, "SKILL.md"));
+  }
+
+  for (const root of [
+    join(homedir(), ".agents", "skills"),
+    join(input.sourceHome, "skills"),
+    "/etc/codex/skills",
+  ]) {
+    for (const skillPath of await findSkillFiles(root)) {
+      paths.add(skillPath);
+    }
+  }
+
+  for (const root of repoSkillRoots(input.cwd)) {
+    for (const skillPath of await findSkillFiles(root)) {
+      paths.add(skillPath);
+    }
+  }
+
+  return [...paths].sort();
+}
+
+async function findSkillFiles(root: string): Promise<string[]> {
+  try {
+    const rootStats = await stat(root);
+    if (!rootStats.isDirectory()) {
+      return [];
+    }
+  } catch {
+    return [];
+  }
+
+  const result: string[] = [];
+  const seenDirectories = new Set<string>();
+  const visit = async (directory: string): Promise<void> => {
+    let canonicalDirectory = directory;
+    try {
+      canonicalDirectory = await realpath(directory);
+    } catch {
+      return;
+    }
+    if (seenDirectories.has(canonicalDirectory)) {
+      return;
+    }
+    seenDirectories.add(canonicalDirectory);
+
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.name === "SKILL.md") {
+        try {
+          result.push(await realpath(path));
+        } catch {
+          result.push(path);
+        }
+        continue;
+      }
+
+      let entryStats: import("node:fs").Stats;
+      try {
+        entryStats = await stat(path);
+      } catch {
+        continue;
+      }
+      if (entryStats.isDirectory()) {
+        await visit(path);
+      }
+    }
+  };
+
+  await visit(root);
+  return result;
+}
+
+function repoSkillRoots(cwd: string): string[] {
+  const roots: string[] = [];
+  const filesystemRoot = parse(cwd).root;
+  let current = cwd;
+  while (true) {
+    roots.push(join(current, ".agents", "skills"));
+    if (current === filesystemRoot) {
+      break;
+    }
+    if (pathExists(join(current, ".git"))) {
+      break;
+    }
+    current = dirname(current);
+  }
+  return roots;
+}
+
+function pathExists(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function renderDisabledSkillsConfig(skillPaths: string[]): string {
+  if (skillPaths.length === 0) {
+    return "";
+  }
+  return `${skillPaths
+    .map(
+      (skillPath) =>
+        `[[skills.config]]\npath = ${JSON.stringify(skillPath)}\nenabled = false\n`,
+    )
+    .join("\n")}\n`;
+}
+
+function quoteShellString(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function parseJsonLine(line: string): JsonObject | null {

@@ -142,6 +142,8 @@ describe("config-resolver", () => {
           },
           codex: {
             command: "codex app-server --stdio",
+            ephemeral_home: "true",
+            disable_skills: "true",
             turn_timeout_ms: "90000",
             read_timeout_ms: "2500",
             stall_timeout_ms: "-1",
@@ -187,6 +189,8 @@ describe("config-resolver", () => {
       estimatedCostPer1kTokensUsd: 0.08,
     });
     expect(resolved.codex.command).toBe("codex app-server --stdio");
+    expect(resolved.codex.ephemeralHome).toBe(true);
+    expect(resolved.codex.disableSkills).toBe(true);
     expect(resolved.codex.turnTimeoutMs).toBe(90_000);
     expect(resolved.codex.readTimeoutMs).toBe(2_500);
     expect(resolved.codex.stallTimeoutMs).toBe(-1);
@@ -498,6 +502,38 @@ describe("config-resolver", () => {
       error: {
         code: ERROR_CODES.unsupportedTrackerKind,
         message: "tracker.kind 'jira' is not supported.",
+      },
+    });
+  });
+
+  it("rejects disabling skills without an ephemeral Codex home during dispatch validation", () => {
+    const validation = validateDispatchConfig(
+      resolveWorkflowConfig(
+        {
+          workflowPath: "/repo/WORKFLOW.md",
+          promptTemplate: "Prompt",
+          config: {
+            tracker: {
+              kind: "linear",
+              api_key: "token",
+              project_slug: "ENG",
+            },
+            codex: {
+              disable_skills: true,
+              ephemeral_home: false,
+            },
+          },
+        },
+        {},
+      ),
+    );
+
+    expect(validation).toEqual({
+      ok: false,
+      error: {
+        code: ERROR_CODES.configInvalid,
+        message:
+          "codex.disable_skills requires codex.ephemeral_home before dispatch.",
       },
     });
   });

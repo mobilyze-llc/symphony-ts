@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_ACTIVE_STATES,
   DEFAULT_CODEX_COMMAND,
+  DEFAULT_CODEX_DISABLE_SKILLS,
+  DEFAULT_CODEX_EPHEMERAL_HOME,
   DEFAULT_HOOK_TIMEOUT_MS,
   DEFAULT_MAX_CONCURRENT_AGENTS,
   DEFAULT_MAX_RETRY_BACKOFF_MS,
@@ -35,6 +37,8 @@ describe("SPEC_DEFAULTS", () => {
     expect(DEFAULT_OBSERVABILITY_REFRESH_MS).toBe(1_000);
     expect(DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS).toBe(16);
     expect(DEFAULT_CODEX_COMMAND).toBe("codex app-server");
+    expect(DEFAULT_CODEX_EPHEMERAL_HOME).toBe(false);
+    expect(DEFAULT_CODEX_DISABLE_SKILLS).toBe(false);
     expect(DEFAULT_ACTIVE_STATES).toEqual([
       "Todo",
       "In Progress",
@@ -55,6 +59,12 @@ describe("SPEC_DEFAULTS", () => {
       DEFAULT_MAX_CONCURRENT_AGENTS,
     );
     expect(SPEC_DEFAULTS.codex.command).toBe(DEFAULT_CODEX_COMMAND);
+    expect(SPEC_DEFAULTS.codex.ephemeralHome).toBe(
+      DEFAULT_CODEX_EPHEMERAL_HOME,
+    );
+    expect(SPEC_DEFAULTS.codex.disableSkills).toBe(
+      DEFAULT_CODEX_DISABLE_SKILLS,
+    );
     expect(SPEC_DEFAULTS.tracker.activeStates).toBe(DEFAULT_ACTIVE_STATES);
     expect(SPEC_DEFAULTS.observability.dashboardEnabled).toBe(
       DEFAULT_OBSERVABILITY_ENABLED,

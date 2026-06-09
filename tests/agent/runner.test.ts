@@ -1568,6 +1568,8 @@ function createConfig(root: string, scenario: string): ResolvedWorkflowConfig {
     },
     codex: {
       command: `${process.execPath} "${fixturePath}" ${scenario}`,
+      ephemeralHome: false,
+      disableSkills: false,
       approvalPolicy: "full-auto",
       threadSandbox: "workspace-write",
       turnSandboxPolicy: {

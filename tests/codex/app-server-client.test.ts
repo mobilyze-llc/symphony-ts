@@ -1,4 +1,12 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -114,6 +122,192 @@ describe("CodexAppServerClient", () => {
     expect(result.status).toBe("completed");
 
     await client.close();
+  });
+
+  it("launches Codex with an ephemeral auth-only CODEX_HOME when configured", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    await mkdir(sourceHome, { recursive: true });
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+
+    const markerPath = join(workspace, "codex-home.txt");
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `printf '%s' "$CODEX_HOME" > ${shellQuote(markerPath)}`,
+        'test -L "$CODEX_HOME/auth.json"',
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} happy`,
+      ].join(" && ");
+      const client = createClient("happy", workspace, events, {
+        command,
+        ephemeralHome: true,
+      });
+
+      const result = await client.startSession({
+        prompt: "Verify ephemeral Codex home",
+        title: "ABC-123: Example",
+      });
+
+      expect(result.status).toBe("completed");
+      const codexHome = (await readFile(markerPath, "utf8")).trim();
+      expect(codexHome).not.toBe(sourceHome);
+      expect(codexHome).toContain("symphony-codex-home-");
+      await client.close();
+      await expect(access(codexHome)).rejects.toThrow();
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("reasserts ephemeral CODEX_HOME after login profiles are loaded", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const profileHome = await createWorkspace();
+    const profileCodexHome = await createWorkspace();
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+    await writeFile(
+      join(profileHome, ".bash_profile"),
+      `export CODEX_HOME=${shellQuote(profileCodexHome)}\n`,
+    );
+
+    const markerPath = join(workspace, "codex-home.txt");
+    const previousCodexHome = process.env.CODEX_HOME;
+    const previousHome = process.env.HOME;
+    process.env.CODEX_HOME = sourceHome;
+    process.env.HOME = profileHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `printf '%s' "$CODEX_HOME" > ${shellQuote(markerPath)}`,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} happy`,
+      ].join(" && ");
+      const client = createClient("happy", workspace, events, {
+        command,
+        ephemeralHome: true,
+      });
+
+      const result = await client.startSession({
+        prompt: "Verify profile CODEX_HOME isolation",
+        title: "ABC-123: Example",
+      });
+
+      expect(result.status).toBe("completed");
+      const codexHome = (await readFile(markerPath, "utf8")).trim();
+      expect(codexHome).not.toBe(sourceHome);
+      expect(codexHome).not.toBe(profileCodexHome);
+      expect(codexHome).toContain("symphony-codex-home-");
+      await client.close();
+      await expect(access(codexHome)).rejects.toThrow();
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+      if (previousHome === undefined) {
+        Reflect.deleteProperty(process.env, "HOME");
+      } else {
+        process.env.HOME = previousHome;
+      }
+    }
+  });
+
+  it("writes a skill-denylist config into the ephemeral CODEX_HOME when configured", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const userSkillRoot = join(sourceHome, "skills", "example");
+    const systemSkillRoot = join(sourceHome, "skills", ".system", "future");
+    await mkdir(userSkillRoot, { recursive: true });
+    await mkdir(systemSkillRoot, { recursive: true });
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+    await writeFile(
+      join(userSkillRoot, "SKILL.md"),
+      "---\nname: example\ndescription: example\n---\n",
+    );
+    await writeFile(
+      join(systemSkillRoot, "SKILL.md"),
+      "---\nname: future\ndescription: future\n---\n",
+    );
+
+    const markerPath = join(workspace, "codex-home.txt");
+    const configPath = join(workspace, "codex-config.toml");
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `printf '%s' "$CODEX_HOME" > ${shellQuote(markerPath)}`,
+        `cp "$CODEX_HOME/config.toml" ${shellQuote(configPath)}`,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} happy`,
+      ].join(" && ");
+      const client = createClient("happy", workspace, events, {
+        command,
+        ephemeralHome: true,
+        disableSkills: true,
+      });
+
+      const result = await client.startSession({
+        prompt: "Verify ephemeral skill config",
+        title: "ABC-123: Example",
+      });
+
+      expect(result.status).toBe("completed");
+      const codexHome = (await readFile(markerPath, "utf8")).trim();
+      const config = await readFile(configPath, "utf8");
+      const skillPath = await realpath(join(userSkillRoot, "SKILL.md"));
+      expect(config).toContain("[[skills.config]]");
+      expect(config).toContain(`path = "${skillPath}"`);
+      expect(config).toContain(
+        `path = "${join(codexHome, "skills", ".system", "openai-docs", "SKILL.md")}"`,
+      );
+      expect(config).toContain(
+        `path = "${join(codexHome, "skills", ".system", "future", "SKILL.md")}"`,
+      );
+      expect(config).toContain("enabled = false");
+      await client.close();
+      await expect(access(codexHome)).rejects.toThrow();
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("fails clearly when ephemeral CODEX_HOME cannot read operator auth", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const client = createClient("happy", workspace, events, {
+        ephemeralHome: true,
+      });
+
+      await expect(
+        client.startSession({
+          prompt: "Verify auth failure",
+          title: "ABC-123: Example",
+        }),
+      ).rejects.toMatchObject({
+        code: ERROR_CODES.codexLaunchFailed,
+        message: expect.stringContaining("no readable auth.json"),
+      });
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
   });
 
   it("denies PR creation approvals when prototype mode cannot open pull requests", async () => {
@@ -647,6 +841,8 @@ function createClient(
       ConstructorParameters<typeof CodexAppServerClient>[0]["dynamicTools"]
     >;
     command: string;
+    ephemeralHome: boolean;
+    disableSkills: boolean;
     threadSandbox: ConstructorParameters<
       typeof CodexAppServerClient
     >[0]["threadSandbox"];
@@ -658,6 +854,12 @@ function createClient(
   const client = new CodexAppServerClient({
     command:
       overrides?.command ?? `${process.execPath} "${fixturePath}" ${scenario}`,
+    ...(overrides?.ephemeralHome === undefined
+      ? {}
+      : { ephemeralHome: overrides.ephemeralHome }),
+    ...(overrides?.disableSkills === undefined
+      ? {}
+      : { disableSkills: overrides.disableSkills }),
     cwd: workspace,
     approvalPolicy: "full-auto",
     threadSandbox: overrides?.threadSandbox ?? "workspace-write",

@@ -743,6 +743,99 @@ describe("orchestrator core", () => {
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
   });
 
+  it("does not record a manual-stop resume guard when the stop lease is already active", async () => {
+    const timers = createFakeTimerScheduler();
+    const stopRunningIssue = vi.fn();
+    const orchestrator = createOrchestrator({
+      timerScheduler: timers,
+      stopRunningIssue,
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().dispatcherLeases[
+      "dispatcher:1:no-stage:initial:hard_stop_manual_stop"
+    ] = {
+      leaseId: "dispatcher:1:no-stage:initial:hard_stop_manual_stop",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      operation: "dispatcher",
+      ownerId: "other-runtime",
+      status: "active",
+      acquiredAt: "2026-03-06T00:00:00.000Z",
+      expiresAt: "2026-03-06T00:10:00.000Z",
+      completedAt: null,
+      stage: null,
+      attempt: null,
+      lastJournalSequence: 1,
+    };
+
+    const stopRequest = await orchestrator.requestStopByIdentifier("ISSUE-1");
+
+    expect(stopRequest).toMatchObject({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      reason: "manual_stop",
+    });
+    expect(stopRunningIssue).not.toHaveBeenCalled();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("does not redispatch a manually stopped issue that was already in Resume", async () => {
+    const timers = createFakeTimerScheduler();
+    const stopRunningIssue = vi.fn();
+    let issueState = "Resume";
+    const config = createConfig();
+    config.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Blocked",
+      "Resume",
+    ];
+    const orchestrator = createOrchestrator({
+      config,
+      timerScheduler: timers,
+      stopRunningIssue,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+    });
+
+    await orchestrator.pollTick();
+    const stopRequest = await orchestrator.requestStopByIdentifier("ISSUE-1");
+    expect(stopRequest).toMatchObject({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      reason: "manual_stop",
+    });
+
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: "worker exited: codex_protocol_error",
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(timers.scheduled).toEqual([]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    const stillResume = await orchestrator.pollTick();
+    expect(stillResume.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    issueState = "Blocked";
+    const blocked = await orchestrator.pollTick();
+    expect(blocked.dispatchedIssueIds).toEqual([]);
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
   it("applies codex session events to the running entry and aggregate counters", async () => {
     const orchestrator = createOrchestrator();
 

@@ -163,6 +163,19 @@ codex:
   # Default: codex app-server
   command: codex app-server
 
+  # Launch Codex with a temporary CODEX_HOME containing only the operator auth
+  # file. Use this for headless workers that should not inherit global hooks,
+  # plugins, or AGENTS.md from the development environment.
+  # Default: false
+  ephemeral_home: false
+
+  # When used with ephemeral_home, write a generated config.toml that disables
+  # discovered Codex skills for the worker process. This removes the advertised
+  # skills inventory from headless worker startup context without touching the
+  # operator's real Codex config.
+  # Default: false
+  disable_skills: false
+
   # Codex approval policy, passed through to the app-server.
   # Common values depend on the installed Codex schema.
   # Example values: never, on-request, on-failure

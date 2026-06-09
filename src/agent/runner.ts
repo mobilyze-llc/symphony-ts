@@ -77,6 +77,8 @@ export interface AgentRunnerCodexClient {
 
 export interface AgentRunnerCodexClientFactoryInput {
   command: string;
+  ephemeralHome: boolean;
+  disableSkills: boolean;
   cwd: string;
   approvalPolicy: unknown;
   threadSandbox: unknown;
@@ -341,6 +343,8 @@ export class AgentRunner {
         : this.createCodexClient;
       client = effectiveClientFactory({
         command: this.config.codex.command,
+        ephemeralHome: this.config.codex.ephemeralHome === true,
+        disableSkills: this.config.codex.disableSkills === true,
         cwd: workspace.path,
         approvalPolicy:
           input.modePolicy?.approvalPolicy ?? this.config.codex.approvalPolicy,
@@ -1103,6 +1107,8 @@ function createDefaultCodexClient(
 ): AgentRunnerCodexClient {
   return new CodexAppServerClient({
     command: input.command,
+    ephemeralHome: input.ephemeralHome,
+    disableSkills: input.disableSkills,
     cwd: input.cwd,
     approvalPolicy: input.approvalPolicy,
     threadSandbox: input.threadSandbox,

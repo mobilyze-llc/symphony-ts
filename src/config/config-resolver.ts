@@ -189,6 +189,8 @@ export function resolveWorkflowConfig(
     },
     codex: {
       command: readString(codex.command) ?? DEFAULT_CODEX_COMMAND,
+      ephemeralHome: readBoolean(codex.ephemeral_home) ?? false,
+      disableSkills: readBoolean(codex.disable_skills) ?? false,
       approvalPolicy: codex.approval_policy,
       threadSandbox: codex.thread_sandbox,
       turnSandboxPolicy: codex.turn_sandbox_policy,
@@ -258,6 +260,16 @@ export function validateDispatchConfig(
     return invalid(
       ERROR_CODES.configInvalid,
       "codex.command must be present and non-empty before dispatch.",
+    );
+  }
+
+  if (
+    config.codex.disableSkills === true &&
+    config.codex.ephemeralHome !== true
+  ) {
+    return invalid(
+      ERROR_CODES.configInvalid,
+      "codex.disable_skills requires codex.ephemeral_home before dispatch.",
     );
   }
 
