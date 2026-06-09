@@ -24,6 +24,7 @@ export * from "./orchestrator/manager-run.js";
 export * from "./orchestrator/right-sizing.js";
 export * from "./orchestrator/runtime-host.js";
 export * from "./orchestrator/supervision.js";
+export * from "./orchestrator/tracker-write.js";
 export * from "./policy/hard-stops.js";
 export * from "./workspace/hooks.js";
 export * from "./tracker/errors.js";

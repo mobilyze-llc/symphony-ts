@@ -23,5 +23,7 @@ export interface IssueTracker {
     title: string;
     projectId: string;
     labelIds: string[];
+    description?: string;
+    parentId?: string;
   }): Promise<{ id: string; identifier: string; title: string }>;
 }

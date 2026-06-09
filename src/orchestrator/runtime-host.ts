@@ -112,6 +112,7 @@ import { runEnsembleGate } from "./gate-handler.js";
 import { reduceManagerRunJournal } from "./manager-run.js";
 import type { PipelineNotificationSink } from "./pipeline-notifier.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
+import { writeTrackerIssueFromBoundary } from "./tracker-write.js";
 
 const DEFAULT_RUNTIME_HARD_STOPS_CONFIG = {
   maxIterations: DEFAULT_HARD_STOP_MAX_ITERATIONS,
@@ -473,6 +474,29 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ),
       requestSupervisionResteer: async (input) => {
         await this.handleSupervisionResteer(input);
+      },
+      requestTrackerIssueWrite: async (input) => {
+        if (!(this.tracker instanceof LinearTrackerClient)) {
+          return;
+        }
+        await writeTrackerIssueFromBoundary({
+          client: this.tracker,
+          request: input,
+          terminalStates: options.config.tracker.terminalStates,
+          now: this.now,
+          onFailure: ({ title, sourceIssueIds, error }) => {
+            void this.logger?.warn(
+              "tracker_follow_up_write_failed",
+              "Failed to create or update dispatcher follow-up issue.",
+              {
+                outcome: "degraded",
+                title,
+                source_issue_ids: sourceIssueIds,
+                reason: error instanceof Error ? error.message : String(error),
+              },
+            );
+          },
+        });
       },
       runEnsembleGate: async ({ issue, stage }) => {
         const workspaceInfo = this.workspaceManager.resolveForIssue(issue.id);
