@@ -557,6 +557,12 @@ describe("orchestrator core", () => {
         .getState()
         .issueExecutionHistory["1"]?.map((record) => record.stageName),
     ).toEqual(["investigate", "implement"]);
+    expect(
+      orchestrator.getState().issueExecutionHistory["1"]?.[1],
+    ).toMatchObject({
+      stageName: "implement",
+      outcome: "PAUSED-budget",
+    });
 
     issueState = "Resume";
     const resumed = await orchestrator.pollTick();

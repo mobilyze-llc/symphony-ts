@@ -1726,20 +1726,54 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       }
     }
 
+    const hardStop = execution.lastResult?.hardStop ?? null;
+    const hardStopFields =
+      hardStop === null
+        ? {}
+        : {
+            hard_stop_outcome: hardStop.outcome,
+            hard_stop_trigger: hardStop.trigger,
+            hard_stop_reason: hardStop.reason,
+            hard_stop_turn_count: hardStop.turnCount,
+            hard_stop_total_tokens: hardStop.totalTokens,
+            hard_stop_estimated_cost_usd: hardStop.estimatedCostUsd,
+          };
+    const exitEvent =
+      hardStop !== null
+        ? "worker_exit_paused"
+        : input.outcome === "normal"
+          ? "worker_exit_normal"
+          : "worker_exit_abnormal";
+    const exitOutcome =
+      hardStop !== null
+        ? "paused"
+        : input.outcome === "normal"
+          ? "completed"
+          : "failed";
+    const exitMessage =
+      hardStop !== null
+        ? "Worker paused by hard stop."
+        : input.outcome === "normal"
+          ? "Worker completed normally."
+          : "Worker completed abnormally.";
+
     await this.logger?.log(
-      input.outcome === "normal" ? "info" : "error",
-      input.outcome === "normal"
-        ? "worker_exit_normal"
-        : "worker_exit_abnormal",
-      input.outcome === "normal"
-        ? "Worker completed normally."
-        : "Worker completed abnormally.",
+      hardStop !== null
+        ? "warn"
+        : input.outcome === "normal"
+          ? "info"
+          : "error",
+      exitEvent,
+      exitMessage,
       {
-        outcome: input.outcome === "normal" ? "completed" : "failed",
-        ...(input.reason === undefined ? {} : { reason: input.reason }),
+        outcome: exitOutcome,
+        ...(input.reason === undefined && hardStop === null
+          ? {}
+          : { reason: input.reason ?? hardStop?.reason }),
         issue_id: execution.issueId,
         issue_identifier: execution.issueIdentifier,
         session_id: execution.lastResult?.liveSession.sessionId ?? null,
+        ...hardStopFields,
       },
     );
 
@@ -1759,40 +1793,55 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         : 0;
 
     const liveSession = execution.lastResult?.liveSession;
-    await this.logger?.log("info", "stage_completed", "Stage completed.", {
-      issue_id: execution.issueId,
-      issue_identifier: execution.issueIdentifier,
-      session_id: liveSession?.sessionId ?? null,
-      stage_name: execution.stageName,
-      input_tokens: liveSession?.codexInputTokens ?? 0,
-      output_tokens: liveSession?.codexOutputTokens ?? 0,
-      total_tokens: liveSession?.codexTotalTokens ?? 0,
-      ...(liveSession?.codexCacheReadTokens
-        ? { cache_read_tokens: liveSession.codexCacheReadTokens }
-        : {}),
-      ...(liveSession?.codexCacheWriteTokens
-        ? { cache_write_tokens: liveSession.codexCacheWriteTokens }
-        : {}),
-      ...(liveSession?.codexNoCacheTokens
-        ? { no_cache_tokens: liveSession.codexNoCacheTokens }
-        : {}),
-      ...(liveSession?.codexReasoningTokens
-        ? { reasoning_tokens: liveSession.codexReasoningTokens }
-        : {}),
-      turns_used: liveSession?.turnCount ?? 0,
-      total_input_tokens: liveSession?.totalStageInputTokens ?? 0,
-      total_output_tokens: liveSession?.totalStageOutputTokens ?? 0,
-      total_total_tokens: liveSession?.totalStageTotalTokens ?? 0,
-      ...(liveSession?.totalStageCacheReadTokens
-        ? { total_cache_read_tokens: liveSession.totalStageCacheReadTokens }
-        : {}),
-      ...(liveSession?.totalStageCacheWriteTokens
-        ? { total_cache_write_tokens: liveSession.totalStageCacheWriteTokens }
-        : {}),
-      turn_count: liveSession?.turnCount ?? 0,
-      duration_ms: durationMs,
-      outcome: input.outcome === "normal" ? "completed" : "failed",
-    });
+    await this.logger?.log(
+      hardStop !== null ? "warn" : "info",
+      "stage_completed",
+      hardStop !== null
+        ? "Stage paused by hard stop."
+        : input.outcome === "normal"
+          ? "Stage completed."
+          : "Stage failed.",
+      {
+        issue_id: execution.issueId,
+        issue_identifier: execution.issueIdentifier,
+        session_id: liveSession?.sessionId ?? null,
+        stage_name: execution.stageName,
+        input_tokens: liveSession?.codexInputTokens ?? 0,
+        output_tokens: liveSession?.codexOutputTokens ?? 0,
+        total_tokens: liveSession?.codexTotalTokens ?? 0,
+        ...(liveSession?.codexCacheReadTokens
+          ? { cache_read_tokens: liveSession.codexCacheReadTokens }
+          : {}),
+        ...(liveSession?.codexCacheWriteTokens
+          ? { cache_write_tokens: liveSession.codexCacheWriteTokens }
+          : {}),
+        ...(liveSession?.codexNoCacheTokens
+          ? { no_cache_tokens: liveSession.codexNoCacheTokens }
+          : {}),
+        ...(liveSession?.codexReasoningTokens
+          ? { reasoning_tokens: liveSession.codexReasoningTokens }
+          : {}),
+        turns_used: liveSession?.turnCount ?? 0,
+        total_input_tokens: liveSession?.totalStageInputTokens ?? 0,
+        total_output_tokens: liveSession?.totalStageOutputTokens ?? 0,
+        total_total_tokens: liveSession?.totalStageTotalTokens ?? 0,
+        ...(liveSession?.totalStageCacheReadTokens
+          ? { total_cache_read_tokens: liveSession.totalStageCacheReadTokens }
+          : {}),
+        ...(liveSession?.totalStageCacheWriteTokens
+          ? { total_cache_write_tokens: liveSession.totalStageCacheWriteTokens }
+          : {}),
+        turn_count: liveSession?.turnCount ?? 0,
+        duration_ms: durationMs,
+        outcome:
+          hardStop !== null
+            ? "paused"
+            : input.outcome === "normal"
+              ? "completed"
+              : "failed",
+        ...hardStopFields,
+      },
+    );
 
     if (execution.stopRequest?.cleanupWorkspace === true) {
       await this.workspaceManager.removeForIssue(execution.issueId);

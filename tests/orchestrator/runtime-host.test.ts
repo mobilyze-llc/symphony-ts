@@ -3416,9 +3416,18 @@ describe("pipeline notifications", () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
     const notifier = createMockNotifier();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
     const host = new OrchestratorRuntimeHost({
       config: createConfig(),
       tracker,
+      logger,
       notifier,
       createAgentRunner: ({ onEvent }) => {
         fakeRunner.onEvent = onEvent;
@@ -3447,6 +3456,26 @@ describe("pipeline notifications", () => {
 
     const snapshot = await host.getRuntimeSnapshot();
     expect(snapshot.counts.failed).toBe(0);
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_exit_paused",
+        level: "warn",
+        outcome: "paused",
+        hard_stop_outcome: "PAUSED-budget",
+        hard_stop_trigger: "token_budget",
+        hard_stop_total_tokens: 250_000,
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "stage_completed",
+        level: "warn",
+        outcome: "paused",
+        hard_stop_outcome: "PAUSED-budget",
+        hard_stop_trigger: "token_budget",
+        hard_stop_total_tokens: 250_000,
+      }),
+    );
 
     const stillActive = await host.pollOnce();
     expect(stillActive.dispatchedIssueIds).toEqual([]);
