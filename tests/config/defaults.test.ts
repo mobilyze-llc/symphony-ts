@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_ACTIVE_STATES,
   DEFAULT_CODEX_COMMAND,
   DEFAULT_HOOK_TIMEOUT_MS,
   DEFAULT_MAX_CONCURRENT_AGENTS,
@@ -34,6 +35,12 @@ describe("SPEC_DEFAULTS", () => {
     expect(DEFAULT_OBSERVABILITY_REFRESH_MS).toBe(1_000);
     expect(DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS).toBe(16);
     expect(DEFAULT_CODEX_COMMAND).toBe("codex app-server");
+    expect(DEFAULT_ACTIVE_STATES).toEqual([
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ]);
   });
 
   it("uses the expected workflow and workspace defaults", () => {
@@ -48,6 +55,7 @@ describe("SPEC_DEFAULTS", () => {
       DEFAULT_MAX_CONCURRENT_AGENTS,
     );
     expect(SPEC_DEFAULTS.codex.command).toBe(DEFAULT_CODEX_COMMAND);
+    expect(SPEC_DEFAULTS.tracker.activeStates).toBe(DEFAULT_ACTIVE_STATES);
     expect(SPEC_DEFAULTS.observability.dashboardEnabled).toBe(
       DEFAULT_OBSERVABILITY_ENABLED,
     );

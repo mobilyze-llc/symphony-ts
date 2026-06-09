@@ -122,16 +122,20 @@ Minimal working example:
 tracker:
   kind: linear
   api_key: $LINEAR_API_KEY
-  project_slug: "your-project-slug"
+  project_slug: $SYMPHONY_LINEAR_PROJECT_SLUG
   active_states:
     - "Todo"
     - "In Progress"
+    - "In Review"
+    - "Resume"
   terminal_states:
     - "Closed"
     - "Cancelled"
     - "Canceled"
     - "Duplicate"
     - "Done"
+
+escalation_state: "Blocked"
 
 polling:
   interval_ms: 30000
@@ -142,6 +146,9 @@ workspace:
 agent:
   max_concurrent_agents: 2
   max_turns: 20
+
+runner:
+  kind: codex
 
 codex:
   command: "codex app-server"
@@ -171,9 +178,10 @@ issue to "In Review" and leave a comment summarizing what you did.
 | `tracker.kind` | Tracker backend. Only `linear` is supported | `linear` |
 | `tracker.endpoint` | GraphQL endpoint for the Linear API | `https://api.linear.app/graphql` |
 | `tracker.api_key` | Linear API key; use `$ENV_VAR` to reference env | Reads `LINEAR_API_KEY` env var |
-| `tracker.project_slug` | Linear project slug — required | None |
-| `tracker.active_states` | Issue states that trigger dispatch | `[Todo, In Progress]` |
+| `tracker.project_slug` | Linear project slug — required; use `$ENV_VAR` for self-host smoke | None |
+| `tracker.active_states` | Issue states that trigger dispatch | `[Todo, In Progress, In Review, Resume]` |
 | `tracker.terminal_states` | States that trigger workspace cleanup | `[Closed, Cancelled, Canceled, Duplicate, Done]` |
+| `escalation_state` | Issue state used when Symphony pauses a work item for manual review; keep it out of `active_states` unless your workflow has an explicit recovery contract | None |
 | `polling.interval_ms` | Poll interval in milliseconds | `30000` |
 | `workspace.root` | Root directory for all workspaces | `<os.tmpdir()>/symphony_workspaces` |
 | `hooks.after_create` | Shell command run after workspace is created | `null` |
@@ -185,6 +193,7 @@ issue to "In Review" and leave a comment summarizing what you did.
 | `agent.max_turns` | Max Codex turns per run | `20` |
 | `agent.max_retry_backoff_ms` | Max retry back-off delay in ms (exponential cap) | `300000` |
 | `agent.max_concurrent_agents_by_state` | Per-state concurrency overrides (map of state → limit) | `{}` |
+| `runner.kind` | Default implementation runner | `codex` |
 | `hard_stops.max_iterations` | Per-unit turn cap before `STALLED` | `20` |
 | `hard_stops.no_progress_turns` | Repeated unchanged turns before `STALLED`; `0` disables | `3` |
 | `hard_stops.max_tokens_per_unit` | Token ceiling before `PAUSED-budget` | `200000` |
@@ -356,6 +365,7 @@ These fields take effect on the next poll tick without restarting Symphony:
 
 **Issues are not being dispatched after startup**
 - Verify `tracker.project_slug` matches exactly (check Linear project URL)
+- For self-host smoke, set `SYMPHONY_LINEAR_PROJECT_SLUG` to an isolated test project slug, not the production project slug
 - Verify `LINEAR_API_KEY` is set and valid
 - Check that the issue's current state matches an entry in `active_states` (comparison is case-insensitive after trim)
 
