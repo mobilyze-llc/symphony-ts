@@ -793,7 +793,62 @@ function artifactSectionHasContent(artifact: string, heading: string): boolean {
 }
 
 function normalizeArtifactStart(artifact: string): string {
-  return artifact.replace(/^(?:\s|\uFEFF)+/u, "");
+  const trimmedArtifact = artifact.replace(/^(?:\s|\uFEFF)+/u, "");
+  if (artifactStartsWithVerdict(trimmedArtifact)) {
+    return trimmedArtifact;
+  }
+
+  const verdictIndex = findFirstArtifactVerdictIndex(trimmedArtifact);
+  if (
+    verdictIndex > 0 &&
+    isPlainTextArtifactPreamble(trimmedArtifact.slice(0, verdictIndex))
+  ) {
+    return trimmedArtifact.slice(verdictIndex).replace(/^(?:\s|\uFEFF)+/u, "");
+  }
+
+  return trimmedArtifact;
+}
+
+function artifactStartsWithVerdict(artifact: string): boolean {
+  return (
+    /^## Verdict\s*\n\s*(PASS|FINDINGS|FAIL)\b/i.test(artifact) ||
+    /^Verdict:\s*(PASS|FINDINGS|FAIL)\b/i.test(artifact)
+  );
+}
+
+function findFirstArtifactVerdictIndex(artifact: string): number {
+  const headingIndex = artifact.search(
+    /^## Verdict\s*\n\s*(PASS|FINDINGS|FAIL)\b/im,
+  );
+  const inlineIndex = artifact.search(/^Verdict:\s*(PASS|FINDINGS|FAIL)\b/im);
+  const indexes = [headingIndex, inlineIndex].filter((index) => index >= 0);
+  return indexes.length === 0 ? -1 : Math.min(...indexes);
+}
+
+function isPlainTextArtifactPreamble(preamble: string): boolean {
+  const trimmed = preamble.replace(/^(?:\s|\uFEFF)+/u, "").trim();
+  if (trimmed === "") {
+    return true;
+  }
+  if (trimmed.length > 500) {
+    return false;
+  }
+
+  const lines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  if (lines.length > 3) {
+    return false;
+  }
+
+  return lines.every(
+    (line) =>
+      !/^(#{1,6}\s|`{3,}|~{3,}|[-*+]\s|\d+[.)]\s|>\s|\|)/.test(line) &&
+      !/\b(DIFF_DATA|BEGIN_SYMPHONY_UNTRUSTED_DIFF|END_SYMPHONY_UNTRUSTED_DIFF|diff --git)\b/.test(
+        line,
+      ),
+  );
 }
 
 function artifactSectionHeadingPattern(heading: string): RegExp {

@@ -617,6 +617,97 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("parses a verdict after a short plain-text preamble", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "I've completed a thorough review of the diff.\n\n## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n\n## Track\nNone",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "pass",
+      message: null,
+    });
+  });
+
+  it("parses a findings verdict after a short plain-text preamble", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "I've completed a thorough review of the diff.\n\n## Verdict\nFINDINGS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\n- Bug\n\n## Track\nNone",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "fail",
+      message: "Reviewer verdict was FINDINGS.",
+    });
+  });
+
+  it("does not skip a markdown section before the verdict", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Review Notes\nLooks good.\n\n## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "fail",
+      message:
+        "Artifact did not start with a parseable Verdict section at the first non-whitespace line.",
+    });
+  });
+
   it("does not pass when a PASS artifact contains a drifted blocking heading", async () => {
     const harness = await createHarness({
       laneBehavior: {
