@@ -369,6 +369,7 @@ export class CodexAppServerClient {
       );
     }
 
+    this.lastUsage = null;
     const response = await this.request("turn/start", {
       threadId: input.threadId,
       input: [
@@ -525,7 +526,7 @@ export class CodexAppServerClient {
           toolName: permissionDenial.toolName,
           message: permissionDenial.reason,
           raw: parsed,
-          ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+          ...optionalTelemetry(usage, rateLimits),
         });
         return;
       }
@@ -544,7 +545,7 @@ export class CodexAppServerClient {
         threadId: this.currentTurn?.threadId ?? this.threadId,
         turnId: this.currentTurn?.turnId ?? null,
         raw: parsed,
-        ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+        ...optionalTelemetry(usage, rateLimits),
       });
       return;
     }
@@ -576,7 +577,7 @@ export class CodexAppServerClient {
         turnId: this.currentTurn?.turnId ?? null,
         toolName,
         raw: parsed,
-        ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+        ...optionalTelemetry(usage, rateLimits),
       });
       return;
     }
@@ -594,7 +595,7 @@ export class CodexAppServerClient {
         errorCode: error.code,
         message: error.message,
         raw: parsed,
-        ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+        ...optionalTelemetry(usage, rateLimits),
       });
       this.finishTurnWithError(error, "turn_ended_with_error");
       return;
@@ -623,7 +624,7 @@ export class CodexAppServerClient {
         turnId: this.currentTurn?.turnId ?? null,
         message: method,
         raw: parsed,
-        ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+        ...optionalTelemetry(usage, rateLimits),
       });
       return;
     }
@@ -634,7 +635,7 @@ export class CodexAppServerClient {
       threadId: this.currentTurn?.threadId ?? this.threadId,
       turnId: this.currentTurn?.turnId ?? null,
       raw: parsed,
-      ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+      ...optionalTelemetry(usage, rateLimits),
     });
   }
 

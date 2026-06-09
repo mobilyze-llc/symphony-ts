@@ -21,7 +21,7 @@ agent:
   max_retry_backoff_ms: 300000
 
 codex:
-  command: codex --config 'model_reasoning_effort="low"' app-server
+  command: codex --disable plugins --config 'model_reasoning_effort="low"' app-server
 
 runner:
   kind: codex
