@@ -111,7 +111,7 @@ Labels: {{ issue.labels | join: ", " }}
 ## Documentation Maintenance
 
 - Put generated markdown docs, plans, handoffs, ADR-style notes, runbooks, and investigation briefs in Linear Docs, not repo-local markdown, unless the issue explicitly asks for checked-in documentation.
-- Use `linear document create/update --content-file <temp-file> --issue {{ issue.identifier }}` for issue-scoped markdown docs.
+- Use `linear-pp-cli documents create/edit --content-file <temp-file> --issue {{ issue.identifier }} --agent` for issue-scoped markdown docs.
 - If a checked-in docs change is explicitly required by the issue, keep it scoped to that requirement and include it in the same PR as the code change.
 - If the markdown names durable follow-up work, search Linear first, then create or update the issue before mentioning it in the doc.
 - Do not update docs/generated/ files; those are auto-generated and will be overwritten.

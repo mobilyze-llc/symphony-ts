@@ -265,7 +265,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
 
     expect(output).toContain("Put generated markdown docs");
     expect(output).toContain("Linear Docs");
-    expect(output).toContain("linear document create/update");
+    expect(output).toContain("linear-pp-cli documents create/edit");
     expect(output).toContain("Do not request sandbox, network");
   });
 });

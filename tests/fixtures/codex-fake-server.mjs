@@ -285,6 +285,35 @@ async function handleMessage(message) {
       return;
     }
 
+    if (scenario === "mcp-elicitation") {
+      setTimeout(() => {
+        writeJson({
+          id: "elicitation-1",
+          method: "mcpServer/elicitation/request",
+          params: {
+            server: "linear",
+            requestId: "elicitation-1",
+            prompt: "Confirm Linear comment write.",
+          },
+        });
+      }, 10);
+      return;
+    }
+
+    if (scenario === "mcp-elicitation-create") {
+      setTimeout(() => {
+        writeJson({
+          id: "elicitation-1",
+          method: "elicitation/create",
+          params: {
+            requestId: "elicitation-1",
+            message: "Confirm Linear comment write.",
+          },
+        });
+      }, 10);
+      return;
+    }
+
     if (turnCount === 1) {
       setTimeout(() => {
         process.stderr.write("diagnostic from stderr\n");
@@ -467,6 +496,16 @@ async function handleMessage(message) {
         },
       });
     }, 10);
+    return;
+  }
+
+  if (message.id === "elicitation-1") {
+    assertEqual(
+      message.error?.data?.code,
+      "codex_user_input_required",
+      "elicitation requests must receive a user-input-required error response",
+    );
+    process.stderr.write(`${scenario} response received\n`);
   }
 }
 
