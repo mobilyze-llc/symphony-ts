@@ -221,7 +221,7 @@ describe("CodexAppServerClient", () => {
     }
   });
 
-  it("writes a skill-denylist config into the ephemeral CODEX_HOME when configured", async () => {
+  it("writes a headless denylist config into the ephemeral CODEX_HOME when configured", async () => {
     const workspace = await createWorkspace();
     const sourceHome = await createWorkspace();
     const userSkillRoot = join(sourceHome, "skills", "example");
@@ -264,6 +264,16 @@ describe("CodexAppServerClient", () => {
       const codexHome = (await readFile(markerPath, "utf8")).trim();
       const config = await readFile(configPath, "utf8");
       const skillPath = await realpath(join(userSkillRoot, "SKILL.md"));
+      expect(config).toContain("project_doc_max_bytes = 0");
+      expect(config).toContain("[features]");
+      expect(config).toContain("apps = false");
+      expect(config).toContain("browser_use = false");
+      expect(config).toContain("codex_hooks = false");
+      expect(config).toContain("computer_use = false");
+      expect(config).toContain("memories = false");
+      expect(config).toContain("multi_agent = false");
+      expect(config).toContain("plugins = false");
+      expect(config).toContain("tool_call_mcp_elicitation = false");
       expect(config).toContain("[[skills.config]]");
       expect(config).toContain(`path = "${skillPath}"`);
       expect(config).toContain(
