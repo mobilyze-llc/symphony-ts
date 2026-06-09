@@ -79,6 +79,7 @@ import {
   type DashboardServerHost,
   type DashboardServerInstance,
   type IssueDetailResponse,
+  type PipelineRestartSafetyResponse,
   type PipelineStatusResponse,
   type RefreshResponse,
   type StopIssueResponse,
@@ -207,6 +208,12 @@ interface WorkerExecution {
 
 /** Maximum ms to wait for idle workers during shutdown before forcing exit. */
 const SHUTDOWN_IDLE_TIMEOUT_MS = 30_000;
+const PIPELINE_HALT_LABEL = "pipeline-halt";
+const PIPELINE_RESTART_GUIDANCE = [
+  "Stage candidate tickets outside Pipeline first.",
+  "Add dependency relations and acceptance criteria before adding the Pipeline project.",
+  "Once tickets enter Pipeline, wait for active Pipeline issues and runtime lanes to drain before restarting Symphony.",
+];
 
 const execFileAsync = promisify(execFile);
 
@@ -1427,17 +1434,19 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   }
 
   async getPipelineStatus(): Promise<PipelineStatusResponse> {
+    const restartSafety = await this.getPipelineRestartSafety();
+
     if (!(this.tracker instanceof LinearTrackerClient)) {
-      return { paused: false, issues: [] };
+      return { paused: false, issues: [], restart_safety: restartSafety };
     }
 
     const tracker = this.tracker as LinearTrackerClient;
     if (tracker.fetchOpenIssuesByLabels === undefined) {
-      return { paused: false, issues: [] };
+      return { paused: false, issues: [], restart_safety: restartSafety };
     }
 
     const haltIssues = await tracker.fetchOpenIssuesByLabels(
-      ["pipeline-halt"],
+      [PIPELINE_HALT_LABEL],
       ["Done", "Cancelled"],
     );
 
@@ -1447,6 +1456,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         identifier: issue.identifier,
         title: issue.title,
       })),
+      restart_safety: restartSafety,
     };
   }
 
@@ -1458,12 +1468,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
 
     if (!(this.tracker instanceof LinearTrackerClient)) {
-      return { paused: false, issues: [] };
+      return status;
     }
 
     const tracker = this.tracker as LinearTrackerClient;
     if (tracker.createIssue === undefined) {
-      return { paused: false, issues: [] };
+      return status;
     }
 
     // TODO(SYMPH-221): resolve teamId, projectId, and haltLabelId from the tracker's
@@ -1483,21 +1493,24 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     return {
       paused: true,
       issues: [{ identifier: created.identifier, title: created.title }],
+      ...(status.restart_safety !== undefined
+        ? { restart_safety: status.restart_safety }
+        : {}),
     };
   }
 
   async requestPipelineResume(): Promise<PipelineStatusResponse> {
     if (!(this.tracker instanceof LinearTrackerClient)) {
-      return { paused: false, issues: [] };
+      return await this.getPipelineStatus();
     }
 
     const tracker = this.tracker as LinearTrackerClient;
     if (tracker.fetchOpenIssuesByLabels === undefined) {
-      return { paused: false, issues: [] };
+      return await this.getPipelineStatus();
     }
 
     const haltIssues = await tracker.fetchOpenIssuesByLabels(
-      ["pipeline-halt"],
+      [PIPELINE_HALT_LABEL],
       ["Done", "Cancelled"],
     );
 
@@ -1506,7 +1519,65 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       await tracker.updateIssueState(issue.id, "Cancelled", teamKey);
     }
 
-    return { paused: false, issues: [] };
+    const status = await this.getPipelineStatus();
+    return {
+      paused: false,
+      issues: [],
+      ...(status.restart_safety !== undefined
+        ? { restart_safety: status.restart_safety }
+        : {}),
+    };
+  }
+
+  private async getPipelineRestartSafety(): Promise<PipelineRestartSafetyResponse> {
+    const state = this.orchestrator.getState();
+    const runningLaneCount = Object.keys(state.running).length;
+    const retryingLaneCount = Object.keys(state.retryAttempts).length;
+
+    let activeIssues: Issue[] = [];
+    let errorMessage: string | null = null;
+    try {
+      activeIssues = await this.tracker.fetchIssuesByStates(
+        this.config.tracker.activeStates,
+      );
+    } catch (error) {
+      errorMessage = toErrorMessage(error);
+    }
+
+    const restartBlockingIssues = activeIssues
+      .filter((issue) => !hasPipelineHaltLabel(issue))
+      .map((issue) => ({
+        identifier: issue.identifier,
+        title: issue.title,
+        state: issue.state,
+      }))
+      .sort((a, b) => a.identifier.localeCompare(b.identifier));
+
+    if (errorMessage !== null) {
+      return {
+        restart_safe: false,
+        reason: "queue_status_unavailable",
+        running_lane_count: runningLaneCount,
+        retrying_lane_count: retryingLaneCount,
+        active_issue_count: 0,
+        active_issues: [],
+        guidance: PIPELINE_RESTART_GUIDANCE,
+        error_message: errorMessage,
+      };
+    }
+
+    const lanesActive = runningLaneCount > 0 || retryingLaneCount > 0;
+    const queueActive = restartBlockingIssues.length > 0;
+
+    return {
+      restart_safe: !lanesActive && !queueActive,
+      reason: getPipelineRestartSafetyReason(lanesActive, queueActive),
+      running_lane_count: runningLaneCount,
+      retrying_lane_count: retryingLaneCount,
+      active_issue_count: restartBlockingIssues.length,
+      active_issues: restartBlockingIssues,
+      guidance: PIPELINE_RESTART_GUIDANCE,
+    };
   }
 
   abortAllWorkers(): number {
@@ -3038,6 +3109,28 @@ function toErrorMessage(error: unknown): string {
   }
 
   return "worker failed";
+}
+
+function hasPipelineHaltLabel(issue: Issue): boolean {
+  return issue.labels.some(
+    (label) => label.trim().toLowerCase() === PIPELINE_HALT_LABEL,
+  );
+}
+
+function getPipelineRestartSafetyReason(
+  lanesActive: boolean,
+  queueActive: boolean,
+): PipelineRestartSafetyResponse["reason"] {
+  if (lanesActive && queueActive) {
+    return "runtime_and_queue_not_drained";
+  }
+  if (lanesActive) {
+    return "running_or_retrying_lanes";
+  }
+  if (queueActive) {
+    return "active_pipeline_issues";
+  }
+  return "drained";
 }
 
 function extractErrorCode(error: unknown): string | null {

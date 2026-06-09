@@ -165,6 +165,56 @@ describe("dashboard pipeline control", () => {
     });
   });
 
+  it("status passes through restart safety details", async () => {
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        getPipelineStatus: () => ({
+          paused: false,
+          issues: [],
+          restart_safety: {
+            restart_safe: false,
+            reason: "active_pipeline_issues",
+            running_lane_count: 0,
+            retrying_lane_count: 0,
+            active_issue_count: 1,
+            active_issues: [
+              {
+                identifier: "SYMPH-271",
+                title: "Add Pipeline queue drain guard",
+                state: "Todo",
+              },
+            ],
+            guidance: ["Add the Pipeline project last."],
+          },
+        }),
+      }),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "GET",
+      path: "/api/v1/pipeline/status",
+    });
+    expect(response.statusCode).toBe(200);
+    const body = JSON.parse(response.body);
+    expect(body.restart_safety).toEqual({
+      restart_safe: false,
+      reason: "active_pipeline_issues",
+      running_lane_count: 0,
+      retrying_lane_count: 0,
+      active_issue_count: 1,
+      active_issues: [
+        {
+          identifier: "SYMPH-271",
+          title: "Add Pipeline queue drain guard",
+          state: "Todo",
+        },
+      ],
+      guidance: ["Add the Pipeline project last."],
+    });
+  });
+
   it("returns 501 when host does not support pause", async () => {
     const server = await startDashboardServer({
       port: 0,
