@@ -178,6 +178,7 @@ export type LoopTraceJournal = LoopTraceEntry[];
 export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "admission",
   "right_sizing",
+  "dispatcher_decision",
   "supervision_finding",
   "re_steer_request",
   "gate_started",
@@ -234,6 +235,97 @@ export interface DispatcherRunJournalEntry {
 }
 
 export type DispatcherRunJournal = DispatcherRunJournalEntry[];
+
+export const DISPATCHER_DECISION_CATEGORIES = [
+  "right_sizing",
+  "admission",
+  "re_steer",
+  "model_routing",
+] as const;
+
+export type DispatcherDecisionCategory =
+  (typeof DISPATCHER_DECISION_CATEGORIES)[number];
+
+export const DISPATCHER_DECISION_CLASSIFICATIONS = [
+  "positive",
+  "negative",
+] as const;
+
+export type DispatcherDecisionClassification =
+  (typeof DISPATCHER_DECISION_CLASSIFICATIONS)[number];
+
+export const DISPATCHER_DECISION_COST_WEIGHTS = [
+  "low",
+  "medium",
+  "high",
+] as const;
+
+export type DispatcherDecisionCostWeight =
+  (typeof DISPATCHER_DECISION_COST_WEIGHTS)[number];
+
+export interface DispatcherDecisionOutcome {
+  decision: string;
+  classification: DispatcherDecisionClassification | null;
+  rationale: string;
+  costWeight: DispatcherDecisionCostWeight | null;
+}
+
+export interface DispatcherDecisionCorrection {
+  outcome: DispatcherDecisionOutcome;
+  source: "operator" | "meta_eval" | "runtime";
+  recordedAt: string;
+  note: string | null;
+}
+
+export interface DispatcherDecisionContext {
+  reason: string;
+  triggerHits: string[];
+  findingKinds: string[];
+  files: string[];
+  workerIds: string[];
+  details: Record<string, unknown>;
+}
+
+export interface DispatcherDecisionEvent {
+  decisionId: string;
+  category: DispatcherDecisionCategory;
+  classifier: string | null;
+  issueId: string;
+  issueIdentifier: string;
+  operation: DispatcherOperation;
+  stage: string | null;
+  attempt: number | null;
+  timestamp: string;
+  context: DispatcherDecisionContext;
+  expectedOutcome: DispatcherDecisionOutcome;
+  observedOutcome: DispatcherDecisionOutcome | null;
+  operatorCorrection: DispatcherDecisionCorrection | null;
+}
+
+export interface DispatcherDecisionQualityBucket {
+  total: number;
+  measured: number;
+  pending: number;
+  exactMatches: number;
+  corrected: number;
+  truePositive: number;
+  falsePositive: number;
+  falseNegative: number;
+  trueNegative: number;
+  unclassified: number;
+  costSensitiveRoutingMisses: number;
+}
+
+export type DispatcherDecisionQualityCategorySummary = Record<
+  DispatcherDecisionCategory,
+  DispatcherDecisionQualityBucket
+>;
+
+export interface DispatcherDecisionQualitySummary
+  extends DispatcherDecisionQualityBucket {
+  latestEventAt: string | null;
+  categories: DispatcherDecisionQualityCategorySummary;
+}
 
 export const MANAGER_RUN_EVENT_TYPES = [
   "manager_run_started",

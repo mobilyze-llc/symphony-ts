@@ -1,0 +1,44 @@
+{
+  "decisionId": "fixture:fn:admission",
+  "category": "admission",
+  "classifier": "deterministic-disjointness-v1",
+  "issueId": "issue-fn",
+  "issueIdentifier": "MOB-FN",
+  "operation": "dispatcher",
+  "stage": "implement",
+  "attempt": null,
+  "timestamp": "2026-06-08T12:10:00.000Z",
+  "context": {
+    "reason": "Dispatch admitted work that later collided.",
+    "triggerHits": [],
+    "findingKinds": [],
+    "files": ["src/shared/runtime.ts"],
+    "workerIds": ["issue-fn"],
+    "details": {
+      "phase": "dispatch"
+    }
+  },
+  "expectedOutcome": {
+    "decision": "admit",
+    "classification": "negative",
+    "rationale": "No deterministic overlap was seen at admission time.",
+    "costWeight": "low"
+  },
+  "observedOutcome": {
+    "decision": "admit",
+    "classification": "negative",
+    "rationale": "Dispatch proceeded as planned.",
+    "costWeight": "low"
+  },
+  "operatorCorrection": {
+    "outcome": {
+      "decision": "pause",
+      "classification": "positive",
+      "rationale": "The later collision means admission should have paused.",
+      "costWeight": "high"
+    },
+    "source": "meta_eval",
+    "recordedAt": "2026-06-08T12:18:00.000Z",
+    "note": "Observed write collision invalidated the admission decision."
+  }
+}
