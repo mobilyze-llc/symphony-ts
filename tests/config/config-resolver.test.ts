@@ -48,7 +48,12 @@ describe("config-resolver", () => {
 
     expect(resolved.tracker.kind).toBe("linear");
     expect(resolved.tracker.endpoint).toBe("https://api.linear.app/graphql");
-    expect(resolved.tracker.activeStates).toEqual(["Todo", "In Progress"]);
+    expect(resolved.tracker.activeStates).toEqual([
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ]);
     expect(resolved.tracker.terminalStates).toEqual([
       "Closed",
       "Cancelled",
@@ -286,6 +291,50 @@ describe("config-resolver", () => {
     );
 
     expect(resolved.tracker.apiKey).toBe("canonical-secret");
+  });
+
+  it("resolves tracker.project_slug from an environment reference", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          tracker: {
+            project_slug: "$SYMPHONY_LINEAR_PROJECT_SLUG",
+          },
+        },
+      },
+      {
+        SYMPHONY_LINEAR_PROJECT_SLUG: "isolated-test-project",
+      },
+    );
+
+    expect(resolved.tracker.projectSlug).toBe("isolated-test-project");
+  });
+
+  it("fails closed when tracker.project_slug references an unset environment variable", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          tracker: {
+            api_key: "token",
+            project_slug: "$SYMPHONY_LINEAR_PROJECT_SLUG",
+          },
+        },
+      },
+      {},
+    );
+
+    expect(resolved.tracker.projectSlug).toBeNull();
+    expect(validateDispatchConfig(resolved)).toEqual({
+      ok: false,
+      error: {
+        code: ERROR_CODES.configInvalid,
+        message: "tracker.project_slug must be configured before dispatch.",
+      },
+    });
   });
 
   it("resolves env-backed workspace roots and expands the home directory", () => {

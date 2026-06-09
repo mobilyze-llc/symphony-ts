@@ -3,7 +3,12 @@ import { join } from "node:path";
 
 export const DEFAULT_LINEAR_ENDPOINT = "https://api.linear.app/graphql";
 export const DEFAULT_TRACKER_KIND = "linear";
-export const DEFAULT_ACTIVE_STATES = ["Todo", "In Progress"] as const;
+export const DEFAULT_ACTIVE_STATES = [
+  "Todo",
+  "In Progress",
+  "In Review",
+  "Resume",
+] as const;
 export const DEFAULT_TERMINAL_STATES = [
   "Closed",
   "Cancelled",

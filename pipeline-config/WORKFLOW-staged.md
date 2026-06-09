@@ -7,7 +7,6 @@ tracker:
     - Todo
     - In Progress
     - In Review
-    - Blocked
     - Resume
   terminal_states:
     - Done

@@ -16,17 +16,24 @@ tracker:
   api_key: $LINEAR_API_KEY
 
   # Linear project slug (the short identifier visible in issue URLs).
-  # Required for dispatch. Example: ENG, MYPROJECT-abc123
-  project_slug: YOUR_PROJECT_SLUG
+  # Required for dispatch. Use $ENV_VAR syntax for self-host smoke so
+  # production project slugs are not baked into repo-local workflows.
+  # Example: $SYMPHONY_LINEAR_PROJECT_SLUG
+  project_slug: $SYMPHONY_LINEAR_PROJECT_SLUG
 
   # Issue states that are eligible for the agent to pick up.
-  # Default: [Todo, In Progress]
-  active_states: [Todo, In Progress]
+  # Default: [Todo, In Progress, In Review, Resume]
+  active_states: [Todo, In Progress, In Review, Resume]
 
   # Issue states that are considered permanently finished.
   # Reaching one of these triggers workspace cleanup.
   # Default: [Closed, Cancelled, Canceled, Duplicate, Done]
   terminal_states: [Closed, Cancelled, Canceled, Duplicate, Done]
+
+# Issue state used when Symphony pauses a work item for manual review.
+# Keep this out of active_states unless your workflow has an explicit
+# Blocked-state recovery contract.
+escalation_state: Blocked
 
 # ============================================================
 # polling — How often Symphony checks for new/changed issues
@@ -89,6 +96,33 @@ agent:
   #     In Review: 2
   # Default: {} (no per-state limits)
   max_concurrent_agents_by_state: {}
+
+# ============================================================
+# runner — Primary implementation lane
+# ============================================================
+runner:
+  # Codex is the default developer runner. Use stage-level overrides for
+  # specialist/review lanes rather than changing the normal implementation lane.
+  # Default: codex
+  kind: codex
+
+# ============================================================
+# continuous_feedback — Cheap inner-loop decorrelated pressure
+# ============================================================
+continuous_feedback:
+  # Continuous feedback is advisory inner-loop pressure, not terminal QA.
+  # Default: true
+  enabled: true
+
+  # Events that trigger feedback. Default: [checkpoint]
+  events: [checkpoint]
+
+  # Default cheap lane. Override per workflow if a different feedback runner is
+  # available, but keep this separate from authoritative terminal review.
+  runner: pi
+  model: local-flash
+  role: continuous-feedback
+  bounce_on_finding: true
 
 # ============================================================
 # hard_stops — Per-unit loop ceilings
@@ -166,6 +200,7 @@ codex:
   # Maximum time in ms a running agent may be silent before being
   # declared stalled and stopped.
   # Default: 300000 (5 min)
+  # Use 900000 for workflows with Claude-bearing or other slow review lanes.
   stall_timeout_ms: 300000
 
 # ============================================================
@@ -204,6 +239,9 @@ Rules:
 2. Keep changes scoped and safe.
 3. Run the test suite before finishing.
 4. Do not add secrets or credentials to the repository.
+5. Open a draft PR for merge-bound work, but do not mark it ready or merge it.
+6. Every PR, including low-risk PRs, requires a decorrelated review artifact before merge.
+7. Keep continuous feedback separate from terminal QA.
 
 If this workflow needs environment variables from the launching shell:
 

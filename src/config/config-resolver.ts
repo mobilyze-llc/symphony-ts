@@ -83,7 +83,10 @@ export function resolveWorkflowConfig(
         resolveEnvReference(readString(tracker.api_key), environment) ??
         environment[LINEAR_CANONICAL_API_KEY_ENV] ??
         null,
-      projectSlug: readString(tracker.project_slug),
+      projectSlug: resolveEnvReference(
+        readString(tracker.project_slug),
+        environment,
+      ),
       activeStates: readStringList(
         tracker.active_states,
         DEFAULT_ACTIVE_STATES,
