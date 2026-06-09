@@ -196,6 +196,81 @@ describe("config-resolver", () => {
     expect(resolved.observability.renderIntervalMs).toBe(33);
   });
 
+  it("resolves path-like hook scripts relative to the workflow file", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/pipeline-config/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          hooks: {
+            after_create: "./hooks/after-create.sh",
+            before_run:
+              "test -x ./hooks/before-run.sh && ./hooks/before-run.sh",
+            after_run: "$AFTER_RUN_HOOK",
+            before_remove: "~/bin/symphony-cleanup",
+          },
+        },
+      },
+      {
+        AFTER_RUN_HOOK: "./hooks/after-run.sh",
+      },
+    );
+
+    expect(resolved.hooks.afterCreate).toBe(
+      join("/repo/pipeline-config", "hooks/after-create.sh"),
+    );
+    expect(resolved.hooks.beforeRun).toBe(
+      "test -x ./hooks/before-run.sh && ./hooks/before-run.sh",
+    );
+    expect(resolved.hooks.afterRun).toBe(
+      join("/repo/pipeline-config", "hooks/after-run.sh"),
+    );
+    expect(resolved.hooks.beforeRemove).toBe(
+      join(homedir(), "bin/symphony-cleanup"),
+    );
+  });
+
+  it("leaves multi-line hook scripts verbatim", () => {
+    const script = [
+      "set -euo pipefail",
+      "test -x ./hooks/before-run.sh",
+      "./hooks/before-run.sh",
+    ].join("\n");
+
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/pipeline-config/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        hooks: {
+          before_run: script,
+        },
+      },
+    });
+
+    expect(resolved.hooks.beforeRun).toBe(script);
+  });
+
+  it("leaves unresolved env-backed hook scripts for the shell", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/pipeline-config/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          hooks: {
+            after_create: "$AFTER_CREATE_HOOK",
+            before_run: "./$PRODUCT/hooks/before-run.sh",
+          },
+        },
+      },
+      {},
+    );
+
+    expect(resolved.hooks.afterCreate).toBe("$AFTER_CREATE_HOOK");
+    expect(resolved.hooks.beforeRun).toBe(
+      join("/repo/pipeline-config", "$PRODUCT/hooks/before-run.sh"),
+    );
+  });
+
   it("projects explicit continuous_feedback event, runner, and model settings", () => {
     const resolved = resolveWorkflowConfig({
       workflowPath: "/repo/WORKFLOW.md",
