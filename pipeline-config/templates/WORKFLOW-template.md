@@ -30,7 +30,7 @@ agent:
 hard_stops:
   max_iterations: 20
   no_progress_turns: 3
-  max_tokens_per_unit: 200000
+  max_tokens_per_unit: 1000000
   max_dollar_budget_usd: 50
   premium_budget_pause_ratio: 0.8
   estimated_cost_per_1k_tokens_usd: 0.05
