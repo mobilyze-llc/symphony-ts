@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * Live Codex probe for the generated disable-skills config (SYMPH-310).
+ * Live Codex probe for the generated headless Codex config.
  *
  * Builds an ephemeral CODEX_HOME through the same code path production uses
  * (prepareDisabledSkillsConfig from dist/), takes the worker `codex.command`
  * from a WORKFLOW.md, swaps the trailing `app-server` subcommand for
  * `debug prompt-input`, and asserts the model-visible prompt contains no
- * advertised skills inventory and no Hindsight memory block.
+ * advertised skills inventory, apps connector block, or Hindsight memory block.
  *
  * Modes:
  *   real   probe against the operator's actual Codex home (skills installed)
@@ -146,6 +146,9 @@ function evaluate(label, result) {
     failures.push(
       "prompt still advertises a skills inventory (`### Available skills`)",
     );
+  }
+  if (/<apps_instructions>|## Apps \(Connectors\)/i.test(stdout)) {
+    failures.push("prompt still advertises apps connector instructions");
   }
   if (/hindsight/i.test(stdout)) {
     failures.push("prompt still contains a Hindsight memory block");

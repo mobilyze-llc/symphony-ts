@@ -1097,16 +1097,16 @@ export class CodexAppServerClient {
 }
 
 /**
- * Render the generated config.toml that disables every Codex skill a worker
- * launch could otherwise discover. Exported so the probe script
- * (scripts/probe-codex-skills.mjs) exercises the exact production path.
+ * Render the generated config.toml that keeps headless Codex launches bare and
+ * disables every Codex skill a worker launch could otherwise discover. Exported
+ * so the probe script exercises the exact production path.
  */
 export async function prepareDisabledSkillsConfig(input: {
   codexHome: string;
   cwd: string;
   sourceHome: string;
 }): Promise<string> {
-  return renderDisabledSkillsConfig(await discoverCodexSkillPaths(input));
+  return renderHeadlessCodexConfig(await discoverCodexSkillPaths(input));
 }
 
 async function discoverCodexSkillPaths(input: {
@@ -1263,16 +1263,30 @@ function pathExists(path: string): boolean {
   }
 }
 
-function renderDisabledSkillsConfig(skillPaths: string[]): string {
-  if (skillPaths.length === 0) {
-    return "";
-  }
-  return `${skillPaths
-    .map(
+function renderHeadlessCodexConfig(skillPaths: string[]): string {
+  const featureConfig = `project_doc_max_bytes = 0
+
+[features]
+apps = false
+browser_use = false
+browser_use_external = false
+computer_use = false
+codex_hooks = false
+goals = false
+hooks = false
+memories = false
+multi_agent = false
+plugins = false
+plugin_hooks = false
+tool_call_mcp_elicitation = false
+`;
+  return `${[
+    featureConfig,
+    ...skillPaths.map(
       (skillPath) =>
         `[[skills.config]]\npath = ${JSON.stringify(skillPath)}\nenabled = false\n`,
-    )
-    .join("\n")}\n`;
+    ),
+  ].join("\n")}\n`;
 }
 
 function quoteShellString(value: string): string {
