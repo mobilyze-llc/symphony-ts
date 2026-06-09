@@ -47,6 +47,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(stages?.stages.review?.runner).toBe("codex");
     expect(stages?.stages.merge?.runner).toBe("codex");
     expect(stages?.stages.review?.model).toBeNull();
+    expect(stages?.stages.review?.maxTurns).toBe(8);
   });
 
   it("investigate stage contains description and no merge prohibitions", async () => {

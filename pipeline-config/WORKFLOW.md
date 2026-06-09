@@ -64,7 +64,7 @@ stages:
   review:
     type: agent
     runner: codex
-    max_turns: 5
+    max_turns: 8
     max_rework: 3
     on_complete: merge
     on_rework: implement

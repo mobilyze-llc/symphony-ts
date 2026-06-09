@@ -164,7 +164,7 @@ stages:
   review:
     type: agent
     runner: codex
-    max_turns: 5
+    max_turns: 8
     max_rework: 3
     linear_state: In Review
     on_complete: merge
