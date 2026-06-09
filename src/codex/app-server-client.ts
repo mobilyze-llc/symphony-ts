@@ -452,19 +452,22 @@ export class CodexAppServerClient {
       return;
     }
     staleEphemeralCodexHomeSweepStarted = true;
-    // Fire-and-forget: orphan cleanup must never delay or fail a launch.
+    // Fire-and-forget: orphan cleanup must never delay or fail a launch. The
+    // trailing catch also covers a throwing onEvent handler inside emit.
     void sweepStaleCodexHomes({
       root: tmpdir(),
       maxAgeMs: STALE_EPHEMERAL_CODEX_HOME_MAX_AGE_MS,
       now: () => Date.now(),
-    }).then((removed) => {
-      if (removed.length > 0) {
-        this.emit({
-          event: "other_message",
-          message: `Removed ${removed.length} stale ephemeral Codex home(s) from ${tmpdir()}.`,
-        });
-      }
-    });
+    })
+      .then((removed) => {
+        if (removed.length > 0) {
+          this.emit({
+            event: "other_message",
+            message: `Removed ${removed.length} stale ephemeral Codex home(s) from ${tmpdir()}.`,
+          });
+        }
+      })
+      .catch(() => {});
   }
 
   private async cleanupEphemeralCodexHome(): Promise<void> {

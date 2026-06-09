@@ -87,9 +87,6 @@ function probeCommandFrom(workerCommand) {
 }
 
 async function buildEphemeralHome(input) {
-  const codexHome = await mkdtemp(
-    join(tmpdir(), "symphony-codex-skills-probe-"),
-  );
   const sourceAuth = join(input.authSourceHome, "auth.json");
   if (!existsSync(sourceAuth)) {
     console.error(
@@ -97,6 +94,12 @@ async function buildEphemeralHome(input) {
     );
     process.exit(2);
   }
+  const codexHome = await mkdtemp(
+    join(tmpdir(), "symphony-codex-skills-probe-"),
+  );
+  // Register for cleanup before any operation that can throw, so a failed
+  // symlink or config render does not leak the directory.
+  input.scratch.push(codexHome);
   await symlink(sourceAuth, join(codexHome, "auth.json"));
   const config = await input.prepareDisabledSkillsConfig({
     codexHome,
@@ -123,7 +126,11 @@ function evaluate(label, result) {
   if (result.error !== undefined) {
     failures.push(`codex failed to run: ${result.error.message}`);
   } else if (result.status !== 0) {
-    failures.push(`codex exited with status ${result.status}`);
+    const signalSuffix =
+      result.signal === null || result.signal === undefined
+        ? ""
+        : ` (signal ${result.signal})`;
+    failures.push(`codex exited with status ${result.status}${signalSuffix}`);
   }
   const stdout = result.stdout ?? "";
   if (stdout.trim().length < 200) {
@@ -180,8 +187,8 @@ try {
       authSourceHome: operatorHome,
       cwd: repoRoot,
       prepareDisabledSkillsConfig,
+      scratch,
     });
-    scratch.push(home);
     allPassed =
       evaluate("real", runProbe(probeCommand, home, repoRoot)) && allPassed;
   }
@@ -199,8 +206,8 @@ try {
       authSourceHome: operatorHome,
       cwd: emptyCwd,
       prepareDisabledSkillsConfig,
+      scratch,
     });
-    scratch.push(home);
     allPassed =
       evaluate("clean", runProbe(probeCommand, home, emptyCwd)) && allPassed;
   }

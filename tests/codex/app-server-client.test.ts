@@ -5,6 +5,7 @@ import {
   readFile,
   realpath,
   rm,
+  stat,
   utimes,
   writeFile,
 } from "node:fs/promises";
@@ -1024,6 +1025,26 @@ describe("sweepStaleCodexHomes", () => {
     await expect(access(stale)).rejects.toThrow();
     await expect(access(fresh)).resolves.toBeUndefined();
     await expect(access(unrelated)).resolves.toBeUndefined();
+  });
+
+  it("treats age exactly equal to maxAgeMs as fresh", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-sweep-test-"));
+    roots.push(root);
+    const boundary = join(root, "symphony-codex-home-boundary");
+    await mkdir(boundary, { recursive: true });
+    await backdate(boundary, MAX_AGE_MS);
+    // Pin the injected clock to the dir's actual mtime so the delta is
+    // exactly maxAgeMs — the real clock would drift past the boundary.
+    const mtimeMs = (await stat(boundary)).mtimeMs;
+
+    const removed = await sweepStaleCodexHomes({
+      root,
+      maxAgeMs: MAX_AGE_MS,
+      now: () => mtimeMs + MAX_AGE_MS,
+    });
+
+    expect(removed).toEqual([]);
+    await expect(access(boundary)).resolves.toBeUndefined();
   });
 
   it("ignores plain files that match the prefix", async () => {
