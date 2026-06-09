@@ -413,7 +413,9 @@ export class CodexAppServerClient {
     await this.cleanupEphemeralCodexHome();
     this.sweepStaleEphemeralCodexHomesOnce();
     const sourceHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
-    const codexHome = await mkdtemp(join(tmpdir(), EPHEMERAL_CODEX_HOME_PREFIX));
+    const codexHome = await mkdtemp(
+      join(tmpdir(), EPHEMERAL_CODEX_HOME_PREFIX),
+    );
     this.ephemeralCodexHome = codexHome;
 
     const sourceAuth = join(sourceHome, "auth.json");

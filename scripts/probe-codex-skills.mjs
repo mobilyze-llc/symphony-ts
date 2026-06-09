@@ -132,7 +132,9 @@ function evaluate(label, result) {
     );
   }
   if (/### Available skills/i.test(output)) {
-    failures.push("prompt still advertises a skills inventory (`### Available skills`)");
+    failures.push(
+      "prompt still advertises a skills inventory (`### Available skills`)",
+    );
   }
   if (/hindsight/i.test(output)) {
     failures.push("prompt still contains a Hindsight memory block");
@@ -146,12 +148,17 @@ function evaluate(label, result) {
 }
 
 const args = parseArgs(process.argv.slice(2));
-const { loadWorkflowDefinition, resolveWorkflowConfig, prepareDisabledSkillsConfig } =
-  await importDist();
+const {
+  loadWorkflowDefinition,
+  resolveWorkflowConfig,
+  prepareDisabledSkillsConfig,
+} = await importDist();
 
 const codexVersion = spawnSync("codex", ["--version"], { encoding: "utf8" });
 if (codexVersion.error !== undefined || codexVersion.status !== 0) {
-  console.error("codex binary not found on PATH — this probe needs a local Codex CLI.");
+  console.error(
+    "codex binary not found on PATH — this probe needs a local Codex CLI.",
+  );
   process.exit(2);
 }
 console.log(`codex: ${codexVersion.stdout.trim()}`);
@@ -175,7 +182,8 @@ try {
       prepareDisabledSkillsConfig,
     });
     scratch.push(home);
-    allPassed = evaluate("real", runProbe(probeCommand, home, repoRoot)) && allPassed;
+    allPassed =
+      evaluate("real", runProbe(probeCommand, home, repoRoot)) && allPassed;
   }
 
   if (args.mode === "clean" || args.mode === "both") {
@@ -193,7 +201,8 @@ try {
       prepareDisabledSkillsConfig,
     });
     scratch.push(home);
-    allPassed = evaluate("clean", runProbe(probeCommand, home, emptyCwd)) && allPassed;
+    allPassed =
+      evaluate("clean", runProbe(probeCommand, home, emptyCwd)) && allPassed;
   }
 } finally {
   if (args.keep) {
