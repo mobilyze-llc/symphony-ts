@@ -937,9 +937,13 @@ function createClient(
     turnSandboxPolicy: overrides?.turnSandboxPolicy ?? {
       type: "workspace-write",
     },
-    readTimeoutMs: overrides?.readTimeoutMs ?? 750,
-    turnTimeoutMs: overrides?.turnTimeoutMs ?? 500,
-    stallTimeoutMs: overrides?.stallTimeoutMs ?? 1_000,
+    // Generous defaults: these bound failure detection, not happy-path
+    // speed. Tight values (750ms initialize) flaked under parallel-suite
+    // load (SYMPH-313); tests that assert timeout behavior pass explicit
+    // small overrides.
+    readTimeoutMs: overrides?.readTimeoutMs ?? 10_000,
+    turnTimeoutMs: overrides?.turnTimeoutMs ?? 10_000,
+    stallTimeoutMs: overrides?.stallTimeoutMs ?? 10_000,
     ...(overrides?.modePolicy === undefined
       ? {}
       : { modePolicy: overrides.modePolicy }),
