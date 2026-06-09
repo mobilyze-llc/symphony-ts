@@ -27,6 +27,14 @@ agent:
   max_turns: 30
   max_retry_backoff_ms: 300000
 
+hard_stops:
+  max_iterations: 20
+  no_progress_turns: 3
+  max_tokens_per_unit: 200000
+  max_dollar_budget_usd: 50
+  premium_budget_pause_ratio: 0.8
+  estimated_cost_per_1k_tokens_usd: 0.05
+
 codex:
   command: codex --disable plugins --config 'model_reasoning_effort="low"' app-server
   stall_timeout_ms: 3600000
