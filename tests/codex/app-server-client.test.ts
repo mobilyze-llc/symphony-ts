@@ -92,6 +92,30 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
+  it("runs configured commands through a shell so Codex config quoting is preserved", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const command = [
+      "assert_codex_args() {",
+      '[ "$1" = "--config" ] &&',
+      '[ "$2" = \'model_reasoning_effort="low"\' ] &&',
+      '[ "$3" = "app-server" ];',
+      "};",
+      "assert_codex_args --config 'model_reasoning_effort=\"low\"' app-server &&",
+      `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} happy`,
+    ].join(" ");
+    const client = createClient("happy", workspace, events, { command });
+
+    const result = await client.startSession({
+      prompt: "Verify quoted config launch",
+      title: "ABC-123: Example",
+    });
+
+    expect(result.status).toBe("completed");
+
+    await client.close();
+  });
+
   it("denies PR creation approvals when prototype mode cannot open pull requests", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];
@@ -390,10 +414,12 @@ function createClient(
     dynamicTools: NonNullable<
       ConstructorParameters<typeof CodexAppServerClient>[0]["dynamicTools"]
     >;
+    command: string;
   }>,
 ): CodexAppServerClient {
   const client = new CodexAppServerClient({
-    command: `${process.execPath} "${fixturePath}" ${scenario}`,
+    command:
+      overrides?.command ?? `${process.execPath} "${fixturePath}" ${scenario}`,
     cwd: workspace,
     approvalPolicy: "full-auto",
     threadSandbox: "workspace-write",
@@ -432,4 +458,8 @@ async function createWorkspace(): Promise<string> {
   await mkdir(workspace, { recursive: true });
   roots.push(root);
   return workspace;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }

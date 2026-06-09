@@ -28,6 +28,7 @@ agent:
 
 codex:
   command: codex --config 'model_reasoning_effort="low"' app-server
+  stall_timeout_ms: 3600000
 
 runner:
   kind: codex

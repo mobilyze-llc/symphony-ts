@@ -9,6 +9,10 @@ const WORKFLOW_PATH = resolve(
   import.meta.dirname,
   "../../pipeline-config/workflows/WORKFLOW-symphony.md",
 );
+const PIPELINE_WORKFLOW_PATH = resolve(
+  import.meta.dirname,
+  "../../pipeline-config/WORKFLOW.md",
+);
 
 const DESCRIPTION_SENTINEL = "DESCRIPTION_SENTINEL: do not leak to merge";
 
@@ -48,6 +52,19 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(stages?.stages.merge?.runner).toBe("codex");
     expect(stages?.stages.review?.model).toBeNull();
     expect(stages?.stages.review?.maxTurns).toBe(8);
+    expect(resolvedConfig.codex.stallTimeoutMs).toBe(3_600_000);
+  });
+
+  it("keeps the primary review gate stall budget above the council timeout", async () => {
+    const primaryWorkflow = await loadWorkflowDefinition(
+      PIPELINE_WORKFLOW_PATH,
+    );
+    const primaryConfig = resolveWorkflowConfig(primaryWorkflow, {
+      LINEAR_API_KEY: "test-token",
+      LINEAR_PROJECT_SLUG: "test-project",
+    });
+
+    expect(primaryConfig.codex.stallTimeoutMs).toBeGreaterThan(1_800_000);
   });
 
   it("investigate stage contains description and no merge prohibitions", async () => {
