@@ -429,14 +429,13 @@ export class CodexAppServerClient {
     await symlink(sourceAuth, join(codexHome, "auth.json"));
 
     if (this.options.disableSkills === true) {
-      const skillPaths = await discoverCodexSkillPaths({
-        codexHome,
-        cwd: this.options.cwd,
-        sourceHome,
-      });
       await writeFile(
         join(codexHome, "config.toml"),
-        renderDisabledSkillsConfig(skillPaths),
+        await prepareDisabledSkillsConfig({
+          codexHome,
+          cwd: this.options.cwd,
+          sourceHome,
+        }),
       );
     }
 
@@ -1090,6 +1089,19 @@ export class CodexAppServerClient {
       });
     }
   }
+}
+
+/**
+ * Render the generated config.toml that disables every Codex skill a worker
+ * launch could otherwise discover. Exported so the probe script
+ * (scripts/probe-codex-skills.mjs) exercises the exact production path.
+ */
+export async function prepareDisabledSkillsConfig(input: {
+  codexHome: string;
+  cwd: string;
+  sourceHome: string;
+}): Promise<string> {
+  return renderDisabledSkillsConfig(await discoverCodexSkillPaths(input));
 }
 
 async function discoverCodexSkillPaths(input: {
