@@ -87,8 +87,12 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     );
     expect(output).toContain("symphony-council-review-gate");
     expect(output).toContain("CMUX_SPAWN_BIN");
+    expect(output).toContain("command -v cmux-spawn");
     expect(output).toContain("--timeout-seconds 1800");
     expect(output).toContain("Claude must run through CMUX");
+    expect(output).not.toContain(
+      "/Users/ericlitman/projects/crucible/bin/cmux-spawn",
+    );
     expect(output).not.toContain("Load and execute the /self-moa-review skill");
     expect(output).not.toContain("issue description contains the frozen spec");
   });

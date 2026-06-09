@@ -348,7 +348,11 @@ pnpm build
 PR_NUMBER=$(gh pr view --json number --jq '.number')
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-{{ issue.identifier }}-$(date +%s)"
-CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn}"
+CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-$(command -v cmux-spawn || true)}"
+if [ -z "$CMUX_SPAWN_BIN" ] || [ ! -x "$CMUX_SPAWN_BIN" ]; then
+  echo "Set CMUX_SPAWN_BIN to an executable cmux-spawn path or put cmux-spawn on PATH." >&2
+  exit 1
+fi
 node dist/src/cli/council-review-gate.js \
   --issue-id {{ issue.identifier }} \
   --artifact-dir "$ARTIFACT_DIR" \

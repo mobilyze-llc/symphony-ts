@@ -64,11 +64,6 @@ echo "--- Prompt Templates ---"
 PROMPTS_DIR="$SCRIPT_DIR/prompts"
 PROMPT_FILES=(
   "global.liquid"
-  "investigate.liquid"
-  "implement.liquid"
-  "review-adversarial.liquid"
-  "review-security.liquid"
-  "merge.liquid"
 )
 
 # Also extract prompt file references from YAML
