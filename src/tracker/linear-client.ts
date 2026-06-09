@@ -15,11 +15,15 @@ import {
   LINEAR_CREATE_ISSUE_MUTATION,
   LINEAR_ISSUES_BY_LABELS_QUERY,
   LINEAR_ISSUES_BY_STATES_QUERY,
+  LINEAR_ISSUE_DETAILS_BY_IDS_QUERY,
+  LINEAR_ISSUE_DETAILS_UPDATE_MUTATION,
+  LINEAR_ISSUE_LABELS_BY_NAMES_QUERY,
   LINEAR_ISSUE_PARENT_AND_SIBLINGS_QUERY,
   LINEAR_ISSUE_PARENT_DETAIL_QUERY,
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
   LINEAR_ISSUE_UPDATE_MUTATION,
   LINEAR_OPEN_ISSUES_BY_LABELS_QUERY,
+  LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
   LINEAR_WORKFLOW_STATES_QUERY,
 } from "./linear-queries.js";
 import type { IssueStateSnapshot, IssueTracker } from "./tracker.js";
@@ -42,6 +46,25 @@ interface LinearGraphqlResponse<TData> {
 export interface LinearRawGraphqlResponse {
   status: number;
   body: unknown;
+}
+
+export interface LinearIssueReference {
+  id: string;
+  identifier: string;
+  title: string;
+  description: string | null;
+  url: string | null;
+  teamId: string | null;
+  teamKey: string | null;
+  projectId: string | null;
+  projectSlug: string | null;
+  labels: string[];
+  parent: {
+    id: string;
+    identifier: string;
+    title: string;
+    url: string | null;
+  } | null;
 }
 
 interface LinearCandidateData {
@@ -72,6 +95,50 @@ interface LinearCommentCreateData {
 
 interface LinearIssueCreateData {
   issueCreate?: {
+    success?: boolean;
+    issue?: { id?: string; identifier?: string; title?: string };
+  };
+}
+
+interface LinearIssueDetailsNode {
+  id?: string;
+  identifier?: string;
+  title?: string;
+  description?: string | null;
+  url?: string | null;
+  team?: {
+    id?: string;
+    key?: string | null;
+  } | null;
+  project?: {
+    id?: string;
+    slugId?: string | null;
+  } | null;
+  labels?: {
+    nodes?: Array<{ name?: string | null }>;
+  } | null;
+  parent?: {
+    id?: string;
+    identifier?: string;
+    title?: string;
+    url?: string | null;
+  } | null;
+}
+
+interface LinearIssueDetailsData {
+  issues?: {
+    nodes?: unknown;
+  };
+}
+
+interface LinearIssueLabelData {
+  issueLabels?: {
+    nodes?: unknown;
+  };
+}
+
+interface LinearIssueDetailsUpdateData {
+  issueUpdate?: {
     success?: boolean;
     issue?: { id?: string; identifier?: string; title?: string };
   };
@@ -266,6 +333,8 @@ export class LinearTrackerClient implements IssueTracker {
     title: string;
     projectId: string;
     labelIds: string[];
+    description?: string;
+    parentId?: string;
   }): Promise<{ id: string; identifier: string; title: string }> {
     const response = await this.postGraphql<LinearIssueCreateData>(
       LINEAR_CREATE_ISSUE_MUTATION,
@@ -274,6 +343,10 @@ export class LinearTrackerClient implements IssueTracker {
         title: input.title,
         projectId: input.projectId,
         labelIds: input.labelIds,
+        ...(input.description !== undefined
+          ? { description: input.description }
+          : {}),
+        ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
       },
     );
 
@@ -294,6 +367,136 @@ export class LinearTrackerClient implements IssueTracker {
       throw new TrackerError(
         ERROR_CODES.linearUnknownPayload,
         "Linear issueCreate returned incomplete issue data.",
+        { details: response },
+      );
+    }
+
+    return {
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+    };
+  }
+
+  async fetchIssueReferencesByIds(
+    issueIds: string[],
+  ): Promise<LinearIssueReference[]> {
+    if (issueIds.length === 0) {
+      return [];
+    }
+
+    const response = await this.postGraphql<LinearIssueDetailsData>(
+      LINEAR_ISSUE_DETAILS_BY_IDS_QUERY,
+      { issueIds },
+    );
+    const nodes = response.issues?.nodes;
+    if (!Array.isArray(nodes)) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear issue details payload was missing issues.nodes.",
+        { details: response },
+      );
+    }
+
+    return nodes.map((node) => normalizeLinearIssueReference(node));
+  }
+
+  async findOpenIssuesByTitle(input: {
+    projectId: string;
+    title: string;
+    excludeStateNames: string[];
+  }): Promise<LinearIssueReference[]> {
+    const response = await this.postGraphql<LinearIssueDetailsData>(
+      LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
+      {
+        projectId: input.projectId,
+        title: input.title,
+        excludeStateNames: input.excludeStateNames,
+        first: this.pageSize,
+      },
+    );
+    const nodes = response.issues?.nodes;
+    if (!Array.isArray(nodes)) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear open issues by title payload was missing issues.nodes.",
+        { details: response },
+      );
+    }
+
+    return nodes.map((node) => normalizeLinearIssueReference(node));
+  }
+
+  async resolveLabelIdsByNames(
+    labelNames: string[],
+    teamId: string,
+  ): Promise<Array<{ id: string; name: string }>> {
+    if (labelNames.length === 0) {
+      return [];
+    }
+
+    const response = await this.postGraphql<LinearIssueLabelData>(
+      LINEAR_ISSUE_LABELS_BY_NAMES_QUERY,
+      {
+        teamId,
+        labelNames,
+      },
+    );
+    const nodes = response.issueLabels?.nodes;
+    if (!Array.isArray(nodes)) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear issue labels payload was missing issueLabels.nodes.",
+        { details: response },
+      );
+    }
+
+    return nodes.flatMap((node) => {
+      if (!node || typeof node !== "object" || Array.isArray(node)) {
+        return [];
+      }
+      const id = "id" in node ? node.id : undefined;
+      const name = "name" in node ? node.name : undefined;
+      if (typeof id !== "string" || typeof name !== "string") {
+        return [];
+      }
+      return [{ id, name }];
+    });
+  }
+
+  async updateIssue(input: {
+    issueId: string;
+    description: string;
+    labelIds: string[];
+    parentId?: string;
+  }): Promise<{ id: string; identifier: string; title: string }> {
+    const response = await this.postGraphql<LinearIssueDetailsUpdateData>(
+      LINEAR_ISSUE_DETAILS_UPDATE_MUTATION,
+      {
+        issueId: input.issueId,
+        description: input.description,
+        labelIds: input.labelIds,
+        ...(input.parentId !== undefined ? { parentId: input.parentId } : {}),
+      },
+    );
+
+    if (response.issueUpdate?.success !== true) {
+      throw new TrackerError(
+        ERROR_CODES.linearGraphqlErrors,
+        "Linear issueUpdate mutation did not return success.",
+        { details: response },
+      );
+    }
+
+    const issue = response.issueUpdate.issue;
+    if (
+      typeof issue?.id !== "string" ||
+      typeof issue.identifier !== "string" ||
+      typeof issue.title !== "string"
+    ) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear issueUpdate returned incomplete issue data.",
         { details: response },
       );
     }
@@ -595,6 +798,59 @@ export class LinearTrackerClient implements IssueTracker {
 
     return this.projectSlug;
   }
+}
+
+function normalizeLinearIssueReference(node: unknown): LinearIssueReference {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    throw new TrackerError(
+      ERROR_CODES.linearUnknownPayload,
+      "Linear issue reference payload was not an object.",
+      { details: node },
+    );
+  }
+
+  const raw = node as LinearIssueDetailsNode;
+  if (
+    typeof raw.id !== "string" ||
+    typeof raw.identifier !== "string" ||
+    typeof raw.title !== "string"
+  ) {
+    throw new TrackerError(
+      ERROR_CODES.linearUnknownPayload,
+      "Linear issue reference payload was missing id, identifier, or title.",
+      { details: node },
+    );
+  }
+
+  return {
+    id: raw.id,
+    identifier: raw.identifier,
+    title: raw.title,
+    description: typeof raw.description === "string" ? raw.description : null,
+    url: typeof raw.url === "string" ? raw.url : null,
+    teamId: typeof raw.team?.id === "string" ? raw.team.id : null,
+    teamKey: typeof raw.team?.key === "string" ? raw.team.key : null,
+    projectId: typeof raw.project?.id === "string" ? raw.project.id : null,
+    projectSlug:
+      typeof raw.project?.slugId === "string" ? raw.project.slugId : null,
+    labels:
+      raw.labels?.nodes
+        ?.flatMap((label) =>
+          typeof label?.name === "string" ? [label.name.toLowerCase()] : [],
+        )
+        .sort() ?? [],
+    parent:
+      typeof raw.parent?.id === "string" &&
+      typeof raw.parent.identifier === "string" &&
+      typeof raw.parent.title === "string"
+        ? {
+            id: raw.parent.id,
+            identifier: raw.parent.identifier,
+            title: raw.parent.title,
+            url: typeof raw.parent.url === "string" ? raw.parent.url : null,
+          }
+        : null,
+  };
 }
 
 async function parseGraphqlResponseBody(response: Response): Promise<unknown> {

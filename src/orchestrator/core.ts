@@ -74,6 +74,7 @@ import {
   detectSupervisionFindings,
   formatSupervisionFindingsComment,
 } from "./supervision.js";
+import type { TrackerIssueWriteRequest } from "./tracker-write.js";
 
 const CONTINUATION_RETRY_DELAY_MS = 1_000;
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
@@ -207,6 +208,9 @@ export interface OrchestratorCoreOptions {
   requestSupervisionResteer?: (
     input: SupervisionResteerRequest,
   ) => Promise<void> | void;
+  requestTrackerIssueWrite?: (
+    input: TrackerIssueWriteRequest,
+  ) => Promise<void> | void;
   runContinuousFeedback?: (input: {
     issue: Issue;
     event: ContinuousFeedbackEvent;
@@ -249,6 +253,8 @@ export class OrchestratorCore {
 
   private readonly requestSupervisionResteer?: OrchestratorCoreOptions["requestSupervisionResteer"];
 
+  private readonly requestTrackerIssueWrite?: OrchestratorCoreOptions["requestTrackerIssueWrite"];
+
   private readonly runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
 
   private readonly timerScheduler: TimerScheduler;
@@ -289,6 +295,7 @@ export class OrchestratorCore {
     this.getRunningSupervisionSnapshots =
       options.getRunningSupervisionSnapshots;
     this.requestSupervisionResteer = options.requestSupervisionResteer;
+    this.requestTrackerIssueWrite = options.requestTrackerIssueWrite;
     this.runContinuousFeedback = options.runContinuousFeedback;
     this.timerScheduler = options.timerScheduler ?? defaultTimerScheduler();
     this.now = options.now ?? (() => new Date());
@@ -1623,6 +1630,37 @@ export class OrchestratorCore {
         );
       }
     }
+    if (this.requestTrackerIssueWrite !== undefined) {
+      try {
+        await this.runTrackerWriteOnce(
+          {
+            idempotencyKey: `tracker_write:promotion_boundary:${input.issue.id}:${input.stageName ?? "unnamed"}`,
+            issueId: input.issue.id,
+            issueIdentifier: input.issue.identifier,
+            stage: input.stageName,
+            attempt: input.attempt,
+            action: "upsert_issue",
+            summary:
+              "Upsert tracker follow-up for prototype promotion boundary.",
+          },
+          async () => {
+            await this.requestTrackerIssueWrite?.({
+              boundary: {
+                type: "promotion_boundary",
+                label: `prototype promotion for ${input.issue.identifier}`,
+                summary,
+                sourceIssueIds: [input.issue.id],
+              },
+            });
+          },
+        );
+      } catch (error) {
+        console.warn(
+          `[orchestrator] Failed to upsert tracker follow-up for prototype boundary ${input.issue.identifier}:`,
+          error,
+        );
+      }
+    }
     this.state.completed.add(input.issue.id);
     this.releaseClaim(input.issue.id);
     this.clearTerminalIssueRuntimeState(input.issue.id);
@@ -2508,10 +2546,11 @@ export class OrchestratorCore {
   private async runTrackerWriteOnce(
     input: {
       idempotencyKey: string;
-      issue: Issue;
+      issueId: string;
+      issueIdentifier: string;
       stage: string | null;
       attempt: number | null;
-      action: "update_issue_state";
+      action: "update_issue_state" | "upsert_issue";
       summary: string;
     },
     write: () => Promise<void>,
@@ -2523,7 +2562,7 @@ export class OrchestratorCore {
 
     const leaseId = createDispatcherLeaseId({
       operation: "tracker_write",
-      issueId: input.issue.id,
+      issueId: input.issueId,
       stage: input.stage,
       attempt: input.attempt,
       suffix: input.idempotencyKey,
@@ -2532,8 +2571,8 @@ export class OrchestratorCore {
       leaseId,
       idempotencyKey: `${input.idempotencyKey}:started`,
       kind: "tracker_write",
-      issueId: input.issue.id,
-      issueIdentifier: input.issue.identifier,
+      issueId: input.issueId,
+      issueIdentifier: input.issueIdentifier,
       operation: "tracker_write",
       stage: input.stage,
       attempt: input.attempt,
@@ -2551,8 +2590,8 @@ export class OrchestratorCore {
       leaseId,
       idempotencyKey: completedKey,
       kind: "tracker_write",
-      issueId: input.issue.id,
-      issueIdentifier: input.issue.identifier,
+      issueId: input.issueId,
+      issueIdentifier: input.issueIdentifier,
       operation: "tracker_write",
       stage: input.stage,
       attempt: input.attempt,
@@ -2674,7 +2713,8 @@ export class OrchestratorCore {
           void this.runTrackerWriteOnce(
             {
               idempotencyKey: `tracker_write:${issue.id}:terminal:${stageName}:${linearState}`,
-              issue,
+              issueId: issue.id,
+              issueIdentifier: issue.identifier,
               stage: stageName,
               attempt,
               action: "update_issue_state",
@@ -2778,7 +2818,8 @@ export class OrchestratorCore {
             await this.runTrackerWriteOnce(
               {
                 idempotencyKey: `tracker_write:${issue.id}:gate:${stageName}:${linearState}`,
-                issue,
+                issueId: issue.id,
+                issueIdentifier: issue.identifier,
                 stage: stageName,
                 attempt,
                 action: "update_issue_state",
@@ -2998,7 +3039,8 @@ export class OrchestratorCore {
         await this.runTrackerWriteOnce(
           {
             idempotencyKey: `tracker_write:${issue.id}:stage:${stageName}:${linearState}:${attemptKey}`,
-            issue,
+            issueId: issue.id,
+            issueIdentifier: issue.identifier,
             stage: stageName,
             attempt,
             action: "update_issue_state",
@@ -3322,6 +3364,36 @@ export class OrchestratorCore {
           files: finding.files,
         },
       });
+
+      if (this.requestTrackerIssueWrite !== undefined) {
+        try {
+          await this.runTrackerWriteOnce(
+            {
+              idempotencyKey: `tracker_write:follow_up:${signature}`,
+              issueId: finding.workerIds[0] ?? "unknown",
+              issueIdentifier: finding.issueIdentifiers[0] ?? "unknown",
+              stage: null,
+              attempt: null,
+              action: "upsert_issue",
+              summary: `Upsert tracker follow-up for ${finding.kind}.`,
+            },
+            async () => {
+              await this.requestTrackerIssueWrite?.({
+                boundary: {
+                  type: "explicit_finding",
+                  phase,
+                  finding,
+                },
+              });
+            },
+          );
+        } catch (error) {
+          console.warn(
+            `[orchestrator] Failed to upsert tracker follow-up for ${finding.issueIdentifiers[0] ?? "unknown"}:`,
+            error,
+          );
+        }
+      }
     }
 
     const resteerSignature = freshFindings

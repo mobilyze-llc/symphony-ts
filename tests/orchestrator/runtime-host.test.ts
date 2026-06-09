@@ -34,6 +34,7 @@ import {
   readGitChangedFiles,
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
+import { LinearTrackerClient } from "../../src/tracker/linear-client.js";
 import type {
   IssueStateSnapshot,
   IssueTracker,
@@ -1403,6 +1404,69 @@ describe("OrchestratorRuntimeHost", () => {
         finding_kinds: ["actual_write_collision"],
         issue_identifiers: ["ISSUE-1", "ISSUE-2"],
         files: ["src/shared/config.ts"],
+      }),
+    );
+  });
+
+  it("logs tracker follow-up write failures for bounded supervision findings", async () => {
+    const tracker = new LinearTrackerClient({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "token",
+      projectSlug: "project",
+      activeStates: ["Todo", "In Progress", "In Review"],
+      fetchFn: vi.fn(),
+    });
+    vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+      createIssue({ id: "1", identifier: "ISSUE-1" }),
+      createIssue({ id: "2", identifier: "ISSUE-2", priority: 2 }),
+    ]);
+    vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+      { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+      { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+    ]);
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockResolvedValue([]);
+    vi.spyOn(tracker, "fetchIssueReferencesByIds").mockRejectedValue(
+      new Error("tracker unavailable"),
+    );
+
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const readWorkspaceChangedFiles = vi.fn(async (workspacePath: string) =>
+      workspacePath.endsWith("/1")
+        ? ["src/shared/config.ts"]
+        : ["src/shared/config.ts", "src/features/two.ts"],
+    );
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      readWorkspaceChangedFiles,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.pollOnce();
+
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "tracker_follow_up_write_failed",
+        level: "warn",
+        outcome: "degraded",
+        title:
+          "Dispatcher follow-up: actual_write_collision for ISSUE-1 + ISSUE-2",
+        source_issue_ids: ["1", "2"],
+        reason: "tracker unavailable",
       }),
     );
   });

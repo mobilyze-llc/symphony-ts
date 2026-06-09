@@ -13,6 +13,7 @@ import {
   computeFailureRetryDelayMs,
   sortIssuesForDispatch,
 } from "../../src/orchestrator/core.js";
+import type { TrackerIssueWriteRequest } from "../../src/orchestrator/tracker-write.js";
 import type {
   IssueStateSnapshot,
   IssueTracker,
@@ -188,6 +189,7 @@ describe("orchestrator core", () => {
 
   it("pauses dispatch when declared file scopes overlap a co-running worker", async () => {
     const resteers: SupervisionResteerRequest[] = [];
+    const trackerWrites: TrackerIssueWriteRequest[] = [];
     const orchestrator = createOrchestrator({
       tracker: createTracker({
         candidates: [
@@ -207,6 +209,9 @@ describe("orchestrator core", () => {
       }),
       requestSupervisionResteer: (input) => {
         resteers.push(input);
+      },
+      requestTrackerIssueWrite: (input) => {
+        trackerWrites.push(input);
       },
     });
 
@@ -230,6 +235,22 @@ describe("orchestrator core", () => {
     expect(resteers[0]!.comment).toContain(
       "Deterministic dispatch supervision paused a co-run",
     );
+    expect(trackerWrites).toEqual([
+      {
+        boundary: {
+          type: "explicit_finding",
+          phase: "dispatch",
+          finding: {
+            kind: "declared_scope_overlap",
+            action: "pause",
+            workerIds: ["1", "2"],
+            issueIdentifiers: ["ISSUE-1", "ISSUE-2"],
+            files: ["src/shared/config.ts"],
+            message: "ISSUE-1 and ISSUE-2 declared overlapping file scope.",
+          },
+        },
+      },
+    ]);
   });
 
   it("updates running issue state during reconciliation", async () => {
@@ -1722,6 +1743,7 @@ describe("decorrelated terminal gates", () => {
       comment: "should not run",
     }));
     const comments: string[] = [];
+    const trackerWrites: TrackerIssueWriteRequest[] = [];
     const orchestrator = createOrchestrator({
       config,
       tracker: createTracker({
@@ -1736,6 +1758,9 @@ describe("decorrelated terminal gates", () => {
       runEnsembleGate,
       postComment: async (_issueId, body) => {
         comments.push(body);
+      },
+      requestTrackerIssueWrite: (input) => {
+        trackerWrites.push(input);
       },
     });
 
@@ -1756,6 +1781,17 @@ describe("decorrelated terminal gates", () => {
     ]);
     expect(comments[0]).toContain("Prototype promotion boundary");
     expect(comments[0]).toContain("new `thin` or `full` production unit");
+    expect(trackerWrites).toEqual([
+      {
+        boundary: {
+          type: "promotion_boundary",
+          label: "prototype promotion for ISSUE-1",
+          summary:
+            "Prototype boundary reached for ISSUE-1; promotion requires a new gated production unit.",
+          sourceIssueIds: ["1"],
+        },
+      },
+    ]);
   });
 
   it("replays prototype boundary completion as terminal after restart", async () => {
@@ -4216,6 +4252,7 @@ function createOrchestrator(overrides?: {
   getRunningSupervisionSnapshots?: OrchestratorCoreOptions["getRunningSupervisionSnapshots"];
   requestSupervisionResteer?: OrchestratorCoreOptions["requestSupervisionResteer"];
   runEnsembleGate?: OrchestratorCoreOptions["runEnsembleGate"];
+  requestTrackerIssueWrite?: OrchestratorCoreOptions["requestTrackerIssueWrite"];
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   postComment?: OrchestratorCoreOptions["postComment"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
@@ -4265,6 +4302,10 @@ function createOrchestrator(overrides?: {
 
   if (overrides?.runEnsembleGate !== undefined) {
     options.runEnsembleGate = overrides.runEnsembleGate;
+  }
+
+  if (overrides?.requestTrackerIssueWrite !== undefined) {
+    options.requestTrackerIssueWrite = overrides.requestTrackerIssueWrite;
   }
 
   if (overrides?.runContinuousFeedback !== undefined) {

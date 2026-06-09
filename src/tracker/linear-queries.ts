@@ -209,12 +209,16 @@ export const LINEAR_CREATE_ISSUE_MUTATION = `
     $title: String!
     $projectId: String!
     $labelIds: [String!]!
+    $description: String
+    $parentId: String
   ) {
     issueCreate(input: {
       teamId: $teamId
       title: $title
       projectId: $projectId
       labelIds: $labelIds
+      description: $description
+      parentId: $parentId
     }) {
       success
       issue {
@@ -224,6 +228,127 @@ export const LINEAR_CREATE_ISSUE_MUTATION = `
         state {
           name
         }
+      }
+    }
+  }
+`.trim();
+
+export const LINEAR_ISSUE_DETAILS_BY_IDS_QUERY = `
+  query SymphonyIssueDetailsByIds($issueIds: [ID!]!) {
+    issues(filter: { id: { in: $issueIds } }) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        url
+        team {
+          id
+          key
+        }
+        project {
+          id
+          slugId
+        }
+        labels {
+          nodes {
+            name
+          }
+        }
+        parent {
+          id
+          identifier
+          title
+          url
+        }
+      }
+    }
+  }
+`.trim();
+
+export const LINEAR_OPEN_ISSUES_BY_TITLE_QUERY = `
+  query SymphonyOpenIssuesByTitle(
+    $projectId: String!
+    $title: String!
+    $excludeStateNames: [String!]!
+    $first: Int!
+  ) {
+    issues(
+      first: $first
+      filter: {
+        project: { id: { eq: $projectId } }
+        title: { eq: $title }
+        state: { name: { nin: $excludeStateNames } }
+      }
+      orderBy: updatedAt
+    ) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        url
+        team {
+          id
+          key
+        }
+        project {
+          id
+          slugId
+        }
+        labels {
+          nodes {
+            name
+          }
+        }
+        parent {
+          id
+          identifier
+          title
+          url
+        }
+      }
+    }
+  }
+`.trim();
+
+export const LINEAR_ISSUE_LABELS_BY_NAMES_QUERY = `
+  query SymphonyIssueLabelsByNames($teamId: String!, $labelNames: [String!]!) {
+    issueLabels(
+      first: 50
+      filter: {
+        team: { id: { eq: $teamId } }
+        name: { in: $labelNames }
+      }
+    ) {
+      nodes {
+        id
+        name
+      }
+    }
+  }
+`.trim();
+
+export const LINEAR_ISSUE_DETAILS_UPDATE_MUTATION = `
+  mutation SymphonyIssueDetailsUpdate(
+    $issueId: String!
+    $description: String!
+    $labelIds: [String!]
+    $parentId: String
+  ) {
+    issueUpdate(
+      id: $issueId
+      input: {
+        description: $description
+        labelIds: $labelIds
+        parentId: $parentId
+      }
+    ) {
+      success
+      issue {
+        id
+        identifier
+        title
       }
     }
   }
