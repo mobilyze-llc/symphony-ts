@@ -1039,7 +1039,6 @@ export class OrchestratorCore {
 
     if (this.state.resumeRequired.has(input.issueId)) {
       this.releaseClaim(input.issueId);
-      this.clearRetryEntry(input.issueId);
       return null;
     }
 
@@ -1994,7 +1993,6 @@ export class OrchestratorCore {
   ): void {
     this.recordIssueRequiresExplicitResume(issueId, issueState);
     this.releaseClaim(issueId);
-    this.clearRetryEntry(issueId);
   }
 
   private recordIssueRequiresExplicitResume(
@@ -2642,6 +2640,23 @@ export class OrchestratorCore {
     this.state.claimed.delete(issueId);
   }
 
+  private formatPauseResumeInstruction(
+    pausedState: string | null | undefined,
+    pauseVerb: "continuing" | "retrying",
+  ): string {
+    const base = `The worker has paused instead of ${pauseVerb} silently.`;
+    const normalized =
+      pausedState === undefined || pausedState === null
+        ? null
+        : normalizeIssueState(pausedState);
+    if (normalized === EXPLICIT_RESUME_STATE) {
+      // Requeue only triggers on a fresh transition into Resume, so an issue
+      // paused while already in Resume must leave the state before re-entering.
+      return `${base} This issue was already in Resume when it paused, so it will only requeue on a fresh transition into Resume: move it out of Resume (if it is still there) and back into Resume after human review.`;
+    }
+    return `${base} Move the issue to Resume after human review to requeue it.`;
+  }
+
   private async handleHardStopTrigger(
     issueId: string,
     runningEntry: RunningEntry,
@@ -2684,7 +2699,7 @@ export class OrchestratorCore {
       `Total tokens: ${input.hardStop.totalTokens}`,
       `Estimated cost: $${input.hardStop.estimatedCostUsd.toFixed(2)}`,
       "",
-      "The worker has paused instead of continuing silently. Move the issue to Resume after human review to requeue it.",
+      this.formatPauseResumeInstruction(runningEntry.issue.state, "continuing"),
     ].join("\n");
 
     await this.fireEscalationSideEffects(
@@ -2728,7 +2743,7 @@ export class OrchestratorCore {
       "Headless Codex requested operator input during the worker turn.",
       `Reason: ${input.reason}`,
       "",
-      "The worker has paused instead of retrying silently. Move the issue to Resume after human review to requeue it.",
+      this.formatPauseResumeInstruction(runningEntry.issue.state, "retrying"),
     ].join("\n");
 
     await this.fireEscalationSideEffects(
