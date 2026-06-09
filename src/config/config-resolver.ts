@@ -108,10 +108,26 @@ export function resolveWorkflowConfig(
         ) ?? DEFAULT_WORKSPACE_ROOT,
     },
     hooks: {
-      afterCreate: readScript(hooks.after_create),
-      beforeRun: readScript(hooks.before_run),
-      afterRun: readScript(hooks.after_run),
-      beforeRemove: readScript(hooks.before_remove),
+      afterCreate: readHookScript(
+        hooks.after_create,
+        workflow.workflowPath,
+        environment,
+      ),
+      beforeRun: readHookScript(
+        hooks.before_run,
+        workflow.workflowPath,
+        environment,
+      ),
+      afterRun: readHookScript(
+        hooks.after_run,
+        workflow.workflowPath,
+        environment,
+      ),
+      beforeRemove: readHookScript(
+        hooks.before_remove,
+        workflow.workflowPath,
+        environment,
+      ),
       timeoutMs:
         readPositiveInteger(hooks.timeout_ms) ?? DEFAULT_HOOK_TIMEOUT_MS,
     },
@@ -281,6 +297,46 @@ function readScript(value: unknown): string | null {
   }
 
   return script === "" ? null : script;
+}
+
+function readHookScript(
+  value: unknown,
+  workflowPath: string,
+  environment: NodeJS.ProcessEnv,
+): string | null {
+  const script = readScript(value);
+  if (script === null) {
+    return null;
+  }
+
+  // A hook can be configured as `$HOOK_SCRIPT`; resolve that when present.
+  // Missing top-level env refs and embedded shell refs stay verbatim so the
+  // hook still runs with the process environment in the workspace shell.
+  const resolvedScript = resolveEnvReference(script, environment) ?? script;
+  const trimmedScript = resolvedScript.trim();
+  if (!isSinglePathHookScript(trimmedScript)) {
+    return resolvedScript;
+  }
+
+  return (
+    resolvePathValue(trimmedScript, workflowPath, environment) ?? resolvedScript
+  );
+}
+
+function isSinglePathHookScript(script: string): boolean {
+  // `$HOOK_SCRIPT` reaches this branch only when config-time env resolution
+  // missed; keep it shell-resolved instead of treating it as a path.
+  if (script === "" || /\s/.test(script) || script.startsWith("$")) {
+    return false;
+  }
+
+  return (
+    isAbsolute(script) ||
+    script.startsWith(".") ||
+    script.startsWith("~") ||
+    script.includes("/") ||
+    script.includes("\\")
+  );
 }
 
 function readInteger(value: unknown): number | null {

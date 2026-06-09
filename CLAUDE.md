@@ -111,7 +111,7 @@ No dev server -- this is a CLI tool. The D40 port table does not apply.
 - **`active_states` in WORKFLOW configs** must include ALL states set during execution (In Progress, In Review, Blocked, Resume). This bug has been hit 3 times -- missing a state causes silent failures.
 - **LiquidJS `strictVariables: true`** -- any variable referenced in a prompt template that is not passed in the render context will throw. Always verify template variables match the context passed by `prompt-builder.ts`.
 - **`scheduleRetry`** is used for both failures AND continuations -- the max retry limit must only count actual failures, not continuation retries.
-- **Hook scripts** run with `cwd: workspacePath`, NOT the WORKFLOW.md location. Relative paths in hooks resolve against the workspace.
+- **Hook scripts** run with `cwd: workspacePath`. Bare path-like hook values such as `./hooks/after-create.sh` are resolved relative to the `WORKFLOW.md` file before execution; inline or multi-line shell snippets run verbatim from the workspace cwd.
 - **`issue.state`** is a string in LiquidJS context (via `toTemplateIssue`), not an object. Template conditionals must compare against string values.
 - **`stall_timeout_ms`** default (5 min) is too short for Claude Code agents. Set to 900000 (15 min) in WORKFLOW configs.
 - **Linear project slug** is the `slugId` UUID, not the team key.
