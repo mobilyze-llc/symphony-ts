@@ -46,6 +46,24 @@ describe("parseCouncilReviewGateArgs", () => {
     ).toThrow("--repo is required");
   });
 
+  it("rejects malformed repo slugs before shelling out to gh", () => {
+    expect(() =>
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "MOB-88",
+          "--artifact-dir",
+          "/tmp/review",
+          "--repo",
+          "mobilyze-llc/symphony-ts/extra",
+          "--pr",
+          "282",
+        ],
+        "/cwd",
+      ),
+    ).toThrow("--repo must use OWNER/REPO format");
+  });
+
   it("rejects invalid numeric flags", () => {
     expect(() =>
       parseCouncilReviewGateArgs(

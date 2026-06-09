@@ -731,10 +731,7 @@ async function parseLaneResult(input: {
 }
 
 function parseArtifactVerdict(artifact: string): ParsedArtifactVerdict {
-  const trimmedArtifact = artifact
-    .replace(/^\uFEFF+/, "")
-    .trimStart()
-    .replace(/^\uFEFF+/, "");
+  const trimmedArtifact = normalizeArtifactStart(artifact);
   const verdictMatch =
     trimmedArtifact.match(/^## Verdict\s*\n\s*(PASS|FINDINGS|FAIL)\b/i) ??
     trimmedArtifact.match(/^Verdict:\s*(PASS|FINDINGS|FAIL)\b/i);
@@ -776,10 +773,7 @@ function artifactHasBlockingSections(artifact: string): boolean {
 }
 
 function artifactSectionHasContent(artifact: string, heading: string): boolean {
-  const escapedHeading = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const sectionMatch = new RegExp(`^## ${escapedHeading}\\s*$`, "im").exec(
-    artifact,
-  );
+  const sectionMatch = artifactSectionHeadingPattern(heading).exec(artifact);
   if (sectionMatch === null) {
     return false;
   }
@@ -791,12 +785,32 @@ function artifactSectionHasContent(artifact: string, heading: string): boolean {
     nextHeadingIndex === -1
       ? sectionTail
       : sectionTail.slice(0, nextHeadingIndex);
-  const normalized = section
+  const normalizedLines = section
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line !== "")
-    .join("\n");
-  return normalized !== "" && !/^None\.?$/i.test(normalized);
+    .filter((line) => line !== "");
+  return normalizedLines.some((line) => !isEmptySectionMarker(line));
+}
+
+function normalizeArtifactStart(artifact: string): string {
+  return artifact.replace(/^(?:\s|\uFEFF)+/u, "");
+}
+
+function artifactSectionHeadingPattern(heading: string): RegExp {
+  const escapedWords = heading
+    .split(/\s+/)
+    .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const headingPattern = escapedWords.join("\\s*:?\\s+");
+  return new RegExp(`^#{2,3}\\s+${headingPattern}\\s*:?\\s*$`, "im");
+}
+
+function isEmptySectionMarker(line: string): boolean {
+  const marker = line
+    .replace(/^[-*+]\s*/, "")
+    .replace(/^[_*]+/, "")
+    .replace(/[_*]+$/, "")
+    .trim();
+  return /^None(?:\s+found)?\.?$/i.test(marker);
 }
 
 function aggregateHeadlessVerdict(
@@ -825,7 +839,7 @@ function collectDegradedConditions(
       conditions.push(`${lane.laneId}:${detail}`);
     }
   }
-  return [...new Set(conditions)];
+  return conditions;
 }
 
 function summarizeVerdict(
@@ -929,6 +943,7 @@ function buildReviewerPrompt(context: ReviewContext, role: string): string {
     "- P1: must fix before merge.",
     "- P2: should fix before merge.",
     "- Track: durable follow-up not introduced by this diff.",
+    "Use FINDINGS only when P1 or P2 contains blocking content. Use PASS when only Track contains content.",
     "",
     "Output exactly:",
     "",

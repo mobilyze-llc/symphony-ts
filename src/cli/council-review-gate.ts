@@ -104,6 +104,9 @@ export function parseCouncilReviewGateArgs(
   if (parsed.artifactDir === undefined || parsed.artifactDir.trim() === "") {
     throw new UsageError("--artifact-dir is required.");
   }
+  if (parsed.repo !== undefined && !isValidRepoSlug(parsed.repo)) {
+    throw new UsageError("--repo must use OWNER/REPO format.");
+  }
   if (parsed.prNumber !== undefined && parsed.repo === undefined) {
     throw new UsageError("--repo is required when --pr is provided.");
   }
@@ -154,6 +157,10 @@ function readPositiveInteger(value: string, flag: string): number {
     throw new UsageError(`${flag} must be a positive integer.`);
   }
   return parsed;
+}
+
+function isValidRepoSlug(value: string): boolean {
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value);
 }
 
 function renderUsage(): string {

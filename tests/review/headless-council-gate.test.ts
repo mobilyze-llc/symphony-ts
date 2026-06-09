@@ -568,7 +568,7 @@ describe("runHeadlessCouncilGate", () => {
       laneBehavior: {
         "claude-opus": {
           artifact:
-            "\uFEFF## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone",
+            "\uFEFF \uFEFF \uFEFF## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone",
         },
       },
     });
@@ -591,6 +591,59 @@ describe("runHeadlessCouncilGate", () => {
       verdict: "pass",
       message: null,
     });
+  });
+
+  it("does not pass when a PASS artifact contains a drifted blocking heading", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n### P2: Should Fix:\n- Bug",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "fail",
+      message:
+        "Artifact verdict was PASS but P1/P2 findings sections were not empty.",
+    });
+  });
+
+  it("treats common empty-section markers as empty", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\n- None\n\n## P2 Should Fix\n_None found._",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
   });
 
   it("does not pass on a verdict block reproduced from diff content", async () => {
