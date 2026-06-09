@@ -31,6 +31,7 @@ import {
   OrchestratorRuntimeHost,
   createWorkspaceHookLogger,
   extractProductName,
+  readGitBaseRevision,
   readGitChangedFiles,
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
@@ -58,6 +59,180 @@ describe("OrchestratorRuntimeHost", () => {
       await expect(readGitChangedFiles(repoPath)).resolves.toEqual([
         "new-file.ts",
       ]);
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves base revision in a bare-clone worktree without origin/main", async () => {
+    const rootPath = mkdtempSync(join(tmpdir(), "symphony-base-ref-"));
+    const sourcePath = join(rootPath, "source");
+    const barePath = join(rootPath, "source.git");
+    const worktreePath = join(rootPath, "worker");
+    try {
+      mkdirSync(sourcePath);
+      execFileSync("git", ["init", "-b", "main", sourcePath]);
+      execFileSync("git", [
+        "-C",
+        sourcePath,
+        "config",
+        "user.email",
+        "test@example.com",
+      ]);
+      execFileSync("git", [
+        "-C",
+        sourcePath,
+        "config",
+        "user.name",
+        "Test User",
+      ]);
+      writeFileSync(join(sourcePath, "file.txt"), "base\n");
+      execFileSync("git", ["-C", sourcePath, "add", "file.txt"]);
+      execFileSync("git", ["-C", sourcePath, "commit", "-m", "base"]);
+      const baseRevision = execFileSync(
+        "git",
+        ["-C", sourcePath, "rev-parse", "HEAD"],
+        {
+          encoding: "utf8",
+        },
+      ).trim();
+      execFileSync("git", ["clone", "--bare", sourcePath, barePath], {
+        stdio: "ignore",
+      });
+      execFileSync(
+        "git",
+        [
+          "-C",
+          barePath,
+          "worktree",
+          "add",
+          worktreePath,
+          "-b",
+          "worktree/ISSUE-1",
+          "main",
+        ],
+        { stdio: "ignore" },
+      );
+
+      expect(() =>
+        execFileSync(
+          "git",
+          [
+            "-C",
+            worktreePath,
+            "show-ref",
+            "--verify",
+            "refs/remotes/origin/main",
+          ],
+          { stdio: "ignore" },
+        ),
+      ).toThrow();
+      await expect(readGitBaseRevision(worktreePath)).resolves.toBe(
+        baseRevision,
+      );
+    } finally {
+      rmSync(rootPath, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers SYMPHONY_BASE_BRANCH over existing main refs", async () => {
+    const rootPath = mkdtempSync(join(tmpdir(), "symphony-base-env-"));
+    const sourcePath = join(rootPath, "source");
+    const barePath = join(rootPath, "source.git");
+    const worktreePath = join(rootPath, "worker");
+    const originalBaseBranch = process.env.SYMPHONY_BASE_BRANCH;
+    try {
+      mkdirSync(sourcePath);
+      execFileSync("git", ["init", "-b", "main", sourcePath]);
+      execFileSync("git", [
+        "-C",
+        sourcePath,
+        "config",
+        "user.email",
+        "test@example.com",
+      ]);
+      execFileSync("git", [
+        "-C",
+        sourcePath,
+        "config",
+        "user.name",
+        "Test User",
+      ]);
+      writeFileSync(join(sourcePath, "file.txt"), "main\n");
+      execFileSync("git", ["-C", sourcePath, "add", "file.txt"]);
+      execFileSync("git", ["-C", sourcePath, "commit", "-m", "main"], {
+        stdio: "ignore",
+      });
+      execFileSync("git", ["-C", sourcePath, "checkout", "-b", "develop"], {
+        stdio: "ignore",
+      });
+      writeFileSync(join(sourcePath, "file.txt"), "develop\n");
+      execFileSync("git", ["-C", sourcePath, "commit", "-am", "develop"], {
+        stdio: "ignore",
+      });
+      const developRevision = execFileSync(
+        "git",
+        ["-C", sourcePath, "rev-parse", "HEAD"],
+        {
+          encoding: "utf8",
+        },
+      ).trim();
+      execFileSync("git", ["clone", "--bare", sourcePath, barePath], {
+        stdio: "ignore",
+      });
+      execFileSync("git", [
+        "-C",
+        barePath,
+        "update-ref",
+        "refs/remotes/origin/main",
+        "main",
+      ]);
+      execFileSync("git", [
+        "-C",
+        barePath,
+        "update-ref",
+        "refs/remotes/origin/develop",
+        "develop",
+      ]);
+      execFileSync(
+        "git",
+        [
+          "-C",
+          barePath,
+          "worktree",
+          "add",
+          worktreePath,
+          "-b",
+          "worktree/ISSUE-2",
+          "origin/develop",
+        ],
+        { stdio: "ignore" },
+      );
+      process.env.SYMPHONY_BASE_BRANCH = "develop";
+
+      await expect(readGitBaseRevision(worktreePath)).resolves.toBe(
+        developRevision,
+      );
+    } finally {
+      if (originalBaseBranch === undefined) {
+        Reflect.deleteProperty(process.env, "SYMPHONY_BASE_BRANCH");
+      } else {
+        process.env.SYMPHONY_BASE_BRANCH = originalBaseBranch;
+      }
+      rmSync(rootPath, { recursive: true, force: true });
+    }
+  });
+
+  it("reports all attempted refs when base revision cannot be resolved", async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "symphony-base-missing-"));
+    try {
+      execFileSync("git", ["init", "-b", "main", repoPath], {
+        stdio: "ignore",
+      });
+
+      await expect(readGitBaseRevision(repoPath)).rejects.toThrow(
+        /origin\/main: ref not found.*main: ref not found.*origin\/master: ref not found.*master: ref not found/,
+      );
     } finally {
       rmSync(repoPath, { recursive: true, force: true });
     }
