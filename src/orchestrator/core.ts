@@ -17,6 +17,7 @@ import {
   type ContinuousFeedbackEvent,
   type ContinuousFeedbackLane,
   type DecorrelatedGateLane,
+  type DecorrelatedGateOutcome,
   type DispatcherDecisionCategory,
   type DispatcherDecisionClassification,
   type DispatcherDecisionCostWeight,
@@ -314,6 +315,7 @@ export class OrchestratorCore {
       this.state.dispatcherRunJournal,
     );
     this.reportedSupervisionFindings.clear();
+    this.state.decorrelatedGateOutcomes = {};
 
     const nowMs = this.now().getTime();
     for (const entry of this.state.dispatcherRunJournal) {
@@ -328,11 +330,17 @@ export class OrchestratorCore {
       if (
         entry.kind === "gate_result" &&
         entry.operation === "gate" &&
-        entry.metadata.status === "skipped_prototype"
+        entry.lease?.status === "completed"
       ) {
-        this.state.completed.add(entry.issueId);
-        this.releaseClaim(entry.issueId);
-        this.clearTerminalIssueRuntimeState(entry.issueId);
+        const recovered = this.recoverDecorrelatedGateOutcome(entry);
+
+        if (recovered?.status === "skipped_prototype") {
+          this.state.completed.add(entry.issueId);
+          this.releaseClaim(entry.issueId);
+          this.clearTerminalIssueRuntimeState(entry.issueId);
+        } else if (recovered !== null) {
+          this.recoverCompletedGateTransition(entry, recovered);
+        }
       }
     }
 
@@ -343,6 +351,64 @@ export class OrchestratorCore {
         Date.parse(lease.expiresAt) > nowMs
       ) {
         this.state.claimed.add(lease.issueId);
+      }
+    }
+  }
+
+  private recoverDecorrelatedGateOutcome(
+    entry: DispatcherRunJournalEntry,
+  ): DecorrelatedGateOutcome | null {
+    const recovered = toDecorrelatedGateOutcome(entry);
+    if (recovered === null) {
+      return null;
+    }
+
+    this.state.decorrelatedGateOutcomes[entry.issueId] = [
+      ...(this.state.decorrelatedGateOutcomes[entry.issueId] ?? []),
+      recovered,
+    ];
+    return recovered;
+  }
+
+  private recoverCompletedGateTransition(
+    entry: DispatcherRunJournalEntry,
+    outcome: DecorrelatedGateOutcome,
+  ): void {
+    if (this.config.stages === null || entry.stage === null) {
+      return;
+    }
+
+    const gateStage = this.config.stages.stages[entry.stage];
+    if (gateStage === undefined || gateStage.type !== "gate") {
+      return;
+    }
+
+    if (
+      (outcome.status === "failed" || outcome.status === "blocked") &&
+      entry.metadata.terminal === true
+    ) {
+      this.state.failed.add(entry.issueId);
+      this.releaseClaim(entry.issueId);
+      this.clearTerminalIssueRuntimeState(entry.issueId);
+      return;
+    }
+
+    const nextStage =
+      outcome.status === "passed"
+        ? gateStage.transitions.onApprove
+        : outcome.status === "failed" || outcome.status === "blocked"
+          ? (outcome.reworkTarget ?? gateStage.transitions.onRework)
+          : null;
+
+    if (nextStage === null) {
+      return;
+    }
+
+    this.state.issueStages[entry.issueId] = nextStage;
+    if (outcome.status === "failed" || outcome.status === "blocked") {
+      const reworkCount = toOptionalNumber(entry.metadata.reworkCount);
+      if (reworkCount !== null) {
+        this.state.issueReworkCounts[entry.issueId] = reworkCount;
       }
     }
   }
@@ -1464,6 +1530,7 @@ export class OrchestratorCore {
       // biome-ignore lint/style/noNonNullAssertion: runEnsembleGate is guaranteed to be set when this method is called
       const result = await this.runEnsembleGate!({ issue, stage });
       let reworkTarget: string | null = null;
+      const reworkCountBeforeGate = this.state.issueReworkCounts[issue.id] ?? 0;
 
       if (result.aggregate === "pass") {
         const nextStage = this.approveGate(issue.id);
@@ -1547,6 +1614,14 @@ export class OrchestratorCore {
           verifierSeparated: gateContext?.verifierSeparated ?? null,
           authoritative:
             gateContext === null ? null : gateContext.mode !== "prototype",
+          reworkTarget: reworkTarget === "escalated" ? null : reworkTarget,
+          reworkCount:
+            reworkTarget === "escalated"
+              ? reworkCountBeforeGate
+              : (this.state.issueReworkCounts[issue.id] ?? null),
+          terminal: reworkTarget === "escalated",
+          terminalReason:
+            reworkTarget === "escalated" ? "max_rework_exceeded" : null,
         },
       });
     } catch {
@@ -1656,6 +1731,8 @@ export class OrchestratorCore {
     gateContext: DecorrelatedGateContext;
     leaseId: string;
   }): Promise<void> {
+    const reworkCountBeforeGate =
+      this.state.issueReworkCounts[input.issue.id] ?? 0;
     const reworkTarget = this.reworkGate(input.issue.id);
     const blockReason =
       input.gateContext.reviewerLanes.length === 0
@@ -1728,6 +1805,14 @@ export class OrchestratorCore {
         verifierSeparated: false,
         authoritative: true,
         status: "blocked",
+        reworkTarget: reworkTarget === "escalated" ? null : reworkTarget,
+        reworkCount:
+          reworkTarget === "escalated"
+            ? reworkCountBeforeGate
+            : (this.state.issueReworkCounts[input.issue.id] ?? null),
+        terminal: reworkTarget === "escalated",
+        terminalReason:
+          reworkTarget === "escalated" ? "max_rework_exceeded" : null,
       },
     });
   }
@@ -2702,11 +2787,13 @@ export class OrchestratorCore {
           stageName,
           stage,
         );
+        const gateCycle = this.state.issueReworkCounts[issue.id] ?? 0;
         const gateLeaseId = createDispatcherLeaseId({
           operation: "gate",
           issueId: issue.id,
           stage: stageName,
           attempt,
+          suffix: `gate-cycle-${gateCycle}`,
         });
         const gateLease = await this.acquireDispatcherLease({
           leaseId: gateLeaseId,
@@ -2726,6 +2813,7 @@ export class OrchestratorCore {
             verifierSeparated: gateContext?.verifierSeparated ?? null,
             authoritative:
               gateContext === null ? null : gateContext.mode !== "prototype",
+            gateCycle,
           },
         });
         if (gateLease === null) {
@@ -3699,6 +3787,125 @@ function parseEventTimestamp(
 
 function toNormalizedStateSet(states: readonly string[]): Set<string> {
   return new Set(states.map((state) => normalizeIssueState(state)));
+}
+
+function toDecorrelatedGateOutcome(
+  entry: DispatcherRunJournalEntry,
+): DecorrelatedGateOutcome | null {
+  const status = toDecorrelatedGateStatus(entry.metadata);
+  const mode = toRightSizingMode(entry.metadata.mode);
+  const workerLane = toDecorrelatedGateLane(entry.metadata.workerLane);
+  const reviewerLanes = toDecorrelatedGateLanes(entry.metadata.reviewerLanes);
+  const verifierSeparated = toOptionalBoolean(entry.metadata.verifierSeparated);
+  const authoritative = toOptionalBoolean(entry.metadata.authoritative);
+
+  if (
+    status === null ||
+    mode === null ||
+    workerLane === null ||
+    reviewerLanes === null ||
+    verifierSeparated === null
+  ) {
+    return null;
+  }
+
+  return {
+    issueId: entry.issueId,
+    issueIdentifier: entry.issueIdentifier,
+    gateStage: entry.stage,
+    mode,
+    status,
+    aggregate: toGateAggregate(entry.metadata.aggregate),
+    checkedAt: entry.timestamp,
+    workerLane,
+    reviewerLanes,
+    verifierSeparated,
+    authoritative: authoritative ?? status !== "skipped_prototype",
+    reworkTarget:
+      typeof entry.metadata.reworkTarget === "string"
+        ? entry.metadata.reworkTarget
+        : null,
+    summary: entry.summary,
+  };
+}
+
+function toDecorrelatedGateStatus(
+  metadata: Record<string, unknown>,
+): DecorrelatedGateOutcome["status"] | null {
+  if (metadata.status === "skipped_prototype") {
+    return "skipped_prototype";
+  }
+  if (metadata.status === "blocked") {
+    return "blocked";
+  }
+  if (metadata.aggregate === "pass") {
+    return "passed";
+  }
+  if (metadata.aggregate === "fail") {
+    return "failed";
+  }
+  return null;
+}
+
+function toGateAggregate(value: unknown): "pass" | "fail" | null {
+  return value === "pass" || value === "fail" ? value : null;
+}
+
+function toRightSizingMode(value: unknown): RightSizingMode | null {
+  return value === "prototype" || value === "thin" || value === "full"
+    ? value
+    : null;
+}
+
+function toDecorrelatedGateLanes(
+  value: unknown,
+): DecorrelatedGateLane[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+
+  const lanes: DecorrelatedGateLane[] = [];
+  for (const item of value) {
+    const lane = toDecorrelatedGateLane(item);
+    if (lane === null) {
+      return null;
+    }
+    lanes.push(lane);
+  }
+  return lanes;
+}
+
+function toDecorrelatedGateLane(value: unknown): DecorrelatedGateLane | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (
+    typeof value.runner !== "string" ||
+    typeof value.role !== "string" ||
+    (value.model !== null && typeof value.model !== "string") ||
+    (value.stageName !== null && typeof value.stageName !== "string")
+  ) {
+    return null;
+  }
+
+  return {
+    runner: value.runner,
+    model: value.model,
+    role: value.role,
+    stageName: value.stageName,
+  };
+}
+
+function toOptionalBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function toOptionalNumber(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function formatSupervisionFindingSignature(
