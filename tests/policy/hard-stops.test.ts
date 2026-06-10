@@ -349,6 +349,50 @@ describe("hard-stop policy", () => {
       totalTokens: 1_500_000,
     });
     expect(crossed?.reason).toContain("420000 billable");
+    expect(crossed?.billableTokens).toBe(420_000);
+  });
+
+  it("locks the discount clamp contract at the extremes", () => {
+    const config = {
+      ...CONFIG,
+      maxTokensPerUnit: 1000,
+      maxDollarBudgetUsd: 1_000_000,
+      estimatedCostPer1kTokensUsd: 5,
+    };
+
+    // Fully-cached unit at max discount: billable is 0 — never fires.
+    expect(
+      evaluateBudgetHardStop({
+        config: { ...config, cachedTokenCostRatio: 0 },
+        turnCount: 1,
+        totalTokens: 1000,
+        cacheReadTokens: 5000,
+      }),
+    ).toBeNull();
+
+    // undefined ratio fails closed to no discount (raw totals gate).
+    expect(
+      evaluateBudgetHardStop({
+        config: {
+          ...config,
+          cachedTokenCostRatio: undefined as unknown as number,
+        },
+        turnCount: 1,
+        totalTokens: 1000,
+        cacheReadTokens: 900,
+      })?.trigger,
+    ).toBe("token_budget");
+
+    // null ALSO fails closed: Number.isFinite does not coerce (unlike the
+    // global isFinite), so null gets no discount and raw totals gate.
+    expect(
+      evaluateBudgetHardStop({
+        config: { ...config, cachedTokenCostRatio: null as unknown as number },
+        turnCount: 1,
+        totalTokens: 1000,
+        cacheReadTokens: 1000,
+      })?.trigger,
+    ).toBe("token_budget");
   });
 
   it("applies the cache discount to iteration and no-progress decisions", () => {
