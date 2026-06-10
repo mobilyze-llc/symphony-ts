@@ -951,7 +951,7 @@ describe("orchestrator core", () => {
       },
     });
 
-    expect(result).toEqual({ applied: true });
+    expect(result).toEqual({ applied: true, rateLimitsUpdated: true });
     expect(orchestrator.getState().running["1"]).toMatchObject({
       sessionId: "thread-1-turn-1",
       threadId: "thread-1",
