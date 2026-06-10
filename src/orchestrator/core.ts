@@ -137,6 +137,8 @@ export interface RetryTimerResult {
 
 export interface CodexEventResult {
   applied: boolean;
+  /** True when the event carried a fresh rate-limit snapshot (SYMPH-336). */
+  rateLimitsUpdated: boolean;
 }
 
 export interface ContinuousFeedbackCheckpointResult {
@@ -2322,11 +2324,15 @@ export class OrchestratorCore {
   }): CodexEventResult {
     const runningEntry = this.state.running[input.issueId];
     if (runningEntry === undefined) {
-      return { applied: false };
+      return { applied: false, rateLimitsUpdated: false };
     }
 
-    applyCodexEventToOrchestratorState(this.state, runningEntry, input.event);
-    return { applied: true };
+    const telemetry = applyCodexEventToOrchestratorState(
+      this.state,
+      runningEntry,
+      input.event,
+    );
+    return { applied: true, rateLimitsUpdated: telemetry.rateLimitsUpdated };
   }
 
   async runContinuousFeedbackCheckpoint(input: {

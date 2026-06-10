@@ -116,6 +116,10 @@ import { OrchestratorCore } from "./core.js";
 import { runEnsembleGate } from "./gate-handler.js";
 import { reduceManagerRunJournal } from "./manager-run.js";
 import type { PipelineNotificationSink } from "./pipeline-notifier.js";
+import {
+  loadPersistedRateLimitSnapshot,
+  persistRateLimitSnapshot,
+} from "./rate-limit-persistence.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
 import { writeTrackerIssueFromBoundary } from "./tracker-write.js";
 
@@ -311,6 +315,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private dispatcherRunJournalRoot: string | null = null;
   private readonly dispatcherLeaseRoots = new Map<string, string>();
   private managerRunJournalHydrationTask: Promise<void> | null = null;
+  private rateLimitSnapshotHydrated = false;
+  private lastPersistedRateLimitsJson: string | null = null;
 
   constructor(options: RuntimeHostOptions) {
     this.config = options.config;
@@ -338,10 +344,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       createWorkspaceManagerFromConfig(options.config, this.logger);
     this.agentEventSink = (event) => {
       void this.enqueue(async () => {
-        this.orchestrator.onCodexEvent({
+        const codexEventResult = this.orchestrator.onCodexEvent({
           issueId: event.issueId,
           event,
         });
+        if (codexEventResult.rateLimitsUpdated) {
+          await this.persistRateLimitSnapshotBestEffort();
+        }
         await logAgentEvent(this.logger, event);
         await this.recordLoopTraceForAgentEvent(event);
         const feedbackEvent = toContinuousFeedbackEvent(event);
@@ -624,6 +633,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   async pollOnce() {
     return this.enqueue(async () => {
       await this.ensureDispatcherRunJournalLoaded();
+      await this.ensureRateLimitSnapshotHydrated();
       return await this.orchestrator.pollTick();
     });
   }
@@ -814,6 +824,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     if (!coalesced) {
       void this.enqueue(async () => {
         await this.ensureDispatcherRunJournalLoaded();
+        await this.ensureRateLimitSnapshotHydrated();
         this.refreshQueued = false;
         await this.orchestrator.pollTick();
       });
@@ -844,6 +855,93 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       stopped: true,
       reason: "manual_stop",
     };
+  }
+
+  /**
+   * Hydrate the last persisted Codex rate-limit snapshot into orchestrator
+   * state once per process (SYMPH-336), so the dispatch admission floor can
+   * engage from the first poll tick after a restart. Live telemetry always
+   * wins: hydration only applies while no snapshot has been observed yet.
+   * Stale data is safe — the admission gate ignores windows whose resets_at
+   * has passed.
+   */
+  private async ensureRateLimitSnapshotHydrated(): Promise<void> {
+    if (this.rateLimitSnapshotHydrated) {
+      return;
+    }
+    this.rateLimitSnapshotHydrated = true;
+
+    const state = this.orchestrator.getState();
+    if (state.codexRateLimits !== null) {
+      return;
+    }
+
+    try {
+      const persisted = await loadPersistedRateLimitSnapshot(
+        this.workspaceManager.root,
+      );
+      if (persisted === null) {
+        return;
+      }
+      if (state.codexRateLimits === null) {
+        state.codexRateLimits = persisted.rateLimits;
+        this.lastPersistedRateLimitsJson = JSON.stringify(persisted.rateLimits);
+        await this.logger?.info(
+          "rate_limit_snapshot_hydrated",
+          "Hydrated persisted Codex rate-limit snapshot.",
+          {
+            outcome: "hydrated",
+            observed_at: persisted.observedAt,
+            workspace_root: this.workspaceManager.root,
+          },
+        );
+      }
+    } catch (error) {
+      await this.logger?.warn(
+        "rate_limit_snapshot_hydration_failed",
+        "Failed to hydrate persisted rate-limit snapshot.",
+        {
+          outcome: "degraded",
+          reason: toErrorMessage(error),
+          workspace_root: this.workspaceManager.root,
+        },
+      );
+    }
+  }
+
+  /**
+   * Write-behind persistence of the latest rate-limit snapshot. Best-effort
+   * and deduplicated on content: failures degrade to pre-SYMPH-336 behavior
+   * and must never disturb the event path.
+   */
+  private async persistRateLimitSnapshotBestEffort(): Promise<void> {
+    const rateLimits = this.orchestrator.getState().codexRateLimits;
+    if (rateLimits === null) {
+      return;
+    }
+
+    const serialized = JSON.stringify(rateLimits);
+    if (serialized === this.lastPersistedRateLimitsJson) {
+      return;
+    }
+
+    try {
+      await persistRateLimitSnapshot(this.workspaceManager.root, {
+        observedAt: this.now().toISOString(),
+        rateLimits,
+      });
+      this.lastPersistedRateLimitsJson = serialized;
+    } catch (error) {
+      await this.logger?.warn(
+        "rate_limit_snapshot_persist_failed",
+        "Failed to persist rate-limit snapshot.",
+        {
+          outcome: "degraded",
+          reason: toErrorMessage(error),
+          workspace_root: this.workspaceManager.root,
+        },
+      );
+    }
   }
 
   private async ensureDispatcherRunJournalLoaded(): Promise<void> {

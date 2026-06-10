@@ -32,6 +32,10 @@ import {
 } from "../../src/logging/structured-logger.js";
 import type { PipelineNotificationEvent } from "../../src/orchestrator/pipeline-notifier.js";
 import {
+  loadPersistedRateLimitSnapshot,
+  persistRateLimitSnapshot,
+} from "../../src/orchestrator/rate-limit-persistence.js";
+import {
   OrchestratorRuntimeHost,
   createWorkspaceHookLogger,
   extractProductName,
@@ -562,6 +566,122 @@ describe("OrchestratorRuntimeHost", () => {
         stage_transition: {
           status: "failed",
         },
+      });
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("persists rate-limit snapshots and hydrates them into a cold host", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-rl-snapshot-"));
+    try {
+      const rateLimits = {
+        limit_id: "codex",
+        primary: {
+          used_percent: 39,
+          window_minutes: 300,
+          resets_at: 1772800000,
+        },
+        secondary: {
+          used_percent: 97,
+          window_minutes: 10080,
+          resets_at: 1772900000,
+        },
+      };
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      await host.pollOnce();
+      fakeRunner.emit("1", {
+        event: "notification",
+        timestamp: "2026-03-06T00:00:01.000Z",
+        codexAppServerPid: "1001",
+        sessionId: "thread-1-turn-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        rateLimits,
+      });
+      await host.flushEvents();
+
+      const persisted = await loadPersistedRateLimitSnapshot(workspaceRoot);
+      expect(persisted).toEqual({
+        observedAt: "2026-03-06T00:00:05.000Z",
+        rateLimits,
+      });
+
+      // A cold host in the same workspace hydrates the snapshot before its
+      // first tick, so the admission floor has data from tick one.
+      const coldTracker = createTracker();
+      const coldRunner = new FakeAgentRunner();
+      const coldHost = new OrchestratorRuntimeHost({
+        config,
+        tracker: coldTracker,
+        createAgentRunner: ({ onEvent }) => {
+          coldRunner.onEvent = onEvent;
+          return coldRunner;
+        },
+        now: () => new Date("2026-03-06T00:10:00.000Z"),
+      });
+
+      await coldHost.pollOnce();
+      expect(coldHost.getState().codexRateLimits).toEqual(rateLimits);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks cold-start dispatch from a persisted low-headroom snapshot", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-rl-floor-"));
+    try {
+      // Persisted snapshot: 2% secondary headroom, resets in the future
+      // relative to the host clock (2026-03-06T00:00:05Z = 1772755205).
+      await persistRateLimitSnapshot(workspaceRoot, {
+        observedAt: "2026-03-06T00:00:00.000Z",
+        rateLimits: {
+          limit_id: "codex",
+          secondary: {
+            used_percent: 98,
+            window_minutes: 10080,
+            resets_at: 1772800000,
+          },
+        },
+      });
+
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      config.rateLimitAdmission = {
+        minPrimaryHeadroomPct: 10,
+        minSecondaryHeadroomPct: 5,
+      };
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      const tick = await host.pollOnce();
+
+      expect(tick.dispatchedIssueIds).toEqual([]);
+      expect(host.getState().rateLimitAdmission).toMatchObject({
+        blocked: true,
+        secondaryUsedPercent: 98,
       });
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
