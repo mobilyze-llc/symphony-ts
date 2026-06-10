@@ -7,6 +7,7 @@ import {
   ORCHESTRATOR_ISSUE_STATUSES,
   RUN_ATTEMPT_PHASES,
   type StageRecord,
+  containsStageCompleteSignal,
   createEmptyLiveSession,
   createInitialOrchestratorState,
   normalizeIssueState,
@@ -261,6 +262,55 @@ describe("parseFailureSignal", () => {
 
   it("returns null when no failure signal is present", () => {
     expect(parseFailureSignal("[STAGE_COMPLETE]")).toBeNull();
+  });
+});
+
+describe("containsStageCompleteSignal", () => {
+  it("detects the marker at the start of any line", () => {
+    expect(containsStageCompleteSignal("[STAGE_COMPLETE]")).toBe(true);
+    expect(
+      containsStageCompleteSignal("Done with investigation.\n[STAGE_COMPLETE]"),
+    ).toBe(true);
+    // Verbatim SYMPH-330 round-3 shape: marker leads, explanation follows.
+    expect(
+      containsStageCompleteSignal(
+        "[STAGE_COMPLETE]  Investigation workpad updated on the existing Linear comment.",
+      ),
+    ).toBe(true);
+    expect(
+      containsStageCompleteSignal("Workpad posted.\n  [STAGE_COMPLETE]\n"),
+    ).toBe(true);
+  });
+
+  it("does not fire on instruction echoes or mid-prose mentions", () => {
+    // The stage prompts quote the marker; echoing instructions must not
+    // complete the stage.
+    expect(
+      containsStageCompleteSignal(
+        "I'll output [STAGE_COMPLETE] once the workpad is posted. Starting now.",
+      ),
+    ).toBe(false);
+    expect(
+      containsStageCompleteSignal("Workpad posted. [STAGE_COMPLETE] Thanks!"),
+    ).toBe(false);
+    expect(
+      containsStageCompleteSignal(
+        "When done, output the exact text [STAGE_COMPLETE] as the last line.",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not fire without the exact marker", () => {
+    expect(containsStageCompleteSignal(null)).toBe(false);
+    expect(containsStageCompleteSignal(undefined)).toBe(false);
+    expect(containsStageCompleteSignal("")).toBe(false);
+    expect(containsStageCompleteSignal("STAGE_COMPLETE")).toBe(false);
+    expect(containsStageCompleteSignal("[STAGE_FAILED: verify]")).toBe(false);
+  });
+});
+
+describe("parseFailureSignal extraction cases", () => {
+  it("returns null for non-signal prose", () => {
     expect(parseFailureSignal("All tests passed successfully.")).toBeNull();
     expect(parseFailureSignal("STAGE_FAILED: verify")).toBeNull();
   });
