@@ -44,7 +44,7 @@ import {
 } from "../policy/hard-stops.js";
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
-import { getDefaultCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
+import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
 import type { IssueTracker } from "../tracker/tracker.js";
 import { WorkspaceHookRunner } from "../workspace/hooks.js";
 import { validateWorkspaceCwd } from "../workspace/path-safety.js";
@@ -358,8 +358,9 @@ export class AgentRunner {
         readTimeoutMs: this.config.codex.readTimeoutMs,
         turnTimeoutMs: this.config.codex.turnTimeoutMs,
         stallTimeoutMs: this.config.codex.stallTimeoutMs,
-        artifactDirectory: getDefaultCodexSessionArtifactDirectory(
-          workspace.path,
+        artifactDirectory: getDurableCodexSessionArtifactDirectory(
+          this.config.workspace.root,
+          workspace.workspaceKey,
         ),
         dynamicTools: this.createDynamicTools(),
         ...(input.modePolicy === undefined
