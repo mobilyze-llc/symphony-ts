@@ -441,7 +441,10 @@ function readRatio(value: unknown): number | null {
   return parsed;
 }
 
-// Percent points on the 0-100 scale used by Codex rate-limit `used_percent`.
+// Percent points in (0, 100] matching Codex rate-limit `used_percent` units.
+// Zero is rejected on purpose: a 0 budget would pause on the first snapshot
+// (delta >= 0 always holds) and a 0 headroom floor is a no-op — "disabled"
+// is expressed by omitting the key, never by 0.
 function readPercentPoints(value: unknown): number | null {
   const parsed = readNumber(value);
   if (parsed === null || parsed <= 0 || parsed > 100) {

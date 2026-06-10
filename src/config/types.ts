@@ -49,7 +49,9 @@ export interface WorkflowHardStopsConfig {
   cachedTokenCostRatio: number;
   /**
    * Max share of the Codex primary (5-hour) rate-limit window one unit of
-   * work may burn, in percent points (0-100). null disables the check.
+   * work may burn, in percent points (0, 100]. null (the key omitted in
+   * YAML) disables the check; 0 is rejected by config parsing because it
+   * would pause on the first observed snapshot.
    */
   maxPrimaryWindowPctPerUnit: number | null;
   /** Same budget for the secondary (weekly) window. null disables. */
