@@ -719,6 +719,21 @@ describe("OrchestratorRuntimeHost", () => {
           bytes: 18,
         },
       ]);
+
+      const terminalDetailsById = await coldHost.getIssueDetails("terminal-1");
+      expect(terminalDetailsById).toMatchObject({
+        issue_identifier: "ISSUE-TERMINAL",
+        issue_id: "terminal-1",
+        status: "released",
+      });
+      expect(terminalDetailsById?.logs.codex_session_logs).toEqual([
+        {
+          label: "home-b/sessions/2026/rollout-terminal.jsonl",
+          path: terminalArtifactPath,
+          url: null,
+          bytes: 18,
+        },
+      ]);
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
     }
@@ -1167,7 +1182,84 @@ describe("OrchestratorRuntimeHost", () => {
       const artifact = readFileSync(details!.loop_trace_journal.path, "utf8");
       expect(artifact).toContain('"kind":"session_start"');
       expect(artifact).toContain('"kind":"worker_exit"');
+
+      const detailsByIssueId = await coldHost.getIssueDetails("1");
+      expect(detailsByIssueId).toMatchObject({
+        issue_identifier: "ISSUE-1",
+        issue_id: "1",
+        status: "completed",
+        loop_trace_journal: {
+          path: `${workspaceRoot}/.symphony/loop-traces/1.jsonl`,
+          total_entries: 4,
+          stored_entries: 4,
+          truncated: false,
+        },
+      });
+
       await expect(coldHost.getIssueDetails("MISSING-1")).resolves.toBeNull();
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("loads stored issue-id details through an injected loop trace reader", async () => {
+    const workspaceRoot = mkdtempSync(
+      join(tmpdir(), "symph-loop-trace-reader-"),
+    );
+
+    try {
+      const journal: LoopTraceJournal = [
+        {
+          sequence: 1,
+          timestamp: "2026-03-06T00:01:00.000Z",
+          kind: "stage_transition",
+          issueId: "issue-uuid-1",
+          issueIdentifier: "ISSUE-READER",
+          stage: "implement",
+          attempt: null,
+          sessionId: "thread-reader",
+          summary: "Stage implement moved to released.",
+          stageTransition: {
+            from: "implement",
+            to: "implement",
+            status: "released",
+          },
+        },
+      ];
+      const readCalls: string[] = [];
+      const config = createStagedConfig({
+        workspace: {
+          root: workspaceRoot,
+        },
+      });
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({
+          candidates: [],
+          stateSnapshots: [],
+        }),
+        agentRunner: new FakeAgentRunner(),
+        readLoopTraceJournal: async (locator) => {
+          readCalls.push(locator.workspaceKey);
+          return journal;
+        },
+        now: () => new Date("2026-03-06T00:01:05.000Z"),
+      });
+
+      const details = await host.getIssueDetails("issue-uuid-1");
+
+      expect(details).toMatchObject({
+        issue_identifier: "ISSUE-READER",
+        issue_id: "issue-uuid-1",
+        status: "released",
+        loop_trace_journal: {
+          path: `${workspaceRoot}/.symphony/loop-traces/issue-uuid-1.jsonl`,
+          total_entries: 1,
+          stored_entries: 1,
+          truncated: false,
+        },
+      });
+      expect(readCalls).toEqual(["issue-uuid-1"]);
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
     }

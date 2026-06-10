@@ -687,7 +687,10 @@ export function createDashboardRequestHandler(
 
       if (url.pathname.startsWith("/api/v1/")) {
         const rest = url.pathname.slice("/api/v1/".length);
-        const stopMatch = rest.match(/^(.+)\/stop$/);
+        const issueRest = rest.startsWith("issues/")
+          ? rest.slice("issues/".length)
+          : rest;
+        const stopMatch = issueRest.match(/^(.+)\/stop$/);
 
         if (stopMatch !== null) {
           if (method !== "POST") {
@@ -715,7 +718,7 @@ export function createDashboardRequestHandler(
           return;
         }
 
-        const issueIdentifier = decodeURIComponent(rest);
+        const issueIdentifier = decodeURIComponent(issueRest);
         const issue = await options.host.getIssueDetails(issueIdentifier);
         if (issue === null) {
           writeJsonError(response, 404, ERROR_CODES.issueNotFound, {
