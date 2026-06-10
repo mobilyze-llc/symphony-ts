@@ -636,6 +636,14 @@ describe("CodexAppServerClient", () => {
       expect(config).toContain("tool_output_token_limit = 2500");
       expect(config).toContain("model_auto_compact_token_limit = 40000");
       expect(config).toContain("[features]");
+      // Top-level keys after a table header would silently attach to that
+      // table — assert the caps stay above [features].
+      expect(config.indexOf("tool_output_token_limit")).toBeLessThan(
+        config.indexOf("[features]"),
+      );
+      expect(config.indexOf("model_auto_compact_token_limit")).toBeLessThan(
+        config.indexOf("[features]"),
+      );
       expect(config).toContain("apps = false");
       expect(config).toContain("browser_use = false");
       expect(config).toContain("codex_hooks = false");

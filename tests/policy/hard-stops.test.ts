@@ -93,9 +93,10 @@ describe("hard-stop policy", () => {
   });
 
   it("discounts cached input tokens in the estimated dollar cost", () => {
-    // Post-PR #314 SYMPH-319 canary shape: 87,657 total tokens of which
-    // 60,672 were cache reads. Full-rate pricing called this $4.38 and
-    // paused the worker; cache-aware pricing is $1.65 of the $4 budget.
+    // Canary data from the SYMPH-319 run recorded after PR #314 landed:
+    // 87,657 total tokens of which 60,672 were cache reads. Full-rate
+    // pricing called this $4.38 and paused the worker; cache-aware pricing
+    // is $1.65 of the $4 budget.
     const config = {
       ...CONFIG,
       maxTokensPerUnit: 240_000,
@@ -170,6 +171,39 @@ describe("hard-stop policy", () => {
     ).toMatchObject({
       trigger: "token_budget",
       estimatedCostUsd: expect.closeTo(5, 10),
+    });
+  });
+
+  it("applies the cache discount to iteration and no-progress decisions", () => {
+    const config = {
+      ...CONFIG,
+      estimatedCostPer1kTokensUsd: 5,
+      cachedTokenCostRatio: 0.1,
+    };
+
+    expect(
+      evaluateIterationHardStop({
+        config,
+        turnCount: 3,
+        totalTokens: 1000,
+        cacheReadTokens: 600,
+      }),
+    ).toMatchObject({
+      trigger: "iteration_cap",
+      estimatedCostUsd: expect.closeTo(2.3, 10),
+    });
+
+    expect(
+      evaluateNoProgressHardStop({
+        config,
+        repeatedNoProgressTurns: 2,
+        turnCount: 2,
+        totalTokens: 1000,
+        cacheReadTokens: 600,
+      }),
+    ).toMatchObject({
+      trigger: "no_progress",
+      estimatedCostUsd: expect.closeTo(2.3, 10),
     });
   });
 

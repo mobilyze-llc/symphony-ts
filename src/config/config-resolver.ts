@@ -422,6 +422,15 @@ function readRatio(value: unknown): number | null {
   return parsed;
 }
 
+function readZeroInclusiveRatio(value: unknown): number | null {
+  const parsed = readNumber(value);
+  if (parsed === null || parsed < 0 || parsed > 1) {
+    return null;
+  }
+
+  return parsed;
+}
+
 function readNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -659,7 +668,11 @@ function readHardStopsConfig(
     parsed.estimatedCostPer1kTokensUsd = estimatedCostPer1kTokensUsd;
   }
 
-  const cachedTokenCostRatio = readRatio(hardStops.cached_token_cost_ratio);
+  // Unlike premium_budget_pause_ratio, a ratio of exactly 0 is meaningful
+  // here: cached input is free.
+  const cachedTokenCostRatio = readZeroInclusiveRatio(
+    hardStops.cached_token_cost_ratio,
+  );
   if (cachedTokenCostRatio !== null) {
     parsed.cachedTokenCostRatio = cachedTokenCostRatio;
   }

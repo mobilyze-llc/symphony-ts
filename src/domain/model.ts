@@ -689,6 +689,10 @@ export interface LiveSession {
   lastReportedInputTokens: number;
   lastReportedOutputTokens: number;
   lastReportedTotalTokens: number;
+  lastReportedCacheReadTokens: number;
+  lastReportedCacheWriteTokens: number;
+  lastReportedNoCacheTokens: number;
+  lastReportedReasoningTokens: number;
   turnCount: number;
   totalStageInputTokens: number;
   totalStageOutputTokens: number;
@@ -952,6 +956,10 @@ export function createEmptyLiveSession(): LiveSession {
     lastReportedInputTokens: 0,
     lastReportedOutputTokens: 0,
     lastReportedTotalTokens: 0,
+    lastReportedCacheReadTokens: 0,
+    lastReportedCacheWriteTokens: 0,
+    lastReportedNoCacheTokens: 0,
+    lastReportedReasoningTokens: 0,
     turnCount: 0,
     totalStageInputTokens: 0,
     totalStageOutputTokens: 0,

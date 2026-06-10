@@ -709,6 +709,20 @@ describe("config-resolver fast_track", () => {
     expect(resolved.hardStops?.cachedTokenCostRatio).toBe(0.1);
   });
 
+  it("accepts cached_token_cost_ratio of exactly 0 (free cache reads)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        hard_stops: {
+          cached_token_cost_ratio: "0",
+        },
+      },
+    });
+
+    expect(resolved.hardStops?.cachedTokenCostRatio).toBe(0);
+  });
+
   it("resolves slack_notify_channel from YAML config", () => {
     const resolved = resolveWorkflowConfig({
       workflowPath: "/repo/WORKFLOW.md",

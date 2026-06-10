@@ -342,9 +342,14 @@ function estimateCostUsd(input: {
     Math.max(input.cacheReadTokens, 0),
     input.totalTokens,
   );
+  // A malformed ratio must fail closed (no discount), never disable the
+  // dollar checks via NaN comparisons.
+  const configuredRatio = input.config.cachedTokenCostRatio;
+  const cachedTokenCostRatio = Number.isFinite(configuredRatio)
+    ? Math.min(Math.max(configuredRatio, 0), 1)
+    : 1;
   const billableTokens =
-    input.totalTokens -
-    cacheReadTokens * (1 - input.config.cachedTokenCostRatio);
+    input.totalTokens - cacheReadTokens * (1 - cachedTokenCostRatio);
   return (billableTokens / 1000) * input.config.estimatedCostPer1kTokensUsd;
 }
 

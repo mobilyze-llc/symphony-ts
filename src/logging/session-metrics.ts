@@ -104,6 +104,10 @@ export function applyCodexEventToSession(
     session.lastReportedInputTokens = 0;
     session.lastReportedOutputTokens = 0;
     session.lastReportedTotalTokens = 0;
+    session.lastReportedCacheReadTokens = 0;
+    session.lastReportedCacheWriteTokens = 0;
+    session.lastReportedNoCacheTokens = 0;
+    session.lastReportedReasoningTokens = 0;
   }
 
   const activityEntry = buildRecentActivityEntry(event);
@@ -147,21 +151,50 @@ export function applyCodexEventToSession(
     totalTokens,
   );
 
-  const cacheReadTokensDelta =
+  // Cache/reasoning counters are reported cumulatively by the Codex
+  // app-server, same as input/output/total — delta-normalize them so the
+  // stage accumulators do not sum cumulative readings (fail-open hazard for
+  // the cache-aware budget discount, SYMPH-319 council P1).
+  const cacheReadTokens =
     event.usage.cacheReadTokens !== undefined
       ? normalizeAbsoluteCounter(event.usage.cacheReadTokens)
-      : 0;
-  const cacheWriteTokensDelta =
+      : null;
+  const cacheWriteTokens =
     event.usage.cacheWriteTokens !== undefined
       ? normalizeAbsoluteCounter(event.usage.cacheWriteTokens)
-      : 0;
-  const noCacheTokensDelta =
+      : null;
+  const noCacheTokens =
     event.usage.noCacheTokens !== undefined
       ? normalizeAbsoluteCounter(event.usage.noCacheTokens)
-      : 0;
-  const reasoningTokensDelta =
+      : null;
+  const reasoningTokens =
     event.usage.reasoningTokens !== undefined
       ? normalizeAbsoluteCounter(event.usage.reasoningTokens)
+      : null;
+  const cacheReadTokensDelta =
+    cacheReadTokens !== null
+      ? computeCounterDelta(
+          session.lastReportedCacheReadTokens,
+          cacheReadTokens,
+        )
+      : 0;
+  const cacheWriteTokensDelta =
+    cacheWriteTokens !== null
+      ? computeCounterDelta(
+          session.lastReportedCacheWriteTokens,
+          cacheWriteTokens,
+        )
+      : 0;
+  const noCacheTokensDelta =
+    noCacheTokens !== null
+      ? computeCounterDelta(session.lastReportedNoCacheTokens, noCacheTokens)
+      : 0;
+  const reasoningTokensDelta =
+    reasoningTokens !== null
+      ? computeCounterDelta(
+          session.lastReportedReasoningTokens,
+          reasoningTokens,
+        )
       : 0;
 
   session.codexInputTokens = inputTokens;
@@ -181,6 +214,18 @@ export function applyCodexEventToSession(
   session.lastReportedInputTokens = inputTokens;
   session.lastReportedOutputTokens = outputTokens;
   session.lastReportedTotalTokens = totalTokens;
+  if (cacheReadTokens !== null) {
+    session.lastReportedCacheReadTokens = cacheReadTokens;
+  }
+  if (cacheWriteTokens !== null) {
+    session.lastReportedCacheWriteTokens = cacheWriteTokens;
+  }
+  if (noCacheTokens !== null) {
+    session.lastReportedNoCacheTokens = noCacheTokens;
+  }
+  if (reasoningTokens !== null) {
+    session.lastReportedReasoningTokens = reasoningTokens;
+  }
   pushTokenTelemetry(session, {
     timestamp: event.timestamp,
     event: event.event,

@@ -161,7 +161,7 @@ describe("session metrics", () => {
           inputTokens: 30,
           outputTokens: 7,
           totalTokens: 37,
-          cacheReadTokens: 4,
+          cacheReadTokens: 12,
         },
       }),
     );
@@ -194,7 +194,7 @@ describe("session metrics", () => {
         inputTokensDelta: 10,
         outputTokensDelta: 2,
         totalTokensDelta: 12,
-        cacheReadTokens: 4,
+        cacheReadTokens: 12,
         cacheReadTokensDelta: 4,
       }),
     ]);
@@ -284,11 +284,47 @@ describe("session metrics", () => {
     applyCodexEventToOrchestratorState(state, running, firstEvent);
     applyCodexEventToOrchestratorState(state, running, secondEvent);
 
-    // Detail tokens are accumulated additively (not absolute like input/output/total)
-    expect(running.codexCacheReadTokens).toBe(10);
-    expect(running.codexReasoningTokens).toBe(8);
-    expect(state.codexTotals.cacheReadTokens).toBe(10);
-    expect(state.codexTotals.reasoningTokens).toBe(8);
+    // Detail tokens are reported cumulatively within a turn (same as
+    // input/output/total) and must be delta-normalized, not summed raw.
+    expect(running.codexCacheReadTokens).toBe(7);
+    expect(running.codexReasoningTokens).toBe(6);
+    expect(state.codexTotals.cacheReadTokens).toBe(7);
+    expect(state.codexTotals.reasoningTokens).toBe(6);
+  });
+
+  it("does not double-count cumulative cache counters in stage accumulators", () => {
+    const running = createRunningEntry();
+
+    // Shape from the preserved SYMPH-319 canary JSONL: token_count events
+    // report cumulative usage including cached_input_tokens.
+    applyCodexEventToSession(
+      running,
+      createEvent("notification", {
+        usage: {
+          inputTokens: 12_344,
+          outputTokens: 122,
+          totalTokens: 12_466,
+          cacheReadTokens: 2_432,
+        },
+      }),
+    );
+    applyCodexEventToSession(
+      running,
+      createEvent("notification", {
+        usage: {
+          inputTokens: 25_029,
+          outputTokens: 234,
+          totalTokens: 25_263,
+          cacheReadTokens: 14_592,
+        },
+      }),
+    );
+
+    // The accumulator must equal the latest cumulative reading, not the sum
+    // of cumulative readings (2,432 + 14,592 = 17,024 would overstate the
+    // cached share and inflate the budget discount).
+    expect(running.totalStageCacheReadTokens).toBe(14_592);
+    expect(running.totalStageTotalTokens).toBe(25_263);
   });
 
   it("returns zero deltas for detail tokens when no usage on event", () => {
@@ -429,10 +465,10 @@ describe("session metrics", () => {
     expect(running.totalStageOutputTokens).toBe(9);
     // totalTokensDelta for first = 14, for second = 15 (29-14), total = 29
     expect(running.totalStageTotalTokens).toBe(29);
-    // cacheReadTokens accumulated additively: 2 + 5 = 7
-    expect(running.totalStageCacheReadTokens).toBe(7);
-    // cacheWriteTokens accumulated additively: 1 + 3 = 4
-    expect(running.totalStageCacheWriteTokens).toBe(4);
+    // cacheReadTokensDelta for first = 2, for second = 3 (5-2), total = 5
+    expect(running.totalStageCacheReadTokens).toBe(5);
+    // cacheWriteTokensDelta for first = 1, for second = 2 (3-1), total = 3
+    expect(running.totalStageCacheWriteTokens).toBe(3);
   });
 
   it("zero-turn stage: all totalStage accumulator fields are 0", () => {
