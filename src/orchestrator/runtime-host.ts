@@ -671,11 +671,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     });
   }
 
-  async getIssueDetails(
-    issueIdentifier: string,
-  ): Promise<IssueDetailResponse | null> {
+  async getIssueDetails(issueKey: string): Promise<IssueDetailResponse | null> {
     const running = Object.values(this.orchestrator.getState().running).find(
-      (entry) => entry.identifier === issueIdentifier,
+      (entry) => entry.identifier === issueKey || entry.issue.id === issueKey,
     );
     if (running !== undefined) {
       await this.ensureLoopTraceJournalLoadedBestEffort(running.issue.id);
@@ -693,12 +691,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     const retry = Object.values(
       this.orchestrator.getState().retryAttempts,
-    ).find((entry) => entry.identifier === issueIdentifier);
+    ).find(
+      (entry) => entry.identifier === issueKey || entry.issueId === issueKey,
+    );
     if (retry !== undefined) {
       await this.ensureLoopTraceJournalLoadedBestEffort(retry.issueId);
       const parent = await this.fetchParentSafe(retry.issueId);
       return toRetryIssueDetail(
-        issueIdentifier,
+        retry.identifier ?? issueKey,
         retry,
         parent,
         await this.readCodexSessionLogsForIssueBestEffort(retry.issueId),
@@ -709,11 +709,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       );
     }
 
-    const inMemoryTrace =
-      this.findInMemoryLoopTraceByIssueIdentifier(issueIdentifier);
+    const inMemoryTrace = this.findInMemoryLoopTraceByIssueKey(issueKey);
     if (inMemoryTrace !== null) {
       return toStoredIssueDetail(
-        issueIdentifier,
+        issueKey,
         inMemoryTrace,
         await this.readCodexSessionLogsForIssueBestEffort(
           inMemoryTrace.issueId,
@@ -722,12 +721,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
 
     const storedTrace =
-      await this.findStoredLoopTraceByIssueIdentifierBestEffort(
-        issueIdentifier,
-      );
+      await this.findStoredLoopTraceByIssueKeyBestEffort(issueKey);
     if (storedTrace !== null) {
       return toStoredIssueDetail(
-        issueIdentifier,
+        issueKey,
         storedTrace,
         await this.readCodexSessionLogsForIssueBestEffort(storedTrace.issueId),
       );
@@ -736,13 +733,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     return null;
   }
 
-  private findInMemoryLoopTraceByIssueIdentifier(
-    issueIdentifier: string,
+  private findInMemoryLoopTraceByIssueKey(
+    issueKey: string,
   ): StoredLoopTrace | null {
     for (const [issueId, journal] of Object.entries(
       this.orchestrator.getState().loopTraceJournal,
     )) {
-      if (journal.some((entry) => entry.issueIdentifier === issueIdentifier)) {
+      if (journal.some((entry) => isTraceEntryForIssueKey(entry, issueKey))) {
         return {
           issueId,
           artifactPath: buildLoopTraceJournalResponse(
@@ -1004,20 +1001,21 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     };
   }
 
-  private async findStoredLoopTraceByIssueIdentifierBestEffort(
-    issueIdentifier: string,
+  private async findStoredLoopTraceByIssueKeyBestEffort(
+    issueKey: string,
   ): Promise<StoredLoopTrace | null> {
     try {
-      const storedTrace = await findLoopTraceJournalByIssueIdentifier(
-        this.workspaceManager.root,
-        issueIdentifier,
-      );
+      const storedTrace =
+        (await findLoopTraceJournalByIssueIdentifier(
+          this.workspaceManager.root,
+          issueKey,
+        )) ?? (await this.readStoredLoopTraceByIssueIdBestEffort(issueKey));
       if (storedTrace === null) {
         return null;
       }
-      const issueEntry = findLatestTraceEntryForIdentifier(
+      const issueEntry = findLatestTraceEntryForIssueKey(
         storedTrace.journal,
-        issueIdentifier,
+        issueKey,
       );
       if (issueEntry === null) {
         return null;
@@ -1034,7 +1032,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           {
             outcome: "degraded",
             reason: toErrorMessage(error),
-            issue_identifier: issueIdentifier,
+            issue_identifier: issueKey,
             workspace_root: this.workspaceManager.root,
           },
         );
@@ -1043,6 +1041,20 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       }
       return null;
     }
+  }
+
+  private async readStoredLoopTraceByIssueIdBestEffort(
+    issueId: string,
+  ): Promise<{ artifactPath: string; journal: LoopTraceJournal } | null> {
+    const locator = this.getLoopTraceLocator(issueId);
+    const journal = await this.readLoopTraceJournal(locator);
+    if (!journal.some((entry) => entry.issueId === issueId)) {
+      return null;
+    }
+    return {
+      artifactPath: buildLoopTraceJournalResponse(journal, locator).path,
+      journal,
+    };
   }
 
   private async ensureLoopTraceJournalLoadedBestEffort(
@@ -3246,13 +3258,13 @@ async function readCodexSessionLogsForIssue(
 }
 
 function toStoredIssueDetail(
-  issueIdentifier: string,
+  issueKey: string,
   storedTrace: StoredLoopTrace,
   codexSessionLogs: CodexSessionLogEntry[],
 ): IssueDetailResponse | null {
-  const issueEntry = findLatestTraceEntryForIdentifier(
+  const issueEntry = findLatestTraceEntryForIssueKey(
     storedTrace.journal,
-    issueIdentifier,
+    issueKey,
   );
   if (issueEntry === null) {
     return null;
@@ -3260,7 +3272,7 @@ function toStoredIssueDetail(
   const latest = storedTrace.journal.at(-1) ?? null;
   const status = deriveStoredIssueStatus(storedTrace.journal);
   return {
-    issue_identifier: issueIdentifier,
+    issue_identifier: issueEntry.issueIdentifier,
     issue_id: issueEntry.issueId,
     status,
     workspace: null,
@@ -3381,17 +3393,24 @@ function deriveStoredIssueStatus(
   return "released";
 }
 
-function findLatestTraceEntryForIdentifier(
+function findLatestTraceEntryForIssueKey(
   journal: LoopTraceEntry[],
-  issueIdentifier: string,
+  issueKey: string,
 ): LoopTraceEntry | null {
   for (let index = journal.length - 1; index >= 0; index -= 1) {
     const entry = journal[index];
-    if (entry?.issueIdentifier === issueIdentifier) {
+    if (entry !== undefined && isTraceEntryForIssueKey(entry, issueKey)) {
       return entry;
     }
   }
   return null;
+}
+
+function isTraceEntryForIssueKey(
+  entry: LoopTraceEntry,
+  issueKey: string,
+): boolean {
+  return entry.issueIdentifier === issueKey || entry.issueId === issueKey;
 }
 
 function extractTraceFilePath(

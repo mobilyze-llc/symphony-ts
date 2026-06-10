@@ -101,7 +101,7 @@ describe("dashboard server", () => {
 
     const issue = await sendRequest(server.port, {
       method: "GET",
-      path: "/api/v1/ABC-123",
+      path: "/api/v1/issues/ABC-123",
     });
     expect(issue.statusCode).toBe(200);
     expect(JSON.parse(issue.body)).toMatchObject({
@@ -129,9 +129,15 @@ describe("dashboard server", () => {
       },
     });
 
+    const legacyIssue = await sendRequest(server.port, {
+      method: "GET",
+      path: "/api/v1/ABC-123",
+    });
+    expect(legacyIssue.statusCode).toBe(200);
+
     const missing = await sendRequest(server.port, {
       method: "GET",
-      path: "/api/v1/UNKNOWN-1",
+      path: "/api/v1/issues/UNKNOWN-1",
     });
     expect(missing.statusCode).toBe(404);
     expect(JSON.parse(missing.body)).toEqual({
@@ -596,7 +602,7 @@ describe("dashboard server", () => {
 
     const response = await sendRequest(server.port, {
       method: "POST",
-      path: "/api/v1/ABC-123/stop",
+      path: "/api/v1/issues/ABC-123/stop",
       body: "{}",
       headers: { "content-type": "application/json" },
     });
