@@ -2979,12 +2979,19 @@ function toHookMessageSuffix(
   }
 }
 
+const ISSUE_DETAIL_TOKEN_TELEMETRY_MAX_ENTRIES = 25;
+
 function toRunningIssueDetail(
   running: RunningEntry,
   workspaceManager: WorkspaceManager,
   parent: { identifier: string; title: string; url: string } | null,
   loopTraceJournal: IssueDetailResponse["loop_trace_journal"],
 ): IssueDetailResponse {
+  const tokenTelemetry = tailEntries(
+    running.tokenTelemetry,
+    ISSUE_DETAIL_TOKEN_TELEMETRY_MAX_ENTRIES,
+  );
+
   return {
     issue_identifier: running.identifier,
     issue_id: running.issue.id,
@@ -3021,7 +3028,7 @@ function toRunningIssueDetail(
           ? { reasoning_tokens: running.codexReasoningTokens }
           : {}),
       },
-      token_telemetry: running.tokenTelemetry.map((entry) => ({
+      token_telemetry: tokenTelemetry.map((entry) => ({
         at: entry.timestamp,
         event: entry.event,
         session_id: entry.sessionId,
@@ -3041,6 +3048,9 @@ function toRunningIssueDetail(
         no_cache_tokens_delta: entry.noCacheTokensDelta,
         reasoning_tokens_delta: entry.reasoningTokensDelta,
       })),
+      token_telemetry_total_entries: running.tokenTelemetry.length,
+      token_telemetry_truncated:
+        tokenTelemetry.length < running.tokenTelemetry.length,
     },
     retry: null,
     logs: {
@@ -3060,6 +3070,14 @@ function toRunningIssueDetail(
     tracked: {},
     parent,
   };
+}
+
+function tailEntries<T>(entries: readonly T[], maxEntries: number): T[] {
+  if (entries.length <= maxEntries) {
+    return [...entries];
+  }
+
+  return entries.slice(entries.length - maxEntries);
 }
 
 function toRetryIssueDetail(

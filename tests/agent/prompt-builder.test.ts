@@ -167,6 +167,9 @@ describe("prompt builder", () => {
     expect(prompt).toContain("Ship prompt rendering");
     expect(prompt).toContain("Current tracker state: In Progress.");
     expect(prompt).toContain("initial dispatch");
+    expect(prompt).toContain("path/count-only commands");
+    expect(prompt).toContain("max_output_tokens");
+    expect(prompt).toContain("1,500 or less");
   });
 
   it("fails on unknown variables in strict mode", async () => {

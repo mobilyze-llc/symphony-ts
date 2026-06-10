@@ -4,7 +4,7 @@ import { createWriteStream, mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
-const DEFAULT_TAIL_BYTES = 12_000;
+const DEFAULT_TAIL_BYTES = 4_000;
 
 function parsePositiveInt(value, flagName) {
   const parsed = Number.parseInt(value, 10);
