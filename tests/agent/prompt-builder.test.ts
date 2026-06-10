@@ -212,6 +212,8 @@ describe("prompt builder", () => {
 
     expect(prompt).toContain("Current stage: investigate.");
     expect(prompt).toContain("Do NOT implement code");
+    expect(prompt).toContain("zsh-safe");
+    expect(prompt).toContain("cmd_status");
     expect(prompt).toContain("[STAGE_COMPLETE]");
   });
 
@@ -228,6 +230,8 @@ describe("prompt builder", () => {
     expect(prompt).toContain("IMPLEMENT stage");
     expect(prompt).toContain("Headless output budget");
     expect(prompt).toContain(".symphony/validation/");
+    expect(prompt).toContain("zsh-safe");
+    expect(prompt).toContain("cmd_status");
     expect(prompt).toContain("[STAGE_COMPLETE]");
   });
 

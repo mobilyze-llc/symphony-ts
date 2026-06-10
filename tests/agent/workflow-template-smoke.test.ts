@@ -29,6 +29,7 @@ const INLINE_WORKER_PROMPT_CONFIGS = SHIPPED_CODEX_WORKFLOW_CONFIGS.filter(
 );
 const PRIMARY_PROMPT_PARTIALS = [
   "../../pipeline-config/prompts/global.liquid",
+  "../../pipeline-config/prompts/investigate.liquid",
   "../../pipeline-config/prompts/implement.liquid",
 ].map((path) => resolve(import.meta.dirname, path));
 const RESOLVED_CODEX_WORKFLOW_CONFIGS = [
@@ -119,6 +120,9 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       expect(prompt).toContain("broad `rg`");
       expect(prompt).toContain("scripts/symphony-run-logged.mjs");
       expect(prompt).toContain(".symphony/validation/");
+      expect(prompt).toContain("zsh-safe");
+      expect(prompt).toContain("cmd_status=$?");
+      expect(prompt).not.toMatch(/(^|[^A-Za-z0-9_])status=\$\?/);
       expect(prompt).not.toContain("Run `npm test 2>&1`");
       expect(prompt).not.toContain("Do NOT filter or interpret SAST results");
     }
@@ -132,6 +136,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(rendered).toContain("Headless Output Discipline");
     expect(rendered).toContain("broad `rg`");
     expect(rendered).toContain("scripts/symphony-run-logged.mjs");
+    expect(rendered).toContain("cmd_status=$?");
   });
 
   it("keeps the primary review gate stall budget above the council timeout", async () => {

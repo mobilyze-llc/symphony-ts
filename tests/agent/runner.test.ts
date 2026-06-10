@@ -681,7 +681,7 @@ describe("AgentRunner", () => {
     expect(prompts[0]).toContain("Pull requests: denied");
   });
 
-  it("emits promptChars and estimatedPromptTokens on agent events, with turn 1 larger than turn 2 for a long template", async () => {
+  it("emits promptChars and estimatedPromptTokens on agent events", async () => {
     const root = await createRoot();
     const prompts: string[] = [];
     const capturedEvents: Array<{
@@ -696,11 +696,10 @@ describe("AgentRunner", () => {
         { id: "issue-1", identifier: "ABC-123", state: "Human Review" },
       ],
     });
-    // Use a long template (>600 chars) so turn 1 prompt is larger than the continuation prompt
-    const longTemplate =
+    const promptTemplate =
       "You are an expert software engineer working on the following issue.\n\nIssue: {{ issue.identifier }}\nTitle: {{ issue.title }}\nDescription: {{ issue.description }}\nState: {{ issue.state }}\nAttempt: {{ attempt }}\n\nInstructions:\n- Read the issue description carefully.\n- Implement all required changes.\n- Write tests for any new functionality.\n- Run the full test suite and fix any failures.\n- Follow the existing code style and conventions.\n- Write clear commit messages.\n- Open a pull request when done.\n- Do not modify unrelated code.\n- Do not skip tests.\n- Document any architectural decisions.\n";
     const runner = new AgentRunner({
-      config: { ...createConfig(root, "unused"), promptTemplate: longTemplate },
+      config: { ...createConfig(root, "unused"), promptTemplate },
       tracker,
       onEvent: (event) => {
         capturedEvents.push({
@@ -737,12 +736,10 @@ describe("AgentRunner", () => {
     expect(turn2Events.length).toBeGreaterThan(0);
     const turn2PromptChars = turn2Events[0]?.promptChars;
     expect(turn2PromptChars).toBe(prompts[1]?.length);
+    expect(prompts[1]).toContain("cmd_status");
     expect(turn2Events[0]?.estimatedPromptTokens).toBe(
       Math.ceil((turn2PromptChars ?? 0) / 4),
     );
-
-    // Turn 1 (full WORKFLOW template) should be larger than turn 2 (continuation)
-    expect(turn1PromptChars).toBeGreaterThan(turn2PromptChars ?? 0);
   });
 
   it("fails immediately when before_run fails and still invokes after_run best-effort", async () => {
