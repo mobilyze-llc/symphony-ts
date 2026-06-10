@@ -1,3 +1,7 @@
+import type {
+  PauseTriageEvidence,
+  PauseTriageVerdict,
+} from "../agent/pause-triage.js";
 import type { CodexClientEvent } from "../codex/app-server-client.js";
 import {
   evaluateWindowHeadroom,
@@ -214,6 +218,14 @@ export interface OrchestratorCoreOptions {
     stage: StageDefinition;
   }) => Promise<EnsembleGateResult>;
   postComment?: (issueId: string, body: string) => Promise<void>;
+  /**
+   * LLM pause triage (SYMPH-337 slice 2): render a continue/split/hold
+   * verdict for a budget pause the escalation ladder could not absorb.
+   * Resolve null to fail closed to the operator pause.
+   */
+  runPauseTriage?: (
+    evidence: PauseTriageEvidence,
+  ) => Promise<PauseTriageVerdict | null>;
   updateIssueState?: (
     issueId: string,
     issueIdentifier: string,
@@ -265,6 +277,8 @@ export class OrchestratorCore {
   private readonly runEnsembleGate?: OrchestratorCoreOptions["runEnsembleGate"];
 
   private readonly postComment?: OrchestratorCoreOptions["postComment"];
+
+  private readonly runPauseTriage?: OrchestratorCoreOptions["runPauseTriage"];
 
   private readonly updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
 
@@ -319,6 +333,7 @@ export class OrchestratorCore {
     this.stopRunningIssue = options.stopRunningIssue;
     this.runEnsembleGate = options.runEnsembleGate;
     this.postComment = options.postComment;
+    this.runPauseTriage = options.runPauseTriage;
     this.updateIssueState = options.updateIssueState;
     this.autoCloseParentIssue = options.autoCloseParentIssue;
     this.getRunningSupervisionSnapshots =
@@ -947,6 +962,138 @@ export class OrchestratorCore {
     });
   }
 
+  /**
+   * LLM pause triage (SYMPH-337 slice 2): consulted only for budget pauses
+   * the ladder declined (exhausted or unconfigured), gated by the same
+   * trigger set, the admission floor, and a per-issue resume bound. A
+   * `continue` verdict grants exactly one continuation at the issue's
+   * current budget ceiling; everything else (split/hold/null/failure)
+   * parks for the operator with the verdict recorded.
+   */
+  private async tryPauseTriageResume(
+    issueId: string,
+    runningEntry: RunningEntry,
+    hardStop: HardStopDecision,
+    stageName: string | null,
+  ): Promise<RetryEntry | null> {
+    if (this.runPauseTriage === undefined) {
+      return null;
+    }
+    if (hardStop.outcome !== "PAUSED-budget") {
+      return null;
+    }
+    if (!isBudgetEscalationTrigger(hardStop.trigger)) {
+      return null;
+    }
+
+    const resumesUsed = this.state.issuePauseTriageResumes[issueId] ?? 0;
+    if (resumesUsed >= this.config.pauseTriage.maxResumes) {
+      return null;
+    }
+
+    const gate = this.evaluateRateLimitAdmissionGate();
+    if (gate.blocked) {
+      return null;
+    }
+
+    let verdict: PauseTriageVerdict | null = null;
+    try {
+      verdict = await this.runPauseTriage({
+        issueIdentifier: runningEntry.identifier,
+        issueTitle: runningEntry.issue.title,
+        stageName,
+        hardStop,
+        escalationStepsUsed: this.state.issueBudgetEscalations[issueId] ?? 0,
+        triageResumesUsed: resumesUsed,
+        reworkCount: this.state.issueReworkCounts[issueId] ?? 0,
+        recentActivity: runningEntry.recentActivity.map((entry) => ({
+          toolName: entry.toolName,
+          context: entry.context,
+        })),
+        lastMessage: runningEntry.lastCodexMessage,
+        stageHistory: (this.state.issueExecutionHistory[issueId] ?? []).map(
+          (record) => ({
+            stageName: record.stageName,
+            outcome: record.outcome,
+            turns: record.turns,
+          }),
+        ),
+      });
+    } catch {
+      verdict = null;
+    }
+
+    const willResume = verdict !== null && verdict.verdict === "continue";
+    if (willResume) {
+      this.state.issuePauseTriageResumes[issueId] = resumesUsed + 1;
+    }
+
+    // Journal the verdict together with the action actually taken so the
+    // audit trail can never claim a resume that did not happen (PR #330
+    // review P2). Journaling is best-effort relative to the resume itself.
+    try {
+      await this.recordRunJournalEntry({
+        idempotencyKey: `pause_triage:${issueId}:${stageName ?? "no-stage"}:${resumesUsed + 1}:${this.now().toISOString()}`,
+        timestamp: this.now().toISOString(),
+        kind: "pause_triage",
+        issueId,
+        issueIdentifier: runningEntry.identifier,
+        operation: "dispatcher",
+        stage: stageName,
+        attempt: runningEntry.retryAttempt,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary:
+          verdict === null
+            ? `Pause triage unavailable for ${runningEntry.identifier}; parking for operator.`
+            : `Pause triage verdict for ${runningEntry.identifier}: ${verdict.verdict} (${willResume ? "resuming" : "parking"}).`,
+        metadata: {
+          status: "completed",
+          trigger: hardStop.trigger,
+          verdict: verdict?.verdict ?? "unavailable",
+          rationale: verdict?.rationale ?? null,
+          action: willResume ? "resumed" : "parked",
+          resumesUsed,
+        },
+      });
+    } catch {
+      // Audit is best-effort; the verdict outcome must still apply.
+    }
+
+    if (verdict === null || verdict.verdict !== "continue") {
+      if (verdict !== null) {
+        try {
+          await this.postComment?.(
+            issueId,
+            `Pause triage verdict: ${verdict.verdict}\n${verdict.rationale}`,
+          );
+        } catch {
+          // Observability only.
+        }
+      }
+      return null;
+    }
+
+    try {
+      await this.postComment?.(
+        issueId,
+        [
+          `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes})`,
+          verdict.rationale,
+          "Auto-resuming one continuation unit at the current budget ceiling.",
+        ].join("\n"),
+      );
+    } catch {
+      // Observability only.
+    }
+
+    return this.scheduleRetry(issueId, 1, {
+      identifier: runningEntry.identifier,
+      error: null,
+      delayType: "continuation",
+    });
+  }
+
   async onRetryTimer(issueId: string): Promise<RetryTimerResult> {
     await this.expireDispatcherLeases();
 
@@ -1026,6 +1173,7 @@ export class OrchestratorCore {
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.issueBudgetEscalations[issueId];
+      delete this.state.issuePauseTriageResumes[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       this.onIssueDropped?.({
@@ -1052,6 +1200,7 @@ export class OrchestratorCore {
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.issueBudgetEscalations[issueId];
+      delete this.state.issuePauseTriageResumes[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       this.onIssueDropped?.({
@@ -1232,6 +1381,16 @@ export class OrchestratorCore {
           return escalation;
         }
 
+        const triageResume = await this.tryPauseTriageResume(
+          input.issueId,
+          runningEntry,
+          input.hardStop,
+          exitedStageName,
+        );
+        if (triageResume !== null) {
+          return triageResume;
+        }
+
         await this.handleHardStopTrigger(input.issueId, runningEntry, {
           hardStop: input.hardStop,
           stageName: exitedStageName,
@@ -1350,6 +1509,7 @@ export class OrchestratorCore {
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.issueBudgetEscalations[issueId];
+      delete this.state.issuePauseTriageResumes[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       return "completed";
@@ -1365,6 +1525,7 @@ export class OrchestratorCore {
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.issueBudgetEscalations[issueId];
+      delete this.state.issuePauseTriageResumes[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       return "completed";
@@ -1394,6 +1555,7 @@ export class OrchestratorCore {
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.issueBudgetEscalations[issueId];
+      delete this.state.issuePauseTriageResumes[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       // Fire linearState update for the terminal stage (e.g., move to "Done")
@@ -1481,6 +1643,7 @@ export class OrchestratorCore {
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.issueBudgetEscalations[issueId];
+      delete this.state.issuePauseTriageResumes[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       void this.fireEscalationSideEffects(
@@ -2237,6 +2400,7 @@ export class OrchestratorCore {
     delete this.state.issueFirstDispatchedAt[issueId];
     delete this.state.issueRightSizingDecisions[issueId];
     delete this.state.issueBudgetEscalations[issueId];
+    delete this.state.issuePauseTriageResumes[issueId];
     delete this.state.loopTraceJournal[issueId];
     delete this.state.continuousFeedback[issueId];
   }
@@ -2438,6 +2602,7 @@ export class OrchestratorCore {
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.issueBudgetEscalations[issueId];
+      delete this.state.issuePauseTriageResumes[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       this.state.failed.add(issueId);
@@ -3267,6 +3432,7 @@ export class OrchestratorCore {
         delete this.state.issueFirstDispatchedAt[issue.id];
         delete this.state.issueRightSizingDecisions[issue.id];
         delete this.state.issueBudgetEscalations[issue.id];
+        delete this.state.issuePauseTriageResumes[issue.id];
         delete this.state.loopTraceJournal[issue.id];
         delete this.state.continuousFeedback[issue.id];
         // Fire linearState update for the terminal stage (e.g., move to "Done")
@@ -4200,6 +4366,7 @@ export class OrchestratorCore {
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
       delete this.state.issueBudgetEscalations[issueId];
+      delete this.state.issuePauseTriageResumes[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       void this.fireEscalationSideEffects(

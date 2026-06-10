@@ -12,6 +12,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { promisify } from "node:util";
 
+import { runPauseTriage } from "../agent/pause-triage.js";
 import type {
   AgentRunInput,
   AgentRunResult,
@@ -476,6 +477,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           budgetMultiplier,
         );
       },
+      runPauseTriage: (evidence) =>
+        runPauseTriage({
+          config: this.config.pauseTriage,
+          evidence,
+        }),
       onIssueDropped: ({ identifier, title, url, reason }) => {
         this.notifier?.notify({
           type: "issue_dropped",

@@ -51,6 +51,9 @@ export const DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT: number | null =
 // budget pause operator-gated as before.
 export const DEFAULT_BUDGET_ESCALATION_MAX_STEPS: number | null = null;
 export const DEFAULT_BUDGET_ESCALATION_MULTIPLIER = 2;
+// Pause triage (SYMPH-337 slice 2) is off until a WORKFLOW provides the
+// local endpoint; verdict-authorized continuations are bounded per issue.
+export const DEFAULT_PAUSE_TRIAGE_MAX_RESUMES = 2;
 
 export const DEFAULT_RUNNER_KIND = "codex";
 export const DEFAULT_CONTINUOUS_FEEDBACK_ENABLED = true;
@@ -121,6 +124,9 @@ export const SPEC_DEFAULTS = Object.freeze({
   budgetEscalation: {
     maxSteps: DEFAULT_BUDGET_ESCALATION_MAX_STEPS,
     multiplier: DEFAULT_BUDGET_ESCALATION_MULTIPLIER,
+  },
+  pauseTriage: {
+    maxResumes: DEFAULT_PAUSE_TRIAGE_MAX_RESUMES,
   },
   runner: {
     kind: DEFAULT_RUNNER_KIND,

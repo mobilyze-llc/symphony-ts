@@ -36,6 +36,7 @@ import {
   DEFAULT_OBSERVABILITY_ENABLED,
   DEFAULT_OBSERVABILITY_REFRESH_MS,
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
+  DEFAULT_PAUSE_TRIAGE_MAX_RESUMES,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_RATE_LIMIT_MIN_PRIMARY_HEADROOM_PCT,
   DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT,
@@ -78,6 +79,7 @@ export function resolveWorkflowConfig(
   const hardStopOverrides = readHardStopsConfig(hardStops) ?? {};
   const rateLimitAdmission = asRecord(config.rate_limit_admission);
   const budgetEscalation = asRecord(config.budget_escalation);
+  const pauseTriage = asRecord(config.pause_triage);
   const runner = asRecord(config.runner);
   const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
@@ -200,6 +202,14 @@ export function resolveWorkflowConfig(
       multiplier:
         readEscalationMultiplier(budgetEscalation.multiplier) ??
         DEFAULT_BUDGET_ESCALATION_MULTIPLIER,
+    },
+    pauseTriage: {
+      baseUrl: readString(pauseTriage.base_url),
+      model: readString(pauseTriage.model),
+      apiKey: resolveEnvReference(readString(pauseTriage.api_key), environment),
+      maxResumes:
+        readPositiveInteger(pauseTriage.max_resumes) ??
+        DEFAULT_PAUSE_TRIAGE_MAX_RESUMES,
     },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,

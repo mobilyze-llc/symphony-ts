@@ -1438,6 +1438,265 @@ describe("orchestrator core", () => {
     expect(Object.keys(orchestrator.getState().running)).toEqual([]);
   });
 
+  it("resumes once on a pause-triage continue verdict when the ladder is unconfigured", async () => {
+    const triageCalls: string[] = [];
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({
+        pauseTriage: {
+          baseUrl: "http://studio2.local:8000/v1",
+          model: "deepseek-v4-flash",
+          apiKey: null,
+          maxResumes: 1,
+        },
+      }),
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      runPauseTriage: async (evidence) => {
+        triageCalls.push(evidence.issueIdentifier);
+        return {
+          verdict: "continue",
+          rationale: "Real diff in progress; one unit should finish.",
+        };
+      },
+    });
+
+    await orchestrator.pollTick();
+    const budgetPause = {
+      outcome: "PAUSED-budget" as const,
+      trigger: "token_budget" as const,
+      reason: "Token budget exceeded.",
+      turnCount: 2,
+      totalTokens: 250001,
+      estimatedCostUsd: 5,
+    };
+
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: budgetPause,
+    });
+
+    expect(triageCalls).toEqual(["ISSUE-1"]);
+    expect(retryEntry?.delayType).toBe("continuation");
+    expect(orchestrator.getState().issuePauseTriageResumes["1"]).toBe(1);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+
+    // Resume bound exhausted: the next pause parks without consulting triage.
+    const retryResult = await orchestrator.onRetryTimer("1");
+    expect(retryResult.dispatched).toBe(true);
+    const second = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: budgetPause,
+    });
+    expect(second).toBeNull();
+    expect(triageCalls).toEqual(["ISSUE-1"]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+  });
+
+  it("parks with the verdict recorded on hold/split or triage failure", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const comments: string[] = [];
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({
+        pauseTriage: {
+          baseUrl: "http://studio2.local:8000/v1",
+          model: "deepseek-v4-flash",
+          apiKey: null,
+          maxResumes: 2,
+        },
+      }),
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+      runPauseTriage: async () => ({
+        verdict: "hold",
+        rationale: "Worker is repeating discovery; needs human review.",
+      }),
+    });
+
+    await orchestrator.pollTick();
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "dollar_budget",
+        reason: "Estimated dollar budget exceeded.",
+        turnCount: 3,
+        totalTokens: 100,
+        estimatedCostUsd: 9,
+      },
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(
+      orchestrator.getState().issuePauseTriageResumes["1"],
+    ).toBeUndefined();
+    expect(
+      comments.some((body) => body.includes("Pause triage verdict: hold")),
+    ).toBe(true);
+  });
+
+  it("lets the ladder absorb pauses before triage is consulted", async () => {
+    const triageCalls: string[] = [];
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({
+        budgetEscalation: { maxSteps: 1, multiplier: 2 },
+        pauseTriage: {
+          baseUrl: "http://studio2.local:8000/v1",
+          model: "deepseek-v4-flash",
+          apiKey: null,
+          maxResumes: 2,
+        },
+      }),
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      runPauseTriage: async (evidence) => {
+        triageCalls.push(
+          `${evidence.issueIdentifier}:steps=${evidence.escalationStepsUsed}`,
+        );
+        return { verdict: "continue", rationale: "Keep going." };
+      },
+    });
+
+    await orchestrator.pollTick();
+    const budgetPause = {
+      outcome: "PAUSED-budget" as const,
+      trigger: "token_budget" as const,
+      reason: "Token budget exceeded.",
+      turnCount: 2,
+      totalTokens: 250001,
+      estimatedCostUsd: 5,
+    };
+
+    // First pause: ladder absorbs it without any triage call.
+    const first = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: budgetPause,
+    });
+    expect(first?.delayType).toBe("continuation");
+    expect(triageCalls).toEqual([]);
+
+    // Second pause: ladder exhausted, triage consulted with the step count.
+    await orchestrator.onRetryTimer("1");
+    const second = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: budgetPause,
+    });
+    expect(second?.delayType).toBe("continuation");
+    expect(triageCalls).toEqual(["ISSUE-1:steps=1"]);
+  });
+
+  it("never consults triage for non-budget hard stops or while the floor is blocked", async () => {
+    const triageCalls: string[] = [];
+    const makeOrchestrator = (rateLimitAdmission?: {
+      minPrimaryHeadroomPct: number | null;
+      minSecondaryHeadroomPct: number | null;
+    }) =>
+      new OrchestratorCore({
+        config: createConfig({
+          pauseTriage: {
+            baseUrl: "http://studio2.local:8000/v1",
+            model: "deepseek-v4-flash",
+            apiKey: null,
+            maxResumes: 2,
+          },
+          ...(rateLimitAdmission === undefined ? {} : { rateLimitAdmission }),
+        }),
+        tracker: createTracker({
+          candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+          statesById: [
+            { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+          ],
+        }),
+        spawnWorker: async () => ({
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        }),
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+        runPauseTriage: async (evidence) => {
+          triageCalls.push(evidence.issueIdentifier);
+          return { verdict: "continue", rationale: "Keep going." };
+        },
+      });
+
+    // Non-budget hard stop (STALLED iteration cap): triage never consulted.
+    const stalled = makeOrchestrator();
+    await stalled.pollTick();
+    const stalledEntry = await stalled.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "STALLED",
+        trigger: "iteration_cap",
+        reason: "Iteration cap reached.",
+        turnCount: 5,
+        totalTokens: 100,
+        estimatedCostUsd: 1,
+      },
+    });
+    expect(stalledEntry).toBeNull();
+    expect(triageCalls).toEqual([]);
+
+    // Budget pause with the admission floor blocked: triage never consulted.
+    const gated = makeOrchestrator({
+      minPrimaryHeadroomPct: null,
+      minSecondaryHeadroomPct: 5,
+    });
+    await gated.pollTick();
+    gated.getState().codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+    const gatedEntry = await gated.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 100,
+        estimatedCostUsd: 1,
+      },
+    });
+    expect(gatedEntry).toBeNull();
+    expect(triageCalls).toEqual([]);
+    expect(gated.getState().resumeRequired.has("1")).toBe(true);
+  });
+
   it("refuses all dispatch when rate-limit headroom is below the configured floor", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
@@ -5602,6 +5861,7 @@ function createConfig(overrides?: {
   continuousFeedback?: ResolvedWorkflowConfig["continuousFeedback"];
   rateLimitAdmission?: ResolvedWorkflowConfig["rateLimitAdmission"];
   budgetEscalation?: ResolvedWorkflowConfig["budgetEscalation"];
+  pauseTriage?: ResolvedWorkflowConfig["pauseTriage"];
 }): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
@@ -5652,6 +5912,12 @@ function createConfig(overrides?: {
     budgetEscalation: overrides?.budgetEscalation ?? {
       maxSteps: null,
       multiplier: 2,
+    },
+    pauseTriage: overrides?.pauseTriage ?? {
+      baseUrl: null,
+      model: null,
+      apiKey: null,
+      maxResumes: 2,
     },
     server: {
       port: null,

@@ -215,6 +215,7 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "tracker_write",
   "hard_stop_trigger",
   "budget_escalation",
+  "pause_triage",
   "operator_input_required",
   "continuous_feedback",
 ] as const;
@@ -910,6 +911,7 @@ export interface OrchestratorState {
   rateLimitAdmission: RateLimitAdmissionState | null;
   issueStages: Record<string, string>;
   issueBudgetEscalations: Record<string, number>;
+  issuePauseTriageResumes: Record<string, number>;
   issueReworkCounts: Record<string, number>;
   issuePassedStages: Record<string, string[]>;
   issueFirstDispatchedAt: Record<string, string>;
@@ -1060,6 +1062,7 @@ export function createInitialOrchestratorState(input: {
     rateLimitAdmission: null,
     issueStages: {},
     issueBudgetEscalations: {},
+    issuePauseTriageResumes: {},
     issueReworkCounts: {},
     issuePassedStages: {},
     issueFirstDispatchedAt: {},
