@@ -285,6 +285,96 @@ async function handleMessage(message) {
       return;
     }
 
+    if (scenario === "prompt-echo-user-input-code") {
+      setTimeout(() => {
+        writeJson({
+          method: "item/started",
+          params: {
+            item: {
+              type: "userMessage",
+              content: [
+                {
+                  type: "text",
+                  text: "Issue text mentions codex_user_input_required but is not a protocol request.",
+                },
+              ],
+            },
+          },
+        });
+        writeJson({
+          method: "item/completed",
+          params: {
+            item: {
+              type: "userMessage",
+              content: [
+                {
+                  type: "text",
+                  text: "Issue text mentions codex_user_input_required but is not a protocol request.",
+                },
+              ],
+            },
+          },
+        });
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "Prompt echo did not pause the turn",
+            usage: {
+              inputTokens: 12,
+              outputTokens: 4,
+              totalTokens: 16,
+            },
+          },
+        });
+      }, 10);
+      return;
+    }
+
+    if (scenario === "prompt-echo-approval-text") {
+      setTimeout(() => {
+        writeJson({
+          method: "item/started",
+          params: {
+            item: {
+              type: "userMessage",
+              content: [
+                {
+                  type: "text",
+                  text: "Issue text mentions approval but is not an approval request.",
+                },
+              ],
+            },
+          },
+        });
+        writeJson({
+          method: "item/completed",
+          params: {
+            item: {
+              type: "userMessage",
+              content: [
+                {
+                  type: "text",
+                  text: "Issue text mentions approval but is not an approval request.",
+                },
+              ],
+            },
+          },
+        });
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "Approval prompt echo did not trigger approval handling",
+            usage: {
+              inputTokens: 12,
+              outputTokens: 4,
+              totalTokens: 16,
+            },
+          },
+        });
+      }, 10);
+      return;
+    }
+
     if (scenario === "mcp-elicitation") {
       setTimeout(() => {
         writeJson({

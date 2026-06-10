@@ -564,6 +564,53 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
+  it("does not treat prompt echoes containing user-input-required text as operator input", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient(
+      "prompt-echo-user-input-code",
+      workspace,
+      events,
+    );
+
+    const result = await client.startSession({
+      prompt:
+        "Investigate why codex_user_input_required appears in this issue description.",
+      title: "ABC-123: Example",
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      message: "Prompt echo did not pause the turn",
+    });
+    expect(events.some((event) => event.event === "turn_input_required")).toBe(
+      false,
+    );
+
+    await client.close();
+  });
+
+  it("does not treat prompt echoes containing approval text as approval requests", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("prompt-echo-approval-text", workspace, events);
+
+    const result = await client.startSession({
+      prompt: "Investigate why approval appears in this issue description.",
+      title: "ABC-123: Example",
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      message: "Approval prompt echo did not trigger approval handling",
+    });
+    expect(
+      events.some((event) => event.event === "approval_auto_approved"),
+    ).toBe(false);
+
+    await client.close();
+  });
+
   it("fails the turn when a headless MCP server requests elicitation", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];

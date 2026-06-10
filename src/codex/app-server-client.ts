@@ -1575,11 +1575,7 @@ function isApprovalRequest(
   }
 
   const normalized = method.toLowerCase();
-  if (normalized.includes("approval")) {
-    return true;
-  }
-
-  return containsStringValue(message, "approval");
+  return normalized.includes("approval");
 }
 
 function isToolCallRequest(
@@ -1617,7 +1613,29 @@ function isUserInputRequired(
     }
   }
 
-  return containsStringValue(message, "user_input_required");
+  return hasExplicitUserInputRequiredCode(message);
+}
+
+// Only treat protocol control fields as user-input-required signals. Codex
+// echoes user prompts in item notifications, so scanning arbitrary text would
+// let issue prose containing this code pause a headless worker.
+function hasExplicitUserInputRequiredCode(message: JsonObject): boolean {
+  const candidates = [
+    extractNestedString(message, ["code"]),
+    extractNestedString(message, ["reason"]),
+    extractNestedString(message, ["data", "code"]),
+    extractNestedString(message, ["error", "code"]),
+    extractNestedString(message, ["error", "data", "code"]),
+    extractNestedString(message, ["params", "code"]),
+    extractNestedString(message, ["params", "reason"]),
+    extractNestedString(message, ["params", "data", "code"]),
+    extractNestedString(message, ["params", "error", "code"]),
+    extractNestedString(message, ["params", "error", "data", "code"]),
+  ];
+
+  return candidates.some(
+    (value) => value?.toLowerCase() === "codex_user_input_required",
+  );
 }
 
 function extractToolName(message: JsonObject): string | null {
@@ -1852,22 +1870,6 @@ function* walkObjects(value: unknown): Generator<JsonObject> {
   for (const nested of Object.values(objectValue)) {
     yield* walkObjects(nested);
   }
-}
-
-function containsStringValue(value: unknown, expected: string): boolean {
-  const target = expected.toLowerCase();
-  if (typeof value === "string") {
-    return value.toLowerCase().includes(target);
-  }
-  if (Array.isArray(value)) {
-    return value.some((entry) => containsStringValue(entry, expected));
-  }
-  if (value !== null && typeof value === "object") {
-    return Object.values(value).some((entry) =>
-      containsStringValue(entry, expected),
-    );
-  }
-  return false;
 }
 
 function asFiniteNumber(value: unknown): number | null {
