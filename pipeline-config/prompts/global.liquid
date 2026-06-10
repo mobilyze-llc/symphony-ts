@@ -11,9 +11,10 @@ Never hardcode localhost or 127.0.0.1. Use the $BASE_URL environment variable fo
 Headless Codex turns have a strict output budget. This applies during investigation, code search, log inspection, validation, and PR writeup.
 
 - Do not run high-volume commands as direct streaming commands such as `npm test 2>&1`, `pnpm test 2>&1`, broad `rg`, full log dumps, unfiltered JSON, or full lockfile/dist output.
-- Before broad inspection, bound the output: use targeted `rg -n ... -m 50`, `sed -n '<start>,<end>p'`, `tail -n 120`, `jq` filters, `find ... | sed -n '1,200p'`, and `git diff --stat` before full diffs.
-- For every command that may print more than a screen, write full stdout/stderr to `.symphony/validation/` and return only command metadata, exit code, log path, and a bounded tail/summary to the model.
-- If `scripts/symphony-run-logged.mjs` exists, use it for noisy commands: `node scripts/symphony-run-logged.mjs --label <label> -- <command> [args...]`.
+- Start broad inspection with path/count-only commands such as `rg -l ... | sed -n '1,80p'`, `rg -c ...`, `find ... | sed -n '1,80p'`, and `git diff --stat`. Then inspect relevant files with bounded contextual commands such as `rg -n ... -m 50 path` or `sed -n '<start>,<end>p'`. Do not stream broad match lines across the whole repo.
+- Keep direct command output under roughly 2,000 tokens. When a tool supports `max_output_tokens`, set it to 1,500 or less and also bound the command itself with `sed`, `head`, `tail`, `jq`, or `wc`.
+- For every command that may print more than ~200 lines or 20 KB, write full stdout/stderr to `.symphony/validation/` and return only command metadata, exit code, log path, and a bounded tail/summary to the model.
+- If `scripts/symphony-run-logged.mjs` exists, use it for noisy commands: `node scripts/symphony-run-logged.mjs --label <label> --tail-bytes 4000 -- <command> [args...]`.
 - Shell snippets must be zsh-safe. Do not assign to `status`; zsh treats it as a read-only parameter. Use neutral names such as `cmd_status` or `exit_code`.
 - If the helper does not exist, redirect output yourself: `mkdir -p .symphony/validation && <command> > .symphony/validation/<label>.log 2>&1; cmd_status=$?; tail -n 80 .symphony/validation/<label>.log; exit $cmd_status`.
 - Do not poll a long-running command with a large output budget. Wait for completion, then inspect only the log path, exit code, and a short tail unless deeper diagnosis is required.

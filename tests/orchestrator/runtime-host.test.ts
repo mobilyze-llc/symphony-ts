@@ -333,6 +333,8 @@ describe("OrchestratorRuntimeHost", () => {
         total_tokens_delta: 18,
       }),
     ]);
+    expect(details?.running?.token_telemetry_total_entries).toBe(1);
+    expect(details?.running?.token_telemetry_truncated).toBe(false);
     expect(details?.logs.codex_session_logs).toEqual([
       {
         label: "sessions/2026/rollout-test.jsonl",
@@ -405,6 +407,49 @@ describe("OrchestratorRuntimeHost", () => {
         error: null,
       }),
     ]);
+  });
+
+  it("caps issue detail token telemetry to recent entries", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    for (let index = 1; index <= 30; index += 1) {
+      fakeRunner.emit("1", {
+        event: "notification",
+        timestamp: `2026-03-06T00:00:${String(index).padStart(2, "0")}.000Z`,
+        codexAppServerPid: "1001",
+        sessionId: "thread-1-turn-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        usage: {
+          inputTokens: index,
+          outputTokens: index,
+          totalTokens: index * 2,
+        },
+      });
+    }
+    await host.flushEvents();
+
+    const details = await host.getIssueDetails("ISSUE-1");
+    expect(details?.running?.token_telemetry).toHaveLength(25);
+    expect(details?.running?.token_telemetry_total_entries).toBe(30);
+    expect(details?.running?.token_telemetry_truncated).toBe(true);
+    expect(details?.running?.token_telemetry[0]?.input_tokens).toBe(6);
+    expect(details?.running?.token_telemetry.at(-1)?.input_tokens).toBe(30);
+
+    fakeRunner.resolve("1", createNormalResult());
+    await host.waitForIdle();
   });
 
   it("cancels a reconciled worker and releases the claim when the issue is no longer eligible on retry", async () => {

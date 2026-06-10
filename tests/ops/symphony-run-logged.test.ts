@@ -109,6 +109,7 @@ describe("symphony-run-logged", () => {
 
     expect(result.status).toBe(7);
     expect(result.stdout).toContain("[symphony-run-logged] exit_code: 7");
+    expect(result.stdout).toContain("[symphony-run-logged] tail_bytes: 4000");
     expect(result.stdout).toContain("validation failed");
     expect(readOnlyLog()).toContain("validation failed");
   });
