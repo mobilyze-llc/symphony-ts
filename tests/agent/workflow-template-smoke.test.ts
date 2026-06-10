@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import packageJson from "../../package.json" with { type: "json" };
 import { renderPrompt } from "../../src/agent/prompt-builder.js";
 import { resolveWorkflowConfig } from "../../src/config/config-resolver.js";
 import { loadWorkflowDefinition } from "../../src/config/workflow-loader.js";
@@ -78,6 +79,26 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       expect(config).toContain("ephemeral_home: true");
       expect(config).toContain("disable_skills: true");
     }
+  });
+
+  it("exposes the CI-safe live Codex headless smoke command", async () => {
+    expect(packageJson.scripts["probe:codex-skills"]).toBe(
+      "node scripts/probe-codex-skills.mjs",
+    );
+    expect(packageJson.scripts["smoke:codex-headless"]).toBe(
+      "node scripts/probe-codex-skills.mjs --ci-smoke",
+    );
+
+    const probeScript = await readFile(
+      resolve(import.meta.dirname, "../../scripts/probe-codex-skills.mjs"),
+      "utf8",
+    );
+    expect(probeScript).toContain(
+      "skipped live Codex headless feature-flag smoke",
+    );
+    expect(probeScript).toContain(
+      "Local verification: pnpm build && pnpm smoke:codex-headless",
+    );
   });
 
   it("keeps the primary review gate stall budget above the council timeout", async () => {
