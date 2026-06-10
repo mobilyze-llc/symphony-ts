@@ -249,6 +249,43 @@ async function handleMessage(message) {
       return;
     }
 
+    if (scenario === "codex-cached-usage") {
+      setTimeout(() => {
+        // Real codex app-server v2 usage shape: the cached share is named
+        // cachedInputTokens (camelCase notification) / cached_input_tokens
+        // (rollout snake_case), not cache_read_tokens. The two payloads use
+        // DIFFERENT cached/reasoning values so each alias is pinned
+        // independently — the notification event must carry 41000/7 and the
+        // turn result 56064/12.
+        writeJson({
+          method: "thread/tokenUsage/updated",
+          params: {
+            usage: {
+              inputTokens: 67419,
+              cachedInputTokens: 41000,
+              outputTokens: 598,
+              totalTokens: 68017,
+              reasoningOutputTokens: 7,
+            },
+          },
+        });
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "Cached usage turn finished",
+            usage: {
+              input_tokens: 81831,
+              cached_input_tokens: 56064,
+              output_tokens: 681,
+              total_tokens: 82512,
+              reasoning_output_tokens: 12,
+            },
+          },
+        });
+      }, 10);
+      return;
+    }
+
     if (scenario === "usage-reset-between-turns" && turnCount === 2) {
       setTimeout(() => {
         writeJson({
