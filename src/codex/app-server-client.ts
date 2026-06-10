@@ -736,6 +736,10 @@ export class CodexAppServerClient {
       this.bumpStallTimer(this.currentTurn);
       const agentMessage = extractCompletedAgentMessageText(parsed);
       if (agentMessage !== null) {
+        // Unconditional overwrite is deliberate: the runner's completion
+        // contract is that the turn's FINAL agent message ends with the
+        // [STAGE_COMPLETE] sentinel. Preserving an earlier marker-bearing
+        // message would falsely complete a stage that kept working.
         this.currentTurn.lastAgentMessage = agentMessage;
       }
     }

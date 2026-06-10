@@ -120,7 +120,6 @@ describe("CodexAppServerClient", () => {
     // final message so the [STAGE_COMPLETE] early-exit can fire.
     expect(result.status).toBe("completed");
     expect(result.message).toBe("Investigation complete.\n\n[STAGE_COMPLETE]");
-    expect(result.message?.trimEnd().endsWith("[STAGE_COMPLETE]")).toBe(true);
 
     await client.close();
   });
