@@ -134,19 +134,38 @@ describe("dashboard server", () => {
       path: "/api/v1/ABC-123",
     });
     expect(legacyIssue.statusCode).toBe(200);
-
-    const missing = await sendRequest(server.port, {
-      method: "GET",
-      path: "/api/v1/issues/UNKNOWN-1",
-    });
-    expect(missing.statusCode).toBe(404);
-    expect(JSON.parse(missing.body)).toEqual({
-      error: {
-        code: "issue_not_found",
-        message:
-          "Issue 'UNKNOWN-1' is not tracked in the current runtime state.",
+    expect(JSON.parse(legacyIssue.body)).toMatchObject({
+      issue_identifier: "ABC-123",
+      status: "running",
+      logs: {
+        codex_session_logs: [
+          {
+            label: "latest",
+            path: "/var/log/symphony/ABC-123/latest.log",
+            url: null,
+            bytes: 2048,
+          },
+        ],
       },
     });
+
+    for (const missingPath of [
+      "/api/v1/issues/UNKNOWN-1",
+      "/api/v1/UNKNOWN-1",
+    ]) {
+      const missing = await sendRequest(server.port, {
+        method: "GET",
+        path: missingPath,
+      });
+      expect(missing.statusCode).toBe(404);
+      expect(JSON.parse(missing.body)).toEqual({
+        error: {
+          code: "issue_not_found",
+          message:
+            "Issue 'UNKNOWN-1' is not tracked in the current runtime state.",
+        },
+      });
+    }
   });
 
   it("returns recent_events with at, event, and message fields in issue details", async () => {
@@ -600,19 +619,24 @@ describe("dashboard server", () => {
     });
     servers.push(server);
 
-    const response = await sendRequest(server.port, {
-      method: "POST",
-      path: "/api/v1/issues/ABC-123/stop",
-      body: "{}",
-      headers: { "content-type": "application/json" },
-    });
-    expect(response.statusCode).toBe(200);
-    expect(JSON.parse(response.body)).toEqual({
-      issue_identifier: "ABC-123",
-      stopped: true,
-      reason: "manual_stop",
-    });
-    expect(stopCalls).toEqual(["ABC-123"]);
+    for (const stopPath of [
+      "/api/v1/issues/ABC-123/stop",
+      "/api/v1/ABC-123/stop",
+    ]) {
+      const response = await sendRequest(server.port, {
+        method: "POST",
+        path: stopPath,
+        body: "{}",
+        headers: { "content-type": "application/json" },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(JSON.parse(response.body)).toEqual({
+        issue_identifier: "ABC-123",
+        stopped: true,
+        reason: "manual_stop",
+      });
+    }
+    expect(stopCalls).toEqual(["ABC-123", "ABC-123"]);
   });
 
   it("returns 404 when stopping an issue that is not running", async () => {
