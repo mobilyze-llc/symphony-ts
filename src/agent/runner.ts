@@ -44,6 +44,7 @@ import {
 } from "../policy/hard-stops.js";
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
+import { getDefaultCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
 import type { IssueTracker } from "../tracker/tracker.js";
 import { WorkspaceHookRunner } from "../workspace/hooks.js";
 import { validateWorkspaceCwd } from "../workspace/path-safety.js";
@@ -357,7 +358,9 @@ export class AgentRunner {
         readTimeoutMs: this.config.codex.readTimeoutMs,
         turnTimeoutMs: this.config.codex.turnTimeoutMs,
         stallTimeoutMs: this.config.codex.stallTimeoutMs,
-        artifactDirectory: `${workspace.path}/.symphony/codex-sessions`,
+        artifactDirectory: getDefaultCodexSessionArtifactDirectory(
+          workspace.path,
+        ),
         dynamicTools: this.createDynamicTools(),
         ...(input.modePolicy === undefined
           ? {}

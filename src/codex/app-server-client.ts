@@ -22,6 +22,7 @@ import {
   detectModePermissionAction,
   evaluateModePermission,
 } from "../policy/hard-stops.js";
+import { getDefaultCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
 import { VERSION } from "../version.js";
 
 const DEFAULT_SYSTEM_SKILL_NAMES = Object.freeze([
@@ -529,7 +530,7 @@ export class CodexAppServerClient {
 
     const artifactRoot =
       this.options.artifactDirectory ??
-      join(this.options.cwd, ".symphony", "codex-sessions");
+      getDefaultCodexSessionArtifactDirectory(this.options.cwd);
     const artifactDirectory = join(artifactRoot, basename(codexHome));
     const artifacts: CodexSessionArtifact[] = [];
 
