@@ -168,6 +168,7 @@ describe("prompt builder", () => {
     expect(prompt).toContain("Current tracker state: In Progress.");
     expect(prompt).toContain("initial dispatch");
     expect(prompt).toContain("path/count-only commands");
+    expect(prompt).toContain("rg -n ... -m 50 path");
     expect(prompt).toContain("max_output_tokens");
     expect(prompt).toContain("1,500 or less");
   });

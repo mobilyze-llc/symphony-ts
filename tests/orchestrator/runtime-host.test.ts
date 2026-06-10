@@ -333,6 +333,8 @@ describe("OrchestratorRuntimeHost", () => {
         total_tokens_delta: 18,
       }),
     ]);
+    expect(details?.running?.token_telemetry_total_entries).toBe(1);
+    expect(details?.running?.token_telemetry_truncated).toBe(false);
     expect(details?.logs.codex_session_logs).toEqual([
       {
         label: "sessions/2026/rollout-test.jsonl",

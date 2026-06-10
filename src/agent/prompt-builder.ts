@@ -113,7 +113,7 @@ export function buildContinuationPrompt(input: {
     "Reuse the existing thread context and current workspace state.",
     "Do not restate the original task prompt unless it is strictly needed.",
     "Headless output budget still applies: write noisy command output to .symphony/validation/ and return only command metadata, exit code, log path, and a short tail/summary.",
-    "Start broad inspection with path/count-only commands such as `rg -l`, `rg -c`, `find ... | sed -n '1,80p'`, and `git diff --stat`; do not stream broad match lines across the whole repo.",
+    "Start broad inspection with path/count-only commands such as `rg -l`, `rg -c`, `find ... | sed -n '1,80p'`, and `git diff --stat`; then inspect relevant files with bounded contextual commands such as `rg -n ... -m 50 path` or `sed -n '<start>,<end>p'`. Do not stream broad match lines across the whole repo.",
     "Keep direct shell output under roughly 2,000 tokens. When a tool supports `max_output_tokens`, set it to 1,500 or less and also bound the command itself with `sed`, `head`, `tail`, `jq`, or `wc`.",
     "Shell snippets must be zsh-safe: do not assign to `status`; use `cmd_status`, `exit_code`, or another neutral variable name.",
     "Make the next best progress on the issue, then stop when this session has no further useful work to do.",
