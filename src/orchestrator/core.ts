@@ -947,7 +947,7 @@ export class OrchestratorCore {
       `Budget escalation step ${nextStep}/${ladder.maxSteps}: auto-resuming with a ${nextMultiplier}x unit budget.`,
       `Trigger: ${hardStop.trigger}`,
       `Reason: ${hardStop.reason}`,
-      `Unit spend at pause: ${hardStop.totalTokens} tokens, ~$${hardStop.estimatedCostUsd.toFixed(2)}.`,
+      `Unit spend at pause: ${hardStop.billableTokens ?? hardStop.totalTokens} billable tokens (raw ${hardStop.totalTokens}), ~$${hardStop.estimatedCostUsd.toFixed(2)}.`,
     ].join("\n");
     try {
       await this.postComment?.(issueId, comment);

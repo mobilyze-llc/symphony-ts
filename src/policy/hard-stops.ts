@@ -25,7 +25,10 @@ export interface HardStopDecision {
   trigger: HardStopTrigger;
   reason: string;
   turnCount: number;
+  /** Raw cumulative unit tokens, cache reads at full weight (observability). */
   totalTokens: number;
+  /** Cache-discounted tokens — the measure budget triggers gate on (SYMPH-351). */
+  billableTokens?: number;
   estimatedCostUsd: number;
 }
 
@@ -238,19 +241,28 @@ export function evaluateBudgetHardStop(input: {
   totalTokens: number;
   cacheReadTokens?: number;
 }): HardStopDecision | null {
-  const estimatedCostUsd = estimateCostUsd({
+  // SYMPH-351: evaluate the token trigger on the same cache-discounted
+  // measure the cost model bills. Raw totals are dominated by cached
+  // re-reads of the conversation prefix (~90% on observed long units),
+  // which consume almost none of the scarce resources the budget protects
+  // (rate-limit window share, dollars). Missing cache telemetry degrades
+  // to raw totals — the conservative direction. Computed exactly once per
+  // evaluation; the dollar estimate derives from the same value.
+  const billableTokens = computeBillableTokens({
     totalTokens: input.totalTokens,
     cacheReadTokens: input.cacheReadTokens ?? 0,
     config: input.config,
   });
+  const estimatedCostUsd = costFromBillableTokens(billableTokens, input.config);
 
-  if (input.totalTokens >= input.config.maxTokensPerUnit) {
+  if (billableTokens >= input.config.maxTokensPerUnit) {
     return {
       outcome: "PAUSED-budget",
       trigger: "token_budget",
-      reason: `Token budget exceeded: ${input.totalTokens} >= ${input.config.maxTokensPerUnit}.`,
+      reason: `Token budget exceeded: ${billableTokens} billable >= ${input.config.maxTokensPerUnit} (raw ${input.totalTokens}, cached ${input.cacheReadTokens ?? 0}).`,
       turnCount: input.turnCount,
       totalTokens: input.totalTokens,
+      billableTokens,
       estimatedCostUsd,
     };
   }
@@ -262,6 +274,7 @@ export function evaluateBudgetHardStop(input: {
       reason: `Estimated dollar budget exceeded: ${formatCost(estimatedCostUsd)} >= ${formatCost(input.config.maxDollarBudgetUsd)}.`,
       turnCount: input.turnCount,
       totalTokens: input.totalTokens,
+      billableTokens,
       estimatedCostUsd,
     };
   }
@@ -276,6 +289,7 @@ export function evaluateBudgetHardStop(input: {
       reason: `Estimated premium spend is near ceiling: ${formatCost(estimatedCostUsd)} of ${formatCost(input.config.maxDollarBudgetUsd)}.`,
       turnCount: input.turnCount,
       totalTokens: input.totalTokens,
+      billableTokens,
       estimatedCostUsd,
     };
   }
@@ -397,6 +411,41 @@ export function evaluateNoProgressHardStop(input: {
   };
 }
 
+// Cached input tokens are re-reads of an unchanged prefix and are billed
+// at a fraction of the full rate; charging them at full weight overstated
+// spend by the cached share (~70% on observed worker turns, SYMPH-319).
+// Shared by the dollar estimate and the token trigger (SYMPH-351) so both
+// measure the same scarce resource.
+function computeBillableTokens(input: {
+  totalTokens: number;
+  cacheReadTokens: number;
+  config: Pick<WorkflowHardStopsConfig, "cachedTokenCostRatio">;
+}): number {
+  const cacheReadTokens = Math.min(
+    Math.max(input.cacheReadTokens, 0),
+    input.totalTokens,
+  );
+  // A malformed ratio must fail closed (no discount), never disable the
+  // budget checks via NaN comparisons.
+  const configuredRatio = input.config.cachedTokenCostRatio;
+  const cachedTokenCostRatio = Number.isFinite(configuredRatio)
+    ? Math.min(Math.max(configuredRatio, 0), 1)
+    : 1;
+  // Math.round makes the >= cap comparison fire up to half a token early
+  // at fractional boundaries — negligible against real ceilings (>=10K)
+  // and preferable to surfacing fractional token counts to operators.
+  return Math.round(
+    input.totalTokens - cacheReadTokens * (1 - cachedTokenCostRatio),
+  );
+}
+
+function costFromBillableTokens(
+  billableTokens: number,
+  config: Pick<WorkflowHardStopsConfig, "estimatedCostPer1kTokensUsd">,
+): number {
+  return (billableTokens / 1000) * config.estimatedCostPer1kTokensUsd;
+}
+
 function estimateCostUsd(input: {
   totalTokens: number;
   cacheReadTokens: number;
@@ -405,22 +454,7 @@ function estimateCostUsd(input: {
     "estimatedCostPer1kTokensUsd" | "cachedTokenCostRatio"
   >;
 }): number {
-  // Cached input tokens are re-reads of an unchanged prefix and are billed
-  // at a fraction of the full rate; charging them at full weight overstated
-  // spend by the cached share (~70% on observed worker turns, SYMPH-319).
-  const cacheReadTokens = Math.min(
-    Math.max(input.cacheReadTokens, 0),
-    input.totalTokens,
-  );
-  // A malformed ratio must fail closed (no discount), never disable the
-  // dollar checks via NaN comparisons.
-  const configuredRatio = input.config.cachedTokenCostRatio;
-  const cachedTokenCostRatio = Number.isFinite(configuredRatio)
-    ? Math.min(Math.max(configuredRatio, 0), 1)
-    : 1;
-  const billableTokens =
-    input.totalTokens - cacheReadTokens * (1 - cachedTokenCostRatio);
-  return (billableTokens / 1000) * input.config.estimatedCostPer1kTokensUsd;
+  return costFromBillableTokens(computeBillableTokens(input), input.config);
 }
 
 function formatCost(cost: number): string {
