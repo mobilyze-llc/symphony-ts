@@ -129,6 +129,7 @@ async function upsertTrackerIssueFromBoundary(input: {
   if (
     primaryIssue.teamId === null ||
     primaryIssue.teamKey === null ||
+    primaryIssue.teamKey.trim() === "" ||
     primaryIssue.projectId === null
   ) {
     throw new Error(
