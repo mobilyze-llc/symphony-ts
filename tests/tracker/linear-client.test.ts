@@ -4,6 +4,7 @@ import { ERROR_CODES } from "../../src/errors/codes.js";
 import {
   LINEAR_CANDIDATE_ISSUES_QUERY,
   LINEAR_CREATE_ISSUE_MUTATION,
+  LINEAR_ISSUE_LABELS_BY_NAMES_QUERY,
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
   LinearTrackerClient,
   type TrackerError,
@@ -433,6 +434,63 @@ describe("createIssue", () => {
     ).rejects.toThrow(
       expect.objectContaining<Partial<TrackerError>>({
         code: ERROR_CODES.linearUnknownPayload,
+      }),
+    );
+  });
+});
+
+describe("resolveLabelIdsByNames", () => {
+  it("resolves global and team-owned labels with the Linear team key filter", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issueLabels: {
+            nodes: [
+              { id: "label-supervision", name: "supervision" },
+              { id: "label-risk-high", name: "risk:high" },
+            ],
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+
+    await expect(
+      client.resolveLabelIdsByNames(["supervision", "risk:high"], "SYMPH"),
+    ).resolves.toEqual([
+      { id: "label-supervision", name: "supervision" },
+      { id: "label-risk-high", name: "risk:high" },
+    ]);
+
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toBe(LINEAR_ISSUE_LABELS_BY_NAMES_QUERY);
+    expect(request.query).toContain("team: { null: true }");
+    expect(request.query).toContain("team: { key: { eq: $teamKey } }");
+    expect(request.variables).toEqual({
+      teamKey: "SYMPH",
+      labelNames: ["supervision", "risk:high"],
+    });
+  });
+
+  it("includes sanitized operation context on Linear HTTP failures", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response("bad request", { status: 400 }));
+    const client = createClient({ fetchFn });
+
+    await expect(
+      client.resolveLabelIdsByNames(["supervision"], "SYMPH"),
+    ).rejects.toThrow(
+      expect.objectContaining<Partial<TrackerError>>({
+        code: ERROR_CODES.linearApiStatus,
+        status: 400,
+        details: {
+          operationName: "SymphonyIssueLabelsByNames",
+          variables: {
+            teamKey: "SYMPH",
+            labelNames: ["supervision"],
+          },
+        },
       }),
     );
   });

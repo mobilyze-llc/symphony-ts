@@ -313,11 +313,14 @@ export const LINEAR_OPEN_ISSUES_BY_TITLE_QUERY = `
 `.trim();
 
 export const LINEAR_ISSUE_LABELS_BY_NAMES_QUERY = `
-  query SymphonyIssueLabelsByNames($teamId: String!, $labelNames: [String!]!) {
+  query SymphonyIssueLabelsByNames($teamKey: String!, $labelNames: [String!]!) {
     issueLabels(
       first: 50
       filter: {
-        team: { id: { eq: $teamId } }
+        or: [
+          { team: { null: true } }
+          { team: { key: { eq: $teamKey } } }
+        ]
         name: { in: $labelNames }
       }
     ) {

@@ -492,6 +492,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           terminalStates: options.config.tracker.terminalStates,
           now: this.now,
           onFailure: ({ title, sourceIssueIds, error }) => {
+            const trackerError =
+              error instanceof Error
+                ? (error as {
+                    code?: unknown;
+                    status?: unknown;
+                    details?: unknown;
+                  })
+                : null;
             void this.logger?.warn(
               "tracker_follow_up_write_failed",
               "Failed to create or update dispatcher follow-up issue.",
@@ -500,6 +508,16 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 title,
                 source_issue_ids: sourceIssueIds,
                 reason: error instanceof Error ? error.message : String(error),
+                ...(typeof trackerError?.code === "string"
+                  ? { error_code: trackerError.code }
+                  : {}),
+                ...(typeof trackerError?.status === "number"
+                  ? { http_status: trackerError.status }
+                  : {}),
+                ...(trackerError?.details !== undefined &&
+                trackerError.details !== null
+                  ? { details: trackerError.details }
+                  : {}),
               },
             );
           },
