@@ -70,9 +70,11 @@ import {
 } from "./gate-handler.js";
 import { createRightSizingDecision } from "./right-sizing.js";
 import {
+  type IgnoredSetupInstructionCollision,
   type SupervisionFinding,
   type WorkerSupervisionSnapshot,
   createIssueSupervisionSnapshot,
+  detectIgnoredSetupInstructionCollisions,
   detectSupervisionFindings,
   formatSupervisionFindingsComment,
 } from "./supervision.js";
@@ -279,6 +281,9 @@ export class OrchestratorCore {
 
   private readonly reportedSupervisionFindings = new Set<string>();
 
+  private readonly reportedIgnoredSetupInstructionCollisions =
+    new Set<string>();
+
   /**
    * Snapshot of execution history captured after the final stage record is
    * appended but before advanceStage() deletes issueExecutionHistory.
@@ -334,6 +339,7 @@ export class OrchestratorCore {
       this.state.dispatcherRunJournal,
     );
     this.reportedSupervisionFindings.clear();
+    this.reportedIgnoredSetupInstructionCollisions.clear();
     this.state.decorrelatedGateOutcomes = {};
 
     const nowMs = this.now().getTime();
@@ -344,6 +350,16 @@ export class OrchestratorCore {
         typeof entry.metadata.signature === "string"
       ) {
         this.reportedSupervisionFindings.add(entry.metadata.signature);
+      }
+
+      if (
+        entry.kind === "supervision_finding" &&
+        entry.metadata.findingKind === "ignored_setup_instruction_collision" &&
+        typeof entry.metadata.signature === "string"
+      ) {
+        this.reportedIgnoredSetupInstructionCollisions.add(
+          entry.metadata.signature,
+        );
       }
 
       if (
@@ -3599,6 +3615,9 @@ export class OrchestratorCore {
             }),
           )
         : await this.getRunningSupervisionSnapshots(runningEntries);
+    await this.reportIgnoredSetupInstructionCollisions(
+      detectIgnoredSetupInstructionCollisions(snapshots),
+    );
     const findings = detectSupervisionFindings(snapshots);
     if (findings.length === 0) {
       return;
@@ -3797,6 +3816,51 @@ export class OrchestratorCore {
         signature: resteerSignature,
       },
     });
+  }
+
+  private async reportIgnoredSetupInstructionCollisions(
+    collisions: readonly IgnoredSetupInstructionCollision[],
+  ): Promise<void> {
+    for (const collision of collisions) {
+      const signature =
+        formatIgnoredSetupInstructionCollisionSignature(collision);
+      if (this.reportedIgnoredSetupInstructionCollisions.has(signature)) {
+        continue;
+      }
+      this.reportedIgnoredSetupInstructionCollisions.add(signature);
+
+      try {
+        await this.recordRunJournalEntry({
+          idempotencyKey: `supervision_ignored_setup_instruction_collision:${signature}`,
+          timestamp: this.now().toISOString(),
+          kind: "supervision_finding",
+          issueId: collision.workerIds[0] ?? "unknown",
+          issueIdentifier: collision.issueIdentifiers[0] ?? "unknown",
+          operation: "supervisor",
+          stage: null,
+          attempt: null,
+          ownerId: this.leaseOwnerId,
+          lease: null,
+          summary: collision.message,
+          metadata: {
+            phase: "running",
+            signature,
+            findingKind: "ignored_setup_instruction_collision",
+            action: "ignored",
+            workerIds: collision.workerIds,
+            issueIdentifiers: collision.issueIdentifiers,
+            files: collision.files,
+            ignored: true,
+            nonBlocking: true,
+          },
+        });
+      } catch (error) {
+        console.warn(
+          "[orchestrator] Failed to record ignored setup-instruction collision diagnostic:",
+          error,
+        );
+      }
+    }
   }
 
   private async requestStop(
@@ -4216,6 +4280,18 @@ function formatSupervisionFindingSignature(
     ...finding.issueIdentifiers,
     ...finding.workerIds,
     ...finding.files,
+  ].join("\0");
+}
+
+function formatIgnoredSetupInstructionCollisionSignature(
+  collision: IgnoredSetupInstructionCollision,
+): string {
+  return [
+    "running",
+    "ignored_setup_instruction_collision",
+    ...collision.issueIdentifiers,
+    ...collision.workerIds,
+    ...collision.files,
   ].join("\0");
 }
 

@@ -1775,8 +1775,8 @@ describe("OrchestratorRuntimeHost", () => {
     ]);
     const readWorkspaceChangedFiles = vi.fn(async (workspacePath: string) =>
       workspacePath.endsWith("/1")
-        ? ["src/shared/config.ts"]
-        : ["./src/shared/config.ts", "src/features/two.ts"],
+        ? ["CLAUDE.md", "src/shared/config.ts"]
+        : ["./CLAUDE.md", "./src/shared/config.ts", "src/features/two.ts"],
     );
     const host = new OrchestratorRuntimeHost({
       config: createConfig(),
@@ -1804,6 +1804,68 @@ describe("OrchestratorRuntimeHost", () => {
         finding_kinds: ["actual_write_collision"],
         issue_identifiers: ["ISSUE-1", "ISSUE-2"],
         files: ["src/shared/config.ts"],
+        ignored_files: ["CLAUDE.md"],
+      }),
+    );
+  });
+
+  it("records ignored setup-instruction overlaps without re-steering", async () => {
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2", priority: 2 }),
+      ],
+      stateSnapshots: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const readWorkspaceChangedFiles = vi.fn(async (workspacePath: string) =>
+      workspacePath.endsWith("/1")
+        ? ["CLAUDE.md", "src/features/one.ts"]
+        : ["./CLAUDE.md", "src/features/two.ts"],
+    );
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      readWorkspaceChangedFiles,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.pollOnce();
+
+    expect(
+      entries.some((entry) => entry.event === "supervision_resteer_requested"),
+    ).toBe(false);
+    expect(host.getState().dispatcherRunJournal).toContainEqual(
+      expect.objectContaining({
+        kind: "supervision_finding",
+        summary:
+          "ISSUE-1 and ISSUE-2 share setup-only instruction-file changes that were ignored for write-collision supervision.",
+        metadata: expect.objectContaining({
+          action: "ignored",
+          files: ["CLAUDE.md"],
+          findingKind: "ignored_setup_instruction_collision",
+          ignored: true,
+          issueIdentifiers: ["ISSUE-1", "ISSUE-2"],
+          nonBlocking: true,
+          workerIds: ["1", "2"],
+        }),
       }),
     );
   });

@@ -25,6 +25,14 @@ export interface SupervisionFinding {
   workerIds: string[];
   issueIdentifiers: string[];
   files: string[];
+  ignoredFiles?: string[];
+  message: string;
+}
+
+export interface IgnoredSetupInstructionCollision {
+  workerIds: string[];
+  issueIdentifiers: string[];
+  files: string[];
   message: string;
 }
 
@@ -82,6 +90,54 @@ export function hasBlockingSupervisionFindings(
   workers: readonly WorkerSupervisionSnapshot[],
 ): boolean {
   return detectSupervisionFindings(workers).length > 0;
+}
+
+export function detectIgnoredSetupInstructionCollisions(
+  workers: readonly WorkerSupervisionSnapshot[],
+): IgnoredSetupInstructionCollision[] {
+  const normalizedWorkers = workers.map(normalizeWorker).sort(compareWorkers);
+  const collisions: IgnoredSetupInstructionCollision[] = [];
+
+  for (
+    let leftIndex = 0;
+    leftIndex < normalizedWorkers.length;
+    leftIndex += 1
+  ) {
+    const left = normalizedWorkers[leftIndex];
+    if (left === undefined) {
+      continue;
+    }
+
+    for (
+      let rightIndex = leftIndex + 1;
+      rightIndex < normalizedWorkers.length;
+      rightIndex += 1
+    ) {
+      const right = normalizedWorkers[rightIndex];
+      if (right === undefined) {
+        continue;
+      }
+
+      const ignoredFiles = sortedIntersection(
+        left.changedFiles,
+        right.changedFiles,
+      ).filter((file) =>
+        isIgnorableSetupInstructionCollision(file, left, right),
+      );
+      if (ignoredFiles.length === 0) {
+        continue;
+      }
+
+      collisions.push({
+        workerIds: [left.workerId, right.workerId],
+        issueIdentifiers: [left.issueIdentifier, right.issueIdentifier],
+        files: ignoredFiles,
+        message: `${left.issueIdentifier} and ${right.issueIdentifier} share setup-only instruction-file changes that were ignored for write-collision supervision.`,
+      });
+    }
+  }
+
+  return collisions.sort(compareIgnoredSetupInstructionCollisions);
 }
 
 export function createIssueSupervisionSnapshot(
@@ -162,8 +218,14 @@ export function formatSupervisionFindingsComment(input: {
       finding.files.length === 0
         ? ""
         : ` Files: ${finding.files.map((file) => `\`${file}\``).join(", ")}.`;
+    const ignoredFileSuffix =
+      finding.ignoredFiles === undefined || finding.ignoredFiles.length === 0
+        ? ""
+        : ` Ignored setup-only files: ${finding.ignoredFiles
+            .map((file) => `\`${file}\``)
+            .join(", ")}.`;
     lines.push(
-      `- ${finding.kind} -> ${finding.action}: ${finding.message}${fileSuffix}`,
+      `- ${finding.kind} -> ${finding.action}: ${finding.message}${fileSuffix}${ignoredFileSuffix}`,
     );
   }
 
@@ -249,14 +311,27 @@ function detectPairFindings(
     left.changedFiles,
     right.changedFiles,
   );
-  if (changedOverlap.length > 0) {
-    findings.push({
+  const ignoredChangedOverlap = changedOverlap.filter((file) =>
+    isIgnorableSetupInstructionCollision(file, left, right),
+  );
+  const blockingChangedOverlap = sortedDifference(
+    changedOverlap,
+    ignoredChangedOverlap,
+  );
+  if (blockingChangedOverlap.length > 0) {
+    const finding: SupervisionFinding = {
       kind: "actual_write_collision",
       action: "pause",
       workerIds: [left.workerId, right.workerId],
       issueIdentifiers: [left.issueIdentifier, right.issueIdentifier],
-      files: changedOverlap,
+      files: blockingChangedOverlap,
       message: `${left.issueIdentifier} and ${right.issueIdentifier} changed the same file set.`,
+    };
+    if (ignoredChangedOverlap.length > 0) {
+      finding.ignoredFiles = ignoredChangedOverlap;
+    }
+    findings.push({
+      ...finding,
     });
   }
 
@@ -553,6 +628,36 @@ function sortedDifference(left: readonly string[], right: readonly string[]) {
   return left.filter((item) => !rightSet.has(item)).sort(compareStrings);
 }
 
+function isIgnorableSetupInstructionCollision(
+  file: string,
+  left: NormalizedWorker,
+  right: NormalizedWorker,
+): boolean {
+  return (
+    isRootInstructionFile(file) &&
+    !isDeclaredOrEvaluatedFile(file, left) &&
+    !isDeclaredOrEvaluatedFile(file, right)
+  );
+}
+
+function isDeclaredOrEvaluatedFile(
+  file: string,
+  worker: NormalizedWorker,
+): boolean {
+  return (
+    worker.declaredFileScope.includes(file) ||
+    (worker.evalFileScope?.includes(file) ?? false)
+  );
+}
+
+function isRootInstructionFile(file: string): boolean {
+  return (
+    file === "CLAUDE.md" ||
+    file === "AGENTS.md" ||
+    file === "AGENTS.override.md"
+  );
+}
+
 function isNonEmptyString(value: string): boolean {
   return value.length > 0;
 }
@@ -573,6 +678,20 @@ function compareFindings(
 ): number {
   return (
     FINDING_ORDER[left.kind] - FINDING_ORDER[right.kind] ||
+    compareStrings(
+      left.issueIdentifiers.join("\0"),
+      right.issueIdentifiers.join("\0"),
+    ) ||
+    compareStrings(left.workerIds.join("\0"), right.workerIds.join("\0")) ||
+    compareStrings(left.files.join("\0"), right.files.join("\0"))
+  );
+}
+
+function compareIgnoredSetupInstructionCollisions(
+  left: IgnoredSetupInstructionCollision,
+  right: IgnoredSetupInstructionCollision,
+): number {
+  return (
     compareStrings(
       left.issueIdentifiers.join("\0"),
       right.issueIdentifiers.join("\0"),
