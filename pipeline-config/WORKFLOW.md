@@ -68,6 +68,11 @@ stages:
     type: agent
     runner: codex
     max_turns: 8
+    hard_stops:
+      max_iterations: 4
+      max_tokens_per_unit: 80000
+      max_dollar_budget_usd: 4
+      premium_budget_pause_ratio: 0.9
     prompt: prompts/investigate.liquid
     on_complete: implement
 

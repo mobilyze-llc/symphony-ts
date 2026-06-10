@@ -629,6 +629,41 @@ describe("config-resolver fast_track", () => {
     expect(resolved.stages?.fastTrack).toBeNull();
   });
 
+  it("parses per-stage hard stop overrides without filling global defaults", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        stages: {
+          initial_stage: "investigate",
+          investigate: {
+            type: "agent",
+            hard_stops: {
+              max_iterations: "4",
+              max_tokens_per_unit: "80000",
+              max_dollar_budget_usd: "4",
+              premium_budget_pause_ratio: "0.9",
+            },
+            on_complete: "done",
+          },
+          done: { type: "terminal" },
+        },
+      },
+    });
+
+    expect(resolved.stages?.stages.investigate?.hardStops).toEqual({
+      maxIterations: 4,
+      maxTokensPerUnit: 80_000,
+      maxDollarBudgetUsd: 4,
+      premiumBudgetPauseRatio: 0.9,
+    });
+    expect(
+      resolved.stages?.stages.investigate?.hardStops
+        ?.estimatedCostPer1kTokensUsd,
+    ).toBeUndefined();
+    expect(resolved.stages?.stages.done?.hardStops).toBeNull();
+  });
+
   it("resolves slack_notify_channel from YAML config", () => {
     const resolved = resolveWorkflowConfig({
       workflowPath: "/repo/WORKFLOW.md",

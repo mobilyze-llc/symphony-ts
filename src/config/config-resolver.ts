@@ -51,6 +51,7 @@ import type {
   StageType,
   StagesConfig,
   WorkflowContinuousFeedbackEvent,
+  WorkflowHardStopsConfigOverride,
 } from "./types.js";
 import { GATE_TYPES, STAGE_TYPES } from "./types.js";
 
@@ -67,6 +68,7 @@ export function resolveWorkflowConfig(
   const hooks = asRecord(config.hooks);
   const agent = asRecord(config.agent);
   const hardStops = asRecord(config.hard_stops);
+  const hardStopOverrides = readHardStopsConfig(hardStops) ?? {};
   const runner = asRecord(config.runner);
   const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
@@ -148,22 +150,21 @@ export function resolveWorkflowConfig(
     },
     hardStops: {
       maxIterations:
-        readPositiveInteger(hardStops.max_iterations) ??
-        DEFAULT_HARD_STOP_MAX_ITERATIONS,
+        hardStopOverrides.maxIterations ?? DEFAULT_HARD_STOP_MAX_ITERATIONS,
       noProgressTurns:
-        readNonNegativeInteger(hardStops.no_progress_turns) ??
+        hardStopOverrides.noProgressTurns ??
         DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
       maxTokensPerUnit:
-        readPositiveInteger(hardStops.max_tokens_per_unit) ??
+        hardStopOverrides.maxTokensPerUnit ??
         DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
       maxDollarBudgetUsd:
-        readPositiveNumber(hardStops.max_dollar_budget_usd) ??
+        hardStopOverrides.maxDollarBudgetUsd ??
         DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
       premiumBudgetPauseRatio:
-        readRatio(hardStops.premium_budget_pause_ratio) ??
+        hardStopOverrides.premiumBudgetPauseRatio ??
         DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
       estimatedCostPer1kTokensUsd:
-        readPositiveNumber(hardStops.estimated_cost_per_1k_tokens_usd) ??
+        hardStopOverrides.estimatedCostPer1kTokensUsd ??
         DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
     },
     runner: {
@@ -571,6 +572,7 @@ export function resolveStagesConfig(value: unknown): StagesConfig | null {
       prompt: readString(stageRecord.prompt),
       maxTurns: readPositiveInteger(stageRecord.max_turns),
       timeoutMs: readPositiveInteger(stageRecord.timeout_ms),
+      hardStops: readHardStopsConfig(stageRecord.hard_stops),
       concurrency: readPositiveInteger(stageRecord.concurrency),
       gateType: parseGateType(readString(stageRecord.gate_type)),
       maxRework: readPositiveInteger(stageRecord.max_rework),
@@ -609,6 +611,51 @@ export function resolveStagesConfig(value: unknown): StagesConfig | null {
     fastTrack,
     stages: Object.freeze(stageEntries),
   });
+}
+
+function readHardStopsConfig(
+  value: unknown,
+): WorkflowHardStopsConfigOverride | null {
+  const hardStops = asRecord(value);
+  const parsed: WorkflowHardStopsConfigOverride = {};
+
+  const maxIterations = readPositiveInteger(hardStops.max_iterations);
+  if (maxIterations !== null) {
+    parsed.maxIterations = maxIterations;
+  }
+
+  const noProgressTurns = readNonNegativeInteger(hardStops.no_progress_turns);
+  if (noProgressTurns !== null) {
+    parsed.noProgressTurns = noProgressTurns;
+  }
+
+  const maxTokensPerUnit = readPositiveInteger(hardStops.max_tokens_per_unit);
+  if (maxTokensPerUnit !== null) {
+    parsed.maxTokensPerUnit = maxTokensPerUnit;
+  }
+
+  const maxDollarBudgetUsd = readPositiveNumber(
+    hardStops.max_dollar_budget_usd,
+  );
+  if (maxDollarBudgetUsd !== null) {
+    parsed.maxDollarBudgetUsd = maxDollarBudgetUsd;
+  }
+
+  const premiumBudgetPauseRatio = readRatio(
+    hardStops.premium_budget_pause_ratio,
+  );
+  if (premiumBudgetPauseRatio !== null) {
+    parsed.premiumBudgetPauseRatio = premiumBudgetPauseRatio;
+  }
+
+  const estimatedCostPer1kTokensUsd = readPositiveNumber(
+    hardStops.estimated_cost_per_1k_tokens_usd,
+  );
+  if (estimatedCostPer1kTokensUsd !== null) {
+    parsed.estimatedCostPer1kTokensUsd = estimatedCostPer1kTokensUsd;
+  }
+
+  return Object.keys(parsed).length === 0 ? null : parsed;
 }
 
 function readFastTrackLabels(

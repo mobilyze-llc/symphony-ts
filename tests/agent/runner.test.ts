@@ -14,7 +14,10 @@ import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
+import type {
+  ResolvedWorkflowConfig,
+  StageDefinition,
+} from "../../src/config/types.js";
 import type { Issue } from "../../src/domain/model.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 import {
@@ -509,6 +512,145 @@ describe("AgentRunner", () => {
       totalTokens: 21,
     });
     expect(result.hardStop?.reason).toContain("Live token telemetry");
+  });
+
+  it("uses stage hard-stop overrides for live telemetry budget enforcement", async () => {
+    const root = await createRoot();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const continueTurn = vi.fn();
+    const stage: StageDefinition = {
+      type: "agent",
+      runner: null,
+      model: null,
+      prompt: null,
+      maxTurns: null,
+      timeoutMs: null,
+      hardStops: {
+        maxTokensPerUnit: 20,
+      },
+      concurrency: null,
+      gateType: null,
+      maxRework: null,
+      reviewers: [],
+      transitions: { onComplete: "implement", onApprove: null, onRework: null },
+      linearState: null,
+    };
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 10_000,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+        },
+      },
+      tracker: createTracker(),
+      createCodexClient: (input) => ({
+        async startSession() {
+          input.onEvent({
+            event: "notification",
+            timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "live usage update",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+          });
+
+          const error = new Error(
+            "Codex session closed while a turn was running.",
+          ) as Error & { code: string };
+          error.code = ERROR_CODES.codexProtocolError;
+          throw error;
+        },
+        continueTurn,
+        close,
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "investigate",
+      stage,
+    });
+
+    expect(close).toHaveBeenCalled();
+    expect(continueTurn).not.toHaveBeenCalled();
+    expect(result.hardStop).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "token_budget",
+      totalTokens: 21,
+    });
+    expect(result.hardStop?.reason).toContain("Live token telemetry");
+  });
+
+  it("uses stage max_iterations to cap turns below the stage max_turns", async () => {
+    const root = await createRoot();
+    const prompts: string[] = [];
+    const stage: StageDefinition = {
+      type: "agent",
+      runner: null,
+      model: null,
+      prompt: null,
+      maxTurns: 5,
+      timeoutMs: null,
+      hardStops: {
+        maxIterations: 2,
+      },
+      concurrency: null,
+      gateType: null,
+      maxRework: null,
+      reviewers: [],
+      transitions: { onComplete: "implement", onApprove: null, onRework: null },
+      linearState: null,
+    };
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 10_000,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+        },
+      },
+      tracker,
+      createCodexClient: (input) =>
+        createStubCodexClient(prompts, input, {
+          messages: ["still working", "still working more"],
+        }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "investigate",
+      stage,
+    });
+
+    expect(prompts).toHaveLength(2);
+    expect(result.hardStop).toMatchObject({
+      outcome: "STALLED",
+      trigger: "iteration_cap",
+      turnCount: 2,
+    });
   });
 
   it("does not use heartbeat telemetry as the live budget stop trigger", async () => {

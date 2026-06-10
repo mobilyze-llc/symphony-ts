@@ -253,10 +253,11 @@ export class AgentRunner {
     const effectiveRunnerKind = (stage?.runner ??
       this.config.runner.kind) as RunnerKind;
     const effectiveModel = stage?.model ?? this.config.runner.model;
-    const hardStops = resolveHardStopsConfig(
+    const globalHardStops = resolveHardStopsConfig(
       this.config.hardStops,
       DEFAULT_HARD_STOPS_CONFIG,
     );
+    const hardStops = resolveHardStopsConfig(stage?.hardStops, globalHardStops);
     const effectiveMaxTurns = Math.min(
       stage?.maxTurns ?? this.config.agent.maxTurns,
       hardStops.maxIterations,

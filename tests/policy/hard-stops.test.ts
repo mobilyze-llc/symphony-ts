@@ -8,6 +8,7 @@ import {
   evaluateIterationHardStop,
   evaluateModePermission,
   evaluateNoProgressHardStop,
+  resolveHardStopsConfig,
 } from "../../src/policy/hard-stops.js";
 
 const CONFIG = {
@@ -20,6 +21,22 @@ const CONFIG = {
 };
 
 describe("hard-stop policy", () => {
+  it("merges hard-stop overrides over fallback config", () => {
+    expect(
+      resolveHardStopsConfig(
+        {
+          maxTokensPerUnit: 80_000,
+          maxDollarBudgetUsd: 4,
+        },
+        CONFIG,
+      ),
+    ).toEqual({
+      ...CONFIG,
+      maxTokensPerUnit: 80_000,
+      maxDollarBudgetUsd: 4,
+    });
+  });
+
   it("triggers STALLED when the iteration cap is reached", () => {
     expect(
       evaluateIterationHardStop({
