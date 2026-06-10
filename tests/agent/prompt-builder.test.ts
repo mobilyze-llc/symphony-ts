@@ -226,6 +226,8 @@ describe("prompt builder", () => {
 
     expect(prompt).toContain("Current stage: implement.");
     expect(prompt).toContain("IMPLEMENT stage");
+    expect(prompt).toContain("Headless output budget");
+    expect(prompt).toContain(".symphony/validation/");
     expect(prompt).toContain("[STAGE_COMPLETE]");
   });
 

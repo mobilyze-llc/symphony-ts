@@ -24,6 +24,13 @@ const SHIPPED_CODEX_WORKFLOW_CONFIGS = [
   "../../pipeline-config/WORKFLOW-instrumentation.md",
   "../../pipeline-config/templates/WORKFLOW-template.md",
 ].map((path) => resolve(import.meta.dirname, path));
+const INLINE_WORKER_PROMPT_CONFIGS = SHIPPED_CODEX_WORKFLOW_CONFIGS.filter(
+  (path) => !path.endsWith("/pipeline-config/WORKFLOW.md"),
+);
+const PRIMARY_PROMPT_PARTIALS = [
+  "../../pipeline-config/prompts/global.liquid",
+  "../../pipeline-config/prompts/implement.liquid",
+].map((path) => resolve(import.meta.dirname, path));
 const RESOLVED_CODEX_WORKFLOW_CONFIGS = [
   ...SHIPPED_CODEX_WORKFLOW_CONFIGS,
   WORKFLOW_PATH,
@@ -101,6 +108,32 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     );
   });
 
+  it("keeps shipped worker headless output bounded by log artifacts", async () => {
+    for (const promptPath of [
+      ...INLINE_WORKER_PROMPT_CONFIGS,
+      ...PRIMARY_PROMPT_PARTIALS,
+    ]) {
+      const prompt = await readFile(promptPath, "utf8");
+
+      expect(prompt).toContain("Headless Output Discipline");
+      expect(prompt).toContain("broad `rg`");
+      expect(prompt).toContain("scripts/symphony-run-logged.mjs");
+      expect(prompt).toContain(".symphony/validation/");
+      expect(prompt).not.toContain("Run `npm test 2>&1`");
+      expect(prompt).not.toContain("Do NOT filter or interpret SAST results");
+    }
+
+    const rendered = await renderPrompt({
+      workflow: { promptTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "implement",
+    });
+    expect(rendered).toContain("Headless Output Discipline");
+    expect(rendered).toContain("broad `rg`");
+    expect(rendered).toContain("scripts/symphony-run-logged.mjs");
+  });
+
   it("keeps the primary review gate stall budget above the council timeout", async () => {
     const primaryWorkflow = await loadWorkflowDefinition(
       PIPELINE_WORKFLOW_PATH,
@@ -125,7 +158,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     }
   });
 
-  it("declares hard-stop budget rails in the shipped self-host template", async () => {
+  it("declares canary hard-stop budget rails in shipped workflow configs", async () => {
     const template = await readFile(
       resolve(
         import.meta.dirname,
@@ -133,9 +166,12 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       ),
       "utf8",
     );
+    const primaryWorkflow = await readFile(PIPELINE_WORKFLOW_PATH, "utf8");
 
     expect(template).toContain("hard_stops:");
-    expect(template).toContain("max_tokens_per_unit: 1000000");
+    expect(template).toContain("max_tokens_per_unit: 250000");
+    expect(primaryWorkflow).toContain("hard_stops:");
+    expect(primaryWorkflow).toContain("max_tokens_per_unit: 250000");
 
     const { hardStops } = resolvedConfig;
     expect(hardStops).toBeDefined();
@@ -143,11 +179,11 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       throw new Error("Expected resolved workflow hard stops");
     }
 
-    expect(hardStops.maxTokensPerUnit).toBe(1_000_000);
+    expect(hardStops.maxTokensPerUnit).toBe(250_000);
     expect(hardStops.maxTokensPerUnit).toBeGreaterThan(
       OBSERVED_CODEX_LOW_FIRST_TURN_TOKENS,
     );
-    expect(hardStops.maxDollarBudgetUsd).toBe(50);
+    expect(hardStops.maxDollarBudgetUsd).toBe(12.5);
     expect(hardStops.premiumBudgetPauseRatio).toBe(0.8);
   });
 
