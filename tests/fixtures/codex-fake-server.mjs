@@ -210,6 +210,39 @@ async function handleMessage(message) {
       return;
     }
 
+    if (scenario === "agent-message-item") {
+      setTimeout(() => {
+        writeJson({
+          method: "item/agentMessage/delta",
+          params: {
+            delta: "Investigation complete.",
+          },
+        });
+        writeJson({
+          method: "item/completed",
+          params: {
+            item: {
+              type: "agentMessage",
+              text: "Investigation complete.\n\n[STAGE_COMPLETE]",
+            },
+          },
+        });
+        // Real codex-cli 0.135 shape: turn/completed carries usage only,
+        // never the agent message (SYMPH-350).
+        writeJson({
+          method: "turn/completed",
+          params: {
+            usage: {
+              inputTokens: 21,
+              outputTokens: 8,
+              totalTokens: 29,
+            },
+          },
+        });
+      }, 10);
+      return;
+    }
+
     if (scenario === "usage-then-noisy-notification") {
       setTimeout(() => {
         writeJson({

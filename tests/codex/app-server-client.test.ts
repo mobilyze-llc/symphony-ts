@@ -105,6 +105,25 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
+  it("falls back to the last completed agent-message item when turn/completed has no message (SYMPH-350)", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("agent-message-item", workspace, events);
+
+    const result = await client.startSession({
+      prompt: "Investigate the ticket",
+      title: "ABC-123: Example",
+    });
+
+    // The real app-server streams agent text via item/completed and emits a
+    // message-less turn/completed; the turn result must surface the agent's
+    // final message so the [STAGE_COMPLETE] early-exit can fire.
+    expect(result.status).toBe("completed");
+    expect(result.message).toBe("Investigation complete.\n\n[STAGE_COMPLETE]");
+
+    await client.close();
+  });
+
   it("runs configured commands through a shell so Codex config quoting is preserved", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];
