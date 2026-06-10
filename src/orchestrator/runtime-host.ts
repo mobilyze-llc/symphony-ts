@@ -1630,6 +1630,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       },
     );
 
+    const globalHardStops = resolveHardStopsConfig(
+      this.config.hardStops,
+      DEFAULT_RUNTIME_HARD_STOPS_CONFIG,
+    );
+    const effectiveHardStops = resolveHardStopsConfig(
+      stage?.hardStops,
+      globalHardStops,
+    );
+
     const completion = this.agentRunner
       .run({
         issue,
@@ -1643,10 +1652,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           configuredApprovalPolicy: this.config.codex.approvalPolicy,
           configuredThreadSandbox: this.config.codex.threadSandbox,
           configuredTurnSandboxPolicy: this.config.codex.turnSandboxPolicy,
-          maxBudgetUsd: resolveHardStopsConfig(
-            this.config.hardStops,
-            DEFAULT_RUNTIME_HARD_STOPS_CONFIG,
-          ).maxDollarBudgetUsd,
+          maxBudgetUsd: effectiveHardStops.maxDollarBudgetUsd,
         }),
       })
       .then(async (result) => {

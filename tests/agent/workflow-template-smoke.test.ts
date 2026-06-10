@@ -37,6 +37,12 @@ const RESOLVED_CODEX_WORKFLOW_CONFIGS = [
   WORKFLOW_PATH,
 ];
 const OBSERVED_CODEX_LOW_FIRST_TURN_TOKENS = 233_719;
+const EXPECTED_INVESTIGATE_HARD_STOPS = {
+  maxIterations: 4,
+  maxTokensPerUnit: 80_000,
+  maxDollarBudgetUsd: 4,
+  premiumBudgetPauseRatio: 0.9,
+};
 
 const DESCRIPTION_SENTINEL = "DESCRIPTION_SENTINEL: do not leak to merge";
 
@@ -249,20 +255,6 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
   });
 
   it("declares canary hard-stop budget rails in shipped workflow configs", async () => {
-    const template = await readFile(
-      resolve(
-        import.meta.dirname,
-        "../../pipeline-config/templates/WORKFLOW-template.md",
-      ),
-      "utf8",
-    );
-    const primaryWorkflow = await readFile(PIPELINE_WORKFLOW_PATH, "utf8");
-
-    expect(template).toContain("hard_stops:");
-    expect(template).toContain("max_tokens_per_unit: 250000");
-    expect(primaryWorkflow).toContain("hard_stops:");
-    expect(primaryWorkflow).toContain("max_tokens_per_unit: 250000");
-
     const { hardStops } = resolvedConfig;
     expect(hardStops).toBeDefined();
     if (hardStops === undefined) {
@@ -275,6 +267,30 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     );
     expect(hardStops.maxDollarBudgetUsd).toBe(12.5);
     expect(hardStops.premiumBudgetPauseRatio).toBe(0.8);
+
+    for (const configPath of RESOLVED_CODEX_WORKFLOW_CONFIGS) {
+      const workflowConfig = await loadWorkflowDefinition(configPath);
+      const resolved = resolveWorkflowConfig(workflowConfig, {
+        LINEAR_API_KEY: "test-token",
+        LINEAR_PROJECT_SLUG: "test-project",
+      });
+      const investigateStage = resolved.stages?.stages.investigate;
+      if (investigateStage === undefined) {
+        continue;
+      }
+
+      expect(investigateStage.hardStops).toEqual(
+        EXPECTED_INVESTIGATE_HARD_STOPS,
+      );
+      expect(investigateStage.hardStops?.maxTokensPerUnit).toBeLessThan(
+        OBSERVED_CODEX_LOW_FIRST_TURN_TOKENS,
+      );
+      for (const stageName of ["implement", "review", "merge"] as const) {
+        expect(
+          resolved.stages?.stages[stageName]?.hardStops ?? null,
+        ).toBeNull();
+      }
+    }
   });
 
   it("fast-tracks existing low-risk test labels in the shipped self-host template", () => {

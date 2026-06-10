@@ -12,6 +12,7 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  AgentRunInput,
   AgentRunResult,
   AgentRunnerEvent,
 } from "../../src/agent/runner.js";
@@ -3093,6 +3094,87 @@ describe("pipeline notifications", () => {
     });
   });
 
+  it("passes stage hard-stop dollar budget into the mode policy", async () => {
+    const fakeRunner = new FakeAgentRunner();
+    const tracker = createTracker({
+      candidates: [
+        createIssue({
+          priority: 1,
+          labels: ["risk:high"],
+          description:
+            "## Declared file scope\n- src/orchestrator/runtime-host.ts\n",
+        }),
+      ],
+    });
+    const host = new OrchestratorRuntimeHost({
+      config: createStagedConfig({
+        hardStops: {
+          maxIterations: 20,
+          noProgressTurns: 3,
+          maxTokensPerUnit: 250_000,
+          maxDollarBudgetUsd: 12.5,
+          premiumBudgetPauseRatio: 0.8,
+          estimatedCostPer1kTokensUsd: 0.05,
+        },
+        stages: {
+          initialStage: "investigate",
+          fastTrack: null,
+          stages: {
+            investigate: {
+              type: "agent",
+              runner: "claude-code",
+              model: null,
+              prompt: null,
+              maxTurns: 8,
+              timeoutMs: null,
+              hardStops: {
+                maxDollarBudgetUsd: 4,
+              },
+              concurrency: null,
+              gateType: null,
+              maxRework: null,
+              reviewers: [],
+              transitions: {
+                onComplete: "done",
+                onApprove: null,
+                onRework: null,
+              },
+              linearState: null,
+            },
+            done: {
+              type: "terminal",
+              runner: null,
+              model: null,
+              prompt: null,
+              maxTurns: null,
+              timeoutMs: null,
+              concurrency: null,
+              gateType: null,
+              maxRework: null,
+              reviewers: [],
+              transitions: {
+                onComplete: null,
+                onApprove: null,
+                onRework: null,
+              },
+              linearState: null,
+            },
+          },
+        },
+      }),
+      tracker,
+      agentRunner: fakeRunner,
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(fakeRunner.runInputs[0]?.stageName).toBe("investigate");
+    expect(fakeRunner.runInputs[0]?.modePolicy?.maxBudgetUsd).toBe(4);
+    fakeRunner.resolve("1", createNormalResult());
+    await host.waitForIdle();
+  });
+
   it("fires issue_completed on terminal completion", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
@@ -4151,6 +4233,7 @@ describe("createWorkspaceHookLogger", () => {
 
 class FakeAgentRunner {
   onEvent: ((event: AgentRunnerEvent) => void) | undefined;
+  readonly runInputs: AgentRunInput[] = [];
   readonly runs = new Map<
     string,
     {
@@ -4160,11 +4243,8 @@ class FakeAgentRunner {
   >();
   readonly abortReasons: string[] = [];
 
-  async run(input: {
-    issue: Issue;
-    attempt: number | null;
-    signal?: AbortSignal;
-  }): Promise<AgentRunResult> {
+  async run(input: AgentRunInput): Promise<AgentRunResult> {
+    this.runInputs.push(input);
     return await new Promise<AgentRunResult>((resolve, reject) => {
       this.runs.set(input.issue.id, { resolve, reject });
       input.signal?.addEventListener(
