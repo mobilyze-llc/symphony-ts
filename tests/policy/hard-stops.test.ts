@@ -255,30 +255,34 @@ describe("hard-stop policy", () => {
       cachedTokenCostRatio: 0.1,
     };
 
+    // The token trigger now fires on billable tokens (SYMPH-351), so each
+    // case supplies enough raw volume for billable to reach the 1000 cap.
     expect(
       evaluateBudgetHardStop({
         config,
         turnCount: 1,
-        totalTokens: 1000,
+        totalTokens: 1540,
         cacheReadTokens: 600,
       }),
     ).toMatchObject({
       trigger: "token_budget",
-      estimatedCostUsd: expect.closeTo(2.3, 10),
+      estimatedCostUsd: expect.closeTo(5, 10),
     });
 
+    // cacheReadTokens above raw total clamps to the total.
     expect(
       evaluateBudgetHardStop({
         config,
         turnCount: 1,
-        totalTokens: 1000,
-        cacheReadTokens: 5000,
+        totalTokens: 10_000,
+        cacheReadTokens: 50_000,
       }),
     ).toMatchObject({
       trigger: "token_budget",
-      estimatedCostUsd: expect.closeTo(0.5, 10),
+      estimatedCostUsd: expect.closeTo(5, 10),
     });
 
+    // Negative cache telemetry clamps to zero discount.
     expect(
       evaluateBudgetHardStop({
         config,
@@ -290,6 +294,61 @@ describe("hard-stop policy", () => {
       trigger: "token_budget",
       estimatedCostUsd: expect.closeTo(5, 10),
     });
+  });
+
+  it("evaluates the token trigger on cache-discounted tokens (SYMPH-351)", () => {
+    const config = {
+      ...CONFIG,
+      maxTokensPerUnit: 250_000,
+      maxDollarBudgetUsd: 1_000_000,
+      estimatedCostPer1kTokensUsd: 5,
+      cachedTokenCostRatio: 0.1,
+    };
+
+    // SYMPH-330 unit 3 shape: 1.03M raw, 90% cached — billable ~194K stays
+    // under the 250K ceiling instead of pausing at 257K raw.
+    expect(
+      evaluateBudgetHardStop({
+        config,
+        turnCount: 30,
+        totalTokens: 1_032_161,
+        cacheReadTokens: 921_344,
+      }),
+    ).toBeNull();
+
+    // Genuinely uncached burn still pauses at the nominal ceiling.
+    const uncached = evaluateBudgetHardStop({
+      config,
+      turnCount: 5,
+      totalTokens: 250_000,
+      cacheReadTokens: 0,
+    });
+    expect(uncached?.trigger).toBe("token_budget");
+    expect(uncached?.reason).toContain("billable");
+    expect(uncached?.reason).toContain("raw 250000");
+
+    // Missing cache telemetry degrades to raw totals (conservative).
+    expect(
+      evaluateBudgetHardStop({
+        config,
+        turnCount: 5,
+        totalTokens: 250_000,
+      })?.trigger,
+    ).toBe("token_budget");
+
+    // Discounted crossing reports both measures and keeps raw totals in
+    // the decision for observability.
+    const crossed = evaluateBudgetHardStop({
+      config,
+      turnCount: 60,
+      totalTokens: 1_500_000,
+      cacheReadTokens: 1_200_000,
+    });
+    expect(crossed).toMatchObject({
+      trigger: "token_budget",
+      totalTokens: 1_500_000,
+    });
+    expect(crossed?.reason).toContain("420000 billable");
   });
 
   it("applies the cache discount to iteration and no-progress decisions", () => {
