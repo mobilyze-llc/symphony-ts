@@ -240,6 +240,7 @@ function pushTokenTelemetry(
   session: LiveSession,
   entry: TokenTelemetryEntry,
 ): void {
+  session.tokenTelemetryObservedCount += 1;
   session.tokenTelemetry.push(entry);
   if (session.tokenTelemetry.length > TOKEN_TELEMETRY_MAX_SIZE) {
     session.tokenTelemetry.splice(

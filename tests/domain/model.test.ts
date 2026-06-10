@@ -91,6 +91,7 @@ describe("domain model", () => {
       turnHistory: [],
       recentActivity: [],
       tokenTelemetry: [],
+      tokenTelemetryObservedCount: 0,
       codexSessionLogs: [],
     });
 

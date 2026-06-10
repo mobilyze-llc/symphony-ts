@@ -3060,9 +3060,13 @@ function toRunningIssueDetail(
         no_cache_tokens_delta: entry.noCacheTokensDelta,
         reasoning_tokens_delta: entry.reasoningTokensDelta,
       })),
-      token_telemetry_total_entries: running.tokenTelemetry.length,
+      token_telemetry_total_entries: running.tokenTelemetryObservedCount,
+      token_telemetry_retained_entries: running.tokenTelemetry.length,
+      token_telemetry_observed_entries: running.tokenTelemetryObservedCount,
       token_telemetry_truncated:
         tokenTelemetry.length < running.tokenTelemetry.length,
+      token_telemetry_retention_truncated:
+        running.tokenTelemetry.length < running.tokenTelemetryObservedCount,
     },
     retry: null,
     logs: {

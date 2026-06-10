@@ -388,6 +388,7 @@ describe("OrchestratorRuntimeHost", () => {
         turnHistory: [],
         recentActivity: [],
         tokenTelemetry: [],
+        tokenTelemetryObservedCount: 0,
         codexSessionLogs: [],
       },
       turnsCompleted: 1,
@@ -410,48 +411,81 @@ describe("OrchestratorRuntimeHost", () => {
     ]);
   });
 
-  it("caps issue detail token telemetry to recent entries", async () => {
-    const tracker = createTracker();
-    const fakeRunner = new FakeAgentRunner();
-    const host = new OrchestratorRuntimeHost({
-      config: createConfig(),
-      tracker,
-      createAgentRunner: ({ onEvent }) => {
-        fakeRunner.onEvent = onEvent;
-        return fakeRunner;
-      },
-      now: () => new Date("2026-03-06T00:00:05.000Z"),
-    });
-
-    await host.pollOnce();
-
-    for (let index = 1; index <= 30; index += 1) {
-      fakeRunner.emit("1", {
-        event: "notification",
-        timestamp: `2026-03-06T00:00:${String(index).padStart(2, "0")}.000Z`,
-        codexAppServerPid: "1001",
-        sessionId: "thread-1-turn-1",
-        threadId: "thread-1",
-        turnId: "turn-1",
-        usage: {
-          inputTokens: index,
-          outputTokens: index,
-          totalTokens: index * 2,
+  it.each([
+    {
+      events: 30,
+      retainedEntries: 30,
+      responseStart: 6,
+      retentionTruncated: false,
+    },
+    {
+      events: 200,
+      retainedEntries: 200,
+      responseStart: 176,
+      retentionTruncated: false,
+    },
+    {
+      events: 205,
+      retainedEntries: 200,
+      responseStart: 181,
+      retentionTruncated: true,
+    },
+  ])(
+    "exposes token telemetry response, retained, and observed counts for $events events",
+    async ({ events, retainedEntries, responseStart, retentionTruncated }) => {
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config: createConfig(),
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
         },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
       });
-    }
-    await host.flushEvents();
 
-    const details = await host.getIssueDetails("ISSUE-1");
-    expect(details?.running?.token_telemetry).toHaveLength(25);
-    expect(details?.running?.token_telemetry_total_entries).toBe(30);
-    expect(details?.running?.token_telemetry_truncated).toBe(true);
-    expect(details?.running?.token_telemetry[0]?.input_tokens).toBe(6);
-    expect(details?.running?.token_telemetry.at(-1)?.input_tokens).toBe(30);
+      await host.pollOnce();
 
-    fakeRunner.resolve("1", createNormalResult());
-    await host.waitForIdle();
-  });
+      for (let index = 1; index <= events; index += 1) {
+        fakeRunner.emit("1", {
+          event: "notification",
+          timestamp: `2026-03-06T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+          codexAppServerPid: "1001",
+          sessionId: "thread-1-turn-1",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          usage: {
+            inputTokens: index,
+            outputTokens: index,
+            totalTokens: index * 2,
+          },
+        });
+      }
+      await host.flushEvents();
+
+      const details = await host.getIssueDetails("ISSUE-1");
+      expect(details?.running?.token_telemetry).toHaveLength(25);
+      expect(details?.running?.token_telemetry_total_entries).toBe(events);
+      expect(details?.running?.token_telemetry_observed_entries).toBe(events);
+      expect(details?.running?.token_telemetry_retained_entries).toBe(
+        retainedEntries,
+      );
+      expect(details?.running?.token_telemetry_truncated).toBe(true);
+      expect(details?.running?.token_telemetry_retention_truncated).toBe(
+        retentionTruncated,
+      );
+      expect(details?.running?.token_telemetry[0]?.input_tokens).toBe(
+        responseStart,
+      );
+      expect(details?.running?.token_telemetry.at(-1)?.input_tokens).toBe(
+        events,
+      );
+
+      fakeRunner.resolve("1", createNormalResult());
+      await host.waitForIdle();
+    },
+  );
 
   it("cancels a reconciled worker and releases the claim when the issue is no longer eligible on retry", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-loop-retry-"));
@@ -2098,6 +2132,7 @@ describe("OrchestratorRuntimeHost", () => {
         turnHistory: [],
         recentActivity: [],
         tokenTelemetry: [],
+        tokenTelemetryObservedCount: 0,
         codexSessionLogs: [],
       },
       turnsCompleted: 3,
@@ -2251,6 +2286,7 @@ describe("OrchestratorRuntimeHost", () => {
         turnHistory: [],
         recentActivity: [],
         tokenTelemetry: [],
+        tokenTelemetryObservedCount: 0,
         codexSessionLogs: [],
       },
       turnsCompleted: 2,
@@ -2338,6 +2374,7 @@ describe("OrchestratorRuntimeHost", () => {
         turnHistory: [],
         recentActivity: [],
         tokenTelemetry: [],
+        tokenTelemetryObservedCount: 0,
         codexSessionLogs: [],
       },
       turnsCompleted: 1,
@@ -2423,6 +2460,7 @@ describe("OrchestratorRuntimeHost", () => {
         turnHistory: [],
         recentActivity: [],
         tokenTelemetry: [],
+        tokenTelemetryObservedCount: 0,
         codexSessionLogs: [],
       },
       turnsCompleted: 1,
@@ -2559,6 +2597,7 @@ describe("OrchestratorRuntimeHost", () => {
         turnHistory: [],
         recentActivity: [],
         tokenTelemetry: [],
+        tokenTelemetryObservedCount: 0,
         codexSessionLogs: [],
       },
       turnsCompleted: 4,
@@ -4589,6 +4628,7 @@ function createNormalResult(): AgentRunResult {
       turnHistory: [],
       recentActivity: [],
       tokenTelemetry: [],
+      tokenTelemetryObservedCount: 0,
       codexSessionLogs: [],
     },
     turnsCompleted: 1,
