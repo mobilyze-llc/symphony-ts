@@ -17,6 +17,7 @@ import {
   DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
   DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
   DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
+  DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
   DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
   DEFAULT_HARD_STOP_MAX_ITERATIONS,
@@ -77,6 +78,7 @@ describe("config-resolver", () => {
       premiumBudgetPauseRatio: DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
       estimatedCostPer1kTokensUsd:
         DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+      cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
     });
     expect(resolved.codex.command).toBe(DEFAULT_CODEX_COMMAND);
     expect(resolved.codex.turnTimeoutMs).toBe(DEFAULT_TURN_TIMEOUT_MS);
@@ -187,6 +189,7 @@ describe("config-resolver", () => {
       maxDollarBudgetUsd: 12.5,
       premiumBudgetPauseRatio: 0.75,
       estimatedCostPer1kTokensUsd: 0.08,
+      cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
     });
     expect(resolved.codex.command).toBe("codex app-server --stdio");
     expect(resolved.codex.ephemeralHome).toBe(true);
@@ -662,6 +665,62 @@ describe("config-resolver fast_track", () => {
         ?.estimatedCostPer1kTokensUsd,
     ).toBeUndefined();
     expect(resolved.stages?.stages.done?.hardStops).toBeNull();
+  });
+
+  it("parses cached_token_cost_ratio at workflow and stage level", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        hard_stops: {
+          cached_token_cost_ratio: "0.25",
+        },
+        stages: {
+          initial_stage: "investigate",
+          investigate: {
+            type: "agent",
+            hard_stops: {
+              cached_token_cost_ratio: "0.5",
+            },
+            on_complete: "done",
+          },
+          done: { type: "terminal" },
+        },
+      },
+    });
+
+    expect(resolved.hardStops?.cachedTokenCostRatio).toBe(0.25);
+    expect(
+      resolved.stages?.stages.investigate?.hardStops?.cachedTokenCostRatio,
+    ).toBe(0.5);
+  });
+
+  it("defaults cached_token_cost_ratio and rejects out-of-range values", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        hard_stops: {
+          cached_token_cost_ratio: "1.5",
+        },
+      },
+    });
+
+    expect(resolved.hardStops?.cachedTokenCostRatio).toBe(0.1);
+  });
+
+  it("accepts cached_token_cost_ratio of exactly 0 (free cache reads)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        hard_stops: {
+          cached_token_cost_ratio: "0",
+        },
+      },
+    });
+
+    expect(resolved.hardStops?.cachedTokenCostRatio).toBe(0);
   });
 
   it("resolves slack_notify_channel from YAML config", () => {

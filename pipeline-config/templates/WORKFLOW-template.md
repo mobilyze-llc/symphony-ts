@@ -271,7 +271,12 @@ stages:
     max_turns: 8
     hard_stops:
       max_iterations: 4
-      max_tokens_per_unit: 80000
+      # Total-token runaway guard only — kept below the observed pathological
+      # first-turn count (233,719). The binding budget is the cache-aware
+      # dollar estimate (cached input discounted via cached_token_cost_ratio);
+      # 80000 predated cache-aware costing and paused workers whose billable
+      # volume was ~30% of the raw total (SYMPH-319).
+      max_tokens_per_unit: 200000
       max_dollar_budget_usd: 4
       premium_budget_pause_ratio: 0.9
     linear_state: In Progress

@@ -20,6 +20,7 @@ import type {
 import { AgentRunner } from "../agent/runner.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
+  DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
   DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
   DEFAULT_HARD_STOP_MAX_ITERATIONS,
@@ -124,6 +125,7 @@ const DEFAULT_RUNTIME_HARD_STOPS_CONFIG = {
   premiumBudgetPauseRatio: DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
   estimatedCostPer1kTokensUsd:
     DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+  cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
 };
 
 export interface AgentRunnerLike {

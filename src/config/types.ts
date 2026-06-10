@@ -46,6 +46,7 @@ export interface WorkflowHardStopsConfig {
   maxDollarBudgetUsd: number;
   premiumBudgetPauseRatio: number;
   estimatedCostPer1kTokensUsd: number;
+  cachedTokenCostRatio: number;
 }
 
 export type WorkflowHardStopsConfigOverride = Partial<WorkflowHardStopsConfig>;

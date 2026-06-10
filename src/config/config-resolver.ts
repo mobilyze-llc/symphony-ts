@@ -13,6 +13,7 @@ import {
   DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
   DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
   DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
+  DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
   DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
   DEFAULT_HARD_STOP_MAX_ITERATIONS,
@@ -166,6 +167,9 @@ export function resolveWorkflowConfig(
       estimatedCostPer1kTokensUsd:
         hardStopOverrides.estimatedCostPer1kTokensUsd ??
         DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+      cachedTokenCostRatio:
+        hardStopOverrides.cachedTokenCostRatio ??
+        DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
     },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,
@@ -418,6 +422,15 @@ function readRatio(value: unknown): number | null {
   return parsed;
 }
 
+function readZeroInclusiveRatio(value: unknown): number | null {
+  const parsed = readNumber(value);
+  if (parsed === null || parsed < 0 || parsed > 1) {
+    return null;
+  }
+
+  return parsed;
+}
+
 function readNumber(value: unknown): number | null {
   if (typeof value === "number" && Number.isFinite(value)) {
     return value;
@@ -653,6 +666,15 @@ function readHardStopsConfig(
   );
   if (estimatedCostPer1kTokensUsd !== null) {
     parsed.estimatedCostPer1kTokensUsd = estimatedCostPer1kTokensUsd;
+  }
+
+  // Unlike premium_budget_pause_ratio, a ratio of exactly 0 is meaningful
+  // here: cached input is free.
+  const cachedTokenCostRatio = readZeroInclusiveRatio(
+    hardStops.cached_token_cost_ratio,
+  );
+  if (cachedTokenCostRatio !== null) {
+    parsed.cachedTokenCostRatio = cachedTokenCostRatio;
   }
 
   return Object.keys(parsed).length === 0 ? null : parsed;

@@ -63,6 +63,8 @@ export function resolveHardStopsConfig(
     estimatedCostPer1kTokensUsd:
       config?.estimatedCostPer1kTokensUsd ??
       fallback.estimatedCostPer1kTokensUsd,
+    cachedTokenCostRatio:
+      config?.cachedTokenCostRatio ?? fallback.cachedTokenCostRatio,
   };
 }
 
@@ -226,10 +228,12 @@ export function evaluateBudgetHardStop(input: {
   config: WorkflowHardStopsConfig;
   turnCount: number;
   totalTokens: number;
+  cacheReadTokens?: number;
 }): HardStopDecision | null {
   const estimatedCostUsd = estimateCostUsd({
     totalTokens: input.totalTokens,
-    estimatedCostPer1kTokensUsd: input.config.estimatedCostPer1kTokensUsd,
+    cacheReadTokens: input.cacheReadTokens ?? 0,
+    config: input.config,
   });
 
   if (input.totalTokens >= input.config.maxTokensPerUnit) {
@@ -275,6 +279,7 @@ export function evaluateIterationHardStop(input: {
   config: WorkflowHardStopsConfig;
   turnCount: number;
   totalTokens: number;
+  cacheReadTokens?: number;
 }): HardStopDecision | null {
   if (input.turnCount < input.config.maxIterations) {
     return null;
@@ -288,7 +293,8 @@ export function evaluateIterationHardStop(input: {
     totalTokens: input.totalTokens,
     estimatedCostUsd: estimateCostUsd({
       totalTokens: input.totalTokens,
-      estimatedCostPer1kTokensUsd: input.config.estimatedCostPer1kTokensUsd,
+      cacheReadTokens: input.cacheReadTokens ?? 0,
+      config: input.config,
     }),
   };
 }
@@ -298,6 +304,7 @@ export function evaluateNoProgressHardStop(input: {
   repeatedNoProgressTurns: number;
   turnCount: number;
   totalTokens: number;
+  cacheReadTokens?: number;
 }): HardStopDecision | null {
   if (
     input.config.noProgressTurns <= 0 ||
@@ -314,16 +321,36 @@ export function evaluateNoProgressHardStop(input: {
     totalTokens: input.totalTokens,
     estimatedCostUsd: estimateCostUsd({
       totalTokens: input.totalTokens,
-      estimatedCostPer1kTokensUsd: input.config.estimatedCostPer1kTokensUsd,
+      cacheReadTokens: input.cacheReadTokens ?? 0,
+      config: input.config,
     }),
   };
 }
 
 function estimateCostUsd(input: {
   totalTokens: number;
-  estimatedCostPer1kTokensUsd: number;
+  cacheReadTokens: number;
+  config: Pick<
+    WorkflowHardStopsConfig,
+    "estimatedCostPer1kTokensUsd" | "cachedTokenCostRatio"
+  >;
 }): number {
-  return (input.totalTokens / 1000) * input.estimatedCostPer1kTokensUsd;
+  // Cached input tokens are re-reads of an unchanged prefix and are billed
+  // at a fraction of the full rate; charging them at full weight overstated
+  // spend by the cached share (~70% on observed worker turns, SYMPH-319).
+  const cacheReadTokens = Math.min(
+    Math.max(input.cacheReadTokens, 0),
+    input.totalTokens,
+  );
+  // A malformed ratio must fail closed (no discount), never disable the
+  // dollar checks via NaN comparisons.
+  const configuredRatio = input.config.cachedTokenCostRatio;
+  const cachedTokenCostRatio = Number.isFinite(configuredRatio)
+    ? Math.min(Math.max(configuredRatio, 0), 1)
+    : 1;
+  const billableTokens =
+    input.totalTokens - cacheReadTokens * (1 - cachedTokenCostRatio);
+  return (billableTokens / 1000) * input.config.estimatedCostPer1kTokensUsd;
 }
 
 function formatCost(cost: number): string {
