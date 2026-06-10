@@ -4,10 +4,11 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -24,6 +25,7 @@ import type {
   ManagerRunJournal,
 } from "../../src/domain/model.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
+import { writeLoopTraceJournal } from "../../src/logging/loop-trace.js";
 import {
   type StructuredLogEntry,
   StructuredLogger,
@@ -42,6 +44,7 @@ import type {
   IssueStateSnapshot,
   IssueTracker,
 } from "../../src/tracker/tracker.js";
+import { sanitizeWorkspaceKey } from "../../src/workspace/path-safety.js";
 import { WorkspaceManager } from "../../src/workspace/workspace-manager.js";
 
 beforeEach(() => {
@@ -341,6 +344,7 @@ describe("OrchestratorRuntimeHost", () => {
         label: "sessions/2026/rollout-test.jsonl",
         path: "/tmp/workspaces/1/.symphony/codex-sessions/rollout-test.jsonl",
         url: null,
+        bytes: 80,
       },
     ]);
 
@@ -550,6 +554,241 @@ describe("OrchestratorRuntimeHost", () => {
           status: "failed",
         },
       });
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves legacy Codex session log entries without byte metadata", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    host.getState().running["1"]?.codexSessionLogs.push({
+      label: "legacy-rollout.jsonl",
+      path: "/tmp/workspaces/1/.symphony/codex-sessions/legacy-rollout.jsonl",
+      url: null,
+    });
+
+    const details = await host.getIssueDetails("ISSUE-1");
+
+    expect(details?.logs.codex_session_logs).toEqual([
+      {
+        label: "legacy-rollout.jsonl",
+        path: "/tmp/workspaces/1/.symphony/codex-sessions/legacy-rollout.jsonl",
+        url: null,
+      },
+    ]);
+    expect("bytes" in details!.logs.codex_session_logs[0]!).toBe(false);
+
+    fakeRunner.resolve("1", createNormalResult());
+    await host.waitForIdle();
+  });
+
+  it("exposes durable Codex session artifact sizes for retry and terminal issue details", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-artifacts-"));
+    try {
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      await host.pollOnce();
+      fakeRunner.emit("1", {
+        event: "session_artifact_saved",
+        timestamp: "2026-03-06T00:00:03.000Z",
+        codexAppServerPid: "1001",
+        sessionId: "thread-1-turn-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        artifacts: [
+          {
+            label: "sessions/2026/rollout-live.jsonl",
+            path: join(
+              workspaceRoot,
+              ".symphony/codex-sessions/1/home-a/sessions/2026/rollout-live.jsonl",
+            ),
+            sourcePath:
+              "/tmp/symphony-codex-home-1/sessions/rollout-live.jsonl",
+            bytes: 12,
+          },
+        ],
+      });
+      await host.flushEvents();
+
+      const artifactPath = join(
+        workspaceRoot,
+        ".symphony/codex-sessions/1/home-a/sessions/2026/rollout-live.jsonl",
+      );
+      mkdirSync(dirname(artifactPath), { recursive: true });
+      writeFileSync(artifactPath, "hello world\n");
+      const outsideDirectory = join(workspaceRoot, "outside-artifacts");
+      mkdirSync(outsideDirectory, { recursive: true });
+      writeFileSync(join(outsideDirectory, "outside.jsonl"), "outside\n");
+      symlinkSync(
+        outsideDirectory,
+        join(workspaceRoot, ".symphony/codex-sessions/1/home-symlink"),
+      );
+      symlinkSync(
+        join(outsideDirectory, "outside.jsonl"),
+        join(workspaceRoot, ".symphony/codex-sessions/1/linked.jsonl"),
+      );
+
+      fakeRunner.resolve("1", createNormalResult());
+      await host.waitForIdle();
+
+      const details = await host.getIssueDetails("ISSUE-1");
+
+      expect(details?.status).toBe("retry_queued");
+      expect(details?.logs.codex_session_logs).toEqual([
+        {
+          label: "home-a/sessions/2026/rollout-live.jsonl",
+          path: artifactPath,
+          url: null,
+          bytes: 12,
+        },
+      ]);
+
+      const terminalArtifactPath = join(
+        workspaceRoot,
+        ".symphony/codex-sessions/terminal-1/home-b/sessions/2026/rollout-terminal.jsonl",
+      );
+      mkdirSync(dirname(terminalArtifactPath), { recursive: true });
+      writeFileSync(terminalArtifactPath, "terminal artifact\n");
+      await writeLoopTraceJournal(
+        {
+          workspaceRoot,
+          workspaceKey: "terminal-1",
+        },
+        [
+          {
+            sequence: 1,
+            timestamp: "2026-03-06T00:01:00.000Z",
+            kind: "stage_transition",
+            issueId: "terminal-1",
+            issueIdentifier: "ISSUE-TERMINAL",
+            stage: "implement",
+            attempt: null,
+            sessionId: "thread-terminal",
+            summary: "Stage implement moved to released.",
+            stageTransition: {
+              from: "implement",
+              to: "implement",
+              status: "released",
+            },
+          },
+        ],
+      );
+
+      const coldHost = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({ candidates: [] }),
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:01:05.000Z"),
+      });
+
+      const terminalDetails = await coldHost.getIssueDetails("ISSUE-TERMINAL");
+      expect(terminalDetails?.status).toBe("released");
+      expect(terminalDetails?.logs.codex_session_logs).toEqual([
+        {
+          label: "home-b/sessions/2026/rollout-terminal.jsonl",
+          path: terminalArtifactPath,
+          url: null,
+          bytes: 18,
+        },
+      ]);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reads durable Codex session logs from the sanitized workspace key", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-artifact-key-"));
+    try {
+      const unsafeIssueId = "unsafe issue/id";
+      const workspaceKey = sanitizeWorkspaceKey(unsafeIssueId);
+      const safeArtifactPath = join(
+        workspaceRoot,
+        ".symphony/codex-sessions",
+        workspaceKey,
+        "home-a/sessions/2026/rollout-safe.jsonl",
+      );
+      const rawArtifactPath = join(
+        workspaceRoot,
+        ".symphony/codex-sessions",
+        unsafeIssueId,
+        "home-b/sessions/2026/rollout-raw.jsonl",
+      );
+      mkdirSync(dirname(safeArtifactPath), { recursive: true });
+      mkdirSync(dirname(rawArtifactPath), { recursive: true });
+      writeFileSync(safeArtifactPath, "safe artifact\n");
+      writeFileSync(rawArtifactPath, "raw artifact\n");
+
+      await writeLoopTraceJournal(
+        {
+          workspaceRoot,
+          workspaceKey,
+        },
+        [
+          {
+            sequence: 1,
+            timestamp: "2026-03-06T00:01:00.000Z",
+            kind: "stage_transition",
+            issueId: unsafeIssueId,
+            issueIdentifier: "ISSUE-UNSAFE",
+            stage: "implement",
+            attempt: null,
+            sessionId: "thread-unsafe",
+            summary: "Stage implement moved to released.",
+            stageTransition: {
+              from: "implement",
+              to: "implement",
+              status: "released",
+            },
+          },
+        ],
+      );
+
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({ candidates: [] }),
+        agentRunner: new FakeAgentRunner(),
+        now: () => new Date("2026-03-06T00:01:05.000Z"),
+      });
+
+      const details = await host.getIssueDetails("ISSUE-UNSAFE");
+
+      expect(details?.logs.codex_session_logs).toEqual([
+        {
+          label: "home-a/sessions/2026/rollout-safe.jsonl",
+          path: safeArtifactPath,
+          url: null,
+          bytes: 14,
+        },
+      ]);
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
     }

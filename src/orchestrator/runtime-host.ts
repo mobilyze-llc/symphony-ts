@@ -6,7 +6,7 @@ import {
   mkdirSync,
   openSync,
 } from "node:fs";
-import { access, mkdir } from "node:fs/promises";
+import { access, lstat, mkdir, readdir } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
@@ -33,6 +33,7 @@ import type {
 } from "../config/types.js";
 import { WorkflowWatcher } from "../config/workflow-watch.js";
 import type {
+  CodexSessionLogEntry,
   ContinuousFeedbackEvent,
   DispatcherRunJournal,
   DispatcherRunJournalEntry,
@@ -138,6 +139,7 @@ export type ReadWorkspaceBaseRevision = (
 ) => Promise<string | null>;
 
 interface StoredLoopTrace {
+  issueId: string;
   artifactPath: string;
   journal: LoopTraceEntry[];
 }
@@ -699,6 +701,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         issueIdentifier,
         retry,
         parent,
+        await this.readCodexSessionLogsForIssueBestEffort(retry.issueId),
         buildLoopTraceJournalResponse(
           this.orchestrator.getState().loopTraceJournal[retry.issueId] ?? [],
           this.getLoopTraceLocator(retry.issueId),
@@ -709,7 +712,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const inMemoryTrace =
       this.findInMemoryLoopTraceByIssueIdentifier(issueIdentifier);
     if (inMemoryTrace !== null) {
-      return toStoredIssueDetail(issueIdentifier, inMemoryTrace);
+      return toStoredIssueDetail(
+        issueIdentifier,
+        inMemoryTrace,
+        await this.readCodexSessionLogsForIssueBestEffort(
+          inMemoryTrace.issueId,
+        ),
+      );
     }
 
     const storedTrace =
@@ -717,7 +726,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         issueIdentifier,
       );
     if (storedTrace !== null) {
-      return toStoredIssueDetail(issueIdentifier, storedTrace);
+      return toStoredIssueDetail(
+        issueIdentifier,
+        storedTrace,
+        await this.readCodexSessionLogsForIssueBestEffort(storedTrace.issueId),
+      );
     }
 
     return null;
@@ -731,6 +744,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     )) {
       if (journal.some((entry) => entry.issueIdentifier === issueIdentifier)) {
         return {
+          issueId,
           artifactPath: buildLoopTraceJournalResponse(
             journal,
             this.getLoopTraceLocator(issueId),
@@ -753,6 +767,20 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     } catch {
       // Non-critical — return null rather than failing the entire detail request
       return null;
+    }
+  }
+
+  private async readCodexSessionLogsForIssueBestEffort(
+    issueId: string,
+  ): Promise<CodexSessionLogEntry[]> {
+    try {
+      const { workspaceKey } = this.workspaceManager.resolveForIssue(issueId);
+      return await readCodexSessionLogsForIssue(
+        this.workspaceManager.root,
+        workspaceKey,
+      );
+    } catch {
+      return [];
     }
   }
 
@@ -980,10 +1008,24 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     issueIdentifier: string,
   ): Promise<StoredLoopTrace | null> {
     try {
-      return await findLoopTraceJournalByIssueIdentifier(
+      const storedTrace = await findLoopTraceJournalByIssueIdentifier(
         this.workspaceManager.root,
         issueIdentifier,
       );
+      if (storedTrace === null) {
+        return null;
+      }
+      const issueEntry = findLatestTraceEntryForIdentifier(
+        storedTrace.journal,
+        issueIdentifier,
+      );
+      if (issueEntry === null) {
+        return null;
+      }
+      return {
+        issueId: issueEntry.issueId,
+        ...storedTrace,
+      };
     } catch (error) {
       try {
         await this.logger?.warn(
@@ -3074,6 +3116,7 @@ function toRunningIssueDetail(
         label: entry.label,
         path: entry.path,
         url: entry.url,
+        ...(entry.bytes !== undefined ? { bytes: entry.bytes } : {}),
       })),
     },
     recent_events: running.recentActivity.map((entry) => ({
@@ -3096,10 +3139,22 @@ function tailEntries<T>(entries: readonly T[], maxEntries: number): T[] {
   return entries.slice(entries.length - maxEntries);
 }
 
+function toIssueDetailCodexSessionLogs(
+  entries: readonly CodexSessionLogEntry[],
+): IssueDetailResponse["logs"]["codex_session_logs"] {
+  return entries.map((entry) => ({
+    label: entry.label,
+    path: entry.path,
+    url: entry.url,
+    ...(entry.bytes !== undefined ? { bytes: entry.bytes } : {}),
+  }));
+}
+
 function toRetryIssueDetail(
   issueIdentifier: string,
   retry: RetryEntry,
   parent: { identifier: string; title: string; url: string } | null,
+  codexSessionLogs: CodexSessionLogEntry[],
   loopTraceJournal: IssueDetailResponse["loop_trace_journal"],
 ): IssueDetailResponse {
   return {
@@ -3118,7 +3173,7 @@ function toRetryIssueDetail(
       error: retry.error,
     },
     logs: {
-      codex_session_logs: [],
+      codex_session_logs: toIssueDetailCodexSessionLogs(codexSessionLogs),
     },
     recent_events: [],
     loop_trace_journal: loopTraceJournal,
@@ -3128,9 +3183,72 @@ function toRetryIssueDetail(
   };
 }
 
+async function readCodexSessionLogsForIssue(
+  workspaceRoot: string,
+  workspaceKey: string,
+): Promise<CodexSessionLogEntry[]> {
+  const artifactRoot = join(
+    workspaceRoot,
+    ".symphony",
+    "codex-sessions",
+    workspaceKey,
+  );
+  try {
+    if (!(await lstat(artifactRoot)).isDirectory()) {
+      return [];
+    }
+  } catch {
+    return [];
+  }
+  const result: CodexSessionLogEntry[] = [];
+
+  const visit = async (directory: string): Promise<void> => {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const entryPath = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(entryPath);
+        continue;
+      }
+
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) {
+        continue;
+      }
+
+      let bytes: number | undefined;
+      try {
+        const stats = await lstat(entryPath);
+        if (!stats.isFile()) {
+          continue;
+        }
+        bytes = stats.size;
+      } catch {
+        bytes = undefined;
+      }
+
+      result.push({
+        label: relative(artifactRoot, entryPath),
+        path: entryPath,
+        url: null,
+        ...(bytes !== undefined ? { bytes } : {}),
+      });
+    }
+  };
+
+  await visit(artifactRoot);
+  return result.sort((left, right) => left.path.localeCompare(right.path));
+}
+
 function toStoredIssueDetail(
   issueIdentifier: string,
   storedTrace: StoredLoopTrace,
+  codexSessionLogs: CodexSessionLogEntry[],
 ): IssueDetailResponse | null {
   const issueEntry = findLatestTraceEntryForIdentifier(
     storedTrace.journal,
@@ -3153,7 +3271,7 @@ function toStoredIssueDetail(
     running: null,
     retry: null,
     logs: {
-      codex_session_logs: [],
+      codex_session_logs: toIssueDetailCodexSessionLogs(codexSessionLogs),
     },
     recent_events: storedTrace.journal.slice(-10).map((entry) => ({
       at: entry.timestamp,
