@@ -1340,6 +1340,16 @@ async function findSkillFiles(root: string): Promise<string[]> {
 async function findCodexSessionLogFiles(codexHome: string): Promise<string[]> {
   const result: string[] = [];
   const visit = async (directory: string): Promise<void> => {
+    let directoryStats: import("node:fs").Stats;
+    try {
+      directoryStats = await lstat(directory);
+    } catch {
+      return;
+    }
+    if (!directoryStats.isDirectory()) {
+      return;
+    }
+
     let entries: import("node:fs").Dirent[];
     try {
       entries = await readdir(directory, { withFileTypes: true });
@@ -1354,7 +1364,7 @@ async function findCodexSessionLogFiles(codexHome: string): Promise<string[]> {
         continue;
       }
 
-      if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      if (entry.name.endsWith(".jsonl")) {
         result.push(path);
       }
     }

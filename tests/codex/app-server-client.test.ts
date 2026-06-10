@@ -270,12 +270,13 @@ describe("CodexAppServerClient", () => {
       const artifactEvent = events.find(
         (event) => event.event === "session_artifact_saved",
       );
-      expect(
-        artifactEvent?.artifacts?.map((artifact) => artifact.label),
-      ).toEqual([
+      const artifactLabels =
+        artifactEvent?.artifacts?.map((artifact) => artifact.label) ?? [];
+      expect(artifactLabels).toEqual([
         "sessions/2026/06/10/nested.jsonl",
         "sessions/2026/rollout-test.jsonl",
       ]);
+      expect(artifactLabels).not.toContain("sessions/2026/06/10/linked.jsonl");
       await expect(
         access(
           join(
@@ -302,6 +303,79 @@ describe("CodexAppServerClient", () => {
       await expect(
         access(join(artifactDirectory, basename(codexHome), "outside.jsonl")),
       ).rejects.toThrow();
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("does not follow a symlinked sessions root while preserving cleanup", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const artifactDirectory = join(workspace, "artifacts");
+    const outsideDirectory = join(workspace, "outside-sessions");
+    await mkdir(outsideDirectory, { recursive: true });
+    await writeFile(
+      join(outsideDirectory, "leaked.jsonl"),
+      '{"type":"leak"}\n',
+    );
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+
+    const markerPath = join(workspace, "codex-home.txt");
+    const setupScript = `
+      import { rmSync, symlinkSync } from "node:fs";
+      import { join } from "node:path";
+
+      const codexHome = process.env.CODEX_HOME;
+      const outsideDirectory = process.env.OUTSIDE_SESSIONS;
+      if (!codexHome || !outsideDirectory) throw new Error("missing env");
+      rmSync(join(codexHome, "sessions"), { recursive: true, force: true });
+      symlinkSync(outsideDirectory, join(codexHome, "sessions"));
+    `;
+
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `printf '%s' "$CODEX_HOME" > ${shellQuote(markerPath)}`,
+        `OUTSIDE_SESSIONS=${shellQuote(outsideDirectory)} ${shellQuote(process.execPath)} --input-type=module --eval ${shellQuote(setupScript)}`,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} happy`,
+      ].join(" && ");
+      const client = createClient("session-artifact", workspace, events, {
+        command,
+        ephemeralHome: true,
+        artifactDirectory,
+      });
+
+      const result = await client.startSession({
+        prompt: "Do not preserve symlinked session roots",
+        title: "ABC-123: Example",
+      });
+      const codexHome = (await readFile(markerPath, "utf8")).trim();
+
+      expect(result.status).toBe("completed");
+      await expect(client.close()).resolves.toBeUndefined();
+      await expect(access(codexHome)).rejects.toThrow();
+      expect(events.map((event) => event.event)).not.toContain(
+        "session_artifact_saved",
+      );
+      await expect(
+        access(
+          join(
+            artifactDirectory,
+            basename(codexHome),
+            "sessions",
+            "leaked.jsonl",
+          ),
+        ),
+      ).rejects.toThrow();
+      await expect(
+        access(join(outsideDirectory, "leaked.jsonl")),
+      ).resolves.toBeUndefined();
     } finally {
       if (previousCodexHome === undefined) {
         Reflect.deleteProperty(process.env, "CODEX_HOME");
