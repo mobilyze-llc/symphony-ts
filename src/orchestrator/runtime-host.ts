@@ -1386,6 +1386,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const files = [
       ...new Set(input.findings.flatMap((finding) => finding.files)),
     ];
+    const ignoredFiles = [
+      ...new Set(
+        input.findings.flatMap((finding) => finding.ignoredFiles ?? []),
+      ),
+    ];
 
     await this.logger?.warn(
       "supervision_resteer_requested",
@@ -1399,6 +1404,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ],
         issue_identifiers: issueIdentifiers,
         files,
+        ignored_files: ignoredFiles,
       },
     );
 
