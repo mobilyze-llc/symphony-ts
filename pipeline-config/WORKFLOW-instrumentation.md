@@ -210,7 +210,8 @@ Headless Codex turns have a strict output budget. This applies during investigat
 - Before broad inspection, bound the output: use targeted `rg -n ... -m 50`, `sed -n '<start>,<end>p'`, `tail -n 120`, `jq` filters, `find ... | sed -n '1,200p'`, and `git diff --stat` before full diffs.
 - For every command that may print more than a screen, write full stdout/stderr to `.symphony/validation/` and return only command metadata, exit code, log path, and a bounded tail/summary to the model.
 - If `scripts/symphony-run-logged.mjs` exists, use it for noisy commands: `node scripts/symphony-run-logged.mjs --label <label> -- <command> [args...]`.
-- If the helper does not exist, redirect output yourself: `mkdir -p .symphony/validation && <command> > .symphony/validation/<label>.log 2>&1; status=$?; tail -n 80 .symphony/validation/<label>.log; exit $status`.
+- Shell snippets must be zsh-safe. Do not assign to `status`; zsh treats it as a read-only parameter. Use neutral names such as `cmd_status` or `exit_code`.
+- If the helper does not exist, redirect output yourself: `mkdir -p .symphony/validation && <command> > .symphony/validation/<label>.log 2>&1; cmd_status=$?; tail -n 80 .symphony/validation/<label>.log; exit $cmd_status`.
 - Do not poll a long-running command with a large output budget. Wait for completion, then inspect only the log path, exit code, and a short tail unless deeper diagnosis is required.
 - PR bodies, workpads, and Linear comments should include command, exit code, log path, and a compact summary/tail. Do not paste full raw logs, broad search output, or SAST JSON unless the artifact is under 20 KB.
 
