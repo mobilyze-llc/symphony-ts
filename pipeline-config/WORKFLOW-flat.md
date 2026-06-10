@@ -21,6 +21,14 @@ agent:
   max_turns: 30
   max_retry_backoff_ms: 300000
 
+hard_stops:
+  max_iterations: 20
+  no_progress_turns: 3
+  max_tokens_per_unit: 250000
+  max_dollar_budget_usd: 12.5
+  premium_budget_pause_ratio: 0.8
+  estimated_cost_per_1k_tokens_usd: 0.05
+
 codex:
   command: codex --disable plugins --disable hooks --disable plugin_hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use --disable multi_agent --disable goals --disable memories --disable tool_call_mcp_elicitation --config 'model_reasoning_effort="low"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server
   ephemeral_home: true
@@ -79,6 +87,18 @@ You are running in headless/unattended mode. Do NOT use interactive skills, slas
 Implement only what your task specifies. If you encounter missing functionality that another task covers, add a TODO comment rather than implementing it. Do not refactor surrounding code or add unsolicited improvements.
 
 Never hardcode localhost or 127.0.0.1. Use the $BASE_URL environment variable for all URL references. Set BASE_URL=localhost:<port> during local development.
+
+## Headless Output Discipline
+
+Headless Codex turns have a strict output budget. This applies during investigation, code search, log inspection, validation, and PR writeup.
+
+- Do not run high-volume commands as direct streaming commands such as `npm test 2>&1`, `pnpm test 2>&1`, broad `rg`, full log dumps, unfiltered JSON, or full lockfile/dist output.
+- Before broad inspection, bound the output: use targeted `rg -n ... -m 50`, `sed -n '<start>,<end>p'`, `tail -n 120`, `jq` filters, `find ... | sed -n '1,200p'`, and `git diff --stat` before full diffs.
+- For every command that may print more than a screen, write full stdout/stderr to `.symphony/validation/` and return only command metadata, exit code, log path, and a bounded tail/summary to the model.
+- If `scripts/symphony-run-logged.mjs` exists, use it for noisy commands: `node scripts/symphony-run-logged.mjs --label <label> -- <command> [args...]`.
+- If the helper does not exist, redirect output yourself: `mkdir -p .symphony/validation && <command> > .symphony/validation/<label>.log 2>&1; status=$?; tail -n 80 .symphony/validation/<label>.log; exit $status`.
+- Do not poll a long-running command with a large output budget. Wait for completion, then inspect only the log path, exit code, and a short tail unless deeper diagnosis is required.
+- PR bodies, workpads, and Linear comments should include command, exit code, log path, and a compact summary/tail. Do not paste full raw logs, broad search output, or SAST JSON unless the artifact is under 20 KB.
 
 # Implementation: {{ issue.identifier }} — {{ issue.title }}
 

@@ -6,5 +6,6 @@ coverage/
 
 .worktrees/
 .env
+.symphony/
 pipeline-config/workflows/workspaces/
 pipeline-config/workspaces/

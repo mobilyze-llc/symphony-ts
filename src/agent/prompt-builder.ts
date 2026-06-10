@@ -127,6 +127,7 @@ export function buildContinuationPrompt(input: {
       case "implement":
         lines.push(
           "You are in the IMPLEMENT stage. Focus on implementing the code changes and running tests. Open a PR only when the Mode Permission Envelope allows PR creation; otherwise stop after verification and report BLOCKED-needs-human if a PR is required. When the permitted implement work is complete and all verify commands pass, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
+          "Headless output budget: do not stream high-volume searches, logs, JSON, lockfiles, validation commands, or generated output directly into the turn. Write full stdout/stderr to .symphony/validation/ and return only command metadata, exit code, log path, and a short tail/summary.",
         );
         break;
       case "merge":

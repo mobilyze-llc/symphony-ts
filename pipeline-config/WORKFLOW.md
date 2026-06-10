@@ -27,6 +27,14 @@ agent:
     in progress: 3
     in review: 2
 
+hard_stops:
+  max_iterations: 20
+  no_progress_turns: 3
+  max_tokens_per_unit: 250000
+  max_dollar_budget_usd: 12.5
+  premium_budget_pause_ratio: 0.8
+  estimated_cost_per_1k_tokens_usd: 0.05
+
 codex:
   command: codex --disable plugins --disable hooks --disable plugin_hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use --disable multi_agent --disable goals --disable memories --disable tool_call_mcp_elicitation --config 'model_reasoning_effort="low"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server
   ephemeral_home: true

@@ -30,8 +30,8 @@ agent:
 hard_stops:
   max_iterations: 20
   no_progress_turns: 3
-  max_tokens_per_unit: 1000000
-  max_dollar_budget_usd: 50
+  max_tokens_per_unit: 250000
+  max_dollar_budget_usd: 12.5
   premium_budget_pause_ratio: 0.8
   estimated_cost_per_1k_tokens_usd: 0.05
 
@@ -324,6 +324,18 @@ Implement only what your task specifies. If you encounter missing functionality 
 
 Never hardcode localhost or 127.0.0.1. Use the $BASE_URL environment variable for all URL references. Set BASE_URL=localhost:<port> during local development.
 
+## Headless Output Discipline
+
+Headless Codex turns have a strict output budget. This applies during investigation, code search, log inspection, validation, and PR writeup.
+
+- Do not run high-volume commands as direct streaming commands such as `npm test 2>&1`, `pnpm test 2>&1`, broad `rg`, full log dumps, unfiltered JSON, or full lockfile/dist output.
+- Before broad inspection, bound the output: use targeted `rg -n ... -m 50`, `sed -n '<start>,<end>p'`, `tail -n 120`, `jq` filters, `find ... | sed -n '1,200p'`, and `git diff --stat` before full diffs.
+- For every command that may print more than a screen, write full stdout/stderr to `.symphony/validation/` and return only command metadata, exit code, log path, and a bounded tail/summary to the model.
+- If `scripts/symphony-run-logged.mjs` exists, use it for noisy commands: `node scripts/symphony-run-logged.mjs --label <label> -- <command> [args...]`.
+- If the helper does not exist, redirect output yourself: `mkdir -p .symphony/validation && <command> > .symphony/validation/<label>.log 2>&1; status=$?; tail -n 80 .symphony/validation/<label>.log; exit $status`.
+- Do not poll a long-running command with a large output budget. Wait for completion, then inspect only the log path, exit code, and a short tail unless deeper diagnosis is required.
+- PR bodies, workpads, and Linear comments should include command, exit code, log path, and a compact summary/tail. Do not paste full raw logs, broad search output, or SAST JSON unless the artifact is under 20 KB.
+
 # {{ issue.identifier }} — {{ issue.title }}
 
 <!-- CUSTOMIZE: Update the product description below to match your product. -->
@@ -506,12 +518,11 @@ Read ALL comments on this Linear issue starting with `## Review Findings`. These
 4. Write tests as needed.
 5. Run all `# Verify:` commands from the spec. You are not done until every verify command exits 0.
 6. Run `pnpm format --write` to auto-format code, then run `pnpm lint` to verify no lint errors remain. If lint fails, fix the errors and re-run until clean. This must pass before creating the PR.
-7. Before creating the PR, capture structured tool output:
-   - Run `npx tsc --noEmit 2>&1` and include output in PR body under `## Tool Output > TypeScript`
-   - Run `pnpm lint 2>&1` and include output in PR body under `## Tool Output > Lint`
-   - Run `npm test 2>&1` and include summary in PR body under `## Tool Output > Tests`
-   - Run `semgrep scan --config auto --json 2>&1` (if available) and include raw output in PR body under `## SAST Output`
-   - Do NOT filter or interpret SAST results — include them verbatim.
+7. Before creating the PR, capture structured tool output as bounded artifacts:
+   - Run `node scripts/symphony-run-logged.mjs --label typecheck -- npx tsc --noEmit` when the helper exists, or redirect equivalent output to `.symphony/validation/typecheck.log`; include command, exit code, log path, and summary/tail in PR body under `## Tool Output > TypeScript`.
+   - Run `node scripts/symphony-run-logged.mjs --label lint -- pnpm lint` when the helper exists, or redirect equivalent output to `.symphony/validation/lint.log`; include command, exit code, log path, and summary/tail in PR body under `## Tool Output > Lint`.
+   - Run the test command through the same log-capturing path, preferably `node scripts/symphony-run-logged.mjs --label tests -- pnpm test` when the helper exists; include command, exit code, log path, and summary/tail in PR body under `## Tool Output > Tests`.
+   - Run Semgrep through the same log-capturing path if available, for example `node scripts/symphony-run-logged.mjs --label semgrep -- semgrep scan --config auto --json`; include the raw artifact path and a compact summary under `## SAST Output`, and paste raw JSON only if the artifact is under 20 KB.
 8. Commit your changes with message format: `feat({{ issue.identifier }}): <description>`.
 9. Open a PR targeting this repo (not its upstream fork parent) via `gh pr create --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")` with the issue description in the PR body. Include the Tool Output and SAST Output sections.
 10. Link the PR to the Linear issue by including `{{ issue.identifier }}` in the PR title or body.
