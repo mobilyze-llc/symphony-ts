@@ -64,7 +64,9 @@ budget_escalation:
 # marginal cost; never consumes the Codex window it adjudicates). Consulted
 # only when the ladder declines a budget pause; a continue verdict grants
 # ONE continuation at the current ceiling, bounded by max_resumes per issue.
-# Any endpoint/schema failure parks for the operator (fail closed).
+# Any endpoint/schema failure parks for the operator (fail closed). Triage
+# works best layered ABOVE the ladder: with the ladder off, a continue
+# verdict re-runs at the same ceiling that just paused and is usually wasted.
 pause_triage:
   base_url: http://studio2.local:8000/v1
   model: deepseek-v4-flash

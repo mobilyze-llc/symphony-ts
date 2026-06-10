@@ -1616,6 +1616,87 @@ describe("orchestrator core", () => {
     expect(triageCalls).toEqual(["ISSUE-1:steps=1"]);
   });
 
+  it("never consults triage for non-budget hard stops or while the floor is blocked", async () => {
+    const triageCalls: string[] = [];
+    const makeOrchestrator = (rateLimitAdmission?: {
+      minPrimaryHeadroomPct: number | null;
+      minSecondaryHeadroomPct: number | null;
+    }) =>
+      new OrchestratorCore({
+        config: createConfig({
+          pauseTriage: {
+            baseUrl: "http://studio2.local:8000/v1",
+            model: "deepseek-v4-flash",
+            apiKey: null,
+            maxResumes: 2,
+          },
+          ...(rateLimitAdmission === undefined ? {} : { rateLimitAdmission }),
+        }),
+        tracker: createTracker({
+          candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+          statesById: [
+            { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+          ],
+        }),
+        spawnWorker: async () => ({
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        }),
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+        runPauseTriage: async (evidence) => {
+          triageCalls.push(evidence.issueIdentifier);
+          return { verdict: "continue", rationale: "Keep going." };
+        },
+      });
+
+    // Non-budget hard stop (STALLED iteration cap): triage never consulted.
+    const stalled = makeOrchestrator();
+    await stalled.pollTick();
+    const stalledEntry = await stalled.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "STALLED",
+        trigger: "iteration_cap",
+        reason: "Iteration cap reached.",
+        turnCount: 5,
+        totalTokens: 100,
+        estimatedCostUsd: 1,
+      },
+    });
+    expect(stalledEntry).toBeNull();
+    expect(triageCalls).toEqual([]);
+
+    // Budget pause with the admission floor blocked: triage never consulted.
+    const gated = makeOrchestrator({
+      minPrimaryHeadroomPct: null,
+      minSecondaryHeadroomPct: 5,
+    });
+    await gated.pollTick();
+    gated.getState().codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+    const gatedEntry = await gated.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 100,
+        estimatedCostUsd: 1,
+      },
+    });
+    expect(gatedEntry).toBeNull();
+    expect(triageCalls).toEqual([]);
+    expect(gated.getState().resumeRequired.has("1")).toBe(true);
+  });
+
   it("refuses all dispatch when rate-limit headroom is below the configured floor", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],

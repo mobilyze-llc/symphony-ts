@@ -1023,29 +1023,42 @@ export class OrchestratorCore {
       verdict = null;
     }
 
-    await this.recordRunJournalEntry({
-      idempotencyKey: `pause_triage:${issueId}:${stageName ?? "no-stage"}:${resumesUsed + 1}:${this.now().toISOString()}`,
-      timestamp: this.now().toISOString(),
-      kind: "pause_triage",
-      issueId,
-      issueIdentifier: runningEntry.identifier,
-      operation: "dispatcher",
-      stage: stageName,
-      attempt: runningEntry.retryAttempt,
-      ownerId: this.leaseOwnerId,
-      lease: null,
-      summary:
-        verdict === null
-          ? `Pause triage unavailable for ${runningEntry.identifier}; parking for operator.`
-          : `Pause triage verdict for ${runningEntry.identifier}: ${verdict.verdict}.`,
-      metadata: {
-        status: "completed",
-        trigger: hardStop.trigger,
-        verdict: verdict?.verdict ?? "unavailable",
-        rationale: verdict?.rationale ?? null,
-        resumesUsed,
-      },
-    });
+    const willResume = verdict !== null && verdict.verdict === "continue";
+    if (willResume) {
+      this.state.issuePauseTriageResumes[issueId] = resumesUsed + 1;
+    }
+
+    // Journal the verdict together with the action actually taken so the
+    // audit trail can never claim a resume that did not happen (PR #330
+    // review P2). Journaling is best-effort relative to the resume itself.
+    try {
+      await this.recordRunJournalEntry({
+        idempotencyKey: `pause_triage:${issueId}:${stageName ?? "no-stage"}:${resumesUsed + 1}:${this.now().toISOString()}`,
+        timestamp: this.now().toISOString(),
+        kind: "pause_triage",
+        issueId,
+        issueIdentifier: runningEntry.identifier,
+        operation: "dispatcher",
+        stage: stageName,
+        attempt: runningEntry.retryAttempt,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary:
+          verdict === null
+            ? `Pause triage unavailable for ${runningEntry.identifier}; parking for operator.`
+            : `Pause triage verdict for ${runningEntry.identifier}: ${verdict.verdict} (${willResume ? "resuming" : "parking"}).`,
+        metadata: {
+          status: "completed",
+          trigger: hardStop.trigger,
+          verdict: verdict?.verdict ?? "unavailable",
+          rationale: verdict?.rationale ?? null,
+          action: willResume ? "resumed" : "parked",
+          resumesUsed,
+        },
+      });
+    } catch {
+      // Audit is best-effort; the verdict outcome must still apply.
+    }
 
     if (verdict === null || verdict.verdict !== "continue") {
       if (verdict !== null) {
@@ -1060,8 +1073,6 @@ export class OrchestratorCore {
       }
       return null;
     }
-
-    this.state.issuePauseTriageResumes[issueId] = resumesUsed + 1;
 
     try {
       await this.postComment?.(
