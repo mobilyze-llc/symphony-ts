@@ -743,6 +743,27 @@ export class CodexAppServerClient {
     }
 
     if (isApprovalRequest(parsed, method)) {
+      const outputDenial = evaluateHeadlessCommandOutputForApproval(parsed);
+      if (outputDenial !== null) {
+        if (responseId !== null) {
+          this.send({
+            id: parsed.id,
+            result: createApprovalResponse(false, outputDenial.reason),
+          });
+        }
+        this.emit({
+          event: "unsupported_tool_call",
+          sessionId: this.currentTurn?.sessionId ?? null,
+          threadId: this.currentTurn?.threadId ?? this.threadId,
+          turnId: this.currentTurn?.turnId ?? null,
+          toolName: outputDenial.toolName,
+          message: outputDenial.reason,
+          raw: parsed,
+          ...optionalTelemetry(usage, rateLimits),
+        });
+        return;
+      }
+
       const permissionDenial = this.evaluateModePermissionForApproval(parsed);
       if (permissionDenial !== null) {
         if (responseId !== null) {
@@ -1776,6 +1797,148 @@ function extractToolInput(message: JsonObject): unknown {
   }
 
   return undefined;
+}
+
+function evaluateHeadlessCommandOutputForApproval(message: JsonObject): {
+  toolName: string | null;
+  reason: string;
+} | null {
+  const toolName = extractToolName(message);
+  const toolInput = extractToolInput(message) ?? message;
+  const command = extractCommandText(toolInput);
+  if (command === null) {
+    return null;
+  }
+
+  const reason = detectHeadlessCommandOutputRisk(command);
+  if (reason === null) {
+    return null;
+  }
+
+  return {
+    toolName,
+    reason,
+  };
+}
+
+export function detectHeadlessCommandOutputRisk(
+  command: string,
+): string | null {
+  const normalized = command
+    .split("\n")
+    .map((line) => line.replace(/[ \t\r]+/g, " ").trim())
+    .join("\n")
+    .trim();
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  const riskyRgSegment = normalized
+    .split(/(?:&&|\|\||;|\n)/)
+    .map((segment) => segment.trim())
+    .find(isBroadLineRgSegment);
+
+  if (riskyRgSegment === undefined) {
+    return null;
+  }
+
+  return [
+    "Headless output guard declined a broad `rg` line-output command because it is likely to add excessive search results to the Codex thread.",
+    "Use `rg -l` or `rg -c` for broad discovery, then run `rg -n ... -m 20 <specific-file>` on selected files.",
+    `Declined command segment: ${truncateCommandForReason(riskyRgSegment)}`,
+  ].join(" ");
+}
+
+function isBroadLineRgSegment(segment: string): boolean {
+  if (!/\brg\b/.test(segment)) {
+    return false;
+  }
+
+  if (
+    /(?:^|\s)(?:--files|-l|--files-with-matches|-c|--count)(?:\s|$)/.test(
+      segment,
+    )
+  ) {
+    return false;
+  }
+
+  return extractShellWords(segment).some(isBroadSearchPathToken);
+}
+
+function isBroadSearchPathToken(token: string): boolean {
+  const trimmed = token.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed.startsWith("-") ||
+    trimmed.includes("=") ||
+    trimmed.includes("*")
+  ) {
+    return false;
+  }
+
+  const rawUnquoted = trimmed.replace(/^["']|["']$/g, "");
+  const unquoted =
+    rawUnquoted === "./" ? "." : rawUnquoted.replace(/^\.\//, "");
+  if (unquoted === "." || unquoted === "./") {
+    return true;
+  }
+
+  return /^(?:src|tests|ops|docs|pipeline-config)(?:\/[^.\s/]+)*\/?$/.test(
+    unquoted,
+  );
+}
+
+function extractShellWords(command: string): string[] {
+  const matches = command.match(/"[^"]*"|'[^']*'|\S+/g);
+  return matches ?? [];
+}
+
+function extractCommandText(value: unknown, depth = 0): string | null {
+  if (depth > 4) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  for (const key of ["command", "cmd", "script"]) {
+    const candidate = record[key];
+    if (typeof candidate === "string") {
+      return candidate;
+    }
+  }
+
+  for (const key of [
+    "tool_input",
+    "toolInput",
+    "input",
+    "arguments",
+    "args",
+    "payload",
+    "params",
+  ]) {
+    const nested = extractCommandText(record[key], depth + 1);
+    if (nested !== null) {
+      return nested;
+    }
+  }
+
+  return null;
+}
+
+function truncateCommandForReason(command: string): string {
+  const maxLength = 220;
+  if (command.length <= maxLength) {
+    return command;
+  }
+
+  return `${command.slice(0, maxLength)}...`;
 }
 
 function extractUsage(message: JsonObject): CodexUsage | null {
