@@ -56,7 +56,10 @@ import {
   addPipelineActivity,
   applyCodexEventToOrchestratorState,
 } from "../logging/session-metrics.js";
-import type { HardStopDecision } from "../policy/hard-stops.js";
+import type {
+  HardStopDecision,
+  HardStopTrigger,
+} from "../policy/hard-stops.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 import {
   type ContinuousFeedbackReviewResult,
@@ -190,6 +193,8 @@ export interface OrchestratorCoreOptions {
     reworkCount: number;
     isFirstDispatch: boolean;
     rightSizingDecision: RightSizingDecision;
+    /** base * multiplier^escalationSteps for this issue (SYMPH-337); 1 when unescalated. */
+    budgetMultiplier: number;
   }) => Promise<SpawnWorkerResult> | SpawnWorkerResult;
   onIssueDropped?: (input: {
     issueId: string;
@@ -841,6 +846,107 @@ export class OrchestratorCore {
     return { blocked, reason };
   }
 
+  budgetMultiplierForIssue(issueId: string): number {
+    const steps = this.state.issueBudgetEscalations[issueId] ?? 0;
+    if (steps <= 0) {
+      return 1;
+    }
+    return this.config.budgetEscalation.multiplier ** steps;
+  }
+
+  /**
+   * Deterministic budget-escalation ladder (SYMPH-337 slice 1). A budget
+   * hard stop auto-resumes as a continuation with a multiplied unit budget
+   * when the ladder is configured, steps remain, and the rate-limit floor
+   * admits. Anything else falls through to the operator pause. no_progress,
+   * iteration_cap, and permission stops are never escalated — by the time a
+   * budget trigger fires, the no-progress guard has already vouched that the
+   * unit was moving.
+   */
+  private async tryBudgetEscalation(
+    issueId: string,
+    runningEntry: RunningEntry,
+    hardStop: HardStopDecision,
+    stageName: string | null,
+  ): Promise<RetryEntry | null> {
+    if (hardStop.outcome !== "PAUSED-budget") {
+      return null;
+    }
+    if (!isBudgetEscalationTrigger(hardStop.trigger)) {
+      return null;
+    }
+
+    const ladder = this.config.budgetEscalation;
+    if (ladder.maxSteps === null) {
+      return null;
+    }
+
+    const steps = this.state.issueBudgetEscalations[issueId] ?? 0;
+    if (steps >= ladder.maxSteps) {
+      console.warn(
+        `[orchestrator] Budget escalation exhausted for ${runningEntry.identifier} (${steps}/${ladder.maxSteps} steps used) — parking for operator.`,
+      );
+      return null;
+    }
+
+    const gate = this.evaluateRateLimitAdmissionGate();
+    if (gate.blocked) {
+      console.warn(
+        `[orchestrator] Budget escalation deferred to operator for ${runningEntry.identifier}: ${gate.reason}`,
+      );
+      return null;
+    }
+
+    const nextStep = steps + 1;
+    const nextMultiplier = ladder.multiplier ** nextStep;
+
+    await this.recordRunJournalEntry({
+      idempotencyKey: `budget_escalation:${issueId}:${stageName ?? "no-stage"}:${nextStep}`,
+      timestamp: this.now().toISOString(),
+      kind: "budget_escalation",
+      issueId,
+      issueIdentifier: runningEntry.identifier,
+      operation: "dispatcher",
+      stage: stageName,
+      attempt: runningEntry.retryAttempt,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Budget escalation step ${nextStep}/${ladder.maxSteps} for ${runningEntry.identifier}: auto-resuming with ${nextMultiplier}x unit budget after ${hardStop.trigger}.`,
+      metadata: {
+        status: "completed",
+        trigger: hardStop.trigger,
+        step: nextStep,
+        maxSteps: ladder.maxSteps,
+        multiplier: nextMultiplier,
+        totalTokens: hardStop.totalTokens,
+        estimatedCostUsd: hardStop.estimatedCostUsd,
+      },
+    });
+
+    // Increment only after the journal write succeeded so an exception above
+    // leaves the issue un-escalated and the pause falls through to the
+    // operator park (PR #329 review P1).
+    this.state.issueBudgetEscalations[issueId] = nextStep;
+
+    const comment = [
+      `Budget escalation step ${nextStep}/${ladder.maxSteps}: auto-resuming with a ${nextMultiplier}x unit budget.`,
+      `Trigger: ${hardStop.trigger}`,
+      `Reason: ${hardStop.reason}`,
+      `Unit spend at pause: ${hardStop.totalTokens} tokens, ~$${hardStop.estimatedCostUsd.toFixed(2)}.`,
+    ].join("\n");
+    try {
+      await this.postComment?.(issueId, comment);
+    } catch {
+      // Observability is best-effort; the resume must not depend on Linear.
+    }
+
+    return this.scheduleRetry(issueId, 1, {
+      identifier: runningEntry.identifier,
+      error: null,
+      delayType: "continuation",
+    });
+  }
+
   async onRetryTimer(issueId: string): Promise<RetryTimerResult> {
     await this.expireDispatcherLeases();
 
@@ -867,6 +973,25 @@ export class OrchestratorCore {
         retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
           identifier: retryEntry.identifier,
           error: `pipeline halted: ${haltIssue.identifier}`,
+          delayType: retryEntry.delayType,
+        }),
+      };
+    }
+
+    // Rate-limit admission floor applies to retry/continuation dispatch too
+    // (SYMPH-337): auto-resumes must never burn into protected headroom.
+    const rateLimitGate = this.evaluateRateLimitAdmissionGate();
+    if (rateLimitGate.blocked) {
+      console.warn(
+        `[orchestrator] ${rateLimitGate.reason} Deferring retry for ${retryEntry.identifier ?? issueId}.`,
+      );
+      this.clearRetryEntry(issueId);
+      return {
+        dispatched: false,
+        released: false,
+        retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
+          identifier: retryEntry.identifier,
+          error: "rate-limit admission floor active",
           delayType: retryEntry.delayType,
         }),
       };
@@ -900,6 +1025,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
+      delete this.state.issueBudgetEscalations[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       this.onIssueDropped?.({
@@ -925,6 +1051,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
+      delete this.state.issueBudgetEscalations[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       this.onIssueDropped?.({
@@ -1095,6 +1222,16 @@ export class OrchestratorCore {
 
     if (input.outcome === "normal") {
       if (input.hardStop !== undefined && input.hardStop !== null) {
+        const escalation = await this.tryBudgetEscalation(
+          input.issueId,
+          runningEntry,
+          input.hardStop,
+          exitedStageName,
+        );
+        if (escalation !== null) {
+          return escalation;
+        }
+
         await this.handleHardStopTrigger(input.issueId, runningEntry, {
           hardStop: input.hardStop,
           stageName: exitedStageName,
@@ -1212,6 +1349,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
+      delete this.state.issueBudgetEscalations[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       return "completed";
@@ -1226,6 +1364,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
+      delete this.state.issueBudgetEscalations[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       return "completed";
@@ -1254,6 +1393,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
+      delete this.state.issueBudgetEscalations[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       // Fire linearState update for the terminal stage (e.g., move to "Done")
@@ -1340,6 +1480,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
+      delete this.state.issueBudgetEscalations[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       void this.fireEscalationSideEffects(
@@ -2095,6 +2236,7 @@ export class OrchestratorCore {
     delete this.state.issueExecutionHistory[issueId];
     delete this.state.issueFirstDispatchedAt[issueId];
     delete this.state.issueRightSizingDecisions[issueId];
+    delete this.state.issueBudgetEscalations[issueId];
     delete this.state.loopTraceJournal[issueId];
     delete this.state.continuousFeedback[issueId];
   }
@@ -2295,6 +2437,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
+      delete this.state.issueBudgetEscalations[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       this.state.failed.add(issueId);
@@ -3123,6 +3266,7 @@ export class OrchestratorCore {
         delete this.state.issuePassedStages[issue.id];
         delete this.state.issueFirstDispatchedAt[issue.id];
         delete this.state.issueRightSizingDecisions[issue.id];
+        delete this.state.issueBudgetEscalations[issue.id];
         delete this.state.loopTraceJournal[issue.id];
         delete this.state.continuousFeedback[issue.id];
         // Fire linearState update for the terminal stage (e.g., move to "Done")
@@ -3490,6 +3634,7 @@ export class OrchestratorCore {
         reworkCount,
         isFirstDispatch,
         rightSizingDecision,
+        budgetMultiplier: this.budgetMultiplierForIssue(issue.id),
       });
       const runEntry: RunningEntry = {
         ...createEmptyLiveSession(),
@@ -4054,6 +4199,7 @@ export class OrchestratorCore {
       delete this.state.issueExecutionHistory[issueId];
       delete this.state.issueFirstDispatchedAt[issueId];
       delete this.state.issueRightSizingDecisions[issueId];
+      delete this.state.issueBudgetEscalations[issueId];
       delete this.state.loopTraceJournal[issueId];
       delete this.state.continuousFeedback[issueId];
       void this.fireEscalationSideEffects(
@@ -4158,7 +4304,20 @@ export function computeFailureRetryDelayMs(
   return Math.min(exponentialDelay, maxRetryBackoffMs);
 }
 
-export function nextRetryAttempt(attempt: number | null): number {
+// rate_limit_budget is deliberately NOT escalatable: the ladder widens token
+// and dollar budgets but cannot relieve a subscription-window constraint, so
+// escalating a window-bound unit mechanically re-triggers and burns widened
+// budget for no gain (PR #329 review P1). Window pauses wait for the floor /
+// reset timing or the operator.
+export const BUDGET_ESCALATION_TRIGGERS: ReadonlySet<HardStopTrigger> = new Set(
+  ["token_budget", "dollar_budget", "premium_spend_near_ceiling"],
+);
+
+function isBudgetEscalationTrigger(trigger: HardStopTrigger): boolean {
+  return BUDGET_ESCALATION_TRIGGERS.has(trigger);
+}
+
+function nextRetryAttempt(attempt: number | null): number {
   return attempt === null ? 1 : attempt + 1;
 }
 

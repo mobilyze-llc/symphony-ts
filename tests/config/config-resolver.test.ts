@@ -812,6 +812,51 @@ describe("config-resolver fast_track", () => {
     });
   });
 
+  it("parses budget_escalation and defaults it off", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        budget_escalation: {
+          max_steps: "2",
+          multiplier: "3",
+        },
+      },
+    });
+    expect(resolved.budgetEscalation).toEqual({ maxSteps: 2, multiplier: 3 });
+
+    const unset = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {},
+    });
+    expect(unset.budgetEscalation).toEqual({ maxSteps: null, multiplier: 2 });
+  });
+
+  it("rejects out-of-range budget_escalation multipliers", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        budget_escalation: {
+          max_steps: 2,
+          multiplier: "1",
+        },
+      },
+    });
+    // multiplier must be in (1, 10]; invalid values fall back to the default.
+    expect(resolved.budgetEscalation).toEqual({ maxSteps: 2, multiplier: 2 });
+
+    const tooBig = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        budget_escalation: { max_steps: 1, multiplier: 25 },
+      },
+    });
+    expect(tooBig.budgetEscalation.multiplier).toBe(2);
+  });
+
   it("resolves slack_notify_channel from YAML config", () => {
     const resolved = resolveWorkflowConfig({
       workflowPath: "/repo/WORKFLOW.md",

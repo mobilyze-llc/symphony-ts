@@ -6,6 +6,8 @@ import { normalizeIssueState } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import {
   DEFAULT_ACTIVE_STATES,
+  DEFAULT_BUDGET_ESCALATION_MAX_STEPS,
+  DEFAULT_BUDGET_ESCALATION_MULTIPLIER,
   DEFAULT_CODEX_COMMAND,
   DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
   DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
@@ -75,6 +77,7 @@ export function resolveWorkflowConfig(
   const hardStops = asRecord(config.hard_stops);
   const hardStopOverrides = readHardStopsConfig(hardStops) ?? {};
   const rateLimitAdmission = asRecord(config.rate_limit_admission);
+  const budgetEscalation = asRecord(config.budget_escalation);
   const runner = asRecord(config.runner);
   const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
@@ -189,6 +192,14 @@ export function resolveWorkflowConfig(
       minSecondaryHeadroomPct:
         readPercentPoints(rateLimitAdmission.min_secondary_headroom_pct) ??
         DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT,
+    },
+    budgetEscalation: {
+      maxSteps:
+        readPositiveInteger(budgetEscalation.max_steps) ??
+        DEFAULT_BUDGET_ESCALATION_MAX_STEPS,
+      multiplier:
+        readEscalationMultiplier(budgetEscalation.multiplier) ??
+        DEFAULT_BUDGET_ESCALATION_MULTIPLIER,
     },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,
@@ -435,6 +446,16 @@ function readNonNegativeInteger(value: unknown): number | null {
 function readRatio(value: unknown): number | null {
   const parsed = readNumber(value);
   if (parsed === null || parsed <= 0 || parsed > 1) {
+    return null;
+  }
+
+  return parsed;
+}
+
+// Escalation multipliers must grow the budget but stay sane: (1, 10].
+function readEscalationMultiplier(value: unknown): number | null {
+  const parsed = readNumber(value);
+  if (parsed === null || parsed <= 1 || parsed > 10) {
     return null;
   }
 

@@ -47,6 +47,10 @@ export const DEFAULT_HARD_STOP_MAX_SECONDARY_WINDOW_PCT_PER_UNIT:
 export const DEFAULT_RATE_LIMIT_MIN_PRIMARY_HEADROOM_PCT: number | null = null;
 export const DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT: number | null =
   null;
+// Budget-escalation ladder is opt-in (SYMPH-337): null max_steps keeps every
+// budget pause operator-gated as before.
+export const DEFAULT_BUDGET_ESCALATION_MAX_STEPS: number | null = null;
+export const DEFAULT_BUDGET_ESCALATION_MULTIPLIER = 2;
 
 export const DEFAULT_RUNNER_KIND = "codex";
 export const DEFAULT_CONTINUOUS_FEEDBACK_ENABLED = true;
@@ -113,6 +117,10 @@ export const SPEC_DEFAULTS = Object.freeze({
   rateLimitAdmission: {
     minPrimaryHeadroomPct: DEFAULT_RATE_LIMIT_MIN_PRIMARY_HEADROOM_PCT,
     minSecondaryHeadroomPct: DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT,
+  },
+  budgetEscalation: {
+    maxSteps: DEFAULT_BUDGET_ESCALATION_MAX_STEPS,
+    multiplier: DEFAULT_BUDGET_ESCALATION_MULTIPLIER,
   },
   runner: {
     kind: DEFAULT_RUNNER_KIND,

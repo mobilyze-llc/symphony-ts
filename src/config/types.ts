@@ -71,6 +71,19 @@ export interface WorkflowRateLimitAdmissionConfig {
   minSecondaryHeadroomPct: number | null;
 }
 
+/**
+ * Deterministic budget-escalation ladder (SYMPH-337 slice 1). When a worker
+ * pauses on a budget hard stop, the orchestrator may auto-resume it with a
+ * multiplied unit budget up to maxSteps times per issue. null maxSteps
+ * disables the ladder (default); pauses then park for the operator as
+ * before. Escalated unit budget = base * multiplier^step, so the cumulative
+ * per-issue ceiling is base * (1 + m + m^2 + ...) bounded by maxSteps.
+ */
+export interface WorkflowBudgetEscalationConfig {
+  maxSteps: number | null;
+  multiplier: number;
+}
+
 export interface WorkflowRunnerConfig {
   kind: string;
   model: string | null;
@@ -167,6 +180,7 @@ export interface ResolvedWorkflowConfig {
   agent: WorkflowAgentConfig;
   hardStops?: WorkflowHardStopsConfig;
   rateLimitAdmission: WorkflowRateLimitAdmissionConfig;
+  budgetEscalation: WorkflowBudgetEscalationConfig;
   runner: WorkflowRunnerConfig;
   continuousFeedback?: WorkflowContinuousFeedbackConfig;
   codex: WorkflowCodexConfig;
