@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import packageJson from "../../package.json" with { type: "json" };
 import { renderPrompt } from "../../src/agent/prompt-builder.js";
@@ -122,6 +122,19 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       expect(prompt).toContain(".symphony/validation/");
       expect(prompt).toContain("zsh-safe");
       expect(prompt).toContain("cmd_status=$?");
+      if (
+        promptPath.endsWith(
+          "/pipeline-config/templates/WORKFLOW-template.md",
+        ) ||
+        promptPath.endsWith("/pipeline-config/WORKFLOW-staged.md") ||
+        promptPath.endsWith("/pipeline-config/WORKFLOW-instrumentation.md") ||
+        promptPath.endsWith("/pipeline-config/prompts/investigate.liquid")
+      ) {
+        expect(prompt).toContain("Investigation Token Brake");
+        expect(prompt).toContain("at most 6 shell/tool calls");
+        expect(prompt).toContain("max_output_tokens` of 800 or less");
+        expect(prompt).toContain("latest issue comments/workpad/resume notes");
+      }
       expect(prompt).not.toMatch(/(^|[^A-Za-z0-9_])status=\$\?/);
       expect(prompt).not.toContain("Run `npm test 2>&1`");
       expect(prompt).not.toContain("Do NOT filter or interpret SAST results");
@@ -137,6 +150,78 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(rendered).toContain("broad `rg`");
     expect(rendered).toContain("scripts/symphony-run-logged.mjs");
     expect(rendered).toContain("cmd_status=$?");
+    expect(rendered).not.toContain("Investigation Token Brake");
+
+    const investigateRendered = await renderPrompt({
+      workflow: { promptTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "investigate",
+    });
+    expect(investigateRendered).toContain("Investigation Token Brake");
+    expect(investigateRendered).toContain("at most 6 shell/tool calls");
+    expect(investigateRendered).toContain("max_output_tokens` of 800 or less");
+    expect(investigateRendered).toContain(
+      "latest issue comments/workpad/resume notes",
+    );
+  });
+
+  it("scopes the investigation token brake to rendered investigate prompts", async () => {
+    const primaryWorkflow = await loadWorkflowDefinition(
+      PIPELINE_WORKFLOW_PATH,
+    );
+    const primaryConfig = resolveWorkflowConfig(primaryWorkflow, {
+      LINEAR_API_KEY: "test-token",
+      LINEAR_PROJECT_SLUG: "test-project",
+    });
+    const primaryInvestigatePrompt =
+      primaryConfig.stages?.stages.investigate?.prompt;
+    expect(primaryInvestigatePrompt).toBe("prompts/investigate.liquid");
+    const primaryInvestigateTemplate = await readFile(
+      resolve(dirname(PIPELINE_WORKFLOW_PATH), primaryInvestigatePrompt!),
+      "utf8",
+    );
+    const primaryInvestigateRendered = await renderPrompt({
+      workflow: { promptTemplate: primaryInvestigateTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "investigate",
+    });
+    expect(primaryInvestigateRendered).toContain("Investigation Token Brake");
+    expect(primaryInvestigateRendered).toContain("at most 6 shell/tool calls");
+
+    for (const configPath of [
+      resolve(import.meta.dirname, "../../pipeline-config/WORKFLOW-staged.md"),
+      resolve(
+        import.meta.dirname,
+        "../../pipeline-config/WORKFLOW-instrumentation.md",
+      ),
+      resolve(
+        import.meta.dirname,
+        "../../pipeline-config/templates/WORKFLOW-template.md",
+      ),
+    ]) {
+      const workflowConfig = await loadWorkflowDefinition(configPath);
+      const investigateRendered = await renderPrompt({
+        workflow: { promptTemplate: workflowConfig.promptTemplate },
+        issue: ISSUE_FIXTURE,
+        attempt: null,
+        stageName: "investigate",
+      });
+      expect(investigateRendered).toContain("Investigation Token Brake");
+      expect(investigateRendered).toContain("at most 6 shell/tool calls");
+
+      for (const stageName of ["implement", "review", "merge"]) {
+        const stageRendered = await renderPrompt({
+          workflow: { promptTemplate: workflowConfig.promptTemplate },
+          issue: ISSUE_FIXTURE,
+          attempt: null,
+          stageName,
+        });
+        expect(stageRendered).not.toContain("Investigation Token Brake");
+        expect(stageRendered).not.toContain("at most 6 shell/tool calls");
+      }
+    }
   });
 
   it("keeps the primary review gate stall budget above the council timeout", async () => {
