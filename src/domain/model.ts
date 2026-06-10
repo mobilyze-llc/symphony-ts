@@ -698,6 +698,7 @@ export interface LiveSession {
   turnHistory: TurnHistoryEntry[];
   recentActivity: RecentActivityEntry[];
   tokenTelemetry: TokenTelemetryEntry[];
+  tokenTelemetryObservedCount: number;
   codexSessionLogs: CodexSessionLogEntry[];
 }
 
@@ -960,6 +961,7 @@ export function createEmptyLiveSession(): LiveSession {
     turnHistory: [],
     recentActivity: [],
     tokenTelemetry: [],
+    tokenTelemetryObservedCount: 0,
     codexSessionLogs: [],
   };
 }

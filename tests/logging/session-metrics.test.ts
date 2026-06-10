@@ -198,6 +198,7 @@ describe("session metrics", () => {
         cacheReadTokensDelta: 4,
       }),
     ]);
+    expect(running.tokenTelemetryObservedCount).toBe(2);
   });
 
   it("records preserved Codex session artifacts on live sessions", () => {

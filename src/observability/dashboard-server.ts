@@ -86,7 +86,10 @@ export interface IssueDetailRunningState {
     reasoning_tokens_delta: number;
   }>;
   token_telemetry_total_entries?: number;
+  token_telemetry_retained_entries?: number;
+  token_telemetry_observed_entries?: number;
   token_telemetry_truncated?: boolean;
+  token_telemetry_retention_truncated?: boolean;
 }
 
 export interface IssueDetailRetryState {
