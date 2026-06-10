@@ -321,6 +321,39 @@ describe("writeTrackerIssueFromBoundary", () => {
       }),
     );
   });
+
+  it("fails closed before label resolution when the source issue lacks a team key", async () => {
+    const onFailure = vi.fn();
+    const client = createClient({
+      sourceIssues: [createSourceIssue({ teamKey: null })],
+    });
+
+    await expect(
+      writeTrackerIssueFromBoundary({
+        client,
+        request: createRequest(),
+        terminalStates: ["Done", "Canceled"],
+        onFailure,
+      }),
+    ).rejects.toThrow(
+      "Tracker write source issue ISSUE-1 is missing team/project context.",
+    );
+
+    expect(client.resolveLabelIdsByNames).not.toHaveBeenCalled();
+    expect(client.createIssue).not.toHaveBeenCalled();
+    expect(client.updateIssue).not.toHaveBeenCalled();
+    expect(onFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title:
+          "Dispatcher follow-up: actual_write_collision for ISSUE-1 + ISSUE-2",
+        sourceIssueIds: ["1", "2"],
+        error: expect.objectContaining({
+          message:
+            "Tracker write source issue ISSUE-1 is missing team/project context.",
+        }),
+      }),
+    );
+  });
 });
 
 function createClient(overrides?: {

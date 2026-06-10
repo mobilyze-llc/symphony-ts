@@ -494,6 +494,35 @@ describe("resolveLabelIdsByNames", () => {
       }),
     );
   });
+
+  it("includes sanitized operation context and returned errors on GraphQL top-level errors", async () => {
+    const graphqlErrors = [
+      {
+        message: "Argument Validation Error",
+        extensions: { code: "INVALID_INPUT" },
+      },
+    ];
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse({ errors: graphqlErrors }));
+    const client = createClient({ fetchFn });
+
+    await expect(
+      client.resolveLabelIdsByNames(["supervision"], "SYMPH"),
+    ).rejects.toThrow(
+      expect.objectContaining<Partial<TrackerError>>({
+        code: ERROR_CODES.linearGraphqlErrors,
+        details: {
+          operationName: "SymphonyIssueLabelsByNames",
+          variables: {
+            teamKey: "SYMPH",
+            labelNames: ["supervision"],
+          },
+          errors: graphqlErrors,
+        },
+      }),
+    );
+  });
 });
 
 function createClient(
