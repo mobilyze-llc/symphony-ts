@@ -66,12 +66,17 @@ export function isPauseTriageConfigured(
 
 const DEFAULT_TRIAGE_TIMEOUT_MS = 30_000;
 
-// Node's Happy-Eyeballs autoselection gives each connection attempt 250ms
-// by default — less than the observed RTT to the operator's LAN endpoint
-// (~390ms over the mesh), so every fetch died with "Cannot connect to API"
-// while curl succeeded (first live triage attempt, SYMPH-330 2026-06-10).
-// Raise the per-attempt budget once, process-wide; strictly more tolerant
-// for every outbound socket and a no-op on fast paths.
+// Node's Happy-Eyeballs autoselection gives each address family's TCP
+// handshake 250ms before interleaving to the next family. Handshakes to
+// the operator's mesh LAN endpoint take longer than that for BOTH
+// families, so every attempt died pre-SYN-ACK ("Cannot connect to API")
+// while curl, with no such per-family budget, succeeded (first live
+// triage attempt, SYMPH-330 2026-06-10). Raising the budget is
+// PROCESS-WIDE (node:net global): every fresh outbound handshake in the
+// orchestrator — including Linear API calls — waits up to 2s before
+// family fallback instead of 250ms. Bounded by per-request timeouts and
+// only observable when a family is unreachable; scoping per-request
+// would require depending on undici directly.
 let networkTimeoutApplied = false;
 function ensureLanTolerantNetworking(): void {
   if (networkTimeoutApplied) {
