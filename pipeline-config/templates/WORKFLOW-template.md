@@ -60,6 +60,17 @@ budget_escalation:
   max_steps: 2
   multiplier: 2
 
+# SYMPH-337 slice 2: LLM pause triage on the operator's local model (zero
+# marginal cost; never consumes the Codex window it adjudicates). Consulted
+# only when the ladder declines a budget pause; a continue verdict grants
+# ONE continuation at the current ceiling, bounded by max_resumes per issue.
+# Any endpoint/schema failure parks for the operator (fail closed).
+pause_triage:
+  base_url: http://studio2.local:8000/v1
+  model: deepseek-v4-flash
+  api_key: $LOCAL_LLM_API_KEY
+  max_resumes: 2
+
 codex:
   command: codex --disable plugins --disable hooks --disable plugin_hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use --disable multi_agent --disable goals --disable memories --disable tool_call_mcp_elicitation --config 'model_reasoning_effort="low"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server
   ephemeral_home: true

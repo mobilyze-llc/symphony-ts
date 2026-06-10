@@ -84,6 +84,21 @@ export interface WorkflowBudgetEscalationConfig {
   multiplier: number;
 }
 
+/**
+ * LLM pause triage (SYMPH-337 slice 2). When a budget pause survives the
+ * deterministic escalation ladder, a local OpenAI-compatible model renders a
+ * structured continue/split/hold verdict over harness-digested evidence.
+ * Disabled unless baseUrl and model are both set; any endpoint or schema
+ * failure fails closed to the operator pause. maxResumes bounds how many
+ * triage-authorized continuations one issue may receive.
+ */
+export interface WorkflowPauseTriageConfig {
+  baseUrl: string | null;
+  model: string | null;
+  apiKey: string | null;
+  maxResumes: number;
+}
+
 export interface WorkflowRunnerConfig {
   kind: string;
   model: string | null;
@@ -181,6 +196,7 @@ export interface ResolvedWorkflowConfig {
   hardStops?: WorkflowHardStopsConfig;
   rateLimitAdmission: WorkflowRateLimitAdmissionConfig;
   budgetEscalation: WorkflowBudgetEscalationConfig;
+  pauseTriage: WorkflowPauseTriageConfig;
   runner: WorkflowRunnerConfig;
   continuousFeedback?: WorkflowContinuousFeedbackConfig;
   codex: WorkflowCodexConfig;

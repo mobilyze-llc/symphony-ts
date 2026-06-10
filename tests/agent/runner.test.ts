@@ -2071,6 +2071,12 @@ function createConfig(root: string, scenario: string): ResolvedWorkflowConfig {
       readTimeoutMs: 1_000,
       stallTimeoutMs: 2_000,
     },
+    pauseTriage: {
+      baseUrl: null,
+      model: null,
+      apiKey: null,
+      maxResumes: 2,
+    },
     budgetEscalation: {
       maxSteps: null,
       multiplier: 2,
