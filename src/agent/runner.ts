@@ -396,11 +396,16 @@ export class AgentRunner {
                 : { modePolicy: factoryInput.modePolicy }),
             })
         : this.createCodexClient;
-      // Workspaces are git worktrees: branch/index/ref writes land in the
-      // shared bare clone OUTSIDE the workspace cwd. Without this the
-      // sandbox lets a worker finish the diff but never commit or open a
-      // PR (SYMPH-353).
-      const gitMetadataRoot = join(this.config.workspace.root, ".bare-clones");
+      // Workspaces are git worktrees: branch/index/ref writes land in this
+      // product's shared bare clone OUTSIDE the workspace cwd. Without this
+      // the sandbox lets a worker finish the diff but never commit or open
+      // a PR (SYMPH-353). Scope the grant to THIS repo's bare clone via the
+      // worktree's gitdir pointer; per-issue scoping is impossible (branch
+      // refs and objects are repo-shared by git's design).
+      const gitMetadataRoot = await resolveGitMetadataRoot(
+        workspace.path,
+        this.config.workspace.root,
+      );
       client = effectiveClientFactory({
         command: this.config.codex.command,
         ephemeralHome: this.config.codex.ephemeralHome === true,
@@ -1327,6 +1332,36 @@ function createProgressSignature(issue: Issue, turn: CodexTurnResult): string {
 // Escalated units (SYMPH-337) widen the per-unit token and dollar budgets;
 // iteration/no-progress caps and pricing inputs stay fixed.
 /**
+ * Resolve the git metadata directory the turn sandbox must be allowed to
+ * write (SYMPH-353). Worktree workspaces carry a `.git` FILE pointing at
+ * `<bare-clone>/worktrees/<id>` — the grant is scoped to that repo's bare
+ * clone. Full clones (`.git` directory) need no extra root: the metadata
+ * lives inside the workspace. Unparseable layouts fall back to the
+ * product's `.bare-clones` parent so commits keep working.
+ */
+async function resolveGitMetadataRoot(
+  workspacePath: string,
+  workspaceRoot: string,
+): Promise<string> {
+  const fallback = join(workspaceRoot, ".bare-clones");
+  try {
+    const pointer = await readFile(join(workspacePath, ".git"), "utf8");
+    const match = pointer.match(/^gitdir:\s*(.+)\s*$/m);
+    if (match?.[1] !== undefined) {
+      const gitdir = normalize(match[1].trim());
+      const marker = `${sep}worktrees${sep}`;
+      const markerIndex = gitdir.lastIndexOf(marker);
+      if (markerIndex > 0) {
+        return gitdir.slice(0, markerIndex);
+      }
+    }
+  } catch {
+    // `.git` is a directory (full clone) or unreadable — fall through.
+  }
+  return fallback;
+}
+
+/**
  * Append the shared git-metadata root to a workspace-write sandbox policy
  * (SYMPH-353). String policies are expanded to object form; object policies
  * keep their other fields (the client reads camelCase before snake_case).
@@ -1353,19 +1388,35 @@ export function augmentWorkspaceWriteSandbox(
     return value;
   }
 
+  const isStringArray = (candidate: unknown): candidate is string[] =>
+    Array.isArray(candidate) &&
+    candidate.every((entry) => typeof entry === "string");
   const existing = [record.writableRoots, record.writable_roots].find(
-    (candidate): candidate is string[] =>
-      Array.isArray(candidate) &&
-      candidate.every((entry) => typeof entry === "string"),
+    isStringArray,
   );
+  for (const [key, candidate] of [
+    ["writableRoots", record.writableRoots],
+    ["writable_roots", record.writable_roots],
+  ] as const) {
+    if (candidate !== undefined && !isStringArray(candidate)) {
+      // The client normalizer would silently drop this too — at least say so.
+      console.warn(
+        `[agent-runner] sandbox policy ${key} is not a string array; ignoring it`,
+      );
+    }
+  }
   const roots = existing ?? [];
   if (roots.includes(extraRoot)) {
     return value;
   }
 
-  // Rebuild without any stale snake_case duplicate that could shadow the
-  // augmented camelCase list in the client's alias reader.
-  const { writable_roots: _staleSnakeRoots, ...rest } = record;
+  // Rebuild without either original key so neither a stale snake_case
+  // duplicate nor a malformed camelCase value survives the spread.
+  const {
+    writable_roots: _staleSnakeRoots,
+    writableRoots: _staleCamelRoots,
+    ...rest
+  } = record;
   return {
     ...rest,
     writableRoots: [...roots, extraRoot],

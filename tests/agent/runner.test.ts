@@ -2256,6 +2256,42 @@ describe("augmentWorkspaceWriteSandbox (SYMPH-353)", () => {
     });
   });
 
+  it("handles the bare mode-policy shape, frozen objects, and malformed roots", () => {
+    // Most common shape from mode-scoped policies: no roots fields at all.
+    expect(
+      augmentWorkspaceWriteSandbox(
+        { type: "workspace-write", networkAccess: false },
+        ROOT,
+      ),
+    ).toEqual({
+      type: "workspace-write",
+      networkAccess: false,
+      writableRoots: [ROOT],
+    });
+
+    // Frozen input objects are never mutated.
+    const frozen = Object.freeze({
+      type: "workspace-write",
+      writable_roots: Object.freeze(["/x"]) as unknown as string[],
+    });
+    expect(augmentWorkspaceWriteSandbox(frozen, ROOT)).toEqual({
+      type: "workspace-write",
+      writableRoots: ["/x", ROOT],
+    });
+    expect(frozen).toEqual({ type: "workspace-write", writable_roots: ["/x"] });
+
+    // Malformed camelCase roots are warned about and rebuilt away.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(
+      augmentWorkspaceWriteSandbox(
+        { type: "workspace-write", writableRoots: "/not-an-array" },
+        ROOT,
+      ),
+    ).toEqual({ type: "workspace-write", writableRoots: [ROOT] });
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
   it("is idempotent and leaves non-workspace-write policies untouched", () => {
     const augmented = augmentWorkspaceWriteSandbox(
       { type: "workspace-write", writableRoots: [ROOT] },
