@@ -24,6 +24,7 @@ import {
 import { createLinearGraphqlDynamicTool } from "../../src/codex/linear-graphql-tool.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 import { createModeScopedPermissionPolicy } from "../../src/policy/hard-stops.js";
+import { getDefaultCodexSessionArtifactDirectory } from "../../src/shared/codex-session-artifacts.js";
 
 const roots: string[] = [];
 const clients: CodexAppServerClient[] = [];
@@ -209,6 +210,44 @@ describe("CodexAppServerClient", () => {
         '"total_tokens":15',
       );
       await expect(access(artifact?.sourcePath ?? "")).rejects.toThrow();
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("uses the shared default artifact directory when no override is provided", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const client = createClient("session-artifact", workspace, events, {
+        ephemeralHome: true,
+      });
+
+      const result = await client.startSession({
+        prompt: "Preserve session telemetry in the default artifact directory",
+        title: "ABC-123: Example",
+      });
+
+      expect(result.status).toBe("completed");
+      await client.close();
+
+      const artifact = events.find(
+        (event) => event.event === "session_artifact_saved",
+      )?.artifacts?.[0];
+      const expectedRoot = getDefaultCodexSessionArtifactDirectory(workspace);
+      expect(artifact?.path.startsWith(expectedRoot)).toBe(true);
+      await expect(readFile(artifact?.path ?? "", "utf8")).resolves.toContain(
+        '"total_tokens":15',
+      );
     } finally {
       if (previousCodexHome === undefined) {
         Reflect.deleteProperty(process.env, "CODEX_HOME");

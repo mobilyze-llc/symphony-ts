@@ -23,6 +23,7 @@ import {
   type AgentRunnerError,
   WorkspaceHookError,
 } from "../../src/index.js";
+import { getDefaultCodexSessionArtifactDirectory } from "../../src/shared/codex-session-artifacts.js";
 import type {
   IssueStateSnapshot,
   IssueTracker,
@@ -671,6 +672,10 @@ describe("AgentRunner", () => {
       threadSandbox: "workspace-write",
       turnSandboxPolicy: { type: "workspace-write", networkAccess: false },
     });
+    const workspacePath = join(root, ISSUE_FIXTURE.id);
+    expect(factoryInputs[0]?.artifactDirectory).toBe(
+      getDefaultCodexSessionArtifactDirectory(workspacePath),
+    );
     expect(prompts[0]).toContain("## Mode Permission Envelope");
     expect(prompts[0]).toContain("Mode: prototype");
     expect(prompts[0]).toContain("Pull requests: denied");
