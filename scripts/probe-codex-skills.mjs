@@ -13,11 +13,16 @@
  *   clean  probe against an empty source home (only built-in system skills)
  *
  * Usage:
- *   pnpm probe:codex-skills [-- --workflow <path>] [--mode real|clean|both] [--keep]
+ *   pnpm probe:codex-skills [-- --workflow <path>] [--mode real|clean|both] [--keep] [--ci-smoke]
  *
  * Requires a local authed `codex` CLI and a fresh `pnpm build`. Not part of
  * `pnpm test`: this intentionally exercises the real Codex binary so it can
  * catch Codex-version drift in skill discovery (run it after Codex upgrades).
+ *
+ * `--ci-smoke` is intentionally lighter: it uses a clean source home and dummy
+ * auth, exits 0 with an explicit warning when `codex` is unavailable, and
+ * exists to catch misspelled live CLI `--disable` tokens or `[features]` keys.
+ * Local verification: `pnpm build && pnpm smoke:codex-headless`.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -33,6 +38,7 @@ function parseArgs(argv) {
     workflow: join(repoRoot, "pipeline-config", "WORKFLOW.md"),
     mode: "both",
     keep: false,
+    ciSmoke: false,
   };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--workflow" && i + 1 < argv.length) {
@@ -41,6 +47,8 @@ function parseArgs(argv) {
       args.mode = argv[++i];
     } else if (argv[i] === "--keep") {
       args.keep = true;
+    } else if (argv[i] === "--ci-smoke") {
+      args.ciSmoke = true;
     } else {
       console.error(`Unknown argument: ${argv[i]}`);
       process.exit(2);
@@ -49,6 +57,9 @@ function parseArgs(argv) {
   if (!["real", "clean", "both"].includes(args.mode)) {
     console.error(`--mode must be real, clean, or both (got ${args.mode})`);
     process.exit(2);
+  }
+  if (args.ciSmoke) {
+    args.mode = "clean";
   }
   return args;
 }
@@ -89,10 +100,14 @@ function probeCommandFrom(workerCommand) {
 async function buildEphemeralHome(input) {
   const sourceAuth = join(input.authSourceHome, "auth.json");
   if (!existsSync(sourceAuth)) {
-    console.error(
-      `No readable auth.json at ${sourceAuth} — the probe mirrors production, which symlinks operator auth into the ephemeral home.`,
-    );
-    process.exit(2);
+    if (input.dummyAuth === true) {
+      await writeFile(sourceAuth, "{}\n");
+    } else {
+      console.error(
+        `No readable auth.json at ${sourceAuth} — the probe mirrors production, which symlinks operator auth into the ephemeral home.`,
+      );
+      process.exit(2);
+    }
   }
   const codexHome = await mkdtemp(
     join(tmpdir(), "symphony-codex-skills-probe-"),
@@ -170,6 +185,12 @@ const {
 
 const codexVersion = spawnSync("codex", ["--version"], { encoding: "utf8" });
 if (codexVersion.error !== undefined || codexVersion.status !== 0) {
+  if (args.ciSmoke) {
+    console.log(
+      "::warning::codex binary not found on PATH; skipped live Codex headless feature-flag smoke. Local verification: pnpm build && pnpm smoke:codex-headless",
+    );
+    process.exit(0);
+  }
   console.error(
     "codex binary not found on PATH — this probe needs a local Codex CLI.",
   );
@@ -182,6 +203,11 @@ const resolved = resolveWorkflowConfig(workflow);
 const probeCommand = probeCommandFrom(resolved.codex.command);
 console.log(`workflow: ${args.workflow}`);
 console.log(`probe command: ${probeCommand}`);
+if (args.ciSmoke) {
+  console.log(
+    "CI smoke: validating shipped headless Codex command/config against the installed Codex CLI. Local verification: pnpm build && pnpm smoke:codex-headless",
+  );
+}
 
 const operatorHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
 const scratch = [];
@@ -210,10 +236,11 @@ try {
     scratch.push(emptySourceHome, emptyCwd);
     const home = await buildEphemeralHome({
       sourceHome: emptySourceHome,
-      authSourceHome: operatorHome,
+      authSourceHome: args.ciSmoke ? emptySourceHome : operatorHome,
       cwd: emptyCwd,
       prepareDisabledSkillsConfig,
       scratch,
+      dummyAuth: args.ciSmoke,
     });
     allPassed =
       evaluate("clean", runProbe(probeCommand, home, emptyCwd)) && allPassed;
