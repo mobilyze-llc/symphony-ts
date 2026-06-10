@@ -25,6 +25,7 @@ import {
   type AgentRunnerCodexClientFactoryInput,
   type AgentRunnerError,
   WorkspaceHookError,
+  augmentWorkspaceWriteSandbox,
 } from "../../src/index.js";
 import type {
   IssueStateSnapshot,
@@ -2221,5 +2222,90 @@ describe("Agent runner startup diagnostics", () => {
     } finally {
       console.warn = origWarn;
     }
+  });
+});
+
+describe("augmentWorkspaceWriteSandbox (SYMPH-353)", () => {
+  const ROOT = "/srv/workspaces/.bare-clones";
+
+  it("expands string workspace-write policies with the git metadata root", () => {
+    expect(augmentWorkspaceWriteSandbox("workspace-write", ROOT)).toEqual({
+      type: "workspace-write",
+      writableRoots: [ROOT],
+    });
+    expect(augmentWorkspaceWriteSandbox("workspaceWrite", ROOT)).toEqual({
+      type: "workspace-write",
+      writableRoots: [ROOT],
+    });
+  });
+
+  it("appends to object policies preserving other fields and existing roots", () => {
+    expect(
+      augmentWorkspaceWriteSandbox(
+        {
+          type: "workspace-write",
+          network_access: true,
+          writable_roots: ["/extra"],
+        },
+        ROOT,
+      ),
+    ).toEqual({
+      type: "workspace-write",
+      network_access: true,
+      writableRoots: ["/extra", ROOT],
+    });
+  });
+
+  it("handles the bare mode-policy shape, frozen objects, and malformed roots", () => {
+    // Most common shape from mode-scoped policies: no roots fields at all.
+    expect(
+      augmentWorkspaceWriteSandbox(
+        { type: "workspace-write", networkAccess: false },
+        ROOT,
+      ),
+    ).toEqual({
+      type: "workspace-write",
+      networkAccess: false,
+      writableRoots: [ROOT],
+    });
+
+    // Frozen input objects are never mutated.
+    const frozen = Object.freeze({
+      type: "workspace-write",
+      writable_roots: Object.freeze(["/x"]) as unknown as string[],
+    });
+    expect(augmentWorkspaceWriteSandbox(frozen, ROOT)).toEqual({
+      type: "workspace-write",
+      writableRoots: ["/x", ROOT],
+    });
+    expect(frozen).toEqual({ type: "workspace-write", writable_roots: ["/x"] });
+
+    // Malformed camelCase roots are warned about and rebuilt away.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(
+      augmentWorkspaceWriteSandbox(
+        { type: "workspace-write", writableRoots: "/not-an-array" },
+        ROOT,
+      ),
+    ).toEqual({ type: "workspace-write", writableRoots: [ROOT] });
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
+  });
+
+  it("is idempotent and leaves non-workspace-write policies untouched", () => {
+    const augmented = augmentWorkspaceWriteSandbox(
+      { type: "workspace-write", writableRoots: [ROOT] },
+      ROOT,
+    );
+    expect(augmented).toEqual({
+      type: "workspace-write",
+      writableRoots: [ROOT],
+    });
+
+    expect(augmentWorkspaceWriteSandbox("read-only", ROOT)).toBe("read-only");
+    expect(
+      augmentWorkspaceWriteSandbox({ type: "dangerFullAccess" }, ROOT),
+    ).toEqual({ type: "dangerFullAccess" });
+    expect(augmentWorkspaceWriteSandbox(null, ROOT)).toBeNull();
   });
 });
