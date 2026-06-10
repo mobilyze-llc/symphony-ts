@@ -14,3 +14,4 @@ pipeline-config/workspaces/
 # Agent scratch artifacts belong in Linear issues/docs, not repo roots.
 /workpad.md
 /INVESTIGATION-BRIEF.md
+.herenow/

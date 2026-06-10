@@ -176,6 +176,14 @@ interface ActiveTurn {
   readonly reject: (error: Error) => void;
   readonly timeout: NodeJS.Timeout;
   stallTimer: NodeJS.Timeout | null;
+  /**
+   * Last completed agent-message text streamed during this turn
+   * (item/completed notifications). The real app-server's turn/completed
+   * payload carries no agent message, so this is the only reliable source
+   * for the turn's final message — losing it broke the [STAGE_COMPLETE]
+   * early-exit and burned budgets past completion (SYMPH-350).
+   */
+  lastAgentMessage: string | null;
 }
 
 export class CodexAppServerClient {
@@ -663,6 +671,7 @@ export class CodexAppServerClient {
         reject,
         timeout,
         stallTimer: null,
+        lastAgentMessage: null,
       };
 
       this.currentTurn = activeTurn;
@@ -725,6 +734,10 @@ export class CodexAppServerClient {
 
     if (this.currentTurn !== null) {
       this.bumpStallTimer(this.currentTurn);
+      const agentMessage = extractCompletedAgentMessageText(parsed);
+      if (agentMessage !== null) {
+        this.currentTurn.lastAgentMessage = agentMessage;
+      }
     }
 
     const responseId = normalizeJsonRpcId(parsed.id);
@@ -982,7 +995,9 @@ export class CodexAppServerClient {
       sessionId: activeTurn.sessionId,
       usage: usage ?? this.lastUsage,
       rateLimits: rateLimits ?? this.lastRateLimits,
-      message: extractTurnMessage(raw),
+      // turn/completed carries no agent message on the real app-server;
+      // fall back to the last streamed agent-message item (SYMPH-350).
+      message: extractTurnMessage(raw) ?? activeTurn.lastAgentMessage,
     };
 
     this.emit({
@@ -2119,6 +2134,66 @@ function extractRateLimits(
     }
   }
   return null;
+}
+
+/**
+ * Extract the text of a completed agent-message item from an
+ * `item/completed` notification (codex-cli 0.135 protocol: agent text
+ * streams via item notifications, never on turn/completed — SYMPH-350).
+ * Tolerant of camelCase and snake_case item types and text aliases.
+ */
+function extractCompletedAgentMessageText(message: JsonObject): string | null {
+  if (message.method !== "item/completed") {
+    return null;
+  }
+
+  const params = asJsonObject(message.params);
+  const item = asJsonObject(params?.item);
+  if (item === null) {
+    return null;
+  }
+
+  const itemType =
+    typeof item.type === "string"
+      ? item.type
+      : typeof item.itemType === "string"
+        ? item.itemType
+        : typeof item.item_type === "string"
+          ? item.item_type
+          : null;
+  if (itemType !== "agentMessage" && itemType !== "agent_message") {
+    return null;
+  }
+
+  for (const alias of ["text", "message"]) {
+    const value = item[alias];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value;
+    }
+  }
+
+  if (Array.isArray(item.content)) {
+    const joined = item.content
+      .map((entry) => {
+        const record = asJsonObject(entry);
+        return record !== null && typeof record.text === "string"
+          ? record.text
+          : "";
+      })
+      .join("");
+    if (joined.trim().length > 0) {
+      return joined;
+    }
+  }
+
+  return null;
+}
+
+function asJsonObject(value: unknown): JsonObject | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as JsonObject;
 }
 
 function extractTurnMessage(message: JsonObject): string | null {
