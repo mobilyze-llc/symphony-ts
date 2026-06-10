@@ -2056,7 +2056,12 @@ function extractExtendedTokenFields(
   const cacheRead =
     asFiniteNumber(value.cacheReadTokens) ??
     asFiniteNumber(value.cache_read_tokens) ??
-    asFiniteNumber(value.cache_read_input_tokens);
+    asFiniteNumber(value.cache_read_input_tokens) ??
+    // Codex app-server usage objects report the cached share as
+    // cached_input_tokens (camelCase in v2 notifications). Without these
+    // aliases the cache-aware budget discount never engages for codex runs.
+    asFiniteNumber(value.cachedInputTokens) ??
+    asFiniteNumber(value.cached_input_tokens);
   if (cacheRead !== null) {
     result.cacheReadTokens = cacheRead;
   }
@@ -2078,7 +2083,9 @@ function extractExtendedTokenFields(
 
   const reasoning =
     asFiniteNumber(value.reasoningTokens) ??
-    asFiniteNumber(value.reasoning_tokens);
+    asFiniteNumber(value.reasoning_tokens) ??
+    asFiniteNumber(value.reasoningOutputTokens) ??
+    asFiniteNumber(value.reasoning_output_tokens);
   if (reasoning !== null) {
     result.reasoningTokens = reasoning;
   }

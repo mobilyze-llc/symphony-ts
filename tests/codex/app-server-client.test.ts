@@ -883,6 +883,38 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
+  it("extracts the codex cached_input_tokens share into cacheReadTokens", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("codex-cached-usage", workspace, events);
+
+    const result = await client.startSession({
+      prompt: "Report cached usage",
+      title: "ABC-123: Example",
+    });
+
+    // Canary-shaped payload (SYMPH-319): without the cached_input_tokens /
+    // cachedInputTokens aliases the budget discount never engages and the
+    // worker is charged full rate for a 68%-cached turn.
+    expect(result.status).toBe("completed");
+    expect(result.usage).toMatchObject({
+      inputTokens: 81831,
+      outputTokens: 681,
+      totalTokens: 82512,
+      cacheReadTokens: 56064,
+      reasoningTokens: 12,
+    });
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        usage: expect.objectContaining({
+          cacheReadTokens: 56064,
+        }),
+      }),
+    );
+
+    await client.close();
+  });
+
   it("does not attach cached usage to non-telemetry notifications", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];
