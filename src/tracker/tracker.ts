@@ -8,6 +8,16 @@ export interface IssueStateSnapshot {
 
 export interface IssueTracker {
   fetchCandidateIssues(): Promise<Issue[]>;
+  /**
+   * Timestamp (ISO) of the most recent transition INTO the named state, or
+   * null when no such transition is visible. Optional: trackers without
+   * history support leave the resume guard on observation-only semantics
+   * (SYMPH-291).
+   */
+  fetchLatestStateTransitionAt?(
+    issueId: string,
+    stateName: string,
+  ): Promise<string | null>;
   fetchIssuesByStates(stateNames: string[]): Promise<Issue[]>;
   fetchIssueStatesByIds(issueIds: string[]): Promise<IssueStateSnapshot[]>;
   fetchIssuesByLabels?(labelNames: string[]): Promise<Issue[]>;

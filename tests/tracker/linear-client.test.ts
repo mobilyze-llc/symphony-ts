@@ -271,6 +271,76 @@ describe("fetchParent", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
   });
 
+  it("returns the newest transition into the requested state from issue history", async () => {
+    const mockFetch = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issue: {
+            history: {
+              nodes: [
+                {
+                  createdAt: "2026-06-10T22:00:00.000Z",
+                  toState: { name: "Blocked" },
+                },
+                {
+                  createdAt: "2026-06-10T22:05:00.000Z",
+                  toState: { name: "resume" },
+                },
+                {
+                  createdAt: "2026-06-10T22:30:00.000Z",
+                  toState: { name: "Resume" },
+                },
+                { createdAt: "not-a-date", toState: { name: "Resume" } },
+                { createdAt: "2026-06-10T23:00:00.000Z", toState: null },
+                { createdAt: "2026-06-10T21:00:00.000Z" },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn: mockFetch });
+
+    const result = await client.fetchLatestStateTransitionAt(
+      "issue-1",
+      "Resume",
+    );
+
+    // Case-insensitive state match; malformed nodes skipped; newest wins.
+    expect(result).toBe("2026-06-10T22:30:00.000Z");
+  });
+
+  it("returns null when the issue has no visible transitions into the state", async () => {
+    const mockFetch = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issue: {
+            history: {
+              nodes: [
+                {
+                  createdAt: "2026-06-10T22:00:00.000Z",
+                  toState: { name: "Blocked" },
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn: mockFetch });
+    expect(
+      await client.fetchLatestStateTransitionAt("issue-1", "Resume"),
+    ).toBeNull();
+
+    const emptyFetch = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse({ data: { issue: null } }));
+    const emptyClient = createClient({ fetchFn: emptyFetch });
+    expect(
+      await emptyClient.fetchLatestStateTransitionAt("issue-1", "Resume"),
+    ).toBeNull();
+  });
+
   it("returns cached data on cache hit without making a GraphQL call", async () => {
     const mockFetch = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({

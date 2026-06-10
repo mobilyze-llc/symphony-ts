@@ -99,6 +99,8 @@ const EXPLICIT_RESUME_STATE = "resume";
 interface ResumeRequiredGuard {
   pausedState: string | null;
   observedNonResumeState: boolean;
+  /** When the pause was recorded — tracker resume evidence must be newer. */
+  pausedAt: string | null;
 }
 
 export type WorkerExitOutcome =
@@ -402,6 +404,7 @@ export class OrchestratorCore {
         this.markIssueRequiresExplicitResume(
           entry.issueId,
           readMetadataString(entry.metadata, "issueState"),
+          entry.timestamp,
         );
       }
 
@@ -459,6 +462,7 @@ export class OrchestratorCore {
       this.markIssueRequiresExplicitResume(
         entry.issueId,
         readMetadataString(entry.metadata, "issueState"),
+        entry.timestamp,
       );
     }
   }
@@ -675,6 +679,8 @@ export class OrchestratorCore {
         runningCount: Object.keys(this.state.running).length,
       };
     }
+
+    await this.applyTrackerResumeEvidence(issues);
 
     // Check for pipeline-halt before dispatching
     const haltIssue = await this.checkPipelineHalt();
@@ -947,7 +953,7 @@ export class OrchestratorCore {
       `Budget escalation step ${nextStep}/${ladder.maxSteps}: auto-resuming with a ${nextMultiplier}x unit budget.`,
       `Trigger: ${hardStop.trigger}`,
       `Reason: ${hardStop.reason}`,
-      `Unit spend at pause: ${hardStop.billableTokens ?? hardStop.totalTokens} billable tokens (raw ${hardStop.totalTokens}), ~$${hardStop.estimatedCostUsd.toFixed(2)}.`,
+      `Unit spend at pause: ${hardStop.totalTokens} tokens, ~$${hardStop.estimatedCostUsd.toFixed(2)}.`,
     ].join("\n");
     try {
       await this.postComment?.(issueId, comment);
@@ -2408,14 +2414,16 @@ export class OrchestratorCore {
   private markIssueRequiresExplicitResume(
     issueId: string,
     issueState?: string | null,
+    pausedAt?: string | null,
   ): void {
-    this.recordIssueRequiresExplicitResume(issueId, issueState);
+    this.recordIssueRequiresExplicitResume(issueId, issueState, pausedAt);
     this.releaseClaim(issueId);
   }
 
   private recordIssueRequiresExplicitResume(
     issueId: string,
     issueState?: string | null,
+    pausedAt?: string | null,
   ): void {
     this.state.resumeRequired.add(issueId);
     const pausedState =
@@ -2428,6 +2436,7 @@ export class OrchestratorCore {
       observedNonResumeState:
         existingGuard?.observedNonResumeState === true ||
         pausedState !== EXPLICIT_RESUME_STATE,
+      pausedAt: pausedAt ?? this.now().toISOString(),
     });
   }
 
@@ -2453,6 +2462,55 @@ export class OrchestratorCore {
       ...guard,
       observedNonResumeState: true,
     });
+  }
+
+  /**
+   * SYMPH-291: a pause recorded while the issue was already IN Resume can
+   * never be cleared by observation — Blocked is invisible to candidate
+   * polls, and journal replay re-creates the wedged guard after restarts.
+   * When the tracker exposes state history, an operator transition INTO
+   * Resume that is newer than the pause is accepted as explicit resume
+   * evidence. Evidence failures leave the issue parked (fail closed).
+   */
+  private async applyTrackerResumeEvidence(issues: Issue[]): Promise<void> {
+    const fetchTransition = this.tracker.fetchLatestStateTransitionAt?.bind(
+      this.tracker,
+    );
+    if (fetchTransition === undefined) {
+      return;
+    }
+
+    for (const issue of issues) {
+      if (!this.state.resumeRequired.has(issue.id)) {
+        continue;
+      }
+      const guard = this.resumeRequiredGuards.get(issue.id);
+      if (
+        guard === undefined ||
+        guard.observedNonResumeState ||
+        guard.pausedState !== EXPLICIT_RESUME_STATE ||
+        guard.pausedAt === null ||
+        normalizeIssueState(issue.state) !== EXPLICIT_RESUME_STATE
+      ) {
+        continue;
+      }
+
+      try {
+        const transitionAt = await fetchTransition(issue.id, "Resume");
+        if (
+          transitionAt !== null &&
+          Date.parse(transitionAt) > Date.parse(guard.pausedAt)
+        ) {
+          this.resumeRequiredGuards.set(issue.id, {
+            ...guard,
+            observedNonResumeState: true,
+          });
+        }
+      } catch {
+        // Tracker history unavailable; the issue stays parked until the
+        // next poll retries the lookup or the operator dances states.
+      }
+    }
   }
 
   private canConsumeResumeRequirement(

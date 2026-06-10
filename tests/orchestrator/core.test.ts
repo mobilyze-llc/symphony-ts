@@ -1697,6 +1697,128 @@ describe("orchestrator core", () => {
     expect(gated.getState().resumeRequired.has("1")).toBe(true);
   });
 
+  it("admits a wedged Resume pause when the tracker shows a newer transition into Resume", async () => {
+    const transitionCalls: Array<{ issueId: string; stateName: string }> = [];
+    let transitionAt: string | null = null;
+    const spawns: string[] = [];
+    const baseConfig = createConfig();
+    const config = {
+      ...baseConfig,
+      tracker: {
+        ...baseConfig.tracker,
+        activeStates: ["Todo", "In Progress", "In Review", "Resume"],
+      },
+    };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: "Resume" }),
+        ],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "Resume" }],
+        latestStateTransitionAt: async (issueId, stateName) => {
+          transitionCalls.push({ issueId, stateName });
+          return transitionAt;
+        },
+      }),
+      spawnWorker: async (input) => {
+        spawns.push(input.issue.id);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:10:00.000Z"),
+    });
+
+    // Dispatch from Resume, then pause IN Resume — the wedged-guard shape.
+    await orchestrator.pollTick();
+    expect(spawns).toEqual(["1"]);
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250001,
+        estimatedCostUsd: 5,
+      },
+    });
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    // No transition evidence: observation can never arrive (the issue only
+    // ever appears in Resume), so the issue stays parked.
+    transitionAt = null;
+    await orchestrator.pollTick();
+    expect(spawns).toEqual(["1"]);
+
+    // A transition OLDER than the pause is stale evidence.
+    transitionAt = "2026-03-06T00:05:00.000Z";
+    await orchestrator.pollTick();
+    expect(spawns).toEqual(["1"]);
+
+    // A transition NEWER than the pause is explicit operator resume
+    // evidence — the issue admits without any state dance.
+    transitionAt = "2026-03-06T00:15:00.000Z";
+    await orchestrator.pollTick();
+    expect(spawns).toEqual(["1", "1"]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+    expect(
+      transitionCalls.every(
+        (call) => call.issueId === "1" && call.stateName === "Resume",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps observation-only semantics when the tracker lacks history support", async () => {
+    const spawns: string[] = [];
+    const baseConfig = createConfig();
+    const config = {
+      ...baseConfig,
+      tracker: {
+        ...baseConfig.tracker,
+        activeStates: ["Todo", "In Progress", "In Review", "Resume"],
+      },
+    };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: "Resume" }),
+        ],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "Resume" }],
+      }),
+      spawnWorker: async (input) => {
+        spawns.push(input.issue.id);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:10:00.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250001,
+        estimatedCostUsd: 5,
+      },
+    });
+
+    await orchestrator.pollTick();
+    expect(spawns).toEqual(["1"]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+  });
+
   it("refuses all dispatch when rate-limit headroom is below the configured floor", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
@@ -2388,6 +2510,65 @@ describe("dispatcher run journal restart recovery", () => {
     expect(resumed.dispatchedIssueIds).toEqual(["1"]);
     expect(spawnWorker).toHaveBeenCalledTimes(1);
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("restart recovery admits a replay-wedged Resume pause on newer tracker evidence", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    let transitionAt: string | null = null;
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: "Resume" }),
+        ],
+        latestStateTransitionAt: async () => transitionAt,
+      }),
+      spawnWorker,
+      now: () => new Date("2026-03-06T01:00:00.000Z"),
+      runJournal: [
+        // Pause recorded while the issue was already IN Resume — after a
+        // restart, replay re-creates the wedged guard and the issue can
+        // never be observed in a non-Resume state.
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "hard_stop:1:implement:initial:token_budget:1",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:implement:initial:token_budget:1",
+          leaseStatus: "completed",
+          stage: "implement",
+          metadata: {
+            status: "completed",
+            outcome: "PAUSED-budget",
+            trigger: "token_budget",
+            reason: "Token budget exceeded: 300000 >= 250000.",
+            issueState: "Resume",
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    // Replay-wedged: Resume-only observations never clear the guard.
+    const wedged = await orchestrator.pollTick();
+    expect(wedged.dispatchedIssueIds).toEqual([]);
+
+    // Evidence older than the journaled pause stays parked.
+    transitionAt = "2026-03-05T23:00:00.000Z";
+    const stale = await orchestrator.pollTick();
+    expect(stale.dispatchedIssueIds).toEqual([]);
+
+    // Operator re-entered Resume after the pause: admit without a dance.
+    transitionAt = "2026-03-06T00:59:00.000Z";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
   });
 
   it("restart recovery preserves input-required pause until explicit Resume", async () => {
@@ -5837,8 +6018,12 @@ function createTracker(input?: {
   candidates?: Issue[];
   candidatesFn?: () => Issue[];
   statesById?: IssueStateSnapshot[];
+  latestStateTransitionAt?: (
+    issueId: string,
+    stateName: string,
+  ) => Promise<string | null>;
 }): IssueTracker {
-  return {
+  const tracker: IssueTracker = {
     async fetchCandidateIssues() {
       return (
         input?.candidatesFn?.() ??
@@ -5852,6 +6037,10 @@ function createTracker(input?: {
       return input?.statesById ?? [];
     },
   };
+  if (input?.latestStateTransitionAt !== undefined) {
+    tracker.fetchLatestStateTransitionAt = input.latestStateTransitionAt;
+  }
+  return tracker;
 }
 
 function createConfig(overrides?: {

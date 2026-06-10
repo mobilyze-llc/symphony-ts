@@ -21,6 +21,7 @@ import {
   LINEAR_ISSUE_PARENT_AND_SIBLINGS_QUERY,
   LINEAR_ISSUE_PARENT_DETAIL_QUERY,
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
+  LINEAR_ISSUE_STATE_TRANSITIONS_QUERY,
   LINEAR_ISSUE_UPDATE_MUTATION,
   LINEAR_OPEN_ISSUES_BY_LABELS_QUERY,
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
@@ -84,6 +85,17 @@ interface LinearIssueUpdateData {
     success?: boolean;
     issue?: { id?: string; state?: { name?: string } };
   };
+}
+
+interface LinearIssueStateTransitionsData {
+  issue?: {
+    history?: {
+      nodes?: Array<{
+        createdAt?: string;
+        toState?: { name?: string } | null;
+      }>;
+    };
+  } | null;
 }
 
 interface LinearCommentCreateData {
@@ -311,6 +323,40 @@ export class LinearTrackerClient implements IssueTracker {
     }
 
     return nodes.map((node) => normalizeLinearIssueState(node));
+  }
+
+  async fetchLatestStateTransitionAt(
+    issueId: string,
+    stateName: string,
+  ): Promise<string | null> {
+    const response = await this.postGraphql<LinearIssueStateTransitionsData>(
+      LINEAR_ISSUE_STATE_TRANSITIONS_QUERY,
+      { issueId },
+    );
+
+    const nodes = response.issue?.history?.nodes;
+    if (!Array.isArray(nodes)) {
+      return null;
+    }
+
+    const wanted = stateName.trim().toLowerCase();
+    let latest: string | null = null;
+    for (const node of nodes) {
+      const toState = node?.toState?.name;
+      const createdAt = node?.createdAt;
+      if (
+        typeof toState !== "string" ||
+        typeof createdAt !== "string" ||
+        toState.trim().toLowerCase() !== wanted ||
+        Number.isNaN(Date.parse(createdAt))
+      ) {
+        continue;
+      }
+      if (latest === null || Date.parse(createdAt) > Date.parse(latest)) {
+        latest = createdAt;
+      }
+    }
+    return latest;
   }
 
   async postComment(issueId: string, body: string): Promise<void> {
