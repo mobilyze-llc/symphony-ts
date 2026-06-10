@@ -214,6 +214,7 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "gate_result",
   "tracker_write",
   "hard_stop_trigger",
+  "budget_escalation",
   "operator_input_required",
   "continuous_feedback",
 ] as const;
@@ -908,6 +909,7 @@ export interface OrchestratorState {
   codexRateLimits: CodexRateLimits;
   rateLimitAdmission: RateLimitAdmissionState | null;
   issueStages: Record<string, string>;
+  issueBudgetEscalations: Record<string, number>;
   issueReworkCounts: Record<string, number>;
   issuePassedStages: Record<string, string[]>;
   issueFirstDispatchedAt: Record<string, string>;
@@ -1057,6 +1059,7 @@ export function createInitialOrchestratorState(input: {
     codexRateLimits: null,
     rateLimitAdmission: null,
     issueStages: {},
+    issueBudgetEscalations: {},
     issueReworkCounts: {},
     issuePassedStages: {},
     issueFirstDispatchedAt: {},

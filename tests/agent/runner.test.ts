@@ -608,6 +608,70 @@ describe("AgentRunner", () => {
     expect(result.hardStop?.reason).toContain("Live token telemetry");
   });
 
+  it("widens unit budgets by the escalation multiplier (SYMPH-337)", async () => {
+    const root = await createRoot();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const tracker = createTracker({
+      refreshStates: [{ id: "issue-1", identifier: "ABC-123", state: "Done" }],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 20,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+          cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
+        },
+      },
+      tracker,
+      createCodexClient: (input) => ({
+        async startSession() {
+          input.onEvent({
+            event: "notification",
+            timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "live usage update",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+          });
+          return {
+            status: "completed" as const,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            sessionId: "thread-1-turn-1",
+            usage: null,
+            rateLimits: null,
+            message: "turn 1 done",
+          };
+        },
+        continueTurn: vi.fn(),
+        close,
+      }),
+    });
+
+    // 21 tokens exceeds the base 20-token unit budget, but a 2x escalation
+    // widens the cap to 40 — the run must NOT pause.
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      budgetMultiplier: 2,
+    });
+
+    expect(result.hardStop ?? null).toBeNull();
+  });
+
   it("uses stage hard-stop overrides for live telemetry budget enforcement", async () => {
     const root = await createRoot();
     const close = vi.fn().mockResolvedValue(undefined);
@@ -2006,6 +2070,10 @@ function createConfig(root: string, scenario: string): ResolvedWorkflowConfig {
       turnTimeoutMs: 1_000,
       readTimeoutMs: 1_000,
       stallTimeoutMs: 2_000,
+    },
+    budgetEscalation: {
+      maxSteps: null,
+      multiplier: 2,
     },
     rateLimitAdmission: {
       minPrimaryHeadroomPct: null,

@@ -1630,6 +1630,10 @@ function createConfig(overrides?: {
       readTimeoutMs: 30_000,
       stallTimeoutMs: 300_000,
     },
+    budgetEscalation: {
+      maxSteps: null,
+      multiplier: 2,
+    },
     rateLimitAdmission: {
       minPrimaryHeadroomPct: null,
       minSecondaryHeadroomPct: null,

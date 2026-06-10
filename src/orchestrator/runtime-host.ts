@@ -449,6 +449,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         reworkCount,
         isFirstDispatch,
         rightSizingDecision,
+        budgetMultiplier,
       }) => {
         const lastRework = this.lastNotifiedReworkCount.get(issue.id) ?? 0;
         const isNewRework = !isFirstDispatch && reworkCount > lastRework;
@@ -472,6 +473,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           stageName,
           reworkCount,
           rightSizingDecision,
+          budgetMultiplier,
         );
       },
       onIssueDropped: ({ identifier, title, url, reason }) => {
@@ -1778,6 +1780,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     stageName: string | null,
     reworkCount: number,
     rightSizingDecision: RightSizingDecision,
+    budgetMultiplier = 1,
   ): Promise<{
     workerHandle: WorkerExecution;
     monitorHandle: Promise<void>;
@@ -1830,12 +1833,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         stage,
         stageName,
         reworkCount,
+        budgetMultiplier,
         modePolicy: createModeScopedPermissionPolicy({
           mode: rightSizingDecision.mode,
           configuredApprovalPolicy: this.config.codex.approvalPolicy,
           configuredThreadSandbox: this.config.codex.threadSandbox,
           configuredTurnSandboxPolicy: this.config.codex.turnSandboxPolicy,
-          maxBudgetUsd: effectiveHardStops.maxDollarBudgetUsd,
+          maxBudgetUsd:
+            effectiveHardStops.maxDollarBudgetUsd * budgetMultiplier,
         }),
       })
       .then(async (result) => {

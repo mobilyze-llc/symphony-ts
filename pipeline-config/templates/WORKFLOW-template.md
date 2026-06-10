@@ -49,6 +49,17 @@ rate_limit_admission:
   min_primary_headroom_pct: 10
   min_secondary_headroom_pct: 5
 
+# SYMPH-337: deterministic budget-escalation ladder. A budget hard stop
+# auto-resumes the unit with a multiplied budget (base * multiplier^step)
+# up to max_steps times per issue, then parks for the operator. With the
+# investigate stage's $4 base this bounds cumulative per-issue spend at
+# 4 + 8 + 16 = $28 per stage. Escalations never run while the admission
+# floor is blocked, and only budget triggers escalate (never no_progress,
+# iteration_cap, or permission stops). Operator-approved assertive defaults.
+budget_escalation:
+  max_steps: 2
+  multiplier: 2
+
 codex:
   command: codex --disable plugins --disable hooks --disable plugin_hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use --disable multi_agent --disable goals --disable memories --disable tool_call_mcp_elicitation --config 'model_reasoning_effort="low"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server
   ephemeral_home: true

@@ -1159,6 +1159,220 @@ describe("orchestrator core", () => {
     expect(Object.keys(orchestrator.getState().running)).toEqual(["1", "2"]);
   });
 
+  it("auto-resumes a budget pause via the escalation ladder and scales the next unit", async () => {
+    const spawnInputs: Array<{ budgetMultiplier: number }> = [];
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({
+        budgetEscalation: { maxSteps: 2, multiplier: 2 },
+      }),
+      tracker,
+      spawnWorker: async (input) => {
+        spawnInputs.push({ budgetMultiplier: input.budgetMultiplier });
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    expect(spawnInputs).toEqual([{ budgetMultiplier: 1 }]);
+
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded: 250001 >= 250000.",
+        turnCount: 2,
+        totalTokens: 250001,
+        estimatedCostUsd: 5.2,
+      },
+    });
+
+    // Escalated instead of parking: continuation retry scheduled, no
+    // operator-resume requirement, step recorded.
+    expect(retryEntry).not.toBeNull();
+    expect(retryEntry?.delayType).toBe("continuation");
+    expect(orchestrator.getState().issueBudgetEscalations["1"]).toBe(1);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+
+    const retryResult = await orchestrator.onRetryTimer("1");
+    expect(retryResult.dispatched).toBe(true);
+    expect(spawnInputs).toEqual([
+      { budgetMultiplier: 1 },
+      { budgetMultiplier: 2 },
+    ]);
+  });
+
+  it("parks for the operator when the escalation ladder is exhausted", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({
+        budgetEscalation: { maxSteps: 1, multiplier: 2 },
+      }),
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueBudgetEscalations["1"] = 1;
+
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "dollar_budget",
+        reason: "Estimated dollar budget exceeded.",
+        turnCount: 3,
+        totalTokens: 100,
+        estimatedCostUsd: 9,
+      },
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+  });
+
+  it("never escalates when unconfigured or for non-budget hard stops", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = new OrchestratorCore({
+      config: createConfig(),
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 100,
+        estimatedCostUsd: 1,
+      },
+    });
+    // Default config (maxSteps null): parks exactly as before SYMPH-337.
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().issueBudgetEscalations["1"]).toBeUndefined();
+  });
+
+  it("defers escalation to the operator while the admission floor is blocked", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({
+        budgetEscalation: { maxSteps: 2, multiplier: 2 },
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+        },
+      }),
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "rate_limit_budget",
+        reason: "Rate-limit budget exceeded.",
+        turnCount: 1,
+        totalTokens: 100,
+        estimatedCostUsd: 1,
+      },
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().issueBudgetEscalations["1"]).toBeUndefined();
+  });
+
+  it("defers retry dispatch while the rate-limit admission floor is blocked", async () => {
+    const timers = createFakeTimerScheduler();
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      timerScheduler: timers,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+        },
+      }),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+    });
+    expect(orchestrator.getState().retryAttempts["1"]).toBeDefined();
+
+    orchestrator.getState().codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+
+    const result = await orchestrator.onRetryTimer("1");
+    expect(result.dispatched).toBe(false);
+    expect(result.released).toBe(false);
+    // Deferred, not consumed: a fresh retry entry exists at the same attempt.
+    expect(orchestrator.getState().retryAttempts["1"]).toBeDefined();
+    expect(orchestrator.getState().retryAttempts["1"]?.error).toContain(
+      "rate-limit admission floor",
+    );
+    expect(Object.keys(orchestrator.getState().running)).toEqual([]);
+  });
+
   it("refuses all dispatch when rate-limit headroom is below the configured floor", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
@@ -5322,6 +5536,7 @@ function createConfig(overrides?: {
   runner?: Partial<ResolvedWorkflowConfig["runner"]>;
   continuousFeedback?: ResolvedWorkflowConfig["continuousFeedback"];
   rateLimitAdmission?: ResolvedWorkflowConfig["rateLimitAdmission"];
+  budgetEscalation?: ResolvedWorkflowConfig["budgetEscalation"];
 }): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
@@ -5368,6 +5583,10 @@ function createConfig(overrides?: {
     rateLimitAdmission: overrides?.rateLimitAdmission ?? {
       minPrimaryHeadroomPct: null,
       minSecondaryHeadroomPct: null,
+    },
+    budgetEscalation: overrides?.budgetEscalation ?? {
+      maxSteps: null,
+      multiplier: 2,
     },
     server: {
       port: null,

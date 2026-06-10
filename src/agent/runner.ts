@@ -29,6 +29,7 @@ import {
 import type {
   ResolvedWorkflowConfig,
   StageDefinition,
+  WorkflowHardStopsConfig,
 } from "../config/types.js";
 import {
   type Issue,
@@ -128,6 +129,12 @@ export interface AgentRunInput {
   stageName?: string | null;
   reworkCount?: number;
   modePolicy?: ModeScopedPermissionPolicy;
+  /**
+   * Budget-escalation multiplier for this unit (SYMPH-337): scales the
+   * token and dollar unit budgets after stage/global resolution. 1 or
+   * undefined means no escalation.
+   */
+  budgetMultiplier?: number;
 }
 
 export interface AgentRunResult {
@@ -267,7 +274,14 @@ export class AgentRunner {
       this.config.hardStops,
       DEFAULT_HARD_STOPS_CONFIG,
     );
-    const hardStops = resolveHardStopsConfig(stage?.hardStops, globalHardStops);
+    const resolvedHardStops = resolveHardStopsConfig(
+      stage?.hardStops,
+      globalHardStops,
+    );
+    const hardStops = applyBudgetMultiplier(
+      resolvedHardStops,
+      input.budgetMultiplier,
+    );
     const effectiveMaxTurns = Math.min(
       stage?.maxTurns ?? this.config.agent.maxTurns,
       hardStops.maxIterations,
@@ -1299,6 +1313,27 @@ function createProgressSignature(issue: Issue, turn: CodexTurnResult): string {
     status: turn.status,
     message: turn.message?.trim() ?? null,
   });
+}
+
+// Escalated units (SYMPH-337) widen the per-unit token and dollar budgets;
+// iteration/no-progress caps and pricing inputs stay fixed.
+function applyBudgetMultiplier(
+  config: WorkflowHardStopsConfig,
+  multiplier: number | undefined,
+): WorkflowHardStopsConfig {
+  if (
+    multiplier === undefined ||
+    !Number.isFinite(multiplier) ||
+    multiplier <= 1
+  ) {
+    return config;
+  }
+
+  return {
+    ...config,
+    maxTokensPerUnit: Math.round(config.maxTokensPerUnit * multiplier),
+    maxDollarBudgetUsd: config.maxDollarBudgetUsd * multiplier,
+  };
 }
 
 function isLiveUsageEvent(event: CodexClientEvent): boolean {

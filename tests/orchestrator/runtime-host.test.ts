@@ -5116,6 +5116,10 @@ function createConfig(): ResolvedWorkflowConfig {
       readTimeoutMs: 5_000,
       stallTimeoutMs: 60_000,
     },
+    budgetEscalation: {
+      maxSteps: null,
+      multiplier: 2,
+    },
     rateLimitAdmission: {
       minPrimaryHeadroomPct: null,
       minSecondaryHeadroomPct: null,
