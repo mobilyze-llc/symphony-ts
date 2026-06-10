@@ -938,15 +938,17 @@ export interface FailureSignal {
 const STAGE_FAILED_REGEX =
   /\[STAGE_FAILED:\s*(verify|review|rebase|spec|infra)\s*\]/;
 
-const STAGE_COMPLETE_REGEX = /\[STAGE_COMPLETE\]/;
+const STAGE_COMPLETE_REGEX = /(?:^|\n)[ \t]*\[STAGE_COMPLETE\]/;
 
 /**
- * Detect the `[STAGE_COMPLETE]` signal anywhere in the agent's final
- * message, mirroring parseFailureSignal semantics. Workers emit the marker
- * leading, trailing, or inline (observed on the SYMPH-330 canary:
- * "[STAGE_COMPLETE]  Investigation workpad updated on …"), and most prompt
- * variants just say "output [STAGE_COMPLETE]" — an endsWith predicate
- * silently missed those completions (SYMPH-350).
+ * Detect the `[STAGE_COMPLETE]` signal at the start of any line in the
+ * agent's final message. Workers emit the marker leading or trailing
+ * (observed on the SYMPH-330 canary: "[STAGE_COMPLETE]  Investigation
+ * workpad updated on …"), so an endsWith predicate silently missed real
+ * completions (SYMPH-350). Line-anchoring (rather than match-anywhere)
+ * exists because the stage prompts themselves quote the marker — a worker
+ * echoing its instructions mid-prose ("I'll output [STAGE_COMPLETE] when
+ * done") must not complete the stage.
  */
 export function containsStageCompleteSignal(
   text: string | null | undefined,
