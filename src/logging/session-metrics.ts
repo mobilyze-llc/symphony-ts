@@ -5,11 +5,13 @@ import type {
   OrchestratorState,
   RecentActivityEntry,
   RunningEntry,
+  TokenTelemetryEntry,
   TurnHistoryEntry,
 } from "../domain/model.js";
 
 const TURN_HISTORY_MAX_SIZE = 50;
 const RECENT_ACTIVITY_MAX_SIZE = 10;
+const TOKEN_TELEMETRY_MAX_SIZE = 200;
 
 const SESSION_EVENT_MESSAGES: Partial<
   Record<CodexClientEvent["event"], string>
@@ -57,6 +59,23 @@ export function applyCodexEventToSession(
   session.lastCodexEvent = event.event;
   session.lastCodexTimestamp = event.timestamp;
   session.lastCodexMessage = summarizeCodexEvent(event);
+  if (event.artifacts !== undefined && event.artifacts.length > 0) {
+    const existingPaths = new Set(
+      session.codexSessionLogs.map((entry) => entry.path),
+    );
+    for (const artifact of event.artifacts) {
+      if (existingPaths.has(artifact.path)) {
+        continue;
+      }
+      session.codexSessionLogs.push({
+        label: artifact.label,
+        path: artifact.path,
+        url: null,
+        bytes: artifact.bytes,
+      });
+      existingPaths.add(artifact.path);
+    }
+  }
 
   if (event.event === "session_started") {
     // Push previous turn summary to ring buffer before resetting counters
@@ -162,6 +181,26 @@ export function applyCodexEventToSession(
   session.lastReportedInputTokens = inputTokens;
   session.lastReportedOutputTokens = outputTokens;
   session.lastReportedTotalTokens = totalTokens;
+  pushTokenTelemetry(session, {
+    timestamp: event.timestamp,
+    event: event.event,
+    sessionId: event.sessionId ?? session.sessionId,
+    turnId: event.turnId ?? session.turnId,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    inputTokensDelta,
+    outputTokensDelta,
+    totalTokensDelta,
+    cacheReadTokens: event.usage.cacheReadTokens ?? null,
+    cacheWriteTokens: event.usage.cacheWriteTokens ?? null,
+    noCacheTokens: event.usage.noCacheTokens ?? null,
+    reasoningTokens: event.usage.reasoningTokens ?? null,
+    cacheReadTokensDelta,
+    cacheWriteTokensDelta,
+    noCacheTokensDelta,
+    reasoningTokensDelta,
+  });
 
   return {
     inputTokensDelta,
@@ -195,6 +234,19 @@ export function applyCodexEventToOrchestratorState(
   }
 
   return result;
+}
+
+function pushTokenTelemetry(
+  session: LiveSession,
+  entry: TokenTelemetryEntry,
+): void {
+  session.tokenTelemetry.push(entry);
+  if (session.tokenTelemetry.length > TOKEN_TELEMETRY_MAX_SIZE) {
+    session.tokenTelemetry.splice(
+      0,
+      session.tokenTelemetry.length - TOKEN_TELEMETRY_MAX_SIZE,
+    );
+  }
 }
 
 export function addEndedSessionRuntime(

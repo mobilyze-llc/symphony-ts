@@ -168,6 +168,104 @@ describe("CodexAppServerClient", () => {
     }
   });
 
+  it("preserves Codex session JSONL artifacts before deleting ephemeral CODEX_HOME", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const artifactDirectory = join(workspace, "artifacts");
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const client = createClient("session-artifact", workspace, events, {
+        ephemeralHome: true,
+        artifactDirectory,
+      });
+
+      const result = await client.startSession({
+        prompt: "Preserve session telemetry",
+        title: "ABC-123: Example",
+      });
+
+      expect(result.status).toBe("completed");
+      await client.close();
+
+      const artifactEvent = events.find(
+        (event) => event.event === "session_artifact_saved",
+      );
+      expect(artifactEvent).toMatchObject({
+        sessionId: "thread-1-turn-1",
+        message: "Preserved 1 Codex session artifact(s).",
+      });
+      const artifact = artifactEvent?.artifacts?.[0];
+      expect(artifact).toEqual(
+        expect.objectContaining({
+          label: "sessions/2026/rollout-test.jsonl",
+        }),
+      );
+      expect(artifact?.path.startsWith(artifactDirectory)).toBe(true);
+      await expect(readFile(artifact?.path ?? "", "utf8")).resolves.toContain(
+        '"total_tokens":15',
+      );
+      await expect(access(artifact?.sourcePath ?? "")).rejects.toThrow();
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("still deletes ephemeral CODEX_HOME when artifact preservation fails", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const artifactDirectory = join(workspace, "artifact-root-is-file");
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+    await writeFile(artifactDirectory, "not a directory");
+
+    const markerPath = join(workspace, "codex-home.txt");
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `printf '%s' "$CODEX_HOME" > ${shellQuote(markerPath)}`,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} session-artifact`,
+      ].join(" && ");
+      const client = createClient("session-artifact", workspace, events, {
+        command,
+        ephemeralHome: true,
+        artifactDirectory,
+      });
+
+      const result = await client.startSession({
+        prompt: "Preserve session telemetry despite artifact failure",
+        title: "ABC-123: Example",
+      });
+      const codexHome = (await readFile(markerPath, "utf8")).trim();
+
+      expect(result.status).toBe("completed");
+      await expect(client.close()).resolves.toBeUndefined();
+      await expect(access(codexHome)).rejects.toThrow();
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          event: "other_message",
+          message: expect.stringContaining(
+            "Failed to preserve ephemeral Codex session artifacts before cleanup",
+          ),
+        } satisfies Partial<CodexClientEvent>),
+      );
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
   it("reasserts ephemeral CODEX_HOME after login profiles are loaded", async () => {
     const workspace = await createWorkspace();
     const sourceHome = await createWorkspace();
@@ -971,6 +1069,7 @@ function createClient(
     command: string;
     ephemeralHome: boolean;
     disableSkills: boolean;
+    artifactDirectory: string;
     threadSandbox: ConstructorParameters<
       typeof CodexAppServerClient
     >[0]["threadSandbox"];
@@ -1001,6 +1100,9 @@ function createClient(
     readTimeoutMs: overrides?.readTimeoutMs ?? 10_000,
     turnTimeoutMs: overrides?.turnTimeoutMs ?? 10_000,
     stallTimeoutMs: overrides?.stallTimeoutMs ?? 10_000,
+    ...(overrides?.artifactDirectory === undefined
+      ? {}
+      : { artifactDirectory: overrides.artifactDirectory }),
     ...(overrides?.modePolicy === undefined
       ? {}
       : { modePolicy: overrides.modePolicy }),

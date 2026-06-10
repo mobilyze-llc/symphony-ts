@@ -814,6 +814,7 @@ function createIssueDetail(): IssueDetailResponse {
         output_tokens: 800,
         total_tokens: 2000,
       },
+      token_telemetry: [],
     },
     retry: null,
     logs: {

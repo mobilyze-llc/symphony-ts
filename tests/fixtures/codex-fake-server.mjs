@@ -1,4 +1,5 @@
-import { realpathSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import process from "node:process";
 import readline from "node:readline";
 
@@ -101,6 +102,14 @@ async function handleMessage(message) {
 
   if (message.method === "turn/start") {
     turnCount += 1;
+    if (scenario === "session-artifact" && process.env.CODEX_HOME) {
+      const sessionDir = join(process.env.CODEX_HOME, "sessions", "2026");
+      mkdirSync(sessionDir, { recursive: true });
+      writeFileSync(
+        join(sessionDir, "rollout-test.jsonl"),
+        `${JSON.stringify({ type: "token_usage", input_tokens: 12, output_tokens: 3, total_tokens: 15 })}\n`,
+      );
+    }
     assertEqual(message.params.threadId, "thread-1", "threadId must be reused");
     assertEqual(
       realpathSync(process.cwd()),

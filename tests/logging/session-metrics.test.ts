@@ -133,6 +133,100 @@ describe("session metrics", () => {
     expect(state.codexTotals.reasoningTokens).toBe(4);
   });
 
+  it("records per-event token telemetry deltas", () => {
+    const running = createRunningEntry();
+
+    applyCodexEventToSession(
+      running,
+      createEvent("notification", {
+        sessionId: "thread-1-turn-1",
+        turnId: "turn-1",
+        usage: {
+          inputTokens: 20,
+          outputTokens: 5,
+          totalTokens: 25,
+          cacheReadTokens: 8,
+          cacheWriteTokens: 2,
+          noCacheTokens: 10,
+          reasoningTokens: 1,
+        },
+      }),
+    );
+    applyCodexEventToSession(
+      running,
+      createEvent("notification", {
+        sessionId: "thread-1-turn-1",
+        turnId: "turn-1",
+        usage: {
+          inputTokens: 30,
+          outputTokens: 7,
+          totalTokens: 37,
+          cacheReadTokens: 4,
+        },
+      }),
+    );
+
+    expect(running.tokenTelemetry).toEqual([
+      expect.objectContaining({
+        event: "notification",
+        sessionId: "thread-1-turn-1",
+        turnId: "turn-1",
+        inputTokens: 20,
+        outputTokens: 5,
+        totalTokens: 25,
+        inputTokensDelta: 20,
+        outputTokensDelta: 5,
+        totalTokensDelta: 25,
+        cacheReadTokens: 8,
+        cacheWriteTokens: 2,
+        noCacheTokens: 10,
+        reasoningTokens: 1,
+        cacheReadTokensDelta: 8,
+        cacheWriteTokensDelta: 2,
+        noCacheTokensDelta: 10,
+        reasoningTokensDelta: 1,
+      }),
+      expect.objectContaining({
+        event: "notification",
+        inputTokens: 30,
+        outputTokens: 7,
+        totalTokens: 37,
+        inputTokensDelta: 10,
+        outputTokensDelta: 2,
+        totalTokensDelta: 12,
+        cacheReadTokens: 4,
+        cacheReadTokensDelta: 4,
+      }),
+    ]);
+  });
+
+  it("records preserved Codex session artifacts on live sessions", () => {
+    const running = createRunningEntry();
+
+    applyCodexEventToSession(
+      running,
+      createEvent("session_artifact_saved", {
+        artifacts: [
+          {
+            label: "sessions/rollout.jsonl",
+            path: "/tmp/symphony/sessions/rollout.jsonl",
+            sourcePath: "/tmp/symphony-codex-home/sessions/rollout.jsonl",
+            bytes: 120,
+          },
+        ],
+      }),
+    );
+
+    expect(running.codexSessionLogs).toEqual([
+      {
+        label: "sessions/rollout.jsonl",
+        path: "/tmp/symphony/sessions/rollout.jsonl",
+        url: null,
+        bytes: 120,
+      },
+    ]);
+  });
+
   it("leaves detail token counts at 0 when usage has no detail fields", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,

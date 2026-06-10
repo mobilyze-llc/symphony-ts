@@ -280,6 +280,23 @@ describe("OrchestratorRuntimeHost", () => {
       },
       message: "turn completed",
     });
+    fakeRunner.emit("1", {
+      event: "session_artifact_saved",
+      timestamp: "2026-03-06T00:00:03.000Z",
+      codexAppServerPid: "1001",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      artifacts: [
+        {
+          label: "sessions/2026/rollout-test.jsonl",
+          path: "/tmp/workspaces/1/.symphony/codex-sessions/rollout-test.jsonl",
+          sourcePath: "/tmp/symphony-codex-home-1/sessions/rollout-test.jsonl",
+          bytes: 80,
+        },
+      ],
+      message: "Preserved 1 Codex session artifact(s).",
+    });
     await host.flushEvents();
 
     let snapshot = await host.getRuntimeSnapshot();
@@ -288,8 +305,8 @@ describe("OrchestratorRuntimeHost", () => {
         issue_id: "1",
         session_id: "thread-1-turn-1",
         turn_count: 1,
-        last_event: "turn_completed",
-        last_message: "turn completed",
+        last_event: "session_artifact_saved",
+        last_message: "Preserved 1 Codex session artifact(s).",
         tokens: {
           input_tokens: 11,
           output_tokens: 7,
@@ -301,6 +318,28 @@ describe("OrchestratorRuntimeHost", () => {
       }),
     ]);
     expect(snapshot.codex_totals.total_tokens).toBe(18);
+    const details = await host.getIssueDetails("ISSUE-1");
+    expect(details?.running?.token_telemetry).toEqual([
+      expect.objectContaining({
+        at: "2026-03-06T00:00:02.000Z",
+        event: "turn_completed",
+        session_id: "thread-1-turn-1",
+        turn_id: "turn-1",
+        input_tokens: 11,
+        output_tokens: 7,
+        total_tokens: 18,
+        input_tokens_delta: 11,
+        output_tokens_delta: 7,
+        total_tokens_delta: 18,
+      }),
+    ]);
+    expect(details?.logs.codex_session_logs).toEqual([
+      {
+        label: "sessions/2026/rollout-test.jsonl",
+        path: "/tmp/workspaces/1/.symphony/codex-sessions/rollout-test.jsonl",
+        url: null,
+      },
+    ]);
 
     fakeRunner.resolve("1", {
       issue: createIssue({ state: "In Progress" }),
@@ -345,6 +384,8 @@ describe("OrchestratorRuntimeHost", () => {
         totalStageCacheWriteTokens: 0,
         turnHistory: [],
         recentActivity: [],
+        tokenTelemetry: [],
+        codexSessionLogs: [],
       },
       turnsCompleted: 1,
       lastTurn: null,
@@ -1948,6 +1989,8 @@ describe("OrchestratorRuntimeHost", () => {
         totalStageCacheWriteTokens: 15,
         turnHistory: [],
         recentActivity: [],
+        tokenTelemetry: [],
+        codexSessionLogs: [],
       },
       turnsCompleted: 3,
       lastTurn: null,
@@ -2099,6 +2142,8 @@ describe("OrchestratorRuntimeHost", () => {
         totalStageCacheWriteTokens: 0,
         turnHistory: [],
         recentActivity: [],
+        tokenTelemetry: [],
+        codexSessionLogs: [],
       },
       turnsCompleted: 2,
       lastTurn: null,
@@ -2184,6 +2229,8 @@ describe("OrchestratorRuntimeHost", () => {
         totalStageCacheWriteTokens: 0,
         turnHistory: [],
         recentActivity: [],
+        tokenTelemetry: [],
+        codexSessionLogs: [],
       },
       turnsCompleted: 1,
       lastTurn: null,
@@ -2267,6 +2314,8 @@ describe("OrchestratorRuntimeHost", () => {
         totalStageCacheWriteTokens: 0,
         turnHistory: [],
         recentActivity: [],
+        tokenTelemetry: [],
+        codexSessionLogs: [],
       },
       turnsCompleted: 1,
       lastTurn: null,
@@ -2401,6 +2450,8 @@ describe("OrchestratorRuntimeHost", () => {
         totalStageCacheWriteTokens: 7,
         turnHistory: [],
         recentActivity: [],
+        tokenTelemetry: [],
+        codexSessionLogs: [],
       },
       turnsCompleted: 4,
       lastTurn: null,
@@ -4350,6 +4401,8 @@ function createNormalResult(): AgentRunResult {
       totalStageCacheWriteTokens: 0,
       turnHistory: [],
       recentActivity: [],
+      tokenTelemetry: [],
+      codexSessionLogs: [],
     },
     turnsCompleted: 1,
     lastTurn: null,

@@ -2,6 +2,8 @@ import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { constants, statSync } from "node:fs";
 import {
   access,
+  copyFile,
+  mkdir,
   mkdtemp,
   readdir,
   realpath,
@@ -11,7 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, join, parse } from "node:path";
+import { basename, dirname, join, parse, relative } from "node:path";
 
 import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
@@ -58,6 +60,13 @@ export interface CodexUsage {
   reasoningTokens?: number;
 }
 
+export interface CodexSessionArtifact {
+  label: string;
+  path: string;
+  sourcePath: string;
+  bytes: number;
+}
+
 export type CodexTurnStatus = "completed" | "failed" | "cancelled";
 
 export interface CodexClientEvent {
@@ -71,6 +80,7 @@ export interface CodexClientEvent {
     | "turn_input_required"
     | "approval_auto_approved"
     | "unsupported_tool_call"
+    | "session_artifact_saved"
     | "notification"
     | "other_message"
     | "malformed"
@@ -86,6 +96,7 @@ export interface CodexClientEvent {
   message?: string;
   raw?: unknown;
   toolName?: string | null;
+  artifacts?: CodexSessionArtifact[];
 }
 
 export interface CodexDynamicToolDefinition {
@@ -109,6 +120,7 @@ export interface CodexAppServerClientOptions {
   readTimeoutMs: number;
   turnTimeoutMs: number;
   stallTimeoutMs: number;
+  artifactDirectory?: string;
   clientInfo?: {
     name: string;
     version: string;
@@ -179,6 +191,7 @@ export class CodexAppServerClient {
   private closed = false;
   private ephemeralCodexHome: string | null = null;
   private ephemeralCodexHomeCleanup: Promise<void> | null = null;
+  private lastSessionId: string | null = null;
 
   constructor(options: CodexAppServerClientOptions) {
     this.options = options;
@@ -481,15 +494,74 @@ export class CodexAppServerClient {
       return;
     }
     this.ephemeralCodexHome = null;
-    const cleanup = rm(codexHome, { recursive: true, force: true }).finally(
-      () => {
-        if (this.ephemeralCodexHomeCleanup === cleanup) {
-          this.ephemeralCodexHomeCleanup = null;
-        }
-      },
-    );
+    const cleanup = (async () => {
+      let preservationError: unknown = null;
+      try {
+        await this.preserveEphemeralCodexHomeArtifacts(codexHome);
+      } catch (error) {
+        preservationError = error;
+      }
+      await rm(codexHome, { recursive: true, force: true });
+      if (preservationError !== null) {
+        this.emit({
+          event: "other_message",
+          sessionId: this.lastSessionId,
+          threadId: this.threadId,
+          message: `Failed to preserve ephemeral Codex session artifacts before cleanup: ${toErrorMessage(preservationError)}`,
+        });
+      }
+    })().finally(() => {
+      if (this.ephemeralCodexHomeCleanup === cleanup) {
+        this.ephemeralCodexHomeCleanup = null;
+      }
+    });
     this.ephemeralCodexHomeCleanup = cleanup;
     await cleanup;
+  }
+
+  private async preserveEphemeralCodexHomeArtifacts(
+    codexHome: string,
+  ): Promise<void> {
+    const sessionFiles = await findJsonlFiles(codexHome);
+    if (sessionFiles.length === 0) {
+      return;
+    }
+
+    const artifactRoot =
+      this.options.artifactDirectory ??
+      join(this.options.cwd, ".symphony", "codex-sessions");
+    const artifactDirectory = join(artifactRoot, basename(codexHome));
+    const artifacts: CodexSessionArtifact[] = [];
+
+    for (const sourcePath of sessionFiles) {
+      const relativePath = relative(codexHome, sourcePath);
+      if (relativePath.length === 0 || relativePath.startsWith("..")) {
+        continue;
+      }
+
+      const destinationPath = join(artifactDirectory, relativePath);
+      await mkdir(dirname(destinationPath), { recursive: true });
+      await copyFile(sourcePath, destinationPath);
+      const stats = await stat(destinationPath);
+      artifacts.push({
+        label: relativePath,
+        path: destinationPath,
+        sourcePath,
+        bytes: stats.size,
+      });
+    }
+
+    if (artifacts.length === 0) {
+      return;
+    }
+
+    this.emit({
+      event: "session_artifact_saved",
+      sessionId: this.lastSessionId,
+      threadId: this.threadId,
+      message: `Preserved ${artifacts.length} Codex session artifact(s).`,
+      artifacts,
+    });
   }
 
   private renderSpawnCommand(env: NodeJS.ProcessEnv): string {
@@ -557,6 +629,7 @@ export class CodexAppServerClient {
     }
 
     const sessionId = `${input.threadId}-${turnId}`;
+    this.lastSessionId = sessionId;
     this.emit({
       event: "session_started",
       sessionId,
@@ -1235,6 +1308,33 @@ async function findSkillFiles(root: string): Promise<string[]> {
 
   await visit(root);
   return result;
+}
+
+async function findJsonlFiles(root: string): Promise<string[]> {
+  const result: string[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+        continue;
+      }
+
+      if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        result.push(path);
+      }
+    }
+  };
+
+  await visit(root);
+  return result.sort();
 }
 
 function repoSkillRoots(cwd: string): string[] {

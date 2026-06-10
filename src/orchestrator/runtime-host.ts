@@ -3008,11 +3008,47 @@ function toRunningIssueDetail(
         input_tokens: running.codexInputTokens,
         output_tokens: running.codexOutputTokens,
         total_tokens: running.codexTotalTokens,
+        ...(running.codexCacheReadTokens > 0
+          ? { cache_read_tokens: running.codexCacheReadTokens }
+          : {}),
+        ...(running.codexCacheWriteTokens > 0
+          ? { cache_write_tokens: running.codexCacheWriteTokens }
+          : {}),
+        ...(running.codexNoCacheTokens > 0
+          ? { no_cache_tokens: running.codexNoCacheTokens }
+          : {}),
+        ...(running.codexReasoningTokens > 0
+          ? { reasoning_tokens: running.codexReasoningTokens }
+          : {}),
       },
+      token_telemetry: running.tokenTelemetry.map((entry) => ({
+        at: entry.timestamp,
+        event: entry.event,
+        session_id: entry.sessionId,
+        turn_id: entry.turnId,
+        input_tokens: entry.inputTokens,
+        output_tokens: entry.outputTokens,
+        total_tokens: entry.totalTokens,
+        input_tokens_delta: entry.inputTokensDelta,
+        output_tokens_delta: entry.outputTokensDelta,
+        total_tokens_delta: entry.totalTokensDelta,
+        cache_read_tokens: entry.cacheReadTokens,
+        cache_write_tokens: entry.cacheWriteTokens,
+        no_cache_tokens: entry.noCacheTokens,
+        reasoning_tokens: entry.reasoningTokens,
+        cache_read_tokens_delta: entry.cacheReadTokensDelta,
+        cache_write_tokens_delta: entry.cacheWriteTokensDelta,
+        no_cache_tokens_delta: entry.noCacheTokensDelta,
+        reasoning_tokens_delta: entry.reasoningTokensDelta,
+      })),
     },
     retry: null,
     logs: {
-      codex_session_logs: [],
+      codex_session_logs: running.codexSessionLogs.map((entry) => ({
+        label: entry.label,
+        path: entry.path,
+        url: entry.url,
+      })),
     },
     recent_events: running.recentActivity.map((entry) => ({
       at: entry.timestamp,
