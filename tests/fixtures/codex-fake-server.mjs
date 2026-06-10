@@ -444,9 +444,18 @@ async function handleMessage(message) {
                       command: "gh pr create --fill",
                     },
                   }
-                : {
-                    kind: "command_execution",
-                  },
+                : scenario === "broad-rg-denied"
+                  ? {
+                      kind: "command_execution",
+                      toolName: "Bash",
+                      input: {
+                        command:
+                          'rg -n "token_telemetry|codex|running" src ops -m 80',
+                      },
+                    }
+                  : {
+                      kind: "command_execution",
+                    },
           });
         }, 10);
       }, 10);
@@ -495,23 +504,26 @@ async function handleMessage(message) {
   }
 
   if (message.id === "approval-1") {
-    if (scenario === "denied-pr") {
+    if (scenario === "denied-pr" || scenario === "broad-rg-denied") {
       assertEqual(
         message.result?.decision,
         "decline",
-        "forbidden PR approval must send the Codex decision field",
+        "denied approval must send the Codex decision field",
       );
       assertEqual(
         message.result?.approved,
         false,
-        "forbidden PR approval must be denied",
+        "denied approval must be denied",
       );
 
       setTimeout(() => {
         writeJson({
           method: "turn/completed",
           params: {
-            message: "PR command denied by mode policy",
+            message:
+              scenario === "broad-rg-denied"
+                ? "Broad rg command denied by output guard"
+                : "PR command denied by mode policy",
             usage: {
               inputTokens: 14,
               outputTokens: 9,

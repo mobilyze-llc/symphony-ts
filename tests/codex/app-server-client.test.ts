@@ -19,6 +19,7 @@ import {
   CodexAppServerClient,
   type CodexAppServerClientError,
   type CodexClientEvent,
+  detectHeadlessCommandOutputRisk,
   sweepStaleCodexHomes,
 } from "../../src/codex/app-server-client.js";
 import { createLinearGraphqlDynamicTool } from "../../src/codex/linear-graphql-tool.js";
@@ -491,6 +492,67 @@ describe("CodexAppServerClient", () => {
     );
 
     await client.close();
+  });
+
+  it("declines broad rg line-output approvals before they grow headless context", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("broad-rg-denied", workspace, events);
+
+    const result = await client.startSession({
+      prompt: "Investigate token growth",
+      title: "ABC-123: Example",
+    });
+
+    expect(result.message).toBe("Broad rg command denied by output guard");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "unsupported_tool_call",
+        toolName: "Bash",
+        message: expect.stringContaining("Headless output guard declined"),
+      } satisfies Partial<CodexClientEvent>),
+    );
+    expect(events.map((event) => event.event)).not.toContain(
+      "approval_auto_approved",
+    );
+
+    await client.close();
+  });
+
+  it("allows file-scoped rg while flagging broad directory searches", () => {
+    expect(
+      detectHeadlessCommandOutputRisk(
+        'rg -n "token_telemetry|codex|running" src ops -m 80',
+      ),
+    ).toContain("Headless output guard");
+    expect(
+      detectHeadlessCommandOutputRisk(
+        'rg "token_telemetry|codex|running" src ops -m 80',
+      ),
+    ).toContain("Headless output guard");
+    expect(
+      detectHeadlessCommandOutputRisk(
+        'rg -n "token|codex" ./src ./tests -m 80',
+      ),
+    ).toContain("Headless output guard");
+    expect(
+      detectHeadlessCommandOutputRisk('rg -n "token|codex" ./ -m 80'),
+    ).toContain("Headless output guard");
+    expect(
+      detectHeadlessCommandOutputRisk(
+        'rg -n "token|codex" src -m 80\nrg -l "runner" tests',
+      ),
+    ).toContain("Headless output guard");
+    expect(
+      detectHeadlessCommandOutputRisk(
+        'rg -n "tokenTelemetry|truncated" src/orchestrator/runtime-host.ts tests/orchestrator/runtime-host.test.ts -m 20',
+      ),
+    ).toBeNull();
+    expect(
+      detectHeadlessCommandOutputRisk(
+        'rg -l "token_telemetry|codex|running" src ops',
+      ),
+    ).toBeNull();
   });
 
   it("reuses the same thread id across continuation turns", async () => {
