@@ -1,3 +1,5 @@
+import { setDefaultAutoSelectFamilyAttemptTimeout } from "node:net";
+
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateObject } from "ai";
 import { z } from "zod";
@@ -64,6 +66,25 @@ export function isPauseTriageConfigured(
 
 const DEFAULT_TRIAGE_TIMEOUT_MS = 30_000;
 
+// Node's Happy-Eyeballs autoselection gives each connection attempt 250ms
+// by default — less than the observed RTT to the operator's LAN endpoint
+// (~390ms over the mesh), so every fetch died with "Cannot connect to API"
+// while curl succeeded (first live triage attempt, SYMPH-330 2026-06-10).
+// Raise the per-attempt budget once, process-wide; strictly more tolerant
+// for every outbound socket and a no-op on fast paths.
+let networkTimeoutApplied = false;
+function ensureLanTolerantNetworking(): void {
+  if (networkTimeoutApplied) {
+    return;
+  }
+  networkTimeoutApplied = true;
+  try {
+    setDefaultAutoSelectFamilyAttemptTimeout(2_000);
+  } catch {
+    // Older runtimes without the setter keep platform defaults.
+  }
+}
+
 /**
  * Render a triage verdict, or null when triage is unconfigured or anything
  * fails — callers must treat null as "park for the operator".
@@ -75,6 +96,8 @@ export async function runPauseTriage(
   if (!isPauseTriageConfigured(config)) {
     return null;
   }
+
+  ensureLanTolerantNetworking();
 
   try {
     const provider = createOpenAICompatible({
