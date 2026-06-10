@@ -102,6 +102,34 @@ export interface RecentActivityEntry {
   totalTokens?: number;
 }
 
+export interface TokenTelemetryEntry {
+  timestamp: string;
+  event: string;
+  sessionId: string | null;
+  turnId: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  inputTokensDelta: number;
+  outputTokensDelta: number;
+  totalTokensDelta: number;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  noCacheTokens: number | null;
+  reasoningTokens: number | null;
+  cacheReadTokensDelta: number;
+  cacheWriteTokensDelta: number;
+  noCacheTokensDelta: number;
+  reasoningTokensDelta: number;
+}
+
+export interface CodexSessionLogEntry {
+  label: string;
+  path: string;
+  url: string | null;
+  bytes?: number;
+}
+
 export const LOOP_TRACE_EVENT_KINDS = [
   "session_start",
   "prompt_summary",
@@ -669,6 +697,8 @@ export interface LiveSession {
   totalStageCacheWriteTokens: number;
   turnHistory: TurnHistoryEntry[];
   recentActivity: RecentActivityEntry[];
+  tokenTelemetry: TokenTelemetryEntry[];
+  codexSessionLogs: CodexSessionLogEntry[];
 }
 
 export interface RetryEntry {
@@ -929,6 +959,8 @@ export function createEmptyLiveSession(): LiveSession {
     totalStageCacheWriteTokens: 0,
     turnHistory: [],
     recentActivity: [],
+    tokenTelemetry: [],
+    codexSessionLogs: [],
   };
 }
 

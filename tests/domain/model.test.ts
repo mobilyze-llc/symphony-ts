@@ -90,6 +90,8 @@ describe("domain model", () => {
       totalStageCacheWriteTokens: 0,
       turnHistory: [],
       recentActivity: [],
+      tokenTelemetry: [],
+      codexSessionLogs: [],
     });
 
     const state = createInitialOrchestratorState({

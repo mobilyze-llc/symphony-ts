@@ -86,6 +86,7 @@ export interface AgentRunnerCodexClientFactoryInput {
   readTimeoutMs: number;
   turnTimeoutMs: number;
   stallTimeoutMs: number;
+  artifactDirectory?: string;
   dynamicTools: CodexDynamicTool[];
   modePolicy?: ModeScopedPermissionPolicy;
   onEvent: (event: CodexClientEvent) => void;
@@ -356,6 +357,7 @@ export class AgentRunner {
         readTimeoutMs: this.config.codex.readTimeoutMs,
         turnTimeoutMs: this.config.codex.turnTimeoutMs,
         stallTimeoutMs: this.config.codex.stallTimeoutMs,
+        artifactDirectory: `${workspace.path}/.symphony/codex-sessions`,
         dynamicTools: this.createDynamicTools(),
         ...(input.modePolicy === undefined
           ? {}
@@ -1116,6 +1118,9 @@ function createDefaultCodexClient(
     readTimeoutMs: input.readTimeoutMs,
     turnTimeoutMs: input.turnTimeoutMs,
     stallTimeoutMs: input.stallTimeoutMs,
+    ...(input.artifactDirectory === undefined
+      ? {}
+      : { artifactDirectory: input.artifactDirectory }),
     dynamicTools: input.dynamicTools,
     ...(input.modePolicy === undefined ? {} : { modePolicy: input.modePolicy }),
     onEvent: input.onEvent,
@@ -1190,6 +1195,7 @@ function isLiveUsageEvent(event: CodexClientEvent): boolean {
     case "turn_cancelled":
     case "turn_ended_with_error":
     case "turn_input_required":
+    case "session_artifact_saved":
       return false;
   }
 }
