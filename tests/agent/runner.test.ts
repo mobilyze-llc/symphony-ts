@@ -25,6 +25,7 @@ import {
   type AgentRunnerCodexClientFactoryInput,
   type AgentRunnerError,
   WorkspaceHookError,
+  augmentWorkspaceWriteSandbox,
 } from "../../src/index.js";
 import type {
   IssueStateSnapshot,
@@ -2221,5 +2222,54 @@ describe("Agent runner startup diagnostics", () => {
     } finally {
       console.warn = origWarn;
     }
+  });
+});
+
+describe("augmentWorkspaceWriteSandbox (SYMPH-353)", () => {
+  const ROOT = "/srv/workspaces/.bare-clones";
+
+  it("expands string workspace-write policies with the git metadata root", () => {
+    expect(augmentWorkspaceWriteSandbox("workspace-write", ROOT)).toEqual({
+      type: "workspace-write",
+      writableRoots: [ROOT],
+    });
+    expect(augmentWorkspaceWriteSandbox("workspaceWrite", ROOT)).toEqual({
+      type: "workspace-write",
+      writableRoots: [ROOT],
+    });
+  });
+
+  it("appends to object policies preserving other fields and existing roots", () => {
+    expect(
+      augmentWorkspaceWriteSandbox(
+        {
+          type: "workspace-write",
+          network_access: true,
+          writable_roots: ["/extra"],
+        },
+        ROOT,
+      ),
+    ).toEqual({
+      type: "workspace-write",
+      network_access: true,
+      writableRoots: ["/extra", ROOT],
+    });
+  });
+
+  it("is idempotent and leaves non-workspace-write policies untouched", () => {
+    const augmented = augmentWorkspaceWriteSandbox(
+      { type: "workspace-write", writableRoots: [ROOT] },
+      ROOT,
+    );
+    expect(augmented).toEqual({
+      type: "workspace-write",
+      writableRoots: [ROOT],
+    });
+
+    expect(augmentWorkspaceWriteSandbox("read-only", ROOT)).toBe("read-only");
+    expect(
+      augmentWorkspaceWriteSandbox({ type: "dangerFullAccess" }, ROOT),
+    ).toEqual({ type: "dangerFullAccess" });
+    expect(augmentWorkspaceWriteSandbox(null, ROOT)).toBeNull();
   });
 });

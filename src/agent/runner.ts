@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { readFile, rm } from "node:fs/promises";
-import { dirname, isAbsolute, normalize, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, normalize, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -396,6 +396,11 @@ export class AgentRunner {
                 : { modePolicy: factoryInput.modePolicy }),
             })
         : this.createCodexClient;
+      // Workspaces are git worktrees: branch/index/ref writes land in the
+      // shared bare clone OUTSIDE the workspace cwd. Without this the
+      // sandbox lets a worker finish the diff but never commit or open a
+      // PR (SYMPH-353).
+      const gitMetadataRoot = join(this.config.workspace.root, ".bare-clones");
       client = effectiveClientFactory({
         command: this.config.codex.command,
         ephemeralHome: this.config.codex.ephemeralHome === true,
@@ -403,11 +408,15 @@ export class AgentRunner {
         cwd: workspace.path,
         approvalPolicy:
           input.modePolicy?.approvalPolicy ?? this.config.codex.approvalPolicy,
+        // thread/start only accepts a sandbox MODE; writable roots are a
+        // turn-level concept — and turns are where git executes.
         threadSandbox:
           input.modePolicy?.threadSandbox ?? this.config.codex.threadSandbox,
-        turnSandboxPolicy:
+        turnSandboxPolicy: augmentWorkspaceWriteSandbox(
           input.modePolicy?.turnSandboxPolicy ??
-          this.config.codex.turnSandboxPolicy,
+            this.config.codex.turnSandboxPolicy,
+          gitMetadataRoot,
+        ),
         readTimeoutMs: this.config.codex.readTimeoutMs,
         turnTimeoutMs: this.config.codex.turnTimeoutMs,
         stallTimeoutMs: this.config.codex.stallTimeoutMs,
@@ -1317,6 +1326,52 @@ function createProgressSignature(issue: Issue, turn: CodexTurnResult): string {
 
 // Escalated units (SYMPH-337) widen the per-unit token and dollar budgets;
 // iteration/no-progress caps and pricing inputs stay fixed.
+/**
+ * Append the shared git-metadata root to a workspace-write sandbox policy
+ * (SYMPH-353). String policies are expanded to object form; object policies
+ * keep their other fields (the client reads camelCase before snake_case).
+ * Non-workspace-write policies pass through untouched.
+ */
+export function augmentWorkspaceWriteSandbox(
+  value: unknown,
+  extraRoot: string,
+): unknown {
+  if (value === "workspace-write" || value === "workspaceWrite") {
+    return {
+      type: "workspace-write",
+      writableRoots: [extraRoot],
+    };
+  }
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return value;
+  }
+
+  const record = value as Record<string, unknown>;
+  const type = record.type;
+  if (type !== "workspace-write" && type !== "workspaceWrite") {
+    return value;
+  }
+
+  const existing = [record.writableRoots, record.writable_roots].find(
+    (candidate): candidate is string[] =>
+      Array.isArray(candidate) &&
+      candidate.every((entry) => typeof entry === "string"),
+  );
+  const roots = existing ?? [];
+  if (roots.includes(extraRoot)) {
+    return value;
+  }
+
+  // Rebuild without any stale snake_case duplicate that could shadow the
+  // augmented camelCase list in the client's alias reader.
+  const { writable_roots: _staleSnakeRoots, ...rest } = record;
+  return {
+    ...rest,
+    writableRoots: [...roots, extraRoot],
+  };
+}
+
 function applyBudgetMultiplier(
   config: WorkflowHardStopsConfig,
   multiplier: number | undefined,
