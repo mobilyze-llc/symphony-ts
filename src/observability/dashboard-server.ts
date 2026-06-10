@@ -123,6 +123,7 @@ export interface IssueDetailResponse {
       label: string;
       path: string;
       url: string | null;
+      bytes?: number;
     }>;
   };
   recent_events: Array<{
