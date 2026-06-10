@@ -199,14 +199,8 @@ hooks:
     else
       echo "On feature branch $CURRENT_BRANCH — skipping rebase, fetch only."
     fi
-    # Import briefs into CLAUDE.md (skip during merge — merge agent doesn't need them)
+    # Import rebase briefs into CLAUDE.md (skip during merge — merge agent doesn't need them)
     if [ "${SYMPHONY_STAGE:-}" != "merge" ]; then
-      if [ -f "INVESTIGATION-BRIEF.md" ]; then
-        if ! grep -q "@INVESTIGATION-BRIEF.md" CLAUDE.md 2>/dev/null; then
-          echo '' >> CLAUDE.md
-          echo '@INVESTIGATION-BRIEF.md' >> CLAUDE.md
-        fi
-      fi
       if [ -f "REBASE-BRIEF.md" ]; then
         if ! grep -q "@REBASE-BRIEF.md" CLAUDE.md 2>/dev/null; then
           echo '' >> CLAUDE.md
@@ -363,7 +357,7 @@ Labels: {{ issue.labels | join: ", " }}
 
 Investigation is a routing and planning stage, not a full implementation rehearsal.
 
-- First inspect the latest issue comments/workpad/resume notes. If they already identify the next implementation move, reuse that plan instead of rediscovering the repo.
+- First inspect the latest Linear issue comments/workpad/resume notes. Do not trust repo-root scratch files such as `workpad.md` or `INVESTIGATION-BRIEF.md` unless they explicitly name the current issue and stage. If the Linear context already identifies the next implementation move, reuse that plan instead of rediscovering the repo.
 - Spend at most 6 shell/tool calls before posting the investigation workpad, unless a command fails and a single retry is necessary.
 - Use `max_output_tokens` of 800 or less in investigate-stage shell calls. Prefer 400 for Linear/comment reads and 800 for source snippets.
 - Do not run multi-file `sed` batches, broad `rg -n` over multiple top-level directories, full docs scans, or source dumps during investigate.
@@ -375,8 +369,8 @@ You are in the INVESTIGATE stage. Your job is to analyze the issue and create an
 If the issue description contains a detailed spec with specific file paths, line numbers, and proposed changes (typical of spec-gen'd issues): DO NOT re-explore the codebase from scratch. Instead:
 1. Read the spec from the issue description
 2. Verify the cited files and line numbers are still accurate (quick reads, not full grep sweeps)
-3. Write INVESTIGATION-BRIEF.md by reformatting the spec content into the brief template below
-4. Post the workpad and complete
+3. Reformat the spec content into the Linear workpad structure below
+4. Post the workpad to Linear and complete
 
 Save full codebase exploration for issues with vague or ambiguous descriptions that lack specific file references.
 
@@ -428,14 +422,11 @@ Do not use Codex app/connector MCP tools for Linear comments or documents in hea
    ```
 4. Fill the Plan and Acceptance Criteria sections from your investigation findings.
 
-## Investigation Brief
+## Linear Workpad Orientation
 
-After posting the workpad, write `INVESTIGATION-BRIEF.md` to the worktree root. This file gives the implement-stage agent a concise orientation without re-reading the codebase.
-
-Keep the brief under ~200 lines (~4K tokens). Use exactly this structure:
+After investigation, post a concise Linear workpad/comment for the implement-stage agent instead of writing root-level scratch files. Keep the workpad under ~200 lines (~4K tokens) and use this structure:
 
 ```markdown
-# Investigation Brief
 ## Issue: [ISSUE-KEY] — [Title]
 
 ## Objective
@@ -495,7 +486,7 @@ When you are done:
 
 {{ issue.description }}
 
-You are in the IMPLEMENT stage. Read INVESTIGATION-BRIEF.md first if it exists in the worktree root. It contains targeted findings from the investigation stage including relevant files, code patterns, architecture context, and test strategy. Follow the Read Order section — do NOT re-read files not listed there unless you discover a dependency not covered in Key Dependencies. The investigation agent already read the codebase; your job is to change it, not re-explore it. If the file does not exist, fall back to reading issue comments for the investigation plan.
+You are in the IMPLEMENT stage. Read the latest Linear issue comments/workpad/resume notes first for targeted investigation findings, relevant files, code patterns, architecture context, and test strategy. Do not trust repo-root scratch files such as `workpad.md` or `INVESTIGATION-BRIEF.md` unless they explicitly name the current issue and stage. Follow the workpad Read Order section when it exists — do NOT re-read files not listed there unless you discover a dependency not covered in Key Dependencies. The investigation agent already read the codebase; your job is to change it, not re-explore it.
 
 {% if reworkCount > 0 %}
 ## REWORK ATTEMPT {{ reworkCount }}

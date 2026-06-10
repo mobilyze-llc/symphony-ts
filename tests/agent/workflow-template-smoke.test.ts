@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -43,6 +44,7 @@ const EXPECTED_INVESTIGATE_HARD_STOPS = {
   maxDollarBudgetUsd: 4,
   premiumBudgetPauseRatio: 0.9,
 };
+const REPO_ROOT = resolve(import.meta.dirname, "../..");
 
 const DESCRIPTION_SENTINEL = "DESCRIPTION_SENTINEL: do not leak to merge";
 
@@ -139,7 +141,10 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
         expect(prompt).toContain("Investigation Token Brake");
         expect(prompt).toContain("at most 6 shell/tool calls");
         expect(prompt).toContain("max_output_tokens` of 800 or less");
-        expect(prompt).toContain("latest issue comments/workpad/resume notes");
+        expect(prompt).toContain(
+          "latest Linear issue comments/workpad/resume notes",
+        );
+        expect(prompt).toContain("Do not trust repo-root scratch files");
       }
       expect(prompt).not.toMatch(/(^|[^A-Za-z0-9_])status=\$\?/);
       expect(prompt).not.toContain("Run `npm test 2>&1`");
@@ -168,8 +173,53 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(investigateRendered).toContain("at most 6 shell/tool calls");
     expect(investigateRendered).toContain("max_output_tokens` of 800 or less");
     expect(investigateRendered).toContain(
-      "latest issue comments/workpad/resume notes",
+      "latest Linear issue comments/workpad/resume notes",
     );
+    expect(investigateRendered).toContain(
+      "Do not trust repo-root scratch files",
+    );
+  });
+
+  it("does not ship root-level worker scratch artifacts", () => {
+    const trackedScratchFiles = execFileSync(
+      "git",
+      ["ls-files", "--", "workpad.md", "INVESTIGATION-BRIEF.md"],
+      { cwd: REPO_ROOT, encoding: "utf8" },
+    )
+      .trim()
+      .split("\n")
+      .filter(Boolean);
+
+    expect(trackedScratchFiles).toEqual([]);
+    expect(isGitIgnored("workpad.md")).toBe(true);
+    expect(isGitIgnored("INVESTIGATION-BRIEF.md")).toBe(true);
+    expect(isGitIgnored("docs/workpad.md")).toBe(false);
+    expect(isGitIgnored("docs/INVESTIGATION-BRIEF.md")).toBe(false);
+    expect(isGitIgnored(".claude/worktrees/example.ts")).toBe(true);
+  });
+
+  it("does not create, import, or read root investigation briefs from worker instructions", async () => {
+    const template = await readFile(
+      resolve(
+        import.meta.dirname,
+        "../../pipeline-config/templates/WORKFLOW-template.md",
+      ),
+      "utf8",
+    );
+
+    expect(template).not.toContain("@INVESTIGATION-BRIEF.md");
+    expect(template).not.toMatch(
+      /\b(?:append|create|import|read|write)\s+`?INVESTIGATION-BRIEF\.md`?/i,
+    );
+    expect(template).toContain("Linear Workpad Orientation");
+  });
+
+  it("keeps Biome from scanning local agent worktree clones", async () => {
+    const biomeConfig = JSON.parse(
+      await readFile(resolve(import.meta.dirname, "../../biome.json"), "utf8"),
+    ) as { files?: { ignore?: string[] } };
+
+    expect(biomeConfig.files?.ignore).toContain(".claude/worktrees/**");
   });
 
   it("scopes the investigation token brake to rendered investigate prompts", async () => {
@@ -432,3 +482,15 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain("Do not request sandbox, network");
   });
 });
+
+function isGitIgnored(path: string): boolean {
+  try {
+    execFileSync("git", ["check-ignore", "-q", "--", path], {
+      cwd: REPO_ROOT,
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
