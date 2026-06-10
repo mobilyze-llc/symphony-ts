@@ -95,10 +95,23 @@ const CONTINUATION_RETRY_DELAY_MS = 1_000;
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
+// Tracker timestamps come from the tracker's clock, pausedAt from ours.
+// Evidence must beat the pause by this margin so modest clock skew cannot
+// promote a PRE-pause transition into resume evidence (false auto-readmit).
+// Transitions inside the margin stay parked — the operator can re-flip.
+const RESUME_EVIDENCE_SKEW_MARGIN_MS = 60_000;
+// Per-issue lookup throttle and per-poll cap keep the evidence phase from
+// amplifying tracker API load when many issues are wedged.
+const RESUME_EVIDENCE_RECHECK_MS = 60_000;
+const RESUME_EVIDENCE_MAX_LOOKUPS_PER_POLL = 5;
 
 interface ResumeRequiredGuard {
   pausedState: string | null;
   observedNonResumeState: boolean;
+  /** When the pause was recorded — tracker resume evidence must be newer. */
+  pausedAt: string | null;
+  /** Last tracker evidence lookup (ms epoch) — throttles per-issue queries. */
+  evidenceCheckedAtMs?: number;
 }
 
 export type WorkerExitOutcome =
@@ -402,6 +415,7 @@ export class OrchestratorCore {
         this.markIssueRequiresExplicitResume(
           entry.issueId,
           readMetadataString(entry.metadata, "issueState"),
+          entry.timestamp,
         );
       }
 
@@ -459,6 +473,7 @@ export class OrchestratorCore {
       this.markIssueRequiresExplicitResume(
         entry.issueId,
         readMetadataString(entry.metadata, "issueState"),
+        entry.timestamp,
       );
     }
   }
@@ -675,6 +690,8 @@ export class OrchestratorCore {
         runningCount: Object.keys(this.state.running).length,
       };
     }
+
+    await this.applyTrackerResumeEvidence(issues);
 
     // Check for pipeline-halt before dispatching
     const haltIssue = await this.checkPipelineHalt();
@@ -2408,14 +2425,16 @@ export class OrchestratorCore {
   private markIssueRequiresExplicitResume(
     issueId: string,
     issueState?: string | null,
+    pausedAt?: string | null,
   ): void {
-    this.recordIssueRequiresExplicitResume(issueId, issueState);
+    this.recordIssueRequiresExplicitResume(issueId, issueState, pausedAt);
     this.releaseClaim(issueId);
   }
 
   private recordIssueRequiresExplicitResume(
     issueId: string,
     issueState?: string | null,
+    pausedAt?: string | null,
   ): void {
     this.state.resumeRequired.add(issueId);
     const pausedState =
@@ -2428,6 +2447,7 @@ export class OrchestratorCore {
       observedNonResumeState:
         existingGuard?.observedNonResumeState === true ||
         pausedState !== EXPLICIT_RESUME_STATE,
+      pausedAt: pausedAt ?? this.now().toISOString(),
     });
   }
 
@@ -2453,6 +2473,77 @@ export class OrchestratorCore {
       ...guard,
       observedNonResumeState: true,
     });
+  }
+
+  /**
+   * SYMPH-291: a pause recorded while the issue was already IN Resume can
+   * never be cleared by observation — Blocked is invisible to candidate
+   * polls, and journal replay re-creates the wedged guard after restarts.
+   * When the tracker exposes state history, an operator transition INTO
+   * Resume that is newer than the pause is accepted as explicit resume
+   * evidence. Evidence failures leave the issue parked (fail closed).
+   */
+  private async applyTrackerResumeEvidence(issues: Issue[]): Promise<void> {
+    const fetchTransition = this.tracker.fetchLatestStateTransitionAt?.bind(
+      this.tracker,
+    );
+    if (fetchTransition === undefined) {
+      return;
+    }
+
+    let lookupsThisPoll = 0;
+    for (const issue of issues) {
+      if (lookupsThisPoll >= RESUME_EVIDENCE_MAX_LOOKUPS_PER_POLL) {
+        return;
+      }
+      if (!this.state.resumeRequired.has(issue.id)) {
+        continue;
+      }
+      const guard = this.resumeRequiredGuards.get(issue.id);
+      if (
+        guard === undefined ||
+        guard.observedNonResumeState ||
+        guard.pausedState !== EXPLICIT_RESUME_STATE ||
+        guard.pausedAt === null ||
+        normalizeIssueState(issue.state) !== EXPLICIT_RESUME_STATE
+      ) {
+        continue;
+      }
+      const nowMs = this.now().getTime();
+      if (
+        guard.evidenceCheckedAtMs !== undefined &&
+        nowMs - guard.evidenceCheckedAtMs < RESUME_EVIDENCE_RECHECK_MS
+      ) {
+        continue;
+      }
+      this.resumeRequiredGuards.set(issue.id, {
+        ...guard,
+        evidenceCheckedAtMs: nowMs,
+      });
+
+      lookupsThisPoll += 1;
+      try {
+        // Matching is case-insensitive per the IssueTracker contract.
+        const transitionAt = await fetchTransition(issue.id, "Resume");
+        if (
+          transitionAt !== null &&
+          Date.parse(transitionAt) >
+            Date.parse(guard.pausedAt) + RESUME_EVIDENCE_SKEW_MARGIN_MS
+        ) {
+          this.resumeRequiredGuards.set(issue.id, {
+            ...guard,
+            evidenceCheckedAtMs: nowMs,
+            observedNonResumeState: true,
+          });
+        }
+      } catch (error) {
+        // Fail closed but never silently: a permanently broken history API
+        // would otherwise present as an inexplicably parked issue.
+        console.warn(
+          `[orchestrator] resume-evidence lookup failed for ${issue.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
   }
 
   private canConsumeResumeRequirement(

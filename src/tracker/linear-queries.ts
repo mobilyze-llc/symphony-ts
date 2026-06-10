@@ -384,3 +384,18 @@ export const LINEAR_OPEN_ISSUES_BY_LABELS_QUERY = `
     }
   }
 `.trim();
+
+export const LINEAR_ISSUE_STATE_TRANSITIONS_QUERY = `
+  query IssueStateTransitions($issueId: String!) {
+    issue(id: $issueId) {
+      history(last: 25) {
+        nodes {
+          createdAt
+          toState {
+            name
+          }
+        }
+      }
+    }
+  }
+`;
