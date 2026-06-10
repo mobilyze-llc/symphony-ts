@@ -3,6 +3,7 @@ import { constants, statSync } from "node:fs";
 import {
   access,
   copyFile,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -34,6 +35,7 @@ const DEFAULT_SYSTEM_SKILL_NAMES = Object.freeze([
 ]);
 
 const EPHEMERAL_CODEX_HOME_PREFIX = "symphony-codex-home-";
+const CODEX_SESSION_LOG_ROOTS = Object.freeze(["sessions"]);
 // Ephemeral homes leak when the process dies before close(); runs are bounded
 // well under an hour, so anything this old is orphaned.
 const STALE_EPHEMERAL_CODEX_HOME_MAX_AGE_MS = 48 * 60 * 60 * 1000;
@@ -523,7 +525,7 @@ export class CodexAppServerClient {
   private async preserveEphemeralCodexHomeArtifacts(
     codexHome: string,
   ): Promise<void> {
-    const sessionFiles = await findJsonlFiles(codexHome);
+    const sessionFiles = await findCodexSessionLogFiles(codexHome);
     if (sessionFiles.length === 0) {
       return;
     }
@@ -537,6 +539,10 @@ export class CodexAppServerClient {
     for (const sourcePath of sessionFiles) {
       const relativePath = relative(codexHome, sourcePath);
       if (relativePath.length === 0 || relativePath.startsWith("..")) {
+        continue;
+      }
+      const sourceStats = await lstat(sourcePath);
+      if (!sourceStats.isFile()) {
         continue;
       }
 
@@ -1331,9 +1337,19 @@ async function findSkillFiles(root: string): Promise<string[]> {
   return result;
 }
 
-async function findJsonlFiles(root: string): Promise<string[]> {
+async function findCodexSessionLogFiles(codexHome: string): Promise<string[]> {
   const result: string[] = [];
   const visit = async (directory: string): Promise<void> => {
+    let directoryStats: import("node:fs").Stats;
+    try {
+      directoryStats = await lstat(directory);
+    } catch {
+      return;
+    }
+    if (!directoryStats.isDirectory()) {
+      return;
+    }
+
     let entries: import("node:fs").Dirent[];
     try {
       entries = await readdir(directory, { withFileTypes: true });
@@ -1348,13 +1364,15 @@ async function findJsonlFiles(root: string): Promise<string[]> {
         continue;
       }
 
-      if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+      if (entry.name.endsWith(".jsonl")) {
         result.push(path);
       }
     }
   };
 
-  await visit(root);
+  for (const root of CODEX_SESSION_LOG_ROOTS) {
+    await visit(join(codexHome, root));
+  }
   return result.sort();
 }
 
