@@ -201,6 +201,8 @@ issue to "In Review" and leave a comment summarizing what you did.
 | `hard_stops.premium_budget_pause_ratio` | Early pause threshold as a share of dollar ceiling | `0.8` |
 | `hard_stops.estimated_cost_per_1k_tokens_usd` | Fallback cost estimate for token-only providers | `0.05` |
 | `codex.command` | Shell command to launch Codex | `codex app-server` |
+| `codex.ephemeral_home` | Launch Codex with a temporary `CODEX_HOME` that symlinks only operator auth | `false` |
+| `codex.disable_skills` | With `ephemeral_home`, write a generated `config.toml` that disables discovered Codex skills for the worker | `false` |
 | `codex.approval_policy` | Codex approval policy, passed through to the installed Codex schema | Inherits Codex default |
 | `codex.thread_sandbox` | Thread-level sandbox mode (e.g. `workspace-write`) | `null` |
 | `codex.turn_sandbox_policy` | Per-turn sandbox policy object | `null` |
@@ -326,9 +328,73 @@ hooks:
 
 `after_create` is the most important hook — use it to clone your repo into the fresh workspace before the agent starts.
 
+### Headless Codex Skill Denylist (`codex.disable_skills`)
+
+With `codex.ephemeral_home: true`, each worker launch gets a temporary
+`CODEX_HOME` containing only a symlink to the operator's `auth.json`. With
+`codex.disable_skills: true`, Symphony also writes a generated `config.toml`
+into that home with one `[[skills.config]] ... enabled = false` entry per
+discovered skill.
+
+**Why this exists (token economics).** Codex re-sends the advertised skills
+inventory on every app-server tool interaction, so a worker is rebilled for it
+on each tool call. On the SYMPH-309 reproduction, the denylist cut the
+model-visible prompt from ~16.8k chars (21 advertised skills) to ~4.8k chars
+(zero skills); the unhardened run burned ~1M tokens on a single thin issue.
+
+**The discovery contract** (see `discoverCodexSkillPaths` in
+`src/codex/app-server-client.ts`). The generated denylist must cover every
+path Codex's own skill discovery can resolve at launch:
+
+- **Built-in system skills** materialize at runtime under
+  `$CODEX_HOME/skills/.system/<name>/SKILL.md` — inside the *ephemeral* home,
+  even when it starts empty. The denylist therefore pre-disables those paths
+  before they exist, for a pinned default name list plus any `.system` entries
+  found in the operator home (which capture names added by newer Codex
+  versions).
+- **External skill roots**: `~/.agents/skills` and `/etc/codex/skills` are
+  scanned by Codex outside the ephemeral `CODEX_HOME`, so their `SKILL.md`
+  files are disabled by absolute (realpath'd) path. The operator home's
+  `skills/.system` directory is still read for future system-skill names, but
+  the operator home's user `skills/` directory is not a live discovery root once
+  `CODEX_HOME` points at the ephemeral home.
+- **Repo-local skills**: `.agents/skills` directories from the workspace cwd
+  up to the nearest `.git` boundary.
+
+**Why a generated config file rather than CLI flags.** `--disable skills` does
+not exist on Codex 0.135.0 (`codex features list` has no `skills` flag), so
+per-skill `[[skills.config]]` entries are the documented disable mechanism.
+The same TOML array could be passed inline via `-c 'skills.config=[...]'`;
+Symphony writes it to the ephemeral home's `config.toml` instead so the
+denylist (and any future worker-scoped settings) live in one generated file
+and the worker command stays operator-readable. Hindsight/memory suppression
+is *not* provided by the denylist — it comes from the bare worker command
+(`--disable hooks --disable plugin_hooks`, verified effective on 0.135.0) plus
+the clean home.
+
+**What a future Codex change must preserve.** If a Codex upgrade adds new
+discovery roots, renames the `.system` materialization path, or ships a real
+`skills` feature flag, `discoverCodexSkillPaths` must be updated to match.
+The canary is the live probe — run it after every Codex CLI upgrade:
+
+```bash
+pnpm build
+pnpm probe:codex-skills            # real + empty-clean-home modes
+pnpm probe:codex-skills --mode clean
+```
+
+The probe (`scripts/probe-codex-skills.mjs`) builds an ephemeral home through
+the exact production code path, swaps the workflow `codex.command`'s trailing
+`app-server` for `debug prompt-input`, and fails if the rendered prompt still
+contains a `### Available skills` section or a Hindsight block. It needs a
+local authed `codex` CLI, so it is not part of `pnpm test`.
+
 ### linear_graphql Dynamic Tool
 
-Every Codex agent run automatically gets a `linear_graphql` tool injected, allowing the agent to read and write Linear directly:
+Every Codex agent run automatically gets a `linear_graphql` tool injected, allowing the agent to read and write Linear directly.
+
+For issue/comment/document body writes, pass markdown through GraphQL variables, use `sync_workpad`, or use `linear-pp-cli` file-backed commands such as `comments add/edit --body-file` and `documents create/edit --content-file`. Do not use Codex app/connector MCP tools for Linear writes in headless runs because they can request interactive elicitation.
+Symphony rejects inline `body: "..."`, `description: "..."`, and `content: "..."` literals on Linear write mutations so shell-sensitive snippets such as `$VAR`, `${VAR}`, `$(cmd)`, and backticks remain literal data.
 
 ```graphql
 # Example mutation an agent might run to update issue state

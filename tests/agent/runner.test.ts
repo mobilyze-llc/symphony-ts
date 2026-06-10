@@ -1,11 +1,23 @@
-import { mkdir, mkdtemp, rm, stat } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
+import type {
+  ResolvedWorkflowConfig,
+  StageDefinition,
+} from "../../src/config/types.js";
 import type { Issue } from "../../src/domain/model.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 import {
@@ -23,6 +35,7 @@ const fixturePath = join(
   dirname(fileURLToPath(import.meta.url)),
   "../fixtures/codex-fake-server.mjs",
 );
+const execFileAsync = promisify(execFile);
 
 const roots: string[] = [];
 
@@ -122,6 +135,161 @@ describe("AgentRunner", () => {
     expect(result.issue.identifier).toBe("RENAMED-456");
     expect(result.workspace.path).toBe(join(root, "issue-1"));
     expect(result.runAttempt.workspacePath).toBe(join(root, "issue-1"));
+  });
+
+  it("fetches the configured base ref before refreshing a reused workspace", async () => {
+    const root = await createRoot();
+    const source = join(root, "source");
+    const bare = join(root, "source.git");
+    const workspacePath = join(root, "issue-1");
+    const originalBaseBranch = process.env.SYMPHONY_BASE_BRANCH;
+    const refreshLogs: Array<{
+      action: string;
+      currentHead: string | null;
+      desiredBase: string | null;
+      previousDesiredBase?: string | null;
+      fetchedBaseRef?: string | null;
+    }> = [];
+
+    try {
+      await mkdir(source);
+      await execFileAsync("git", ["init", "-b", "main", source]);
+      await git(source, ["config", "user.email", "test@example.com"]);
+      await git(source, ["config", "user.name", "Test User"]);
+      await writeFile(join(source, "file.txt"), "old\n");
+      await git(source, ["add", "file.txt"]);
+      await git(source, ["commit", "-m", "old"]);
+      const oldRevision = await git(source, ["rev-parse", "HEAD"]);
+
+      await execFileAsync("git", ["clone", "--bare", source, bare]);
+      await git(bare, ["update-ref", "refs/remotes/origin/main", oldRevision]);
+      await execFileAsync("git", [
+        "-C",
+        bare,
+        "worktree",
+        "add",
+        workspacePath,
+        "-b",
+        "worktree/ABC-123",
+        "main",
+      ]);
+
+      await writeFile(join(source, "file.txt"), "new\n");
+      await git(source, ["commit", "-am", "new"]);
+      const newRevision = await git(source, ["rev-parse", "HEAD"]);
+      process.env.SYMPHONY_BASE_BRANCH = "main";
+
+      const runner = new AgentRunner({
+        config: createConfig(root, "unused"),
+        tracker: createTracker({
+          refreshStates: [
+            { id: "issue-1", identifier: "ABC-123", state: "Done" },
+          ],
+        }),
+        workspaceBaseRefreshLogger: (entry) => {
+          refreshLogs.push(entry);
+        },
+        createCodexClient: (input) =>
+          createStubCodexClient([], input, {
+            statuses: ["completed"],
+          }),
+      });
+
+      const result = await runner.run({
+        issue: ISSUE_FIXTURE,
+        attempt: null,
+      });
+
+      expect(result.workspace.createdNow).toBe(false);
+      expect(await git(workspacePath, ["rev-parse", "HEAD"])).toBe(newRevision);
+      expect(refreshLogs).toContainEqual(
+        expect.objectContaining({
+          action: "reset_hard",
+          currentHead: oldRevision,
+          desiredBase: newRevision,
+          previousDesiredBase: oldRevision,
+          fetchedBaseRef: "main",
+        }),
+      );
+    } finally {
+      if (originalBaseBranch === undefined) {
+        Reflect.deleteProperty(process.env, "SYMPHONY_BASE_BRANCH");
+      } else {
+        process.env.SYMPHONY_BASE_BRANCH = originalBaseBranch;
+      }
+    }
+  });
+
+  it("falls back to a broad fetch when targeted base candidates are absent", async () => {
+    const root = await createRoot();
+    const source = join(root, "source");
+    const bare = join(root, "source.git");
+    const workspacePath = join(root, "issue-1");
+    const originalBaseBranch = process.env.SYMPHONY_BASE_BRANCH;
+    const refreshLogs: Array<{
+      action: string;
+      fetchedBaseRef?: string | null;
+      reason?: string;
+    }> = [];
+
+    try {
+      Reflect.deleteProperty(process.env, "SYMPHONY_BASE_BRANCH");
+      await mkdir(source);
+      await execFileAsync("git", ["init", "-b", "trunk", source]);
+      await git(source, ["config", "user.email", "test@example.com"]);
+      await git(source, ["config", "user.name", "Test User"]);
+      await writeFile(join(source, "file.txt"), "content\n");
+      await git(source, ["add", "file.txt"]);
+      await git(source, ["commit", "-m", "initial"]);
+
+      await execFileAsync("git", ["clone", "--bare", source, bare]);
+      await execFileAsync("git", [
+        "-C",
+        bare,
+        "worktree",
+        "add",
+        workspacePath,
+        "-b",
+        "worktree/ABC-123",
+        "trunk",
+      ]);
+
+      const runner = new AgentRunner({
+        config: createConfig(root, "unused"),
+        tracker: createTracker({
+          refreshStates: [
+            { id: "issue-1", identifier: "ABC-123", state: "Done" },
+          ],
+        }),
+        workspaceBaseRefreshLogger: (entry) => {
+          refreshLogs.push(entry);
+        },
+        createCodexClient: (input) =>
+          createStubCodexClient([], input, {
+            statuses: ["completed"],
+          }),
+      });
+
+      const result = await runner.run({
+        issue: ISSUE_FIXTURE,
+        attempt: null,
+      });
+
+      expect(result.workspace.createdNow).toBe(false);
+      expect(refreshLogs).toContainEqual(
+        expect.objectContaining({
+          action: "no_base_ref",
+          fetchedBaseRef: null,
+          reason: "no_candidate_base_ref_resolved",
+        }),
+      );
+    } finally {
+      if (originalBaseBranch === undefined) {
+        Reflect.deleteProperty(process.env, "SYMPHONY_BASE_BRANCH");
+      } else {
+        process.env.SYMPHONY_BASE_BRANCH = originalBaseBranch;
+      }
+    }
   });
 
   it("sends the rendered workflow prompt first and continuation guidance afterwards", async () => {
@@ -267,6 +435,306 @@ describe("AgentRunner", () => {
     });
   });
 
+  it("pauses from in-flight token telemetry before the turn resolves", async () => {
+    const root = await createRoot();
+    const prompts: string[] = [];
+    const close = vi.fn().mockResolvedValue(undefined);
+    const continueTurn = vi.fn();
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 20,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+        },
+      },
+      tracker,
+      createCodexClient: (input) => ({
+        async startSession({ prompt }: { prompt: string; title: string }) {
+          prompts.push(prompt);
+          input.onEvent({
+            event: "session_started",
+            timestamp: new Date("2026-03-06T00:00:00.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+          });
+          input.onEvent({
+            event: "notification",
+            timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "live usage update",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+          });
+
+          const error = new Error(
+            "Codex session closed while a turn was running.",
+          ) as Error & { code: string };
+          error.code = ERROR_CODES.codexProtocolError;
+          throw error;
+        },
+        continueTurn,
+        close,
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(close).toHaveBeenCalled();
+    expect(continueTurn).not.toHaveBeenCalled();
+    expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
+    expect(result.turnsCompleted).toBe(1);
+    expect(result.lastTurn).toBeNull();
+    expect(result.hardStop).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "token_budget",
+      totalTokens: 21,
+    });
+    expect(result.hardStop?.reason).toContain("Live token telemetry");
+  });
+
+  it("uses stage hard-stop overrides for live telemetry budget enforcement", async () => {
+    const root = await createRoot();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const continueTurn = vi.fn();
+    const stage: StageDefinition = {
+      type: "agent",
+      runner: null,
+      model: null,
+      prompt: null,
+      maxTurns: null,
+      timeoutMs: null,
+      hardStops: {
+        maxTokensPerUnit: 20,
+      },
+      concurrency: null,
+      gateType: null,
+      maxRework: null,
+      reviewers: [],
+      transitions: { onComplete: "implement", onApprove: null, onRework: null },
+      linearState: null,
+    };
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 10_000,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+        },
+      },
+      tracker: createTracker(),
+      createCodexClient: (input) => ({
+        async startSession() {
+          input.onEvent({
+            event: "notification",
+            timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "live usage update",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+          });
+
+          const error = new Error(
+            "Codex session closed while a turn was running.",
+          ) as Error & { code: string };
+          error.code = ERROR_CODES.codexProtocolError;
+          throw error;
+        },
+        continueTurn,
+        close,
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "investigate",
+      stage,
+    });
+
+    expect(close).toHaveBeenCalled();
+    expect(continueTurn).not.toHaveBeenCalled();
+    expect(result.hardStop).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "token_budget",
+      totalTokens: 21,
+    });
+    expect(result.hardStop?.reason).toContain("Live token telemetry");
+  });
+
+  it("uses stage max_iterations to cap turns below the stage max_turns", async () => {
+    const root = await createRoot();
+    const prompts: string[] = [];
+    const stage: StageDefinition = {
+      type: "agent",
+      runner: null,
+      model: null,
+      prompt: null,
+      maxTurns: 5,
+      timeoutMs: null,
+      hardStops: {
+        maxIterations: 2,
+      },
+      concurrency: null,
+      gateType: null,
+      maxRework: null,
+      reviewers: [],
+      transitions: { onComplete: "implement", onApprove: null, onRework: null },
+      linearState: null,
+    };
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 10_000,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+        },
+      },
+      tracker,
+      createCodexClient: (input) =>
+        createStubCodexClient(prompts, input, {
+          messages: ["still working", "still working more"],
+        }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "investigate",
+      stage,
+    });
+
+    expect(prompts).toHaveLength(2);
+    expect(result.hardStop).toMatchObject({
+      outcome: "STALLED",
+      trigger: "iteration_cap",
+      turnCount: 2,
+    });
+  });
+
+  it("does not use heartbeat telemetry as the live budget stop trigger", async () => {
+    const root = await createRoot();
+    const prompts: string[] = [];
+    const close = vi.fn().mockResolvedValue(undefined);
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 20,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+        },
+      },
+      tracker,
+      createCodexClient: (input) => ({
+        async startSession({ prompt }: { prompt: string; title: string }) {
+          prompts.push(prompt);
+          input.onEvent({
+            event: "session_started",
+            timestamp: new Date("2026-03-06T00:00:00.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+          });
+          input.onEvent({
+            event: "activity_heartbeat",
+            timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "workspace activity",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+          });
+          expect(close).not.toHaveBeenCalled();
+
+          return {
+            status: "completed" as const,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            sessionId: "thread-1-turn-1",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+            rateLimits: null,
+            message: "turn 1",
+          };
+        },
+        continueTurn: vi.fn(),
+        close,
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(result.hardStop).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "token_budget",
+      totalTokens: 21,
+    });
+    expect(result.hardStop?.reason).not.toContain("Live token telemetry");
+  });
+
   it("lets explicit stage completion win over a same-turn budget ceiling", async () => {
     const root = await createRoot();
     const prompts: string[] = [];
@@ -345,12 +813,63 @@ describe("AgentRunner", () => {
       threadSandbox: "workspace-write",
       turnSandboxPolicy: { type: "workspace-write", networkAccess: false },
     });
+    expect(factoryInputs[0]?.artifactDirectory).toBe(
+      join(root, ".symphony", "codex-sessions", ISSUE_FIXTURE.id),
+    );
+    expect(factoryInputs[0]?.artifactDirectory).not.toContain(
+      join(root, ISSUE_FIXTURE.id, ".symphony"),
+    );
     expect(prompts[0]).toContain("## Mode Permission Envelope");
     expect(prompts[0]).toContain("Mode: prototype");
     expect(prompts[0]).toContain("Pull requests: denied");
   });
 
-  it("emits promptChars and estimatedPromptTokens on agent events, with turn 1 larger than turn 2 for a long template", async () => {
+  it("uses the sanitized workspace key for durable Codex trace artifacts", async () => {
+    const root = await createRoot();
+    const workspacePath = join(root, "safe-workspace-key");
+    const factoryInputs: AgentRunnerCodexClientFactoryInput[] = [];
+    const mockWorkspaceManager = {
+      root,
+      createForIssue: vi.fn().mockResolvedValue({
+        path: workspacePath,
+        workspaceKey: "safe-workspace-key",
+        createdNow: true,
+      }),
+      removeForIssue: vi.fn(),
+      resolveForIssue: vi.fn(),
+    };
+    const issue: Issue = {
+      ...ISSUE_FIXTURE,
+      id: "../unsafe-issue-id",
+    };
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker: createTracker({
+        refreshStates: [
+          { id: issue.id, identifier: issue.identifier, state: "Done" },
+        ],
+      }),
+      workspaceManager: mockWorkspaceManager as never,
+      createCodexClient: (input) => {
+        factoryInputs.push(input);
+        return createStubCodexClient([], input, {
+          statuses: ["completed"],
+        });
+      },
+    });
+
+    await runner.run({ issue, attempt: null });
+
+    expect(mockWorkspaceManager.createForIssue).toHaveBeenCalledWith(
+      "../unsafe-issue-id",
+    );
+    expect(factoryInputs[0]?.artifactDirectory).toBe(
+      join(root, ".symphony", "codex-sessions", "safe-workspace-key"),
+    );
+    expect(factoryInputs[0]?.artifactDirectory).not.toContain("unsafe");
+  });
+
+  it("emits promptChars and estimatedPromptTokens on agent events", async () => {
     const root = await createRoot();
     const prompts: string[] = [];
     const capturedEvents: Array<{
@@ -365,11 +884,10 @@ describe("AgentRunner", () => {
         { id: "issue-1", identifier: "ABC-123", state: "Human Review" },
       ],
     });
-    // Use a long template (>600 chars) so turn 1 prompt is larger than the continuation prompt
-    const longTemplate =
+    const promptTemplate =
       "You are an expert software engineer working on the following issue.\n\nIssue: {{ issue.identifier }}\nTitle: {{ issue.title }}\nDescription: {{ issue.description }}\nState: {{ issue.state }}\nAttempt: {{ attempt }}\n\nInstructions:\n- Read the issue description carefully.\n- Implement all required changes.\n- Write tests for any new functionality.\n- Run the full test suite and fix any failures.\n- Follow the existing code style and conventions.\n- Write clear commit messages.\n- Open a pull request when done.\n- Do not modify unrelated code.\n- Do not skip tests.\n- Document any architectural decisions.\n";
     const runner = new AgentRunner({
-      config: { ...createConfig(root, "unused"), promptTemplate: longTemplate },
+      config: { ...createConfig(root, "unused"), promptTemplate },
       tracker,
       onEvent: (event) => {
         capturedEvents.push({
@@ -406,12 +924,92 @@ describe("AgentRunner", () => {
     expect(turn2Events.length).toBeGreaterThan(0);
     const turn2PromptChars = turn2Events[0]?.promptChars;
     expect(turn2PromptChars).toBe(prompts[1]?.length);
+    expect(prompts[1]).toContain("cmd_status");
     expect(turn2Events[0]?.estimatedPromptTokens).toBe(
       Math.ceil((turn2PromptChars ?? 0) / 4),
     );
+  });
 
-    // Turn 1 (full WORKFLOW template) should be larger than turn 2 (continuation)
-    expect(turn1PromptChars).toBeGreaterThan(turn2PromptChars ?? 0);
+  it("loads file-backed stage prompts before starting the first turn", async () => {
+    const root = await createRoot();
+    const prompts: string[] = [];
+    const workspacePath = join(root, "issue-workspace");
+    await mkdir(join(root, "prompts"), { recursive: true });
+    await writeFile(
+      join(root, "prompts", "investigate.liquid"),
+      "Investigation Token Brake {{ issue.identifier }} {{ stageName }}",
+    );
+
+    const config = createConfig(root, "unused");
+    config.workflowPath = join(root, "WORKFLOW.md");
+    config.stages = {
+      initialStage: "investigate",
+      fastTrack: null,
+      stages: {
+        investigate: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: "prompts/investigate.liquid",
+          maxTurns: 1,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: "done", onApprove: null, onRework: null },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: null,
+        },
+      },
+    };
+    const stage = config.stages.stages.investigate;
+    if (stage === undefined) {
+      throw new Error("Expected investigate stage");
+    }
+    const runner = new AgentRunner({
+      config,
+      tracker: createTracker(),
+      workspaceManager: {
+        root,
+        createForIssue: vi.fn().mockResolvedValue({
+          path: workspacePath,
+          workspaceKey: "issue-workspace",
+          createdNow: true,
+        }),
+        removeForIssue: vi.fn().mockResolvedValue(true),
+        resolveForIssue: vi.fn(),
+      } as never,
+      createCodexClient: (input) =>
+        createStubCodexClient(prompts, input, {
+          statuses: ["completed"],
+        }),
+    });
+
+    await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stage,
+      stageName: "investigate",
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("Investigation Token Brake ABC-123");
+    expect(prompts[0]).toContain("investigate");
+    expect(prompts[0]).not.toContain("prompts/investigate.liquid");
   });
 
   it("fails immediately when before_run fails and still invokes after_run best-effort", async () => {
@@ -500,7 +1098,7 @@ describe("AgentRunner", () => {
 
     const result = await runner.run({
       issue: ISSUE_FIXTURE,
-      attempt: null,
+      attempt: 1,
     });
 
     expect(result.runAttempt.status).toBe("succeeded");
@@ -634,7 +1232,7 @@ describe("AgentRunner", () => {
     const createForIssue = vi.fn().mockResolvedValue({
       path: workspacePath,
       workspaceKey: "issue-1",
-      createdNow: false,
+      createdNow: true,
     });
     const mockWorkspaceManager = {
       root,
@@ -663,6 +1261,138 @@ describe("AgentRunner", () => {
 
     expect(removeForIssue).not.toHaveBeenCalled();
     expect(createForIssue).toHaveBeenCalledWith("issue-1");
+  });
+
+  it("refreshes a reused stale workspace to the fetched base before dispatch", async () => {
+    const sandbox = await createRoot();
+    const remotePath = join(sandbox, "remote.git");
+    const seedPath = join(sandbox, "seed");
+    const workspaceRoot = join(sandbox, "workspaces");
+    const workspacePath = join(workspaceRoot, "issue-1");
+    await mkdir(workspaceRoot, { recursive: true });
+
+    await execFileAsync("git", ["init", "--bare", remotePath]);
+    await execFileAsync("git", ["init", seedPath]);
+    await git(seedPath, ["config", "user.email", "symphony@example.test"]);
+    await git(seedPath, ["config", "user.name", "Symphony Test"]);
+    await writeFile(join(seedPath, "README.md"), "first\n");
+    await writeFile(join(seedPath, "workpad.md"), "committed workpad\n");
+    await git(seedPath, ["add", "README.md", "workpad.md"]);
+    await git(seedPath, ["commit", "-m", "initial"]);
+    await git(seedPath, ["branch", "-M", "main"]);
+    await git(seedPath, ["remote", "add", "origin", remotePath]);
+    await git(seedPath, ["push", "-u", "origin", "main"]);
+    await execFileAsync("git", [
+      "-C",
+      remotePath,
+      "symbolic-ref",
+      "HEAD",
+      "refs/heads/main",
+    ]);
+    const staleHead = await git(seedPath, ["rev-parse", "HEAD"]);
+
+    await writeFile(join(seedPath, "README.md"), "second\n");
+    await git(seedPath, ["commit", "-am", "advance main"]);
+    await git(seedPath, ["push", "origin", "main"]);
+    const currentBase = await git(seedPath, ["rev-parse", "HEAD"]);
+
+    await execFileAsync("git", ["clone", remotePath, workspacePath]);
+    await git(workspacePath, ["checkout", "-b", "worker", staleHead]);
+    await writeFile(join(workspacePath, "workpad.md"), "local worker note\n");
+
+    const refreshLogs: unknown[] = [];
+    const config = createConfig(workspaceRoot, "unused");
+    config.stages = {
+      initialStage: "investigate",
+      fastTrack: null,
+      stages: {
+        investigate: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: 3,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "implement",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: 3,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: "done", onApprove: null, onRework: null },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: null,
+        },
+      },
+    };
+    const runner = new AgentRunner({
+      config,
+      tracker: createTracker({
+        refreshStates: [
+          { id: "issue-1", identifier: "ABC-123", state: "Done" },
+        ],
+      }),
+      workspaceBaseRefreshLogger: (entry) => {
+        refreshLogs.push(entry);
+      },
+      createCodexClient: (input) =>
+        createStubCodexClient([], input, {
+          statuses: ["completed"],
+        }),
+    });
+
+    await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "implement",
+    });
+
+    expect(await git(workspacePath, ["rev-parse", "HEAD"])).toBe(currentBase);
+    await expect(
+      readFile(join(workspacePath, "workpad.md"), "utf8"),
+    ).resolves.toBe("local worker note\n");
+    expect(refreshLogs).toContainEqual(
+      expect.objectContaining({
+        issueId: "issue-1",
+        issueIdentifier: "ABC-123",
+        workspacePath,
+        stageName: "implement",
+        currentHead: staleHead,
+        desiredBase: currentBase,
+        baseRef: "origin/main",
+        action: "rebase_autostash",
+        dirty: true,
+      }),
+    );
   });
 
   it("does NOT remove workspace on continuation (attempt !== null)", async () => {
@@ -1110,6 +1840,8 @@ function createConfig(root: string, scenario: string): ResolvedWorkflowConfig {
     },
     codex: {
       command: `${process.execPath} "${fixturePath}" ${scenario}`,
+      ephemeralHome: false,
+      disableSkills: false,
       approvalPolicy: "full-auto",
       threadSandbox: "workspace-write",
       turnSandboxPolicy: {
@@ -1141,6 +1873,13 @@ async function createRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "symphony-task11-"));
   roots.push(root);
   return root;
+}
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
+    encoding: "utf8",
+  });
+  return stdout.trim();
 }
 
 function jsonResponse(body: unknown, status = 200): Response {

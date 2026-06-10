@@ -8,7 +8,13 @@
 
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,6 +69,88 @@ function runDryRun(specContent: string): string {
       `freeze-and-queue.sh failed (exit ${e.status}):\nSTDERR: ${stderr}\nSTDOUT (last 500): ${stdout.slice(-500)}`,
     );
   }
+}
+
+function runLiveTrivialWithFakeLinear(description: string): {
+  output: string;
+  capturedDescription: string;
+} {
+  const fakeBinDir = join(tmpDir, "bin");
+  const fakeLinear = join(fakeBinDir, "linear");
+  const descriptionFile = join(tmpDir, "trivial-description.md");
+  const captureFile = join(tmpDir, "captured-description.md");
+  mkdirSync(fakeBinDir, { recursive: true });
+  writeFileSync(descriptionFile, description);
+  writeFileSync(
+    fakeLinear,
+    `#!/usr/bin/env bash
+set -euo pipefail
+
+if [[ "\${1:-}" != "api" ]]; then
+  echo "unexpected command: $*" >&2
+  exit 64
+fi
+
+query=$(cat)
+if [[ -z "$query" ]]; then
+  for arg in "$@"; do
+    if [[ "$arg" == query* || "$arg" == mutation* || "$arg" == *"projects(filter"* || "$arg" == *"workflowStates"* || "$arg" == *"issueLabels"* ]]; then
+      query="$arg"
+    fi
+  done
+fi
+description_file=""
+for arg in "$@"; do
+  if [[ "$arg" == description=@* ]]; then
+    description_file="\${arg#description=@}"
+  fi
+done
+
+if [[ "$query" == *"projects(filter"* ]]; then
+  printf '%s\\n' '{"data":{"projects":{"nodes":[{"id":"project-1","teams":{"nodes":[{"id":"team-1","key":"SYMPH"}]}}]}}}'
+elif [[ "$query" == *"workflowStates"* ]]; then
+  printf '%s\\n' '{"data":{"workflowStates":{"nodes":[{"id":"draft-1","name":"Draft"},{"id":"todo-1","name":"Todo"},{"id":"backlog-1","name":"Backlog"}]}}}'
+elif [[ "$query" == *"issueLabels"* ]]; then
+  printf '%s\\n' '{"data":{"issueLabels":{"nodes":[{"id":"label-trivial","name":"trivial"}]}}}'
+elif [[ "$query" == *"issue(id:"* ]]; then
+  printf '%s\\n' '{"data":{"issue":{"project":{"slugId":"fdba14472043"},"parent":null}}}'
+elif [[ -n "$description_file" ]]; then
+  cat "$description_file" > "$FAKE_LINEAR_CAPTURE"
+  printf '%s\\n' '{"data":{"issueCreate":{"success":true,"issue":{"id":"issue-1","identifier":"SYMPH-999","url":"https://linear.app/mobilyze-llc/issue/SYMPH-999"}}}}'
+else
+  echo "unexpected query: $query" >&2
+  exit 66
+fi
+`,
+  );
+  chmodSync(fakeLinear, 0o755);
+
+  const output = execFileSync(
+    "bash",
+    [
+      SCRIPT_PATH,
+      "--trivial",
+      "Preserve expansion syntax",
+      WORKFLOW_PATH,
+      descriptionFile,
+    ],
+    {
+      encoding: "utf-8",
+      timeout: 15000,
+      env: {
+        ...process.env,
+        FAKE_LINEAR_CAPTURE: captureFile,
+        LINEAR_API_KEY: "fake-linear-token",
+        PATH: `${fakeBinDir}:${process.env.PATH ?? ""}`,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    },
+  );
+
+  return {
+    output,
+    capturedDescription: readFileSync(captureFile, "utf-8"),
+  };
 }
 
 beforeEach(() => {
@@ -233,5 +321,77 @@ Scenario: B works
     const output = runDryRun(spec);
     expect(output).toContain("blocked by Task 1");
     expect(output).toContain("Sequential chain: 1 relations");
+  });
+
+  it("preserves shell expansion syntax literally in generated issue bodies", () => {
+    const spec = [
+      "# Expansion Fixture",
+      "",
+      "## Scenarios",
+      "",
+      "```gherkin",
+      "Scenario: Literal shell snippets survive",
+      "    Given a ticket body with shell syntax",
+      "    When freeze-and-queue builds issue descriptions",
+      "    Then the snippets stay literal",
+      '    # Verify: echo "$SYMPHONY_INPUT"',
+      "    # Verify: printf '%s\\n' \"${EXPANSION_HEAVY_VALUE}\"",
+      '    # Verify: run-step "$(linear issue view SYMPH-123 --raw)"',
+      "    # Verify: echo `date`",
+      "    # Verify: cat <<'SCRIPT'",
+      '    # Verify: echo "do not expand me now"',
+      "    # Verify: SCRIPT",
+      "```",
+      "",
+      "## Tasks",
+      "",
+      "### Task 1: Preserve body syntax",
+      "",
+      "**Priority**: 1",
+      "**Scope**: `src/preserve.ts`",
+      "**Scenarios**: Literal shell snippets survive",
+      "",
+      "Implementation notes:",
+      "",
+      "```bash",
+      'echo "$SYMPHONY_INPUT"',
+      "printf '%s\\n' \"${EXPANSION_HEAVY_VALUE}\"",
+      'run-step "$(linear issue view SYMPH-123 --raw)"',
+      "echo `date`",
+      "cat <<'SCRIPT'",
+      'echo "do not expand me now"',
+      "SCRIPT",
+      "```",
+    ].join("\n");
+
+    const output = runDryRun(spec);
+
+    expect(output).toContain('echo "$SYMPHONY_INPUT"');
+    expect(output).toContain("printf '%s\\n' \"${EXPANSION_HEAVY_VALUE}\"");
+    expect(output).toContain('run-step "$(linear issue view SYMPH-123 --raw)"');
+    expect(output).toContain("echo `date`");
+    expect(output).toContain("cat <<'SCRIPT'");
+  });
+
+  it("passes trivial issue descriptions through a file-backed GraphQL variable", () => {
+    const description = [
+      "## Trivial body",
+      "",
+      "```bash",
+      'echo "$SYMPHONY_INPUT"',
+      "printf '%s\\n' \"${EXPANSION_HEAVY_VALUE}\"",
+      'run-step "$(linear issue view SYMPH-123 --raw)"',
+      "echo `date`",
+      "cat <<'SCRIPT'",
+      'echo "do not expand me now"',
+      "SCRIPT",
+      "```",
+    ].join("\n");
+
+    const { output, capturedDescription } =
+      runLiveTrivialWithFakeLinear(description);
+
+    expect(output).toContain("Issue: SYMPH-999");
+    expect(capturedDescription).toBe(description);
   });
 });

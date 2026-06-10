@@ -44,6 +44,7 @@ describe("domain model", () => {
       "poll_tick",
       "poll_tick_completed",
       "worker_exit_normal",
+      "worker_exit_paused",
       "worker_exit_abnormal",
       "stage_completed",
       "codex_update_event",
@@ -89,6 +90,9 @@ describe("domain model", () => {
       totalStageCacheWriteTokens: 0,
       turnHistory: [],
       recentActivity: [],
+      tokenTelemetry: [],
+      tokenTelemetryObservedCount: 0,
+      codexSessionLogs: [],
     });
 
     const state = createInitialOrchestratorState({

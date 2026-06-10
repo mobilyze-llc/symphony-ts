@@ -60,7 +60,36 @@ export interface IssueDetailRunningState {
     input_tokens: number;
     output_tokens: number;
     total_tokens: number;
+    cache_read_tokens?: number;
+    cache_write_tokens?: number;
+    no_cache_tokens?: number;
+    reasoning_tokens?: number;
   };
+  token_telemetry: Array<{
+    at: string;
+    event: string;
+    session_id: string | null;
+    turn_id: string | null;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    input_tokens_delta: number;
+    output_tokens_delta: number;
+    total_tokens_delta: number;
+    cache_read_tokens: number | null;
+    cache_write_tokens: number | null;
+    no_cache_tokens: number | null;
+    reasoning_tokens: number | null;
+    cache_read_tokens_delta: number;
+    cache_write_tokens_delta: number;
+    no_cache_tokens_delta: number;
+    reasoning_tokens_delta: number;
+  }>;
+  token_telemetry_total_entries?: number;
+  token_telemetry_retained_entries?: number;
+  token_telemetry_observed_entries?: number;
+  token_telemetry_truncated?: boolean;
+  token_telemetry_retention_truncated?: boolean;
 }
 
 export interface IssueDetailRetryState {
@@ -94,6 +123,7 @@ export interface IssueDetailResponse {
       label: string;
       path: string;
       url: string | null;
+      bytes?: number;
     }>;
   };
   recent_events: Array<{

@@ -1,6 +1,16 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -9,10 +19,13 @@ import {
   CodexAppServerClient,
   type CodexAppServerClientError,
   type CodexClientEvent,
+  detectHeadlessCommandOutputRisk,
+  sweepStaleCodexHomes,
 } from "../../src/codex/app-server-client.js";
 import { createLinearGraphqlDynamicTool } from "../../src/codex/linear-graphql-tool.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 import { createModeScopedPermissionPolicy } from "../../src/policy/hard-stops.js";
+import { getDefaultCodexSessionArtifactDirectory } from "../../src/shared/codex-session-artifacts.js";
 
 const roots: string[] = [];
 const clients: CodexAppServerClient[] = [];
@@ -116,6 +129,568 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
+  it("launches Codex with an ephemeral auth-only CODEX_HOME when configured", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    await mkdir(sourceHome, { recursive: true });
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+
+    const markerPath = join(workspace, "codex-home.txt");
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `printf '%s' "$CODEX_HOME" > ${shellQuote(markerPath)}`,
+        'test -L "$CODEX_HOME/auth.json"',
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} happy`,
+      ].join(" && ");
+      const client = createClient("happy", workspace, events, {
+        command,
+        ephemeralHome: true,
+      });
+
+      const result = await client.startSession({
+        prompt: "Verify ephemeral Codex home",
+        title: "ABC-123: Example",
+      });
+
+      expect(result.status).toBe("completed");
+      const codexHome = (await readFile(markerPath, "utf8")).trim();
+      expect(codexHome).not.toBe(sourceHome);
+      expect(codexHome).toContain("symphony-codex-home-");
+      await client.close();
+      await expect(access(codexHome)).rejects.toThrow();
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("preserves Codex session JSONL artifacts before deleting ephemeral CODEX_HOME", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const artifactDirectory = join(workspace, "artifacts");
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const client = createClient("session-artifact", workspace, events, {
+        ephemeralHome: true,
+        artifactDirectory,
+      });
+
+      const result = await client.startSession({
+        prompt: "Preserve session telemetry",
+        title: "ABC-123: Example",
+      });
+
+      expect(result.status).toBe("completed");
+      await client.close();
+
+      const artifactEvent = events.find(
+        (event) => event.event === "session_artifact_saved",
+      );
+      expect(artifactEvent).toMatchObject({
+        sessionId: "thread-1-turn-1",
+        message: "Preserved 1 Codex session artifact(s).",
+      });
+      const artifact = artifactEvent?.artifacts?.[0];
+      expect(artifact).toEqual(
+        expect.objectContaining({
+          label: "sessions/2026/rollout-test.jsonl",
+        }),
+      );
+      expect(artifact?.path.startsWith(artifactDirectory)).toBe(true);
+      await expect(readFile(artifact?.path ?? "", "utf8")).resolves.toContain(
+        '"total_tokens":15',
+      );
+      await expect(access(artifact?.sourcePath ?? "")).rejects.toThrow();
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("preserves nested session logs without copying out-of-scope JSONL files or symlinks", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const artifactDirectory = join(workspace, "artifacts");
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+
+    const markerPath = join(workspace, "codex-home.txt");
+    const setupScript = `
+      import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+      import { join } from "node:path";
+
+      const codexHome = process.env.CODEX_HOME;
+      if (!codexHome) throw new Error("missing CODEX_HOME");
+      const nestedSessionDir = join(codexHome, "sessions", "2026", "06", "10");
+      mkdirSync(nestedSessionDir, { recursive: true });
+      writeFileSync(join(nestedSessionDir, "nested.jsonl"), '{"type":"nested"}\\n');
+      mkdirSync(join(codexHome, "logs"), { recursive: true });
+      writeFileSync(join(codexHome, "logs", "not-a-session.jsonl"), '{"type":"leak"}\\n');
+      writeFileSync(join(codexHome, "outside.jsonl"), '{"type":"outside"}\\n');
+      symlinkSync(join(codexHome, "outside.jsonl"), join(nestedSessionDir, "linked.jsonl"));
+    `;
+
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `printf '%s' "$CODEX_HOME" > ${shellQuote(markerPath)}`,
+        `${shellQuote(process.execPath)} --input-type=module --eval ${shellQuote(setupScript)}`,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} session-artifact`,
+      ].join(" && ");
+      const client = createClient("session-artifact", workspace, events, {
+        command,
+        ephemeralHome: true,
+        artifactDirectory,
+      });
+
+      const result = await client.startSession({
+        prompt: "Preserve scoped session telemetry",
+        title: "ABC-123: Example",
+      });
+      const codexHome = (await readFile(markerPath, "utf8")).trim();
+
+      expect(result.status).toBe("completed");
+      await client.close();
+      await expect(access(codexHome)).rejects.toThrow();
+
+      const artifactEvent = events.find(
+        (event) => event.event === "session_artifact_saved",
+      );
+      const artifactLabels =
+        artifactEvent?.artifacts?.map((artifact) => artifact.label) ?? [];
+      expect(artifactLabels).toEqual([
+        "sessions/2026/06/10/nested.jsonl",
+        "sessions/2026/rollout-test.jsonl",
+      ]);
+      expect(artifactLabels).not.toContain("sessions/2026/06/10/linked.jsonl");
+      await expect(
+        access(
+          join(
+            artifactDirectory,
+            basename(codexHome),
+            "sessions",
+            "2026",
+            "06",
+            "10",
+            "linked.jsonl",
+          ),
+        ),
+      ).rejects.toThrow();
+      await expect(
+        access(
+          join(
+            artifactDirectory,
+            basename(codexHome),
+            "logs",
+            "not-a-session.jsonl",
+          ),
+        ),
+      ).rejects.toThrow();
+      await expect(
+        access(join(artifactDirectory, basename(codexHome), "outside.jsonl")),
+      ).rejects.toThrow();
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("does not follow a symlinked sessions root while preserving cleanup", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const artifactDirectory = join(workspace, "artifacts");
+    const outsideDirectory = join(workspace, "outside-sessions");
+    await mkdir(outsideDirectory, { recursive: true });
+    await writeFile(
+      join(outsideDirectory, "leaked.jsonl"),
+      '{"type":"leak"}\n',
+    );
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+
+    const markerPath = join(workspace, "codex-home.txt");
+    const setupScript = `
+      import { rmSync, symlinkSync } from "node:fs";
+      import { join } from "node:path";
+
+      const codexHome = process.env.CODEX_HOME;
+      const outsideDirectory = process.env.OUTSIDE_SESSIONS;
+      if (!codexHome || !outsideDirectory) throw new Error("missing env");
+      rmSync(join(codexHome, "sessions"), { recursive: true, force: true });
+      symlinkSync(outsideDirectory, join(codexHome, "sessions"));
+    `;
+
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `printf '%s' "$CODEX_HOME" > ${shellQuote(markerPath)}`,
+        `OUTSIDE_SESSIONS=${shellQuote(outsideDirectory)} ${shellQuote(process.execPath)} --input-type=module --eval ${shellQuote(setupScript)}`,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} happy`,
+      ].join(" && ");
+      const client = createClient("session-artifact", workspace, events, {
+        command,
+        ephemeralHome: true,
+        artifactDirectory,
+      });
+
+      const result = await client.startSession({
+        prompt: "Do not preserve symlinked session roots",
+        title: "ABC-123: Example",
+      });
+      const codexHome = (await readFile(markerPath, "utf8")).trim();
+
+      expect(result.status).toBe("completed");
+      await expect(client.close()).resolves.toBeUndefined();
+      await expect(access(codexHome)).rejects.toThrow();
+      expect(events.map((event) => event.event)).not.toContain(
+        "session_artifact_saved",
+      );
+      await expect(
+        access(
+          join(
+            artifactDirectory,
+            basename(codexHome),
+            "sessions",
+            "leaked.jsonl",
+          ),
+        ),
+      ).rejects.toThrow();
+      await expect(
+        access(join(outsideDirectory, "leaked.jsonl")),
+      ).resolves.toBeUndefined();
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("continues cleanup when a session-log subtree cannot be traversed", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const artifactDirectory = join(workspace, "artifacts");
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+
+    const markerPath = join(workspace, "codex-home.txt");
+    const setupScript = `
+      import { chmodSync, mkdirSync } from "node:fs";
+      import { join } from "node:path";
+
+      const codexHome = process.env.CODEX_HOME;
+      if (!codexHome) throw new Error("missing CODEX_HOME");
+      const unreadable = join(codexHome, "sessions", "unreadable");
+      mkdirSync(unreadable, { recursive: true });
+      chmodSync(unreadable, 0);
+    `;
+
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `printf '%s' "$CODEX_HOME" > ${shellQuote(markerPath)}`,
+        `${shellQuote(process.execPath)} --input-type=module --eval ${shellQuote(setupScript)}`,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} session-artifact`,
+      ].join(" && ");
+      const client = createClient("session-artifact", workspace, events, {
+        command,
+        ephemeralHome: true,
+        artifactDirectory,
+      });
+
+      const result = await client.startSession({
+        prompt: "Preserve session telemetry through traversal failure",
+        title: "ABC-123: Example",
+      });
+      const codexHome = (await readFile(markerPath, "utf8")).trim();
+
+      expect(result.status).toBe("completed");
+      await expect(client.close()).resolves.toBeUndefined();
+      await expect(access(codexHome)).rejects.toThrow();
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          event: "session_artifact_saved",
+          message: "Preserved 1 Codex session artifact(s).",
+        } satisfies Partial<CodexClientEvent>),
+      );
+      expect(events).not.toContainEqual(
+        expect.objectContaining({
+          event: "other_message",
+          message: expect.stringContaining(
+            "Failed to preserve ephemeral Codex session artifacts before cleanup",
+          ),
+        } satisfies Partial<CodexClientEvent>),
+      );
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("uses the shared default artifact directory when no override is provided", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const client = createClient("session-artifact", workspace, events, {
+        ephemeralHome: true,
+      });
+
+      const result = await client.startSession({
+        prompt: "Preserve session telemetry in the default artifact directory",
+        title: "ABC-123: Example",
+      });
+
+      expect(result.status).toBe("completed");
+      await client.close();
+
+      const artifact = events.find(
+        (event) => event.event === "session_artifact_saved",
+      )?.artifacts?.[0];
+      const expectedRoot = getDefaultCodexSessionArtifactDirectory(workspace);
+      expect(artifact?.path.startsWith(expectedRoot)).toBe(true);
+      await expect(readFile(artifact?.path ?? "", "utf8")).resolves.toContain(
+        '"total_tokens":15',
+      );
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("still deletes ephemeral CODEX_HOME when artifact preservation fails", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const artifactDirectory = join(workspace, "artifact-root-is-file");
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+    await writeFile(artifactDirectory, "not a directory");
+
+    const markerPath = join(workspace, "codex-home.txt");
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `printf '%s' "$CODEX_HOME" > ${shellQuote(markerPath)}`,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} session-artifact`,
+      ].join(" && ");
+      const client = createClient("session-artifact", workspace, events, {
+        command,
+        ephemeralHome: true,
+        artifactDirectory,
+      });
+
+      const result = await client.startSession({
+        prompt: "Preserve session telemetry despite artifact failure",
+        title: "ABC-123: Example",
+      });
+      const codexHome = (await readFile(markerPath, "utf8")).trim();
+
+      expect(result.status).toBe("completed");
+      await expect(client.close()).resolves.toBeUndefined();
+      await expect(access(codexHome)).rejects.toThrow();
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          event: "other_message",
+          message: expect.stringContaining(
+            "Failed to preserve ephemeral Codex session artifacts before cleanup",
+          ),
+        } satisfies Partial<CodexClientEvent>),
+      );
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("reasserts ephemeral CODEX_HOME after login profiles are loaded", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const profileHome = await createWorkspace();
+    const profileCodexHome = await createWorkspace();
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+    await writeFile(
+      join(profileHome, ".bash_profile"),
+      `export CODEX_HOME=${shellQuote(profileCodexHome)}\n`,
+    );
+
+    const markerPath = join(workspace, "codex-home.txt");
+    const previousCodexHome = process.env.CODEX_HOME;
+    const previousHome = process.env.HOME;
+    process.env.CODEX_HOME = sourceHome;
+    process.env.HOME = profileHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `printf '%s' "$CODEX_HOME" > ${shellQuote(markerPath)}`,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} happy`,
+      ].join(" && ");
+      const client = createClient("happy", workspace, events, {
+        command,
+        ephemeralHome: true,
+      });
+
+      const result = await client.startSession({
+        prompt: "Verify profile CODEX_HOME isolation",
+        title: "ABC-123: Example",
+      });
+
+      expect(result.status).toBe("completed");
+      const codexHome = (await readFile(markerPath, "utf8")).trim();
+      expect(codexHome).not.toBe(sourceHome);
+      expect(codexHome).not.toBe(profileCodexHome);
+      expect(codexHome).toContain("symphony-codex-home-");
+      await client.close();
+      await expect(access(codexHome)).rejects.toThrow();
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+      if (previousHome === undefined) {
+        Reflect.deleteProperty(process.env, "HOME");
+      } else {
+        process.env.HOME = previousHome;
+      }
+    }
+  });
+
+  it("writes a headless denylist config into the ephemeral CODEX_HOME when configured", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const userSkillRoot = join(sourceHome, "skills", "example");
+    const systemSkillRoot = join(sourceHome, "skills", ".system", "future");
+    await mkdir(userSkillRoot, { recursive: true });
+    await mkdir(systemSkillRoot, { recursive: true });
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+    await writeFile(
+      join(userSkillRoot, "SKILL.md"),
+      "---\nname: example\ndescription: example\n---\n",
+    );
+    await writeFile(
+      join(systemSkillRoot, "SKILL.md"),
+      "---\nname: future\ndescription: future\n---\n",
+    );
+
+    const markerPath = join(workspace, "codex-home.txt");
+    const configPath = join(workspace, "codex-config.toml");
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `printf '%s' "$CODEX_HOME" > ${shellQuote(markerPath)}`,
+        `cp "$CODEX_HOME/config.toml" ${shellQuote(configPath)}`,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} happy`,
+      ].join(" && ");
+      const client = createClient("happy", workspace, events, {
+        command,
+        ephemeralHome: true,
+        disableSkills: true,
+      });
+
+      const result = await client.startSession({
+        prompt: "Verify ephemeral skill config",
+        title: "ABC-123: Example",
+      });
+
+      expect(result.status).toBe("completed");
+      const codexHome = (await readFile(markerPath, "utf8")).trim();
+      const config = await readFile(configPath, "utf8");
+      const skillPath = await realpath(join(userSkillRoot, "SKILL.md"));
+      expect(config).toContain("project_doc_max_bytes = 0");
+      expect(config).toContain("[features]");
+      expect(config).toContain("apps = false");
+      expect(config).toContain("browser_use = false");
+      expect(config).toContain("codex_hooks = false");
+      expect(config).toContain("computer_use = false");
+      expect(config).toContain("memories = false");
+      expect(config).toContain("multi_agent = false");
+      expect(config).toContain("plugins = false");
+      expect(config).toContain("tool_call_mcp_elicitation = false");
+      expect(config).toContain("[[skills.config]]");
+      expect(config).not.toContain(`path = "${skillPath}"`);
+      expect(config).toContain(
+        `path = "${join(codexHome, "skills", ".system", "openai-docs", "SKILL.md")}"`,
+      );
+      expect(config).toContain(
+        `path = "${join(codexHome, "skills", ".system", "future", "SKILL.md")}"`,
+      );
+      expect(config).toContain("enabled = false");
+      await client.close();
+      await expect(access(codexHome)).rejects.toThrow();
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
+  it("fails clearly when ephemeral CODEX_HOME cannot read operator auth", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const client = createClient("happy", workspace, events, {
+        ephemeralHome: true,
+      });
+
+      await expect(
+        client.startSession({
+          prompt: "Verify auth failure",
+          title: "ABC-123: Example",
+        }),
+      ).rejects.toMatchObject({
+        code: ERROR_CODES.codexLaunchFailed,
+        message: expect.stringContaining("no readable auth.json"),
+      });
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
   it("denies PR creation approvals when prototype mode cannot open pull requests", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];
@@ -147,6 +722,67 @@ describe("CodexAppServerClient", () => {
     );
 
     await client.close();
+  });
+
+  it("declines broad rg line-output approvals before they grow headless context", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("broad-rg-denied", workspace, events);
+
+    const result = await client.startSession({
+      prompt: "Investigate token growth",
+      title: "ABC-123: Example",
+    });
+
+    expect(result.message).toBe("Broad rg command denied by output guard");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "unsupported_tool_call",
+        toolName: "Bash",
+        message: expect.stringContaining("Headless output guard declined"),
+      } satisfies Partial<CodexClientEvent>),
+    );
+    expect(events.map((event) => event.event)).not.toContain(
+      "approval_auto_approved",
+    );
+
+    await client.close();
+  });
+
+  it("allows file-scoped rg while flagging broad directory searches", () => {
+    expect(
+      detectHeadlessCommandOutputRisk(
+        'rg -n "token_telemetry|codex|running" src ops -m 80',
+      ),
+    ).toContain("Headless output guard");
+    expect(
+      detectHeadlessCommandOutputRisk(
+        'rg "token_telemetry|codex|running" src ops -m 80',
+      ),
+    ).toContain("Headless output guard");
+    expect(
+      detectHeadlessCommandOutputRisk(
+        'rg -n "token|codex" ./src ./tests -m 80',
+      ),
+    ).toContain("Headless output guard");
+    expect(
+      detectHeadlessCommandOutputRisk('rg -n "token|codex" ./ -m 80'),
+    ).toContain("Headless output guard");
+    expect(
+      detectHeadlessCommandOutputRisk(
+        'rg -n "token|codex" src -m 80\nrg -l "runner" tests',
+      ),
+    ).toContain("Headless output guard");
+    expect(
+      detectHeadlessCommandOutputRisk(
+        'rg -n "tokenTelemetry|truncated" src/orchestrator/runtime-host.ts tests/orchestrator/runtime-host.test.ts -m 20',
+      ),
+    ).toBeNull();
+    expect(
+      detectHeadlessCommandOutputRisk(
+        'rg -l "token_telemetry|codex|running" src ops',
+      ),
+    ).toBeNull();
   });
 
   it("reuses the same thread id across continuation turns", async () => {
@@ -237,6 +873,101 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
+  it("does not attach cached usage to non-telemetry notifications", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient(
+      "usage-then-noisy-notification",
+      workspace,
+      events,
+    );
+
+    const result = await client.startSession({
+      prompt: "Run a tiny task",
+      title: "ABC-123: Example",
+    });
+
+    expect(result.usage).toEqual({
+      inputTokens: 100,
+      outputTokens: 50,
+      totalTokens: 150,
+    });
+    expect(result.rateLimits).toEqual({
+      requestsRemaining: 7,
+    });
+
+    const usageNotification = events.find(
+      (event) =>
+        event.event === "notification" &&
+        event.message === "thread/tokenUsage/updated",
+    );
+    expect(usageNotification).toMatchObject({
+      usage: {
+        inputTokens: 100,
+        outputTokens: 50,
+        totalTokens: 150,
+      },
+    } satisfies Partial<CodexClientEvent>);
+
+    const noisyNotification = events.find(
+      (event) =>
+        event.event === "notification" && event.message === "item/started",
+    );
+    expect(noisyNotification?.usage).toBeUndefined();
+
+    const rateLimitNotification = events.find(
+      (event) =>
+        event.event === "notification" &&
+        event.message === "account/rateLimits/updated",
+    );
+    expect(rateLimitNotification?.usage).toBeUndefined();
+    expect(rateLimitNotification?.rateLimits).toEqual({
+      requestsRemaining: 7,
+    });
+
+    const completed = events.find((event) => event.event === "turn_completed");
+    expect(completed).toMatchObject({
+      usage: {
+        inputTokens: 100,
+        outputTokens: 50,
+        totalTokens: 150,
+      },
+    } satisfies Partial<CodexClientEvent>);
+
+    await client.close();
+  });
+
+  it("does not carry prior turn usage into a new turn without fresh usage", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("usage-reset-between-turns", workspace, events);
+
+    const first = await client.startSession({
+      prompt: "First prompt",
+      title: "ABC-123: Example",
+    });
+    const second = await client.continueTurn(
+      "Continue without usage",
+      "ABC-123: Example",
+    );
+
+    expect(first.usage).toMatchObject({
+      inputTokens: 14,
+      outputTokens: 9,
+      totalTokens: 23,
+    });
+    expect(second.usage).toBeNull();
+
+    const secondTurnEvents = events.filter(
+      (event) => event.turnId === "turn-2",
+    );
+    expect(secondTurnEvents.some((event) => event.usage !== undefined)).toBe(
+      false,
+    );
+
+    await client.close();
+  });
+
   it("fails the turn when user-input-required is emitted through a compatible variant", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];
@@ -257,6 +988,121 @@ describe("CodexAppServerClient", () => {
         event: "turn_input_required",
         errorCode: ERROR_CODES.codexUserInputRequired,
       }),
+    );
+
+    await client.close();
+  });
+
+  it("does not treat prompt echoes containing user-input-required text as operator input", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient(
+      "prompt-echo-user-input-code",
+      workspace,
+      events,
+    );
+
+    const result = await client.startSession({
+      prompt:
+        "Investigate why codex_user_input_required appears in this issue description.",
+      title: "ABC-123: Example",
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      message: "Prompt echo did not pause the turn",
+    });
+    expect(events.some((event) => event.event === "turn_input_required")).toBe(
+      false,
+    );
+
+    await client.close();
+  });
+
+  it("does not treat prompt echoes containing approval text as approval requests", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("prompt-echo-approval-text", workspace, events);
+
+    const result = await client.startSession({
+      prompt: "Investigate why approval appears in this issue description.",
+      title: "ABC-123: Example",
+    });
+
+    expect(result).toMatchObject({
+      status: "completed",
+      message: "Approval prompt echo did not trigger approval handling",
+    });
+    expect(
+      events.some((event) => event.event === "approval_auto_approved"),
+    ).toBe(false);
+
+    await client.close();
+  });
+
+  it("fails the turn when a headless MCP server requests elicitation", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("mcp-elicitation", workspace, events);
+
+    await expect(
+      client.startSession({
+        prompt: "Write a workpad.",
+        title: "ABC-123: Example",
+      }),
+    ).rejects.toMatchObject({
+      name: "CodexAppServerClientError",
+      code: ERROR_CODES.codexUserInputRequired,
+    } satisfies Partial<CodexAppServerClientError>);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "turn_input_required",
+        errorCode: ERROR_CODES.codexUserInputRequired,
+        raw: expect.objectContaining({
+          method: "mcpServer/elicitation/request",
+        }),
+      }),
+    );
+    await waitForEvent(
+      events,
+      (event) =>
+        event.event === "other_message" &&
+        event.message === "mcp-elicitation response received",
+    );
+
+    await client.close();
+  });
+
+  it("fails the turn when an MCP elicitation create request is emitted", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("mcp-elicitation-create", workspace, events);
+
+    await expect(
+      client.startSession({
+        prompt: "Write a workpad.",
+        title: "ABC-123: Example",
+      }),
+    ).rejects.toMatchObject({
+      name: "CodexAppServerClientError",
+      code: ERROR_CODES.codexUserInputRequired,
+    } satisfies Partial<CodexAppServerClientError>);
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "turn_input_required",
+        errorCode: ERROR_CODES.codexUserInputRequired,
+        raw: expect.objectContaining({
+          method: "elicitation/create",
+        }),
+      }),
+    );
+    await waitForEvent(
+      events,
+      (event) =>
+        event.event === "other_message" &&
+        event.message === "mcp-elicitation-create response received",
     );
 
     await client.close();
@@ -552,6 +1398,9 @@ function createClient(
       ConstructorParameters<typeof CodexAppServerClient>[0]["dynamicTools"]
     >;
     command: string;
+    ephemeralHome: boolean;
+    disableSkills: boolean;
+    artifactDirectory: string;
     threadSandbox: ConstructorParameters<
       typeof CodexAppServerClient
     >[0]["threadSandbox"];
@@ -563,15 +1412,28 @@ function createClient(
   const client = new CodexAppServerClient({
     command:
       overrides?.command ?? `${process.execPath} "${fixturePath}" ${scenario}`,
+    ...(overrides?.ephemeralHome === undefined
+      ? {}
+      : { ephemeralHome: overrides.ephemeralHome }),
+    ...(overrides?.disableSkills === undefined
+      ? {}
+      : { disableSkills: overrides.disableSkills }),
     cwd: workspace,
     approvalPolicy: "full-auto",
     threadSandbox: overrides?.threadSandbox ?? "workspace-write",
     turnSandboxPolicy: overrides?.turnSandboxPolicy ?? {
       type: "workspace-write",
     },
-    readTimeoutMs: overrides?.readTimeoutMs ?? 750,
-    turnTimeoutMs: overrides?.turnTimeoutMs ?? 500,
-    stallTimeoutMs: overrides?.stallTimeoutMs ?? 1_000,
+    // Generous defaults: these bound failure detection, not happy-path
+    // speed. Tight values (750ms initialize) flaked under parallel-suite
+    // load (SYMPH-313); tests that assert timeout behavior pass explicit
+    // small overrides.
+    readTimeoutMs: overrides?.readTimeoutMs ?? 10_000,
+    turnTimeoutMs: overrides?.turnTimeoutMs ?? 10_000,
+    stallTimeoutMs: overrides?.stallTimeoutMs ?? 10_000,
+    ...(overrides?.artifactDirectory === undefined
+      ? {}
+      : { artifactDirectory: overrides.artifactDirectory }),
     ...(overrides?.modePolicy === undefined
       ? {}
       : { modePolicy: overrides.modePolicy }),
@@ -603,6 +1465,105 @@ async function createWorkspace(): Promise<string> {
   return workspace;
 }
 
+async function waitForEvent(
+  events: CodexClientEvent[],
+  predicate: (event: CodexClientEvent) => boolean,
+  timeoutMs = 500,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (events.some(predicate)) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(
+    `Timed out waiting for event. Seen events: ${events
+      .map((event) => event.event)
+      .join(", ")}`,
+  );
+}
+
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
+
+describe("sweepStaleCodexHomes", () => {
+  const MAX_AGE_MS = 48 * 60 * 60 * 1000;
+
+  async function backdate(path: string, ageMs: number): Promise<void> {
+    const past = new Date(Date.now() - ageMs);
+    await utimes(path, past, past);
+  }
+
+  it("removes only stale symphony-codex-home directories", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-sweep-test-"));
+    roots.push(root);
+    const stale = join(root, "symphony-codex-home-stale");
+    const fresh = join(root, "symphony-codex-home-fresh");
+    const unrelated = join(root, "unrelated-dir");
+    await mkdir(join(stale, "sessions"), { recursive: true });
+    await writeFile(join(stale, "config.toml"), "");
+    await mkdir(fresh, { recursive: true });
+    await mkdir(unrelated, { recursive: true });
+    await backdate(stale, MAX_AGE_MS + 60 * 60 * 1000);
+    await backdate(unrelated, MAX_AGE_MS + 60 * 60 * 1000);
+
+    const removed = await sweepStaleCodexHomes({
+      root,
+      maxAgeMs: MAX_AGE_MS,
+      now: () => Date.now(),
+    });
+
+    expect(removed).toEqual([stale]);
+    await expect(access(stale)).rejects.toThrow();
+    await expect(access(fresh)).resolves.toBeUndefined();
+    await expect(access(unrelated)).resolves.toBeUndefined();
+  });
+
+  it("treats age exactly equal to maxAgeMs as fresh", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-sweep-test-"));
+    roots.push(root);
+    const boundary = join(root, "symphony-codex-home-boundary");
+    await mkdir(boundary, { recursive: true });
+    await backdate(boundary, MAX_AGE_MS);
+    // Pin the injected clock to the dir's actual mtime so the delta is
+    // exactly maxAgeMs — the real clock would drift past the boundary.
+    const mtimeMs = (await stat(boundary)).mtimeMs;
+
+    const removed = await sweepStaleCodexHomes({
+      root,
+      maxAgeMs: MAX_AGE_MS,
+      now: () => mtimeMs + MAX_AGE_MS,
+    });
+
+    expect(removed).toEqual([]);
+    await expect(access(boundary)).resolves.toBeUndefined();
+  });
+
+  it("ignores plain files that match the prefix", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-sweep-test-"));
+    roots.push(root);
+    const file = join(root, "symphony-codex-home-file");
+    await writeFile(file, "");
+    await backdate(file, MAX_AGE_MS + 60 * 60 * 1000);
+
+    const removed = await sweepStaleCodexHomes({
+      root,
+      maxAgeMs: MAX_AGE_MS,
+      now: () => Date.now(),
+    });
+
+    expect(removed).toEqual([]);
+    await expect(access(file)).resolves.toBeUndefined();
+  });
+
+  it("returns empty for a missing root", async () => {
+    const removed = await sweepStaleCodexHomes({
+      root: join(tmpdir(), "symphony-sweep-test-does-not-exist"),
+      maxAgeMs: MAX_AGE_MS,
+      now: () => Date.now(),
+    });
+    expect(removed).toEqual([]);
+  });
+});

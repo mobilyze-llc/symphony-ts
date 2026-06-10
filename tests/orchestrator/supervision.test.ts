@@ -2,11 +2,19 @@ import { describe, expect, it } from "vitest";
 
 import {
   type WorkerSupervisionSnapshot,
+  detectIgnoredSetupInstructionCollisions,
   detectSupervisionFindings,
   extractDeclaredFileScope,
   extractEvalFileScope,
+  formatSupervisionFindingsComment,
   hasBlockingSupervisionFindings,
 } from "../../src/orchestrator/supervision.js";
+
+const SETUP_INSTRUCTION_FILES = [
+  "CLAUDE.md",
+  "AGENTS.md",
+  "AGENTS.override.md",
+] as const;
 
 describe("deterministic supervision", () => {
   it("passes workers with disjoint declared scope, writes, branches, and eval coverage", () => {
@@ -79,6 +87,136 @@ describe("deterministic supervision", () => {
         message: "SYMPH-10 and SYMPH-11 changed the same file set.",
       },
     ]);
+  });
+
+  it.each(SETUP_INSTRUCTION_FILES)(
+    "ignores setup-only root %s overlaps when implementation writes are disjoint",
+    (instructionFile) => {
+      const workers = [
+        createWorker({
+          issueIdentifier: "SYMPH-320",
+          declaredFileScope: ["src/orchestrator/runtime-host.ts"],
+          changedFiles: [instructionFile, "src/orchestrator/runtime-host.ts"],
+        }),
+        createWorker({
+          issueIdentifier: "SYMPH-326",
+          declaredFileScope: ["src/observability/dashboard-render.ts"],
+          changedFiles: [
+            `./${instructionFile}`,
+            "src/observability/dashboard-render.ts",
+          ],
+        }),
+      ];
+
+      expect(detectSupervisionFindings(workers)).toEqual([]);
+      expect(hasBlockingSupervisionFindings(workers)).toBe(false);
+      expect(detectIgnoredSetupInstructionCollisions(workers)).toEqual([
+        {
+          workerIds: ["worker-SYMPH-320", "worker-SYMPH-326"],
+          issueIdentifiers: ["SYMPH-320", "SYMPH-326"],
+          files: [instructionFile],
+          message:
+            "SYMPH-320 and SYMPH-326 share setup-only instruction-file changes that were ignored for write-collision supervision.",
+        },
+      ]);
+    },
+  );
+
+  it("keeps root instruction-file overlaps blocking when a worker declares the file in scope", () => {
+    const workers = [
+      createWorker({
+        issueIdentifier: "SYMPH-1",
+        declaredFileScope: ["CLAUDE.md"],
+        changedFiles: ["CLAUDE.md"],
+      }),
+      createWorker({
+        issueIdentifier: "SYMPH-2",
+        declaredFileScope: ["src/features/beta.ts"],
+        changedFiles: ["CLAUDE.md", "src/features/beta.ts"],
+      }),
+    ];
+    const findings = detectSupervisionFindings(workers);
+
+    expect(findings).toEqual([
+      {
+        kind: "actual_write_collision",
+        action: "pause",
+        workerIds: ["worker-SYMPH-1", "worker-SYMPH-2"],
+        issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+        files: ["CLAUDE.md"],
+        message: "SYMPH-1 and SYMPH-2 changed the same file set.",
+      },
+    ]);
+    expect(detectIgnoredSetupInstructionCollisions(workers)).toEqual([]);
+  });
+
+  it("keeps root instruction-file overlaps blocking when a worker evaluates the file in scope", () => {
+    const workers = [
+      createWorker({
+        issueIdentifier: "SYMPH-1",
+        changedFiles: ["AGENTS.override.md"],
+        evalFileScope: ["AGENTS.override.md"],
+      }),
+      createWorker({
+        issueIdentifier: "SYMPH-2",
+        declaredFileScope: ["src/features/beta.ts"],
+        changedFiles: ["AGENTS.override.md", "src/features/beta.ts"],
+      }),
+    ];
+    const findings = detectSupervisionFindings(workers);
+
+    expect(findings).toEqual([
+      {
+        kind: "actual_write_collision",
+        action: "pause",
+        workerIds: ["worker-SYMPH-1", "worker-SYMPH-2"],
+        issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+        files: ["AGENTS.override.md"],
+        message: "SYMPH-1 and SYMPH-2 changed the same file set.",
+      },
+    ]);
+    expect(detectIgnoredSetupInstructionCollisions(workers)).toEqual([]);
+  });
+
+  it("reports ignored setup-only files on mixed actual-write collisions", () => {
+    const findings = detectSupervisionFindings([
+      createWorker({
+        issueIdentifier: "SYMPH-10",
+        declaredFileScope: ["src/features/alpha.ts"],
+        changedFiles: [
+          "CLAUDE.md",
+          "src/features/alpha.ts",
+          "src/shared/config.ts",
+        ],
+      }),
+      createWorker({
+        issueIdentifier: "SYMPH-11",
+        declaredFileScope: ["src/features/beta.ts"],
+        changedFiles: [
+          "CLAUDE.md",
+          "src/features/beta.ts",
+          "src/shared/config.ts",
+        ],
+      }),
+    ]);
+
+    expect(findings).toEqual([
+      {
+        kind: "actual_write_collision",
+        action: "pause",
+        workerIds: ["worker-SYMPH-10", "worker-SYMPH-11"],
+        issueIdentifiers: ["SYMPH-10", "SYMPH-11"],
+        files: ["src/shared/config.ts"],
+        ignoredFiles: ["CLAUDE.md"],
+        message: "SYMPH-10 and SYMPH-11 changed the same file set.",
+      },
+    ]);
+    expect(
+      formatSupervisionFindingsComment({
+        phase: "running",
+        findings,
+      }),
+    ).toContain("Ignored setup-only files: `CLAUDE.md`.");
   });
 
   it("catches branch divergence and branch reuse deterministically", () => {

@@ -29,6 +29,7 @@ export const ORCHESTRATOR_EVENTS = [
   "poll_tick",
   "poll_tick_completed",
   "worker_exit_normal",
+  "worker_exit_paused",
   "worker_exit_abnormal",
   "stage_completed",
   "codex_update_event",
@@ -99,6 +100,34 @@ export interface RecentActivityEntry {
   toolName: string;
   context: string | null;
   totalTokens?: number;
+}
+
+export interface TokenTelemetryEntry {
+  timestamp: string;
+  event: string;
+  sessionId: string | null;
+  turnId: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  inputTokensDelta: number;
+  outputTokensDelta: number;
+  totalTokensDelta: number;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  noCacheTokens: number | null;
+  reasoningTokens: number | null;
+  cacheReadTokensDelta: number;
+  cacheWriteTokensDelta: number;
+  noCacheTokensDelta: number;
+  reasoningTokensDelta: number;
+}
+
+export interface CodexSessionLogEntry {
+  label: string;
+  path: string;
+  url: string | null;
+  bytes?: number;
 }
 
 export const LOOP_TRACE_EVENT_KINDS = [
@@ -185,6 +214,7 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "gate_result",
   "tracker_write",
   "hard_stop_trigger",
+  "operator_input_required",
   "continuous_feedback",
 ] as const;
 
@@ -667,6 +697,9 @@ export interface LiveSession {
   totalStageCacheWriteTokens: number;
   turnHistory: TurnHistoryEntry[];
   recentActivity: RecentActivityEntry[];
+  tokenTelemetry: TokenTelemetryEntry[];
+  tokenTelemetryObservedCount: number;
+  codexSessionLogs: CodexSessionLogEntry[];
 }
 
 export interface RetryEntry {
@@ -835,6 +868,7 @@ export interface OrchestratorState {
   retryAttempts: Record<string, RetryEntry>;
   completed: Set<string>;
   failed: Set<string>;
+  resumeRequired: Set<string>;
   codexTotals: CodexTotals;
   codexRateLimits: CodexRateLimits;
   issueStages: Record<string, string>;
@@ -926,6 +960,9 @@ export function createEmptyLiveSession(): LiveSession {
     totalStageCacheWriteTokens: 0,
     turnHistory: [],
     recentActivity: [],
+    tokenTelemetry: [],
+    tokenTelemetryObservedCount: 0,
+    codexSessionLogs: [],
   };
 }
 
@@ -941,6 +978,7 @@ export function createInitialOrchestratorState(input: {
     retryAttempts: {},
     completed: new Set<string>(),
     failed: new Set<string>(),
+    resumeRequired: new Set<string>(),
     codexTotals: {
       inputTokens: 0,
       outputTokens: 0,

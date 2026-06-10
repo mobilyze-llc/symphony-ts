@@ -4,14 +4,16 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  AgentRunInput,
   AgentRunResult,
   AgentRunnerEvent,
 } from "../../src/agent/runner.js";
@@ -22,6 +24,8 @@ import type {
   LoopTraceJournal,
   ManagerRunJournal,
 } from "../../src/domain/model.js";
+import { ERROR_CODES } from "../../src/errors/codes.js";
+import { writeLoopTraceJournal } from "../../src/logging/loop-trace.js";
 import {
   type StructuredLogEntry,
   StructuredLogger,
@@ -31,6 +35,7 @@ import {
   OrchestratorRuntimeHost,
   createWorkspaceHookLogger,
   extractProductName,
+  readGitBaseRevision,
   readGitChangedFiles,
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
@@ -39,6 +44,7 @@ import type {
   IssueStateSnapshot,
   IssueTracker,
 } from "../../src/tracker/tracker.js";
+import { sanitizeWorkspaceKey } from "../../src/workspace/path-safety.js";
 import { WorkspaceManager } from "../../src/workspace/workspace-manager.js";
 
 beforeEach(() => {
@@ -58,6 +64,180 @@ describe("OrchestratorRuntimeHost", () => {
       await expect(readGitChangedFiles(repoPath)).resolves.toEqual([
         "new-file.ts",
       ]);
+    } finally {
+      rmSync(repoPath, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves base revision in a bare-clone worktree without origin/main", async () => {
+    const rootPath = mkdtempSync(join(tmpdir(), "symphony-base-ref-"));
+    const sourcePath = join(rootPath, "source");
+    const barePath = join(rootPath, "source.git");
+    const worktreePath = join(rootPath, "worker");
+    try {
+      mkdirSync(sourcePath);
+      execFileSync("git", ["init", "-b", "main", sourcePath]);
+      execFileSync("git", [
+        "-C",
+        sourcePath,
+        "config",
+        "user.email",
+        "test@example.com",
+      ]);
+      execFileSync("git", [
+        "-C",
+        sourcePath,
+        "config",
+        "user.name",
+        "Test User",
+      ]);
+      writeFileSync(join(sourcePath, "file.txt"), "base\n");
+      execFileSync("git", ["-C", sourcePath, "add", "file.txt"]);
+      execFileSync("git", ["-C", sourcePath, "commit", "-m", "base"]);
+      const baseRevision = execFileSync(
+        "git",
+        ["-C", sourcePath, "rev-parse", "HEAD"],
+        {
+          encoding: "utf8",
+        },
+      ).trim();
+      execFileSync("git", ["clone", "--bare", sourcePath, barePath], {
+        stdio: "ignore",
+      });
+      execFileSync(
+        "git",
+        [
+          "-C",
+          barePath,
+          "worktree",
+          "add",
+          worktreePath,
+          "-b",
+          "worktree/ISSUE-1",
+          "main",
+        ],
+        { stdio: "ignore" },
+      );
+
+      expect(() =>
+        execFileSync(
+          "git",
+          [
+            "-C",
+            worktreePath,
+            "show-ref",
+            "--verify",
+            "refs/remotes/origin/main",
+          ],
+          { stdio: "ignore" },
+        ),
+      ).toThrow();
+      await expect(readGitBaseRevision(worktreePath)).resolves.toBe(
+        baseRevision,
+      );
+    } finally {
+      rmSync(rootPath, { recursive: true, force: true });
+    }
+  });
+
+  it("prefers SYMPHONY_BASE_BRANCH over existing main refs", async () => {
+    const rootPath = mkdtempSync(join(tmpdir(), "symphony-base-env-"));
+    const sourcePath = join(rootPath, "source");
+    const barePath = join(rootPath, "source.git");
+    const worktreePath = join(rootPath, "worker");
+    const originalBaseBranch = process.env.SYMPHONY_BASE_BRANCH;
+    try {
+      mkdirSync(sourcePath);
+      execFileSync("git", ["init", "-b", "main", sourcePath]);
+      execFileSync("git", [
+        "-C",
+        sourcePath,
+        "config",
+        "user.email",
+        "test@example.com",
+      ]);
+      execFileSync("git", [
+        "-C",
+        sourcePath,
+        "config",
+        "user.name",
+        "Test User",
+      ]);
+      writeFileSync(join(sourcePath, "file.txt"), "main\n");
+      execFileSync("git", ["-C", sourcePath, "add", "file.txt"]);
+      execFileSync("git", ["-C", sourcePath, "commit", "-m", "main"], {
+        stdio: "ignore",
+      });
+      execFileSync("git", ["-C", sourcePath, "checkout", "-b", "develop"], {
+        stdio: "ignore",
+      });
+      writeFileSync(join(sourcePath, "file.txt"), "develop\n");
+      execFileSync("git", ["-C", sourcePath, "commit", "-am", "develop"], {
+        stdio: "ignore",
+      });
+      const developRevision = execFileSync(
+        "git",
+        ["-C", sourcePath, "rev-parse", "HEAD"],
+        {
+          encoding: "utf8",
+        },
+      ).trim();
+      execFileSync("git", ["clone", "--bare", sourcePath, barePath], {
+        stdio: "ignore",
+      });
+      execFileSync("git", [
+        "-C",
+        barePath,
+        "update-ref",
+        "refs/remotes/origin/main",
+        "main",
+      ]);
+      execFileSync("git", [
+        "-C",
+        barePath,
+        "update-ref",
+        "refs/remotes/origin/develop",
+        "develop",
+      ]);
+      execFileSync(
+        "git",
+        [
+          "-C",
+          barePath,
+          "worktree",
+          "add",
+          worktreePath,
+          "-b",
+          "worktree/ISSUE-2",
+          "origin/develop",
+        ],
+        { stdio: "ignore" },
+      );
+      process.env.SYMPHONY_BASE_BRANCH = "develop";
+
+      await expect(readGitBaseRevision(worktreePath)).resolves.toBe(
+        developRevision,
+      );
+    } finally {
+      if (originalBaseBranch === undefined) {
+        Reflect.deleteProperty(process.env, "SYMPHONY_BASE_BRANCH");
+      } else {
+        process.env.SYMPHONY_BASE_BRANCH = originalBaseBranch;
+      }
+      rmSync(rootPath, { recursive: true, force: true });
+    }
+  });
+
+  it("reports all attempted refs when base revision cannot be resolved", async () => {
+    const repoPath = mkdtempSync(join(tmpdir(), "symphony-base-missing-"));
+    try {
+      execFileSync("git", ["init", "-b", "main", repoPath], {
+        stdio: "ignore",
+      });
+
+      await expect(readGitBaseRevision(repoPath)).rejects.toThrow(
+        /origin\/main: ref not found.*main: ref not found.*origin\/master: ref not found.*master: ref not found/,
+      );
     } finally {
       rmSync(repoPath, { recursive: true, force: true });
     }
@@ -104,6 +284,23 @@ describe("OrchestratorRuntimeHost", () => {
       },
       message: "turn completed",
     });
+    fakeRunner.emit("1", {
+      event: "session_artifact_saved",
+      timestamp: "2026-03-06T00:00:03.000Z",
+      codexAppServerPid: "1001",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      artifacts: [
+        {
+          label: "sessions/2026/rollout-test.jsonl",
+          path: "/tmp/workspaces/1/.symphony/codex-sessions/rollout-test.jsonl",
+          sourcePath: "/tmp/symphony-codex-home-1/sessions/rollout-test.jsonl",
+          bytes: 80,
+        },
+      ],
+      message: "Preserved 1 Codex session artifact(s).",
+    });
     await host.flushEvents();
 
     let snapshot = await host.getRuntimeSnapshot();
@@ -112,8 +309,8 @@ describe("OrchestratorRuntimeHost", () => {
         issue_id: "1",
         session_id: "thread-1-turn-1",
         turn_count: 1,
-        last_event: "turn_completed",
-        last_message: "turn completed",
+        last_event: "session_artifact_saved",
+        last_message: "Preserved 1 Codex session artifact(s).",
         tokens: {
           input_tokens: 11,
           output_tokens: 7,
@@ -125,6 +322,31 @@ describe("OrchestratorRuntimeHost", () => {
       }),
     ]);
     expect(snapshot.codex_totals.total_tokens).toBe(18);
+    const details = await host.getIssueDetails("ISSUE-1");
+    expect(details?.running?.token_telemetry).toEqual([
+      expect.objectContaining({
+        at: "2026-03-06T00:00:02.000Z",
+        event: "turn_completed",
+        session_id: "thread-1-turn-1",
+        turn_id: "turn-1",
+        input_tokens: 11,
+        output_tokens: 7,
+        total_tokens: 18,
+        input_tokens_delta: 11,
+        output_tokens_delta: 7,
+        total_tokens_delta: 18,
+      }),
+    ]);
+    expect(details?.running?.token_telemetry_total_entries).toBe(1);
+    expect(details?.running?.token_telemetry_truncated).toBe(false);
+    expect(details?.logs.codex_session_logs).toEqual([
+      {
+        label: "sessions/2026/rollout-test.jsonl",
+        path: "/tmp/workspaces/1/.symphony/codex-sessions/rollout-test.jsonl",
+        url: null,
+        bytes: 80,
+      },
+    ]);
 
     fakeRunner.resolve("1", {
       issue: createIssue({ state: "In Progress" }),
@@ -169,6 +391,9 @@ describe("OrchestratorRuntimeHost", () => {
         totalStageCacheWriteTokens: 0,
         turnHistory: [],
         recentActivity: [],
+        tokenTelemetry: [],
+        tokenTelemetryObservedCount: 0,
+        codexSessionLogs: [],
       },
       turnsCompleted: 1,
       lastTurn: null,
@@ -189,6 +414,82 @@ describe("OrchestratorRuntimeHost", () => {
       }),
     ]);
   });
+
+  it.each([
+    {
+      events: 30,
+      retainedEntries: 30,
+      responseStart: 6,
+      retentionTruncated: false,
+    },
+    {
+      events: 200,
+      retainedEntries: 200,
+      responseStart: 176,
+      retentionTruncated: false,
+    },
+    {
+      events: 205,
+      retainedEntries: 200,
+      responseStart: 181,
+      retentionTruncated: true,
+    },
+  ])(
+    "exposes token telemetry response, retained, and observed counts for $events events",
+    async ({ events, retainedEntries, responseStart, retentionTruncated }) => {
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config: createConfig(),
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      await host.pollOnce();
+
+      for (let index = 1; index <= events; index += 1) {
+        fakeRunner.emit("1", {
+          event: "notification",
+          timestamp: `2026-03-06T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+          codexAppServerPid: "1001",
+          sessionId: "thread-1-turn-1",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          usage: {
+            inputTokens: index,
+            outputTokens: index,
+            totalTokens: index * 2,
+          },
+        });
+      }
+      await host.flushEvents();
+
+      const details = await host.getIssueDetails("ISSUE-1");
+      expect(details?.running?.token_telemetry).toHaveLength(25);
+      expect(details?.running?.token_telemetry_total_entries).toBe(events);
+      expect(details?.running?.token_telemetry_observed_entries).toBe(events);
+      expect(details?.running?.token_telemetry_retained_entries).toBe(
+        retainedEntries,
+      );
+      expect(details?.running?.token_telemetry_truncated).toBe(true);
+      expect(details?.running?.token_telemetry_retention_truncated).toBe(
+        retentionTruncated,
+      );
+      expect(details?.running?.token_telemetry[0]?.input_tokens).toBe(
+        responseStart,
+      );
+      expect(details?.running?.token_telemetry.at(-1)?.input_tokens).toBe(
+        events,
+      );
+
+      fakeRunner.resolve("1", createNormalResult());
+      await host.waitForIdle();
+    },
+  );
 
   it("cancels a reconciled worker and releases the claim when the issue is no longer eligible on retry", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-loop-retry-"));
@@ -253,6 +554,241 @@ describe("OrchestratorRuntimeHost", () => {
           status: "failed",
         },
       });
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves legacy Codex session log entries without byte metadata", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    host.getState().running["1"]?.codexSessionLogs.push({
+      label: "legacy-rollout.jsonl",
+      path: "/tmp/workspaces/1/.symphony/codex-sessions/legacy-rollout.jsonl",
+      url: null,
+    });
+
+    const details = await host.getIssueDetails("ISSUE-1");
+
+    expect(details?.logs.codex_session_logs).toEqual([
+      {
+        label: "legacy-rollout.jsonl",
+        path: "/tmp/workspaces/1/.symphony/codex-sessions/legacy-rollout.jsonl",
+        url: null,
+      },
+    ]);
+    expect("bytes" in details!.logs.codex_session_logs[0]!).toBe(false);
+
+    fakeRunner.resolve("1", createNormalResult());
+    await host.waitForIdle();
+  });
+
+  it("exposes durable Codex session artifact sizes for retry and terminal issue details", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-artifacts-"));
+    try {
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      await host.pollOnce();
+      fakeRunner.emit("1", {
+        event: "session_artifact_saved",
+        timestamp: "2026-03-06T00:00:03.000Z",
+        codexAppServerPid: "1001",
+        sessionId: "thread-1-turn-1",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        artifacts: [
+          {
+            label: "sessions/2026/rollout-live.jsonl",
+            path: join(
+              workspaceRoot,
+              ".symphony/codex-sessions/1/home-a/sessions/2026/rollout-live.jsonl",
+            ),
+            sourcePath:
+              "/tmp/symphony-codex-home-1/sessions/rollout-live.jsonl",
+            bytes: 12,
+          },
+        ],
+      });
+      await host.flushEvents();
+
+      const artifactPath = join(
+        workspaceRoot,
+        ".symphony/codex-sessions/1/home-a/sessions/2026/rollout-live.jsonl",
+      );
+      mkdirSync(dirname(artifactPath), { recursive: true });
+      writeFileSync(artifactPath, "hello world\n");
+      const outsideDirectory = join(workspaceRoot, "outside-artifacts");
+      mkdirSync(outsideDirectory, { recursive: true });
+      writeFileSync(join(outsideDirectory, "outside.jsonl"), "outside\n");
+      symlinkSync(
+        outsideDirectory,
+        join(workspaceRoot, ".symphony/codex-sessions/1/home-symlink"),
+      );
+      symlinkSync(
+        join(outsideDirectory, "outside.jsonl"),
+        join(workspaceRoot, ".symphony/codex-sessions/1/linked.jsonl"),
+      );
+
+      fakeRunner.resolve("1", createNormalResult());
+      await host.waitForIdle();
+
+      const details = await host.getIssueDetails("ISSUE-1");
+
+      expect(details?.status).toBe("retry_queued");
+      expect(details?.logs.codex_session_logs).toEqual([
+        {
+          label: "home-a/sessions/2026/rollout-live.jsonl",
+          path: artifactPath,
+          url: null,
+          bytes: 12,
+        },
+      ]);
+
+      const terminalArtifactPath = join(
+        workspaceRoot,
+        ".symphony/codex-sessions/terminal-1/home-b/sessions/2026/rollout-terminal.jsonl",
+      );
+      mkdirSync(dirname(terminalArtifactPath), { recursive: true });
+      writeFileSync(terminalArtifactPath, "terminal artifact\n");
+      await writeLoopTraceJournal(
+        {
+          workspaceRoot,
+          workspaceKey: "terminal-1",
+        },
+        [
+          {
+            sequence: 1,
+            timestamp: "2026-03-06T00:01:00.000Z",
+            kind: "stage_transition",
+            issueId: "terminal-1",
+            issueIdentifier: "ISSUE-TERMINAL",
+            stage: "implement",
+            attempt: null,
+            sessionId: "thread-terminal",
+            summary: "Stage implement moved to released.",
+            stageTransition: {
+              from: "implement",
+              to: "implement",
+              status: "released",
+            },
+          },
+        ],
+      );
+
+      const coldHost = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({ candidates: [] }),
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        now: () => new Date("2026-03-06T00:01:05.000Z"),
+      });
+
+      const terminalDetails = await coldHost.getIssueDetails("ISSUE-TERMINAL");
+      expect(terminalDetails?.status).toBe("released");
+      expect(terminalDetails?.logs.codex_session_logs).toEqual([
+        {
+          label: "home-b/sessions/2026/rollout-terminal.jsonl",
+          path: terminalArtifactPath,
+          url: null,
+          bytes: 18,
+        },
+      ]);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("reads durable Codex session logs from the sanitized workspace key", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-artifact-key-"));
+    try {
+      const unsafeIssueId = "unsafe issue/id";
+      const workspaceKey = sanitizeWorkspaceKey(unsafeIssueId);
+      const safeArtifactPath = join(
+        workspaceRoot,
+        ".symphony/codex-sessions",
+        workspaceKey,
+        "home-a/sessions/2026/rollout-safe.jsonl",
+      );
+      const rawArtifactPath = join(
+        workspaceRoot,
+        ".symphony/codex-sessions",
+        unsafeIssueId,
+        "home-b/sessions/2026/rollout-raw.jsonl",
+      );
+      mkdirSync(dirname(safeArtifactPath), { recursive: true });
+      mkdirSync(dirname(rawArtifactPath), { recursive: true });
+      writeFileSync(safeArtifactPath, "safe artifact\n");
+      writeFileSync(rawArtifactPath, "raw artifact\n");
+
+      await writeLoopTraceJournal(
+        {
+          workspaceRoot,
+          workspaceKey,
+        },
+        [
+          {
+            sequence: 1,
+            timestamp: "2026-03-06T00:01:00.000Z",
+            kind: "stage_transition",
+            issueId: unsafeIssueId,
+            issueIdentifier: "ISSUE-UNSAFE",
+            stage: "implement",
+            attempt: null,
+            sessionId: "thread-unsafe",
+            summary: "Stage implement moved to released.",
+            stageTransition: {
+              from: "implement",
+              to: "implement",
+              status: "released",
+            },
+          },
+        ],
+      );
+
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({ candidates: [] }),
+        agentRunner: new FakeAgentRunner(),
+        now: () => new Date("2026-03-06T00:01:05.000Z"),
+      });
+
+      const details = await host.getIssueDetails("ISSUE-UNSAFE");
+
+      expect(details?.logs.codex_session_logs).toEqual([
+        {
+          label: "home-a/sessions/2026/rollout-safe.jsonl",
+          path: safeArtifactPath,
+          url: null,
+          bytes: 14,
+        },
+      ]);
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
     }
@@ -1512,8 +2048,8 @@ describe("OrchestratorRuntimeHost", () => {
     ]);
     const readWorkspaceChangedFiles = vi.fn(async (workspacePath: string) =>
       workspacePath.endsWith("/1")
-        ? ["src/shared/config.ts"]
-        : ["./src/shared/config.ts", "src/features/two.ts"],
+        ? ["CLAUDE.md", "src/shared/config.ts"]
+        : ["./CLAUDE.md", "./src/shared/config.ts", "src/features/two.ts"],
     );
     const host = new OrchestratorRuntimeHost({
       config: createConfig(),
@@ -1541,6 +2077,68 @@ describe("OrchestratorRuntimeHost", () => {
         finding_kinds: ["actual_write_collision"],
         issue_identifiers: ["ISSUE-1", "ISSUE-2"],
         files: ["src/shared/config.ts"],
+        ignored_files: ["CLAUDE.md"],
+      }),
+    );
+  });
+
+  it("records ignored setup-instruction overlaps without re-steering", async () => {
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2", priority: 2 }),
+      ],
+      stateSnapshots: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const readWorkspaceChangedFiles = vi.fn(async (workspacePath: string) =>
+      workspacePath.endsWith("/1")
+        ? ["CLAUDE.md", "src/features/one.ts"]
+        : ["./CLAUDE.md", "src/features/two.ts"],
+    );
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      readWorkspaceChangedFiles,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.pollOnce();
+
+    expect(
+      entries.some((entry) => entry.event === "supervision_resteer_requested"),
+    ).toBe(false);
+    expect(host.getState().dispatcherRunJournal).toContainEqual(
+      expect.objectContaining({
+        kind: "supervision_finding",
+        summary:
+          "ISSUE-1 and ISSUE-2 share setup-only instruction-file changes that were ignored for write-collision supervision.",
+        metadata: expect.objectContaining({
+          action: "ignored",
+          files: ["CLAUDE.md"],
+          findingKind: "ignored_setup_instruction_collision",
+          ignored: true,
+          issueIdentifiers: ["ISSUE-1", "ISSUE-2"],
+          nonBlocking: true,
+          workerIds: ["1", "2"],
+        }),
       }),
     );
   });
@@ -1772,6 +2370,9 @@ describe("OrchestratorRuntimeHost", () => {
         totalStageCacheWriteTokens: 15,
         turnHistory: [],
         recentActivity: [],
+        tokenTelemetry: [],
+        tokenTelemetryObservedCount: 0,
+        codexSessionLogs: [],
       },
       turnsCompleted: 3,
       lastTurn: null,
@@ -1923,6 +2524,9 @@ describe("OrchestratorRuntimeHost", () => {
         totalStageCacheWriteTokens: 0,
         turnHistory: [],
         recentActivity: [],
+        tokenTelemetry: [],
+        tokenTelemetryObservedCount: 0,
+        codexSessionLogs: [],
       },
       turnsCompleted: 2,
       lastTurn: null,
@@ -2008,6 +2612,9 @@ describe("OrchestratorRuntimeHost", () => {
         totalStageCacheWriteTokens: 0,
         turnHistory: [],
         recentActivity: [],
+        tokenTelemetry: [],
+        tokenTelemetryObservedCount: 0,
+        codexSessionLogs: [],
       },
       turnsCompleted: 1,
       lastTurn: null,
@@ -2091,6 +2698,9 @@ describe("OrchestratorRuntimeHost", () => {
         totalStageCacheWriteTokens: 0,
         turnHistory: [],
         recentActivity: [],
+        tokenTelemetry: [],
+        tokenTelemetryObservedCount: 0,
+        codexSessionLogs: [],
       },
       turnsCompleted: 1,
       lastTurn: null,
@@ -2225,6 +2835,9 @@ describe("OrchestratorRuntimeHost", () => {
         totalStageCacheWriteTokens: 7,
         turnHistory: [],
         recentActivity: [],
+        tokenTelemetry: [],
+        tokenTelemetryObservedCount: 0,
+        codexSessionLogs: [],
       },
       turnsCompleted: 4,
       lastTurn: null,
@@ -2821,6 +3434,87 @@ describe("pipeline notifications", () => {
     });
   });
 
+  it("passes stage hard-stop dollar budget into the mode policy", async () => {
+    const fakeRunner = new FakeAgentRunner();
+    const tracker = createTracker({
+      candidates: [
+        createIssue({
+          priority: 1,
+          labels: ["risk:high"],
+          description:
+            "## Declared file scope\n- src/orchestrator/runtime-host.ts\n",
+        }),
+      ],
+    });
+    const host = new OrchestratorRuntimeHost({
+      config: createStagedConfig({
+        hardStops: {
+          maxIterations: 20,
+          noProgressTurns: 3,
+          maxTokensPerUnit: 250_000,
+          maxDollarBudgetUsd: 12.5,
+          premiumBudgetPauseRatio: 0.8,
+          estimatedCostPer1kTokensUsd: 0.05,
+        },
+        stages: {
+          initialStage: "investigate",
+          fastTrack: null,
+          stages: {
+            investigate: {
+              type: "agent",
+              runner: "claude-code",
+              model: null,
+              prompt: null,
+              maxTurns: 8,
+              timeoutMs: null,
+              hardStops: {
+                maxDollarBudgetUsd: 4,
+              },
+              concurrency: null,
+              gateType: null,
+              maxRework: null,
+              reviewers: [],
+              transitions: {
+                onComplete: "done",
+                onApprove: null,
+                onRework: null,
+              },
+              linearState: null,
+            },
+            done: {
+              type: "terminal",
+              runner: null,
+              model: null,
+              prompt: null,
+              maxTurns: null,
+              timeoutMs: null,
+              concurrency: null,
+              gateType: null,
+              maxRework: null,
+              reviewers: [],
+              transitions: {
+                onComplete: null,
+                onApprove: null,
+                onRework: null,
+              },
+              linearState: null,
+            },
+          },
+        },
+      }),
+      tracker,
+      agentRunner: fakeRunner,
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(fakeRunner.runInputs[0]?.stageName).toBe("investigate");
+    expect(fakeRunner.runInputs[0]?.modePolicy?.maxBudgetUsd).toBe(4);
+    fakeRunner.resolve("1", createNormalResult());
+    await host.waitForIdle();
+  });
+
   it("fires issue_completed on terminal completion", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
@@ -3201,6 +3895,167 @@ describe("pipeline notifications", () => {
       issueIdentifier: "ISSUE-1",
       retriesExhausted: true,
     });
+  });
+
+  it("does not emit issue_failed for an intentional manual stop", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponse = await host.requestIssueStop("ISSUE-1");
+    await host.waitForIdle();
+
+    expect(stopResponse).toMatchObject({
+      stopped: true,
+      reason: "manual_stop",
+    });
+    expect(notifier.events).toEqual([
+      expect.objectContaining({ type: "issue_dispatched" }),
+    ]);
+
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.counts.failed).toBe(0);
+
+    const stillActive = await host.pollOnce();
+    expect(stillActive.dispatchedIssueIds).toEqual([]);
+  });
+
+  it("does not emit issue_failed for a budget hard stop pause", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.resolve("1", {
+      ...createNormalResult(),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250_000,
+        estimatedCostUsd: 3.21,
+      },
+    });
+    await host.waitForIdle();
+
+    expect(notifier.events).toEqual([
+      expect.objectContaining({ type: "issue_dispatched" }),
+    ]);
+
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.counts.failed).toBe(0);
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_exit_paused",
+        level: "warn",
+        outcome: "paused",
+        hard_stop_outcome: "PAUSED-budget",
+        hard_stop_trigger: "token_budget",
+        hard_stop_total_tokens: 250_000,
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "stage_completed",
+        level: "warn",
+        outcome: "paused",
+        hard_stop_outcome: "PAUSED-budget",
+        hard_stop_trigger: "token_budget",
+        hard_stop_total_tokens: 250_000,
+      }),
+    );
+
+    const stillActive = await host.pollOnce();
+    expect(stillActive.dispatchedIssueIds).toEqual([]);
+  });
+
+  it("logs Codex input-required exits as paused and avoids retry burn", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const error = Object.assign(
+      new Error("Codex requested operator input during a turn."),
+      { code: ERROR_CODES.codexUserInputRequired },
+    );
+    fakeRunner.reject("1", error);
+    await host.waitForIdle();
+
+    expect(notifier.events).toEqual([
+      expect.objectContaining({ type: "issue_dispatched" }),
+    ]);
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.counts.failed).toBe(0);
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_exit_paused",
+        level: "warn",
+        outcome: "paused",
+        pause_reason: ERROR_CODES.codexUserInputRequired,
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "stage_completed",
+        level: "warn",
+        outcome: "paused",
+        pause_reason: ERROR_CODES.codexUserInputRequired,
+      }),
+    );
+
+    const stillActive = await host.pollOnce();
+    expect(stillActive.dispatchedIssueIds).toEqual([]);
   });
 
   it("fires stall_killed when a stall timeout aborts a worker", async () => {
@@ -3718,6 +4573,7 @@ describe("createWorkspaceHookLogger", () => {
 
 class FakeAgentRunner {
   onEvent: ((event: AgentRunnerEvent) => void) | undefined;
+  readonly runInputs: AgentRunInput[] = [];
   readonly runs = new Map<
     string,
     {
@@ -3727,11 +4583,8 @@ class FakeAgentRunner {
   >();
   readonly abortReasons: string[] = [];
 
-  async run(input: {
-    issue: Issue;
-    attempt: number | null;
-    signal?: AbortSignal;
-  }): Promise<AgentRunResult> {
+  async run(input: AgentRunInput): Promise<AgentRunResult> {
+    this.runInputs.push(input);
     return await new Promise<AgentRunResult>((resolve, reject) => {
       this.runs.set(input.issue.id, { resolve, reject });
       input.signal?.addEventListener(
@@ -4013,6 +4866,9 @@ function createNormalResult(): AgentRunResult {
       totalStageCacheWriteTokens: 0,
       turnHistory: [],
       recentActivity: [],
+      tokenTelemetry: [],
+      tokenTelemetryObservedCount: 0,
+      codexSessionLogs: [],
     },
     turnsCompleted: 1,
     lastTurn: null,

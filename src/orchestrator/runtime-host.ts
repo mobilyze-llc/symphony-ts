@@ -6,7 +6,7 @@ import {
   mkdirSync,
   openSync,
 } from "node:fs";
-import { access, mkdir } from "node:fs/promises";
+import { access, lstat, mkdir, readdir } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
@@ -33,6 +33,7 @@ import type {
 } from "../config/types.js";
 import { WorkflowWatcher } from "../config/workflow-watch.js";
 import type {
+  CodexSessionLogEntry,
   ContinuousFeedbackEvent,
   DispatcherRunJournal,
   DispatcherRunJournalEntry,
@@ -138,6 +139,7 @@ export type ReadWorkspaceBaseRevision = (
 ) => Promise<string | null>;
 
 interface StoredLoopTrace {
+  issueId: string;
   artifactPath: string;
   journal: LoopTraceEntry[];
 }
@@ -717,6 +719,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         issueIdentifier,
         retry,
         parent,
+        await this.readCodexSessionLogsForIssueBestEffort(retry.issueId),
         buildLoopTraceJournalResponse(
           this.orchestrator.getState().loopTraceJournal[retry.issueId] ?? [],
           this.getLoopTraceLocator(retry.issueId),
@@ -727,7 +730,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const inMemoryTrace =
       this.findInMemoryLoopTraceByIssueIdentifier(issueIdentifier);
     if (inMemoryTrace !== null) {
-      return toStoredIssueDetail(issueIdentifier, inMemoryTrace);
+      return toStoredIssueDetail(
+        issueIdentifier,
+        inMemoryTrace,
+        await this.readCodexSessionLogsForIssueBestEffort(
+          inMemoryTrace.issueId,
+        ),
+      );
     }
 
     const storedTrace =
@@ -735,7 +744,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         issueIdentifier,
       );
     if (storedTrace !== null) {
-      return toStoredIssueDetail(issueIdentifier, storedTrace);
+      return toStoredIssueDetail(
+        issueIdentifier,
+        storedTrace,
+        await this.readCodexSessionLogsForIssueBestEffort(storedTrace.issueId),
+      );
     }
 
     return null;
@@ -749,6 +762,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     )) {
       if (journal.some((entry) => entry.issueIdentifier === issueIdentifier)) {
         return {
+          issueId,
           artifactPath: buildLoopTraceJournalResponse(
             journal,
             this.getLoopTraceLocator(issueId),
@@ -771,6 +785,20 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     } catch {
       // Non-critical — return null rather than failing the entire detail request
       return null;
+    }
+  }
+
+  private async readCodexSessionLogsForIssueBestEffort(
+    issueId: string,
+  ): Promise<CodexSessionLogEntry[]> {
+    try {
+      const { workspaceKey } = this.workspaceManager.resolveForIssue(issueId);
+      return await readCodexSessionLogsForIssue(
+        this.workspaceManager.root,
+        workspaceKey,
+      );
+    } catch {
+      return [];
     }
   }
 
@@ -998,10 +1026,24 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     issueIdentifier: string,
   ): Promise<StoredLoopTrace | null> {
     try {
-      return await findLoopTraceJournalByIssueIdentifier(
+      const storedTrace = await findLoopTraceJournalByIssueIdentifier(
         this.workspaceManager.root,
         issueIdentifier,
       );
+      if (storedTrace === null) {
+        return null;
+      }
+      const issueEntry = findLatestTraceEntryForIdentifier(
+        storedTrace.journal,
+        issueIdentifier,
+      );
+      if (issueEntry === null) {
+        return null;
+      }
+      return {
+        issueId: issueEntry.issueId,
+        ...storedTrace,
+      };
     } catch (error) {
       try {
         await this.logger?.warn(
@@ -1404,6 +1446,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const files = [
       ...new Set(input.findings.flatMap((finding) => finding.files)),
     ];
+    const ignoredFiles = [
+      ...new Set(
+        input.findings.flatMap((finding) => finding.ignoredFiles ?? []),
+      ),
+    ];
 
     await this.logger?.warn(
       "supervision_resteer_requested",
@@ -1417,6 +1464,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ],
         issue_identifiers: issueIdentifiers,
         files,
+        ignored_files: ignoredFiles,
       },
     );
 
@@ -1648,6 +1696,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       },
     );
 
+    const globalHardStops = resolveHardStopsConfig(
+      this.config.hardStops,
+      DEFAULT_RUNTIME_HARD_STOPS_CONFIG,
+    );
+    const effectiveHardStops = resolveHardStopsConfig(
+      stage?.hardStops,
+      globalHardStops,
+    );
+
     const completion = this.agentRunner
       .run({
         issue,
@@ -1661,10 +1718,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           configuredApprovalPolicy: this.config.codex.approvalPolicy,
           configuredThreadSandbox: this.config.codex.threadSandbox,
           configuredTurnSandboxPolicy: this.config.codex.turnSandboxPolicy,
-          maxBudgetUsd: resolveHardStopsConfig(
-            this.config.hardStops,
-            DEFAULT_RUNTIME_HARD_STOPS_CONFIG,
-          ).maxDollarBudgetUsd,
+          maxBudgetUsd: effectiveHardStops.maxDollarBudgetUsd,
         }),
       })
       .then(async (result) => {
@@ -1688,7 +1742,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             outcome: "abnormal",
             reason:
               execution.stopRequest === null
-                ? toErrorMessage(error)
+                ? formatWorkerErrorReason(error)
                 : `stopped after ${execution.stopRequest.reason}`,
           });
         });
@@ -1744,20 +1798,63 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       }
     }
 
+    const hardStop = execution.lastResult?.hardStop ?? null;
+    const hardStopFields =
+      hardStop === null
+        ? {}
+        : {
+            hard_stop_outcome: hardStop.outcome,
+            hard_stop_trigger: hardStop.trigger,
+            hard_stop_reason: hardStop.reason,
+            hard_stop_turn_count: hardStop.turnCount,
+            hard_stop_total_tokens: hardStop.totalTokens,
+            hard_stop_estimated_cost_usd: hardStop.estimatedCostUsd,
+          };
+    const inputRequiredPause =
+      hardStop === null &&
+      input.outcome === "abnormal" &&
+      isCodexUserInputRequiredReason(input.reason);
+    const exitEvent =
+      hardStop !== null || inputRequiredPause
+        ? "worker_exit_paused"
+        : input.outcome === "normal"
+          ? "worker_exit_normal"
+          : "worker_exit_abnormal";
+    const exitOutcome =
+      hardStop !== null || inputRequiredPause
+        ? "paused"
+        : input.outcome === "normal"
+          ? "completed"
+          : "failed";
+    const exitMessage =
+      hardStop !== null
+        ? "Worker paused by hard stop."
+        : inputRequiredPause
+          ? "Worker paused because Codex requested operator input."
+          : input.outcome === "normal"
+            ? "Worker completed normally."
+            : "Worker completed abnormally.";
+
     await this.logger?.log(
-      input.outcome === "normal" ? "info" : "error",
-      input.outcome === "normal"
-        ? "worker_exit_normal"
-        : "worker_exit_abnormal",
-      input.outcome === "normal"
-        ? "Worker completed normally."
-        : "Worker completed abnormally.",
+      hardStop !== null || inputRequiredPause
+        ? "warn"
+        : input.outcome === "normal"
+          ? "info"
+          : "error",
+      exitEvent,
+      exitMessage,
       {
-        outcome: input.outcome === "normal" ? "completed" : "failed",
-        ...(input.reason === undefined ? {} : { reason: input.reason }),
+        outcome: exitOutcome,
+        ...(input.reason === undefined && hardStop === null
+          ? {}
+          : { reason: input.reason ?? hardStop?.reason }),
         issue_id: execution.issueId,
         issue_identifier: execution.issueIdentifier,
         session_id: execution.lastResult?.liveSession.sessionId ?? null,
+        ...(inputRequiredPause
+          ? { pause_reason: ERROR_CODES.codexUserInputRequired }
+          : {}),
+        ...hardStopFields,
       },
     );
 
@@ -1777,40 +1874,60 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         : 0;
 
     const liveSession = execution.lastResult?.liveSession;
-    await this.logger?.log("info", "stage_completed", "Stage completed.", {
-      issue_id: execution.issueId,
-      issue_identifier: execution.issueIdentifier,
-      session_id: liveSession?.sessionId ?? null,
-      stage_name: execution.stageName,
-      input_tokens: liveSession?.codexInputTokens ?? 0,
-      output_tokens: liveSession?.codexOutputTokens ?? 0,
-      total_tokens: liveSession?.codexTotalTokens ?? 0,
-      ...(liveSession?.codexCacheReadTokens
-        ? { cache_read_tokens: liveSession.codexCacheReadTokens }
-        : {}),
-      ...(liveSession?.codexCacheWriteTokens
-        ? { cache_write_tokens: liveSession.codexCacheWriteTokens }
-        : {}),
-      ...(liveSession?.codexNoCacheTokens
-        ? { no_cache_tokens: liveSession.codexNoCacheTokens }
-        : {}),
-      ...(liveSession?.codexReasoningTokens
-        ? { reasoning_tokens: liveSession.codexReasoningTokens }
-        : {}),
-      turns_used: liveSession?.turnCount ?? 0,
-      total_input_tokens: liveSession?.totalStageInputTokens ?? 0,
-      total_output_tokens: liveSession?.totalStageOutputTokens ?? 0,
-      total_total_tokens: liveSession?.totalStageTotalTokens ?? 0,
-      ...(liveSession?.totalStageCacheReadTokens
-        ? { total_cache_read_tokens: liveSession.totalStageCacheReadTokens }
-        : {}),
-      ...(liveSession?.totalStageCacheWriteTokens
-        ? { total_cache_write_tokens: liveSession.totalStageCacheWriteTokens }
-        : {}),
-      turn_count: liveSession?.turnCount ?? 0,
-      duration_ms: durationMs,
-      outcome: input.outcome === "normal" ? "completed" : "failed",
-    });
+    await this.logger?.log(
+      hardStop !== null || inputRequiredPause ? "warn" : "info",
+      "stage_completed",
+      hardStop !== null
+        ? "Stage paused by hard stop."
+        : inputRequiredPause
+          ? "Stage paused because Codex requested operator input."
+          : input.outcome === "normal"
+            ? "Stage completed."
+            : "Stage failed.",
+      {
+        issue_id: execution.issueId,
+        issue_identifier: execution.issueIdentifier,
+        session_id: liveSession?.sessionId ?? null,
+        stage_name: execution.stageName,
+        input_tokens: liveSession?.codexInputTokens ?? 0,
+        output_tokens: liveSession?.codexOutputTokens ?? 0,
+        total_tokens: liveSession?.codexTotalTokens ?? 0,
+        ...(liveSession?.codexCacheReadTokens
+          ? { cache_read_tokens: liveSession.codexCacheReadTokens }
+          : {}),
+        ...(liveSession?.codexCacheWriteTokens
+          ? { cache_write_tokens: liveSession.codexCacheWriteTokens }
+          : {}),
+        ...(liveSession?.codexNoCacheTokens
+          ? { no_cache_tokens: liveSession.codexNoCacheTokens }
+          : {}),
+        ...(liveSession?.codexReasoningTokens
+          ? { reasoning_tokens: liveSession.codexReasoningTokens }
+          : {}),
+        turns_used: liveSession?.turnCount ?? 0,
+        total_input_tokens: liveSession?.totalStageInputTokens ?? 0,
+        total_output_tokens: liveSession?.totalStageOutputTokens ?? 0,
+        total_total_tokens: liveSession?.totalStageTotalTokens ?? 0,
+        ...(liveSession?.totalStageCacheReadTokens
+          ? { total_cache_read_tokens: liveSession.totalStageCacheReadTokens }
+          : {}),
+        ...(liveSession?.totalStageCacheWriteTokens
+          ? { total_cache_write_tokens: liveSession.totalStageCacheWriteTokens }
+          : {}),
+        turn_count: liveSession?.turnCount ?? 0,
+        duration_ms: durationMs,
+        outcome:
+          hardStop !== null || inputRequiredPause
+            ? "paused"
+            : input.outcome === "normal"
+              ? "completed"
+              : "failed",
+        ...(inputRequiredPause
+          ? { pause_reason: ERROR_CODES.codexUserInputRequired }
+          : {}),
+        ...hardStopFields,
+      },
+    );
 
     if (execution.stopRequest?.cleanupWorkspace === true) {
       await this.workspaceManager.removeForIssue(execution.issueId);
@@ -1883,9 +2000,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         attempt: runningEntry?.retryAttempt ?? null,
         sessionId: liveSession?.sessionId ?? null,
         summary: truncateTraceText(
-          input.outcome === "normal"
-            ? "Worker exited normally."
-            : `Worker exited abnormally: ${input.reason ?? "worker failed"}.`,
+          inputRequiredPause
+            ? `Worker paused for operator input: ${input.reason ?? "Codex requested input"}.`
+            : input.outcome === "normal"
+              ? "Worker exited normally."
+              : `Worker exited abnormally: ${input.reason ?? "worker failed"}.`,
         ),
         workerExit: {
           outcome: input.outcome,
@@ -2066,6 +2185,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       return;
     }
 
+    if (state.resumeRequired.has(execution.issueId)) {
+      return;
+    }
+
     // Infra error — abnormal exit with 0 turns (agent never started)
     if (input.outcome === "abnormal" && captured.capturedTurnCount === 0) {
       notifier.notify({
@@ -2139,6 +2262,44 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       tracker: input.tracker,
       workspaceManager: input.workspaceManager,
       onEvent: this.agentEventSink,
+      workspaceBaseRefreshLogger: async (entry) => {
+        const failed =
+          entry.action === "fetch_failed" || entry.action === "refresh_failed";
+        const repairedBaseRef =
+          entry.previousDesiredBase !== undefined &&
+          entry.previousDesiredBase !== null &&
+          entry.desiredBase !== null &&
+          entry.previousDesiredBase !== entry.desiredBase;
+        await this.logger?.log(
+          failed ? "error" : "info",
+          "workspace_base_refresh",
+          "Checked reused workspace base before agent run.",
+          {
+            outcome: failed
+              ? "failed"
+              : (entry.action === "current" && !repairedBaseRef) ||
+                  entry.action === "retry_preserved"
+                ? "unchanged"
+                : "completed",
+            action: entry.action,
+            issue_id: entry.issueId,
+            issue_identifier: entry.issueIdentifier,
+            workspace_path: entry.workspacePath,
+            stage_name: entry.stageName,
+            current_head: entry.currentHead,
+            desired_base: entry.desiredBase,
+            ...(entry.previousDesiredBase === undefined
+              ? {}
+              : { previous_desired_base: entry.previousDesiredBase }),
+            base_ref: entry.baseRef,
+            ...(entry.fetchedBaseRef === undefined
+              ? {}
+              : { fetched_base_ref: entry.fetchedBaseRef }),
+            dirty: entry.dirty,
+            ...(entry.reason === undefined ? {} : { reason: entry.reason }),
+          },
+        );
+      },
     });
   }
 }
@@ -2628,10 +2789,48 @@ export async function readGitChangedFiles(
   ];
 }
 
-async function readGitBaseRevision(
+export async function readGitBaseRevision(
+  workspacePath: string,
+): Promise<string> {
+  const originHeadRef = await readGitOriginHeadRef(workspacePath);
+  const baseRefs = createGitBaseRefCandidates({
+    configuredBaseBranch: process.env.SYMPHONY_BASE_BRANCH,
+    originHeadRef,
+  });
+  const failures: string[] = [];
+
+  for (const baseRef of baseRefs) {
+    if (!(await gitRefExists(workspacePath, baseRef))) {
+      failures.push(`${baseRef}: ref not found`);
+      continue;
+    }
+
+    try {
+      const { stdout } = await execFileAsync(
+        "git",
+        ["-C", workspacePath, "merge-base", "HEAD", baseRef],
+        {
+          timeout: 5000,
+        },
+      );
+      const revision = String(stdout).trim();
+      if (revision.length > 0) {
+        return revision;
+      }
+      failures.push(`${baseRef}: empty merge-base`);
+    } catch (error) {
+      failures.push(`${baseRef}: ${toErrorMessage(error)}`);
+    }
+  }
+
+  throw new Error(
+    `Failed to resolve git base revision for ${workspacePath}; tried ${failures.join("; ")}`,
+  );
+}
+
+async function readGitOriginHeadRef(
   workspacePath: string,
 ): Promise<string | null> {
-  let baseRef = "origin/main";
   try {
     const { stdout: headRefStdout } = await execFileAsync(
       "git",
@@ -2641,21 +2840,80 @@ async function readGitBaseRevision(
       },
     );
     const headRef = String(headRefStdout).trim();
-    if (headRef.length > 0) {
-      baseRef = headRef;
-    }
+    return headRef.length > 0 ? headRef : null;
   } catch {
-    // Fall back to origin/main when origin/HEAD is unavailable.
+    return null;
   }
-  const { stdout } = await execFileAsync(
-    "git",
-    ["-C", workspacePath, "merge-base", "HEAD", baseRef],
-    {
-      timeout: 5000,
-    },
+}
+
+function createGitBaseRefCandidates(input: {
+  configuredBaseBranch: string | undefined;
+  originHeadRef: string | null;
+}): string[] {
+  const candidates: string[] = [];
+  const configuredBaseBranch = normalizeGitBranchName(
+    input.configuredBaseBranch,
   );
-  const revision = String(stdout).trim();
-  return revision.length > 0 ? revision : null;
+  if (configuredBaseBranch !== null) {
+    candidates.push(`origin/${configuredBaseBranch}`, configuredBaseBranch);
+  }
+
+  const originHeadRef = normalizeGitRef(input.originHeadRef);
+  if (originHeadRef !== null) {
+    candidates.push(originHeadRef);
+  }
+
+  candidates.push("origin/main", "main", "origin/master", "master");
+  return [...new Set(candidates)];
+}
+
+function normalizeGitBranchName(value: string | undefined): string | null {
+  const normalized = normalizeGitRef(value);
+  if (normalized === null) {
+    return null;
+  }
+  return normalized.startsWith("origin/")
+    ? normalized.slice("origin/".length)
+    : normalized;
+}
+
+function normalizeGitRef(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (trimmed === undefined || trimmed.length === 0) {
+    return null;
+  }
+  if (trimmed.startsWith("refs/remotes/")) {
+    return trimmed.slice("refs/remotes/".length);
+  }
+  if (trimmed.startsWith("refs/heads/")) {
+    return trimmed.slice("refs/heads/".length);
+  }
+  return trimmed;
+}
+
+async function gitRefExists(
+  workspacePath: string,
+  ref: string,
+): Promise<boolean> {
+  try {
+    await execFileAsync(
+      "git",
+      [
+        "-C",
+        workspacePath,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        `${ref}^{commit}`,
+      ],
+      {
+        timeout: 1000,
+      },
+    );
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function createWorkspaceHookLogger(logger: StructuredLogger): (entry: {
@@ -2793,12 +3051,19 @@ function toHookMessageSuffix(
   }
 }
 
+const ISSUE_DETAIL_TOKEN_TELEMETRY_MAX_ENTRIES = 25;
+
 function toRunningIssueDetail(
   running: RunningEntry,
   workspaceManager: WorkspaceManager,
   parent: { identifier: string; title: string; url: string } | null,
   loopTraceJournal: IssueDetailResponse["loop_trace_journal"],
 ): IssueDetailResponse {
+  const tokenTelemetry = tailEntries(
+    running.tokenTelemetry,
+    ISSUE_DETAIL_TOKEN_TELEMETRY_MAX_ENTRIES,
+  );
+
   return {
     issue_identifier: running.identifier,
     issue_id: running.issue.id,
@@ -2822,11 +3087,55 @@ function toRunningIssueDetail(
         input_tokens: running.codexInputTokens,
         output_tokens: running.codexOutputTokens,
         total_tokens: running.codexTotalTokens,
+        ...(running.codexCacheReadTokens > 0
+          ? { cache_read_tokens: running.codexCacheReadTokens }
+          : {}),
+        ...(running.codexCacheWriteTokens > 0
+          ? { cache_write_tokens: running.codexCacheWriteTokens }
+          : {}),
+        ...(running.codexNoCacheTokens > 0
+          ? { no_cache_tokens: running.codexNoCacheTokens }
+          : {}),
+        ...(running.codexReasoningTokens > 0
+          ? { reasoning_tokens: running.codexReasoningTokens }
+          : {}),
       },
+      token_telemetry: tokenTelemetry.map((entry) => ({
+        at: entry.timestamp,
+        event: entry.event,
+        session_id: entry.sessionId,
+        turn_id: entry.turnId,
+        input_tokens: entry.inputTokens,
+        output_tokens: entry.outputTokens,
+        total_tokens: entry.totalTokens,
+        input_tokens_delta: entry.inputTokensDelta,
+        output_tokens_delta: entry.outputTokensDelta,
+        total_tokens_delta: entry.totalTokensDelta,
+        cache_read_tokens: entry.cacheReadTokens,
+        cache_write_tokens: entry.cacheWriteTokens,
+        no_cache_tokens: entry.noCacheTokens,
+        reasoning_tokens: entry.reasoningTokens,
+        cache_read_tokens_delta: entry.cacheReadTokensDelta,
+        cache_write_tokens_delta: entry.cacheWriteTokensDelta,
+        no_cache_tokens_delta: entry.noCacheTokensDelta,
+        reasoning_tokens_delta: entry.reasoningTokensDelta,
+      })),
+      token_telemetry_total_entries: running.tokenTelemetryObservedCount,
+      token_telemetry_retained_entries: running.tokenTelemetry.length,
+      token_telemetry_observed_entries: running.tokenTelemetryObservedCount,
+      token_telemetry_truncated:
+        tokenTelemetry.length < running.tokenTelemetry.length,
+      token_telemetry_retention_truncated:
+        running.tokenTelemetry.length < running.tokenTelemetryObservedCount,
     },
     retry: null,
     logs: {
-      codex_session_logs: [],
+      codex_session_logs: running.codexSessionLogs.map((entry) => ({
+        label: entry.label,
+        path: entry.path,
+        url: entry.url,
+        ...(entry.bytes !== undefined ? { bytes: entry.bytes } : {}),
+      })),
     },
     recent_events: running.recentActivity.map((entry) => ({
       at: entry.timestamp,
@@ -2840,10 +3149,30 @@ function toRunningIssueDetail(
   };
 }
 
+function tailEntries<T>(entries: readonly T[], maxEntries: number): T[] {
+  if (entries.length <= maxEntries) {
+    return [...entries];
+  }
+
+  return entries.slice(entries.length - maxEntries);
+}
+
+function toIssueDetailCodexSessionLogs(
+  entries: readonly CodexSessionLogEntry[],
+): IssueDetailResponse["logs"]["codex_session_logs"] {
+  return entries.map((entry) => ({
+    label: entry.label,
+    path: entry.path,
+    url: entry.url,
+    ...(entry.bytes !== undefined ? { bytes: entry.bytes } : {}),
+  }));
+}
+
 function toRetryIssueDetail(
   issueIdentifier: string,
   retry: RetryEntry,
   parent: { identifier: string; title: string; url: string } | null,
+  codexSessionLogs: CodexSessionLogEntry[],
   loopTraceJournal: IssueDetailResponse["loop_trace_journal"],
 ): IssueDetailResponse {
   return {
@@ -2862,7 +3191,7 @@ function toRetryIssueDetail(
       error: retry.error,
     },
     logs: {
-      codex_session_logs: [],
+      codex_session_logs: toIssueDetailCodexSessionLogs(codexSessionLogs),
     },
     recent_events: [],
     loop_trace_journal: loopTraceJournal,
@@ -2872,9 +3201,72 @@ function toRetryIssueDetail(
   };
 }
 
+async function readCodexSessionLogsForIssue(
+  workspaceRoot: string,
+  workspaceKey: string,
+): Promise<CodexSessionLogEntry[]> {
+  const artifactRoot = join(
+    workspaceRoot,
+    ".symphony",
+    "codex-sessions",
+    workspaceKey,
+  );
+  try {
+    if (!(await lstat(artifactRoot)).isDirectory()) {
+      return [];
+    }
+  } catch {
+    return [];
+  }
+  const result: CodexSessionLogEntry[] = [];
+
+  const visit = async (directory: string): Promise<void> => {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const entryPath = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(entryPath);
+        continue;
+      }
+
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) {
+        continue;
+      }
+
+      let bytes: number | undefined;
+      try {
+        const stats = await lstat(entryPath);
+        if (!stats.isFile()) {
+          continue;
+        }
+        bytes = stats.size;
+      } catch {
+        bytes = undefined;
+      }
+
+      result.push({
+        label: relative(artifactRoot, entryPath),
+        path: entryPath,
+        url: null,
+        ...(bytes !== undefined ? { bytes } : {}),
+      });
+    }
+  };
+
+  await visit(artifactRoot);
+  return result.sort((left, right) => left.path.localeCompare(right.path));
+}
+
 function toStoredIssueDetail(
   issueIdentifier: string,
   storedTrace: StoredLoopTrace,
+  codexSessionLogs: CodexSessionLogEntry[],
 ): IssueDetailResponse | null {
   const issueEntry = findLatestTraceEntryForIdentifier(
     storedTrace.journal,
@@ -2897,7 +3289,7 @@ function toStoredIssueDetail(
     running: null,
     retry: null,
     logs: {
-      codex_session_logs: [],
+      codex_session_logs: toIssueDetailCodexSessionLogs(codexSessionLogs),
     },
     recent_events: storedTrace.journal.slice(-10).map((entry) => ({
       at: entry.timestamp,
@@ -3127,6 +3519,23 @@ function toErrorMessage(error: unknown): string {
   }
 
   return "worker failed";
+}
+
+function formatWorkerErrorReason(error: unknown): string {
+  const message = toErrorMessage(error);
+  const code = extractErrorCode(error);
+  return code === null ? message : `${code}: ${message}`;
+}
+
+function isCodexUserInputRequiredReason(reason: string | undefined): boolean {
+  if (reason === undefined) {
+    return false;
+  }
+  return (
+    reason.includes(ERROR_CODES.codexUserInputRequired) ||
+    reason.includes("turn_input_required") ||
+    reason.includes("Codex requested operator input")
+  );
 }
 
 function hasPipelineHaltLabel(issue: Issue): boolean {

@@ -27,8 +27,23 @@ agent:
   max_turns: 30
   max_retry_backoff_ms: 300000
 
+hard_stops:
+  max_iterations: 20
+  no_progress_turns: 3
+  max_tokens_per_unit: 250000
+  max_dollar_budget_usd: 12.5
+  premium_budget_pause_ratio: 0.8
+  estimated_cost_per_1k_tokens_usd: 0.05
+
 codex:
-  command: codex --config 'model_reasoning_effort="low"' app-server
+  command: codex --disable plugins --disable hooks --disable plugin_hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use --disable multi_agent --disable goals --disable memories --disable tool_call_mcp_elicitation --config 'model_reasoning_effort="low"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server
+  ephemeral_home: true
+  disable_skills: true
+  approval_policy: never
+  thread_sandbox: workspace-write
+  turn_sandbox_policy:
+    type: workspace-write
+    network_access: true
   stall_timeout_ms: 3600000
 
 runner:
@@ -67,7 +82,21 @@ hooks:
     fi
 
     # --- Fetch latest refs into bare clone ---
-    git -C "$BARE_CLONE" fetch origin 2>/dev/null || echo "WARNING: fetch failed, using cached refs" >&2
+    BASE_BRANCH="${SYMPHONY_BASE_BRANCH:-main}"
+    if ! git -C "$BARE_CLONE" fetch origin \
+      "+refs/heads/$BASE_BRANCH:refs/heads/$BASE_BRANCH" \
+      "+refs/heads/*:refs/remotes/origin/*" 2>/dev/null; then
+      echo "WARNING: fetch failed, using cached refs" >&2
+    fi
+
+    if git -C "$BARE_CLONE" show-ref --verify --quiet "refs/remotes/origin/$BASE_BRANCH"; then
+      WORKTREE_BASE="origin/$BASE_BRANCH"
+    elif git -C "$BARE_CLONE" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
+      WORKTREE_BASE="$BASE_BRANCH"
+    else
+      echo "ERROR: Could not resolve base branch $BASE_BRANCH in $BARE_CLONE" >&2
+      exit 1
+    fi
 
     # --- Clean up stale branch from previous failed attempt (idempotency) ---
     if git -C "$BARE_CLONE" show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
@@ -80,8 +109,8 @@ hooks:
     fi
 
     # --- Create worktree for this issue ---
-    echo "Creating worktree for $ISSUE_KEY on branch $BRANCH_NAME..."
-    git -C "$BARE_CLONE" worktree add "$WORKSPACE_DIR" -b "$BRANCH_NAME" main
+    echo "Creating worktree for $ISSUE_KEY on branch $BRANCH_NAME from $WORKTREE_BASE..."
+    git -C "$BARE_CLONE" worktree add "$WORKSPACE_DIR" -b "$BRANCH_NAME" "$WORKTREE_BASE"
 
     # --- Install dependencies ---
     if [ -f package.json ]; then
@@ -170,14 +199,8 @@ hooks:
     else
       echo "On feature branch $CURRENT_BRANCH — skipping rebase, fetch only."
     fi
-    # Import briefs into CLAUDE.md (skip during merge — merge agent doesn't need them)
+    # Import rebase briefs into CLAUDE.md (skip during merge — merge agent doesn't need them)
     if [ "${SYMPHONY_STAGE:-}" != "merge" ]; then
-      if [ -f "INVESTIGATION-BRIEF.md" ]; then
-        if ! grep -q "@INVESTIGATION-BRIEF.md" CLAUDE.md 2>/dev/null; then
-          echo '' >> CLAUDE.md
-          echo '@INVESTIGATION-BRIEF.md' >> CLAUDE.md
-        fi
-      fi
       if [ -f "REBASE-BRIEF.md" ]; then
         if ! grep -q "@REBASE-BRIEF.md" CLAUDE.md 2>/dev/null; then
           echo '' >> CLAUDE.md
@@ -237,12 +260,20 @@ stages:
   # Comment out this block to disable fast-track routing.
   fast_track:
     label: trivial
+    labels:
+      - trivial
+      - kind:test
     initial_stage: implement
 
   investigate:
     type: agent
     runner: codex
     max_turns: 8
+    hard_stops:
+      max_iterations: 4
+      max_tokens_per_unit: 80000
+      max_dollar_budget_usd: 4
+      premium_budget_pause_ratio: 0.9
     linear_state: In Progress
     mcp_servers:
       code-review-graph:
@@ -292,6 +323,20 @@ Implement only what your task specifies. If you encounter missing functionality 
 
 Never hardcode localhost or 127.0.0.1. Use the $BASE_URL environment variable for all URL references. Set BASE_URL=localhost:<port> during local development.
 
+## Headless Output Discipline
+
+Headless Codex turns have a strict output budget. This applies during investigation, code search, log inspection, validation, and PR writeup.
+
+- Do not run high-volume commands as direct streaming commands such as `npm test 2>&1`, `pnpm test 2>&1`, broad `rg`, full log dumps, unfiltered JSON, or full lockfile/dist output.
+- Start broad inspection with path/count-only commands such as `rg -l ... | sed -n '1,80p'`, `rg -c ...`, `find ... | sed -n '1,80p'`, and `git diff --stat`. Then inspect relevant files with bounded contextual commands such as `rg -n ... -m 50 path` or `sed -n '<start>,<end>p'`. Do not stream broad match lines across the whole repo.
+- Keep direct command output under roughly 2,000 tokens. When a tool supports `max_output_tokens`, set it to 1,500 or less and also bound the command itself with `sed`, `head`, `tail`, `jq`, or `wc`.
+- For every command that may print more than ~200 lines or 20 KB, write full stdout/stderr to `.symphony/validation/` and return only command metadata, exit code, log path, and a bounded tail/summary to the model.
+- If `scripts/symphony-run-logged.mjs` exists, use it for noisy commands: `node scripts/symphony-run-logged.mjs --label <label> --tail-bytes 4000 -- <command> [args...]`.
+- Shell snippets must be zsh-safe. Do not assign to `status`; zsh treats it as a read-only parameter. Use neutral names such as `cmd_status` or `exit_code`.
+- If the helper does not exist, redirect output yourself: `mkdir -p .symphony/validation && <command> > .symphony/validation/<label>.log 2>&1; cmd_status=$?; tail -n 80 .symphony/validation/<label>.log; exit $cmd_status`.
+- Do not poll a long-running command with a large output budget. Wait for completion, then inspect only the log path, exit code, and a short tail unless deeper diagnosis is required.
+- PR bodies, workpads, and Linear comments should include command, exit code, log path, and a compact summary/tail. Do not paste full raw logs, broad search output, or SAST JSON unless the artifact is under 20 KB.
+
 # {{ issue.identifier }} — {{ issue.title }}
 
 <!-- CUSTOMIZE: Update the product description below to match your product. -->
@@ -308,14 +353,24 @@ Labels: {{ issue.labels | join: ", " }}
 
 {{ issue.description }}
 
+## Investigation Token Brake
+
+Investigation is a routing and planning stage, not a full implementation rehearsal.
+
+- First inspect the latest Linear issue comments/workpad/resume notes. Do not trust repo-root scratch files such as `workpad.md` or `INVESTIGATION-BRIEF.md` unless they explicitly name the current issue and stage. If the Linear context already identifies the next implementation move, reuse that plan instead of rediscovering the repo.
+- Spend at most 6 shell/tool calls before posting the investigation workpad, unless a command fails and a single retry is necessary.
+- Use `max_output_tokens` of 800 or less in investigate-stage shell calls. Prefer 400 for Linear/comment reads and 800 for source snippets.
+- Do not run multi-file `sed` batches, broad `rg -n` over multiple top-level directories, full docs scans, or source dumps during investigate.
+- If more discovery is truly required, write the open questions into the workpad and output `[STAGE_COMPLETE]`; the implement stage can do targeted reads while making changes.
+
 You are in the INVESTIGATE stage. Your job is to analyze the issue and create an implementation plan.
 
 ### Spec-Informed Investigation
 If the issue description contains a detailed spec with specific file paths, line numbers, and proposed changes (typical of spec-gen'd issues): DO NOT re-explore the codebase from scratch. Instead:
 1. Read the spec from the issue description
 2. Verify the cited files and line numbers are still accurate (quick reads, not full grep sweeps)
-3. Write INVESTIGATION-BRIEF.md by reformatting the spec content into the brief template below
-4. Post the workpad and complete
+3. Reformat the spec content into the Linear workpad structure below
+4. Post the workpad to Linear and complete
 
 Save full codebase exploration for issues with vague or ambiguous descriptions that lack specific file references.
 
@@ -324,24 +379,23 @@ Save full codebase exploration for issues with vague or ambiguous descriptions t
 This issue was previously blocked. Check the issue comments for a `## Resume Context` comment explaining what changed. Focus your investigation on the blocking reasons and what has been updated.
 {% endif %}
 
-- Read the codebase to understand existing patterns and architecture
+- Check the latest Linear comments/workpad/resume notes before source search. If a current implementation plan already exists, reuse it and do not repeat broad repo discovery.
+- Read only the minimal code needed to understand existing patterns and architecture. Stay within the Investigation Token Brake.
 - Identify which files need to change and what the approach should be
-- Post a comment on the Linear issue (via `gh`) with your investigation findings and proposed implementation plan
+- Post a workpad comment on the Linear issue with your investigation findings and proposed implementation plan
 - Do NOT implement code, create branches, or open PRs in this stage — investigation only
 
 ### Workpad (investigate)
 After completing your investigation, create the workpad comment on this Linear issue.
-**Preferred**: Write the workpad content to a local `workpad.md` file and call `sync_workpad` with `issue_id` and `file_path`. Save the returned `comment_id` for future updates.
-**Fallback** (if `sync_workpad` is unavailable): Use the `linear` CLI:
+**Preferred**: Write the workpad content to a local `workpad.md` file and call the injected `sync_workpad` tool with `issue_id` and `file_path`. Save the returned `comment_id` for future updates.
+**Fallback** (if `sync_workpad` is unavailable): Use `linear_graphql` with GraphQL variables to search for an existing workpad comment and call `commentCreate` or `commentUpdate`. If shell CLI access is available, `linear-pp-cli` may do the file-backed write after `linear_graphql` gives you the existing comment UUID:
 ```bash
-# Check for existing workpad comment
-linear issue comment list {{ issue.identifier }} --json
-# Create new comment (if no workpad exists)
-linear issue comment add {{ issue.identifier }} --body-file workpad.md
-# Update existing comment (commentId is a UUID from the list output)
-linear issue comment update <COMMENT_UUID> --body-file workpad.md
+# If no existing workpad comment was found:
+linear-pp-cli comments add --issue {{ issue.identifier }} --body-file workpad.md --agent
+# If an existing workpad comment was found:
+linear-pp-cli comments edit <COMMENT_UUID> --body-file workpad.md --agent
 ```
-Note: `comment add` and `comment list` take the issue identifier (e.g. {{ issue.identifier }}). `comment update` takes a comment UUID.
+Do not use Codex app/connector MCP tools for Linear comments or documents in headless runs; they can request interactive elicitation and block the worker.
 3. Use this template for the workpad body:
    ```
    ## Workpad
@@ -368,14 +422,11 @@ Note: `comment add` and `comment list` take the issue identifier (e.g. {{ issue.
    ```
 4. Fill the Plan and Acceptance Criteria sections from your investigation findings.
 
-## Investigation Brief
+## Linear Workpad Orientation
 
-After posting the workpad, write `INVESTIGATION-BRIEF.md` to the worktree root. This file gives the implement-stage agent a concise orientation without re-reading the codebase.
-
-Keep the brief under ~200 lines (~4K tokens). Use exactly this structure:
+After investigation, post a concise Linear workpad/comment for the implement-stage agent instead of writing root-level scratch files. Keep the workpad under ~200 lines (~4K tokens) and use this structure:
 
 ```markdown
-# Investigation Brief
 ## Issue: [ISSUE-KEY] — [Title]
 
 ## Objective
@@ -435,7 +486,7 @@ When you are done:
 
 {{ issue.description }}
 
-You are in the IMPLEMENT stage. Read INVESTIGATION-BRIEF.md first if it exists in the worktree root. It contains targeted findings from the investigation stage including relevant files, code patterns, architecture context, and test strategy. Follow the Read Order section — do NOT re-read files not listed there unless you discover a dependency not covered in Key Dependencies. The investigation agent already read the codebase; your job is to change it, not re-explore it. If the file does not exist, fall back to reading issue comments for the investigation plan.
+You are in the IMPLEMENT stage. Read the latest Linear issue comments/workpad/resume notes first for targeted investigation findings, relevant files, code patterns, architecture context, and test strategy. Do not trust repo-root scratch files such as `workpad.md` or `INVESTIGATION-BRIEF.md` unless they explicitly name the current issue and stage. Follow the workpad Read Order section when it exists — do NOT re-read files not listed there unless you discover a dependency not covered in Key Dependencies. The investigation agent already read the codebase; your job is to change it, not re-explore it.
 
 {% if reworkCount > 0 %}
 ## REWORK ATTEMPT {{ reworkCount }}
@@ -476,25 +527,21 @@ Read ALL comments on this Linear issue starting with `## Review Findings`. These
 4. Write tests as needed.
 5. Run all `# Verify:` commands from the spec. You are not done until every verify command exits 0.
 6. Run `pnpm format --write` to auto-format code, then run `pnpm lint` to verify no lint errors remain. If lint fails, fix the errors and re-run until clean. This must pass before creating the PR.
-7. Before creating the PR, capture structured tool output:
-   - Run `npx tsc --noEmit 2>&1` and include output in PR body under `## Tool Output > TypeScript`
-   - Run `pnpm lint 2>&1` and include output in PR body under `## Tool Output > Lint`
-   - Run `npm test 2>&1` and include summary in PR body under `## Tool Output > Tests`
-   - Run `semgrep scan --config auto --json 2>&1` (if available) and include raw output in PR body under `## SAST Output`
-   - Do NOT filter or interpret SAST results — include them verbatim.
+7. Before creating the PR, capture structured tool output as bounded artifacts:
+   - Run `node scripts/symphony-run-logged.mjs --label typecheck -- npx tsc --noEmit` when the helper exists, or redirect equivalent output to `.symphony/validation/typecheck.log`; include command, exit code, log path, and summary/tail in PR body under `## Tool Output > TypeScript`.
+   - Run `node scripts/symphony-run-logged.mjs --label lint -- pnpm lint` when the helper exists, or redirect equivalent output to `.symphony/validation/lint.log`; include command, exit code, log path, and summary/tail in PR body under `## Tool Output > Lint`.
+   - Run the test command through the same log-capturing path, preferably `node scripts/symphony-run-logged.mjs --label tests -- pnpm test` when the helper exists; include command, exit code, log path, and summary/tail in PR body under `## Tool Output > Tests`.
+   - Run Semgrep through the same log-capturing path if available, for example `node scripts/symphony-run-logged.mjs --label semgrep -- semgrep scan --config auto --json`; include the raw artifact path and a compact summary under `## SAST Output`, and paste raw JSON only if the artifact is under 20 KB.
 8. Commit your changes with message format: `feat({{ issue.identifier }}): <description>`.
 9. Open a PR targeting this repo (not its upstream fork parent) via `gh pr create --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")` with the issue description in the PR body. Include the Tool Output and SAST Output sections.
 10. Link the PR to the Linear issue by including `{{ issue.identifier }}` in the PR title or body.
 
 ### Workpad (implement)
 Update the workpad comment at these milestones during implementation.
-**Preferred**: Edit your local `workpad.md` file and call `sync_workpad` with `issue_id`, `file_path`, and `comment_id` (from the investigate stage).
-**Fallback** (if `sync_workpad` is unavailable): Use the `linear` CLI:
+**Preferred**: Edit your local `workpad.md` file and call the injected `sync_workpad` tool with `issue_id`, `file_path`, and `comment_id` (from the investigate stage).
+**Fallback** (if `sync_workpad` is unavailable): Use `linear_graphql` with GraphQL variables to find the existing `## Workpad` comment and call `commentUpdate`. If shell CLI access is available, `linear-pp-cli` may do the file-backed update after `linear_graphql` gives you the comment UUID:
 ```bash
-# Find existing workpad comment (look for body starting with "## Workpad")
-linear issue comment list {{ issue.identifier }} --json
-# Update it (commentId is a UUID from the list output)
-linear issue comment update <COMMENT_UUID> --body-file workpad.md
+linear-pp-cli comments edit <COMMENT_UUID> --body-file workpad.md --agent
 ```
 3. At each milestone, update the relevant sections:
    - **After starting implementation**: Check off Plan items as you complete them.
@@ -515,6 +562,10 @@ When you are done:
 - If you cannot resolve a verify failure after 3 attempts: output `[STAGE_FAILED: verify]` with the failing command and output
 - If the spec is ambiguous or contradictory: output `[STAGE_FAILED: spec]` with an explanation
 - If you hit infrastructure issues (API limits, network errors): output `[STAGE_FAILED: infra]` with details
+
+Headless worker permissions are preconfigured. Do not request sandbox, network,
+or permission escalation from the user. If a required command is still denied by
+policy, output `[STAGE_FAILED: infra]` with the exact denied command and error.
 {% endif %}
 
 {% if stageName == "review" %}
@@ -662,11 +713,10 @@ If the PR has merge conflicts (mergeable is "CONFLICTING" or mergeStateStatus in
 
 ### Workpad (merge)
 After merging the PR, update the workpad comment one final time.
-**Preferred**: Edit your local `workpad.md` file and call `sync_workpad` with `issue_id`, `file_path`, and `comment_id`.
-**Fallback** (if `sync_workpad` is unavailable): Use the `linear` CLI:
+**Preferred**: Edit your local `workpad.md` file and call the injected `sync_workpad` tool with `issue_id`, `file_path`, and `comment_id`.
+**Fallback** (if `sync_workpad` is unavailable): Use `linear_graphql` with GraphQL variables to find the existing `## Workpad` comment and call `commentUpdate`. If shell CLI access is available, `linear-pp-cli` may do the file-backed update after `linear_graphql` gives you the comment UUID:
 ```bash
-linear issue comment list {{ issue.identifier }} --json
-linear issue comment update <COMMENT_UUID> --body-file workpad.md
+linear-pp-cli comments edit <COMMENT_UUID> --body-file workpad.md --agent
 ```
 Update the workpad to:
 - Check off all remaining Plan and Acceptance Criteria items.
@@ -686,14 +736,18 @@ You maintain a single persistent `## Workpad` comment on the Linear issue. This 
 **Critical rules:**
 - **Never create multiple workpad comments.** Always search for an existing comment with `## Workpad` in its body before creating a new one.
 - **Update at milestones only** — plan finalized, implementation done, validation complete. Do NOT sync after every minor change.
-- **Prefer `sync_workpad` over raw GraphQL.** Write your workpad content to a local `workpad.md` file, then call `sync_workpad` with `issue_id`, `file_path`, and optionally `comment_id` (returned from the first sync). This keeps the workpad body out of your conversation context and saves tokens.
-- **`linear` CLI fallback** (if `sync_workpad` is unavailable):
+- **Prefer the injected headless tools.** Write your workpad content to a local `workpad.md` file, then call `sync_workpad` with `issue_id`, `file_path`, and optionally `comment_id` (returned from the first sync). This keeps the workpad body out of your conversation context and saves tokens.
+- **Headless-safe fallbacks** (if `sync_workpad` is unavailable):
+  - Use `linear_graphql` with GraphQL variables to search for the existing `## Workpad` comment and call `commentCreate` or `commentUpdate`.
+  - Use `linear-pp-cli comments add/edit --body-file ... --agent` only after you already know whether you are creating or updating.
+  - Do not use the old `linear` CLI or Codex app/connector MCP tools for Linear comments/documents in headless runs.
   ```bash
-  linear issue comment list <ISSUE_KEY> --json      # Find existing workpad comment
-  linear issue comment add <ISSUE_KEY> --body-file workpad.md   # Create new comment
-  linear issue comment update <COMMENT_UUID> --body-file workpad.md  # Update existing
+  # If no existing workpad comment was found:
+  linear-pp-cli comments add --issue <ISSUE_KEY> --body-file workpad.md --agent
+  # If an existing workpad comment was found:
+  linear-pp-cli comments edit <COMMENT_UUID> --body-file workpad.md --agent
   ```
-  Note: `add` and `list` take the issue identifier (e.g. SYMPH-246). `update` takes a comment UUID (from `list --json` output).
+- **Never inline markdown into Linear GraphQL `body:`, `description:`, or `content:` literals.** Use `sync_workpad`, `linear-pp-cli` file flags, or GraphQL variables so shell snippets like `$VAR`, `${VAR}`, `$(cmd)`, and backticks stay literal.
 
 ## Media in Workpads (fileUpload)
 
@@ -726,7 +780,7 @@ curl -X PUT -H "Content-Type: <contentType>" \
 ## Documentation Maintenance
 
 - Put generated markdown docs, plans, handoffs, ADR-style notes, runbooks, and investigation briefs in Linear Docs, not repo-local markdown, unless the issue explicitly asks for checked-in documentation.
-- Use `linear document create/update --content-file <temp-file> --issue {{ issue.identifier }}` for issue-scoped markdown docs.
+- Use `linear-pp-cli documents create/edit --content-file <temp-file> --issue {{ issue.identifier }} --agent` for issue-scoped markdown docs.
 - If a checked-in docs change is explicitly required by the issue, keep it scoped to that requirement and include it in the same PR as the code change.
 - If the markdown names durable follow-up work, search Linear first, then create or update the issue before mentioning it in the doc.
 - Do not update docs/generated/ files; those are auto-generated and will be overwritten.

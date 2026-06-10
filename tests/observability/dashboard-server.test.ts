@@ -117,6 +117,16 @@ describe("dashboard server", () => {
         truncated: false,
         entries: [],
       },
+      logs: {
+        codex_session_logs: [
+          {
+            label: "latest",
+            path: "/var/log/symphony/ABC-123/latest.log",
+            url: null,
+            bytes: 2048,
+          },
+        ],
+      },
     });
 
     const missing = await sendRequest(server.port, {
@@ -814,6 +824,7 @@ function createIssueDetail(): IssueDetailResponse {
         output_tokens: 800,
         total_tokens: 2000,
       },
+      token_telemetry: [],
     },
     retry: null,
     logs: {
@@ -822,6 +833,7 @@ function createIssueDetail(): IssueDetailResponse {
           label: "latest",
           path: "/var/log/symphony/ABC-123/latest.log",
           url: null,
+          bytes: 2048,
         },
       ],
     },

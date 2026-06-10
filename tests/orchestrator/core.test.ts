@@ -5,6 +5,7 @@ import type {
   ReviewerDefinition,
 } from "../../src/config/types.js";
 import type { DispatcherRunJournal, Issue } from "../../src/domain/model.js";
+import { ERROR_CODES } from "../../src/errors/codes.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
@@ -365,7 +366,22 @@ describe("orchestrator core", () => {
   });
 
   it("records a hard_stop_trigger journal entry and does not continue a paused unit", async () => {
-    const orchestrator = createOrchestrator();
+    let issueState = "Todo";
+    const config = createConfig();
+    config.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ];
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+    });
 
     await orchestrator.pollTick();
     const retry = await orchestrator.onWorkerExit({
@@ -382,7 +398,8 @@ describe("orchestrator core", () => {
     });
 
     expect(retry).toBeNull();
-    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
     expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
     expect(
       orchestrator
@@ -392,9 +409,318 @@ describe("orchestrator core", () => {
             entry.kind === "hard_stop_trigger" &&
             entry.issueId === "1" &&
             entry.metadata.outcome === "PAUSED-budget" &&
-            entry.metadata.trigger === "premium_spend_near_ceiling",
+            entry.metadata.trigger === "premium_spend_near_ceiling" &&
+            entry.metadata.issueState === "Todo",
         ),
     ).toBe(true);
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("pauses for headless Codex input-required exits until explicit Resume", async () => {
+    let issueState = "Todo";
+    const comments: string[] = [];
+    const config = createConfig();
+    config.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ];
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: `${ERROR_CODES.codexUserInputRequired}: Codex requested operator input during a turn.`,
+    });
+
+    expect(retry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(comments.at(-1)).toContain(
+      "Headless Codex requested operator input",
+    );
+    expect(comments.at(-1)).toContain(
+      "Move the issue to Resume after human review to requeue it.",
+    );
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "operator_input_required" &&
+            entry.issueId === "1" &&
+            entry.metadata.errorCode === ERROR_CODES.codexUserInputRequired,
+        ),
+    ).toBe(true);
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("instructs out-of-and-back-into Resume when input-required pause hits an issue already in Resume", async () => {
+    let issueState = "Resume";
+    const comments: string[] = [];
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "In Progress", "Resume"];
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: `${ERROR_CODES.codexUserInputRequired}: Codex requested operator input during a turn.`,
+    });
+
+    expect(retry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(comments.at(-1)).toContain("already in Resume when it paused");
+    expect(comments.at(-1)).toContain(
+      "move it out of Resume (if it is still there) and back into Resume",
+    );
+
+    // Staying in Resume must not requeue: the guard demands a fresh transition.
+    const stillResume = await orchestrator.pollTick();
+    expect(stillResume.dispatchedIssueIds).toEqual([]);
+
+    // The out-of-and-back-into dance the comment instructs actually requeues.
+    issueState = "Blocked";
+    const observedOut = await orchestrator.pollTick();
+    expect(observedOut.dispatchedIssueIds).toEqual([]);
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("instructs out-of-and-back-into Resume when a hard stop pauses an issue already in Resume", async () => {
+    const comments: string[] = [];
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "In Progress", "Resume"];
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: "Resume" }),
+        ],
+      }),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "premium_spend_near_ceiling",
+        reason: "Estimated premium spend is near ceiling.",
+        turnCount: 2,
+        totalTokens: 150_000,
+        estimatedCostUsd: 40,
+      },
+    });
+
+    expect(retry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(comments.at(-1)).toContain(
+      "The worker has paused instead of continuing silently.",
+    );
+    expect(comments.at(-1)).toContain("already in Resume when it paused");
+    expect(comments.at(-1)).toContain(
+      "move it out of Resume (if it is still there) and back into Resume",
+    );
+  });
+
+  it("preserves stage continuity while a paused unit waits for explicit Resume", async () => {
+    let issueState = "Todo";
+    const spawnedStageNames: Array<string | null> = [];
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    config.stages = {
+      initialStage: "investigate",
+      fastTrack: null,
+      stages: {
+        investigate: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "implement",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "done",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: "Done",
+        },
+      },
+    };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStageNames.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    expect(spawnedStageNames).toEqual(["investigate"]);
+    const firstDispatchedAt =
+      orchestrator.getState().issueFirstDispatchedAt["1"];
+
+    const continuation = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+    expect(continuation).toMatchObject({
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      delayType: "continuation",
+    });
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().issuePassedStages["1"]).toEqual([
+      "investigate",
+    ]);
+
+    const retryDispatch = await orchestrator.onRetryTimer("1");
+    expect(retryDispatch.dispatched).toBe(true);
+    expect(spawnedStageNames).toEqual(["investigate", "implement"]);
+    orchestrator.getState().issueReworkCounts["1"] = 2;
+
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:02:05.000Z"),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "premium_spend_near_ceiling",
+        reason: "Estimated premium spend is near ceiling.",
+        turnCount: 2,
+        totalTokens: 150_000,
+        estimatedCostUsd: 40,
+      },
+    });
+
+    expect(retry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().issuePassedStages["1"]).toEqual([
+      "investigate",
+    ]);
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(2);
+    expect(orchestrator.getState().issueFirstDispatchedAt["1"]).toBe(
+      firstDispatchedAt,
+    );
+    expect(
+      orchestrator
+        .getState()
+        .issueExecutionHistory["1"]?.map((record) => record.stageName),
+    ).toEqual(["investigate", "implement"]);
+    expect(
+      orchestrator.getState().issueExecutionHistory["1"]?.[1],
+    ).toMatchObject({
+      stageName: "implement",
+      outcome: "PAUSED-budget",
+    });
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnedStageNames).toEqual([
+      "investigate",
+      "implement",
+      "implement",
+    ]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
   });
 
   it("keeps worker running state when dispatcher lease completion cannot be persisted", async () => {
@@ -452,6 +778,152 @@ describe("orchestrator core", () => {
     });
     expect(timers.scheduled[0]?.delayMs).toBe(10_000);
     expect(computeFailureRetryDelayMs(3, 30_000)).toBe(30_000);
+  });
+
+  it("does not retry or redispatch a manually stopped issue until explicit Resume", async () => {
+    const timers = createFakeTimerScheduler();
+    const stopRunningIssue = vi.fn();
+    let issueState = "Todo";
+    const config = createConfig();
+    config.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ];
+    const orchestrator = createOrchestrator({
+      config,
+      timerScheduler: timers,
+      stopRunningIssue,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+    });
+
+    await orchestrator.pollTick();
+    const stopRequest = await orchestrator.requestStopByIdentifier("ISSUE-1");
+    expect(stopRequest).toMatchObject({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      reason: "manual_stop",
+    });
+    expect(stopRunningIssue).toHaveBeenCalledTimes(1);
+
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: "stopped after manual_stop",
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(timers.scheduled).toEqual([]);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("does not record a manual-stop resume guard when the stop lease is already active", async () => {
+    const timers = createFakeTimerScheduler();
+    const stopRunningIssue = vi.fn();
+    const orchestrator = createOrchestrator({
+      timerScheduler: timers,
+      stopRunningIssue,
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().dispatcherLeases[
+      "dispatcher:1:no-stage:initial:hard_stop_manual_stop"
+    ] = {
+      leaseId: "dispatcher:1:no-stage:initial:hard_stop_manual_stop",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      operation: "dispatcher",
+      ownerId: "other-runtime",
+      status: "active",
+      acquiredAt: "2026-03-06T00:00:00.000Z",
+      expiresAt: "2026-03-06T00:10:00.000Z",
+      completedAt: null,
+      stage: null,
+      attempt: null,
+      lastJournalSequence: 1,
+    };
+
+    const stopRequest = await orchestrator.requestStopByIdentifier("ISSUE-1");
+
+    expect(stopRequest).toMatchObject({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      reason: "manual_stop",
+    });
+    expect(stopRunningIssue).not.toHaveBeenCalled();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("does not redispatch a manually stopped issue that was already in Resume", async () => {
+    const timers = createFakeTimerScheduler();
+    const stopRunningIssue = vi.fn();
+    let issueState = "Resume";
+    const config = createConfig();
+    config.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Blocked",
+      "Resume",
+    ];
+    const orchestrator = createOrchestrator({
+      config,
+      timerScheduler: timers,
+      stopRunningIssue,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+    });
+
+    await orchestrator.pollTick();
+    const stopRequest = await orchestrator.requestStopByIdentifier("ISSUE-1");
+    expect(stopRequest).toMatchObject({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      reason: "manual_stop",
+    });
+
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: "worker exited: codex_protocol_error",
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(timers.scheduled).toEqual([]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    const stillResume = await orchestrator.pollTick();
+    expect(stillResume.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    issueState = "Blocked";
+    const blocked = await orchestrator.pollTick();
+    expect(blocked.dispatchedIssueIds).toEqual([]);
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
   });
 
   it("applies codex session events to the running entry and aggregate counters", async () => {
@@ -1204,6 +1676,161 @@ describe("dispatcher run journal restart recovery", () => {
     expect(result.dispatchedIssueIds).toEqual([]);
     expect(spawnWorker).not.toHaveBeenCalled();
     expect(orchestrator.getState().claimed.has("1")).toBe(true);
+  });
+
+  it("restart recovery preserves budget hard-stop pause until explicit Resume", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    let issueState = "Todo";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "hard_stop:1:investigate:initial:token_budget:1",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:investigate:initial:token_budget:1",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            outcome: "PAUSED-budget",
+            trigger: "token_budget",
+            reason: "Token budget exceeded: 300000 >= 200000.",
+            issueState: "Todo",
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("restart recovery preserves input-required pause until explicit Resume", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    let issueState = "Todo";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "operator_input_required:1:investigate:initial",
+          kind: "operator_input_required",
+          operation: "dispatcher",
+          leaseId: "operator_input_required:1:investigate:initial",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            reason: `${ERROR_CODES.codexUserInputRequired}: Codex requested operator input during a turn.`,
+            errorCode: ERROR_CODES.codexUserInputRequired,
+            issueState: "Todo",
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("restart recovery does not re-block a hard-stop pause consumed by later dispatch", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["In Progress", "Resume"];
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: "In Progress" }),
+        ],
+      }),
+      spawnWorker,
+      now: () => new Date("2026-03-06T00:10:00.000Z"),
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "hard_stop:1:investigate:initial:token_budget:1",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:investigate:initial:token_budget:1",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            outcome: "PAUSED-budget",
+            trigger: "token_budget",
+            reason: "Token budget exceeded: 300000 >= 200000.",
+            issueState: "Todo",
+          },
+        }),
+        createJournalEntry({
+          sequence: 2,
+          idempotencyKey: "dispatcher:1:no-stage:initial:admission",
+          kind: "admission",
+          operation: "dispatcher",
+          leaseId: "dispatcher:1:no-stage:initial:lease",
+          leaseStatus: "active",
+          expiresAt: "2026-03-06T00:01:00.000Z",
+          metadata: {
+            status: "started",
+            attemptKey: "initial",
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+
+    const result = await orchestrator.pollTick();
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
   });
 
   it("restart recovery avoids duplicate gate side effect after crash during gate", async () => {
@@ -4095,7 +4722,11 @@ describe("fast-track label-based stage routing", () => {
       ...createConfig(),
       stages: {
         initialStage: "investigate",
-        fastTrack: { label: "trivial", initialStage: "implement" },
+        fastTrack: {
+          label: "trivial",
+          labels: ["trivial", "kind:test"],
+          initialStage: "implement",
+        },
         stages: Object.freeze({
           investigate: {
             type: "agent",
@@ -4164,6 +4795,36 @@ describe("fast-track label-based stage routing", () => {
             identifier: "ISSUE-1",
             state: "Todo",
             labels: ["trivial"],
+          }),
+        ],
+      }),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStageNames.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+
+    expect(spawnedStageNames).toEqual(["implement"]);
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+  });
+
+  it("fast-track: kind:test issue starts at fast-track initial stage", async () => {
+    const spawnedStageNames: Array<string | null> = [];
+    const orchestrator = new OrchestratorCore({
+      config: createFastTrackConfig(),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            state: "Todo",
+            labels: ["kind:test"],
           }),
         ],
       }),
@@ -4512,11 +5173,13 @@ async function waitForGateOutcomeCount(
 
 function createTracker(input?: {
   candidates?: Issue[];
+  candidatesFn?: () => Issue[];
   statesById?: IssueStateSnapshot[];
 }): IssueTracker {
   return {
     async fetchCandidateIssues() {
       return (
+        input?.candidatesFn?.() ??
         input?.candidates ?? [createIssue({ id: "1", identifier: "ISSUE-1" })]
       );
     },
@@ -4778,6 +5441,7 @@ function createJournalEntry(input: {
   stage?: string | null;
   expiresAt?: string;
   completedAt?: string | null;
+  metadata?: Record<string, unknown>;
 }): DispatcherRunJournal[number] {
   const stage = input.stage ?? null;
   const completedAt =
@@ -4811,6 +5475,7 @@ function createJournalEntry(input: {
     summary: "journal fixture",
     metadata: {
       status: input.leaseStatus === "active" ? "started" : input.leaseStatus,
+      ...input.metadata,
     },
   };
 }
@@ -4941,6 +5606,22 @@ describe("classifyExitOutcome", () => {
   it("classifies abnormal exit without stall_timeout as error", () => {
     expect(classifyExitOutcome("abnormal", 3, "some error message")).toBe(
       "error",
+    );
+  });
+
+  it("classifies Codex input-required exits as input_required", () => {
+    expect(
+      classifyExitOutcome(
+        "abnormal",
+        2,
+        `${ERROR_CODES.codexUserInputRequired}: Codex requested operator input during a turn.`,
+      ),
+    ).toBe("input_required");
+    expect(classifyExitOutcome("abnormal", 2, "turn_input_required")).toBe(
+      "input_required",
+    );
+    expect(classifyExitOutcome("abnormal", 0, "turn_input_required")).toBe(
+      "input_required",
     );
   });
 

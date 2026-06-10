@@ -1,4 +1,20 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { constants, statSync } from "node:fs";
+import {
+  access,
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join, parse, relative } from "node:path";
 
 import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
@@ -7,7 +23,23 @@ import {
   detectModePermissionAction,
   evaluateModePermission,
 } from "../policy/hard-stops.js";
+import { getDefaultCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
 import { VERSION } from "../version.js";
+
+const DEFAULT_SYSTEM_SKILL_NAMES = Object.freeze([
+  "imagegen",
+  "openai-docs",
+  "plugin-creator",
+  "skill-creator",
+  "skill-installer",
+]);
+
+const EPHEMERAL_CODEX_HOME_PREFIX = "symphony-codex-home-";
+const CODEX_SESSION_LOG_ROOTS = Object.freeze(["sessions"]);
+// Ephemeral homes leak when the process dies before close(); runs are bounded
+// well under an hour, so anything this old is orphaned.
+const STALE_EPHEMERAL_CODEX_HOME_MAX_AGE_MS = 48 * 60 * 60 * 1000;
+let staleEphemeralCodexHomeSweepStarted = false;
 
 const DEFAULT_CLIENT_INFO = Object.freeze({
   name: "symphony-ts",
@@ -31,6 +63,13 @@ export interface CodexUsage {
   reasoningTokens?: number;
 }
 
+export interface CodexSessionArtifact {
+  label: string;
+  path: string;
+  sourcePath: string;
+  bytes: number;
+}
+
 export type CodexTurnStatus = "completed" | "failed" | "cancelled";
 
 export interface CodexClientEvent {
@@ -44,6 +83,7 @@ export interface CodexClientEvent {
     | "turn_input_required"
     | "approval_auto_approved"
     | "unsupported_tool_call"
+    | "session_artifact_saved"
     | "notification"
     | "other_message"
     | "malformed"
@@ -59,6 +99,7 @@ export interface CodexClientEvent {
   message?: string;
   raw?: unknown;
   toolName?: string | null;
+  artifacts?: CodexSessionArtifact[];
 }
 
 export interface CodexDynamicToolDefinition {
@@ -73,6 +114,8 @@ export interface CodexDynamicTool extends CodexDynamicToolDefinition {
 
 export interface CodexAppServerClientOptions {
   command: string;
+  ephemeralHome?: boolean;
+  disableSkills?: boolean;
   cwd: string;
   approvalPolicy: unknown;
   threadSandbox: unknown;
@@ -80,6 +123,7 @@ export interface CodexAppServerClientOptions {
   readTimeoutMs: number;
   turnTimeoutMs: number;
   stallTimeoutMs: number;
+  artifactDirectory?: string;
   clientInfo?: {
     name: string;
     version: string;
@@ -148,6 +192,9 @@ export class CodexAppServerClient {
   private startPromise: Promise<void> | null = null;
   private stderrBuffer = "";
   private closed = false;
+  private ephemeralCodexHome: string | null = null;
+  private ephemeralCodexHomeCleanup: Promise<void> | null = null;
+  private lastSessionId: string | null = null;
 
   constructor(options: CodexAppServerClientOptions) {
     this.options = options;
@@ -211,6 +258,7 @@ export class CodexAppServerClient {
     const child = this.child;
     this.child = null;
     if (child === null) {
+      await this.cleanupEphemeralCodexHome();
       return;
     }
 
@@ -220,6 +268,7 @@ export class CodexAppServerClient {
     }
 
     await waitForChildExit(child);
+    await this.cleanupEphemeralCodexHome();
   }
 
   private async ensureStarted(): Promise<void> {
@@ -242,11 +291,14 @@ export class CodexAppServerClient {
 
   private async spawnAndInitialize(): Promise<void> {
     try {
-      this.child = spawn("bash", ["-lc", this.options.command], {
+      const env = await this.createSpawnEnvironment();
+      this.child = spawn("bash", ["-lc", this.renderSpawnCommand(env)], {
         cwd: this.options.cwd,
+        env,
         stdio: "pipe",
       });
     } catch (error) {
+      await this.cleanupEphemeralCodexHomeBestEffort();
       const wrapped = new CodexAppServerClientError(
         `Failed to launch Codex app-server: ${toErrorMessage(error)}`,
         ERROR_CODES.codexLaunchFailed,
@@ -304,6 +356,12 @@ export class CodexAppServerClient {
         });
       }
       this.child = null;
+      void this.cleanupEphemeralCodexHome().catch((cleanupError) => {
+        this.emit({
+          event: "other_message",
+          message: `Failed to clean up ephemeral Codex home: ${toErrorMessage(cleanupError)}`,
+        });
+      });
     });
 
     try {
@@ -357,6 +415,189 @@ export class CodexAppServerClient {
     }
   }
 
+  private async createSpawnEnvironment(): Promise<NodeJS.ProcessEnv> {
+    if (this.options.ephemeralHome !== true) {
+      if (this.options.disableSkills === true) {
+        throw new CodexAppServerClientError(
+          "codex.disable_skills requires codex.ephemeral_home so Symphony does not mutate the operator Codex config.",
+          ERROR_CODES.codexLaunchFailed,
+        );
+      }
+      return { ...process.env };
+    }
+
+    await this.cleanupEphemeralCodexHome();
+    this.sweepStaleEphemeralCodexHomesOnce();
+    const sourceHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
+    const codexHome = await mkdtemp(
+      join(tmpdir(), EPHEMERAL_CODEX_HOME_PREFIX),
+    );
+    this.ephemeralCodexHome = codexHome;
+
+    const sourceAuth = join(sourceHome, "auth.json");
+    try {
+      await access(sourceAuth, constants.R_OK);
+    } catch (error) {
+      throw new CodexAppServerClientError(
+        `Ephemeral Codex home requested, but no readable auth.json was found at ${sourceAuth}.`,
+        ERROR_CODES.codexLaunchFailed,
+        { cause: error },
+      );
+    }
+    await symlink(sourceAuth, join(codexHome, "auth.json"));
+
+    if (this.options.disableSkills === true) {
+      await writeFile(
+        join(codexHome, "config.toml"),
+        await prepareDisabledSkillsConfig({
+          codexHome,
+          cwd: this.options.cwd,
+          sourceHome,
+        }),
+      );
+    }
+
+    return {
+      ...process.env,
+      CODEX_HOME: codexHome,
+    };
+  }
+
+  private sweepStaleEphemeralCodexHomesOnce(): void {
+    if (staleEphemeralCodexHomeSweepStarted) {
+      return;
+    }
+    staleEphemeralCodexHomeSweepStarted = true;
+    // Fire-and-forget: orphan cleanup must never delay or fail a launch. The
+    // trailing catch also covers a throwing onEvent handler inside emit.
+    void sweepStaleCodexHomes({
+      root: tmpdir(),
+      maxAgeMs: STALE_EPHEMERAL_CODEX_HOME_MAX_AGE_MS,
+      now: () => Date.now(),
+    })
+      .then((removed) => {
+        if (removed.length > 0) {
+          this.emit({
+            event: "other_message",
+            message: `Removed ${removed.length} stale ephemeral Codex home(s) from ${tmpdir()}.`,
+          });
+        }
+      })
+      .catch(() => {});
+  }
+
+  private async cleanupEphemeralCodexHome(): Promise<void> {
+    if (this.ephemeralCodexHomeCleanup !== null) {
+      await this.ephemeralCodexHomeCleanup;
+      return;
+    }
+
+    const codexHome = this.ephemeralCodexHome;
+    if (codexHome === null) {
+      return;
+    }
+    this.ephemeralCodexHome = null;
+    const cleanup = (async () => {
+      let preservationError: unknown = null;
+      try {
+        await this.preserveEphemeralCodexHomeArtifacts(codexHome);
+      } catch (error) {
+        preservationError = error;
+      }
+      await rm(codexHome, { recursive: true, force: true });
+      if (preservationError !== null) {
+        this.emit({
+          event: "other_message",
+          sessionId: this.lastSessionId,
+          threadId: this.threadId,
+          message: `Failed to preserve ephemeral Codex session artifacts before cleanup: ${toErrorMessage(preservationError)}`,
+        });
+      }
+    })().finally(() => {
+      if (this.ephemeralCodexHomeCleanup === cleanup) {
+        this.ephemeralCodexHomeCleanup = null;
+      }
+    });
+    this.ephemeralCodexHomeCleanup = cleanup;
+    await cleanup;
+  }
+
+  private async preserveEphemeralCodexHomeArtifacts(
+    codexHome: string,
+  ): Promise<void> {
+    const sessionFiles = await findCodexSessionLogFiles(codexHome);
+    if (sessionFiles.length === 0) {
+      return;
+    }
+
+    const artifactRoot =
+      this.options.artifactDirectory ??
+      getDefaultCodexSessionArtifactDirectory(this.options.cwd);
+    const artifactDirectory = join(artifactRoot, basename(codexHome));
+    const artifacts: CodexSessionArtifact[] = [];
+
+    for (const sourcePath of sessionFiles) {
+      const relativePath = relative(codexHome, sourcePath);
+      if (relativePath.length === 0 || relativePath.startsWith("..")) {
+        continue;
+      }
+      const sourceStats = await lstat(sourcePath);
+      if (!sourceStats.isFile()) {
+        continue;
+      }
+
+      const destinationPath = join(artifactDirectory, relativePath);
+      await mkdir(dirname(destinationPath), { recursive: true });
+      await copyFile(sourcePath, destinationPath);
+      const stats = await stat(destinationPath);
+      artifacts.push({
+        label: relativePath,
+        path: destinationPath,
+        sourcePath,
+        bytes: stats.size,
+      });
+    }
+
+    if (artifacts.length === 0) {
+      return;
+    }
+
+    this.emit({
+      event: "session_artifact_saved",
+      sessionId: this.lastSessionId,
+      threadId: this.threadId,
+      message: `Preserved ${artifacts.length} Codex session artifact(s).`,
+      artifacts,
+    });
+  }
+
+  private renderSpawnCommand(env: NodeJS.ProcessEnv): string {
+    if (this.options.ephemeralHome !== true) {
+      return this.options.command;
+    }
+
+    const codexHome = env.CODEX_HOME;
+    if (codexHome === undefined || codexHome.length === 0) {
+      throw new CodexAppServerClientError(
+        "Ephemeral Codex home requested, but no CODEX_HOME was prepared.",
+        ERROR_CODES.codexLaunchFailed,
+      );
+    }
+
+    return `export CODEX_HOME=${quoteShellString(codexHome)}; ${this.options.command}`;
+  }
+
+  private async cleanupEphemeralCodexHomeBestEffort(): Promise<void> {
+    try {
+      await this.cleanupEphemeralCodexHome();
+    } catch (cleanupError) {
+      this.emit({
+        event: "other_message",
+        message: `Failed to clean up ephemeral Codex home: ${toErrorMessage(cleanupError)}`,
+      });
+    }
+  }
+
   private async startTurn(input: {
     threadId: string;
     prompt: string;
@@ -369,6 +610,7 @@ export class CodexAppServerClient {
       );
     }
 
+    this.lastUsage = null;
     const response = await this.request("turn/start", {
       threadId: input.threadId,
       input: [
@@ -394,6 +636,7 @@ export class CodexAppServerClient {
     }
 
     const sessionId = `${input.threadId}-${turnId}`;
+    this.lastSessionId = sessionId;
     this.emit({
       event: "session_started",
       sessionId,
@@ -506,15 +749,33 @@ export class CodexAppServerClient {
     }
 
     if (isApprovalRequest(parsed, method)) {
+      const outputDenial = evaluateHeadlessCommandOutputForApproval(parsed);
+      if (outputDenial !== null) {
+        if (responseId !== null) {
+          this.send({
+            id: parsed.id,
+            result: createApprovalResponse(false, outputDenial.reason),
+          });
+        }
+        this.emit({
+          event: "unsupported_tool_call",
+          sessionId: this.currentTurn?.sessionId ?? null,
+          threadId: this.currentTurn?.threadId ?? this.threadId,
+          turnId: this.currentTurn?.turnId ?? null,
+          toolName: outputDenial.toolName,
+          message: outputDenial.reason,
+          raw: parsed,
+          ...optionalTelemetry(usage, rateLimits),
+        });
+        return;
+      }
+
       const permissionDenial = this.evaluateModePermissionForApproval(parsed);
       if (permissionDenial !== null) {
         if (responseId !== null) {
           this.send({
             id: parsed.id,
-            result: {
-              approved: false,
-              reason: permissionDenial.reason,
-            },
+            result: createApprovalResponse(false, permissionDenial.reason),
           });
         }
         this.emit({
@@ -525,7 +786,7 @@ export class CodexAppServerClient {
           toolName: permissionDenial.toolName,
           message: permissionDenial.reason,
           raw: parsed,
-          ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+          ...optionalTelemetry(usage, rateLimits),
         });
         return;
       }
@@ -533,9 +794,7 @@ export class CodexAppServerClient {
       if (responseId !== null) {
         this.send({
           id: parsed.id,
-          result: {
-            approved: true,
-          },
+          result: createApprovalResponse(true),
         });
       }
       this.emit({
@@ -544,7 +803,7 @@ export class CodexAppServerClient {
         threadId: this.currentTurn?.threadId ?? this.threadId,
         turnId: this.currentTurn?.turnId ?? null,
         raw: parsed,
-        ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+        ...optionalTelemetry(usage, rateLimits),
       });
       return;
     }
@@ -576,7 +835,7 @@ export class CodexAppServerClient {
         turnId: this.currentTurn?.turnId ?? null,
         toolName,
         raw: parsed,
-        ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+        ...optionalTelemetry(usage, rateLimits),
       });
       return;
     }
@@ -586,6 +845,18 @@ export class CodexAppServerClient {
         "Codex requested operator input during a turn.",
         ERROR_CODES.codexUserInputRequired,
       );
+      if (responseId !== null) {
+        this.send({
+          id: parsed.id,
+          error: {
+            code: -32000,
+            message: error.message,
+            data: {
+              code: error.code,
+            },
+          },
+        });
+      }
       this.emit({
         event: "turn_input_required",
         sessionId: this.currentTurn?.sessionId ?? null,
@@ -594,7 +865,7 @@ export class CodexAppServerClient {
         errorCode: error.code,
         message: error.message,
         raw: parsed,
-        ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+        ...optionalTelemetry(usage, rateLimits),
       });
       this.finishTurnWithError(error, "turn_ended_with_error");
       return;
@@ -623,7 +894,7 @@ export class CodexAppServerClient {
         turnId: this.currentTurn?.turnId ?? null,
         message: method,
         raw: parsed,
-        ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+        ...optionalTelemetry(usage, rateLimits),
       });
       return;
     }
@@ -634,7 +905,7 @@ export class CodexAppServerClient {
       threadId: this.currentTurn?.threadId ?? this.threadId,
       turnId: this.currentTurn?.turnId ?? null,
       raw: parsed,
-      ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
+      ...optionalTelemetry(usage, rateLimits),
     });
   }
 
@@ -926,6 +1197,241 @@ export class CodexAppServerClient {
   }
 }
 
+/**
+ * Render the generated config.toml that keeps headless Codex launches bare and
+ * disables every Codex skill a worker launch could otherwise discover. Exported
+ * so the probe script exercises the exact production path.
+ */
+export async function prepareDisabledSkillsConfig(input: {
+  codexHome: string;
+  cwd: string;
+  sourceHome: string;
+}): Promise<string> {
+  return renderHeadlessCodexConfig(await discoverCodexSkillPaths(input));
+}
+
+async function discoverCodexSkillPaths(input: {
+  codexHome: string;
+  cwd: string;
+  sourceHome: string;
+}): Promise<string[]> {
+  const paths = new Set<string>();
+  const systemSkillNames = new Set(DEFAULT_SYSTEM_SKILL_NAMES);
+  for (const skillPath of await findSkillFiles(
+    join(input.sourceHome, "skills", ".system"),
+  )) {
+    systemSkillNames.add(basename(dirname(skillPath)));
+  }
+  for (const name of systemSkillNames) {
+    paths.add(join(input.codexHome, "skills", ".system", name, "SKILL.md"));
+  }
+
+  for (const root of [
+    join(homedir(), ".agents", "skills"),
+    "/etc/codex/skills",
+  ]) {
+    for (const skillPath of await findSkillFiles(root)) {
+      paths.add(skillPath);
+    }
+  }
+
+  for (const root of repoSkillRoots(input.cwd)) {
+    for (const skillPath of await findSkillFiles(root)) {
+      paths.add(skillPath);
+    }
+  }
+
+  return [...paths].sort();
+}
+
+export async function sweepStaleCodexHomes(input: {
+  root: string;
+  maxAgeMs: number;
+  now: () => number;
+}): Promise<string[]> {
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await readdir(input.root, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const removed: string[] = [];
+  for (const entry of entries) {
+    if (
+      !entry.name.startsWith(EPHEMERAL_CODEX_HOME_PREFIX) ||
+      !entry.isDirectory()
+    ) {
+      continue;
+    }
+    const path = join(input.root, entry.name);
+    try {
+      const stats = await stat(path);
+      if (input.now() - stats.mtimeMs <= input.maxAgeMs) {
+        continue;
+      }
+      await rm(path, { recursive: true, force: true });
+      removed.push(path);
+    } catch {
+      // Best-effort: a concurrently removed or unreadable entry is not an error.
+    }
+  }
+  return removed;
+}
+
+async function findSkillFiles(root: string): Promise<string[]> {
+  try {
+    const rootStats = await stat(root);
+    if (!rootStats.isDirectory()) {
+      return [];
+    }
+  } catch {
+    return [];
+  }
+
+  const result: string[] = [];
+  const seenDirectories = new Set<string>();
+  const visit = async (directory: string): Promise<void> => {
+    let canonicalDirectory = directory;
+    try {
+      canonicalDirectory = await realpath(directory);
+    } catch {
+      return;
+    }
+    if (seenDirectories.has(canonicalDirectory)) {
+      return;
+    }
+    seenDirectories.add(canonicalDirectory);
+
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.name === "SKILL.md") {
+        try {
+          result.push(await realpath(path));
+        } catch {
+          result.push(path);
+        }
+        continue;
+      }
+
+      let entryStats: import("node:fs").Stats;
+      try {
+        entryStats = await stat(path);
+      } catch {
+        continue;
+      }
+      if (entryStats.isDirectory()) {
+        await visit(path);
+      }
+    }
+  };
+
+  await visit(root);
+  return result;
+}
+
+async function findCodexSessionLogFiles(codexHome: string): Promise<string[]> {
+  const result: string[] = [];
+  const visit = async (directory: string): Promise<void> => {
+    let directoryStats: import("node:fs").Stats;
+    try {
+      directoryStats = await lstat(directory);
+    } catch {
+      return;
+    }
+    if (!directoryStats.isDirectory()) {
+      return;
+    }
+
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    for (const entry of entries) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await visit(path);
+        continue;
+      }
+
+      if (entry.name.endsWith(".jsonl")) {
+        result.push(path);
+      }
+    }
+  };
+
+  for (const root of CODEX_SESSION_LOG_ROOTS) {
+    await visit(join(codexHome, root));
+  }
+  return result.sort();
+}
+
+function repoSkillRoots(cwd: string): string[] {
+  const roots: string[] = [];
+  const filesystemRoot = parse(cwd).root;
+  let current = cwd;
+  while (true) {
+    roots.push(join(current, ".agents", "skills"));
+    if (current === filesystemRoot) {
+      break;
+    }
+    if (pathExists(join(current, ".git"))) {
+      break;
+    }
+    current = dirname(current);
+  }
+  return roots;
+}
+
+function pathExists(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function renderHeadlessCodexConfig(skillPaths: string[]): string {
+  const featureConfig = `project_doc_max_bytes = 0
+
+[features]
+apps = false
+browser_use = false
+browser_use_external = false
+computer_use = false
+codex_hooks = false
+goals = false
+hooks = false
+memories = false
+multi_agent = false
+plugins = false
+plugin_hooks = false
+tool_call_mcp_elicitation = false
+`;
+  return `${[
+    featureConfig,
+    ...skillPaths.map(
+      (skillPath) =>
+        `[[skills.config]]\npath = ${JSON.stringify(skillPath)}\nenabled = false\n`,
+    ),
+  ].join("\n")}\n`;
+}
+
+function quoteShellString(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 function parseJsonLine(line: string): JsonObject | null {
   try {
     const parsed = JSON.parse(line) as unknown;
@@ -985,6 +1491,17 @@ function normalizeCodexApprovalPolicy(value: unknown): unknown {
   }
 
   return value;
+}
+
+function createApprovalResponse(
+  approved: boolean,
+  reason?: string,
+): JsonObject {
+  return {
+    decision: approved ? "accept" : "decline",
+    approved,
+    ...(reason === undefined ? {} : { reason }),
+  };
 }
 
 // Codex exposes two sandbox shapes: thread/start takes a SandboxMode enum
@@ -1197,11 +1714,7 @@ function isApprovalRequest(
   }
 
   const normalized = method.toLowerCase();
-  if (normalized.includes("approval")) {
-    return true;
-  }
-
-  return containsStringValue(message, "approval");
+  return normalized.includes("approval");
 }
 
 function isToolCallRequest(
@@ -1232,13 +1745,36 @@ function isUserInputRequired(
     const normalized = method.toLowerCase();
     if (
       (normalized.includes("input") && normalized.includes("required")) ||
-      (normalized.includes("user") && normalized.includes("input"))
+      (normalized.includes("user") && normalized.includes("input")) ||
+      normalized.includes("elicitation")
     ) {
       return true;
     }
   }
 
-  return containsStringValue(message, "user_input_required");
+  return hasExplicitUserInputRequiredCode(message);
+}
+
+// Only treat protocol control fields as user-input-required signals. Codex
+// echoes user prompts in item notifications, so scanning arbitrary text would
+// let issue prose containing this code pause a headless worker.
+function hasExplicitUserInputRequiredCode(message: JsonObject): boolean {
+  const candidates = [
+    extractNestedString(message, ["code"]),
+    extractNestedString(message, ["reason"]),
+    extractNestedString(message, ["data", "code"]),
+    extractNestedString(message, ["error", "code"]),
+    extractNestedString(message, ["error", "data", "code"]),
+    extractNestedString(message, ["params", "code"]),
+    extractNestedString(message, ["params", "reason"]),
+    extractNestedString(message, ["params", "data", "code"]),
+    extractNestedString(message, ["params", "error", "code"]),
+    extractNestedString(message, ["params", "error", "data", "code"]),
+  ];
+
+  return candidates.some(
+    (value) => value?.toLowerCase() === "codex_user_input_required",
+  );
 }
 
 function extractToolName(message: JsonObject): string | null {
@@ -1279,6 +1815,148 @@ function extractToolInput(message: JsonObject): unknown {
   }
 
   return undefined;
+}
+
+function evaluateHeadlessCommandOutputForApproval(message: JsonObject): {
+  toolName: string | null;
+  reason: string;
+} | null {
+  const toolName = extractToolName(message);
+  const toolInput = extractToolInput(message) ?? message;
+  const command = extractCommandText(toolInput);
+  if (command === null) {
+    return null;
+  }
+
+  const reason = detectHeadlessCommandOutputRisk(command);
+  if (reason === null) {
+    return null;
+  }
+
+  return {
+    toolName,
+    reason,
+  };
+}
+
+export function detectHeadlessCommandOutputRisk(
+  command: string,
+): string | null {
+  const normalized = command
+    .split("\n")
+    .map((line) => line.replace(/[ \t\r]+/g, " ").trim())
+    .join("\n")
+    .trim();
+  if (normalized.length === 0) {
+    return null;
+  }
+
+  const riskyRgSegment = normalized
+    .split(/(?:&&|\|\||;|\n)/)
+    .map((segment) => segment.trim())
+    .find(isBroadLineRgSegment);
+
+  if (riskyRgSegment === undefined) {
+    return null;
+  }
+
+  return [
+    "Headless output guard declined a broad `rg` line-output command because it is likely to add excessive search results to the Codex thread.",
+    "Use `rg -l` or `rg -c` for broad discovery, then run `rg -n ... -m 20 <specific-file>` on selected files.",
+    `Declined command segment: ${truncateCommandForReason(riskyRgSegment)}`,
+  ].join(" ");
+}
+
+function isBroadLineRgSegment(segment: string): boolean {
+  if (!/\brg\b/.test(segment)) {
+    return false;
+  }
+
+  if (
+    /(?:^|\s)(?:--files|-l|--files-with-matches|-c|--count)(?:\s|$)/.test(
+      segment,
+    )
+  ) {
+    return false;
+  }
+
+  return extractShellWords(segment).some(isBroadSearchPathToken);
+}
+
+function isBroadSearchPathToken(token: string): boolean {
+  const trimmed = token.trim();
+  if (
+    trimmed.length === 0 ||
+    trimmed.startsWith("-") ||
+    trimmed.includes("=") ||
+    trimmed.includes("*")
+  ) {
+    return false;
+  }
+
+  const rawUnquoted = trimmed.replace(/^["']|["']$/g, "");
+  const unquoted =
+    rawUnquoted === "./" ? "." : rawUnquoted.replace(/^\.\//, "");
+  if (unquoted === "." || unquoted === "./") {
+    return true;
+  }
+
+  return /^(?:src|tests|ops|docs|pipeline-config)(?:\/[^.\s/]+)*\/?$/.test(
+    unquoted,
+  );
+}
+
+function extractShellWords(command: string): string[] {
+  const matches = command.match(/"[^"]*"|'[^']*'|\S+/g);
+  return matches ?? [];
+}
+
+function extractCommandText(value: unknown, depth = 0): string | null {
+  if (depth > 4) {
+    return null;
+  }
+
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  for (const key of ["command", "cmd", "script"]) {
+    const candidate = record[key];
+    if (typeof candidate === "string") {
+      return candidate;
+    }
+  }
+
+  for (const key of [
+    "tool_input",
+    "toolInput",
+    "input",
+    "arguments",
+    "args",
+    "payload",
+    "params",
+  ]) {
+    const nested = extractCommandText(record[key], depth + 1);
+    if (nested !== null) {
+      return nested;
+    }
+  }
+
+  return null;
+}
+
+function truncateCommandForReason(command: string): string {
+  const maxLength = 220;
+  if (command.length <= maxLength) {
+    return command;
+  }
+
+  return `${command.slice(0, maxLength)}...`;
 }
 
 function extractUsage(message: JsonObject): CodexUsage | null {
@@ -1473,22 +2151,6 @@ function* walkObjects(value: unknown): Generator<JsonObject> {
   for (const nested of Object.values(objectValue)) {
     yield* walkObjects(nested);
   }
-}
-
-function containsStringValue(value: unknown, expected: string): boolean {
-  const target = expected.toLowerCase();
-  if (typeof value === "string") {
-    return value.toLowerCase().includes(target);
-  }
-  if (Array.isArray(value)) {
-    return value.some((entry) => containsStringValue(entry, expected));
-  }
-  if (value !== null && typeof value === "object") {
-    return Object.values(value).some((entry) =>
-      containsStringValue(entry, expected),
-    );
-  }
-  return false;
 }
 
 function asFiniteNumber(value: unknown): number | null {

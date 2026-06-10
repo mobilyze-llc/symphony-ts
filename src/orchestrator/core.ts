@@ -41,6 +41,7 @@ import {
   normalizeIssueState,
   parseFailureSignal,
 } from "../domain/model.js";
+import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
   appendDispatcherRunJournalEntry,
@@ -69,9 +70,11 @@ import {
 } from "./gate-handler.js";
 import { createRightSizingDecision } from "./right-sizing.js";
 import {
+  type IgnoredSetupInstructionCollision,
   type SupervisionFinding,
   type WorkerSupervisionSnapshot,
   createIssueSupervisionSnapshot,
+  detectIgnoredSetupInstructionCollisions,
   detectSupervisionFindings,
   formatSupervisionFindingsComment,
 } from "./supervision.js";
@@ -80,6 +83,12 @@ import type { TrackerIssueWriteRequest } from "./tracker-write.js";
 const CONTINUATION_RETRY_DELAY_MS = 1_000;
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
+const EXPLICIT_RESUME_STATE = "resume";
+
+interface ResumeRequiredGuard {
+  pausedState: string | null;
+  observedNonResumeState: boolean;
+}
 
 export type WorkerExitOutcome =
   | "normal"
@@ -272,6 +281,9 @@ export class OrchestratorCore {
 
   private readonly reportedSupervisionFindings = new Set<string>();
 
+  private readonly reportedIgnoredSetupInstructionCollisions =
+    new Set<string>();
+
   /**
    * Snapshot of execution history captured after the final stage record is
    * appended but before advanceStage() deletes issueExecutionHistory.
@@ -282,6 +294,11 @@ export class OrchestratorCore {
     string,
     import("../domain/model.js").ExecutionHistory
   > = new Map();
+
+  private readonly resumeRequiredGuards = new Map<
+    string,
+    ResumeRequiredGuard
+  >();
 
   constructor(options: OrchestratorCoreOptions) {
     this.config = options.config;
@@ -322,6 +339,7 @@ export class OrchestratorCore {
       this.state.dispatcherRunJournal,
     );
     this.reportedSupervisionFindings.clear();
+    this.reportedIgnoredSetupInstructionCollisions.clear();
     this.state.decorrelatedGateOutcomes = {};
 
     const nowMs = this.now().getTime();
@@ -332,6 +350,37 @@ export class OrchestratorCore {
         typeof entry.metadata.signature === "string"
       ) {
         this.reportedSupervisionFindings.add(entry.metadata.signature);
+      }
+
+      if (
+        entry.kind === "supervision_finding" &&
+        entry.metadata.findingKind === "ignored_setup_instruction_collision" &&
+        typeof entry.metadata.signature === "string"
+      ) {
+        this.reportedIgnoredSetupInstructionCollisions.add(
+          entry.metadata.signature,
+        );
+      }
+
+      if (
+        entry.kind === "hard_stop_trigger" &&
+        entry.metadata.status === "completed"
+      ) {
+        this.recoverHardStopTrigger(entry);
+      }
+
+      if (
+        entry.kind === "operator_input_required" &&
+        entry.metadata.status === "completed"
+      ) {
+        this.markIssueRequiresExplicitResume(
+          entry.issueId,
+          readMetadataString(entry.metadata, "issueState"),
+        );
+      }
+
+      if (isDispatcherAdmissionEntry(entry)) {
+        this.clearResumeRequirement(entry.issueId);
       }
 
       if (
@@ -359,6 +408,32 @@ export class OrchestratorCore {
       ) {
         this.state.claimed.add(lease.issueId);
       }
+    }
+  }
+
+  private recoverHardStopTrigger(entry: DispatcherRunJournalEntry): void {
+    const reason =
+      typeof entry.metadata.reason === "string" ? entry.metadata.reason : null;
+    const outcome =
+      typeof entry.metadata.outcome === "string"
+        ? entry.metadata.outcome
+        : null;
+
+    if (reason === "stall_timeout" || reason === "terminal_state") {
+      return;
+    }
+
+    // requestStop records manual/inactive stops in the same journal kind with
+    // StopReason codes; budget and cost hard stops use outcome-bearing entries.
+    if (
+      reason === "manual_stop" ||
+      reason === "inactive_state" ||
+      outcome !== null
+    ) {
+      this.markIssueRequiresExplicitResume(
+        entry.issueId,
+        readMetadataString(entry.metadata, "issueState"),
+      );
     }
   }
 
@@ -478,6 +553,8 @@ export class OrchestratorCore {
     }
 
     const normalizedState = normalizeIssueState(issue.state);
+    this.observeResumeRequiredState(issue.id, normalizedState);
+
     const activeStates = toNormalizedStateSet(this.config.tracker.activeStates);
     const terminalStates = toNormalizedStateSet(
       this.config.tracker.terminalStates,
@@ -491,12 +568,22 @@ export class OrchestratorCore {
       return false;
     }
 
-    // Allow resumed issues: clear completed flag ONLY when a human has
-    // explicitly moved the issue to a resume-designated state ("Resume" or
-    // "Todo").  Issues still in operational states like "In Progress" or
-    // "In Review" stay completed — they haven't been deliberately requeued.
-    // Issues in the escalation state ("Blocked") also stay completed until
-    // a human explicitly moves them.
+    // Stop-like pauses are stricter than ordinary completions/failures:
+    // leaving the issue in Todo should not redispatch it after an operator or
+    // hard-stop policy asked for human review.
+    if (this.state.resumeRequired.has(issue.id)) {
+      if (this.canConsumeResumeRequirement(issue.id, normalizedState)) {
+        this.state.completed.delete(issue.id);
+        this.state.failed.delete(issue.id);
+        this.clearResumeRequirement(issue.id);
+      } else {
+        return false;
+      }
+    }
+
+    // Allow ordinary completed/failed issues to be rerun from a
+    // resume-designated state ("Resume" or "Todo"). Stop-like pauses are
+    // handled above and require the stricter explicit Resume state.
     if (this.state.completed.has(issue.id) || this.state.failed.has(issue.id)) {
       const resumeStates: ReadonlySet<string> = new Set(["resume", "todo"]);
       if (resumeStates.has(normalizedState)) {
@@ -880,11 +967,9 @@ export class OrchestratorCore {
     addEndedSessionRuntime(this.state, runningEntry.startedAt, endedAt);
 
     // Classify "abnormal" into a more descriptive outcome for stage records
-    const classifiedOutcome = classifyExitOutcome(
-      input.outcome,
-      runningEntry.turnCount,
-      input.reason,
-    );
+    const classifiedOutcome =
+      input.hardStop?.outcome ??
+      classifyExitOutcome(input.outcome, runningEntry.turnCount, input.reason);
 
     // Append a StageRecord to execution history for this completed stage.
     const stageName = this.state.issueStages[input.issueId];
@@ -957,6 +1042,28 @@ export class OrchestratorCore {
         error: null,
         delayType: "continuation",
       });
+    }
+
+    const stopReason = parseStoppedAfterReason(input.reason);
+    if (stopReason === "manual_stop" || stopReason === "inactive_state") {
+      this.markIssueRequiresExplicitResume(
+        input.issueId,
+        runningEntry.issue.state,
+      );
+      return null;
+    }
+
+    if (this.state.resumeRequired.has(input.issueId)) {
+      this.releaseClaim(input.issueId);
+      return null;
+    }
+
+    if (isCodexUserInputRequiredReason(input.reason)) {
+      await this.handleOperatorInputRequiredPause(input.issueId, runningEntry, {
+        reason: input.reason ?? ERROR_CODES.codexUserInputRequired,
+        stageName: exitedStageName,
+      });
+      return null;
     }
 
     return this.scheduleRetry(
@@ -1896,6 +2003,68 @@ export class OrchestratorCore {
     delete this.state.continuousFeedback[issueId];
   }
 
+  private markIssueRequiresExplicitResume(
+    issueId: string,
+    issueState?: string | null,
+  ): void {
+    this.recordIssueRequiresExplicitResume(issueId, issueState);
+    this.releaseClaim(issueId);
+  }
+
+  private recordIssueRequiresExplicitResume(
+    issueId: string,
+    issueState?: string | null,
+  ): void {
+    this.state.resumeRequired.add(issueId);
+    const pausedState =
+      issueState === undefined || issueState === null
+        ? null
+        : normalizeIssueState(issueState);
+    const existingGuard = this.resumeRequiredGuards.get(issueId);
+    this.resumeRequiredGuards.set(issueId, {
+      pausedState: pausedState === "" ? null : pausedState,
+      observedNonResumeState:
+        existingGuard?.observedNonResumeState === true ||
+        pausedState !== EXPLICIT_RESUME_STATE,
+    });
+  }
+
+  private clearResumeRequirement(issueId: string): void {
+    this.state.resumeRequired.delete(issueId);
+    this.resumeRequiredGuards.delete(issueId);
+  }
+
+  private observeResumeRequiredState(
+    issueId: string,
+    normalizedState: string,
+  ): void {
+    const guard = this.resumeRequiredGuards.get(issueId);
+    if (
+      guard === undefined ||
+      guard.pausedState !== EXPLICIT_RESUME_STATE ||
+      normalizedState === EXPLICIT_RESUME_STATE
+    ) {
+      return;
+    }
+
+    this.resumeRequiredGuards.set(issueId, {
+      ...guard,
+      observedNonResumeState: true,
+    });
+  }
+
+  private canConsumeResumeRequirement(
+    issueId: string,
+    normalizedState: string,
+  ): boolean {
+    if (normalizedState !== EXPLICIT_RESUME_STATE) {
+      return false;
+    }
+
+    const guard = this.resumeRequiredGuards.get(issueId);
+    return guard === undefined || guard.observedNonResumeState;
+  }
+
   private resolveDecorrelatedGateContext(
     issueId: string,
     stageName: string | null,
@@ -2487,6 +2656,23 @@ export class OrchestratorCore {
     this.state.claimed.delete(issueId);
   }
 
+  private formatPauseResumeInstruction(
+    pausedState: string | null | undefined,
+    pauseVerb: "continuing" | "retrying",
+  ): string {
+    const base = `The worker has paused instead of ${pauseVerb} silently.`;
+    const normalized =
+      pausedState === undefined || pausedState === null
+        ? null
+        : normalizeIssueState(pausedState);
+    if (normalized === EXPLICIT_RESUME_STATE) {
+      // Requeue only triggers on a fresh transition into Resume, so an issue
+      // paused while already in Resume must leave the state before re-entering.
+      return `${base} This issue was already in Resume when it paused, so it will only requeue on a fresh transition into Resume: move it out of Resume (if it is still there) and back into Resume after human review.`;
+    }
+    return `${base} Move the issue to Resume after human review to requeue it.`;
+  }
+
   private async handleHardStopTrigger(
     issueId: string,
     runningEntry: RunningEntry,
@@ -2515,11 +2701,11 @@ export class OrchestratorCore {
         turnCount: input.hardStop.turnCount,
         totalTokens: input.hardStop.totalTokens,
         estimatedCostUsd: input.hardStop.estimatedCostUsd,
+        issueState: runningEntry.issue.state,
       },
     });
 
-    this.state.failed.add(issueId);
-    this.releaseClaim(issueId);
+    this.markIssueRequiresExplicitResume(issueId, runningEntry.issue.state);
 
     const comment = [
       `Hard stop outcome: ${input.hardStop.outcome}`,
@@ -2529,7 +2715,51 @@ export class OrchestratorCore {
       `Total tokens: ${input.hardStop.totalTokens}`,
       `Estimated cost: $${input.hardStop.estimatedCostUsd.toFixed(2)}`,
       "",
-      "The worker has paused instead of continuing silently. Move the issue to Todo or Resume after human review to requeue it.",
+      this.formatPauseResumeInstruction(runningEntry.issue.state, "continuing"),
+    ].join("\n");
+
+    await this.fireEscalationSideEffects(
+      issueId,
+      runningEntry.identifier,
+      comment,
+    );
+  }
+
+  private async handleOperatorInputRequiredPause(
+    issueId: string,
+    runningEntry: RunningEntry,
+    input: {
+      reason: string;
+      stageName: string | null;
+    },
+  ): Promise<void> {
+    await this.recordRunJournalEntry({
+      idempotencyKey: `operator_input_required:${issueId}:${input.stageName ?? "no-stage"}:${formatAttemptKey(runningEntry.retryAttempt)}`,
+      timestamp: this.now().toISOString(),
+      kind: "operator_input_required",
+      issueId,
+      issueIdentifier: runningEntry.identifier,
+      operation: "dispatcher",
+      stage: input.stageName,
+      attempt: runningEntry.retryAttempt,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Codex requested operator input for ${runningEntry.identifier}.`,
+      metadata: {
+        status: "completed",
+        reason: input.reason,
+        errorCode: ERROR_CODES.codexUserInputRequired,
+        issueState: runningEntry.issue.state,
+      },
+    });
+
+    this.markIssueRequiresExplicitResume(issueId, runningEntry.issue.state);
+
+    const comment = [
+      "Headless Codex requested operator input during the worker turn.",
+      `Reason: ${input.reason}`,
+      "",
+      this.formatPauseResumeInstruction(runningEntry.issue.state, "retrying"),
     ].join("\n");
 
     await this.fireEscalationSideEffects(
@@ -2768,14 +2998,18 @@ export class OrchestratorCore {
       const cachedStage = this.state.issueStages[issue.id];
       if (cachedStage !== undefined) {
         stageName = cachedStage;
-      } else if (
-        stagesConfig.fastTrack != null &&
-        issue.labels.includes(stagesConfig.fastTrack.label)
-      ) {
-        stageName = stagesConfig.fastTrack.initialStage;
-        console.log(
-          `[orchestrator] Fast-tracking ${issue.identifier} to ${stageName} (label: ${stagesConfig.fastTrack.label})`,
+      } else if (stagesConfig.fastTrack != null) {
+        const matchedFastTrackLabel = stagesConfig.fastTrack.labels.find(
+          (label) => issue.labels.includes(label),
         );
+        if (matchedFastTrackLabel === undefined) {
+          stageName = stagesConfig.initialStage;
+        } else {
+          stageName = stagesConfig.fastTrack.initialStage;
+          console.log(
+            `[orchestrator] Fast-tracking ${issue.identifier} to ${stageName} (label: ${matchedFastTrackLabel})`,
+          );
+        }
       } else {
         stageName = stagesConfig.initialStage;
       }
@@ -3381,6 +3615,9 @@ export class OrchestratorCore {
             }),
           )
         : await this.getRunningSupervisionSnapshots(runningEntries);
+    await this.reportIgnoredSetupInstructionCollisions(
+      detectIgnoredSetupInstructionCollisions(snapshots),
+    );
     const findings = detectSupervisionFindings(snapshots);
     if (findings.length === 0) {
       return;
@@ -3581,6 +3818,51 @@ export class OrchestratorCore {
     });
   }
 
+  private async reportIgnoredSetupInstructionCollisions(
+    collisions: readonly IgnoredSetupInstructionCollision[],
+  ): Promise<void> {
+    for (const collision of collisions) {
+      const signature =
+        formatIgnoredSetupInstructionCollisionSignature(collision);
+      if (this.reportedIgnoredSetupInstructionCollisions.has(signature)) {
+        continue;
+      }
+      this.reportedIgnoredSetupInstructionCollisions.add(signature);
+
+      try {
+        await this.recordRunJournalEntry({
+          idempotencyKey: `supervision_ignored_setup_instruction_collision:${signature}`,
+          timestamp: this.now().toISOString(),
+          kind: "supervision_finding",
+          issueId: collision.workerIds[0] ?? "unknown",
+          issueIdentifier: collision.issueIdentifiers[0] ?? "unknown",
+          operation: "supervisor",
+          stage: null,
+          attempt: null,
+          ownerId: this.leaseOwnerId,
+          lease: null,
+          summary: collision.message,
+          metadata: {
+            phase: "running",
+            signature,
+            findingKind: "ignored_setup_instruction_collision",
+            action: "ignored",
+            workerIds: collision.workerIds,
+            issueIdentifiers: collision.issueIdentifiers,
+            files: collision.files,
+            ignored: true,
+            nonBlocking: true,
+          },
+        });
+      } catch (error) {
+        console.warn(
+          "[orchestrator] Failed to record ignored setup-instruction collision diagnostic:",
+          error,
+        );
+      }
+    }
+  }
+
   private async requestStop(
     runningEntry: RunningEntry,
     cleanupWorkspace: boolean,
@@ -3592,7 +3874,6 @@ export class OrchestratorCore {
       cleanupWorkspace,
       reason,
     };
-
     const leaseId = createDispatcherLeaseId({
       operation: "dispatcher",
       issueId: runningEntry.issue.id,
@@ -3613,10 +3894,17 @@ export class OrchestratorCore {
       metadata: {
         cleanupWorkspace,
         reason,
+        issueState: runningEntry.issue.state,
       },
     });
 
     if (lease !== null) {
+      if (reason === "manual_stop" || reason === "inactive_state") {
+        this.recordIssueRequiresExplicitResume(
+          runningEntry.issue.id,
+          runningEntry.issue.state,
+        );
+      }
       await this.stopRunningIssue?.({
         issueId: runningEntry.issue.id,
         runningEntry,
@@ -3636,6 +3924,7 @@ export class OrchestratorCore {
         metadata: {
           cleanupWorkspace,
           reason,
+          issueState: runningEntry.issue.state,
         },
       });
     }
@@ -3994,6 +4283,18 @@ function formatSupervisionFindingSignature(
   ].join("\0");
 }
 
+function formatIgnoredSetupInstructionCollisionSignature(
+  collision: IgnoredSetupInstructionCollision,
+): string {
+  return [
+    "running",
+    "ignored_setup_instruction_collision",
+    ...collision.issueIdentifiers,
+    ...collision.workerIds,
+    ...collision.files,
+  ].join("\0");
+}
+
 function formatUnknownError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -4030,6 +4331,9 @@ export function classifyExitOutcome(
     return outcome;
   }
   // Classify "abnormal" based on context
+  if (isCodexUserInputRequiredReason(reason)) {
+    return "input_required";
+  }
   if (turnCount === 0) {
     return "failed_to_start";
   }
@@ -4037,6 +4341,58 @@ export function classifyExitOutcome(
     return "timed_out";
   }
   return "error";
+}
+
+function isCodexUserInputRequiredReason(reason: string | undefined): boolean {
+  if (reason === undefined) {
+    return false;
+  }
+  return (
+    reason.includes(ERROR_CODES.codexUserInputRequired) ||
+    reason.includes("turn_input_required") ||
+    reason.includes("Codex requested operator input")
+  );
+}
+
+function parseStoppedAfterReason(
+  reason: string | undefined,
+): StopReason | null {
+  if (reason === undefined) {
+    return null;
+  }
+
+  const prefix = "stopped after ";
+  if (!reason.startsWith(prefix)) {
+    return null;
+  }
+
+  const rawReason = reason.slice(prefix.length);
+  return isStopReason(rawReason) ? rawReason : null;
+}
+
+function isStopReason(value: string): value is StopReason {
+  return (
+    value === "terminal_state" ||
+    value === "inactive_state" ||
+    value === "stall_timeout" ||
+    value === "manual_stop"
+  );
+}
+
+function isDispatcherAdmissionEntry(entry: DispatcherRunJournalEntry): boolean {
+  return (
+    entry.kind === "admission" &&
+    entry.operation === "dispatcher" &&
+    entry.metadata.status === "started"
+  );
+}
+
+function readMetadataString(
+  metadata: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = metadata[key];
+  return typeof value === "string" ? value : null;
 }
 
 function defaultTimerScheduler(): TimerScheduler {

@@ -167,6 +167,10 @@ describe("prompt builder", () => {
     expect(prompt).toContain("Ship prompt rendering");
     expect(prompt).toContain("Current tracker state: In Progress.");
     expect(prompt).toContain("initial dispatch");
+    expect(prompt).toContain("path/count-only commands");
+    expect(prompt).toContain("rg -n ... -m 50 path");
+    expect(prompt).toContain("max_output_tokens");
+    expect(prompt).toContain("1,500 or less");
   });
 
   it("fails on unknown variables in strict mode", async () => {
@@ -212,6 +216,15 @@ describe("prompt builder", () => {
 
     expect(prompt).toContain("Current stage: investigate.");
     expect(prompt).toContain("Do NOT implement code");
+    expect(prompt).toContain("Investigation Token Brake");
+    expect(prompt).toContain("at most 6 shell/tool calls");
+    expect(prompt).toContain("max_output_tokens` of 800 or less");
+    expect(prompt).toContain(
+      "latest Linear issue comments/workpad/resume notes",
+    );
+    expect(prompt).toContain("Do not trust repo-root scratch files");
+    expect(prompt).toContain("zsh-safe");
+    expect(prompt).toContain("cmd_status");
     expect(prompt).toContain("[STAGE_COMPLETE]");
   });
 
@@ -226,6 +239,10 @@ describe("prompt builder", () => {
 
     expect(prompt).toContain("Current stage: implement.");
     expect(prompt).toContain("IMPLEMENT stage");
+    expect(prompt).toContain("Headless output budget");
+    expect(prompt).toContain(".symphony/validation/");
+    expect(prompt).toContain("zsh-safe");
+    expect(prompt).toContain("cmd_status");
     expect(prompt).toContain("[STAGE_COMPLETE]");
   });
 

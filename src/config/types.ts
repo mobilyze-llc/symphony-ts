@@ -48,6 +48,8 @@ export interface WorkflowHardStopsConfig {
   estimatedCostPer1kTokensUsd: number;
 }
 
+export type WorkflowHardStopsConfigOverride = Partial<WorkflowHardStopsConfig>;
+
 export interface WorkflowRunnerConfig {
   kind: string;
   model: string | null;
@@ -66,6 +68,8 @@ export interface WorkflowContinuousFeedbackConfig {
 
 export interface WorkflowCodexConfig {
   command: string;
+  ephemeralHome?: boolean;
+  disableSkills?: boolean;
   approvalPolicy: unknown;
   threadSandbox: unknown;
   turnSandboxPolicy: unknown;
@@ -111,6 +115,7 @@ export interface StageDefinition {
   prompt: string | null;
   maxTurns: number | null;
   timeoutMs: number | null;
+  hardStops?: WorkflowHardStopsConfigOverride | null;
   concurrency: number | null;
   gateType: GateType | null;
   maxRework: number | null;
@@ -121,6 +126,7 @@ export interface StageDefinition {
 
 export interface FastTrackConfig {
   label: string;
+  labels: readonly string[];
   initialStage: string;
 }
 

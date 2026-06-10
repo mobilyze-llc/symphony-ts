@@ -142,6 +142,8 @@ describe("config-resolver", () => {
           },
           codex: {
             command: "codex app-server --stdio",
+            ephemeral_home: "true",
+            disable_skills: "true",
             turn_timeout_ms: "90000",
             read_timeout_ms: "2500",
             stall_timeout_ms: "-1",
@@ -187,6 +189,8 @@ describe("config-resolver", () => {
       estimatedCostPer1kTokensUsd: 0.08,
     });
     expect(resolved.codex.command).toBe("codex app-server --stdio");
+    expect(resolved.codex.ephemeralHome).toBe(true);
+    expect(resolved.codex.disableSkills).toBe(true);
     expect(resolved.codex.turnTimeoutMs).toBe(90_000);
     expect(resolved.codex.readTimeoutMs).toBe(2_500);
     expect(resolved.codex.stallTimeoutMs).toBe(-1);
@@ -502,6 +506,38 @@ describe("config-resolver", () => {
     });
   });
 
+  it("rejects disabling skills without an ephemeral Codex home during dispatch validation", () => {
+    const validation = validateDispatchConfig(
+      resolveWorkflowConfig(
+        {
+          workflowPath: "/repo/WORKFLOW.md",
+          promptTemplate: "Prompt",
+          config: {
+            tracker: {
+              kind: "linear",
+              api_key: "token",
+              project_slug: "ENG",
+            },
+            codex: {
+              disable_skills: true,
+              ephemeral_home: false,
+            },
+          },
+        },
+        {},
+      ),
+    );
+
+    expect(validation).toEqual({
+      ok: false,
+      error: {
+        code: ERROR_CODES.configInvalid,
+        message:
+          "codex.disable_skills requires codex.ephemeral_home before dispatch.",
+      },
+    });
+  });
+
   it("accepts dispatch when tracker and codex prerequisites are present", () => {
     const validation = validateDispatchConfig(
       resolveWorkflowConfig(
@@ -546,6 +582,33 @@ describe("config-resolver fast_track", () => {
     expect(resolved.stages).not.toBeNull();
     expect(resolved.stages?.fastTrack).toEqual({
       label: "trivial",
+      labels: ["trivial"],
+      initialStage: "implement",
+    });
+  });
+
+  it("parses fast_track labels and keeps the legacy label as an alias", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        stages: {
+          initial_stage: "investigate",
+          fast_track: {
+            label: "trivial",
+            labels: ["trivial", "kind:test"],
+            initial_stage: "implement",
+          },
+          investigate: { type: "agent", on_complete: "implement" },
+          implement: { type: "agent", on_complete: "done" },
+          done: { type: "terminal" },
+        },
+      },
+    });
+
+    expect(resolved.stages?.fastTrack).toEqual({
+      label: "trivial",
+      labels: ["trivial", "kind:test"],
       initialStage: "implement",
     });
   });
@@ -564,6 +627,41 @@ describe("config-resolver fast_track", () => {
     });
 
     expect(resolved.stages?.fastTrack).toBeNull();
+  });
+
+  it("parses per-stage hard stop overrides without filling global defaults", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        stages: {
+          initial_stage: "investigate",
+          investigate: {
+            type: "agent",
+            hard_stops: {
+              max_iterations: "4",
+              max_tokens_per_unit: "80000",
+              max_dollar_budget_usd: "4",
+              premium_budget_pause_ratio: "0.9",
+            },
+            on_complete: "done",
+          },
+          done: { type: "terminal" },
+        },
+      },
+    });
+
+    expect(resolved.stages?.stages.investigate?.hardStops).toEqual({
+      maxIterations: 4,
+      maxTokensPerUnit: 80_000,
+      maxDollarBudgetUsd: 4,
+      premiumBudgetPauseRatio: 0.9,
+    });
+    expect(
+      resolved.stages?.stages.investigate?.hardStops
+        ?.estimatedCostPer1kTokensUsd,
+    ).toBeUndefined();
+    expect(resolved.stages?.stages.done?.hardStops).toBeNull();
   });
 
   it("resolves slack_notify_channel from YAML config", () => {

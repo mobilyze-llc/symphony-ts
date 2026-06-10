@@ -1,8 +1,10 @@
-import type { WorkflowHardStopsConfig } from "../config/types.js";
+import type {
+  WorkflowHardStopsConfig,
+  WorkflowHardStopsConfigOverride,
+} from "../config/types.js";
 import type { RightSizingMode } from "../domain/model.js";
 
 export type HardStopOutcome =
-  | "DONE"
   | "BLOCKED-needs-human"
   | "STALLED"
   | "PAUSED-budget";
@@ -47,10 +49,21 @@ export interface ModeScopedPermissionPolicy {
 }
 
 export function resolveHardStopsConfig(
-  config: WorkflowHardStopsConfig | undefined,
+  config: WorkflowHardStopsConfigOverride | null | undefined,
   fallback: WorkflowHardStopsConfig,
 ): WorkflowHardStopsConfig {
-  return config ?? fallback;
+  return {
+    maxIterations: config?.maxIterations ?? fallback.maxIterations,
+    noProgressTurns: config?.noProgressTurns ?? fallback.noProgressTurns,
+    maxTokensPerUnit: config?.maxTokensPerUnit ?? fallback.maxTokensPerUnit,
+    maxDollarBudgetUsd:
+      config?.maxDollarBudgetUsd ?? fallback.maxDollarBudgetUsd,
+    premiumBudgetPauseRatio:
+      config?.premiumBudgetPauseRatio ?? fallback.premiumBudgetPauseRatio,
+    estimatedCostPer1kTokensUsd:
+      config?.estimatedCostPer1kTokensUsd ??
+      fallback.estimatedCostPer1kTokensUsd,
+  };
 }
 
 export function createModeScopedPermissionPolicy(input: {

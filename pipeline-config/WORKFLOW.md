@@ -8,6 +8,7 @@ tracker:
     - In Progress
     - In Review
     - Rework
+    - Resume
   terminal_states:
     - Done
     - Cancelled
@@ -26,8 +27,23 @@ agent:
     in progress: 3
     in review: 2
 
+hard_stops:
+  max_iterations: 20
+  no_progress_turns: 3
+  max_tokens_per_unit: 250000
+  max_dollar_budget_usd: 12.5
+  premium_budget_pause_ratio: 0.8
+  estimated_cost_per_1k_tokens_usd: 0.05
+
 codex:
-  command: codex --config 'model_reasoning_effort="low"' app-server
+  command: codex --disable plugins --disable hooks --disable plugin_hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use --disable multi_agent --disable goals --disable memories --disable tool_call_mcp_elicitation --config 'model_reasoning_effort="low"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server
+  ephemeral_home: true
+  disable_skills: true
+  approval_policy: never
+  thread_sandbox: workspace-write
+  turn_sandbox_policy:
+    type: workspace-write
+    network_access: true
   stall_timeout_ms: 3600000
 
 runner:
@@ -52,6 +68,11 @@ stages:
     type: agent
     runner: codex
     max_turns: 8
+    hard_stops:
+      max_iterations: 4
+      max_tokens_per_unit: 80000
+      max_dollar_budget_usd: 4
+      premium_budget_pause_ratio: 0.9
     prompt: prompts/investigate.liquid
     on_complete: implement
 

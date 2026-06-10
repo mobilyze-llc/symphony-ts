@@ -1,4 +1,5 @@
-import { realpathSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import process from "node:process";
 import readline from "node:readline";
 
@@ -101,6 +102,14 @@ async function handleMessage(message) {
 
   if (message.method === "turn/start") {
     turnCount += 1;
+    if (scenario === "session-artifact" && process.env.CODEX_HOME) {
+      const sessionDir = join(process.env.CODEX_HOME, "sessions", "2026");
+      mkdirSync(sessionDir, { recursive: true });
+      writeFileSync(
+        join(sessionDir, "rollout-test.jsonl"),
+        `${JSON.stringify({ type: "token_usage", input_tokens: 12, output_tokens: 3, total_tokens: 15 })}\n`,
+      );
+    }
     assertEqual(message.params.threadId, "thread-1", "threadId must be reused");
     assertEqual(
       realpathSync(process.cwd()),
@@ -201,6 +210,66 @@ async function handleMessage(message) {
       return;
     }
 
+    if (scenario === "usage-then-noisy-notification") {
+      setTimeout(() => {
+        writeJson({
+          method: "thread/tokenUsage/updated",
+          params: {
+            usage: {
+              inputTokens: 100,
+              outputTokens: 50,
+              totalTokens: 150,
+            },
+          },
+        });
+        writeJson({
+          method: "item/started",
+          params: {
+            item: {
+              type: "tool_call",
+              name: "Bash",
+            },
+          },
+        });
+        writeJson({
+          method: "account/rateLimits/updated",
+          params: {
+            rateLimits: {
+              requestsRemaining: 7,
+            },
+          },
+        });
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "Noisy turn finished",
+          },
+        });
+      }, 10);
+      return;
+    }
+
+    if (scenario === "usage-reset-between-turns" && turnCount === 2) {
+      setTimeout(() => {
+        writeJson({
+          method: "item/started",
+          params: {
+            item: {
+              type: "tool_call",
+              name: "Bash",
+            },
+          },
+        });
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "Second turn without usage",
+          },
+        });
+      }, 10);
+      return;
+    }
+
     if (scenario === "user-input") {
       setTimeout(() => {
         writeJson({
@@ -219,6 +288,125 @@ async function handleMessage(message) {
           method: "turn/user_input_required",
           params: {
             reason: "Please confirm.",
+          },
+        });
+      }, 10);
+      return;
+    }
+
+    if (scenario === "prompt-echo-user-input-code") {
+      setTimeout(() => {
+        writeJson({
+          method: "item/started",
+          params: {
+            item: {
+              type: "userMessage",
+              content: [
+                {
+                  type: "text",
+                  text: "Issue text mentions codex_user_input_required but is not a protocol request.",
+                },
+              ],
+            },
+          },
+        });
+        writeJson({
+          method: "item/completed",
+          params: {
+            item: {
+              type: "userMessage",
+              content: [
+                {
+                  type: "text",
+                  text: "Issue text mentions codex_user_input_required but is not a protocol request.",
+                },
+              ],
+            },
+          },
+        });
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "Prompt echo did not pause the turn",
+            usage: {
+              inputTokens: 12,
+              outputTokens: 4,
+              totalTokens: 16,
+            },
+          },
+        });
+      }, 10);
+      return;
+    }
+
+    if (scenario === "prompt-echo-approval-text") {
+      setTimeout(() => {
+        writeJson({
+          method: "item/started",
+          params: {
+            item: {
+              type: "userMessage",
+              content: [
+                {
+                  type: "text",
+                  text: "Issue text mentions approval but is not an approval request.",
+                },
+              ],
+            },
+          },
+        });
+        writeJson({
+          method: "item/completed",
+          params: {
+            item: {
+              type: "userMessage",
+              content: [
+                {
+                  type: "text",
+                  text: "Issue text mentions approval but is not an approval request.",
+                },
+              ],
+            },
+          },
+        });
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "Approval prompt echo did not trigger approval handling",
+            usage: {
+              inputTokens: 12,
+              outputTokens: 4,
+              totalTokens: 16,
+            },
+          },
+        });
+      }, 10);
+      return;
+    }
+
+    if (scenario === "mcp-elicitation") {
+      setTimeout(() => {
+        writeJson({
+          id: "elicitation-1",
+          method: "mcpServer/elicitation/request",
+          params: {
+            server: "linear",
+            requestId: "elicitation-1",
+            prompt: "Confirm Linear comment write.",
+          },
+        });
+      }, 10);
+      return;
+    }
+
+    if (scenario === "mcp-elicitation-create") {
+      setTimeout(() => {
+        writeJson({
+          id: "elicitation-1",
+          method: "elicitation/create",
+          params: {
+            requestId: "elicitation-1",
+            message: "Confirm Linear comment write.",
           },
         });
       }, 10);
@@ -256,9 +444,18 @@ async function handleMessage(message) {
                       command: "gh pr create --fill",
                     },
                   }
-                : {
-                    kind: "command_execution",
-                  },
+                : scenario === "broad-rg-denied"
+                  ? {
+                      kind: "command_execution",
+                      toolName: "Bash",
+                      input: {
+                        command:
+                          'rg -n "token_telemetry|codex|running" src ops -m 80',
+                      },
+                    }
+                  : {
+                      kind: "command_execution",
+                    },
           });
         }, 10);
       }, 10);
@@ -307,18 +504,26 @@ async function handleMessage(message) {
   }
 
   if (message.id === "approval-1") {
-    if (scenario === "denied-pr") {
+    if (scenario === "denied-pr" || scenario === "broad-rg-denied") {
+      assertEqual(
+        message.result?.decision,
+        "decline",
+        "denied approval must send the Codex decision field",
+      );
       assertEqual(
         message.result?.approved,
         false,
-        "forbidden PR approval must be denied",
+        "denied approval must be denied",
       );
 
       setTimeout(() => {
         writeJson({
           method: "turn/completed",
           params: {
-            message: "PR command denied by mode policy",
+            message:
+              scenario === "broad-rg-denied"
+                ? "Broad rg command denied by output guard"
+                : "PR command denied by mode policy",
             usage: {
               inputTokens: 14,
               outputTokens: 9,
@@ -330,6 +535,11 @@ async function handleMessage(message) {
       return;
     }
 
+    assertEqual(
+      message.result?.decision,
+      "accept",
+      "approval must send the Codex decision field",
+    );
     assertEqual(
       message.result?.approved,
       true,
@@ -397,6 +607,16 @@ async function handleMessage(message) {
         },
       });
     }, 10);
+    return;
+  }
+
+  if (message.id === "elicitation-1") {
+    assertEqual(
+      message.error?.data?.code,
+      "codex_user_input_required",
+      "elicitation requests must receive a user-input-required error response",
+    );
+    process.stderr.write(`${scenario} response received\n`);
   }
 }
 

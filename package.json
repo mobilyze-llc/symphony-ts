@@ -41,6 +41,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node scripts/test.mjs",
     "test:watch": "vitest",
+    "probe:codex-skills": "node scripts/probe-codex-skills.mjs",
+    "smoke:codex-headless": "node scripts/probe-codex-skills.mjs --ci-smoke",
     "lint": "biome check .",
     "format": "biome format --write ."
   },
