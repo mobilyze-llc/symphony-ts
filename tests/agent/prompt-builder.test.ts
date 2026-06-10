@@ -216,6 +216,10 @@ describe("prompt builder", () => {
 
     expect(prompt).toContain("Current stage: investigate.");
     expect(prompt).toContain("Do NOT implement code");
+    expect(prompt).toContain("Investigation Token Brake");
+    expect(prompt).toContain("at most 6 shell/tool calls");
+    expect(prompt).toContain("max_output_tokens` of 800 or less");
+    expect(prompt).toContain("latest issue comments/workpad/resume notes");
     expect(prompt).toContain("zsh-safe");
     expect(prompt).toContain("cmd_status");
     expect(prompt).toContain("[STAGE_COMPLETE]");

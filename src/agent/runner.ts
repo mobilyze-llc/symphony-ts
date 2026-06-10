@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
+import { dirname, isAbsolute, normalize, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -56,6 +57,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 const GIT_COMMAND_TIMEOUT_MS = 10_000;
+const PROMPT_FILE_EXTENSIONS = new Set([".liquid", ".md", ".txt"]);
 
 export interface AgentRunnerEvent extends CodexClientEvent {
   issueId: string;
@@ -259,7 +261,8 @@ export class AgentRunner {
       stage?.maxTurns ?? this.config.agent.maxTurns,
       hardStops.maxIterations,
     );
-    const effectivePromptTemplate = stage?.prompt ?? this.config.promptTemplate;
+    const effectivePromptTemplateSource =
+      stage?.prompt ?? this.config.promptTemplate;
     let hardStop: HardStopDecision | null = null;
     let previousProgressSignature: string | null = null;
     let repeatedNoProgressTurns = 0;
@@ -419,6 +422,13 @@ export class AgentRunner {
           liveSession,
         });
         runAttempt.status = "building_prompt";
+        const effectivePromptTemplate =
+          turnNumber === 1
+            ? await resolvePromptTemplate({
+                promptTemplate: effectivePromptTemplateSource,
+                workflowPath: this.config.workflowPath,
+              })
+            : effectivePromptTemplateSource;
         const prompt = await buildTurnPrompt({
           workflow: {
             promptTemplate: effectivePromptTemplate,
@@ -869,6 +879,47 @@ async function cleanupWorkspaceArtifacts(workspacePath: string): Promise<void> {
     force: true,
     recursive: true,
   });
+}
+
+async function resolvePromptTemplate(input: {
+  promptTemplate: string;
+  workflowPath: string;
+}): Promise<string> {
+  const promptPath = resolvePromptFilePath(input);
+  if (promptPath === null) {
+    return input.promptTemplate;
+  }
+
+  return await readFile(promptPath, "utf8");
+}
+
+function resolvePromptFilePath(input: {
+  promptTemplate: string;
+  workflowPath: string;
+}): string | null {
+  const trimmed = input.promptTemplate.trim();
+  if (trimmed.length === 0 || trimmed.includes("\n")) {
+    return null;
+  }
+
+  const extension = trimmed.slice(trimmed.lastIndexOf("."));
+  if (!PROMPT_FILE_EXTENSIONS.has(extension)) {
+    return null;
+  }
+
+  if (
+    !trimmed.includes(sep) &&
+    !trimmed.includes("/") &&
+    !trimmed.includes("\\")
+  ) {
+    return null;
+  }
+
+  if (isAbsolute(trimmed)) {
+    return normalize(trimmed);
+  }
+
+  return normalize(resolve(dirname(input.workflowPath), trimmed));
 }
 
 async function runGit(

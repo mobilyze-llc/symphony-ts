@@ -125,7 +125,9 @@ export function buildContinuationPrompt(input: {
     switch (input.stageName) {
       case "investigate":
         lines.push(
-          "CONSTRAINT: You are in the INVESTIGATE stage. Do NOT implement code, create branches, or open PRs. Investigation and planning only. When you have posted your investigation findings, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
+          "CONSTRAINT: You are in the INVESTIGATE stage. Do NOT implement code, create branches, or open PRs. Investigation and planning only.",
+          "Investigation Token Brake: first inspect latest issue comments/workpad/resume notes. If they already identify the next implementation move, reuse that plan instead of rediscovering the repo. Spend at most 6 shell/tool calls before posting the workpad unless a command fails and one retry is necessary. Use `max_output_tokens` of 800 or less. Do not run multi-file `sed` batches, broad `rg -n` over multiple top-level directories, full docs scans, or source dumps.",
+          "If more discovery is truly required, write the open questions into the workpad and output [STAGE_COMPLETE]; the implement stage can do targeted reads while making changes. When you have posted your investigation findings, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
         );
         break;
       case "implement":

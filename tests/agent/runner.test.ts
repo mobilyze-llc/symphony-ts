@@ -788,6 +788,88 @@ describe("AgentRunner", () => {
     );
   });
 
+  it("loads file-backed stage prompts before starting the first turn", async () => {
+    const root = await createRoot();
+    const prompts: string[] = [];
+    const workspacePath = join(root, "issue-workspace");
+    await mkdir(join(root, "prompts"), { recursive: true });
+    await writeFile(
+      join(root, "prompts", "investigate.liquid"),
+      "Investigation Token Brake {{ issue.identifier }} {{ stageName }}",
+    );
+
+    const config = createConfig(root, "unused");
+    config.workflowPath = join(root, "WORKFLOW.md");
+    config.stages = {
+      initialStage: "investigate",
+      fastTrack: null,
+      stages: {
+        investigate: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: "prompts/investigate.liquid",
+          maxTurns: 1,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: "done", onApprove: null, onRework: null },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: null,
+        },
+      },
+    };
+    const stage = config.stages.stages.investigate;
+    if (stage === undefined) {
+      throw new Error("Expected investigate stage");
+    }
+    const runner = new AgentRunner({
+      config,
+      tracker: createTracker(),
+      workspaceManager: {
+        root,
+        createForIssue: vi.fn().mockResolvedValue({
+          path: workspacePath,
+          workspaceKey: "issue-workspace",
+          createdNow: true,
+        }),
+        removeForIssue: vi.fn().mockResolvedValue(true),
+        resolveForIssue: vi.fn(),
+      } as never,
+      createCodexClient: (input) =>
+        createStubCodexClient(prompts, input, {
+          statuses: ["completed"],
+        }),
+    });
+
+    await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stage,
+      stageName: "investigate",
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain("Investigation Token Brake ABC-123");
+    expect(prompts[0]).toContain("investigate");
+    expect(prompts[0]).not.toContain("prompts/investigate.liquid");
+  });
+
   it("fails immediately when before_run fails and still invokes after_run best-effort", async () => {
     const root = await createRoot();
     const hooks = {

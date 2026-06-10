@@ -232,12 +232,23 @@ Labels: {{ issue.labels | join: ", " }}
 ## Stage: Investigation
 You are in the INVESTIGATE stage. Your job is to analyze the issue and create an implementation plan.
 
+## Investigation Token Brake
+
+Investigation is a routing and planning stage, not a full implementation rehearsal.
+
+- First inspect the latest issue comments/workpad/resume notes. If they already identify the next implementation move, reuse that plan instead of rediscovering the repo.
+- Spend at most 6 shell/tool calls before posting the investigation workpad, unless a command fails and a single retry is necessary.
+- Use `max_output_tokens` of 800 or less in investigate-stage shell calls. Prefer 400 for Linear/comment reads and 800 for source snippets.
+- Do not run multi-file `sed` batches, broad `rg -n` over multiple top-level directories, full docs scans, or source dumps during investigate.
+- If more discovery is truly required, write the open questions into the workpad and output `[STAGE_COMPLETE]`; the implement stage can do targeted reads while making changes.
+
 {% if issue.state == "Resume" %}
 ## RESUME CONTEXT
 This issue was previously blocked. Check the issue comments for a `## Resume Context` comment explaining what changed. Focus your investigation on the blocking reasons and what has been updated.
 {% endif %}
 
-- Read the codebase to understand existing patterns and architecture
+- Check the latest Linear comments/workpad/resume notes before source search. If a current implementation plan already exists, reuse it and do not repeat broad repo discovery.
+- Read only the minimal code needed to understand existing patterns and architecture. Stay within the Investigation Token Brake.
 - Identify which files need to change and what the approach should be
 - Post a workpad comment on the Linear issue with your investigation findings and proposed implementation plan
 - Do NOT implement code, create branches, or open PRs in this stage — investigation only
