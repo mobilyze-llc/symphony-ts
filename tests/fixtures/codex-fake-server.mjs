@@ -253,16 +253,19 @@ async function handleMessage(message) {
       setTimeout(() => {
         // Real codex app-server v2 usage shape: the cached share is named
         // cachedInputTokens (camelCase notification) / cached_input_tokens
-        // (rollout snake_case), not cache_read_tokens.
+        // (rollout snake_case), not cache_read_tokens. The two payloads use
+        // DIFFERENT cached/reasoning values so each alias is pinned
+        // independently — the notification event must carry 41000/7 and the
+        // turn result 56064/12.
         writeJson({
           method: "thread/tokenUsage/updated",
           params: {
             usage: {
-              inputTokens: 81831,
-              cachedInputTokens: 56064,
-              outputTokens: 681,
-              totalTokens: 82512,
-              reasoningOutputTokens: 12,
+              inputTokens: 67419,
+              cachedInputTokens: 41000,
+              outputTokens: 598,
+              totalTokens: 68017,
+              reasoningOutputTokens: 7,
             },
           },
         });

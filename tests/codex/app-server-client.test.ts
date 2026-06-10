@@ -895,7 +895,9 @@ describe("CodexAppServerClient", () => {
 
     // Canary-shaped payload (SYMPH-319): without the cached_input_tokens /
     // cachedInputTokens aliases the budget discount never engages and the
-    // worker is charged full rate for a 68%-cached turn.
+    // worker is charged full rate for a 68%-cached turn. The notification
+    // and the turn result deliberately carry different values so each alias
+    // shape is proven independently.
     expect(result.status).toBe("completed");
     expect(result.usage).toMatchObject({
       inputTokens: 81831,
@@ -904,10 +906,12 @@ describe("CodexAppServerClient", () => {
       cacheReadTokens: 56064,
       reasoningTokens: 12,
     });
+    // camelCase notification path (cachedInputTokens / reasoningOutputTokens)
     expect(events).toContainEqual(
       expect.objectContaining({
         usage: expect.objectContaining({
-          cacheReadTokens: 56064,
+          cacheReadTokens: 41000,
+          reasoningTokens: 7,
         }),
       }),
     );
