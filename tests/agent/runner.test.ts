@@ -23,7 +23,6 @@ import {
   type AgentRunnerError,
   WorkspaceHookError,
 } from "../../src/index.js";
-import { getDefaultCodexSessionArtifactDirectory } from "../../src/shared/codex-session-artifacts.js";
 import type {
   IssueStateSnapshot,
   IssueTracker,
@@ -672,13 +671,60 @@ describe("AgentRunner", () => {
       threadSandbox: "workspace-write",
       turnSandboxPolicy: { type: "workspace-write", networkAccess: false },
     });
-    const workspacePath = join(root, ISSUE_FIXTURE.id);
     expect(factoryInputs[0]?.artifactDirectory).toBe(
-      getDefaultCodexSessionArtifactDirectory(workspacePath),
+      join(root, ".symphony", "codex-sessions", ISSUE_FIXTURE.id),
+    );
+    expect(factoryInputs[0]?.artifactDirectory).not.toContain(
+      join(root, ISSUE_FIXTURE.id, ".symphony"),
     );
     expect(prompts[0]).toContain("## Mode Permission Envelope");
     expect(prompts[0]).toContain("Mode: prototype");
     expect(prompts[0]).toContain("Pull requests: denied");
+  });
+
+  it("uses the sanitized workspace key for durable Codex trace artifacts", async () => {
+    const root = await createRoot();
+    const workspacePath = join(root, "safe-workspace-key");
+    const factoryInputs: AgentRunnerCodexClientFactoryInput[] = [];
+    const mockWorkspaceManager = {
+      root,
+      createForIssue: vi.fn().mockResolvedValue({
+        path: workspacePath,
+        workspaceKey: "safe-workspace-key",
+        createdNow: true,
+      }),
+      removeForIssue: vi.fn(),
+      resolveForIssue: vi.fn(),
+    };
+    const issue: Issue = {
+      ...ISSUE_FIXTURE,
+      id: "../unsafe-issue-id",
+    };
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker: createTracker({
+        refreshStates: [
+          { id: issue.id, identifier: issue.identifier, state: "Done" },
+        ],
+      }),
+      workspaceManager: mockWorkspaceManager as never,
+      createCodexClient: (input) => {
+        factoryInputs.push(input);
+        return createStubCodexClient([], input, {
+          statuses: ["completed"],
+        });
+      },
+    });
+
+    await runner.run({ issue, attempt: null });
+
+    expect(mockWorkspaceManager.createForIssue).toHaveBeenCalledWith(
+      "../unsafe-issue-id",
+    );
+    expect(factoryInputs[0]?.artifactDirectory).toBe(
+      join(root, ".symphony", "codex-sessions", "safe-workspace-key"),
+    );
+    expect(factoryInputs[0]?.artifactDirectory).not.toContain("unsafe");
   });
 
   it("emits promptChars and estimatedPromptTokens on agent events", async () => {
