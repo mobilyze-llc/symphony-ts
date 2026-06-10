@@ -645,6 +645,9 @@ export function renderDashboardHtml(
   const inputTokensLabel = formatInteger(snapshot.codex_totals.input_tokens);
   const outputTokensLabel = formatInteger(snapshot.codex_totals.output_tokens);
   const initialRateLimits = prettyValue(snapshot.rate_limits);
+  const initialRateLimitAdmission = renderRateLimitAdmissionLabel(
+    snapshot.rate_limit_admission,
+  );
 
   return `<!doctype html>
 <html lang="en">
@@ -748,6 +751,7 @@ ${DASHBOARD_STYLES}
             </div>
           </div>
 
+          <p id="rate-limit-admission" class="section-copy">${escapeHtml(initialRateLimitAdmission)}</p>
           <pre id="rate-limits" class="code-panel">${escapeHtml(initialRateLimits)}</pre>
         </section>
 
@@ -1073,6 +1077,7 @@ function renderDashboardClientScript(
             '<span class="detail-kv-label">Cache write</span><span class="detail-kv-value numeric">' + formatInteger(pt.cache_write_tokens) + '</span>' +
             '<span class="detail-kv-label">Reasoning</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.reasoning_tokens) + '</span>' +
             '<span class="detail-kv-label">Pipeline</span><span class="detail-kv-value numeric">' + formatInteger(row.total_pipeline_tokens) + '</span>' +
+            rateLimitWindowKv(row.rate_limit_window) +
             '</div></div>';
 
           var displayActivity = (row.recent_activity || []).slice(-5);
@@ -1117,6 +1122,19 @@ function renderDashboardClientScript(
           const loopTrace = renderLoopTraceJournalPreview(row.loop_trace_preview);
 
           return '<div class="detail-panel">' + contextSection + '<div class="detail-grid">' + tokenBreakdown + recentActivity + executionHistory + loopTrace + '</div></div>';
+        }
+
+        function rateLimitWindowKv(windows) {
+          if (windows == null) {
+            return '';
+          }
+          var renderOne = function (label, w) {
+            if (w == null) {
+              return '';
+            }
+            return '<span class="detail-kv-label">' + label + '</span><span class="detail-kv-value numeric">' + w.start_pct.toFixed(1) + '% → ' + w.latest_pct.toFixed(1) + '% (+' + w.delta_pct.toFixed(1) + '%)</span>';
+          };
+          return renderOne('5h window', windows.primary) + renderOne('Weekly window', windows.secondary);
         }
 
         function renderRunningRows(next) {
@@ -1217,6 +1235,24 @@ function renderDashboardClientScript(
           });
           document.getElementById('retry-rows').innerHTML = renderRetryRows(next);
           document.getElementById('rate-limits').textContent = prettyValue(next.rate_limits);
+          document.getElementById('rate-limit-admission').textContent = rateLimitAdmissionLabel(next.rate_limit_admission);
+        }
+
+        function rateLimitAdmissionLabel(admission) {
+          if (admission == null) {
+            return 'Dispatch headroom floor: not configured.';
+          }
+          if (admission.blocked) {
+            return 'Dispatch blocked: ' + (admission.reason || 'rate-limit headroom below the configured floor.');
+          }
+          var parts = [];
+          if (admission.primary_used_pct != null) {
+            parts.push('5h window ' + admission.primary_used_pct.toFixed(1) + '% used');
+          }
+          if (admission.secondary_used_pct != null) {
+            parts.push('weekly window ' + admission.secondary_used_pct.toFixed(1) + '% used');
+          }
+          return 'Dispatch headroom floor: ok' + (parts.length > 0 ? ' (' + parts.join(', ') + ')' : ' (no snapshot observed yet)') + '.';
         }
 
         render(snapshot);
@@ -1601,6 +1637,7 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
         <span class="detail-kv-label">Cache write</span><span class="detail-kv-value numeric">${formatInteger(pt.cache_write_tokens)}</span>
         <span class="detail-kv-label">Reasoning</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.reasoning_tokens)}</span>
         <span class="detail-kv-label">Pipeline</span><span class="detail-kv-value numeric">${formatInteger(row.total_pipeline_tokens)}</span>
+        ${renderRateLimitWindowKv(row.rate_limit_window)}
       </div>
     </div>`;
 
@@ -1664,6 +1701,54 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
   const loopTrace = renderLoopTraceJournalPreview(row.loop_trace_preview);
 
   return `<div class="detail-panel">${contextSection}<div class="detail-grid">${tokenBreakdown}${recentActivity}${executionHistory}${loopTrace}</div></div>`;
+}
+
+function renderRateLimitAdmissionLabel(
+  admission: RuntimeSnapshot["rate_limit_admission"],
+): string {
+  if (admission === null) {
+    return "Dispatch headroom floor: not configured.";
+  }
+  if (admission.blocked) {
+    return `Dispatch blocked: ${admission.reason ?? "rate-limit headroom below the configured floor."}`;
+  }
+  const parts: string[] = [];
+  if (admission.primary_used_pct !== null) {
+    parts.push(`5h window ${admission.primary_used_pct.toFixed(1)}% used`);
+  }
+  if (admission.secondary_used_pct !== null) {
+    parts.push(
+      `weekly window ${admission.secondary_used_pct.toFixed(1)}% used`,
+    );
+  }
+  const detail =
+    parts.length > 0 ? ` (${parts.join(", ")})` : " (no snapshot observed yet)";
+  return `Dispatch headroom floor: ok${detail}.`;
+}
+
+function renderRateLimitWindowKv(
+  windows: RuntimeSnapshot["running"][number]["rate_limit_window"],
+): string {
+  if (windows === null) {
+    return "";
+  }
+  const renderOne = (
+    label: string,
+    window: {
+      start_pct: number;
+      latest_pct: number;
+      delta_pct: number;
+    } | null,
+  ): string => {
+    if (window === null) {
+      return "";
+    }
+    return `<span class="detail-kv-label">${escapeHtml(label)}</span><span class="detail-kv-value numeric">${window.start_pct.toFixed(1)}% → ${window.latest_pct.toFixed(1)}% (+${window.delta_pct.toFixed(1)}%)</span>`;
+  };
+  return (
+    renderOne("5h window", windows.primary) +
+    renderOne("Weekly window", windows.secondary)
+  );
 }
 
 function renderLoopTraceJournalPreview(

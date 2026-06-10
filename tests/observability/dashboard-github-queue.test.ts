@@ -80,6 +80,7 @@ function createHost(): DashboardServerHost {
       seconds_running: 0,
     },
     rate_limits: { requestsRemaining: 10 },
+    rate_limit_admission: null,
   };
   return {
     getRuntimeSnapshot: () => snapshot,

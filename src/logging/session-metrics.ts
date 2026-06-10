@@ -1,5 +1,9 @@
 import * as path from "node:path";
 import type { CodexClientEvent } from "../codex/app-server-client.js";
+import {
+  observeRateLimitWindow,
+  parseRateLimitSnapshot,
+} from "../codex/rate-limits.js";
 import type {
   LiveSession,
   OrchestratorState,
@@ -108,6 +112,24 @@ export function applyCodexEventToSession(
     session.lastReportedCacheWriteTokens = 0;
     session.lastReportedNoCacheTokens = 0;
     session.lastReportedReasoningTokens = 0;
+  }
+
+  if (event.rateLimits !== undefined) {
+    const rateLimitSnapshot = parseRateLimitSnapshot(event.rateLimits);
+    if (rateLimitSnapshot !== null) {
+      if (rateLimitSnapshot.primary !== null) {
+        session.rateLimitWindows.primary = observeRateLimitWindow(
+          session.rateLimitWindows.primary,
+          rateLimitSnapshot.primary,
+        );
+      }
+      if (rateLimitSnapshot.secondary !== null) {
+        session.rateLimitWindows.secondary = observeRateLimitWindow(
+          session.rateLimitWindows.secondary,
+          rateLimitSnapshot.secondary,
+        );
+      }
+    }
   }
 
   const activityEntry = buildRecentActivityEntry(event);

@@ -79,6 +79,72 @@ describe("session metrics", () => {
     });
   });
 
+  it("tracks per-session rate-limit window start/latest with reset re-baselining", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 3,
+    });
+    const running = createRunningEntry();
+
+    const codexRateLimits = (primaryUsed: number, secondaryUsed: number) => ({
+      limit_id: "codex",
+      primary: {
+        used_percent: primaryUsed,
+        window_minutes: 300,
+        resets_at: 1781093929,
+      },
+      secondary: {
+        used_percent: secondaryUsed,
+        window_minutes: 10080,
+        resets_at: 1781137743,
+      },
+    });
+
+    applyCodexEventToOrchestratorState(
+      state,
+      running,
+      createEvent("notification", { rateLimits: codexRateLimits(39, 97) }),
+    );
+    applyCodexEventToOrchestratorState(
+      state,
+      running,
+      createEvent("notification", { rateLimits: codexRateLimits(42.5, 98) }),
+    );
+
+    expect(running.rateLimitWindows.primary).toEqual({
+      startPercent: 39,
+      latestPercent: 42.5,
+      lastResetsAt: 1781093929,
+    });
+    expect(running.rateLimitWindows.secondary).toEqual({
+      startPercent: 97,
+      latestPercent: 98,
+      lastResetsAt: 1781137743,
+    });
+
+    // Window rollover mid-stage: usage drops, baseline follows the new window.
+    applyCodexEventToOrchestratorState(
+      state,
+      running,
+      createEvent("notification", { rateLimits: codexRateLimits(1.5, 98) }),
+    );
+    expect(running.rateLimitWindows.primary).toEqual({
+      startPercent: 1.5,
+      latestPercent: 1.5,
+      lastResetsAt: 1781093929,
+    });
+
+    // Unparsable blobs leave the telemetry untouched.
+    applyCodexEventToOrchestratorState(
+      state,
+      running,
+      createEvent("notification", {
+        rateLimits: { requestsRemaining: 8 },
+      }),
+    );
+    expect(running.rateLimitWindows.primary?.latestPercent).toBe(1.5);
+  });
+
   it("tracks ended runtime and recomputes live aggregate snapshot time", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,

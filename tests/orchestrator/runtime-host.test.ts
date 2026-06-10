@@ -399,6 +399,10 @@ describe("OrchestratorRuntimeHost", () => {
         tokenTelemetry: [],
         tokenTelemetryObservedCount: 0,
         codexSessionLogs: [],
+        rateLimitWindows: {
+          primary: null,
+          secondary: null,
+        },
       },
       turnsCompleted: 1,
       lastTurn: null,
@@ -2563,6 +2567,10 @@ describe("OrchestratorRuntimeHost", () => {
         tokenTelemetry: [],
         tokenTelemetryObservedCount: 0,
         codexSessionLogs: [],
+        rateLimitWindows: {
+          primary: null,
+          secondary: null,
+        },
       },
       turnsCompleted: 3,
       lastTurn: null,
@@ -2721,6 +2729,10 @@ describe("OrchestratorRuntimeHost", () => {
         tokenTelemetry: [],
         tokenTelemetryObservedCount: 0,
         codexSessionLogs: [],
+        rateLimitWindows: {
+          primary: null,
+          secondary: null,
+        },
       },
       turnsCompleted: 2,
       lastTurn: null,
@@ -2813,6 +2825,10 @@ describe("OrchestratorRuntimeHost", () => {
         tokenTelemetry: [],
         tokenTelemetryObservedCount: 0,
         codexSessionLogs: [],
+        rateLimitWindows: {
+          primary: null,
+          secondary: null,
+        },
       },
       turnsCompleted: 1,
       lastTurn: null,
@@ -2903,6 +2919,10 @@ describe("OrchestratorRuntimeHost", () => {
         tokenTelemetry: [],
         tokenTelemetryObservedCount: 0,
         codexSessionLogs: [],
+        rateLimitWindows: {
+          primary: null,
+          secondary: null,
+        },
       },
       turnsCompleted: 1,
       lastTurn: null,
@@ -3044,6 +3064,10 @@ describe("OrchestratorRuntimeHost", () => {
         tokenTelemetry: [],
         tokenTelemetryObservedCount: 0,
         codexSessionLogs: [],
+        rateLimitWindows: {
+          primary: null,
+          secondary: null,
+        },
       },
       turnsCompleted: 4,
       lastTurn: null,
@@ -3662,6 +3686,8 @@ describe("pipeline notifications", () => {
           premiumBudgetPauseRatio: 0.8,
           estimatedCostPer1kTokensUsd: 0.05,
           cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
         },
         stages: {
           initialStage: "investigate",
@@ -4970,6 +4996,10 @@ function createConfig(): ResolvedWorkflowConfig {
       readTimeoutMs: 5_000,
       stallTimeoutMs: 60_000,
     },
+    rateLimitAdmission: {
+      minPrimaryHeadroomPct: null,
+      minSecondaryHeadroomPct: null,
+    },
     server: {
       port: null,
       slackNotifyChannel: null,
@@ -5080,6 +5110,10 @@ function createNormalResult(): AgentRunResult {
       tokenTelemetry: [],
       tokenTelemetryObservedCount: 0,
       codexSessionLogs: [],
+      rateLimitWindows: {
+        primary: null,
+        secondary: null,
+      },
     },
     turnsCompleted: 1,
     lastTurn: null,

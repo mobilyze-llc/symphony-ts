@@ -313,6 +313,7 @@ function createSnapshotWithRunning(runningCount: number): RuntimeSnapshot {
         truncated: false,
         entries: [],
       },
+      rate_limit_window: null,
     });
   }
   return {
@@ -334,6 +335,7 @@ function createSnapshotWithRunning(runningCount: number): RuntimeSnapshot {
     rate_limits: {
       requestsRemaining: 10,
     },
+    rate_limit_admission: null,
   };
 }
 

@@ -1159,6 +1159,130 @@ describe("orchestrator core", () => {
     expect(Object.keys(orchestrator.getState().running)).toEqual(["1", "2"]);
   });
 
+  it("refuses all dispatch when rate-limit headroom is below the configured floor", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+        },
+      }),
+      // pollTick "now" is 2026-03-06T00:00:05Z (epoch 1772755205).
+    });
+    orchestrator.getState().codexRateLimits = {
+      limit_id: "codex",
+      primary: {
+        used_percent: 40,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.validation.ok).toBe(true);
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(Object.keys(orchestrator.getState().running)).toEqual([]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: true,
+      minSecondaryHeadroomPct: 5,
+      primaryUsedPercent: 40,
+      secondaryUsedPercent: 98,
+    });
+    expect(orchestrator.getState().rateLimitAdmission?.reason).toContain(
+      "secondary window headroom 2.0% < 5% floor",
+    );
+  });
+
+  it("dispatches when a low-headroom snapshot has expired past resets_at", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+        },
+      }),
+    });
+    // Both resets_at are before the orchestrator clock (1772755205): the
+    // windows have rolled over, so the stale snapshot must not block.
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 99,
+        window_minutes: 300,
+        resets_at: 1772755000,
+      },
+      secondary: {
+        used_percent: 99,
+        window_minutes: 10080,
+        resets_at: 1772755100,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: false,
+      primaryUsedPercent: null,
+      secondaryUsedPercent: null,
+    });
+  });
+
+  it("fails open with no rate-limit snapshot and stays inert when unconfigured", async () => {
+    const noSnapshotTracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const gated = createOrchestrator({
+      tracker: noSnapshotTracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+        },
+      }),
+    });
+
+    const gatedResult = await gated.pollTick();
+    expect(gatedResult.dispatchedIssueIds).toEqual(["1"]);
+    expect(gated.getState().rateLimitAdmission).toMatchObject({
+      blocked: false,
+      reason: null,
+    });
+
+    const unconfiguredTracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const unconfigured = createOrchestrator({ tracker: unconfiguredTracker });
+    unconfigured.getState().codexRateLimits = {
+      secondary: {
+        used_percent: 99.5,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+
+    const unconfiguredResult = await unconfigured.pollTick();
+    expect(unconfiguredResult.dispatchedIssueIds).toEqual(["1"]);
+    expect(unconfigured.getState().rateLimitAdmission).toBeNull();
+  });
+
   it("dispatches normally when pipeline-halt issue is in terminal state", async () => {
     const closedHaltIssue = createIssue({
       id: "halt-1",
@@ -5197,6 +5321,7 @@ function createConfig(overrides?: {
   codex?: Partial<ResolvedWorkflowConfig["codex"]>;
   runner?: Partial<ResolvedWorkflowConfig["runner"]>;
   continuousFeedback?: ResolvedWorkflowConfig["continuousFeedback"];
+  rateLimitAdmission?: ResolvedWorkflowConfig["rateLimitAdmission"];
 }): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
@@ -5239,6 +5364,10 @@ function createConfig(overrides?: {
       readTimeoutMs: 30_000,
       stallTimeoutMs: 300_000,
       ...overrides?.codex,
+    },
+    rateLimitAdmission: overrides?.rateLimitAdmission ?? {
+      minPrimaryHeadroomPct: null,
+      minSecondaryHeadroomPct: null,
     },
     server: {
       port: null,

@@ -704,6 +704,23 @@ export interface LiveSession {
   tokenTelemetry: TokenTelemetryEntry[];
   tokenTelemetryObservedCount: number;
   codexSessionLogs: CodexSessionLogEntry[];
+  rateLimitWindows: SessionRateLimitTelemetry;
+}
+
+/**
+ * Per-stage view of the Codex rate-limit windows: usage at stage start,
+ * latest observation, and the burn between them (SYMPH-333). Baselines
+ * re-anchor when a window resets mid-stage.
+ */
+export interface SessionRateLimitWindowTelemetry {
+  startPercent: number;
+  latestPercent: number;
+  lastResetsAt: number | null;
+}
+
+export interface SessionRateLimitTelemetry {
+  primary: SessionRateLimitWindowTelemetry | null;
+  secondary: SessionRateLimitWindowTelemetry | null;
 }
 
 export interface RetryEntry {
@@ -840,6 +857,20 @@ export interface CodexTotals {
 
 export type CodexRateLimits = Record<string, unknown> | null;
 
+/**
+ * Latest dispatcher admission decision under the rate-limit headroom floor
+ * (SYMPH-333). null while the guard is unconfigured.
+ */
+export interface RateLimitAdmissionState {
+  blocked: boolean;
+  reason: string | null;
+  evaluatedAt: string;
+  minPrimaryHeadroomPct: number | null;
+  minSecondaryHeadroomPct: number | null;
+  primaryUsedPercent: number | null;
+  secondaryUsedPercent: number | null;
+}
+
 export interface RunningEntry extends LiveSession {
   issue: Issue;
   identifier: string;
@@ -875,6 +906,7 @@ export interface OrchestratorState {
   resumeRequired: Set<string>;
   codexTotals: CodexTotals;
   codexRateLimits: CodexRateLimits;
+  rateLimitAdmission: RateLimitAdmissionState | null;
   issueStages: Record<string, string>;
   issueReworkCounts: Record<string, number>;
   issuePassedStages: Record<string, string[]>;
@@ -971,6 +1003,10 @@ export function createEmptyLiveSession(): LiveSession {
     tokenTelemetry: [],
     tokenTelemetryObservedCount: 0,
     codexSessionLogs: [],
+    rateLimitWindows: {
+      primary: null,
+      secondary: null,
+    },
   };
 }
 
@@ -998,6 +1034,7 @@ export function createInitialOrchestratorState(input: {
       secondsRunning: 0,
     },
     codexRateLimits: null,
+    rateLimitAdmission: null,
     issueStages: {},
     issueReworkCounts: {},
     issuePassedStages: {},

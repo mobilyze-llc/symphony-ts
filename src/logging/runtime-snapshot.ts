@@ -6,6 +6,8 @@ import type {
   DispatcherDecisionQualitySummary,
   OrchestratorState,
   RecentActivityEntry,
+  SessionRateLimitTelemetry,
+  SessionRateLimitWindowTelemetry,
   StageRecord,
   TurnHistoryEntry,
 } from "../domain/model.js";
@@ -47,6 +49,7 @@ export interface RuntimeSnapshotRunningRow {
     reasoning_tokens: number;
   };
   rework_count?: number;
+  rate_limit_window: RuntimeSnapshotRateLimitWindowUsage | null;
   total_pipeline_tokens: number;
   pipeline_tokens: {
     input_tokens: number;
@@ -64,6 +67,27 @@ export interface RuntimeSnapshotRunningRow {
   health: HealthStatus;
   health_reason: string | null;
   loop_trace_preview: LoopTraceJournalPreviewResponse;
+}
+
+export interface RuntimeSnapshotRateLimitWindowRow {
+  start_pct: number;
+  latest_pct: number;
+  delta_pct: number;
+}
+
+export interface RuntimeSnapshotRateLimitWindowUsage {
+  primary: RuntimeSnapshotRateLimitWindowRow | null;
+  secondary: RuntimeSnapshotRateLimitWindowRow | null;
+}
+
+export interface RuntimeSnapshotRateLimitAdmission {
+  blocked: boolean;
+  reason: string | null;
+  evaluated_at: string;
+  min_primary_headroom_pct: number | null;
+  min_secondary_headroom_pct: number | null;
+  primary_used_pct: number | null;
+  secondary_used_pct: number | null;
 }
 
 export interface RuntimeSnapshotContinuousFeedback {
@@ -199,6 +223,7 @@ export interface RuntimeSnapshot {
     seconds_running: number;
   };
   rate_limits: CodexRateLimits;
+  rate_limit_admission: RuntimeSnapshotRateLimitAdmission | null;
   decorrelated_gates?: RuntimeSnapshotDecorrelatedGateOutcome[];
   decision_quality?: DispatcherDecisionQualitySummary;
   manager_runs?: RuntimeSnapshotManagerRun[];
@@ -297,6 +322,9 @@ export function buildRuntimeSnapshot(
           cache_read_tokens: pipelineCacheReadTokens,
           cache_write_tokens: pipelineCacheWriteTokens,
         },
+        rate_limit_window: toSnapshotRateLimitWindowUsage(
+          entry.rateLimitWindows,
+        ),
         execution_history: executionHistory,
         continuous_feedback:
           continuousFeedback === undefined
@@ -344,11 +372,52 @@ export function buildRuntimeSnapshot(
       getAggregateSecondsRunning(state, now),
     ),
     rate_limits: state.codexRateLimits,
+    rate_limit_admission:
+      state.rateLimitAdmission === null
+        ? null
+        : {
+            blocked: state.rateLimitAdmission.blocked,
+            reason: state.rateLimitAdmission.reason,
+            evaluated_at: state.rateLimitAdmission.evaluatedAt,
+            min_primary_headroom_pct:
+              state.rateLimitAdmission.minPrimaryHeadroomPct,
+            min_secondary_headroom_pct:
+              state.rateLimitAdmission.minSecondaryHeadroomPct,
+            primary_used_pct: state.rateLimitAdmission.primaryUsedPercent,
+            secondary_used_pct: state.rateLimitAdmission.secondaryUsedPercent,
+          },
     decorrelated_gates: buildDecorrelatedGateSnapshots(state),
     decision_quality: evaluateDispatcherDecisionQuality(
       extractDispatcherDecisionEvents(state.dispatcherRunJournal),
     ),
     manager_runs: buildManagerRunSnapshots(state),
+  };
+}
+
+function toSnapshotRateLimitWindowUsage(
+  windows: SessionRateLimitTelemetry,
+): RuntimeSnapshotRateLimitWindowUsage | null {
+  if (windows.primary === null && windows.secondary === null) {
+    return null;
+  }
+
+  return {
+    primary: toSnapshotRateLimitWindowRow(windows.primary),
+    secondary: toSnapshotRateLimitWindowRow(windows.secondary),
+  };
+}
+
+function toSnapshotRateLimitWindowRow(
+  window: SessionRateLimitWindowTelemetry | null,
+): RuntimeSnapshotRateLimitWindowRow | null {
+  if (window === null) {
+    return null;
+  }
+
+  return {
+    start_pct: window.startPercent,
+    latest_pct: window.latestPercent,
+    delta_pct: Math.max(0, window.latestPercent - window.startPercent),
   };
 }
 

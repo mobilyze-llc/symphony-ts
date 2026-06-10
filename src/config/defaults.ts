@@ -37,6 +37,16 @@ export const DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD = 0.05;
 // Cached input tokens are billed at a fraction of the full input rate
 // (OpenAI prompt caching discounts repeated prefixes ~90%).
 export const DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO = 0.1;
+// Rate-limit window budgets are opt-in: null keeps behavior unchanged until
+// a WORKFLOW configures them (SYMPH-333).
+export const DEFAULT_HARD_STOP_MAX_PRIMARY_WINDOW_PCT_PER_UNIT: number | null =
+  null;
+export const DEFAULT_HARD_STOP_MAX_SECONDARY_WINDOW_PCT_PER_UNIT:
+  | number
+  | null = null;
+export const DEFAULT_RATE_LIMIT_MIN_PRIMARY_HEADROOM_PCT: number | null = null;
+export const DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT: number | null =
+  null;
 
 export const DEFAULT_RUNNER_KIND = "codex";
 export const DEFAULT_CONTINUOUS_FEEDBACK_ENABLED = true;
@@ -95,6 +105,14 @@ export const SPEC_DEFAULTS = Object.freeze({
     estimatedCostPer1kTokensUsd:
       DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
     cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
+    maxPrimaryWindowPctPerUnit:
+      DEFAULT_HARD_STOP_MAX_PRIMARY_WINDOW_PCT_PER_UNIT,
+    maxSecondaryWindowPctPerUnit:
+      DEFAULT_HARD_STOP_MAX_SECONDARY_WINDOW_PCT_PER_UNIT,
+  },
+  rateLimitAdmission: {
+    minPrimaryHeadroomPct: DEFAULT_RATE_LIMIT_MIN_PRIMARY_HEADROOM_PCT,
+    minSecondaryHeadroomPct: DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT,
   },
   runner: {
     kind: DEFAULT_RUNNER_KIND,
