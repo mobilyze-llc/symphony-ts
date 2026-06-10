@@ -747,11 +747,22 @@ You maintain a single persistent `## Workpad` comment on the Linear issue. This 
   - Use `linear-pp-cli comments add/edit --body-file ... --agent` only after you already know whether you are creating or updating.
   - Do not use the old `linear` CLI or Codex app/connector MCP tools for Linear comments/documents in headless runs.
   ```bash
+  # Find the existing workpad comment (positional issue form):
+  linear-pp-cli comments list <ISSUE_KEY> --agent --select comments.id,comments.body
   # If no existing workpad comment was found:
   linear-pp-cli comments add --issue <ISSUE_KEY> --body-file workpad.md --agent
   # If an existing workpad comment was found:
   linear-pp-cli comments edit <COMMENT_UUID> --body-file workpad.md --agent
   ```
+- **Issue state changes via CLI** (when shell CLI access is available): do not hunt for workflow-state UUIDs with raw SQL or GraphQL. Use the first-class commands:
+  ```bash
+  # One-command transition resolved against the issue's own team:
+  linear-pp-cli issues edit <ISSUE_KEY> --state-name "In Progress" --agent
+  # Or list the team's states to get the UUID for issues edit --state:
+  linear-pp-cli workflow-states list --team <TEAM_KEY> --agent --select id,name,type
+  ```
+  Without CLI access, keep using the `linear_graphql` tool for state mutations.
+- **CLI errors are JSON in agent mode.** `linear-pp-cli ... --agent` emits failures as one-line `{"error","code","type"}` envelopes on stdout with typed exit codes, so parse stdout directly — no `2>&1 | python` defensive wrappers.
 - **Never inline markdown into Linear GraphQL `body:`, `description:`, or `content:` literals.** Use `sync_workpad`, `linear-pp-cli` file flags, or GraphQL variables so shell snippets like `$VAR`, `${VAR}`, `$(cmd)`, and backticks stay literal.
 
 ## Media in Workpads (fileUpload)
