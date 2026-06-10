@@ -13,7 +13,7 @@
  *   clean  probe against an empty source home (only built-in system skills)
  *
  * Usage:
- *   pnpm probe:codex-skills [-- --workflow <path>] [--mode real|clean|both] [--keep] [--ci-smoke]
+ *   pnpm probe:codex-skills [--workflow <path>] [--mode real|clean|both] [--keep] [--ci-smoke]
  *
  * Requires a local authed `codex` CLI and a fresh `pnpm build`. Not part of
  * `pnpm test`: this intentionally exercises the real Codex binary so it can
@@ -41,7 +41,9 @@ function parseArgs(argv) {
     ciSmoke: false,
   };
   for (let i = 0; i < argv.length; i++) {
-    if (argv[i] === "--workflow" && i + 1 < argv.length) {
+    if (argv[i] === "--") {
+      // Allow both pnpm shorthand and `pnpm run <script> -- ...` forms.
+    } else if (argv[i] === "--workflow" && i + 1 < argv.length) {
       args.workflow = resolve(argv[++i]);
     } else if (argv[i] === "--mode" && i + 1 < argv.length) {
       args.mode = argv[++i];
