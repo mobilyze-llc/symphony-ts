@@ -1,4 +1,8 @@
 import type { CodexClientEvent } from "../codex/app-server-client.js";
+import {
+  evaluateWindowHeadroom,
+  parseRateLimitSnapshot,
+} from "../codex/rate-limits.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
   DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
@@ -667,6 +671,24 @@ export class OrchestratorCore {
       };
     }
 
+    // Refuse new admissions while observed Codex rate-limit headroom is
+    // below the configured floor (SYMPH-333). Running lanes are unaffected.
+    const rateLimitGate = this.evaluateRateLimitAdmissionGate();
+    if (rateLimitGate.blocked) {
+      console.warn(
+        `[orchestrator] ${rateLimitGate.reason} Skipping all dispatch.`,
+      );
+      return {
+        validation,
+        dispatchedIssueIds: [],
+        modeDecisions: [],
+        stopRequests: reconcileResult.stopRequests,
+        trackerFetchFailed: false,
+        reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
+        runningCount: Object.keys(this.state.running).length,
+      };
+    }
+
     const dispatchedIssueIds: string[] = [];
     const modeDecisions: RightSizingDecision[] = [];
     const admittedSnapshots = this.buildRunningAdmissionSnapshots();
@@ -743,6 +765,78 @@ export class OrchestratorCore {
       reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
       runningCount: Object.keys(this.state.running).length,
     };
+  }
+
+  /**
+   * Evaluate the global rate-limit headroom dispatch floor (SYMPH-333).
+   * Fails open when no snapshot has been observed yet (e.g. right after a
+   * restart, before any worker has run) or when a window's resets_at has
+   * passed — a stale pre-reset snapshot must not block dispatch forever.
+   */
+  private evaluateRateLimitAdmissionGate(): {
+    blocked: boolean;
+    reason: string | null;
+  } {
+    const floors = this.config.rateLimitAdmission;
+    if (
+      floors.minPrimaryHeadroomPct === null &&
+      floors.minSecondaryHeadroomPct === null
+    ) {
+      this.state.rateLimitAdmission = null;
+      return { blocked: false, reason: null };
+    }
+
+    const now = this.now();
+    const snapshot = parseRateLimitSnapshot(this.state.codexRateLimits);
+    const primary = evaluateWindowHeadroom(
+      snapshot?.primary ?? null,
+      now.getTime(),
+    );
+    const secondary = evaluateWindowHeadroom(
+      snapshot?.secondary ?? null,
+      now.getTime(),
+    );
+
+    const violations: string[] = [];
+    if (
+      floors.minPrimaryHeadroomPct !== null &&
+      primary !== null &&
+      !primary.expired &&
+      primary.remainingPercent < floors.minPrimaryHeadroomPct
+    ) {
+      violations.push(
+        `primary window headroom ${primary.remainingPercent.toFixed(1)}% < ${floors.minPrimaryHeadroomPct}% floor`,
+      );
+    }
+    if (
+      floors.minSecondaryHeadroomPct !== null &&
+      secondary !== null &&
+      !secondary.expired &&
+      secondary.remainingPercent < floors.minSecondaryHeadroomPct
+    ) {
+      violations.push(
+        `secondary window headroom ${secondary.remainingPercent.toFixed(1)}% < ${floors.minSecondaryHeadroomPct}% floor`,
+      );
+    }
+
+    const blocked = violations.length > 0;
+    const reason = blocked
+      ? `Codex rate-limit headroom below dispatch floor: ${violations.join("; ")}. New dispatches refused until the window resets.`
+      : null;
+
+    this.state.rateLimitAdmission = {
+      blocked,
+      reason,
+      evaluatedAt: now.toISOString(),
+      minPrimaryHeadroomPct: floors.minPrimaryHeadroomPct,
+      minSecondaryHeadroomPct: floors.minSecondaryHeadroomPct,
+      primaryUsedPercent:
+        primary !== null && !primary.expired ? primary.usedPercent : null,
+      secondaryUsedPercent:
+        secondary !== null && !secondary.expired ? secondary.usedPercent : null,
+    };
+
+    return { blocked, reason };
   }
 
   async onRetryTimer(issueId: string): Promise<RetryTimerResult> {

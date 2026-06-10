@@ -49,6 +49,7 @@ const BASE_ROW: RuntimeSnapshot["running"][number] = {
     truncated: false,
     entries: [],
   },
+  rate_limit_window: null,
 };
 
 function buildSnapshot(
@@ -66,6 +67,7 @@ function buildSnapshot(
       seconds_running: 330,
     },
     rate_limits: {},
+    rate_limit_admission: null,
   };
 }
 
@@ -335,6 +337,68 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain("13,000");
     expect(html).toContain("1,200");
     expect(html).toContain("300");
+  });
+
+  it("detail panel renders rate-limit window usage when observed", () => {
+    const snapshot = buildSnapshot({
+      rate_limit_window: {
+        primary: { start_pct: 39, latest_pct: 42.5, delta_pct: 3.5 },
+        secondary: { start_pct: 97, latest_pct: 98, delta_pct: 1 },
+      },
+    });
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+    expect(html).toContain("5h window");
+    expect(html).toContain("39.0% → 42.5% (+3.5%)");
+    expect(html).toContain("Weekly window");
+    expect(html).toContain("97.0% → 98.0% (+1.0%)");
+  });
+
+  it("omits rate-limit window rows when no usage was observed", () => {
+    const snapshot = buildSnapshot({ rate_limit_window: null });
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+    expect(html).not.toContain("39.0% →");
+  });
+
+  it("renders the rate-limit admission floor status line", () => {
+    const unconfigured = buildSnapshot({});
+    expect(
+      renderDashboardHtml(unconfigured, { liveUpdatesEnabled: false }),
+    ).toContain("Dispatch headroom floor: not configured.");
+
+    const blocked = {
+      ...buildSnapshot({}),
+      rate_limit_admission: {
+        blocked: true,
+        reason: "secondary window headroom 2.0% < 5% floor",
+        evaluated_at: "2026-03-21T10:00:00.000Z",
+        min_primary_headroom_pct: 10,
+        min_secondary_headroom_pct: 5,
+        primary_used_pct: 40,
+        secondary_used_pct: 98,
+      },
+    };
+    const blockedHtml = renderDashboardHtml(blocked, {
+      liveUpdatesEnabled: false,
+    });
+    expect(blockedHtml).toContain(
+      "Dispatch blocked: secondary window headroom 2.0% &lt; 5% floor",
+    );
+
+    const ok = {
+      ...buildSnapshot({}),
+      rate_limit_admission: {
+        blocked: false,
+        reason: null,
+        evaluated_at: "2026-03-21T10:00:00.000Z",
+        min_primary_headroom_pct: 10,
+        min_secondary_headroom_pct: 5,
+        primary_used_pct: 40,
+        secondary_used_pct: 91.5,
+      },
+    };
+    expect(renderDashboardHtml(ok, { liveUpdatesEnabled: false })).toContain(
+      "Dispatch headroom floor: ok (5h window 40.0% used, weekly window 91.5% used).",
+    );
   });
 
   it("detail panel renders compact loop trace entries without prompt bodies", () => {

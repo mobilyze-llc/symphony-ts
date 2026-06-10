@@ -423,6 +423,88 @@ describe("runtime snapshot", () => {
     expect(snapshot.running[0]!.pipeline_stage).toBeNull();
   });
 
+  it("projects per-stage rate-limit window usage into running rows", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: "2026-03-06T10:00:05.000Z",
+      lastCodexMessage: "Working",
+      turnCount: 1,
+      codexInputTokens: 10,
+      codexOutputTokens: 5,
+      codexTotalTokens: 15,
+    });
+    entry.rateLimitWindows = {
+      primary: { startPercent: 39, latestPercent: 42.5, lastResetsAt: null },
+      secondary: null,
+    };
+    state.running["issue-1"] = entry;
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+
+    expect(snapshot.running[0]!.rate_limit_window).toEqual({
+      primary: { start_pct: 39, latest_pct: 42.5, delta_pct: 3.5 },
+      secondary: null,
+    });
+  });
+
+  it("leaves rate_limit_window null without observations and projects admission state", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    state.running["issue-1"] = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: "2026-03-06T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: null,
+      lastCodexTimestamp: null,
+      lastCodexMessage: null,
+      turnCount: 0,
+      codexInputTokens: 0,
+      codexOutputTokens: 0,
+      codexTotalTokens: 0,
+    });
+
+    const bare = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+    expect(bare.running[0]!.rate_limit_window).toBeNull();
+    expect(bare.rate_limit_admission).toBeNull();
+
+    state.rateLimitAdmission = {
+      blocked: true,
+      reason: "secondary window headroom 2.0% < 5% floor",
+      evaluatedAt: "2026-03-06T10:00:09.000Z",
+      minPrimaryHeadroomPct: 10,
+      minSecondaryHeadroomPct: 5,
+      primaryUsedPercent: 39,
+      secondaryUsedPercent: 98,
+    };
+    const gated = buildRuntimeSnapshot(state, {
+      now: new Date("2026-03-06T10:00:10.000Z"),
+    });
+    expect(gated.rate_limit_admission).toEqual({
+      blocked: true,
+      reason: "secondary window headroom 2.0% < 5% floor",
+      evaluated_at: "2026-03-06T10:00:09.000Z",
+      min_primary_headroom_pct: 10,
+      min_secondary_headroom_pct: 5,
+      primary_used_pct: 39,
+      secondary_used_pct: 98,
+    });
+  });
+
   it("includes stage_duration_seconds and tokens_per_turn in running rows", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,

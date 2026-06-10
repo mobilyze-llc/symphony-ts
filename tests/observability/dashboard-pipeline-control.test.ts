@@ -337,6 +337,7 @@ function createSnapshot(): RuntimeSnapshot {
     rate_limits: {
       requestsRemaining: 10,
     },
+    rate_limit_admission: null,
   };
 }
 

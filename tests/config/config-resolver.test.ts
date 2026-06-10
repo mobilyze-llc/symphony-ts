@@ -79,6 +79,12 @@ describe("config-resolver", () => {
       estimatedCostPer1kTokensUsd:
         DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
       cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
+      maxPrimaryWindowPctPerUnit: null,
+      maxSecondaryWindowPctPerUnit: null,
+    });
+    expect(resolved.rateLimitAdmission).toEqual({
+      minPrimaryHeadroomPct: null,
+      minSecondaryHeadroomPct: null,
     });
     expect(resolved.codex.command).toBe(DEFAULT_CODEX_COMMAND);
     expect(resolved.codex.turnTimeoutMs).toBe(DEFAULT_TURN_TIMEOUT_MS);
@@ -190,6 +196,8 @@ describe("config-resolver", () => {
       premiumBudgetPauseRatio: 0.75,
       estimatedCostPer1kTokensUsd: 0.08,
       cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
+      maxPrimaryWindowPctPerUnit: null,
+      maxSecondaryWindowPctPerUnit: null,
     });
     expect(resolved.codex.command).toBe("codex app-server --stdio");
     expect(resolved.codex.ephemeralHome).toBe(true);
@@ -721,6 +729,87 @@ describe("config-resolver fast_track", () => {
     });
 
     expect(resolved.hardStops?.cachedTokenCostRatio).toBe(0);
+  });
+
+  it("parses rate-limit window budgets at workflow and stage level", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        hard_stops: {
+          max_primary_window_pct_per_unit: "25",
+          max_secondary_window_pct_per_unit: 5,
+        },
+        stages: {
+          initial_stage: "investigate",
+          investigate: {
+            type: "agent",
+            hard_stops: {
+              max_secondary_window_pct_per_unit: "2.5",
+            },
+            on_complete: "done",
+          },
+          done: { type: "terminal" },
+        },
+      },
+    });
+
+    expect(resolved.hardStops?.maxPrimaryWindowPctPerUnit).toBe(25);
+    expect(resolved.hardStops?.maxSecondaryWindowPctPerUnit).toBe(5);
+    expect(
+      resolved.stages?.stages.investigate?.hardStops
+        ?.maxSecondaryWindowPctPerUnit,
+    ).toBe(2.5);
+  });
+
+  it("defaults rate-limit window budgets to null and rejects out-of-range values", () => {
+    const unset = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {},
+    });
+    expect(unset.hardStops?.maxPrimaryWindowPctPerUnit).toBeNull();
+    expect(unset.hardStops?.maxSecondaryWindowPctPerUnit).toBeNull();
+
+    const outOfRange = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        hard_stops: {
+          max_primary_window_pct_per_unit: "150",
+          max_secondary_window_pct_per_unit: "0",
+        },
+      },
+    });
+    expect(outOfRange.hardStops?.maxPrimaryWindowPctPerUnit).toBeNull();
+    expect(outOfRange.hardStops?.maxSecondaryWindowPctPerUnit).toBeNull();
+  });
+
+  it("parses rate_limit_admission floors and defaults them to null", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        rate_limit_admission: {
+          min_primary_headroom_pct: "10",
+          min_secondary_headroom_pct: 5,
+        },
+      },
+    });
+    expect(resolved.rateLimitAdmission).toEqual({
+      minPrimaryHeadroomPct: 10,
+      minSecondaryHeadroomPct: 5,
+    });
+
+    const unset = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {},
+    });
+    expect(unset.rateLimitAdmission).toEqual({
+      minPrimaryHeadroomPct: null,
+      minSecondaryHeadroomPct: null,
+    });
   });
 
   it("resolves slack_notify_channel from YAML config", () => {

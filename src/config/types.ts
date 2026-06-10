@@ -47,9 +47,29 @@ export interface WorkflowHardStopsConfig {
   premiumBudgetPauseRatio: number;
   estimatedCostPer1kTokensUsd: number;
   cachedTokenCostRatio: number;
+  /**
+   * Max share of the Codex primary (5-hour) rate-limit window one unit of
+   * work may burn, in percent points (0, 100]. null (the key omitted in
+   * YAML) disables the check; 0 is rejected by config parsing because it
+   * would pause on the first observed snapshot.
+   */
+  maxPrimaryWindowPctPerUnit: number | null;
+  /** Same budget for the secondary (weekly) window. null disables. */
+  maxSecondaryWindowPctPerUnit: number | null;
 }
 
 export type WorkflowHardStopsConfigOverride = Partial<WorkflowHardStopsConfig>;
+
+/**
+ * Global dispatch admission floor keyed on observed Codex rate-limit
+ * headroom (SYMPH-333). When the remaining share of a window drops below the
+ * configured floor, the dispatcher refuses new admissions until the window
+ * resets. null floors disable the guard (default).
+ */
+export interface WorkflowRateLimitAdmissionConfig {
+  minPrimaryHeadroomPct: number | null;
+  minSecondaryHeadroomPct: number | null;
+}
 
 export interface WorkflowRunnerConfig {
   kind: string;
@@ -146,6 +166,7 @@ export interface ResolvedWorkflowConfig {
   hooks: WorkflowHooksConfig;
   agent: WorkflowAgentConfig;
   hardStops?: WorkflowHardStopsConfig;
+  rateLimitAdmission: WorkflowRateLimitAdmissionConfig;
   runner: WorkflowRunnerConfig;
   continuousFeedback?: WorkflowContinuousFeedbackConfig;
   codex: WorkflowCodexConfig;

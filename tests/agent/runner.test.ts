@@ -335,6 +335,8 @@ describe("AgentRunner", () => {
           premiumBudgetPauseRatio: 0.9,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
         },
       },
       tracker: createTracker({
@@ -374,6 +376,8 @@ describe("AgentRunner", () => {
           premiumBudgetPauseRatio: 0.9,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
         },
       },
       tracker: createTracker({
@@ -419,6 +423,8 @@ describe("AgentRunner", () => {
           premiumBudgetPauseRatio: 0.9,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
         },
       },
       tracker,
@@ -459,6 +465,8 @@ describe("AgentRunner", () => {
           premiumBudgetPauseRatio: 0.9,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
         },
       },
       tracker,
@@ -518,6 +526,88 @@ describe("AgentRunner", () => {
     expect(result.hardStop?.reason).toContain("Live token telemetry");
   });
 
+  it("pauses with rate_limit_budget from live window telemetry", async () => {
+    const root = await createRoot();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const continueTurn = vi.fn();
+    const codexRateLimits = (primaryUsed: number) => ({
+      limit_id: "codex",
+      primary: {
+        used_percent: primaryUsed,
+        window_minutes: 300,
+        resets_at: 1781093929,
+      },
+      secondary: {
+        used_percent: 50,
+        window_minutes: 10080,
+        resets_at: 1781137743,
+      },
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 1_000_000,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          estimatedCostPer1kTokensUsd: 0.01,
+          cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: 5,
+          maxSecondaryWindowPctPerUnit: null,
+        },
+      },
+      tracker: createTracker(),
+      createCodexClient: (input) => ({
+        async startSession() {
+          input.onEvent({
+            event: "notification",
+            timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "rate limit baseline",
+            rateLimits: codexRateLimits(40),
+          });
+          input.onEvent({
+            event: "notification",
+            timestamp: new Date("2026-03-06T00:00:02.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "rate limit burn",
+            rateLimits: codexRateLimits(46),
+          });
+
+          const error = new Error(
+            "Codex session closed while a turn was running.",
+          ) as Error & { code: string };
+          error.code = ERROR_CODES.codexProtocolError;
+          throw error;
+        },
+        continueTurn,
+        close,
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(close).toHaveBeenCalled();
+    expect(continueTurn).not.toHaveBeenCalled();
+    expect(result.hardStop).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "rate_limit_budget",
+    });
+    expect(result.hardStop?.reason).toContain("primary window burned 6.0%");
+    expect(result.hardStop?.reason).toContain("Live token telemetry");
+  });
+
   it("uses stage hard-stop overrides for live telemetry budget enforcement", async () => {
     const root = await createRoot();
     const close = vi.fn().mockResolvedValue(undefined);
@@ -550,6 +640,8 @@ describe("AgentRunner", () => {
           premiumBudgetPauseRatio: 0.9,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
         },
       },
       tracker: createTracker(),
@@ -635,6 +727,8 @@ describe("AgentRunner", () => {
           premiumBudgetPauseRatio: 0.9,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
         },
       },
       tracker,
@@ -679,6 +773,8 @@ describe("AgentRunner", () => {
           premiumBudgetPauseRatio: 0.9,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
         },
       },
       tracker,
@@ -761,6 +857,8 @@ describe("AgentRunner", () => {
           premiumBudgetPauseRatio: 0.9,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
         },
       },
       tracker,
@@ -1858,6 +1956,10 @@ function createConfig(root: string, scenario: string): ResolvedWorkflowConfig {
       turnTimeoutMs: 1_000,
       readTimeoutMs: 1_000,
       stallTimeoutMs: 2_000,
+    },
+    rateLimitAdmission: {
+      minPrimaryHeadroomPct: null,
+      minSecondaryHeadroomPct: null,
     },
     server: {
       port: null,

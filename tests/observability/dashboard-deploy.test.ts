@@ -379,6 +379,7 @@ function createSnapshot(): RuntimeSnapshot {
           truncated: false,
           entries: [],
         },
+        rate_limit_window: null,
       },
     ],
     retrying: [],
@@ -391,6 +392,7 @@ function createSnapshot(): RuntimeSnapshot {
     rate_limits: {
       requestsRemaining: 7,
     },
+    rate_limit_admission: null,
   };
 }
 

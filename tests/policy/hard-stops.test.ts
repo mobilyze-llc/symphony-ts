@@ -8,6 +8,7 @@ import {
   evaluateIterationHardStop,
   evaluateModePermission,
   evaluateNoProgressHardStop,
+  evaluateRateLimitBudgetHardStop,
   resolveHardStopsConfig,
 } from "../../src/policy/hard-stops.js";
 
@@ -19,6 +20,8 @@ const CONFIG = {
   premiumBudgetPauseRatio: 0.8,
   estimatedCostPer1kTokensUsd: 5,
   cachedTokenCostRatio: 0.1,
+  maxPrimaryWindowPctPerUnit: null,
+  maxSecondaryWindowPctPerUnit: null,
 };
 
 describe("hard-stop policy", () => {
@@ -90,6 +93,121 @@ describe("hard-stop policy", () => {
       outcome: "PAUSED-budget",
       trigger: "premium_spend_near_ceiling",
     });
+  });
+
+  it("pauses with rate_limit_budget when a unit burns its window share", () => {
+    const decision = evaluateRateLimitBudgetHardStop({
+      config: {
+        ...CONFIG,
+        maxSecondaryWindowPctPerUnit: 5,
+      },
+      turnCount: 3,
+      totalTokens: 400,
+      rateLimitUsage: {
+        primary: null,
+        secondary: {
+          startPercent: 91,
+          latestPercent: 96.5,
+          lastResetsAt: 1781137743,
+        },
+      },
+    });
+
+    expect(decision).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "rate_limit_budget",
+      turnCount: 3,
+      totalTokens: 400,
+    });
+    expect(decision?.reason).toContain("secondary window burned 5.5%");
+    expect(decision?.reason).toContain("91.0% -> 96.5%");
+  });
+
+  it("checks the primary window budget independently of the secondary", () => {
+    const usage = {
+      primary: {
+        startPercent: 30,
+        latestPercent: 56,
+        lastResetsAt: 1781093929,
+      },
+      secondary: {
+        startPercent: 90,
+        latestPercent: 90.5,
+        lastResetsAt: null,
+      },
+    };
+
+    expect(
+      evaluateRateLimitBudgetHardStop({
+        config: { ...CONFIG, maxPrimaryWindowPctPerUnit: 25 },
+        turnCount: 1,
+        totalTokens: 100,
+        rateLimitUsage: usage,
+      }),
+    ).toMatchObject({ trigger: "rate_limit_budget" });
+
+    // Same usage with only the secondary budget configured stays under it.
+    expect(
+      evaluateRateLimitBudgetHardStop({
+        config: { ...CONFIG, maxSecondaryWindowPctPerUnit: 5 },
+        turnCount: 1,
+        totalTokens: 100,
+        rateLimitUsage: usage,
+      }),
+    ).toBeNull();
+  });
+
+  it("never pauses on rate limits when budgets are unconfigured or unobserved", () => {
+    // Budgets off (defaults): heavy observed burn does not pause.
+    expect(
+      evaluateRateLimitBudgetHardStop({
+        config: CONFIG,
+        turnCount: 1,
+        totalTokens: 100,
+        rateLimitUsage: {
+          primary: {
+            startPercent: 0,
+            latestPercent: 99,
+            lastResetsAt: null,
+          },
+          secondary: null,
+        },
+      }),
+    ).toBeNull();
+
+    // Budget on but no snapshot observed yet: fail open.
+    expect(
+      evaluateRateLimitBudgetHardStop({
+        config: {
+          ...CONFIG,
+          maxPrimaryWindowPctPerUnit: 1,
+          maxSecondaryWindowPctPerUnit: 1,
+        },
+        turnCount: 1,
+        totalTokens: 100,
+        rateLimitUsage: { primary: null, secondary: null },
+      }),
+    ).toBeNull();
+  });
+
+  it("applies the cache discount to rate_limit_budget cost estimates", () => {
+    const decision = evaluateRateLimitBudgetHardStop({
+      config: { ...CONFIG, maxPrimaryWindowPctPerUnit: 10 },
+      turnCount: 2,
+      totalTokens: 1000,
+      cacheReadTokens: 1000,
+      rateLimitUsage: {
+        primary: {
+          startPercent: 10,
+          latestPercent: 20,
+          lastResetsAt: null,
+        },
+        secondary: null,
+      },
+    });
+
+    // 1000 tokens fully cached at ratio 0.1 => 100 billable => $0.50 at $5/1k.
+    expect(decision?.estimatedCostUsd).toBeCloseTo(0.5, 5);
   });
 
   it("discounts cached input tokens in the estimated dollar cost", () => {

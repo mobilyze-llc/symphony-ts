@@ -34,6 +34,20 @@ hard_stops:
   max_dollar_budget_usd: 12.5
   premium_budget_pause_ratio: 0.8
   estimated_cost_per_1k_tokens_usd: 0.05
+  # SYMPH-333: pause a unit that burns more than its share of a Codex
+  # subscription window, in percent points of the window (0-100). Primary is
+  # the 5-hour window, secondary the weekly window. Sized from SYMPH-319
+  # canaries (a full investigate unit burned ~1% of the weekly window).
+  max_primary_window_pct_per_unit: 25
+  max_secondary_window_pct_per_unit: 5
+
+# SYMPH-333: refuse NEW dispatches when the observed remaining share of a
+# Codex subscription window is below these floors. Running lanes finish
+# normally. Protects interactive operator headroom — the 2026-06-09 session
+# halt happened at 3% weekly headroom while dollar budgets still admitted.
+rate_limit_admission:
+  min_primary_headroom_pct: 10
+  min_secondary_headroom_pct: 5
 
 codex:
   command: codex --disable plugins --disable hooks --disable plugin_hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use --disable multi_agent --disable goals --disable memories --disable tool_call_mcp_elicitation --config 'model_reasoning_effort="low"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server

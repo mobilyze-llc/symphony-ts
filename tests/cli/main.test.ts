@@ -310,6 +310,10 @@ function createConfig(
       readTimeoutMs: 5_000,
       stallTimeoutMs: 300_000,
     },
+    rateLimitAdmission: {
+      minPrimaryHeadroomPct: null,
+      minSecondaryHeadroomPct: null,
+    },
     server: {
       port: null,
       slackNotifyChannel: null,

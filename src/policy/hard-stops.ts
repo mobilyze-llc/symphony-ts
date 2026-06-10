@@ -1,3 +1,5 @@
+import type { RateLimitWindowObservation } from "../codex/rate-limits.js";
+import { observedWindowDeltaPercent } from "../codex/rate-limits.js";
 import type {
   WorkflowHardStopsConfig,
   WorkflowHardStopsConfigOverride,
@@ -15,6 +17,7 @@ export type HardStopTrigger =
   | "token_budget"
   | "dollar_budget"
   | "premium_spend_near_ceiling"
+  | "rate_limit_budget"
   | "permission_denied";
 
 export interface HardStopDecision {
@@ -65,6 +68,11 @@ export function resolveHardStopsConfig(
       fallback.estimatedCostPer1kTokensUsd,
     cachedTokenCostRatio:
       config?.cachedTokenCostRatio ?? fallback.cachedTokenCostRatio,
+    maxPrimaryWindowPctPerUnit:
+      config?.maxPrimaryWindowPctPerUnit ?? fallback.maxPrimaryWindowPctPerUnit,
+    maxSecondaryWindowPctPerUnit:
+      config?.maxSecondaryWindowPctPerUnit ??
+      fallback.maxSecondaryWindowPctPerUnit,
   };
 }
 
@@ -275,6 +283,68 @@ export function evaluateBudgetHardStop(input: {
   return null;
 }
 
+export interface RateLimitUsageObservations {
+  primary: RateLimitWindowObservation | null;
+  secondary: RateLimitWindowObservation | null;
+}
+
+/**
+ * Pause when a single unit of work consumed more than its configured share
+ * of a Codex subscription window (SYMPH-333). The snapshot is account-level,
+ * so under concurrent workers the per-unit delta over-attributes shared burn;
+ * the budget is therefore a protective ceiling, not an exact meter.
+ */
+export function evaluateRateLimitBudgetHardStop(input: {
+  config: WorkflowHardStopsConfig;
+  turnCount: number;
+  totalTokens: number;
+  cacheReadTokens?: number;
+  rateLimitUsage: RateLimitUsageObservations;
+}): HardStopDecision | null {
+  const windows: Array<{
+    label: "primary" | "secondary";
+    budgetPct: number | null;
+    observation: RateLimitWindowObservation | null;
+  }> = [
+    {
+      label: "primary",
+      budgetPct: input.config.maxPrimaryWindowPctPerUnit,
+      observation: input.rateLimitUsage.primary,
+    },
+    {
+      label: "secondary",
+      budgetPct: input.config.maxSecondaryWindowPctPerUnit,
+      observation: input.rateLimitUsage.secondary,
+    },
+  ];
+
+  for (const window of windows) {
+    if (window.budgetPct === null || window.observation === null) {
+      continue;
+    }
+
+    const deltaPct = observedWindowDeltaPercent(window.observation);
+    if (deltaPct < window.budgetPct) {
+      continue;
+    }
+
+    return {
+      outcome: "PAUSED-budget",
+      trigger: "rate_limit_budget",
+      reason: `Rate-limit budget exceeded: ${window.label} window burned ${formatPct(deltaPct)} of the configured ${formatPct(window.budgetPct)} per-unit share (window ${formatPct(window.observation.startPercent)} -> ${formatPct(window.observation.latestPercent)} used).`,
+      turnCount: input.turnCount,
+      totalTokens: input.totalTokens,
+      estimatedCostUsd: estimateCostUsd({
+        totalTokens: input.totalTokens,
+        cacheReadTokens: input.cacheReadTokens ?? 0,
+        config: input.config,
+      }),
+    };
+  }
+
+  return null;
+}
+
 export function evaluateIterationHardStop(input: {
   config: WorkflowHardStopsConfig;
   turnCount: number;
@@ -355,6 +425,10 @@ function estimateCostUsd(input: {
 
 function formatCost(cost: number): string {
   return `$${cost.toFixed(2)}`;
+}
+
+function formatPct(value: number): string {
+  return `${value.toFixed(1)}%`;
 }
 
 function containsGateBypass(command: string): boolean {

@@ -97,6 +97,10 @@ describe("domain model", () => {
       tokenTelemetry: [],
       tokenTelemetryObservedCount: 0,
       codexSessionLogs: [],
+      rateLimitWindows: {
+        primary: null,
+        secondary: null,
+      },
     });
 
     const state = createInitialOrchestratorState({
@@ -122,6 +126,7 @@ describe("domain model", () => {
       secondsRunning: 0,
     });
     expect(state.codexRateLimits).toBeNull();
+    expect(state.rateLimitAdmission).toBeNull();
     expect(state.issueExecutionHistory).toEqual({});
     expect(state.managerRunJournal).toEqual([]);
     expect(state.managerRuns).toEqual({});

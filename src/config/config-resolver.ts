@@ -17,6 +17,8 @@ import {
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
   DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
   DEFAULT_HARD_STOP_MAX_ITERATIONS,
+  DEFAULT_HARD_STOP_MAX_PRIMARY_WINDOW_PCT_PER_UNIT,
+  DEFAULT_HARD_STOP_MAX_SECONDARY_WINDOW_PCT_PER_UNIT,
   DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
   DEFAULT_HARD_STOP_NO_PROGRESS_TURNS,
   DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
@@ -33,6 +35,8 @@ import {
   DEFAULT_OBSERVABILITY_REFRESH_MS,
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_RATE_LIMIT_MIN_PRIMARY_HEADROOM_PCT,
+  DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT,
   DEFAULT_READ_TIMEOUT_MS,
   DEFAULT_RUNNER_KIND,
   DEFAULT_STALL_TIMEOUT_MS,
@@ -70,6 +74,7 @@ export function resolveWorkflowConfig(
   const agent = asRecord(config.agent);
   const hardStops = asRecord(config.hard_stops);
   const hardStopOverrides = readHardStopsConfig(hardStops) ?? {};
+  const rateLimitAdmission = asRecord(config.rate_limit_admission);
   const runner = asRecord(config.runner);
   const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
@@ -170,6 +175,20 @@ export function resolveWorkflowConfig(
       cachedTokenCostRatio:
         hardStopOverrides.cachedTokenCostRatio ??
         DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
+      maxPrimaryWindowPctPerUnit:
+        hardStopOverrides.maxPrimaryWindowPctPerUnit ??
+        DEFAULT_HARD_STOP_MAX_PRIMARY_WINDOW_PCT_PER_UNIT,
+      maxSecondaryWindowPctPerUnit:
+        hardStopOverrides.maxSecondaryWindowPctPerUnit ??
+        DEFAULT_HARD_STOP_MAX_SECONDARY_WINDOW_PCT_PER_UNIT,
+    },
+    rateLimitAdmission: {
+      minPrimaryHeadroomPct:
+        readPercentPoints(rateLimitAdmission.min_primary_headroom_pct) ??
+        DEFAULT_RATE_LIMIT_MIN_PRIMARY_HEADROOM_PCT,
+      minSecondaryHeadroomPct:
+        readPercentPoints(rateLimitAdmission.min_secondary_headroom_pct) ??
+        DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT,
     },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,
@@ -416,6 +435,19 @@ function readNonNegativeInteger(value: unknown): number | null {
 function readRatio(value: unknown): number | null {
   const parsed = readNumber(value);
   if (parsed === null || parsed <= 0 || parsed > 1) {
+    return null;
+  }
+
+  return parsed;
+}
+
+// Percent points in (0, 100] matching Codex rate-limit `used_percent` units.
+// Zero is rejected on purpose: a 0 budget would pause on the first snapshot
+// (delta >= 0 always holds) and a 0 headroom floor is a no-op — "disabled"
+// is expressed by omitting the key, never by 0.
+function readPercentPoints(value: unknown): number | null {
+  const parsed = readNumber(value);
+  if (parsed === null || parsed <= 0 || parsed > 100) {
     return null;
   }
 
@@ -675,6 +707,20 @@ function readHardStopsConfig(
   );
   if (cachedTokenCostRatio !== null) {
     parsed.cachedTokenCostRatio = cachedTokenCostRatio;
+  }
+
+  const maxPrimaryWindowPctPerUnit = readPercentPoints(
+    hardStops.max_primary_window_pct_per_unit,
+  );
+  if (maxPrimaryWindowPctPerUnit !== null) {
+    parsed.maxPrimaryWindowPctPerUnit = maxPrimaryWindowPctPerUnit;
+  }
+
+  const maxSecondaryWindowPctPerUnit = readPercentPoints(
+    hardStops.max_secondary_window_pct_per_unit,
+  );
+  if (maxSecondaryWindowPctPerUnit !== null) {
+    parsed.maxSecondaryWindowPctPerUnit = maxSecondaryWindowPctPerUnit;
   }
 
   return Object.keys(parsed).length === 0 ? null : parsed;
