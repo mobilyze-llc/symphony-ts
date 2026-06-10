@@ -7,6 +7,7 @@ import {
   ORCHESTRATOR_ISSUE_STATUSES,
   RUN_ATTEMPT_PHASES,
   type StageRecord,
+  containsStageCompleteSignal,
   createEmptyLiveSession,
   createInitialOrchestratorState,
   normalizeIssueState,
@@ -261,6 +262,36 @@ describe("parseFailureSignal", () => {
 
   it("returns null when no failure signal is present", () => {
     expect(parseFailureSignal("[STAGE_COMPLETE]")).toBeNull();
+  });
+});
+
+describe("containsStageCompleteSignal", () => {
+  it("detects the marker anywhere in the final message", () => {
+    expect(containsStageCompleteSignal("[STAGE_COMPLETE]")).toBe(true);
+    expect(
+      containsStageCompleteSignal("Done with investigation.\n[STAGE_COMPLETE]"),
+    ).toBe(true);
+    expect(
+      containsStageCompleteSignal(
+        "[STAGE_COMPLETE]  Investigation workpad updated on the existing Linear comment.",
+      ),
+    ).toBe(true);
+    expect(
+      containsStageCompleteSignal("Workpad posted. [STAGE_COMPLETE] Thanks!"),
+    ).toBe(true);
+  });
+
+  it("does not fire without the exact marker", () => {
+    expect(containsStageCompleteSignal(null)).toBe(false);
+    expect(containsStageCompleteSignal(undefined)).toBe(false);
+    expect(containsStageCompleteSignal("")).toBe(false);
+    expect(containsStageCompleteSignal("STAGE_COMPLETE")).toBe(false);
+    expect(containsStageCompleteSignal("[STAGE_FAILED: verify]")).toBe(false);
+  });
+});
+
+describe("parseFailureSignal extraction cases", () => {
+  it("returns null for non-signal prose", () => {
     expect(parseFailureSignal("All tests passed successfully.")).toBeNull();
     expect(parseFailureSignal("STAGE_FAILED: verify")).toBeNull();
   });

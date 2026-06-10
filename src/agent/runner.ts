@@ -36,6 +36,7 @@ import {
   type RunAttempt,
   type RunAttemptPhase,
   type Workspace,
+  containsStageCompleteSignal,
   createEmptyLiveSession,
   normalizeIssueState,
   parseFailureSignal,
@@ -534,7 +535,7 @@ export class AgentRunner {
         if (hardStop !== null) {
           break;
         }
-        if (lastTurn.message?.trimEnd().endsWith("[STAGE_COMPLETE]")) {
+        if (containsStageCompleteSignal(lastTurn.message)) {
           break;
         }
         if (

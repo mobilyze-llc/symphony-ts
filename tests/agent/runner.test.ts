@@ -1612,6 +1612,56 @@ describe("AgentRunner", () => {
     expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
   });
 
+  it("breaks the turn loop when [STAGE_COMPLETE] leads the final message", async () => {
+    const root = await createRoot();
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const continueTurn = vi.fn();
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker,
+      createCodexClient: (input) => ({
+        async startSession() {
+          input.onEvent({
+            event: "session_started",
+            timestamp: new Date().toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+          });
+          return {
+            status: "completed" as const,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            sessionId: "thread-1-turn-1",
+            usage: null,
+            rateLimits: null,
+            // Verbatim shape from the SYMPH-330 round-3 canary: marker
+            // leads, explanation follows. endsWith missed this (SYMPH-350).
+            message:
+              "[STAGE_COMPLETE]  Investigation workpad updated on the existing Linear comment `71de44d1`.",
+          };
+        },
+        continueTurn,
+        close: vi.fn().mockResolvedValue(undefined),
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "investigate",
+    });
+
+    expect(result.turnsCompleted).toBe(1);
+    expect(continueTurn).not.toHaveBeenCalled();
+    expect(result.runAttempt.status).toBe("succeeded");
+  });
+
   it("breaks the turn loop early when the agent emits [STAGE_FAILED: ...]", async () => {
     const root = await createRoot();
     const tracker = createTracker({

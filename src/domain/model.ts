@@ -938,6 +938,25 @@ export interface FailureSignal {
 const STAGE_FAILED_REGEX =
   /\[STAGE_FAILED:\s*(verify|review|rebase|spec|infra)\s*\]/;
 
+const STAGE_COMPLETE_REGEX = /\[STAGE_COMPLETE\]/;
+
+/**
+ * Detect the `[STAGE_COMPLETE]` signal anywhere in the agent's final
+ * message, mirroring parseFailureSignal semantics. Workers emit the marker
+ * leading, trailing, or inline (observed on the SYMPH-330 canary:
+ * "[STAGE_COMPLETE]  Investigation workpad updated on …"), and most prompt
+ * variants just say "output [STAGE_COMPLETE]" — an endsWith predicate
+ * silently missed those completions (SYMPH-350).
+ */
+export function containsStageCompleteSignal(
+  text: string | null | undefined,
+): boolean {
+  if (text === null || text === undefined) {
+    return false;
+  }
+  return STAGE_COMPLETE_REGEX.test(text);
+}
+
 /**
  * Parse a `[STAGE_FAILED: class]` signal from agent output text.
  * Returns the parsed failure signal or null if no signal is found.
