@@ -9,6 +9,17 @@ import {
 
 describe("writeTrackerIssueFromBoundary", () => {
   it("creates a cold-readable follow-up issue with parent linkage", async () => {
+    const resolveLabelIdsByNames = vi.fn(async (labelNames: string[]) =>
+      labelNames.flatMap((label) => {
+        if (label === "supervision") {
+          return [{ id: "label-supervision", name: label }];
+        }
+        if (label === "risk:high") {
+          return [{ id: "label-risk-high", name: label }];
+        }
+        return [];
+      }),
+    );
     const createIssue = vi.fn(async () => ({
       id: "follow-up-1",
       identifier: "SYMPH-200",
@@ -27,6 +38,7 @@ describe("writeTrackerIssueFromBoundary", () => {
           labels: ["risk:high"],
         }),
       ],
+      resolveLabelIdsByNames,
     });
 
     const result = await writeTrackerIssueFromBoundary({
@@ -56,6 +68,10 @@ describe("writeTrackerIssueFromBoundary", () => {
           "Dispatcher follow-up: actual_write_collision for ISSUE-1 + ISSUE-2",
         description: expect.stringContaining("## Acceptance Criteria"),
       }),
+    );
+    expect(resolveLabelIdsByNames).toHaveBeenCalledWith(
+      expect.arrayContaining(["supervision", "risk:high"]),
+      "SYMPH",
     );
     const createCalls = createIssue.mock.calls as unknown as Array<
       [
@@ -262,6 +278,89 @@ describe("writeTrackerIssueFromBoundary", () => {
       }),
     );
   });
+
+  it("reports label resolution failures with follow-up context before rethrowing", async () => {
+    const onFailure = vi.fn();
+    const error = Object.assign(
+      new Error("Linear API request failed with HTTP 400."),
+      {
+        code: "linear_api_status",
+        status: 400,
+        details: {
+          operationName: "SymphonyIssueLabelsByNames",
+          variables: {
+            teamKey: "SYMPH",
+            labelNames: ["supervision"],
+          },
+        },
+      },
+    );
+    const client = createClient({
+      resolveLabelIdsByNames: vi.fn(async () => {
+        throw error;
+      }),
+    });
+
+    await expect(
+      writeTrackerIssueFromBoundary({
+        client,
+        request: createRequest(),
+        terminalStates: ["Done", "Canceled"],
+        onFailure,
+      }),
+    ).rejects.toThrow("Linear API request failed with HTTP 400.");
+
+    expect(client.createIssue).not.toHaveBeenCalled();
+    expect(client.updateIssue).not.toHaveBeenCalled();
+    expect(onFailure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title:
+          "Dispatcher follow-up: actual_write_collision for ISSUE-1 + ISSUE-2",
+        sourceIssueIds: ["1", "2"],
+        error,
+      }),
+    );
+  });
+
+  it.each([
+    ["missing", null],
+    ["empty", ""],
+    ["blank", "   "],
+  ] as const)(
+    "fails closed before label resolution when the source issue team key is %s",
+    async (_label, teamKey) => {
+      const onFailure = vi.fn();
+      const client = createClient({
+        sourceIssues: [createSourceIssue({ teamKey })],
+      });
+
+      await expect(
+        writeTrackerIssueFromBoundary({
+          client,
+          request: createRequest(),
+          terminalStates: ["Done", "Canceled"],
+          onFailure,
+        }),
+      ).rejects.toThrow(
+        "Tracker write source issue ISSUE-1 is missing team/project context.",
+      );
+
+      expect(client.resolveLabelIdsByNames).not.toHaveBeenCalled();
+      expect(client.createIssue).not.toHaveBeenCalled();
+      expect(client.updateIssue).not.toHaveBeenCalled();
+      expect(onFailure).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title:
+            "Dispatcher follow-up: actual_write_collision for ISSUE-1 + ISSUE-2",
+          sourceIssueIds: ["1", "2"],
+          error: expect.objectContaining({
+            message:
+              "Tracker write source issue ISSUE-1 is missing team/project context.",
+          }),
+        }),
+      );
+    },
+  );
 });
 
 function createClient(overrides?: {

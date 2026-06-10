@@ -45,7 +45,7 @@ export interface TrackerIssueWriterClient {
   }): Promise<TrackerIssueReference[]>;
   resolveLabelIdsByNames(
     labelNames: string[],
-    teamId: string,
+    teamKey: string,
   ): Promise<Array<{ id: string; name: string }>>;
   createIssue(input: {
     teamId: string;
@@ -126,7 +126,12 @@ async function upsertTrackerIssueFromBoundary(input: {
   if (primaryIssue === undefined) {
     throw new Error("Tracker write source issues were empty after resolution.");
   }
-  if (primaryIssue.teamId === null || primaryIssue.projectId === null) {
+  if (
+    primaryIssue.teamId === null ||
+    primaryIssue.teamKey === null ||
+    primaryIssue.teamKey.trim() === "" ||
+    primaryIssue.projectId === null
+  ) {
     throw new Error(
       `Tracker write source issue ${primaryIssue.identifier} is missing team/project context.`,
     );
@@ -135,7 +140,7 @@ async function upsertTrackerIssueFromBoundary(input: {
   const parent = resolveCommonParent(sourceIssues);
   const labelNames = resolveRelevantLabels(input.request, sourceIssues);
   const resolvedLabelIds = (
-    await input.client.resolveLabelIdsByNames(labelNames, primaryIssue.teamId)
+    await input.client.resolveLabelIdsByNames(labelNames, primaryIssue.teamKey)
   ).map((label) => label.id);
   const description = formatTrackerIssueDescription({
     request: input.request,

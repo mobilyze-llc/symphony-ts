@@ -429,7 +429,7 @@ export class LinearTrackerClient implements IssueTracker {
 
   async resolveLabelIdsByNames(
     labelNames: string[],
-    teamId: string,
+    teamKey: string,
   ): Promise<Array<{ id: string; name: string }>> {
     if (labelNames.length === 0) {
       return [];
@@ -438,7 +438,7 @@ export class LinearTrackerClient implements IssueTracker {
     const response = await this.postGraphql<LinearIssueLabelData>(
       LINEAR_ISSUE_LABELS_BY_NAMES_QUERY,
       {
-        teamId,
+        teamKey,
         labelNames,
       },
     );
@@ -716,7 +716,10 @@ export class LinearTrackerClient implements IssueTracker {
       throw new TrackerError(
         ERROR_CODES.linearApiStatus,
         `Linear API request failed with HTTP ${response.status}.`,
-        { status: response.status },
+        {
+          details: buildGraphqlDiagnosticContext(query, variables),
+          status: response.status,
+        },
       );
     }
 
@@ -735,7 +738,12 @@ export class LinearTrackerClient implements IssueTracker {
       throw new TrackerError(
         ERROR_CODES.linearGraphqlErrors,
         "Linear GraphQL returned top-level errors.",
-        { details: body.errors },
+        {
+          details: {
+            ...buildGraphqlDiagnosticContext(query, variables),
+            errors: body.errors,
+          },
+        },
       );
     }
 
@@ -851,6 +859,38 @@ function normalizeLinearIssueReference(node: unknown): LinearIssueReference {
           }
         : null,
   };
+}
+
+function buildGraphqlDiagnosticContext(
+  query: string,
+  variables: Record<string, unknown>,
+): { operationName: string | null; variables: Record<string, unknown> } {
+  return {
+    operationName: extractGraphqlOperationName(query),
+    variables: sanitizeGraphqlVariables(variables),
+  };
+}
+
+function extractGraphqlOperationName(query: string): string | null {
+  const match = /\b(?:query|mutation)\s+([_A-Za-z][_0-9A-Za-z]*)/.exec(query);
+  return match?.[1] ?? null;
+}
+
+function sanitizeGraphqlVariables(
+  variables: Record<string, unknown>,
+): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(variables).map(([key, value]) => [
+      key,
+      isSensitiveGraphqlVariable(key) ? "[redacted]" : value,
+    ]),
+  );
+}
+
+function isSensitiveGraphqlVariable(key: string): boolean {
+  return (
+    /(?:api|auth|secret|token|key|password)/i.test(key) && key !== "teamKey"
+  );
 }
 
 async function parseGraphqlResponseBody(response: Response): Promise<unknown> {
