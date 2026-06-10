@@ -1201,7 +1201,6 @@ async function discoverCodexSkillPaths(input: {
 
   for (const root of [
     join(homedir(), ".agents", "skills"),
-    join(input.sourceHome, "skills"),
     "/etc/codex/skills",
   ]) {
     for (const skillPath of await findSkillFiles(root)) {

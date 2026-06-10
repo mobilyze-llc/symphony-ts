@@ -412,7 +412,7 @@ describe("CodexAppServerClient", () => {
       expect(config).toContain("plugins = false");
       expect(config).toContain("tool_call_mcp_elicitation = false");
       expect(config).toContain("[[skills.config]]");
-      expect(config).toContain(`path = "${skillPath}"`);
+      expect(config).not.toContain(`path = "${skillPath}"`);
       expect(config).toContain(
         `path = "${join(codexHome, "skills", ".system", "openai-docs", "SKILL.md")}"`,
       );

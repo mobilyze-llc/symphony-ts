@@ -352,10 +352,12 @@ path Codex's own skill discovery can resolve at launch:
   before they exist, for a pinned default name list plus any `.system` entries
   found in the operator home (which capture names added by newer Codex
   versions).
-- **External skill roots**: `~/.agents/skills`, the operator home's `skills/`
-  directory, and `/etc/codex/skills` are all scanned by Codex regardless of
-  `CODEX_HOME`, so their `SKILL.md` files are disabled by absolute (realpath'd)
-  path.
+- **External skill roots**: `~/.agents/skills` and `/etc/codex/skills` are
+  scanned by Codex outside the ephemeral `CODEX_HOME`, so their `SKILL.md`
+  files are disabled by absolute (realpath'd) path. The operator home's
+  `skills/.system` directory is still read for future system-skill names, but
+  the operator home's user `skills/` directory is not a live discovery root once
+  `CODEX_HOME` points at the ephemeral home.
 - **Repo-local skills**: `.agents/skills` directories from the workspace cwd
   up to the nearest `.git` boundary.
 
@@ -378,7 +380,7 @@ The canary is the live probe — run it after every Codex CLI upgrade:
 ```bash
 pnpm build
 pnpm probe:codex-skills            # real + empty-clean-home modes
-pnpm probe:codex-skills -- --mode clean
+pnpm probe:codex-skills --mode clean
 ```
 
 The probe (`scripts/probe-codex-skills.mjs`) builds an ephemeral home through
