@@ -898,7 +898,6 @@ export class OrchestratorCore {
     }
 
     const nextStep = steps + 1;
-    this.state.issueBudgetEscalations[issueId] = nextStep;
     const nextMultiplier = ladder.multiplier ** nextStep;
 
     await this.recordRunJournalEntry({
@@ -923,6 +922,11 @@ export class OrchestratorCore {
         estimatedCostUsd: hardStop.estimatedCostUsd,
       },
     });
+
+    // Increment only after the journal write succeeded so an exception above
+    // leaves the issue un-escalated and the pause falls through to the
+    // operator park (PR #329 review P1).
+    this.state.issueBudgetEscalations[issueId] = nextStep;
 
     const comment = [
       `Budget escalation step ${nextStep}/${ladder.maxSteps}: auto-resuming with a ${nextMultiplier}x unit budget.`,
@@ -4300,13 +4304,13 @@ export function computeFailureRetryDelayMs(
   return Math.min(exponentialDelay, maxRetryBackoffMs);
 }
 
+// rate_limit_budget is deliberately NOT escalatable: the ladder widens token
+// and dollar budgets but cannot relieve a subscription-window constraint, so
+// escalating a window-bound unit mechanically re-triggers and burns widened
+// budget for no gain (PR #329 review P1). Window pauses wait for the floor /
+// reset timing or the operator.
 export const BUDGET_ESCALATION_TRIGGERS: ReadonlySet<HardStopTrigger> = new Set(
-  [
-    "token_budget",
-    "dollar_budget",
-    "premium_spend_near_ceiling",
-    "rate_limit_budget",
-  ],
+  ["token_budget", "dollar_budget", "premium_spend_near_ceiling"],
 );
 
 function isBudgetEscalationTrigger(trigger: HardStopTrigger): boolean {

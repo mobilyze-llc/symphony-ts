@@ -1317,6 +1317,42 @@ describe("orchestrator core", () => {
       outcome: "normal",
       hardStop: {
         outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 1,
+        totalTokens: 100,
+        estimatedCostUsd: 1,
+      },
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().issueBudgetEscalations["1"]).toBeUndefined();
+  });
+
+  it("never escalates rate_limit_budget pauses — the ladder cannot relieve a window constraint", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({
+        budgetEscalation: { maxSteps: 2, multiplier: 2 },
+      }),
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
         trigger: "rate_limit_budget",
         reason: "Rate-limit budget exceeded.",
         turnCount: 1,
@@ -1328,6 +1364,35 @@ describe("orchestrator core", () => {
     expect(retryEntry).toBeNull();
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
     expect(orchestrator.getState().issueBudgetEscalations["1"]).toBeUndefined();
+  });
+
+  it("carries the escalated multiplier into later dispatches, including operator resumes", async () => {
+    const spawnInputs: Array<{ budgetMultiplier: number }> = [];
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({
+        budgetEscalation: { maxSteps: 2, multiplier: 2 },
+      }),
+      tracker,
+      spawnWorker: async (input) => {
+        spawnInputs.push({ budgetMultiplier: input.budgetMultiplier });
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    // Two consumed steps (e.g. ladder exhausted, then operator resumed):
+    // the widened budget persists for the issue's next unit.
+    orchestrator.getState().issueBudgetEscalations["1"] = 2;
+    await orchestrator.pollTick();
+
+    expect(spawnInputs).toEqual([{ budgetMultiplier: 4 }]);
   });
 
   it("defers retry dispatch while the rate-limit admission floor is blocked", async () => {

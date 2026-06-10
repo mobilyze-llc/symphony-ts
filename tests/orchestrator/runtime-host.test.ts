@@ -572,6 +572,28 @@ describe("OrchestratorRuntimeHost", () => {
     }
   });
 
+  it("plumbs the budget-escalation multiplier through to the agent runner", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    // Seed one consumed escalation step before the first dispatch.
+    host.getState().issueBudgetEscalations["1"] = 1;
+    await host.pollOnce();
+
+    expect(fakeRunner.runInputs).toHaveLength(1);
+    expect(fakeRunner.runInputs[0]?.budgetMultiplier).toBe(2);
+    expect(fakeRunner.runInputs[0]?.modePolicy?.maxBudgetUsd).toBeDefined();
+  });
+
   it("persists rate-limit snapshots and hydrates them into a cold host", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-rl-snapshot-"));
     try {

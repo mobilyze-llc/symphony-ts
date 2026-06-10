@@ -1331,6 +1331,7 @@ function applyBudgetMultiplier(
 
   return {
     ...config,
+    // Tokens are integral counts; dollars stay fractional on purpose.
     maxTokensPerUnit: Math.round(config.maxTokensPerUnit * multiplier),
     maxDollarBudgetUsd: config.maxDollarBudgetUsd * multiplier,
   };
