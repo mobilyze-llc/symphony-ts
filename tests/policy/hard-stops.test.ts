@@ -18,6 +18,7 @@ const CONFIG = {
   maxDollarBudgetUsd: 10,
   premiumBudgetPauseRatio: 0.8,
   estimatedCostPer1kTokensUsd: 5,
+  cachedTokenCostRatio: 0.1,
 };
 
 describe("hard-stop policy", () => {
@@ -88,6 +89,87 @@ describe("hard-stop policy", () => {
     ).toMatchObject({
       outcome: "PAUSED-budget",
       trigger: "premium_spend_near_ceiling",
+    });
+  });
+
+  it("discounts cached input tokens in the estimated dollar cost", () => {
+    // Post-PR #314 SYMPH-319 canary shape: 87,657 total tokens of which
+    // 60,672 were cache reads. Full-rate pricing called this $4.38 and
+    // paused the worker; cache-aware pricing is $1.65 of the $4 budget.
+    const config = {
+      ...CONFIG,
+      maxTokensPerUnit: 240_000,
+      maxDollarBudgetUsd: 4,
+      premiumBudgetPauseRatio: 0.9,
+      estimatedCostPer1kTokensUsd: 0.05,
+      cachedTokenCostRatio: 0.1,
+    };
+
+    expect(
+      evaluateBudgetHardStop({
+        config,
+        turnCount: 1,
+        totalTokens: 87_657,
+        cacheReadTokens: 60_672,
+      }),
+    ).toBeNull();
+
+    expect(
+      evaluateBudgetHardStop({
+        config,
+        turnCount: 1,
+        totalTokens: 87_657,
+      }),
+    ).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "dollar_budget",
+    });
+  });
+
+  it("clamps malformed cached token telemetry when estimating cost", () => {
+    // Trigger via the token cap so the decision exposes estimatedCostUsd.
+    const config = {
+      ...CONFIG,
+      maxTokensPerUnit: 1000,
+      maxDollarBudgetUsd: 1_000_000,
+      estimatedCostPer1kTokensUsd: 5,
+      cachedTokenCostRatio: 0.1,
+    };
+
+    expect(
+      evaluateBudgetHardStop({
+        config,
+        turnCount: 1,
+        totalTokens: 1000,
+        cacheReadTokens: 600,
+      }),
+    ).toMatchObject({
+      trigger: "token_budget",
+      estimatedCostUsd: expect.closeTo(2.3, 10),
+    });
+
+    expect(
+      evaluateBudgetHardStop({
+        config,
+        turnCount: 1,
+        totalTokens: 1000,
+        cacheReadTokens: 5000,
+      }),
+    ).toMatchObject({
+      trigger: "token_budget",
+      estimatedCostUsd: expect.closeTo(0.5, 10),
+    });
+
+    expect(
+      evaluateBudgetHardStop({
+        config,
+        turnCount: 1,
+        totalTokens: 1000,
+        cacheReadTokens: -100,
+      }),
+    ).toMatchObject({
+      trigger: "token_budget",
+      estimatedCostUsd: expect.closeTo(5, 10),
     });
   });
 

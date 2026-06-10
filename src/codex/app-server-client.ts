@@ -1402,8 +1402,17 @@ function pathExists(path: string): boolean {
   }
 }
 
+// Enforceable in-turn context caps (SYMPH-319). Prompt-level output
+// discipline proved advisory-only; these codex-native limits bound what a
+// single tool output can pin in history and when accumulated history is
+// auto-compacted, independent of worker compliance.
+export const HEADLESS_TOOL_OUTPUT_TOKEN_LIMIT = 2_500;
+export const HEADLESS_AUTO_COMPACT_TOKEN_LIMIT = 40_000;
+
 function renderHeadlessCodexConfig(skillPaths: string[]): string {
   const featureConfig = `project_doc_max_bytes = 0
+tool_output_token_limit = ${HEADLESS_TOOL_OUTPUT_TOKEN_LIMIT}
+model_auto_compact_token_limit = ${HEADLESS_AUTO_COMPACT_TOKEN_LIMIT}
 
 [features]
 apps = false

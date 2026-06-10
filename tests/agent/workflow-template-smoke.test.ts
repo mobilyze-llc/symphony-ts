@@ -40,7 +40,7 @@ const RESOLVED_CODEX_WORKFLOW_CONFIGS = [
 const OBSERVED_CODEX_LOW_FIRST_TURN_TOKENS = 233_719;
 const EXPECTED_INVESTIGATE_HARD_STOPS = {
   maxIterations: 4,
-  maxTokensPerUnit: 80_000,
+  maxTokensPerUnit: 200_000,
   maxDollarBudgetUsd: 4,
   premiumBudgetPauseRatio: 0.9,
 };

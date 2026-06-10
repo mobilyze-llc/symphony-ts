@@ -34,6 +34,9 @@ export const DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT = 1_000_000;
 export const DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD = 50;
 export const DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO = 0.8;
 export const DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD = 0.05;
+// Cached input tokens are billed at a fraction of the full input rate
+// (OpenAI prompt caching discounts repeated prefixes ~90%).
+export const DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO = 0.1;
 
 export const DEFAULT_RUNNER_KIND = "codex";
 export const DEFAULT_CONTINUOUS_FEEDBACK_ENABLED = true;
@@ -91,6 +94,7 @@ export const SPEC_DEFAULTS = Object.freeze({
     premiumBudgetPauseRatio: DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
     estimatedCostPer1kTokensUsd:
       DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+    cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
   },
   runner: {
     kind: DEFAULT_RUNNER_KIND,

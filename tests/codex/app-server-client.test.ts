@@ -633,6 +633,8 @@ describe("CodexAppServerClient", () => {
       const config = await readFile(configPath, "utf8");
       const skillPath = await realpath(join(userSkillRoot, "SKILL.md"));
       expect(config).toContain("project_doc_max_bytes = 0");
+      expect(config).toContain("tool_output_token_limit = 2500");
+      expect(config).toContain("model_auto_compact_token_limit = 40000");
       expect(config).toContain("[features]");
       expect(config).toContain("apps = false");
       expect(config).toContain("browser_use = false");

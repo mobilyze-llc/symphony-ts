@@ -3455,6 +3455,7 @@ describe("pipeline notifications", () => {
           maxDollarBudgetUsd: 12.5,
           premiumBudgetPauseRatio: 0.8,
           estimatedCostPer1kTokensUsd: 0.05,
+          cachedTokenCostRatio: 0.1,
         },
         stages: {
           initialStage: "investigate",

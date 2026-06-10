@@ -12,6 +12,7 @@ import {
 import { createLinearGraphqlDynamicTool } from "../codex/linear-graphql-tool.js";
 import { createWorkpadSyncDynamicTool } from "../codex/workpad-sync-tool.js";
 import {
+  DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
   DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
   DEFAULT_HARD_STOP_MAX_ITERATIONS,
@@ -384,6 +385,7 @@ export class AgentRunner {
               config: hardStops,
               turnCount: liveSession.turnCount,
               totalTokens: liveSession.totalStageTotalTokens,
+              cacheReadTokens: liveSession.totalStageCacheReadTokens,
             });
             if (liveHardStop !== null) {
               requestLiveBudgetStop(liveHardStop);
@@ -515,6 +517,7 @@ export class AgentRunner {
           config: hardStops,
           turnCount: liveSession.turnCount,
           totalTokens: liveSession.totalStageTotalTokens,
+          cacheReadTokens: liveSession.totalStageCacheReadTokens,
         });
         if (hardStop !== null) {
           break;
@@ -539,6 +542,7 @@ export class AgentRunner {
           repeatedNoProgressTurns,
           turnCount: liveSession.turnCount,
           totalTokens: liveSession.totalStageTotalTokens,
+          cacheReadTokens: liveSession.totalStageCacheReadTokens,
         });
         if (hardStop !== null) {
           break;
@@ -548,6 +552,7 @@ export class AgentRunner {
           config: hardStops,
           turnCount: liveSession.turnCount,
           totalTokens: liveSession.totalStageTotalTokens,
+          cacheReadTokens: liveSession.totalStageCacheReadTokens,
         });
         if (hardStop !== null) {
           break;
@@ -1219,6 +1224,7 @@ const DEFAULT_HARD_STOPS_CONFIG = {
   premiumBudgetPauseRatio: DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
   estimatedCostPer1kTokensUsd:
     DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+  cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
 };
 
 function createProgressSignature(issue: Issue, turn: CodexTurnResult): string {
