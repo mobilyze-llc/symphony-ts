@@ -95,12 +95,23 @@ const CONTINUATION_RETRY_DELAY_MS = 1_000;
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
+// Tracker timestamps come from the tracker's clock, pausedAt from ours.
+// Evidence must beat the pause by this margin so modest clock skew cannot
+// promote a PRE-pause transition into resume evidence (false auto-readmit).
+// Transitions inside the margin stay parked — the operator can re-flip.
+const RESUME_EVIDENCE_SKEW_MARGIN_MS = 60_000;
+// Per-issue lookup throttle and per-poll cap keep the evidence phase from
+// amplifying tracker API load when many issues are wedged.
+const RESUME_EVIDENCE_RECHECK_MS = 60_000;
+const RESUME_EVIDENCE_MAX_LOOKUPS_PER_POLL = 5;
 
 interface ResumeRequiredGuard {
   pausedState: string | null;
   observedNonResumeState: boolean;
   /** When the pause was recorded — tracker resume evidence must be newer. */
   pausedAt: string | null;
+  /** Last tracker evidence lookup (ms epoch) — throttles per-issue queries. */
+  evidenceCheckedAtMs?: number;
 }
 
 export type WorkerExitOutcome =
@@ -953,7 +964,7 @@ export class OrchestratorCore {
       `Budget escalation step ${nextStep}/${ladder.maxSteps}: auto-resuming with a ${nextMultiplier}x unit budget.`,
       `Trigger: ${hardStop.trigger}`,
       `Reason: ${hardStop.reason}`,
-      `Unit spend at pause: ${hardStop.totalTokens} tokens, ~$${hardStop.estimatedCostUsd.toFixed(2)}.`,
+      `Unit spend at pause: ${hardStop.billableTokens ?? hardStop.totalTokens} billable tokens (raw ${hardStop.totalTokens}), ~$${hardStop.estimatedCostUsd.toFixed(2)}.`,
     ].join("\n");
     try {
       await this.postComment?.(issueId, comment);
@@ -2480,7 +2491,11 @@ export class OrchestratorCore {
       return;
     }
 
+    let lookupsThisPoll = 0;
     for (const issue of issues) {
+      if (lookupsThisPoll >= RESUME_EVIDENCE_MAX_LOOKUPS_PER_POLL) {
+        return;
+      }
       if (!this.state.resumeRequired.has(issue.id)) {
         continue;
       }
@@ -2494,21 +2509,39 @@ export class OrchestratorCore {
       ) {
         continue;
       }
+      const nowMs = this.now().getTime();
+      if (
+        guard.evidenceCheckedAtMs !== undefined &&
+        nowMs - guard.evidenceCheckedAtMs < RESUME_EVIDENCE_RECHECK_MS
+      ) {
+        continue;
+      }
+      this.resumeRequiredGuards.set(issue.id, {
+        ...guard,
+        evidenceCheckedAtMs: nowMs,
+      });
 
+      lookupsThisPoll += 1;
       try {
+        // Matching is case-insensitive per the IssueTracker contract.
         const transitionAt = await fetchTransition(issue.id, "Resume");
         if (
           transitionAt !== null &&
-          Date.parse(transitionAt) > Date.parse(guard.pausedAt)
+          Date.parse(transitionAt) >
+            Date.parse(guard.pausedAt) + RESUME_EVIDENCE_SKEW_MARGIN_MS
         ) {
           this.resumeRequiredGuards.set(issue.id, {
             ...guard,
+            evidenceCheckedAtMs: nowMs,
             observedNonResumeState: true,
           });
         }
-      } catch {
-        // Tracker history unavailable; the issue stays parked until the
-        // next poll retries the lookup or the operator dances states.
+      } catch (error) {
+        // Fail closed but never silently: a permanently broken history API
+        // would otherwise present as an inexplicably parked issue.
+        console.warn(
+          `[orchestrator] resume-evidence lookup failed for ${issue.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
     }
   }

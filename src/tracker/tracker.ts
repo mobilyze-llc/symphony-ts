@@ -10,9 +10,10 @@ export interface IssueTracker {
   fetchCandidateIssues(): Promise<Issue[]>;
   /**
    * Timestamp (ISO) of the most recent transition INTO the named state, or
-   * null when no such transition is visible. Optional: trackers without
-   * history support leave the resume guard on observation-only semantics
-   * (SYMPH-291).
+   * null when no such transition is visible. State-name matching MUST be
+   * case-insensitive — callers pass display-cased names. Optional: trackers
+   * without history support leave the resume guard on observation-only
+   * semantics (SYMPH-291).
    */
   fetchLatestStateTransitionAt?(
     issueId: string,
