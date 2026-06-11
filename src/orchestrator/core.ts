@@ -112,6 +112,12 @@ interface ResumeRequiredGuard {
   pausedAt: string | null;
   /** Last tracker evidence lookup (ms epoch) — throttles per-issue queries. */
   evidenceCheckedAtMs?: number;
+  /**
+   * Monotonic park generation. A deferred triage verdict is causally tied
+   * to exactly one park; comparing generations makes a verdict for an
+   * earlier park a no-op even when a re-park lands moments later.
+   */
+  parkSeq: number;
 }
 
 export type WorkerExitOutcome =
@@ -343,6 +349,8 @@ export class OrchestratorCore {
     string,
     import("../domain/model.js").ExecutionHistory
   > = new Map();
+
+  private parkSequence = 0;
 
   private readonly resumeRequiredGuards = new Map<
     string,
@@ -1051,17 +1059,25 @@ export class OrchestratorCore {
       // Park-then-revise: fall through to the normal park (return null)
       // while the verdict renders out-of-band. The local model may take
       // minutes under contention; nothing in the event queue waits on it.
-      const firedAtMs = this.now().getTime();
       const runTriage = this.runPauseTriage;
       const scheduleDeferred = this.scheduleDeferred;
-      void runTriage(evidence)
-        .catch((error) => {
-          console.warn(
-            `[orchestrator] deferred pause triage failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          return null;
-        })
-        .then((verdict) => {
+      // Capture the originating park's generation through the same
+      // serialized queue: this task runs right after the current exit
+      // handler records the park and before any re-park can possibly be
+      // processed, causally tying the verdict to exactly this pause.
+      const parkSeqAtFire = new Promise<number | null>((resolve) => {
+        scheduleDeferred(async () => {
+          resolve(this.resumeRequiredGuards.get(issueId)?.parkSeq ?? null);
+        });
+      });
+      const verdictPromise = runTriage(evidence).catch((error) => {
+        console.warn(
+          `[orchestrator] deferred pause triage failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        return null;
+      });
+      void Promise.all([verdictPromise, parkSeqAtFire])
+        .then(([verdict, expectedParkSeq]) => {
           scheduleDeferred(() =>
             this.applyDeferredPauseTriageVerdict({
               issueId,
@@ -1070,9 +1086,16 @@ export class OrchestratorCore {
               trigger: hardStop.trigger,
               resumesUsedAtFire: resumesUsed,
               attempt: runningEntry.retryAttempt,
-              firedAtMs,
+              expectedParkSeq,
               verdict,
             }),
+          );
+        })
+        .catch((error) => {
+          // Final rejection boundary: nothing in this chain may become an
+          // unhandled rejection; the park already stands either way.
+          console.warn(
+            `[orchestrator] deferred pause triage chain failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
           );
         });
       return null;
@@ -1172,18 +1195,16 @@ export class OrchestratorCore {
     trigger: HardStopTrigger;
     resumesUsedAtFire: number;
     attempt: number | null;
-    firedAtMs: number;
+    expectedParkSeq: number | null;
     verdict: PauseTriageVerdict | null;
   }): Promise<void> {
     const { issueId, identifier, stageName, verdict } = input;
 
     const guard = this.resumeRequiredGuards.get(issueId);
-    const guardPausedAtMs =
-      guard?.pausedAt != null ? Date.parse(guard.pausedAt) : Number.NaN;
     const parkMatchesPause =
-      Number.isFinite(guardPausedAtMs) &&
-      guardPausedAtMs >= input.firedAtMs - 5_000 &&
-      guardPausedAtMs <= input.firedAtMs + 120_000;
+      input.expectedParkSeq !== null &&
+      guard !== undefined &&
+      guard.parkSeq === input.expectedParkSeq;
     const resumesUsed = this.state.issuePauseTriageResumes[issueId] ?? 0;
     const stillEligible =
       this.state.resumeRequired.has(issueId) &&
@@ -1214,8 +1235,8 @@ export class OrchestratorCore {
         lease: null,
         summary:
           verdict === null
-            ? `Pause triage unavailable for ${identifier}; park stands.`
-            : `Pause triage verdict for ${identifier}: ${verdict.verdict} (${action}).`,
+            ? `Pause triage unavailable for ${identifier}; parking for operator.`
+            : `Pause triage verdict for ${identifier}: ${verdict.verdict} (${action === "resumed" ? "resuming" : action === "stale" ? "stale" : "parking"}).`,
         metadata: {
           status: "completed",
           trigger: input.trigger,
@@ -2596,12 +2617,14 @@ export class OrchestratorCore {
         ? null
         : normalizeIssueState(issueState);
     const existingGuard = this.resumeRequiredGuards.get(issueId);
+    this.parkSequence += 1;
     this.resumeRequiredGuards.set(issueId, {
       pausedState: pausedState === "" ? null : pausedState,
       observedNonResumeState:
         existingGuard?.observedNonResumeState === true ||
         pausedState !== EXPLICIT_RESUME_STATE,
       pausedAt: pausedAt ?? this.now().toISOString(),
+      parkSeq: this.parkSequence,
     });
   }
 

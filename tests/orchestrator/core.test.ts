@@ -1667,10 +1667,12 @@ describe("orchestrator core", () => {
       },
     });
 
-    // The exit path never waited on the model: parked immediately.
+    // The exit path never waited on the model: parked immediately. The
+    // only queued work is the park-generation capture, not the verdict.
     expect(retryEntry).toBeNull();
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
-    expect(deferred).toHaveLength(0);
+    expect(deferred).toHaveLength(1);
+    await deferred[0]?.();
 
     // The verdict lands later and is applied as a serialized task.
     resolveVerdict({
@@ -1678,8 +1680,8 @@ describe("orchestrator core", () => {
       rationale: "Real progress; one more unit should finish.",
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(deferred).toHaveLength(1);
-    await deferred[0]?.();
+    expect(deferred).toHaveLength(2);
+    await deferred[1]?.();
 
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
     expect(orchestrator.getState().issuePauseTriageResumes["1"]).toBe(1);
@@ -1693,12 +1695,19 @@ describe("orchestrator core", () => {
     ).toBe(true);
   });
 
-  it("treats a deferred verdict as stale once the operator has already resumed", async () => {
+  it("never lets a stale verdict resume a different, later pause cycle", async () => {
     const deferred: Array<() => Promise<void>> = [];
-    let resolveVerdict: (v: {
-      verdict: "continue";
-      rationale: string;
-    }) => void = () => {};
+    const verdictResolvers: Array<
+      (v: { verdict: "continue"; rationale: string } | null) => void
+    > = [];
+    const budgetPause = {
+      outcome: "PAUSED-budget" as const,
+      trigger: "token_budget" as const,
+      reason: "Token budget exceeded.",
+      turnCount: 2,
+      totalTokens: 250001,
+      estimatedCostUsd: 5,
+    };
     const orchestrator = new OrchestratorCore({
       config: createConfig({
         pauseTriage: {
@@ -1719,7 +1728,68 @@ describe("orchestrator core", () => {
       now: () => new Date("2026-03-06T00:00:05.000Z"),
       runPauseTriage: () =>
         new Promise((resolve) => {
-          resolveVerdict = resolve;
+          verdictResolvers.push(resolve);
+        }),
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+    });
+
+    // Pause A parks the issue; its park-generation capture runs.
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: budgetPause,
+    });
+    await deferred[0]?.();
+
+    // Operator resumes; the issue re-dispatches and pauses AGAIN within
+    // what used to be the staleness window (same fake clock instant).
+    orchestrator.getState().resumeRequired.delete("1");
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: budgetPause,
+    });
+
+    // Pause A's verdict finally lands — it must NOT resume pause B.
+    verdictResolvers[0]?.({ verdict: "continue", rationale: "Stale." });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await deferred[deferred.length - 1]?.();
+
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(
+      orchestrator.getState().issuePauseTriageResumes["1"],
+    ).toBeUndefined();
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+  });
+
+  it("leaves the park standing when the deferred triage promise rejects", async () => {
+    const deferred: Array<() => Promise<void>> = [];
+    let rejectVerdict: (error: Error) => void = () => {};
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({
+        pauseTriage: {
+          baseUrl: "http://studio2.local:8000/v1",
+          model: "deepseek-v4-flash",
+          apiKey: null,
+          maxResumes: 2,
+        },
+      }),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      runPauseTriage: () =>
+        new Promise((_resolve, reject) => {
+          rejectVerdict = reject;
         }),
       scheduleDeferred: (task) => {
         deferred.push(task);
@@ -1739,19 +1809,19 @@ describe("orchestrator core", () => {
         estimatedCostUsd: 5,
       },
     });
-
-    // Operator beat the model to it.
-    orchestrator.getState().resumeRequired.delete("1");
-
-    resolveVerdict({ verdict: "continue", rationale: "Keep going." });
-    await new Promise((resolve) => setTimeout(resolve, 0));
     await deferred[0]?.();
 
-    // Stale: no double-resume, no counter consumption.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    rejectVerdict(new Error("endpoint exploded"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await deferred[1]?.();
+    warn.mockRestore();
+
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
     expect(
       orchestrator.getState().issuePauseTriageResumes["1"],
     ).toBeUndefined();
-    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
   });
 
   it("leaves the park standing on a deferred hold verdict", async () => {
@@ -1803,12 +1873,13 @@ describe("orchestrator core", () => {
       },
     });
 
+    await deferred[0]?.();
     resolveVerdict({
       verdict: "hold",
       rationale: "Worker is spinning; needs human review.",
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
-    await deferred[0]?.();
+    await deferred[1]?.();
 
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
     expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
