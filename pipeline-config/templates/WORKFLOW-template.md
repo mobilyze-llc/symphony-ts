@@ -83,6 +83,11 @@ codex:
     type: workspace-write
     network_access: true
   stall_timeout_ms: 3600000
+  # Initialize-handshake budget. The default (5s) was sized for an idle
+  # box; under multi-lane operation plus builds, codex app-server spawns
+  # routinely exceed it (live: SYMPH-300 codex_read_timeout at 5000ms,
+  # 2026-06-11). Worker startup is not latency-sensitive.
+  read_timeout_ms: 45000
 
 runner:
   kind: codex
