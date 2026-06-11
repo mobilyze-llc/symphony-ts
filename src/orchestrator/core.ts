@@ -3298,7 +3298,12 @@ export class OrchestratorCore {
           finding.title.trim().toLowerCase(),
         ].join(":"),
     );
-    const status = result.findings.length === 0 ? "pass" : "finding";
+    // Suppression-aware (SYMPH-378): a checkpoint whose findings all
+    // failed the injection-hygiene policy is a pass — nothing bounces.
+    const status = feedbackState.status;
+    const suppressedSignatures = feedbackState.findings
+      .filter((finding) => finding.status === "suppressed")
+      .map((finding) => finding.signature);
 
     await this.recordRunJournalEntry({
       idempotencyKey: `continuous_feedback:${input.issueId}:${input.event}:${checkedAt}`,
@@ -3321,6 +3326,7 @@ export class OrchestratorCore {
         reviewerLane,
         workerLane,
         findingSignatures,
+        suppressedSignatures,
         summary: result.summary ?? null,
         authoritative: false,
       },

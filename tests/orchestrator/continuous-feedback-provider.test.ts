@@ -69,6 +69,20 @@ describe("continuous feedback provider", () => {
     ]);
     expect(commands[0]?.prompt).toContain("This lane is non-authoritative");
     expect(commands[0]?.prompt).toContain("diff --git");
+    // Injection-hygiene policy (SYMPH-378) reaches the reviewer lane.
+    expect(commands[0]?.prompt).toContain("Finding policy (SYMPH-378)");
+    expect(commands[0]?.prompt).toContain("Never restate the task");
+    expect(commands[0]?.prompt).toContain(
+      "proof requirements come from the frozen acceptance criteria only",
+    );
+    // Empty = clean is load-bearing for the resolve-on-empty branch;
+    // still-unaddressed findings are re-reported, not restated.
+    expect(commands[0]?.prompt).toContain(
+      "STILL unaddressed — re-report it with the same signature",
+    );
+    expect(commands[0]?.prompt).toContain(
+      "EMPTY findings array means the checkpoint is genuinely clean",
+    );
   });
 
   it("returns a clean fallback when provider output is malformed", async () => {
