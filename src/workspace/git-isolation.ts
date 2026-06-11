@@ -40,7 +40,7 @@ export function gitIsolationEnv(
  * and hook git commands at the operator's repo. Every workspace-scoped
  * spawn env must pass through this scrub. Mutates and returns `env`.
  */
-export function scrubGitPointerEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function scrubGitPointerEnv<T extends NodeJS.ProcessEnv>(env: T): T {
   delete env.GIT_DIR;
   delete env.GIT_WORK_TREE;
   return env;
@@ -123,6 +123,14 @@ function isSpawnEnoent(error: unknown): boolean {
   );
 }
 
+async function directoryExists(path: string): Promise<boolean> {
+  try {
+    return (await fs.lstat(path)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 async function realpathOrSelf(path: string): Promise<string> {
   try {
     return await fs.realpath(path);
@@ -161,9 +169,15 @@ export async function verifyWorkspaceGitIsolation(
       { cwd: workspacePath, env },
     );
   } catch (error) {
-    if (!hasGitEntry && isSpawnEnoent(error)) {
-      // No git metadata AND no git binary on the host: nothing an agent
-      // runs can perform git discovery either, so isolation holds.
+    if (
+      !hasGitEntry &&
+      isSpawnEnoent(error) &&
+      (await directoryExists(workspacePath))
+    ) {
+      // Spawn ENOENT with the workspace still present means the git
+      // binary itself is absent: nothing an agent runs can perform git
+      // discovery either, so isolation holds. (A vanished workspace also
+      // spawns ENOENT — that case falls through and fails closed.)
       return;
     }
     // Any other probe failure (timeout, EACCES, vanished cwd) leaves the

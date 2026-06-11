@@ -210,6 +210,21 @@ describe("verifyWorkspaceGitIsolation (injected probe)", () => {
     ).resolves.toBe(undefined);
   });
 
+  it("fails closed on spawn ENOENT when the workspace itself has vanished", async () => {
+    await fs.rm(workspace, { force: true, recursive: true });
+    const probe: GitProbe = async () => {
+      const error = new Error("spawn git ENOENT") as NodeJS.ErrnoException;
+      error.code = "ENOENT";
+      throw error;
+    };
+
+    await expect(
+      verifyWorkspaceGitIsolation(workspace, { probe }),
+    ).rejects.toMatchObject({
+      code: ERROR_CODES.workspaceVerifyFailed,
+    });
+  });
+
   it("fails closed when the probe fails for any non-ENOENT reason (timeout, EACCES)", async () => {
     const probe: GitProbe = async () => {
       const error = new Error(

@@ -230,7 +230,10 @@ describe("WorkspaceManager", () => {
       },
     });
 
-    const manager = new WorkspaceManager({ root, hooks });
+    // This test's subject is lock behavior, not isolation: the racing
+    // remove legitimately deletes the dir mid-create, which the real
+    // verifier would (correctly) fail closed on.
+    const manager = new WorkspaceManager({ root, hooks, verifyIsolation: null });
 
     const createPromise = manager.createForIssue("issue-123");
 

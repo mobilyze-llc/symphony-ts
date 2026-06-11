@@ -209,7 +209,10 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
           env: {
             SYMPHONY_PIPELINE: "1",
             // Agent git commands must never resolve a repository above the
-            // workspace parent (SYMPH-373).
+            // workspace parent (SYMPH-373). No GIT_DIR/GIT_WORK_TREE scrub
+            // is needed here: the provider builds the subprocess env from
+            // an allowlist (HOME/PATH/SHELL/...) plus this object, so
+            // ambient git pointer vars never reach the agent.
             ...gitIsolationEnv(this.options.cwd),
           },
           settingSources: ["user", "project"],

@@ -129,11 +129,12 @@ export class WorkspaceHookRunner {
         timeoutMs: this.#config.timeoutMs,
         // Git discovery from hook scripts must never escape the workspace
         // parent (SYMPH-373). The isolation env is spread last so callers
-        // cannot weaken it.
-        env: {
+        // cannot weaken it, and pointer vars are scrubbed here too so the
+        // guarantee does not depend on which executor runs the script.
+        env: scrubGitPointerEnv({
           ...options.env,
           ...gitIsolationEnv(options.workspacePath),
-        },
+        }),
       });
       const durationMs = Date.now() - startedAt;
 
