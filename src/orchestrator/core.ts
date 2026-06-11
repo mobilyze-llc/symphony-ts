@@ -4005,15 +4005,7 @@ export class OrchestratorCore {
       if (stage !== null && stage.type === "terminal") {
         this.state.completed.add(issue.id);
         this.releaseClaim(issue.id);
-        delete this.state.issueStages[issue.id];
-        delete this.state.issueReworkCounts[issue.id];
-        delete this.state.issuePassedStages[issue.id];
-        delete this.state.issueFirstDispatchedAt[issue.id];
-        delete this.state.issueRightSizingDecisions[issue.id];
-        delete this.state.issueBudgetEscalations[issue.id];
-        delete this.state.issuePauseTriageResumes[issue.id];
-        delete this.state.loopTraceJournal[issue.id];
-        delete this.state.continuousFeedback[issue.id];
+        this.clearTerminalIssueRuntimeState(issue.id);
         // Fire linearState update for the terminal stage (e.g., move to "Done")
         if (stage.linearState !== null && this.updateIssueState !== undefined) {
           const linearState = stage.linearState;
