@@ -64,7 +64,12 @@ export function isPauseTriageConfigured(
   return config.baseUrl !== null && config.model !== null;
 }
 
-const DEFAULT_TRIAGE_TIMEOUT_MS = 30_000;
+// Measured: deepseek-v4-flash on the operator's box needs ~29s for a
+// triage-sized prompt when idle, and the box also serves long review
+// jobs. The worker-exit path is not latency-sensitive — a two-minute
+// wait beats a wrong park (the first live consult aborted at 30s and
+// parked an issue whose verdict, reproduced, was "continue").
+const DEFAULT_TRIAGE_TIMEOUT_MS = 120_000;
 
 // Node's Happy-Eyeballs autoselection gives each address family's TCP
 // handshake 250ms before interleaving to the next family. Handshakes to
@@ -127,9 +132,13 @@ export async function runPauseTriage(
     });
 
     return object;
-  } catch {
+  } catch (error) {
     // Fail closed: endpoint down, malformed output, schema mismatch, or
-    // timeout all degrade to the operator pause.
+    // timeout all degrade to the operator pause — but never silently
+    // (the first live failure was undiagnosable from the journal alone).
+    console.warn(
+      `[pause-triage] verdict unavailable for ${evidence.issueIdentifier}: ${error instanceof Error ? error.message : String(error)}`,
+    );
     return null;
   }
 }
