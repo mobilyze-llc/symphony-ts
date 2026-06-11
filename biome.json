@@ -6,7 +6,8 @@
       "dist/**",
       "node_modules/**",
       "pipeline-config/**",
-      ".claude/worktrees/**"
+      ".claude/worktrees/**",
+      "coverage/**"
     ]
   },
   "formatter": {

@@ -7,7 +7,12 @@ on:
   pull_request:
   merge_group:
 
+permissions:
+  contents: read
+
 jobs:
+  # Required check: deterministic verification floor (SYMPH-356).
+  # Branch protection / merge queue should require this job ("test").
   test:
     runs-on: ubuntu-latest
 
@@ -35,8 +40,13 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      # SYMPH-352: the suite has two known teardown flakes — an unhandled
+      # rejection ("Codex app-server process is not writable") fires after all
+      # tests pass, so vitest exits 1 with 0 failed tests. Retry the full suite
+      # once so a teardown flake does not fail the required check. Drop the
+      # retry once SYMPH-352 fixes the teardown.
       - name: Test
-        run: pnpm test
+        run: pnpm test || pnpm test
 
       - name: Build
         run: pnpm build
@@ -46,3 +56,75 @@ jobs:
 
       - name: Verify npm package contents
         run: npm pack --dry-run
+
+  # Warn-only during calibration (SYMPH-356): new/changed lines in src/ must
+  # be exercised by tests (>= 70%). Flip to enforcing by removing
+  # continue-on-error after the calibration week, then mark it required.
+  diff-coverage:
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so the merge-base with the target branch resolves.
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.2
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Same SYMPH-352 teardown-flake retry as the test job; coverage output
+      # is written before the flaky teardown, but a clean exit keeps the job
+      # signal honest.
+      - name: Run tests with coverage
+        run: pnpm exec vitest run --coverage || pnpm exec vitest run --coverage
+
+      - name: Check diff coverage
+        env:
+          # In the merge queue, diff against this group entry's base (main +
+          # PRs ahead in the queue) so a PR is not blamed for queued changes.
+          DIFF_BASE: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || format('origin/{0}', github.base_ref) }}
+        run: node scripts/ci/diff-coverage.mjs --base "$DIFF_BASE" --threshold 70
+
+  # Delta security scan (SYMPH-356): semgrep with --baseline-commit, so only
+  # findings introduced by this PR's diff fail the job. Pre-existing findings
+  # (the backlog tracked by Dependabot/code scanning) never block here.
+  security-delta:
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history: semgrep checks out the baseline commit internally.
+          fetch-depth: 0
+
+      - name: Install semgrep
+        run: pipx install semgrep
+
+      - name: Semgrep delta scan (new findings only)
+        env:
+          DIFF_BASE: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || format('origin/{0}', github.base_ref) }}
+        run: |
+          BASELINE="$(git merge-base "$DIFF_BASE" HEAD)"
+          echo "Baseline commit: $BASELINE"
+          semgrep scan \
+            --config p/default \
+            --config p/typescript \
+            --baseline-commit "$BASELINE" \
+            --error \
+            --text
