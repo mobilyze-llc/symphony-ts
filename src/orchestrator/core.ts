@@ -239,6 +239,15 @@ export interface OrchestratorCoreOptions {
   runPauseTriage?: (
     evidence: PauseTriageEvidence,
   ) => Promise<PauseTriageVerdict | null>;
+  /**
+   * Serialize a deferred task with the host's event queue. When provided,
+   * pause triage runs PARK-THEN-REVISE: the issue parks immediately (the
+   * worker-exit path never waits on the local model — a slow box would
+   * otherwise stall every lane behind the shared event queue) and the
+   * verdict, whenever it arrives, is applied as a small serialized task
+   * that can only UPGRADE a still-standing park into a resume.
+   */
+  scheduleDeferred?: (task: () => Promise<void>) => void;
   updateIssueState?: (
     issueId: string,
     issueIdentifier: string,
@@ -292,6 +301,8 @@ export class OrchestratorCore {
   private readonly postComment?: OrchestratorCoreOptions["postComment"];
 
   private readonly runPauseTriage?: OrchestratorCoreOptions["runPauseTriage"];
+
+  private readonly scheduleDeferred?: OrchestratorCoreOptions["scheduleDeferred"];
 
   private readonly updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
 
@@ -347,6 +358,7 @@ export class OrchestratorCore {
     this.runEnsembleGate = options.runEnsembleGate;
     this.postComment = options.postComment;
     this.runPauseTriage = options.runPauseTriage;
+    this.scheduleDeferred = options.scheduleDeferred;
     this.updateIssueState = options.updateIssueState;
     this.autoCloseParentIssue = options.autoCloseParentIssue;
     this.getRunningSupervisionSnapshots =
@@ -1013,29 +1025,62 @@ export class OrchestratorCore {
       return null;
     }
 
+    const evidence: PauseTriageEvidence = {
+      issueIdentifier: runningEntry.identifier,
+      issueTitle: runningEntry.issue.title,
+      stageName,
+      hardStop,
+      escalationStepsUsed: this.state.issueBudgetEscalations[issueId] ?? 0,
+      triageResumesUsed: resumesUsed,
+      reworkCount: this.state.issueReworkCounts[issueId] ?? 0,
+      recentActivity: runningEntry.recentActivity.map((entry) => ({
+        toolName: entry.toolName,
+        context: entry.context,
+      })),
+      lastMessage: runningEntry.lastCodexMessage,
+      stageHistory: (this.state.issueExecutionHistory[issueId] ?? []).map(
+        (record) => ({
+          stageName: record.stageName,
+          outcome: record.outcome,
+          turns: record.turns,
+        }),
+      ),
+    };
+
+    if (this.scheduleDeferred !== undefined) {
+      // Park-then-revise: fall through to the normal park (return null)
+      // while the verdict renders out-of-band. The local model may take
+      // minutes under contention; nothing in the event queue waits on it.
+      const firedAtMs = this.now().getTime();
+      const runTriage = this.runPauseTriage;
+      const scheduleDeferred = this.scheduleDeferred;
+      void runTriage(evidence)
+        .catch((error) => {
+          console.warn(
+            `[orchestrator] deferred pause triage failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return null;
+        })
+        .then((verdict) => {
+          scheduleDeferred(() =>
+            this.applyDeferredPauseTriageVerdict({
+              issueId,
+              identifier: runningEntry.identifier,
+              stageName,
+              trigger: hardStop.trigger,
+              resumesUsedAtFire: resumesUsed,
+              attempt: runningEntry.retryAttempt,
+              firedAtMs,
+              verdict,
+            }),
+          );
+        });
+      return null;
+    }
+
     let verdict: PauseTriageVerdict | null = null;
     try {
-      verdict = await this.runPauseTriage({
-        issueIdentifier: runningEntry.identifier,
-        issueTitle: runningEntry.issue.title,
-        stageName,
-        hardStop,
-        escalationStepsUsed: this.state.issueBudgetEscalations[issueId] ?? 0,
-        triageResumesUsed: resumesUsed,
-        reworkCount: this.state.issueReworkCounts[issueId] ?? 0,
-        recentActivity: runningEntry.recentActivity.map((entry) => ({
-          toolName: entry.toolName,
-          context: entry.context,
-        })),
-        lastMessage: runningEntry.lastCodexMessage,
-        stageHistory: (this.state.issueExecutionHistory[issueId] ?? []).map(
-          (record) => ({
-            stageName: record.stageName,
-            outcome: record.outcome,
-            turns: record.turns,
-          }),
-        ),
-      });
+      verdict = await this.runPauseTriage(evidence);
     } catch {
       verdict = null;
     }
@@ -1106,6 +1151,115 @@ export class OrchestratorCore {
 
     return this.scheduleRetry(issueId, 1, {
       identifier: runningEntry.identifier,
+      error: null,
+      delayType: "continuation",
+    });
+  }
+
+  /**
+   * Apply an out-of-band triage verdict to a park that may no longer be
+   * standing. The verdict can only UPGRADE: `continue` un-parks and
+   * schedules one continuation; everything else just records itself.
+   * Guards make stale verdicts no-ops: the issue must still be parked,
+   * idle, with the same consumed-resume count as when the verdict was
+   * requested, and the standing park must have been recorded within a
+   * short window of the pause that requested it.
+   */
+  private async applyDeferredPauseTriageVerdict(input: {
+    issueId: string;
+    identifier: string;
+    stageName: string | null;
+    trigger: HardStopTrigger;
+    resumesUsedAtFire: number;
+    attempt: number | null;
+    firedAtMs: number;
+    verdict: PauseTriageVerdict | null;
+  }): Promise<void> {
+    const { issueId, identifier, stageName, verdict } = input;
+
+    const guard = this.resumeRequiredGuards.get(issueId);
+    const guardPausedAtMs =
+      guard?.pausedAt != null ? Date.parse(guard.pausedAt) : Number.NaN;
+    const parkMatchesPause =
+      Number.isFinite(guardPausedAtMs) &&
+      guardPausedAtMs >= input.firedAtMs - 5_000 &&
+      guardPausedAtMs <= input.firedAtMs + 120_000;
+    const resumesUsed = this.state.issuePauseTriageResumes[issueId] ?? 0;
+    const stillEligible =
+      this.state.resumeRequired.has(issueId) &&
+      !(issueId in this.state.running) &&
+      this.state.retryAttempts[issueId] === undefined &&
+      resumesUsed === input.resumesUsedAtFire &&
+      parkMatchesPause;
+
+    const willResume =
+      stillEligible && verdict !== null && verdict.verdict === "continue";
+    const action = willResume ? "resumed" : stillEligible ? "parked" : "stale";
+
+    if (willResume) {
+      this.state.issuePauseTriageResumes[issueId] = resumesUsed + 1;
+    }
+
+    try {
+      await this.recordRunJournalEntry({
+        idempotencyKey: `pause_triage:${issueId}:${stageName ?? "no-stage"}:${input.resumesUsedAtFire + 1}:${this.now().toISOString()}`,
+        timestamp: this.now().toISOString(),
+        kind: "pause_triage",
+        issueId,
+        issueIdentifier: identifier,
+        operation: "dispatcher",
+        stage: stageName,
+        attempt: input.attempt,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary:
+          verdict === null
+            ? `Pause triage unavailable for ${identifier}; park stands.`
+            : `Pause triage verdict for ${identifier}: ${verdict.verdict} (${action}).`,
+        metadata: {
+          status: "completed",
+          trigger: input.trigger,
+          verdict: verdict?.verdict ?? "unavailable",
+          rationale: verdict?.rationale ?? null,
+          action,
+          resumesUsed: input.resumesUsedAtFire,
+        },
+      });
+    } catch {
+      // Audit is best-effort; the verdict outcome must still apply.
+    }
+
+    if (!willResume) {
+      if (verdict !== null && stillEligible) {
+        try {
+          await this.postComment?.(
+            issueId,
+            `Pause triage verdict: ${verdict.verdict}\n${verdict.rationale}`,
+          );
+        } catch {
+          // Observability only.
+        }
+      }
+      return;
+    }
+
+    this.clearResumeRequirement(issueId);
+
+    try {
+      await this.postComment?.(
+        issueId,
+        [
+          `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes})`,
+          verdict.rationale,
+          "Auto-resuming one continuation unit at the current budget ceiling.",
+        ].join("\n"),
+      );
+    } catch {
+      // Observability only.
+    }
+
+    this.scheduleRetry(issueId, 1, {
+      identifier,
       error: null,
       delayType: "continuation",
     });

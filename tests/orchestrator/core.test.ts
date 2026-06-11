@@ -1616,6 +1616,207 @@ describe("orchestrator core", () => {
     expect(triageCalls).toEqual(["ISSUE-1:steps=1"]);
   });
 
+  it("parks immediately and applies the deferred continue verdict when it arrives", async () => {
+    const deferred: Array<() => Promise<void>> = [];
+    let resolveVerdict: (v: {
+      verdict: "continue";
+      rationale: string;
+    }) => void = () => {};
+    const comments: string[] = [];
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({
+        pauseTriage: {
+          baseUrl: "http://studio2.local:8000/v1",
+          model: "deepseek-v4-flash",
+          apiKey: null,
+          maxResumes: 2,
+        },
+      }),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+      runPauseTriage: () =>
+        new Promise((resolve) => {
+          resolveVerdict = resolve;
+        }),
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250001,
+        estimatedCostUsd: 5,
+      },
+    });
+
+    // The exit path never waited on the model: parked immediately.
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(deferred).toHaveLength(0);
+
+    // The verdict lands later and is applied as a serialized task.
+    resolveVerdict({
+      verdict: "continue",
+      rationale: "Real progress; one more unit should finish.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(deferred).toHaveLength(1);
+    await deferred[0]?.();
+
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+    expect(orchestrator.getState().issuePauseTriageResumes["1"]).toBe(1);
+    expect(orchestrator.getState().retryAttempts["1"]?.delayType).toBe(
+      "continuation",
+    );
+    expect(
+      comments.some((body) =>
+        body.includes("Pause triage verdict: continue (resume 1/2)"),
+      ),
+    ).toBe(true);
+  });
+
+  it("treats a deferred verdict as stale once the operator has already resumed", async () => {
+    const deferred: Array<() => Promise<void>> = [];
+    let resolveVerdict: (v: {
+      verdict: "continue";
+      rationale: string;
+    }) => void = () => {};
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({
+        pauseTriage: {
+          baseUrl: "http://studio2.local:8000/v1",
+          model: "deepseek-v4-flash",
+          apiKey: null,
+          maxResumes: 2,
+        },
+      }),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      runPauseTriage: () =>
+        new Promise((resolve) => {
+          resolveVerdict = resolve;
+        }),
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250001,
+        estimatedCostUsd: 5,
+      },
+    });
+
+    // Operator beat the model to it.
+    orchestrator.getState().resumeRequired.delete("1");
+
+    resolveVerdict({ verdict: "continue", rationale: "Keep going." });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await deferred[0]?.();
+
+    // Stale: no double-resume, no counter consumption.
+    expect(
+      orchestrator.getState().issuePauseTriageResumes["1"],
+    ).toBeUndefined();
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+  });
+
+  it("leaves the park standing on a deferred hold verdict", async () => {
+    const deferred: Array<() => Promise<void>> = [];
+    let resolveVerdict: (v: { verdict: "hold"; rationale: string }) => void =
+      () => {};
+    const comments: string[] = [];
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({
+        pauseTriage: {
+          baseUrl: "http://studio2.local:8000/v1",
+          model: "deepseek-v4-flash",
+          apiKey: null,
+          maxResumes: 2,
+        },
+      }),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+      runPauseTriage: () =>
+        new Promise((resolve) => {
+          resolveVerdict = resolve;
+        }),
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "dollar_budget",
+        reason: "Estimated dollar budget exceeded.",
+        turnCount: 3,
+        totalTokens: 100,
+        estimatedCostUsd: 9,
+      },
+    });
+
+    resolveVerdict({
+      verdict: "hold",
+      rationale: "Worker is spinning; needs human review.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await deferred[0]?.();
+
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(
+      comments.some((body) => body.includes("Pause triage verdict: hold")),
+    ).toBe(true);
+  });
+
   it("never consults triage for non-budget hard stops or while the floor is blocked", async () => {
     const triageCalls: string[] = [];
     const makeOrchestrator = (rateLimitAdmission?: {

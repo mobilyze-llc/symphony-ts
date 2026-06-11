@@ -482,6 +482,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           config: this.config.pauseTriage,
           evidence,
         }),
+      scheduleDeferred: (task) => void this.enqueue(task),
       onIssueDropped: ({ identifier, title, url, reason }) => {
         this.notifier?.notify({
           type: "issue_dropped",
