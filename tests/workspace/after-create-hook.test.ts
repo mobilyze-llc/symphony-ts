@@ -136,14 +136,21 @@ describe("after_create hook (WORKFLOW-template.md, real execution)", () => {
       seedRemote,
     );
     await git(["update-ref", "refs/heads/origin/main", staleSha], bare);
+    // Nested poisoned refs must heal too — the for-each-ref prefix form
+    // ("refs/heads/origin/") matches across path segments, unlike a "*"
+    // glob, which stops at "/".
+    await git(["update-ref", "refs/heads/origin/feature/xyz", staleSha], bare);
 
     // Second workspace must succeed (the incident made this fatal), the
-    // poisoned ref must be gone, and HEAD must be the CURRENT remote tip,
+    // poisoned refs must be gone, and HEAD must be the CURRENT remote tip,
     // not the stale commit the ambiguous short name used to resolve to.
     const workspace = await runHook("issue-cccc");
 
     await expect(
       git(["show-ref", "--verify", "refs/heads/origin/main"], bare),
+    ).rejects.toThrow();
+    await expect(
+      git(["show-ref", "--verify", "refs/heads/origin/feature/xyz"], bare),
     ).rejects.toThrow();
     const newSeedHead = await git(["rev-parse", "main"], seedRemote);
     expect(await git(["rev-parse", "HEAD"], workspace)).toBe(newSeedHead);
@@ -151,6 +158,31 @@ describe("after_create hook (WORKFLOW-template.md, real execution)", () => {
 
     const stderr = hookLogs.map((l) => l.stderr ?? "").join("\n");
     expect(stderr).toContain("removing poisoned local ref");
+  });
+
+  it("skips (and warns about) a poisoned ref that a live worktree has checked out", async () => {
+    await runHook("issue-gggg");
+    const bare = join(workspaceRoot, ".bare-clones", "seed.git-source");
+
+    // The incident vector itself: an agent worktree sitting ON a branch
+    // literally named origin/main. Deleting that ref would orphan the
+    // worktree's next commit, so the self-heal must skip it loudly.
+    const rogue = join(root, "rogue-worktree");
+    await git(["worktree", "add", rogue, "-b", "origin/main", "main"], bare);
+
+    const workspace = await runHook("issue-hhhh");
+
+    // Hook succeeded, the checked-out poisoned ref survived, and the new
+    // workspace is still based on the true remote tip (full refnames make
+    // the hook immune to the remaining ambiguity).
+    expect(
+      await git(["show-ref", "--verify", "refs/heads/origin/main"], bare),
+    ).toBeTruthy();
+    const seedHead = await git(["rev-parse", "main"], seedRemote);
+    expect(await git(["rev-parse", "HEAD"], workspace)).toBe(seedHead);
+
+    const stderr = hookLogs.map((l) => l.stderr ?? "").join("\n");
+    expect(stderr).toContain("checked out in a live worktree");
   });
 
   it("prunes remote-tracking refs for branches deleted on the remote", async () => {
