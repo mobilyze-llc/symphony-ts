@@ -195,8 +195,7 @@ export interface GateFailedEvent {
 }
 
 /**
- * Info-tier alert placeholder — interface only; no formatter case required
- * until the first info-severity event is defined.
+ * Info-tier alert event.
  * severity: info
  */
 export interface InfoAlertEvent {
@@ -219,26 +218,6 @@ export type PipelineNotificationEvent =
   | EscalationStepEvent
   | GateFailedEvent
   | InfoAlertEvent;
-
-/** Severity tier for a notification event. */
-export type NotificationSeverity = "critical" | "warning" | "info";
-
-/** Returns the severity tier for a given event type. */
-export function getNotificationSeverity(
-  event: PipelineNotificationEvent,
-): NotificationSeverity {
-  switch (event.type) {
-    case "failure_exhausted":
-      return "critical";
-    case "hard_stop_budget":
-    case "stall_killed":
-    case "infra_error":
-    case "gate_failed":
-      return "warning";
-    default:
-      return "info";
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -902,12 +881,24 @@ export function createWebhookPoster(input: {
         text,
         ...(blocks !== undefined ? { blocks } : {}),
       });
-      const response = await fetchFn(input.webhookUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
-        signal: AbortSignal.timeout(5_000),
-      });
+      // Wrap the fetch so that ALL transport errors (URL parse failures, DNS,
+      // connection refused, timeout) are re-thrown as a fixed URL-free message.
+      // This prevents a malformed SYMPHONY_SLACK_WEBHOOK_URL from leaking the
+      // full secret path into logs via "Failed to parse URL from <url>".
+      // Redaction is co-located with the secret — never rely on callers to sanitize.
+      let response: Response;
+      try {
+        response = await fetchFn(input.webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+          signal: AbortSignal.timeout(5_000),
+        });
+      } catch (err) {
+        throw new Error(
+          `Slack webhook delivery failed: ${err instanceof Error ? err.name : "unknown"}`,
+        );
+      }
       if (!response.ok) {
         throw new Error(`Slack webhook returned HTTP ${response.status}`);
       }

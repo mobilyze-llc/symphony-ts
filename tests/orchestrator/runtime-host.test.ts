@@ -4328,9 +4328,10 @@ describe("pipeline notifications", () => {
     fakeRunner.reject("1", new Error("agent crashed"));
     await host.waitForIdle();
 
-    // Events: dispatched + failure_exhausted (SYMPH-397) + issue_failed
-    // (order between failure_exhausted and issue_failed is async-dependent)
-    expect(notifier.events).toHaveLength(3);
+    // Events: dispatched + failure_exhausted (SYMPH-397).
+    // issue_failed is suppressed when retriesExhausted is true — failure_exhausted
+    // is the canonical terminal alert and avoids double "retries exhausted" posts.
+    expect(notifier.events).toHaveLength(2);
     expect(notifier.events[0]).toMatchObject({
       type: "issue_dispatched",
       issueIdentifier: "ISSUE-1",
@@ -4341,10 +4342,9 @@ describe("pipeline notifications", () => {
         issueIdentifier: "ISSUE-1",
       }),
     );
-    expect(notifier.events).toContainEqual(
+    expect(notifier.events).not.toContainEqual(
       expect.objectContaining({
         type: "issue_failed",
-        issueIdentifier: "ISSUE-1",
         retriesExhausted: true,
       }),
     );
@@ -4806,6 +4806,141 @@ describe("pipeline notifications", () => {
     // Clean up: resolve the rework run
     fakeRunner.resolve("1", createNormalResult());
     await host.waitForIdle();
+  });
+
+  it("onEscalationStep fires escalation_step with real issue title (not identifier)", async () => {
+    // Escalation step: hardStop with PAUSED-budget outcome + maxSteps >= 1 triggers
+    // onEscalationStep in the orchestrator, which the runtime host routes to the notifier.
+    const tracker = createTracker({
+      candidates: [createIssue({ title: "Pagination feature" })],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: {
+        ...createConfig(),
+        budgetEscalation: { maxSteps: 2, multiplier: 2 },
+      },
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    // Resolve with a budget hard stop — step 1 of 2 triggers escalation, not exhaustion
+    fakeRunner.resolve("1", {
+      ...createNormalResult(),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250_000,
+        estimatedCostUsd: 3.21,
+      },
+    });
+    await host.waitForIdle();
+
+    const escalationEvents = notifier.events.filter(
+      (e) => e.type === "escalation_step",
+    );
+    expect(escalationEvents).toHaveLength(1);
+    expect(escalationEvents[0]).toMatchObject({
+      type: "escalation_step",
+      issueIdentifier: "ISSUE-1",
+      // issueTitle must be the real title, not the fallback identifier
+      issueTitle: "Pagination feature",
+    });
+  });
+
+  it("onHardStopBudget fires hard_stop_budget with real issue title (not identifier)", async () => {
+    // Verifies that the hard_stop_budget callback threads the real issue title
+    // rather than falling back to the identifier.
+    const tracker = createTracker({
+      candidates: [createIssue({ title: "Auth refactor" })],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: {
+        ...createConfig(),
+        // maxSteps: null => budget escalation ladder not available → hard_stop_budget
+        budgetEscalation: { maxSteps: null, multiplier: 2 },
+      },
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.resolve("1", {
+      ...createNormalResult(),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250_000,
+        estimatedCostUsd: 3.21,
+      },
+    });
+    await host.waitForIdle();
+
+    const budgetEvents = notifier.events.filter(
+      (e) => e.type === "hard_stop_budget",
+    );
+    expect(budgetEvents).toHaveLength(1);
+    expect(budgetEvents[0]).toMatchObject({
+      type: "hard_stop_budget",
+      issueIdentifier: "ISSUE-1",
+      // issueTitle must be the real title, not the fallback identifier
+      issueTitle: "Auth refactor",
+    });
+  });
+
+  it("onFailureExhausted fires failure_exhausted with real issue title (not identifier)", async () => {
+    // Verifies that failure_exhausted threads the real issue title.
+    const tracker = createTracker({
+      candidates: [createIssue({ title: "Payment gateway fix" })],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: {
+        ...createConfig(),
+        agent: { ...createConfig().agent, maxRetryAttempts: 0 },
+      },
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.reject("1", new Error("agent crashed"));
+    await host.waitForIdle();
+
+    const exhaustedEvents = notifier.events.filter(
+      (e) => e.type === "failure_exhausted",
+    );
+    expect(exhaustedEvents).toHaveLength(1);
+    expect(exhaustedEvents[0]).toMatchObject({
+      type: "failure_exhausted",
+      issueIdentifier: "ISSUE-1",
+      // issueTitle must be the real title, not the fallback identifier
+      issueTitle: "Payment gateway fix",
+    });
   });
 });
 

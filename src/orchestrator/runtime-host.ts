@@ -650,6 +650,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             onFailureExhausted: (input: {
               issueId: string;
               issueIdentifier: string;
+              issueTitle: string;
               reason: string;
               stageName: string | null;
               failureSignature: string | null;
@@ -658,7 +659,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               _notifier.notify({
                 type: "failure_exhausted",
                 issueIdentifier: input.issueIdentifier,
-                issueTitle: input.issueIdentifier,
+                issueTitle: input.issueTitle,
                 issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
                 stageName: input.stageName,
                 reason: input.reason,
@@ -669,6 +670,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             onHardStopBudget: (input: {
               issueId: string;
               issueIdentifier: string;
+              issueTitle: string;
               stageName: string | null;
               trigger: string;
               reason: string;
@@ -678,7 +680,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               _notifier.notify({
                 type: "hard_stop_budget",
                 issueIdentifier: input.issueIdentifier,
-                issueTitle: input.issueIdentifier,
+                issueTitle: input.issueTitle,
                 issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
                 stageName: input.stageName,
                 trigger: input.trigger,
@@ -690,6 +692,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             onEscalationStep: (input: {
               issueId: string;
               issueIdentifier: string;
+              issueTitle: string;
               stageName: string | null;
               step: number;
               maxSteps: number;
@@ -699,7 +702,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               _notifier.notify({
                 type: "escalation_step",
                 issueIdentifier: input.issueIdentifier,
-                issueTitle: input.issueIdentifier,
+                issueTitle: input.issueTitle,
                 issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
                 stageName: input.stageName,
                 step: input.step,
@@ -711,13 +714,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             onGateFailed: (input: {
               issueId: string;
               issueIdentifier: string;
+              issueTitle: string;
               stageName: string | null;
               reason: string;
             }) => {
               _notifier.notify({
                 type: "gate_failed",
                 issueIdentifier: input.issueIdentifier,
-                issueTitle: input.issueIdentifier,
+                issueTitle: input.issueTitle,
                 issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
                 stageName: input.stageName,
                 reason: input.reason,
@@ -2444,15 +2448,21 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       const maxRetries = this.config.agent.maxRetryAttempts;
       const retriesExhausted =
         (captured.capturedRetryAttempt ?? 0) >= maxRetries;
-      notifier.notify({
-        type: "issue_failed",
-        issueIdentifier: execution.issueIdentifier,
-        issueTitle: captured.capturedTitle,
-        issueUrl: captured.capturedUrl,
-        failureReason: input.reason ?? null,
-        retriesExhausted,
-        retryAttempt: captured.capturedRetryAttempt,
-      });
+      // Dedup: when retries are exhausted, onFailureExhausted (SYMPH-397) already
+      // fired a richer failure_exhausted alert (includes signature/class). Suppress
+      // the generic issue_failed post for the same terminal event to avoid double
+      // "retries exhausted" messages in the operator channel.
+      if (!retriesExhausted) {
+        notifier.notify({
+          type: "issue_failed",
+          issueIdentifier: execution.issueIdentifier,
+          issueTitle: captured.capturedTitle,
+          issueUrl: captured.capturedUrl,
+          failureReason: input.reason ?? null,
+          retriesExhausted,
+          retryAttempt: captured.capturedRetryAttempt,
+        });
+      }
       return;
     }
 

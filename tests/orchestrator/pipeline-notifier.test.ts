@@ -7,7 +7,6 @@ import {
   formatNotification,
   formatStageTimeline,
   formatTokensCompact,
-  getNotificationSeverity,
 } from "../../src/orchestrator/pipeline-notifier.js";
 import type {
   NotificationPoster,
@@ -1401,78 +1400,6 @@ describe("formatNotification — watchdog events (SYMPH-397)", () => {
   });
 });
 
-describe("getNotificationSeverity (SYMPH-397)", () => {
-  it("classifies failure_exhausted as critical", () => {
-    expect(
-      getNotificationSeverity({
-        type: "failure_exhausted",
-        issueIdentifier: "X",
-        issueTitle: "X",
-        issueUrl: null,
-        stageName: null,
-        reason: "r",
-        failureSignature: null,
-        failureClass: null,
-      }),
-    ).toBe("critical");
-  });
-
-  it("classifies hard_stop_budget as warning", () => {
-    expect(
-      getNotificationSeverity({
-        type: "hard_stop_budget",
-        issueIdentifier: "X",
-        issueTitle: "X",
-        issueUrl: null,
-        stageName: null,
-        trigger: "t",
-        reason: "r",
-        totalTokens: 0,
-        estimatedCostUsd: 0,
-      }),
-    ).toBe("warning");
-  });
-
-  it("classifies gate_failed as warning", () => {
-    expect(
-      getNotificationSeverity({
-        type: "gate_failed",
-        issueIdentifier: "X",
-        issueTitle: "X",
-        issueUrl: null,
-        stageName: null,
-        reason: "r",
-      }),
-    ).toBe("warning");
-  });
-
-  it("classifies escalation_step as info", () => {
-    expect(
-      getNotificationSeverity({
-        type: "escalation_step",
-        issueIdentifier: "X",
-        issueTitle: "X",
-        issueUrl: null,
-        stageName: null,
-        step: 1,
-        maxSteps: 3,
-        multiplier: 2,
-        trigger: "t",
-      }),
-    ).toBe("info");
-  });
-
-  it("classifies pipeline_started as info", () => {
-    expect(
-      getNotificationSeverity({
-        type: "pipeline_started",
-        productName: "symphony",
-        dashboardUrl: null,
-      }),
-    ).toBe("info");
-  });
-});
-
 describe("createWebhookPoster (SYMPH-397)", () => {
   it("POSTs JSON to the webhook URL with text payload", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
@@ -1499,5 +1426,80 @@ describe("createWebhookPoster (SYMPH-397)", () => {
       _fetchOverride: vi.fn(async () => ({ ok: false, status: 400 }) as any),
     });
     await expect(poster.post("c", "text")).rejects.toThrow("HTTP 400");
+  });
+
+  it("redacts secret URL from transport error — malformed URL does not appear in thrown message", async () => {
+    // A malformed webhook URL containing a secret token would normally produce
+    // "Failed to parse URL from http://hooks.slack.com/services/T00/SuperSecretToken123"
+    // in the thrown error. The wrapper must collapse all transport errors to a
+    // fixed, URL-free message so the secret cannot reach log aggregation.
+    const secretToken = "SuperSecretToken123";
+    const malformedUrl = `http://hooks.slack.com:bad/services/T00/${secretToken}`;
+    const poster = createWebhookPoster({ webhookUrl: malformedUrl });
+    await expect(poster.post("c", "text")).rejects.toSatisfy((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      return !msg.includes(secretToken) && !msg.includes(malformedUrl);
+    });
+  });
+
+  it("transport error is wrapped as 'Slack webhook delivery failed: <name>'", async () => {
+    // Verify the fixed-message shape so callers can rely on it for alerting.
+    const throwingFetch: typeof fetch = async () => {
+      throw new TypeError("fetch failed");
+    };
+    const poster = createWebhookPoster({
+      webhookUrl: "https://hooks.slack.com/services/TEST/WEBHOOK",
+      _fetchOverride: throwingFetch,
+    });
+    await expect(poster.post("c", "text")).rejects.toThrow(
+      "Slack webhook delivery failed: TypeError",
+    );
+  });
+
+  it("AbortSignal timeout path wraps the error without leaking URL", async () => {
+    // Simulate the AbortError that AbortSignal.timeout(5_000) would throw.
+    const throwingFetch: typeof fetch = async () => {
+      throw new DOMException(
+        "The operation was aborted due to timeout",
+        "TimeoutError",
+      );
+    };
+    const poster = createWebhookPoster({
+      webhookUrl: "https://hooks.slack.com/services/TEST/WEBHOOK",
+      _fetchOverride: throwingFetch,
+    });
+    await expect(poster.post("c", "text")).rejects.toThrow(
+      "Slack webhook delivery failed: TimeoutError",
+    );
+  });
+});
+
+describe("PipelineNotifier — fail-open contract (SYMPH-397)", () => {
+  it("notify() swallows a rejecting webhook poster and does not throw", async () => {
+    // The notifier's fail-open guarantee must hold even when the poster rejects.
+    const rejector = createWebhookPoster({
+      webhookUrl: "https://hooks.slack.com/services/FAKE/WEBHOOK",
+      // biome-ignore lint/suspicious/noExplicitAny: test override
+      _fetchOverride: vi.fn(async () => ({ ok: false, status: 503 }) as any),
+    });
+    const errors: unknown[] = [];
+    const notifier = new PipelineNotifier({
+      channel: "webhook",
+      poster: rejector,
+      onError: (err) => errors.push(err),
+    });
+
+    // Must not throw synchronously or asynchronously
+    notifier.notify({
+      type: "pipeline_started",
+      productName: "test",
+      dashboardUrl: null,
+    });
+
+    await notifier.flush(200);
+
+    // Error was captured by onError, not propagated
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as Error).message).toContain("HTTP 503");
   });
 });

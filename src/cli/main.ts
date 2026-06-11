@@ -171,7 +171,11 @@ export async function startCliHost(
 
   // Webhook poster takes precedence over bot-token poster; both require
   // per-product slackEnabled to be true (default: true).
-  const canUseWebhook = slackEnabled && webhookUrl !== undefined;
+  // Require a non-empty trimmed value: an empty-string env var passes !==
+  // undefined but produces "Failed to parse URL from " on every notify call,
+  // silently blocking the otherwise-working bot-token fallback.
+  const canUseWebhook =
+    slackEnabled && webhookUrl !== undefined && webhookUrl.trim() !== "";
   const canUseToken =
     slackEnabled && slackChannel !== null && slackToken !== undefined;
 
