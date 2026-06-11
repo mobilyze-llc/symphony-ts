@@ -2247,6 +2247,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const capturedUrl = runningEntry?.issue.url ?? null;
     const capturedRetryAttempt = runningEntry?.retryAttempt ?? null;
     const preFailedHas = state.failed.has(execution.issueId);
+    const preExhaustedHas = state.failureExhaustedIds.has(execution.issueId);
     const capturedFirstDispatchedAt =
       state.issueFirstDispatchedAt[execution.issueId] ?? null;
 
@@ -2329,6 +2330,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         capturedRetryAttempt,
         capturedTurnCount: runningEntry?.turnCount ?? 0,
         preFailedHas,
+        preExhaustedHas,
         capturedFirstDispatchedAt,
         durationMs,
       });
@@ -2433,6 +2435,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       capturedRetryAttempt: number | null;
       capturedTurnCount: number;
       preFailedHas: boolean;
+      /** Whether a failure_exhausted alert had already fired before onWorkerExit ran. */
+      preExhaustedHas: boolean;
       capturedFirstDispatchedAt: string | null;
       durationMs: number;
     },
@@ -2441,18 +2445,22 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const notifier = this.notifier!;
     const state = this.orchestrator.getState();
 
-    // Terminal failure — retries exhausted (check first; supersedes infra_error)
+    // Terminal failure — issue newly entered failed set (check first; supersedes infra_error)
     const nowFailed =
       state.failed.has(execution.issueId) && !captured.preFailedHas;
     if (nowFailed) {
-      const maxRetries = this.config.agent.maxRetryAttempts;
-      const retriesExhausted =
-        (captured.capturedRetryAttempt ?? 0) >= maxRetries;
-      // Dedup: when retries are exhausted, onFailureExhausted (SYMPH-397) already
-      // fired a richer failure_exhausted alert (includes signature/class). Suppress
-      // the generic issue_failed post for the same terminal event to avoid double
-      // "retries exhausted" messages in the operator channel.
-      if (!retriesExhausted) {
+      // Dedup: if a failure_exhausted alert fired during this onWorkerExit call
+      // (i.e. exhaustedIds grew since we captured preExhaustedHas), suppress
+      // the generic issue_failed post to avoid double terminal alerts for the
+      // same event. This covers both count-based exhaustion AND novelty short-circuit
+      // parks that fire failure_exhausted at attempt < maxRetries.
+      const exhaustedAlertFired =
+        state.failureExhaustedIds.has(execution.issueId) &&
+        !captured.preExhaustedHas;
+      if (!exhaustedAlertFired) {
+        const maxRetries = this.config.agent.maxRetryAttempts;
+        const retriesExhausted =
+          (captured.capturedRetryAttempt ?? 0) >= maxRetries;
         notifier.notify({
           type: "issue_failed",
           issueIdentifier: execution.issueIdentifier,

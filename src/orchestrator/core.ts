@@ -2235,6 +2235,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error: `agent reported failure: ${failureClass}`,
           delayType: "failure",
         },
@@ -2268,6 +2269,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error: "agent reported failure: review",
           delayType: "failure",
         },
@@ -2281,6 +2283,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error: "agent reported failure: review",
           delayType: "failure",
         },
@@ -2329,6 +2332,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error: "agent reported failure: review",
           delayType: "failure",
         },
@@ -2354,6 +2358,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error:
             "agent reported failure: review (no rework target on downstream gate)",
           delayType: "failure",
@@ -2429,6 +2434,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error: "agent reported failure: rebase",
           delayType: "failure",
         },
@@ -2442,6 +2448,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error: "agent reported failure: rebase",
           delayType: "failure",
         },
@@ -2484,6 +2491,7 @@ export class OrchestratorCore {
       nextRetryAttempt(runningEntry.retryAttempt),
       {
         identifier: runningEntry.identifier,
+        issueTitle: runningEntry.issue.title,
         error: "agent reported failure: rebase",
         delayType: "failure",
       },
@@ -2584,6 +2592,9 @@ export class OrchestratorCore {
       failure_class: ErrorSignatureClass;
     },
   ): Promise<void> {
+    // Mark immediately (before any await) so runtime-host's fireWorkerNotification
+    // can check this set synchronously after onWorkerExit returns.
+    this.state.failureExhaustedIds.add(issueId);
     const issueState = this.state.running[issueId]?.issue.state ?? null;
     const stageName = this.state.issueStages[issueId] ?? null;
     try {
@@ -4683,6 +4694,7 @@ export class OrchestratorCore {
       this.state.running[issue.id] = failedEntry;
       this.scheduleRetry(issue.id, nextRetryAttempt(attempt), {
         identifier: issue.identifier,
+        issueTitle: issue.title,
         error: errorMessage,
         delayType: "failure",
       });

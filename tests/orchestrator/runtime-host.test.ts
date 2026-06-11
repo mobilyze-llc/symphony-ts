@@ -4942,6 +4942,63 @@ describe("pipeline notifications", () => {
       issueTitle: "Payment gateway fix",
     });
   });
+
+  it("terminal event with failure_exhausted fires only ONE alert (no redundant issue_failed)", async () => {
+    // Verifies council R2 P2: the dedup guard suppresses issue_failed whenever
+    // a failure_exhausted alert actually fired — not just when the count-based
+    // retriesExhausted proxy is true. A spec failure parks at attempt 0 with
+    // maxRetries=5, so retriesExhausted (old proxy: 0 >= 5 = false) would have
+    // emitted a redundant issue_failed. The new seam checks failureExhaustedIds.
+    const tracker = createTracker({
+      candidates: [createIssue({ title: "Spec-fail dedup test" })],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: {
+        ...createConfig(),
+        // maxRetryAttempts=5 so attempt 0 is far below the limit:
+        // old dedup proxy (0 >= 5 = false) would emit issue_failed even though
+        // failure_exhausted was already fired by the spec-failure path.
+        agent: { ...createConfig().agent, maxRetryAttempts: 5 },
+      },
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    // Spec failure is terminal — no retry, failure_exhausted fires immediately.
+    // Pass the STAGE_FAILED signal via lastCodexMessage (the fallback agentMessage source).
+    fakeRunner.resolve("1", {
+      ...createNormalResult(),
+      liveSession: {
+        ...createNormalResult().liveSession,
+        lastCodexMessage:
+          "[STAGE_FAILED: spec]\nCannot satisfy the acceptance criteria.",
+      },
+    });
+    await host.waitForIdle();
+
+    // Should be in failed state
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.counts.failed).toBe(1);
+
+    // Exactly ONE Slack post for the terminal event: failure_exhausted
+    const exhaustedEvents = notifier.events.filter(
+      (e) => e.type === "failure_exhausted",
+    );
+    const failedEvents = notifier.events.filter(
+      (e) => e.type === "issue_failed",
+    );
+    expect(exhaustedEvents).toHaveLength(1);
+    // issue_failed must be suppressed — failure_exhausted already covers the terminal alert
+    expect(failedEvents).toHaveLength(0);
+  });
 });
 
 describe("pipeline notifications in startRuntimeService", () => {

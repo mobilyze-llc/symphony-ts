@@ -954,6 +954,13 @@ export interface OrchestratorState {
     string,
     { signature: string; class: ErrorSignatureClass }
   >;
+  /**
+   * Issues for which a `failure_exhausted` alert has been fired in this
+   * session (SYMPH-397). Used by runtime-host to suppress the redundant
+   * `issue_failed` notification when the terminal path was already announced
+   * via `failure_exhausted` (e.g. novelty short-circuit parks at attempt < maxRetries).
+   */
+  failureExhaustedIds: Set<string>;
 }
 
 export const FAILURE_CLASSES = [
@@ -1107,5 +1114,6 @@ export function createInitialOrchestratorState(input: {
     managerRunJournal: [],
     managerRuns: {},
     issueFailureSignatures: {},
+    failureExhaustedIds: new Set<string>(),
   };
 }
