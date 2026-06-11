@@ -1424,8 +1424,14 @@ export class OrchestratorCore {
           acceptanceCriteria,
         },
       });
-    } catch {
-      // Audit best-effort.
+    } catch (error) {
+      // Audit best-effort, but never silent for the snapshot entry: the
+      // live process keeps the in-state snapshot (judge correctness over
+      // audit purity) while restart rehydration is journal-only, so a
+      // failed write means the snapshot will NOT survive a restart.
+      console.warn(
+        `[orchestrator] ac_gate journal write failed for ${identifier}; AC snapshot will not survive restart: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
 
     if (action === "rework" && verdict !== null) {
@@ -1573,16 +1579,7 @@ export class OrchestratorCore {
     if (issue === null) {
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       this.onIssueDropped?.({
         issueId,
         identifier: retryEntry.identifier ?? issueId,
@@ -1600,16 +1597,7 @@ export class OrchestratorCore {
     if (!this.isRetryCandidateEligible(issue)) {
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       this.onIssueDropped?.({
         issueId,
         identifier: issue.identifier,
@@ -2006,32 +1994,14 @@ export class OrchestratorCore {
     const nextStageName = currentStage.transitions.onComplete;
     if (nextStageName === null) {
       // No on_complete transition — treat as terminal
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       return "completed";
     }
 
     const nextStage = stagesConfig.stages[nextStageName];
     if (nextStage === undefined) {
       // Invalid target — treat as terminal
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       return "completed";
     }
 
@@ -2052,16 +2022,7 @@ export class OrchestratorCore {
           );
         });
       }
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       // Fire linearState update for the terminal stage (e.g., move to "Done")
       if (
         nextStage.linearState !== null &&
@@ -2140,16 +2101,7 @@ export class OrchestratorCore {
       // Spec failures are unrecoverable — escalate immediately
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       void this.fireEscalationSideEffects(
         issueId,
         runningEntry.identifier,
@@ -3231,16 +3183,7 @@ export class OrchestratorCore {
 
     if (currentCount >= maxRework) {
       // Exceeded max rework — escalate to completed/terminal
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
       return "escalated";
@@ -5073,16 +5016,7 @@ export class OrchestratorCore {
     ) {
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       void this.fireEscalationSideEffects(
         issueId,
         input.identifier ?? issueId,

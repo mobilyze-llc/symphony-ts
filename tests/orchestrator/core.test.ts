@@ -2233,6 +2233,10 @@ describe("orchestrator core", () => {
     });
     expect(judgedAcs).toEqual([expectedSnapshot]);
     expect(orchestrator.getState().completed.has("1")).toBe(true);
+
+    // Terminal completion clears the snapshot — a redispatched issue id
+    // must never be judged against a stale rubric (council R1 P1).
+    expect(orchestrator.getState().issueAcSnapshots["1"]).toBeUndefined();
   });
 
   it("rehydrates gate-passed AC snapshots from the run journal (SYMPH-374)", () => {
