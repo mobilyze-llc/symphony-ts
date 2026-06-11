@@ -1,4 +1,4 @@
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { isAbsolute, normalize, resolve, sep } from "node:path";
 
 import type { WorkflowDefinition } from "../domain/model.js";
@@ -82,6 +82,7 @@ export function resolveWorkflowConfig(
   const pauseTriage = asRecord(config.pause_triage);
   const acGate = asRecord(config.ac_gate);
   const specFidelity = asRecord(config.spec_fidelity);
+  const admissionCard = asRecord(config.admission_card);
   const runner = asRecord(config.runner);
   const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
@@ -219,6 +220,9 @@ export function resolveWorkflowConfig(
     specFidelity: {
       enabled: specFidelity.enabled === true,
     },
+    admissionCard: {
+      enabled: admissionCard.enabled === true,
+    },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,
       model: readString(runner.model),
@@ -274,11 +278,18 @@ export function resolveWorkflowConfig(
     },
     stages: resolveStagesConfig(config.stages),
     escalationState: readString(config.escalation_state),
+    ownerHost: readString(config.owner_host),
   };
+}
+
+/** First hostname label, case-folded: "PRO14.local" and "pro14" compare equal. */
+function normalizeHostLabel(value: string): string {
+  return value.trim().toLowerCase().split(".")[0] ?? "";
 }
 
 export function validateDispatchConfig(
   config: ResolvedWorkflowConfig,
+  options?: { hostname?: string },
 ): DispatchValidationResult {
   const trackerKind = config.tracker.kind?.trim();
   if (!trackerKind) {
@@ -307,6 +318,25 @@ export function validateDispatchConfig(
       ERROR_CODES.configInvalid,
       "tracker.project_slug must be configured before dispatch.",
     );
+  }
+
+  if (config.ownerHost !== null && config.ownerHost !== undefined) {
+    const ownerHost = config.ownerHost.trim();
+    if (ownerHost === "") {
+      // A safety guard that is present but blank reads as intent to
+      // restrict, not intent to disable — fail closed on the typo.
+      return invalid(
+        ERROR_CODES.configInvalid,
+        "owner_host must be a non-empty hostname label when set; omit the key to allow any host.",
+      );
+    }
+    const machine = options?.hostname ?? hostname();
+    if (normalizeHostLabel(machine) !== normalizeHostLabel(ownerHost)) {
+      return invalid(
+        ERROR_CODES.ownerHostMismatch,
+        `owner_host '${ownerHost}' does not match this machine '${machine}' — this workflow is single-homed to one orchestrator host (SYMPH-383); refusing to dispatch.`,
+      );
+    }
   }
 
   if (config.codex.command.trim() === "") {
@@ -383,9 +413,33 @@ function readHookScript(
     return resolvedScript;
   }
 
-  return (
-    resolvePathValue(trimmedScript, workflowPath, environment) ?? resolvedScript
+  const resolvedPath = resolvePathValue(
+    trimmedScript,
+    workflowPath,
+    environment,
   );
+  if (resolvedPath === null) {
+    return resolvedScript;
+  }
+
+  return quoteHookScriptPath(resolvedPath);
+}
+
+function quoteHookScriptPath(path: string): string {
+  // The configured value had no whitespace (isSinglePathHookScript), but the
+  // workflow directory it resolved against may introduce spaces or other
+  // shell-special characters, and the hook runs through `sh -lc` where a bare
+  // word would split or glob (SYMPH-285). Bare-word-safe paths stay
+  // byte-identical with prior behavior; `$` is in the safe set so env refs
+  // like `./$PRODUCT/hooks/x.sh` keep their historical bare-word expansion
+  // semantics (bare expansion word-splits its result; quoted does not).
+  if (/^[A-Za-z0-9_\-./~+@%:,=$]+$/.test(path)) {
+    return path;
+  }
+
+  // Double quotes, NOT single: `$VAR` segments left for the shell (e.g.
+  // `./$PRODUCT/hooks/before-run.sh`) must keep expanding at execution time.
+  return `"${path.replace(/([\\"`])/g, "\\$1")}"`;
 }
 
 function isSinglePathHookScript(script: string): boolean {

@@ -1,3 +1,7 @@
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -5,6 +9,7 @@ import {
   type WorkspaceHookError,
   type WorkspaceHookLogEntry,
   WorkspaceHookRunner,
+  resolveWorkflowConfig,
 } from "../../src/index.js";
 
 describe("WorkspaceHookRunner", () => {
@@ -157,11 +162,42 @@ describe("WorkspaceHookRunner", () => {
     expect(execute).toHaveBeenCalledWith("echo hello", {
       cwd: "/tmp/workspace",
       timeoutMs: 100,
-      env: { SYMPHONY_STAGE: "implement" },
+      env: expect.objectContaining({
+        SYMPHONY_STAGE: "implement",
+        GIT_CEILING_DIRECTORIES: expect.stringMatching(/(^|:)\/tmp$/),
+      }),
     });
   });
 
-  it("omits env when not provided", async () => {
+  it("does not let caller env weaken the git isolation ceiling", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      stdout: "",
+      stderr: "",
+    });
+    const runner = new WorkspaceHookRunner({
+      config: {
+        afterCreate: null,
+        beforeRun: "echo hello",
+        afterRun: null,
+        beforeRemove: null,
+        timeoutMs: 100,
+      },
+      execute,
+    });
+
+    await runner.run({
+      name: "beforeRun",
+      workspacePath: "/tmp/workspace",
+      env: { GIT_CEILING_DIRECTORIES: "" },
+    });
+
+    const env = execute.mock.calls[0]?.[1]?.env as Record<string, string>;
+    expect(env.GIT_CEILING_DIRECTORIES).toMatch(/(^|:)\/tmp$/);
+  });
+
+  it("always injects the git isolation env, even without caller env", async () => {
     const execute = vi.fn().mockResolvedValue({
       exitCode: 0,
       signal: null,
@@ -187,7 +223,56 @@ describe("WorkspaceHookRunner", () => {
     expect(execute).toHaveBeenCalledWith("echo hello", {
       cwd: "/tmp/workspace",
       timeoutMs: 100,
+      env: expect.objectContaining({
+        GIT_CEILING_DIRECTORIES: expect.stringMatching(/(^|:)\/tmp$/),
+      }),
     });
+  });
+
+  it("executes a resolved hook path containing spaces end-to-end (SYMPH-285)", async () => {
+    // Disposable workspace smoke: a real workflow dir with a space in its
+    // name, a real hook script, the real shell executor — no mocks.
+    const workflowDir = await mkdtemp(join(tmpdir(), "symphony hooks "));
+    const workspaceDir = await mkdtemp(join(tmpdir(), "symphony-ws-"));
+    try {
+      const hooksDir = join(workflowDir, "hooks");
+      await mkdir(hooksDir);
+      const scriptPath = join(hooksDir, "after-create.sh");
+      await writeFile(scriptPath, "#!/bin/sh\necho hook-ran\n");
+      await chmod(scriptPath, 0o755);
+
+      const resolved = resolveWorkflowConfig({
+        workflowPath: join(workflowDir, "WORKFLOW.md"),
+        promptTemplate: "Prompt",
+        config: {
+          hooks: {
+            after_create: "./hooks/after-create.sh",
+          },
+        },
+      });
+
+      const logs: WorkspaceHookLogEntry[] = [];
+      const runner = new WorkspaceHookRunner({
+        config: resolved.hooks,
+        log: (entry) => {
+          logs.push(entry);
+        },
+      });
+
+      await expect(
+        runner.run({
+          name: "afterCreate",
+          workspacePath: workspaceDir,
+        }),
+      ).resolves.toBe(true);
+      const completed = logs.find(
+        (entry) => entry.event === "workspace_hook_completed",
+      );
+      expect(completed?.stdout).toContain("hook-ran");
+    } finally {
+      await rm(workflowDir, { recursive: true, force: true });
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
   });
 
   it("suppresses errors in best-effort mode", async () => {

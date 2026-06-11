@@ -818,7 +818,15 @@ export interface DecorrelatedGateOutcome {
 export type ContinuousFeedbackEvent = "commit" | "diff" | "checkpoint";
 export type ContinuousFeedbackStatus = "pass" | "finding";
 export type ContinuousFeedbackFindingSeverity = "info" | "warning" | "blocking";
-export type ContinuousFeedbackFindingStatus = "open" | "resolved" | "bounced";
+export type ContinuousFeedbackFindingStatus =
+  | "open"
+  | "resolved"
+  | "bounced"
+  /**
+   * Failed the injection-hygiene policy (SYMPH-378): no evidence grounding
+   * and not a blocker. Journaled for measurement; never bounces or comments.
+   */
+  | "suppressed";
 
 export interface ContinuousFeedbackLane {
   runner: string;
@@ -920,6 +928,12 @@ export interface OrchestratorState {
   issueFirstDispatchedAt: Record<string, string>;
   issueExecutionHistory: Record<string, ExecutionHistory>;
   issueRightSizingDecisions: Record<string, RightSizingDecision>;
+  /**
+   * Canonical AC rubric per issue, frozen from the investigate completion
+   * message when the AC gate passes (SYMPH-374). Spec-fidelity judges and
+   * implement prompts read this snapshot — never the mutable workpad.
+   */
+  issueAcSnapshots: Record<string, string>;
   decorrelatedGateOutcomes: Record<string, DecorrelatedGateOutcome[]>;
   loopTraceJournal: Record<string, LoopTraceJournal>;
   continuousFeedback: Record<string, ContinuousFeedbackIssueState>;
@@ -1071,6 +1085,7 @@ export function createInitialOrchestratorState(input: {
     issueFirstDispatchedAt: {},
     issueExecutionHistory: {},
     issueRightSizingDecisions: {},
+    issueAcSnapshots: {},
     decorrelatedGateOutcomes: {},
     loopTraceJournal: {},
     continuousFeedback: {},

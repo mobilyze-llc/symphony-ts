@@ -135,6 +135,7 @@ function buildSpecFidelityPrompt(evidence: SpecFidelityEvidence): string {
     "- For each `check:`/`judge:` AC: cite the diff hunks that satisfy it, or state what is missing.",
     '- Verdict "pass" only when every AC is satisfied with diff evidence; otherwise "rework" with the specific gaps.',
     "- No acceptance criteria at all = rework with findings asking for them.",
+    "- Live proof (SYMPH-377): the worker message should carry exactly one disposition line — `live-proof: evidence — <citation>`, `live-proof: waived — <reason>`, or `live-proof: n/a — <reason>`. When the diff touches user-visible runtime behavior (UI, API responses, frontend assets), only `evidence` or an explicit `waived` is acceptable; `n/a` is valid ONLY for diffs with no runtime boundary, so an `n/a` on a diff that visibly touches runtime surfaces is itself a finding, as is a runtime-touching diff with no disposition line at all (note these; they need not alone flip the verdict).",
     "",
     'Respond with JSON only: {"verdict": "pass" | "rework", "findings": "<one line per AC: PASS/FAIL + evidence>"}',
   ].join("\n");

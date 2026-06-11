@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 
 import { ERROR_CODES } from "../errors/codes.js";
+import { gitIsolationEnv, scrubGitPointerEnv } from "./git-isolation.js";
 
 const DEFAULT_OUTPUT_LIMIT = 4_000;
 
@@ -126,7 +127,14 @@ export class WorkspaceHookRunner {
       const result = await this.#execute(script, {
         cwd: options.workspacePath,
         timeoutMs: this.#config.timeoutMs,
-        ...(options.env !== undefined ? { env: options.env } : {}),
+        // Git discovery from hook scripts must never escape the workspace
+        // parent (SYMPH-373). The isolation env is spread last so callers
+        // cannot weaken it, and pointer vars are scrubbed here too so the
+        // guarantee does not depend on which executor runs the script.
+        env: scrubGitPointerEnv({
+          ...options.env,
+          ...gitIsolationEnv(options.workspacePath),
+        }),
       });
       const durationMs = Date.now() - startedAt;
 
@@ -211,7 +219,10 @@ export async function executeShellHook(
     const child = spawn("sh", ["-lc", script], {
       cwd: options.cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: options.env ? { ...process.env, ...options.env } : undefined,
+      // An inherited GIT_DIR/GIT_WORK_TREE would bypass workspace git
+      // isolation entirely (SYMPH-373) — always scrub, even when the
+      // caller provides no env of its own.
+      env: scrubGitPointerEnv({ ...process.env, ...(options.env ?? {}) }),
     });
 
     let stdout = "";

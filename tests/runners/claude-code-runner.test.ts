@@ -97,7 +97,10 @@ describe("ClaudeCodeRunner", () => {
       expect.objectContaining({
         cwd: "/tmp/workspace",
         permissionMode: "bypassPermissions",
-        env: { SYMPHONY_PIPELINE: "1" },
+        env: {
+          SYMPHONY_PIPELINE: "1",
+          GIT_CEILING_DIRECTORIES: expect.stringMatching(/(^|:)\/tmp$/),
+        },
         settingSources: ["user", "project"],
         maxBudgetUsd: 50,
         streamingInput: "always",
@@ -631,7 +634,10 @@ describe("ClaudeCodeRunner", () => {
       expect.objectContaining({
         cwd: "/tmp/workspace",
         permissionMode: "bypassPermissions",
-        env: { SYMPHONY_PIPELINE: "1" },
+        env: {
+          SYMPHONY_PIPELINE: "1",
+          GIT_CEILING_DIRECTORIES: expect.stringMatching(/(^|:)\/tmp$/),
+        },
         settingSources: ["user", "project"],
         maxBudgetUsd: 50,
         streamingInput: "always",

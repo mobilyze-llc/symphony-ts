@@ -245,6 +245,81 @@ describe("config-resolver", () => {
     );
   });
 
+  it("quotes resolved hook paths when the workflow directory contains spaces", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/My Pipeline Config/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        hooks: {
+          after_create: "./hooks/after-create.sh",
+          before_run: "test -x ./hooks/before-run.sh && ./hooks/before-run.sh",
+        },
+      },
+    });
+
+    expect(resolved.hooks.afterCreate).toBe(
+      `"${join("/repo/My Pipeline Config", "hooks/after-create.sh")}"`,
+    );
+    // Shell command hooks stay verbatim even under a spaced workflow dir.
+    expect(resolved.hooks.beforeRun).toBe(
+      "test -x ./hooks/before-run.sh && ./hooks/before-run.sh",
+    );
+  });
+
+  it("keeps $VAR segments expandable when quoting spaced hook paths", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/My Pipeline Config/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          hooks: {
+            before_run: "./$PRODUCT/hooks/before-run.sh",
+          },
+        },
+      },
+      {},
+    );
+
+    // Double-quoted, with $PRODUCT left unescaped for runtime expansion.
+    expect(resolved.hooks.beforeRun).toBe(
+      `"${join("/repo/My Pipeline Config", "$PRODUCT/hooks/before-run.sh")}"`,
+    );
+  });
+
+  it("escapes double quotes and backslashes in quoted hook paths", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: '/repo/we"ird path/WORKFLOW.md',
+      promptTemplate: "Prompt",
+      config: {
+        hooks: {
+          after_create: "./hooks/after-create.sh",
+        },
+      },
+    });
+
+    expect(resolved.hooks.afterCreate).toBe(
+      `"${join('/repo/we\\"ird path', "hooks/after-create.sh")}"`,
+    );
+  });
+
+  it("escapes backticks in quoted hook paths", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/we`ird path/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        hooks: {
+          after_create: "./hooks/after-create.sh",
+        },
+      },
+    });
+
+    // An unescaped backtick inside double quotes would be legacy command
+    // substitution when the hook runs through `sh -lc`.
+    expect(resolved.hooks.afterCreate).toBe(
+      `"${join("/repo/we\\`ird path", "hooks/after-create.sh")}"`,
+    );
+  });
+
   it("leaves multi-line hook scripts verbatim", () => {
     const script = [
       "set -euo pipefail",
@@ -425,6 +500,119 @@ describe("config-resolver", () => {
         message: "tracker.project_slug must be configured before dispatch.",
       },
     });
+  });
+
+  it("resolves owner_host and defaults it to null when absent", () => {
+    const withOwner = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          owner_host: "pro14",
+          tracker: { api_key: "token", project_slug: "proj" },
+        },
+      },
+      {},
+    );
+    expect(withOwner.ownerHost).toBe("pro14");
+
+    const withoutOwner = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          tracker: { api_key: "token", project_slug: "proj" },
+        },
+      },
+      {},
+    );
+    expect(withoutOwner.ownerHost).toBeNull();
+  });
+
+  it("single-homing guard: dispatch passes when the machine matches owner_host (label-wise, case-insensitive)", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          owner_host: "pro14",
+          tracker: { api_key: "token", project_slug: "proj" },
+        },
+      },
+      {},
+    );
+
+    expect(
+      validateDispatchConfig(resolved, { hostname: "PRO14.local" }),
+    ).toEqual({ ok: true });
+    expect(validateDispatchConfig(resolved, { hostname: "pro14" })).toEqual({
+      ok: true,
+    });
+  });
+
+  it("single-homing guard: dispatch fails loudly on a non-owner host (SYMPH-383)", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          owner_host: "pro14",
+          tracker: { api_key: "token", project_slug: "proj" },
+        },
+      },
+      {},
+    );
+
+    const validation = validateDispatchConfig(resolved, {
+      hostname: "pro16.local",
+    });
+    expect(validation.ok).toBe(false);
+    if (!validation.ok) {
+      expect(validation.error.code).toBe(ERROR_CODES.ownerHostMismatch);
+      expect(validation.error.message).toContain("single-homed");
+    }
+  });
+
+  it("single-homing guard: present-but-blank owner_host fails closed", () => {
+    for (const blank of ["", "   "]) {
+      const resolved = resolveWorkflowConfig(
+        {
+          workflowPath: "/repo/WORKFLOW.md",
+          promptTemplate: "Prompt",
+          config: {
+            owner_host: blank,
+            tracker: { api_key: "token", project_slug: "proj" },
+          },
+        },
+        {},
+      );
+
+      const validation = validateDispatchConfig(resolved, {
+        hostname: "pro14",
+      });
+      expect(validation.ok).toBe(false);
+      if (!validation.ok) {
+        expect(validation.error.code).toBe(ERROR_CODES.configInvalid);
+        expect(validation.error.message).toContain("owner_host");
+      }
+    }
+  });
+
+  it("single-homing guard: no owner_host means any host may dispatch", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          tracker: { api_key: "token", project_slug: "proj" },
+        },
+      },
+      {},
+    );
+
+    expect(
+      validateDispatchConfig(resolved, { hostname: "anything.example" }),
+    ).toEqual({ ok: true });
   });
 
   it("resolves env-backed workspace roots and expands the home directory", () => {

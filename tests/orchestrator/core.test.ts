@@ -2100,6 +2100,385 @@ describe("orchestrator core", () => {
     expect(journal).toHaveLength(1);
   });
 
+  it("freezes the gate-passed AC snapshot, serves it to dispatch and the judge, and clears it at terminal (SYMPH-374)", async () => {
+    const deferred: Array<() => Promise<void>> = [];
+    const judgedAcs: Array<string | null> = [];
+    const dispatchedAcs: Array<string | null> = [];
+    const baseConfig = createConfig();
+    const config = {
+      ...baseConfig,
+      acGate: { enabled: true },
+      specFidelity: { enabled: true },
+      stages: {
+        initialStage: "investigate",
+        fastTrack: null,
+        stages: {
+          investigate: {
+            type: "agent" as const,
+            runner: null,
+            model: null,
+            maxTurns: null,
+            maxRework: null,
+            gateType: null,
+            prompt: null,
+            promptPath: null,
+            reviewers: [],
+            hardStops: null,
+            linearState: null,
+            mcpServers: {},
+            timeoutMs: null,
+            concurrency: null,
+            transitions: {
+              onComplete: "review",
+              onRework: null,
+              onApprove: null,
+            },
+          },
+          review: {
+            type: "agent" as const,
+            runner: null,
+            model: null,
+            maxTurns: null,
+            maxRework: null,
+            gateType: null,
+            prompt: null,
+            promptPath: null,
+            reviewers: [],
+            hardStops: null,
+            linearState: null,
+            mcpServers: {},
+            timeoutMs: null,
+            concurrency: null,
+            transitions: {
+              onComplete: null,
+              onRework: "review",
+              onApprove: null,
+            },
+          },
+        },
+      },
+    };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async (input) => {
+        dispatchedAcs.push(input.acceptanceCriteria);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      postComment: async () => {},
+      runAcGate: async () => ({
+        verdict: "pass" as const,
+        feedback: "All criteria falsifiable.",
+      }),
+      runSpecFidelityJudge: async (evidence) => {
+        judgedAcs.push(evidence.acceptanceCriteria);
+        return { verdict: "pass", findings: "AC1 PASS: covered by diff." };
+      },
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+    });
+
+    const expectedSnapshot = [
+      "### Acceptance Criteria",
+      "- [ ] `test: tests/foo.test.ts covers bar`",
+      "- [ ] `check: npx tsc --noEmit exits 0`",
+    ].join("\n");
+
+    await orchestrator.pollTick();
+    expect(dispatchedAcs).toEqual([null]);
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Investigation workpad posted.",
+        "### Acceptance Criteria",
+        "- [ ] `test: tests/foo.test.ts covers bar`",
+        "- [ ] `check: npx tsc --noEmit exits 0`",
+        "### Validation",
+        "- npx vitest run tests/foo.test.ts",
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await deferred[0]?.();
+
+    // Frozen in state and journaled for replay.
+    expect(orchestrator.getState().issueAcSnapshots["1"]).toBe(
+      expectedSnapshot,
+    );
+    const gateEntry = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((entry) => entry.kind === "ac_gate");
+    expect(gateEntry?.metadata.acceptanceCriteria).toBe(expectedSnapshot);
+
+    // The review dispatch renders the snapshot into the prompt context.
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+    await orchestrator.onRetryTimer("1");
+    expect(dispatchedAcs).toEqual([null, expectedSnapshot]);
+
+    // The judge receives the frozen snapshot, never null.
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE] review done",
+    });
+    expect(judgedAcs).toEqual([expectedSnapshot]);
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+
+    // Terminal completion clears the snapshot — a redispatched issue id
+    // must never be judged against a stale rubric (council R1 P1).
+    expect(orchestrator.getState().issueAcSnapshots["1"]).toBeUndefined();
+  });
+
+  it("posts the admission card once, on first dispatch only (SYMPH-379)", async () => {
+    const comments: string[] = [];
+    let spawnCount = 0;
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({ admissionCard: { enabled: true } }),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => {
+        spawnCount += 1;
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      postComment: async (_id, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const cards = comments.filter((body) => body.includes("## Admission Card"));
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toContain("**Issue:** ISSUE-1");
+    expect(cards[0]).toContain("**Right-sizing:**");
+    // No AC snapshot exists at first dispatch, so the card must render the
+    // not-yet-frozen branch of the verification path (council R1 P3).
+    expect(cards[0]).toContain(
+      "**Verification path:** acceptance criteria not yet frozen",
+    );
+
+    // A continuation dispatch of the same issue (normal exit without a
+    // completion signal) genuinely re-dispatches — and does not re-card.
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+    });
+    await orchestrator.onRetryTimer("1");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(spawnCount).toBe(2);
+    expect(
+      comments.filter((body) => body.includes("## Admission Card")),
+    ).toHaveLength(1);
+  });
+
+  it("does not re-post the admission card after a restart — the first-dispatch marker survives journal recovery (SYMPH-379, council R1 P2)", async () => {
+    const comments: string[] = [];
+    const makeTracker = () =>
+      createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      });
+    const first = new OrchestratorCore({
+      config: createConfig({ admissionCard: { enabled: true } }),
+      tracker: makeTracker(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      postComment: async (_id, body) => {
+        comments.push(body);
+      },
+    });
+    await first.pollTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      comments.filter((body) => body.includes("## Admission Card")),
+    ).toHaveLength(1);
+
+    // Restart: a new core recovers from the first run's journal. The clock
+    // has advanced past the recovered lease TTL, so the issue is genuinely
+    // dispatchable again — only the journal carries dispatch history.
+    let redispatched = false;
+    const second = new OrchestratorCore({
+      config: createConfig({ admissionCard: { enabled: true } }),
+      tracker: makeTracker(),
+      spawnWorker: async () => {
+        redispatched = true;
+        return {
+          workerHandle: { pid: 1002 },
+          monitorHandle: { ref: "monitor-2" },
+        };
+      },
+      now: () => new Date("2026-03-06T02:00:00.000Z"),
+      postComment: async (_id, body) => {
+        comments.push(body);
+      },
+      runJournal: first.getState().dispatcherRunJournal,
+    });
+
+    // The marker is rehydrated from the journaled right_sizing entry...
+    expect(second.getState().issueFirstDispatchedAt["1"]).toBeDefined();
+
+    // ...so the post-restart dispatch is not treated as a first dispatch.
+    await second.pollTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(redispatched).toBe(true);
+    expect(
+      comments.filter((body) => body.includes("## Admission Card")),
+    ).toHaveLength(1);
+  });
+
+  it("rehydrates gate-passed AC snapshots from the run journal (SYMPH-374)", () => {
+    const journalEntry = (
+      sequence: number,
+      metadata: Record<string, unknown>,
+    ) => ({
+      sequence,
+      idempotencyKey: `ac_gate:test:${sequence}`,
+      timestamp: "2026-03-06T00:00:05.000Z",
+      kind: "ac_gate" as const,
+      issueId: `${sequence}`,
+      issueIdentifier: `ISSUE-${sequence}`,
+      operation: "dispatcher" as const,
+      stage: "investigate",
+      attempt: null,
+      ownerId: "orchestrator-core",
+      lease: null,
+      summary: "AC gate verdict.",
+      metadata,
+    });
+    const orchestrator = new OrchestratorCore({
+      config: createConfig(),
+      tracker: createTracker({ candidates: [] }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      runJournal: [
+        journalEntry(1, {
+          status: "completed",
+          verdict: "pass",
+          acceptanceCriteria: "### Acceptance Criteria\n- [ ] `check: ok`",
+        }),
+        // Rework verdicts and snapshot-less entries must not rehydrate.
+        journalEntry(2, {
+          status: "completed",
+          verdict: "rework",
+          acceptanceCriteria: "### Acceptance Criteria\n- rejected",
+        }),
+        journalEntry(3, {
+          status: "completed",
+          verdict: "pass_open",
+          acceptanceCriteria: null,
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().issueAcSnapshots).toEqual({
+      "1": "### Acceptance Criteria\n- [ ] `check: ok`",
+    });
+  });
+
+  it("clears a replay-rehydrated AC snapshot on fresh admission — a new run never inherits a prior run's rubric (SYMPH-374)", async () => {
+    const dispatchedAcs: Array<string | null> = [];
+    const baseConfig = createConfig();
+    const config = {
+      ...baseConfig,
+      stages: {
+        initialStage: "investigate",
+        fastTrack: null,
+        stages: {
+          investigate: {
+            type: "agent" as const,
+            runner: null,
+            model: null,
+            maxTurns: null,
+            maxRework: null,
+            gateType: null,
+            prompt: null,
+            promptPath: null,
+            reviewers: [],
+            hardStops: null,
+            linearState: null,
+            mcpServers: {},
+            timeoutMs: null,
+            concurrency: null,
+            transitions: {
+              onComplete: null,
+              onRework: null,
+              onApprove: null,
+            },
+          },
+        },
+      },
+    };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async (input) => {
+        dispatchedAcs.push(input.acceptanceCriteria);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      runJournal: [
+        {
+          sequence: 1,
+          idempotencyKey: "ac_gate:stale:1",
+          timestamp: "2026-03-05T00:00:05.000Z",
+          kind: "ac_gate" as const,
+          issueId: "1",
+          issueIdentifier: "ISSUE-1",
+          operation: "dispatcher" as const,
+          stage: "investigate",
+          attempt: null,
+          ownerId: "orchestrator-core",
+          lease: null,
+          summary: "AC gate verdict from a prior completed run.",
+          metadata: {
+            status: "completed",
+            verdict: "pass",
+            acceptanceCriteria: "### Acceptance Criteria\n- stale rubric",
+          },
+        },
+      ],
+    });
+
+    // Rehydration restored the prior run's snapshot...
+    expect(orchestrator.getState().issueAcSnapshots["1"]).toBe(
+      "### Acceptance Criteria\n- stale rubric",
+    );
+
+    // ...but a fresh admission (no live or gate-recovered stage) must not
+    // inherit it: dispatch serves null and the stale entry is gone.
+    await orchestrator.pollTick();
+    expect(dispatchedAcs).toEqual([null]);
+    expect(orchestrator.getState().issueAcSnapshots["1"]).toBeUndefined();
+  });
+
   it("never consults triage for non-budget hard stops or while the floor is blocked", async () => {
     const triageCalls: string[] = [];
     const makeOrchestrator = (rateLimitAdmission?: {
@@ -6776,6 +7155,7 @@ function createConfig(overrides?: {
   pauseTriage?: ResolvedWorkflowConfig["pauseTriage"];
   acGate?: ResolvedWorkflowConfig["acGate"];
   specFidelity?: ResolvedWorkflowConfig["specFidelity"];
+  admissionCard?: ResolvedWorkflowConfig["admissionCard"];
 }): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
@@ -6835,6 +7215,7 @@ function createConfig(overrides?: {
     },
     acGate: overrides?.acGate ?? { enabled: false },
     specFidelity: overrides?.specFidelity ?? { enabled: false },
+    admissionCard: overrides?.admissionCard ?? { enabled: false },
     server: {
       port: null,
       slackNotifyChannel: null,

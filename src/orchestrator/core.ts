@@ -1,3 +1,4 @@
+import { extractAcceptanceCriteria } from "../agent/ac-gate.js";
 import type {
   PauseTriageEvidence,
   PauseTriageVerdict,
@@ -65,6 +66,7 @@ import type {
   HardStopTrigger,
 } from "../policy/hard-stops.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
+import { formatAdmissionCard } from "./admission-card.js";
 import {
   type ContinuousFeedbackReviewResult,
   ensureDecorrelatedFeedbackLane,
@@ -218,6 +220,11 @@ export interface OrchestratorCoreOptions {
     rightSizingDecision: RightSizingDecision;
     /** base * multiplier^escalationSteps for this issue (SYMPH-337); 1 when unescalated. */
     budgetMultiplier: number;
+    /**
+     * Frozen gate-passed AC snapshot for prompt rendering (SYMPH-374);
+     * null before the gate has passed (e.g. the investigate stage itself).
+     */
+    acceptanceCriteria: string | null;
   }) => Promise<SpawnWorkerResult> | SpawnWorkerResult;
   onIssueDropped?: (input: {
     issueId: string;
@@ -275,6 +282,11 @@ export interface OrchestratorCoreOptions {
     issueId: string;
     issueIdentifier: string;
     issueTitle: string;
+    /**
+     * Canonical AC snapshot frozen at AC-gate pass (SYMPH-374), or null
+     * when no gate passed for this issue (gate disabled / legacy issue).
+     */
+    acceptanceCriteria: string | null;
     reviewMessage: string | null;
   }) => Promise<{ verdict: "pass" | "rework"; findings: string } | null>;
   updateIssueState?: (
@@ -481,6 +493,32 @@ export class OrchestratorCore {
 
       if (isDispatcherAdmissionEntry(entry)) {
         this.clearResumeRequirement(entry.issueId);
+      }
+
+      if (entry.kind === "right_sizing") {
+        // Restore the first-dispatch marker (SYMPH-379): a journaled
+        // right_sizing entry proves this issue already dispatched, so a
+        // post-restart dispatch must not re-post the admission card.
+        // Entries replay in sequence order; a later terminal entry clears
+        // the marker via clearTerminalIssueRuntimeState. Normalized to the
+        // same format the live path writes at dispatch.
+        this.state.issueFirstDispatchedAt[entry.issueId] ??=
+          formatEasternTimestamp(new Date(entry.timestamp));
+      }
+
+      if (
+        entry.kind === "ac_gate" &&
+        entry.metadata.status === "completed" &&
+        (entry.metadata.verdict === "pass" ||
+          entry.metadata.verdict === "pass_open") &&
+        typeof entry.metadata.acceptanceCriteria === "string" &&
+        entry.metadata.acceptanceCriteria.length > 0
+      ) {
+        // Rehydrate the frozen AC snapshot (SYMPH-374). Entries replay in
+        // sequence order, so the latest gate-passed snapshot wins and a
+        // later terminal entry clears it via clearTerminalIssueRuntimeState.
+        this.state.issueAcSnapshots[entry.issueId] =
+          entry.metadata.acceptanceCriteria;
       }
 
       if (
@@ -1333,12 +1371,21 @@ export class OrchestratorCore {
    * same stage (the rework prompt path reads those comments); null →
    * FAIL OPEN: advance with a warning. Guards no-op if anything moved the
    * issue meanwhile.
+   *
+   * On pass/pass_open the AC section of the completion message is frozen
+   * as the issue's canonical rubric (SYMPH-374): journaled for replay and
+   * held in state for the spec-fidelity judge and implement prompts. The
+   * workpad copy stays operator-visible but is never trusted again — the
+   * implement worker is instructed to edit it (checking items off), so a
+   * downstream stage must not be able to re-author what it is judged
+   * against.
    */
   private async applyAcGateVerdict(input: {
     issueId: string;
     identifier: string;
     stageName: string;
     verdict: { verdict: "pass" | "rework"; feedback: string } | null;
+    completionMessage: string | null;
   }): Promise<void> {
     const { issueId, identifier, stageName, verdict } = input;
 
@@ -1357,6 +1404,14 @@ export class OrchestratorCore {
         : verdict.verdict === "pass"
           ? "pass"
           : "rework";
+
+    const acceptanceCriteria =
+      action === "rework"
+        ? null
+        : extractAcceptanceCriteria(input.completionMessage);
+    if (acceptanceCriteria !== null) {
+      this.state.issueAcSnapshots[issueId] = acceptanceCriteria;
+    }
 
     try {
       await this.recordRunJournalEntry({
@@ -1378,10 +1433,17 @@ export class OrchestratorCore {
           status: "completed",
           verdict: action,
           feedback: verdict?.feedback ?? null,
+          acceptanceCriteria,
         },
       });
-    } catch {
-      // Audit best-effort.
+    } catch (error) {
+      // Audit best-effort, but never silent for the snapshot entry: the
+      // live process keeps the in-state snapshot (judge correctness over
+      // audit purity) while restart rehydration is journal-only, so a
+      // failed write means the snapshot will NOT survive a restart.
+      console.warn(
+        `[orchestrator] ac_gate journal write failed for ${identifier}; AC snapshot will not survive restart: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
 
     if (action === "rework" && verdict !== null) {
@@ -1529,16 +1591,7 @@ export class OrchestratorCore {
     if (issue === null) {
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       this.onIssueDropped?.({
         issueId,
         identifier: retryEntry.identifier ?? issueId,
@@ -1556,16 +1609,7 @@ export class OrchestratorCore {
     if (!this.isRetryCandidateEligible(issue)) {
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       this.onIssueDropped?.({
         issueId,
         identifier: issue.identifier,
@@ -1792,11 +1836,16 @@ export class OrchestratorCore {
         // The claim stays held so nothing re-dispatches meanwhile; a
         // null verdict fails OPEN at the applier.
         const scheduleDeferred = this.scheduleDeferred;
+        // The completion message is the one that carried [STAGE_COMPLETE]
+        // (the AC echo lives there per the contract); fall back to the
+        // session's last message when the exit carried no message body.
+        const completionMessage =
+          input.agentMessage ?? runningEntry.lastCodexMessage;
         void this.runAcGate({
           issueIdentifier: runningEntry.identifier,
           issueTitle: runningEntry.issue.title,
           issueDescription: runningEntry.issue.description ?? null,
-          completionMessage: runningEntry.lastCodexMessage,
+          completionMessage,
         })
           .catch((error) => {
             console.warn(
@@ -1811,6 +1860,7 @@ export class OrchestratorCore {
                 identifier: runningEntry.identifier,
                 stageName: exitedStageName,
                 verdict,
+                completionMessage,
               }),
             );
           })
@@ -1842,6 +1892,9 @@ export class OrchestratorCore {
           issueId: input.issueId,
           issueIdentifier: runningEntry.identifier,
           issueTitle: runningEntry.issue.title,
+          // The frozen gate-passed snapshot, never the workpad (SYMPH-374).
+          acceptanceCriteria:
+            this.state.issueAcSnapshots[input.issueId] ?? null,
           reviewMessage: runningEntry.lastCodexMessage,
         })
           .catch((error) => {
@@ -1953,32 +2006,14 @@ export class OrchestratorCore {
     const nextStageName = currentStage.transitions.onComplete;
     if (nextStageName === null) {
       // No on_complete transition — treat as terminal
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       return "completed";
     }
 
     const nextStage = stagesConfig.stages[nextStageName];
     if (nextStage === undefined) {
       // Invalid target — treat as terminal
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       return "completed";
     }
 
@@ -1999,16 +2034,7 @@ export class OrchestratorCore {
           );
         });
       }
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       // Fire linearState update for the terminal stage (e.g., move to "Done")
       if (
         nextStage.linearState !== null &&
@@ -2087,16 +2113,7 @@ export class OrchestratorCore {
       // Spec failures are unrecoverable — escalate immediately
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       void this.fireEscalationSideEffects(
         issueId,
         runningEntry.identifier,
@@ -2907,6 +2924,7 @@ export class OrchestratorCore {
     delete this.state.issueRightSizingDecisions[issueId];
     delete this.state.issueBudgetEscalations[issueId];
     delete this.state.issuePauseTriageResumes[issueId];
+    delete this.state.issueAcSnapshots[issueId];
     delete this.state.loopTraceJournal[issueId];
     delete this.state.continuousFeedback[issueId];
   }
@@ -3177,16 +3195,7 @@ export class OrchestratorCore {
 
     if (currentCount >= maxRework) {
       // Exceeded max rework — escalate to completed/terminal
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
       return "escalated";
@@ -3301,7 +3310,12 @@ export class OrchestratorCore {
           finding.title.trim().toLowerCase(),
         ].join(":"),
     );
-    const status = result.findings.length === 0 ? "pass" : "finding";
+    // Suppression-aware (SYMPH-378): a checkpoint whose findings all
+    // failed the injection-hygiene policy is a pass — nothing bounces.
+    const status = feedbackState.status;
+    const suppressedSignatures = feedbackState.findings
+      .filter((finding) => finding.status === "suppressed")
+      .map((finding) => finding.signature);
 
     await this.recordRunJournalEntry({
       idempotencyKey: `continuous_feedback:${input.issueId}:${input.event}:${checkedAt}`,
@@ -3324,6 +3338,7 @@ export class OrchestratorCore {
         reviewerLane,
         workerLane,
         findingSignatures,
+        suppressedSignatures,
         summary: result.summary ?? null,
         authoritative: false,
       },
@@ -4005,18 +4020,20 @@ export class OrchestratorCore {
       }
       stage = stagesConfig.stages[stageName] ?? null;
 
+      if (cachedStage === undefined) {
+        // Fresh admission (no live or gate-recovered stage): any lingering
+        // AC snapshot is stale by definition — journal replay rehydrates
+        // ac_gate entries from PRIOR runs after a restart, but agent-stage
+        // completion has no replay-side clear (council R3, SYMPH-374). The
+        // run starting now re-freezes its rubric at its own gate pass;
+        // fast-tracked runs legitimately have none.
+        delete this.state.issueAcSnapshots[issue.id];
+      }
+
       if (stage !== null && stage.type === "terminal") {
         this.state.completed.add(issue.id);
         this.releaseClaim(issue.id);
-        delete this.state.issueStages[issue.id];
-        delete this.state.issueReworkCounts[issue.id];
-        delete this.state.issuePassedStages[issue.id];
-        delete this.state.issueFirstDispatchedAt[issue.id];
-        delete this.state.issueRightSizingDecisions[issue.id];
-        delete this.state.issueBudgetEscalations[issue.id];
-        delete this.state.issuePauseTriageResumes[issue.id];
-        delete this.state.loopTraceJournal[issue.id];
-        delete this.state.continuousFeedback[issue.id];
+        this.clearTerminalIssueRuntimeState(issue.id);
         // Fire linearState update for the terminal stage (e.g., move to "Done")
         if (stage.linearState !== null && this.updateIssueState !== undefined) {
           const linearState = stage.linearState;
@@ -4212,6 +4229,12 @@ export class OrchestratorCore {
       },
     });
     if (dispatchLease === null) {
+      if (isFirstDispatch) {
+        // Unwind the premature first-dispatch marker: no lease means no
+        // dispatch happened, so the next successful attempt must still
+        // count as the first (and post the admission card).
+        delete this.state.issueFirstDispatchedAt[issue.id];
+      }
       return {
         dispatched: false,
         rightSizingDecision: null,
@@ -4272,6 +4295,41 @@ export class OrchestratorCore {
         modelRoutingReason: rightSizingDecision.modelRouting.reason,
       },
     });
+    if (
+      this.config.admissionCard.enabled &&
+      isFirstDispatch &&
+      this.postComment !== undefined
+    ) {
+      // Admission card (SYMPH-379): publish the decision the dispatcher
+      // already journaled. Fire-and-forget — observability never gates
+      // dispatch, so even a synchronous formatter or transport fault is
+      // contained here. A crash between the journal write above and this
+      // post loses the card rather than double-posting — the deliberate
+      // tradeoff for an observability-only surface.
+      try {
+        void this.postComment(
+          issue.id,
+          formatAdmissionCard({
+            issueIdentifier: issue.identifier,
+            stageName,
+            decision: rightSizingDecision,
+            budgetMultiplier: this.budgetMultiplierForIssue(issue.id),
+            hasFrozenAcceptanceCriteria:
+              this.state.issueAcSnapshots[issue.id] !== undefined,
+          }),
+        ).catch((err) => {
+          console.warn(
+            `[orchestrator] Failed to post admission card for ${issue.identifier}:`,
+            err,
+          );
+        });
+      } catch (err) {
+        console.warn(
+          `[orchestrator] Failed to post admission card for ${issue.identifier}:`,
+          err,
+        );
+      }
+    }
     await this.recordDispatcherDecisionEvent({
       decisionId: `${issue.id}:${stageName ?? "no-stage"}:${attemptKey}:right_sizing`,
       category: "right_sizing",
@@ -4383,6 +4441,7 @@ export class OrchestratorCore {
         isFirstDispatch,
         rightSizingDecision,
         budgetMultiplier: this.budgetMultiplierForIssue(issue.id),
+        acceptanceCriteria: this.state.issueAcSnapshots[issue.id] ?? null,
       });
       const runEntry: RunningEntry = {
         ...createEmptyLiveSession(),
@@ -5018,16 +5077,7 @@ export class OrchestratorCore {
     ) {
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
-      delete this.state.issueStages[issueId];
-      delete this.state.issueReworkCounts[issueId];
-      delete this.state.issuePassedStages[issueId];
-      delete this.state.issueExecutionHistory[issueId];
-      delete this.state.issueFirstDispatchedAt[issueId];
-      delete this.state.issueRightSizingDecisions[issueId];
-      delete this.state.issueBudgetEscalations[issueId];
-      delete this.state.issuePauseTriageResumes[issueId];
-      delete this.state.loopTraceJournal[issueId];
-      delete this.state.continuousFeedback[issueId];
+      this.clearTerminalIssueRuntimeState(issueId);
       void this.fireEscalationSideEffects(
         issueId,
         input.identifier ?? issueId,

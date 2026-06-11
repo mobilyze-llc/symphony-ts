@@ -25,6 +25,79 @@ export interface AcGateVerdict {
   feedback: string;
 }
 
+const AC_HEADING_REGEX = /^(#{2,4})\s*Acceptance Criteria\b[^\n]*$/im;
+/**
+ * Orchestration control markers must never freeze into the canonical
+ * rubric — when the AC section is the last heading in the completion
+ * message, the trailing [STAGE_COMPLETE] would otherwise be captured.
+ */
+const STAGE_MARKER_LINE_REGEX =
+  /^\s*\[STAGE_(?:COMPLETE|FAILED:[^\]\n]*)\]\s*$/;
+/** Matches the judge prompt's evidence bound (buildSpecFidelityPrompt). */
+const MAX_AC_SNAPSHOT_CHARS = 8000;
+
+/**
+ * Extract the Acceptance Criteria section from an investigate completion
+ * message (the worker echoes the workpad AC section there per the
+ * contract). The snapshot frozen at gate pass is the CANONICAL rubric
+ * (SYMPH-374): downstream stages and judges read it from the journal,
+ * never from the operator-visible workpad — which the implement worker is
+ * instructed to edit (checking off items) and must not be able to re-author.
+ *
+ * The section runs from the AC heading to the next heading of the same or
+ * higher level. Returns null when no heading or no content is found.
+ */
+export function extractAcceptanceCriteria(
+  message: string | null,
+): string | null {
+  if (message === null) {
+    return null;
+  }
+  const headingMatch = AC_HEADING_REGEX.exec(message);
+  if (headingMatch === null) {
+    return null;
+  }
+  const headingLine = headingMatch[0];
+  // Group 1 is non-optional, so this guard is unreachable at runtime —
+  // it satisfies noUncheckedIndexedAccess without inventing a fallback
+  // level that could silently mis-parse a future regex change.
+  const headingLevel = headingMatch[1]?.length;
+  if (headingLevel === undefined) {
+    return null;
+  }
+  const bodyStart = headingMatch.index + headingLine.length;
+  const rest = message.slice(bodyStart);
+  // Static scan instead of a dynamically built RegExp (semgrep
+  // non-literal-regexp): the section ends at the first heading whose
+  // level is the same or higher (fewer or equal #'s); deeper
+  // subheadings stay in the body.
+  let boundary = -1;
+  const headingScan = /^(#{1,6})\s/gm;
+  for (
+    let scan = headingScan.exec(rest);
+    scan !== null;
+    scan = headingScan.exec(rest)
+  ) {
+    const level = scan[1]?.length;
+    if (level !== undefined && level <= headingLevel) {
+      boundary = scan.index;
+      break;
+    }
+  }
+  const body = boundary === -1 ? rest : rest.slice(0, boundary);
+  const cleanedBody = body
+    .split("\n")
+    .filter((line) => !STAGE_MARKER_LINE_REGEX.test(line))
+    .join("\n");
+  if (cleanedBody.trim().length === 0) {
+    return null;
+  }
+  return `${headingLine.trim()}\n${cleanedBody.trim()}`.slice(
+    0,
+    MAX_AC_SNAPSHOT_CHARS,
+  );
+}
+
 const VERDICT_SCHEMA = z.object({
   verdict: z.enum(["pass", "rework"]),
   feedback: z.string().min(1).max(4000),

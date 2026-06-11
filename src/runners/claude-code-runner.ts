@@ -18,6 +18,7 @@ import {
   evaluateModePermission,
   withModePermissionEnvelope,
 } from "../policy/hard-stops.js";
+import { gitIsolationEnv } from "../workspace/git-isolation.js";
 
 // ai-sdk-provider-claude-code uses short model names, not full Anthropic IDs.
 // Map standard names to provider-expected short names.
@@ -205,7 +206,15 @@ export class ClaudeCodeRunner implements AgentRunnerCodexClient {
         model: claudeCode(resolvedModel, {
           cwd: this.options.cwd,
           permissionMode: this.options.permissionMode ?? "bypassPermissions",
-          env: { SYMPHONY_PIPELINE: "1" },
+          env: {
+            SYMPHONY_PIPELINE: "1",
+            // Agent git commands must never resolve a repository above the
+            // workspace parent (SYMPH-373). No GIT_DIR/GIT_WORK_TREE scrub
+            // is needed here: the provider builds the subprocess env from
+            // an allowlist (HOME/PATH/SHELL/...) plus this object, so
+            // ambient git pointer vars never reach the agent.
+            ...gitIsolationEnv(this.options.cwd),
+          },
           settingSources: ["user", "project"],
           maxBudgetUsd: this.options.maxBudgetUsd ?? 50,
           streamingInput: "always",
