@@ -1580,6 +1580,9 @@ export class OrchestratorCore {
           identifier: retryEntry.identifier,
           error: "retry poll failed",
           delayType: retryEntry.delayType,
+          // Orchestrator-synthetic, not issue-attributable: a tracker poll
+          // exception must not feed the novelty short-circuit (council R5).
+          deferral: true,
         }),
       };
     }
