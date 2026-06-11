@@ -4002,6 +4002,16 @@ export class OrchestratorCore {
       }
       stage = stagesConfig.stages[stageName] ?? null;
 
+      if (cachedStage === undefined) {
+        // Fresh admission (no live or gate-recovered stage): any lingering
+        // AC snapshot is stale by definition — journal replay rehydrates
+        // ac_gate entries from PRIOR runs after a restart, but agent-stage
+        // completion has no replay-side clear (council R3, SYMPH-374). The
+        // run starting now re-freezes its rubric at its own gate pass;
+        // fast-tracked runs legitimately have none.
+        delete this.state.issueAcSnapshots[issue.id];
+      }
+
       if (stage !== null && stage.type === "terminal") {
         this.state.completed.add(issue.id);
         this.releaseClaim(issue.id);
