@@ -105,7 +105,12 @@ runner:
 
 hooks:
   after_create: |
-    set -euo pipefail
+    set -eu
+    # pipefail is a bash/ksh extension; the hook runs via `sh -lc`, which is
+    # bash on macOS but dash on Linux (where `set -o pipefail` exits 2).
+    # Enable it when available; every pipeline below tolerates upstream
+    # failure individually, so dash degrades safely (SYMPH-372).
+    (set -o pipefail) 2>/dev/null && set -o pipefail || true
     if [ -z "${REPO_URL:-}" ]; then
       echo "ERROR: REPO_URL environment variable is not set" >&2
       exit 1
