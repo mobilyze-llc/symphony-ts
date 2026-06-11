@@ -860,6 +860,7 @@ function createConfig(
       refreshMs: 1_000,
       renderIntervalMs: 16,
     },
+    admissionCard: { enabled: false },
     stages: stages ?? createThreeStageConfig(),
     escalationState: "Blocked",
   };
