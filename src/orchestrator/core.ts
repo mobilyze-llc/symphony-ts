@@ -66,6 +66,7 @@ import type {
   HardStopTrigger,
 } from "../policy/hard-stops.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
+import { formatAdmissionCard } from "./admission-card.js";
 import {
   type ContinuousFeedbackReviewResult,
   ensureDecorrelatedFeedbackLane,
@@ -4277,6 +4278,31 @@ export class OrchestratorCore {
         modelRoutingReason: rightSizingDecision.modelRouting.reason,
       },
     });
+    if (
+      this.config.admissionCard.enabled &&
+      isFirstDispatch &&
+      this.postComment !== undefined
+    ) {
+      // Admission card (SYMPH-379): publish the decision the dispatcher
+      // already journaled. Fire-and-forget — observability never gates
+      // dispatch.
+      void this.postComment(
+        issue.id,
+        formatAdmissionCard({
+          issueIdentifier: issue.identifier,
+          stageName,
+          decision: rightSizingDecision,
+          budgetMultiplier: this.budgetMultiplierForIssue(issue.id),
+          hasFrozenAcceptanceCriteria:
+            this.state.issueAcSnapshots[issue.id] !== undefined,
+        }),
+      ).catch((err) => {
+        console.warn(
+          `[orchestrator] Failed to post admission card for ${issue.identifier}:`,
+          err,
+        );
+      });
+    }
     await this.recordDispatcherDecisionEvent({
       decisionId: `${issue.id}:${stageName ?? "no-stage"}:${attemptKey}:right_sizing`,
       category: "right_sizing",
