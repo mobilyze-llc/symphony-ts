@@ -1451,23 +1451,20 @@ describe("CodexAppServerClient", () => {
   it("handles dynamic tool response after child exit without unhandled rejection", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];
-
-    // A tool whose execute() resolves after 100ms — enough time for the
-    // fake server to complete the turn and exit first.
     const slowTool: CodexDynamicTool = {
       name: "slow_tool",
       description: "A tool that resolves after a delay",
       execute: () =>
         new Promise((resolve) => {
-          setTimeout(() => resolve({ ok: true }), 100);
+          setTimeout(() => {
+            resolve({ ok: true });
+          }, 100);
         }),
     };
 
     const client = createClient("late-tool-exit", workspace, events, {
       dynamicTools: [slowTool],
     });
-
-    // Track unhandled rejections during this test.
     const unhandled: Error[] = [];
     const onUnhandled = (error: unknown): void => {
       unhandled.push(error instanceof Error ? error : new Error(String(error)));
@@ -1475,8 +1472,6 @@ describe("CodexAppServerClient", () => {
     process.on("unhandledRejection", onUnhandled);
 
     try {
-      // The turn completes (child exits before tool resolves), so
-      // startSession should resolve — the child exit triggers turn completion.
       const result = await client.startSession({
         prompt: "Late tool call",
         title: "SYMPH-332: Regression",
@@ -1484,20 +1479,16 @@ describe("CodexAppServerClient", () => {
 
       expect(result.status).toBe("completed");
 
-      // Wait for the slow tool's delayed resolve + any async ticks.
       await new Promise((resolve) => {
         setTimeout(resolve, 200);
       });
 
-      // The "response dropped" event should have been emitted.
       expect(events).toContainEqual(
         expect.objectContaining({
           event: "other_message",
           message: expect.stringContaining("response dropped"),
         }),
       );
-
-      // No unhandled rejections should have occurred.
       expect(unhandled).toHaveLength(0);
     } finally {
       process.off("unhandledRejection", onUnhandled);

@@ -25,6 +25,10 @@ import {
 } from "../policy/hard-stops.js";
 import { getDefaultCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
 import { VERSION } from "../version.js";
+import {
+  gitIsolationEnv,
+  scrubGitPointerEnv,
+} from "../workspace/git-isolation.js";
 
 const DEFAULT_SYSTEM_SKILL_NAMES = Object.freeze([
   "imagegen",
@@ -431,7 +435,10 @@ export class CodexAppServerClient {
           ERROR_CODES.codexLaunchFailed,
         );
       }
-      return { ...process.env };
+      return scrubGitPointerEnv({
+        ...process.env,
+        ...gitIsolationEnv(this.options.cwd),
+      });
     }
 
     await this.cleanupEphemeralCodexHome();
@@ -465,10 +472,11 @@ export class CodexAppServerClient {
       );
     }
 
-    return {
+    return scrubGitPointerEnv({
       ...process.env,
+      ...gitIsolationEnv(this.options.cwd),
       CODEX_HOME: codexHome,
-    };
+    });
   }
 
   private sweepStaleEphemeralCodexHomesOnce(): void {
@@ -769,10 +777,13 @@ export class CodexAppServerClient {
       const outputDenial = evaluateHeadlessCommandOutputForApproval(parsed);
       if (outputDenial !== null) {
         if (responseId !== null) {
-          this.send({
-            id: parsed.id,
-            result: createApprovalResponse(false, outputDenial.reason),
-          });
+          this.sendResponseOrDrop(
+            {
+              id: parsed.id,
+              result: createApprovalResponse(false, outputDenial.reason),
+            },
+            "headless output denial",
+          );
         }
         this.emit({
           event: "unsupported_tool_call",
@@ -790,10 +801,13 @@ export class CodexAppServerClient {
       const permissionDenial = this.evaluateModePermissionForApproval(parsed);
       if (permissionDenial !== null) {
         if (responseId !== null) {
-          this.send({
-            id: parsed.id,
-            result: createApprovalResponse(false, permissionDenial.reason),
-          });
+          this.sendResponseOrDrop(
+            {
+              id: parsed.id,
+              result: createApprovalResponse(false, permissionDenial.reason),
+            },
+            "mode permission denial",
+          );
         }
         this.emit({
           event: "unsupported_tool_call",
@@ -809,10 +823,13 @@ export class CodexAppServerClient {
       }
 
       if (responseId !== null) {
-        this.send({
-          id: parsed.id,
-          result: createApprovalResponse(true),
-        });
+        this.sendResponseOrDrop(
+          {
+            id: parsed.id,
+            result: createApprovalResponse(true),
+          },
+          "approval auto-approve",
+        );
       }
       this.emit({
         event: "approval_auto_approved",
@@ -834,16 +851,19 @@ export class CodexAppServerClient {
       }
 
       if (responseId !== null) {
-        this.send({
-          id: parsed.id,
-          result: {
-            success: false,
-            error: {
-              code: ERROR_CODES.codexDynamicToolRejected,
-              message: `Unsupported tool call: ${toolName ?? "unknown"}`,
+        this.sendResponseOrDrop(
+          {
+            id: parsed.id,
+            result: {
+              success: false,
+              error: {
+                code: ERROR_CODES.codexDynamicToolRejected,
+                message: `Unsupported tool call: ${toolName ?? "unknown"}`,
+              },
             },
           },
-        });
+          "unsupported dynamic tool call",
+        );
       }
       this.emit({
         event: "unsupported_tool_call",
@@ -863,16 +883,19 @@ export class CodexAppServerClient {
         ERROR_CODES.codexUserInputRequired,
       );
       if (responseId !== null) {
-        this.send({
-          id: parsed.id,
-          error: {
-            code: -32000,
-            message: error.message,
-            data: {
-              code: error.code,
+        this.sendResponseOrDrop(
+          {
+            id: parsed.id,
+            error: {
+              code: -32000,
+              message: error.message,
+              data: {
+                code: error.code,
+              },
             },
           },
-        });
+          "user input required",
+        );
       }
       this.emit({
         event: "turn_input_required",
@@ -1096,6 +1119,24 @@ export class CodexAppServerClient {
     });
   }
 
+  private sendResponseOrDrop(payload: JsonObject, context: string): void {
+    try {
+      this.send(payload);
+    } catch (error) {
+      if (
+        !(error instanceof CodexAppServerClientError) ||
+        error.message !== "Codex app-server process is not writable."
+      ) {
+        throw error;
+      }
+
+      this.emit({
+        event: "other_message",
+        message: `Codex app-server response dropped for ${context}: app-server process already exited.`,
+      });
+    }
+  }
+
   private send(message: JsonObject): void {
     const child = this.child;
     if (child === null || child.stdin.destroyed) {
@@ -1199,8 +1240,8 @@ export class CodexAppServerClient {
     try {
       toolResult = await tool.execute(extractToolInput(message));
     } catch (execError) {
-      try {
-        this.send({
+      this.sendResponseOrDrop(
+        {
           id: requestId,
           result: {
             success: false,
@@ -1209,27 +1250,19 @@ export class CodexAppServerClient {
               message: `Dynamic tool ${tool.name} failed: ${toErrorMessage(execError)}`,
             },
           },
-        });
-      } catch {
-        this.emitToolResponseDropped(tool.name);
-      }
+        },
+        `dynamic tool "${tool.name}" error`,
+      );
       return;
     }
-    try {
-      this.send({
+
+    this.sendResponseOrDrop(
+      {
         id: requestId,
         result: toolResult,
-      });
-    } catch {
-      this.emitToolResponseDropped(tool.name);
-    }
-  }
-
-  private emitToolResponseDropped(toolName: string): void {
-    this.emit({
-      event: "other_message",
-      message: `Dynamic tool "${toolName}" response dropped: app-server process already exited.`,
-    });
+      },
+      `dynamic tool "${tool.name}" result`,
+    );
   }
 }
 

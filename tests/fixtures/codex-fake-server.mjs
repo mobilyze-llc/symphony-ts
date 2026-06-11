@@ -484,8 +484,6 @@ async function handleMessage(message) {
     }
 
     if (scenario === "late-tool-exit") {
-      // Send a dynamic tool call request, then immediately complete and exit.
-      // The client's tool.execute() will resolve after we're already gone.
       setTimeout(() => {
         writeJson({
           id: "late-tool-1",
@@ -495,7 +493,6 @@ async function handleMessage(message) {
             input: {},
           },
         });
-        // Complete the turn and exit before the tool response arrives.
         setTimeout(() => {
           writeJson({
             method: "turn/completed",
