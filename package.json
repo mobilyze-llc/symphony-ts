@@ -18,10 +18,7 @@
     "symphony-council-review-gate": "./dist/src/cli/council-review-gate.js",
     "symphony-manager-run-import": "./dist/src/cli/manager-run-import.js"
   },
-  "files": [
-    "dist/src",
-    "README.md"
-  ],
+  "files": ["dist/src", "README.md"],
   "publishConfig": {
     "access": "public"
   },
