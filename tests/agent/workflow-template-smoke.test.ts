@@ -469,6 +469,11 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain(
       "do not run the council gate on work that skipped its evidence contract",
     );
+    // The review completion message must echo the verified disposition —
+    // it is the channel the spec-fidelity judge actually reads (R3).
+    expect(output).toContain(
+      "echoes the live-proof disposition line you verified",
+    );
 
     // The without-ACs else branch is new code too — render and assert it
     // (council R1: untested Liquid branches are how strictVariables bites).

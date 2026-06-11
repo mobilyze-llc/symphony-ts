@@ -724,7 +724,7 @@ If a check fails, post a `## Review Findings` comment naming the missing evidenc
 
 ### Evaluate findings
 
-If the gate reports `PASS`, post a short workpad note with the artifact directory and output `[STAGE_COMPLETE]`.
+If the gate reports `PASS`, post a short workpad note with the artifact directory, then output `[STAGE_COMPLETE]` in a final message that also echoes the live-proof disposition line you verified in the pre-gate check (`live-proof: evidence|waived|n/a — …`) — the independent spec-fidelity judge reads your final message and checks for it (SYMPH-377).
 If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/malformed: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
 {% endif %}
 
