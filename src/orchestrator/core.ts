@@ -500,8 +500,10 @@ export class OrchestratorCore {
         // right_sizing entry proves this issue already dispatched, so a
         // post-restart dispatch must not re-post the admission card.
         // Entries replay in sequence order; a later terminal entry clears
-        // the marker via clearTerminalIssueRuntimeState.
-        this.state.issueFirstDispatchedAt[entry.issueId] ??= entry.timestamp;
+        // the marker via clearTerminalIssueRuntimeState. Normalized to the
+        // same format the live path writes at dispatch.
+        this.state.issueFirstDispatchedAt[entry.issueId] ??=
+          formatEasternTimestamp(new Date(entry.timestamp));
       }
 
       if (
@@ -4227,6 +4229,12 @@ export class OrchestratorCore {
       },
     });
     if (dispatchLease === null) {
+      if (isFirstDispatch) {
+        // Unwind the premature first-dispatch marker: no lease means no
+        // dispatch happened, so the next successful attempt must still
+        // count as the first (and post the admission card).
+        delete this.state.issueFirstDispatchedAt[issue.id];
+      }
       return {
         dispatched: false,
         rightSizingDecision: null,
@@ -4295,7 +4303,9 @@ export class OrchestratorCore {
       // Admission card (SYMPH-379): publish the decision the dispatcher
       // already journaled. Fire-and-forget — observability never gates
       // dispatch, so even a synchronous formatter or transport fault is
-      // contained here.
+      // contained here. A crash between the journal write above and this
+      // post loses the card rather than double-posting — the deliberate
+      // tradeoff for an observability-only surface.
       try {
         void this.postComment(
           issue.id,
