@@ -111,12 +111,10 @@ describe("verifyWorkspaceGitIsolation (real git)", () => {
       "gitdir: /nonexistent/bare/worktrees/issue-c\n",
     );
 
-    await expect(verifyWorkspaceGitIsolation(workspace)).rejects.toMatchObject(
-      {
-        name: "WorkspacePathError",
-        code: ERROR_CODES.workspaceVerifyFailed,
-      },
-    );
+    await expect(verifyWorkspaceGitIsolation(workspace)).rejects.toMatchObject({
+      name: "WorkspacePathError",
+      code: ERROR_CODES.workspaceVerifyFailed,
+    });
   });
 
   it("accepts a worktree of a bare clone under the workspace root", async () => {

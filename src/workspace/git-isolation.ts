@@ -38,12 +38,12 @@ export function gitIsolationEnv(
  * GIT_CEILING_DIRECTORIES only bounds upward DISCOVERY — an inherited
  * GIT_DIR/GIT_WORK_TREE bypasses discovery entirely and would aim agent
  * and hook git commands at the operator's repo. Every workspace-scoped
- * spawn env must pass through this scrub. Mutates and returns `env`.
+ * spawn env must pass through this scrub. Returns a copy without the
+ * pointer keys.
  */
 export function scrubGitPointerEnv<T extends NodeJS.ProcessEnv>(env: T): T {
-  delete env.GIT_DIR;
-  delete env.GIT_WORK_TREE;
-  return env;
+  const { GIT_DIR: _gitDir, GIT_WORK_TREE: _gitWorkTree, ...rest } = env;
+  return rest as T;
 }
 
 export interface GitProbeResult {
