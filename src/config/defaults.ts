@@ -134,6 +134,9 @@ export const SPEC_DEFAULTS = Object.freeze({
   specFidelity: {
     enabled: false,
   },
+  admissionCard: {
+    enabled: false,
+  },
   runner: {
     kind: DEFAULT_RUNNER_KIND,
   },

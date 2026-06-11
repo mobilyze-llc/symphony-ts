@@ -2085,6 +2085,9 @@ function createConfig(root: string, scenario: string): ResolvedWorkflowConfig {
     specFidelity: {
       enabled: false,
     },
+    admissionCard: {
+      enabled: false,
+    },
     budgetEscalation: {
       maxSteps: null,
       multiplier: 2,

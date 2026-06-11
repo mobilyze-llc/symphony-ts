@@ -84,6 +84,12 @@ ac_gate:
 spec_fidelity:
   enabled: true
 
+# SYMPH-379: publish the dispatcher's journaled admission + right-sizing
+# decision to the issue as one compact card on first dispatch. Pure
+# observability; never gates dispatch.
+admission_card:
+  enabled: true
+
 codex:
   command: codex --disable plugins --disable hooks --disable plugin_hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use --disable multi_agent --disable goals --disable memories --disable tool_call_mcp_elicitation --config 'model_reasoning_effort="low"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server
   ephemeral_home: true

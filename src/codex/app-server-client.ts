@@ -51,6 +51,12 @@ const DEFAULT_CLIENT_INFO = Object.freeze({
 });
 
 const DEFAULT_MAX_LINE_BYTES = 10 * 1024 * 1024;
+/**
+ * Single source of truth for the throw in send() and the drop predicate in
+ * sendResponseOrDrop() — a drift between the two silently turns late-response
+ * drops back into unhandled rejections (SYMPH-332).
+ */
+const NOT_WRITABLE_MESSAGE = "Codex app-server process is not writable.";
 const SUPPORTED_CODEX_SANDBOX_TYPES =
   "danger-full-access, dangerFullAccess, read-only, readOnly, workspace-write, workspaceWrite";
 
@@ -777,10 +783,13 @@ export class CodexAppServerClient {
       const outputDenial = evaluateHeadlessCommandOutputForApproval(parsed);
       if (outputDenial !== null) {
         if (responseId !== null) {
-          this.send({
-            id: parsed.id,
-            result: createApprovalResponse(false, outputDenial.reason),
-          });
+          this.sendResponseOrDrop(
+            {
+              id: parsed.id,
+              result: createApprovalResponse(false, outputDenial.reason),
+            },
+            "headless output denial",
+          );
         }
         this.emit({
           event: "unsupported_tool_call",
@@ -798,10 +807,13 @@ export class CodexAppServerClient {
       const permissionDenial = this.evaluateModePermissionForApproval(parsed);
       if (permissionDenial !== null) {
         if (responseId !== null) {
-          this.send({
-            id: parsed.id,
-            result: createApprovalResponse(false, permissionDenial.reason),
-          });
+          this.sendResponseOrDrop(
+            {
+              id: parsed.id,
+              result: createApprovalResponse(false, permissionDenial.reason),
+            },
+            "mode permission denial",
+          );
         }
         this.emit({
           event: "unsupported_tool_call",
@@ -817,10 +829,13 @@ export class CodexAppServerClient {
       }
 
       if (responseId !== null) {
-        this.send({
-          id: parsed.id,
-          result: createApprovalResponse(true),
-        });
+        this.sendResponseOrDrop(
+          {
+            id: parsed.id,
+            result: createApprovalResponse(true),
+          },
+          "approval auto-approve",
+        );
       }
       this.emit({
         event: "approval_auto_approved",
@@ -842,16 +857,19 @@ export class CodexAppServerClient {
       }
 
       if (responseId !== null) {
-        this.send({
-          id: parsed.id,
-          result: {
-            success: false,
-            error: {
-              code: ERROR_CODES.codexDynamicToolRejected,
-              message: `Unsupported tool call: ${toolName ?? "unknown"}`,
+        this.sendResponseOrDrop(
+          {
+            id: parsed.id,
+            result: {
+              success: false,
+              error: {
+                code: ERROR_CODES.codexDynamicToolRejected,
+                message: `Unsupported tool call: ${toolName ?? "unknown"}`,
+              },
             },
           },
-        });
+          "unsupported dynamic tool call",
+        );
       }
       this.emit({
         event: "unsupported_tool_call",
@@ -871,16 +889,19 @@ export class CodexAppServerClient {
         ERROR_CODES.codexUserInputRequired,
       );
       if (responseId !== null) {
-        this.send({
-          id: parsed.id,
-          error: {
-            code: -32000,
-            message: error.message,
-            data: {
-              code: error.code,
+        this.sendResponseOrDrop(
+          {
+            id: parsed.id,
+            error: {
+              code: -32000,
+              message: error.message,
+              data: {
+                code: error.code,
+              },
             },
           },
-        });
+          "user input required",
+        );
       }
       this.emit({
         event: "turn_input_required",
@@ -1104,11 +1125,29 @@ export class CodexAppServerClient {
     });
   }
 
+  private sendResponseOrDrop(payload: JsonObject, context: string): void {
+    try {
+      this.send(payload);
+    } catch (error) {
+      if (
+        !(error instanceof CodexAppServerClientError) ||
+        error.message !== NOT_WRITABLE_MESSAGE
+      ) {
+        throw error;
+      }
+
+      this.emit({
+        event: "other_message",
+        message: `Codex app-server response dropped for ${context}: app-server process already exited.`,
+      });
+    }
+  }
+
   private send(message: JsonObject): void {
     const child = this.child;
     if (child === null || child.stdin.destroyed) {
       throw new CodexAppServerClientError(
-        "Codex app-server process is not writable.",
+        NOT_WRITABLE_MESSAGE,
         ERROR_CODES.codexProtocolError,
       );
     }
@@ -1203,23 +1242,55 @@ export class CodexAppServerClient {
     tool: CodexDynamicTool,
     message: JsonObject,
   ): Promise<void> {
+    let toolResult: object;
     try {
-      const result = await tool.execute(extractToolInput(message));
-      this.send({
-        id: requestId,
-        result,
-      });
-    } catch (error) {
-      this.send({
-        id: requestId,
-        result: {
-          success: false,
-          error: {
-            code: ERROR_CODES.codexDynamicToolRejected,
-            message: `Dynamic tool ${tool.name} failed: ${toErrorMessage(error)}`,
+      toolResult = await tool.execute(extractToolInput(message));
+    } catch (execError) {
+      this.sendResponseOrDrop(
+        {
+          id: requestId,
+          result: {
+            success: false,
+            error: {
+              code: ERROR_CODES.codexDynamicToolRejected,
+              message: `Dynamic tool ${tool.name} failed: ${toErrorMessage(execError)}`,
+            },
           },
         },
-      });
+        `dynamic tool "${tool.name}" error for request ${String(requestId)}`,
+      );
+      return;
+    }
+
+    try {
+      this.sendResponseOrDrop(
+        {
+          id: requestId,
+          result: toolResult,
+        },
+        `dynamic tool "${tool.name}" result for request ${String(requestId)}`,
+      );
+    } catch (sendError) {
+      // A successful tool result that cannot be serialized/sent (circular
+      // structure, BigInt, ...) must become a reported dynamic-tool
+      // failure — not an unhandled rejection escaping this detached
+      // promise, which is the exact hazard this client guards against
+      // (SYMPH-332). The failure envelope below is all primitives, so it
+      // serializes; if the process died meanwhile, sendResponseOrDrop
+      // drops it.
+      this.sendResponseOrDrop(
+        {
+          id: requestId,
+          result: {
+            success: false,
+            error: {
+              code: ERROR_CODES.codexDynamicToolRejected,
+              message: `Dynamic tool ${tool.name} result could not be sent: ${toErrorMessage(sendError)}`,
+            },
+          },
+        },
+        `dynamic tool "${tool.name}" result-send failure for request ${String(requestId)}`,
+      );
     }
   }
 }

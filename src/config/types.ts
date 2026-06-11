@@ -112,6 +112,15 @@ export interface WorkflowSpecFidelityConfig {
   enabled: boolean;
 }
 
+/**
+ * Admission cards (SYMPH-379): on first dispatch the dispatcher publishes
+ * its already-journaled admission + right-sizing decision to the issue as
+ * one compact comment. Observability only; never gates dispatch.
+ */
+export interface WorkflowAdmissionCardConfig {
+  enabled: boolean;
+}
+
 export interface WorkflowPauseTriageConfig {
   baseUrl: string | null;
   model: string | null;
@@ -219,6 +228,7 @@ export interface ResolvedWorkflowConfig {
   pauseTriage: WorkflowPauseTriageConfig;
   acGate: WorkflowAcGateConfig;
   specFidelity: WorkflowSpecFidelityConfig;
+  admissionCard: WorkflowAdmissionCardConfig;
   runner: WorkflowRunnerConfig;
   continuousFeedback?: WorkflowContinuousFeedbackConfig;
   codex: WorkflowCodexConfig;
