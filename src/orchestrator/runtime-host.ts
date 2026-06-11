@@ -21,6 +21,7 @@ import type {
 } from "../agent/runner.js";
 import { AgentRunner } from "../agent/runner.js";
 import { runSpecFidelityJudge } from "../agent/spec-fidelity.js";
+import { publishVerdictStatus } from "../agent/verdict-status.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
   DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
@@ -496,16 +497,18 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         // from the same sanitized path the workspace manager uses. A
         // missing/unreadable workspace yields a null diff and the judge
         // declines to opine (fail open).
+        let workspacePath: string | null = null;
         let diff: string | null = null;
         try {
-          const { workspacePath } = this.workspaceManager.resolveForIssue(
+          ({ workspacePath } = this.workspaceManager.resolveForIssue(
             evidence.issueId,
-          );
+          ));
           diff = getDiff(workspacePath);
         } catch {
+          workspacePath = null;
           diff = null;
         }
-        return runSpecFidelityJudge({
+        const verdict = await runSpecFidelityJudge({
           config: this.config.pauseTriage,
           evidence: {
             issueIdentifier: evidence.issueIdentifier,
@@ -515,6 +518,24 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             reviewMessage: evidence.reviewMessage,
           },
         });
+        if (verdict !== null && workspacePath !== null) {
+          // Out-of-band enforcement (SYMPH-355): publish the verdict as a
+          // commit status on the workspace HEAD so branch protection can
+          // require it. Fire-and-forget — the judge result never waits on
+          // GitHub, and a failed publish fails open (warn only).
+          void publishVerdictStatus({
+            workspacePath,
+            issueIdentifier: evidence.issueIdentifier,
+            context: "symphony/spec-fidelity",
+            verdict: verdict.verdict,
+            description: `${verdict.verdict}: ${verdict.findings.slice(0, 120)}`,
+          }).catch((error) => {
+            console.warn(
+              `[verdict-status] unexpected publish rejection for ${evidence.issueIdentifier}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+        }
+        return verdict;
       },
       onIssueDropped: ({ identifier, title, url, reason }) => {
         this.notifier?.notify({
