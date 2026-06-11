@@ -97,6 +97,89 @@ describe("feedback injection-hygiene policy (SYMPH-378)", () => {
     expect(open[0]?.title).toBe("broken null guard");
   });
 
+  it("an empty checkpoint resolves prior opens; a suppressed-only checkpoint does NOT (council R1)", () => {
+    const opened = mergeContinuousFeedbackCheckpoint(
+      undefined,
+      checkpoint([
+        {
+          signature: "sig-real",
+          title: "broken guard",
+          severity: "warning",
+          file: "src/foo.ts",
+        },
+      ]),
+    );
+    expect(opened.findings[0]?.status).toBe("open");
+
+    // Suppressed-only checkpoint: no signal about the prior open — it
+    // stays open, the checkpoint stays at "finding", and the open
+    // finding remains bounce-eligible.
+    const suppressedOnly = mergeContinuousFeedbackCheckpoint(
+      opened,
+      checkpoint(
+        [{ title: "vague ungrounded advice" }],
+        "2026-06-11T00:05:00.000Z",
+      ),
+    );
+    expect(
+      suppressedOnly.findings.find((f) => f.signature === "sig-real")?.status,
+    ).toBe("open");
+    expect(suppressedOnly.status).toBe("finding");
+    expect(getOpenContinuousFeedbackFindings(suppressedOnly)).toHaveLength(1);
+
+    // Genuinely empty checkpoint: clean by contract — prior opens resolve.
+    const emptied = mergeContinuousFeedbackCheckpoint(
+      suppressedOnly,
+      checkpoint([], "2026-06-11T00:10:00.000Z"),
+    );
+    expect(
+      emptied.findings.find((f) => f.signature === "sig-real")?.status,
+    ).toBe("resolved");
+    expect(emptied.status).toBe("pass");
+  });
+
+  it("an already-open finding is never demoted by a re-sighting that drops its file (council R1)", () => {
+    const opened = mergeContinuousFeedbackCheckpoint(
+      undefined,
+      checkpoint([
+        {
+          signature: "sig-1",
+          title: "null guard",
+          severity: "warning",
+          file: "src/foo.ts",
+          line: 4,
+        },
+      ]),
+    );
+    const reSighted = mergeContinuousFeedbackCheckpoint(
+      opened,
+      checkpoint(
+        [{ signature: "sig-1", title: "null guard", severity: "warning" }],
+        "2026-06-11T00:05:00.000Z",
+      ),
+    );
+    expect(reSighted.findings[0]?.status).toBe("open");
+    expect(reSighted.status).toBe("finding");
+    expect(getOpenContinuousFeedbackFindings(reSighted)).toHaveLength(1);
+  });
+
+  it("empty or whitespace file does not ground a finding (council R1)", () => {
+    expect(
+      feedbackFindingCarriesNewSignal({
+        title: "add more tests",
+        severity: "warning",
+        file: "",
+      }),
+    ).toBe(false);
+    expect(
+      feedbackFindingCarriesNewSignal({
+        title: "add more tests",
+        severity: "warning",
+        file: "   ",
+      }),
+    ).toBe(false);
+  });
+
   it("re-classifies on every arrival: a suppressed finding returning with evidence opens", () => {
     const first = mergeContinuousFeedbackCheckpoint(
       undefined,

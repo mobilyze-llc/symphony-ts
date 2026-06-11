@@ -172,11 +172,12 @@ function buildContinuousFeedbackPrompt(
     ...(input.diff.trim() === "" ? [] : [input.diff, "```"]),
     "",
     "## Finding policy (SYMPH-378)",
-    "Report a finding ONLY when it carries NEW signal the worker does not already have:",
+    "Report a finding ONLY when it carries signal the worker has not already ACTED on:",
     "- a confirmed blocker: something demonstrably broken in the diff, cited with file (and line when possible);",
     "- a concrete correction: what to change and where, grounded in the diff;",
-    '- a scope stop: the diff implements the wrong item or mutates files outside its task (use severity "blocking").',
-    "Never restate the task or its requirements. Never add speculative requirements. Never raise the proof bar mid-flight — proof requirements come from the frozen acceptance criteria only. If you cannot point at a concrete location or behavior in the diff, the checkpoint is clean: return an empty findings array. Ungrounded advisory findings are suppressed by the harness and waste the checkpoint.",
+    '- a scope stop: the diff implements the wrong item or mutates files outside its task (use severity "blocking");',
+    "- a previously reported finding that is STILL unaddressed — re-report it with the same signature (this is not restatement; it keeps the finding alive).",
+    "Never restate the task or its requirements. Never add speculative requirements. Never raise the proof bar mid-flight — proof requirements come from the frozen acceptance criteria only. For cross-cutting findings, cite the most representative file. An EMPTY findings array means the checkpoint is genuinely clean: previously reported findings are considered resolved. Ungrounded advisory findings are suppressed by the harness and waste the checkpoint.",
     "",
     "## Output",
     "Return a single JSON object and nothing else:",
@@ -233,7 +234,12 @@ function normalizeContinuousFeedbackFinding(
       title: record.title,
       detail: typeof record.detail === "string" ? record.detail : null,
       severity,
-      file: typeof record.file === "string" ? record.file : null,
+      // Empty/whitespace file is no file — it must not count as grounding
+      // for the injection-hygiene policy (SYMPH-378).
+      file:
+        typeof record.file === "string" && record.file.trim() !== ""
+          ? record.file
+          : null,
       line: typeof record.line === "number" ? record.line : null,
     },
   ];

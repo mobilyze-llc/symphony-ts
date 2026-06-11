@@ -59,7 +59,12 @@ export function ensureDecorrelatedFeedbackLane(
 export function feedbackFindingCarriesNewSignal(
   finding: ContinuousFeedbackFindingInput,
 ): boolean {
-  return finding.severity === "blocking" || finding.file != null;
+  // Trim-aware: an empty or whitespace `file` must not defeat the
+  // grounding proxy (council R1 — `"" != null` is true).
+  return (
+    finding.severity === "blocking" ||
+    (finding.file != null && finding.file.trim() !== "")
+  );
 }
 
 export function mergeContinuousFeedbackCheckpoint(
@@ -69,6 +74,12 @@ export function mergeContinuousFeedbackCheckpoint(
   const existing = new Map(
     (previous?.findings ?? []).map((finding) => [finding.signature, finding]),
   );
+  // Resolution requires a genuinely clean checkpoint (no raw findings at
+  // all — the prompt defines empty as "clean", with still-unaddressed
+  // findings re-reported). A checkpoint whose findings were all
+  // suppressed carries NO signal about prior opens: it must not resolve
+  // them (council R1 — the only-new-signal prompt changed what an empty
+  // array means, so emptiness and suppressed-only must diverge).
   const nextFindings =
     input.findings.length === 0
       ? (previous?.findings ?? []).map((finding) =>
@@ -84,9 +95,11 @@ export function mergeContinuousFeedbackCheckpoint(
 
   for (const rawFinding of input.findings) {
     const signature = normalizeFeedbackSignature(rawFinding);
-    // Classified on every arrival: a previously suppressed finding that
-    // returns WITH evidence is admitted; grounding never carries over
-    // from a prior sighting.
+    // Classified on every arrival, but grounding once established carries
+    // forward: an already-open finding is never demoted to suppressed by a
+    // re-sighting that merely drops its file (council R1 — reviewer
+    // non-determinism must not silently downgrade a confirmed finding). A
+    // previously suppressed finding that returns WITH evidence is admitted.
     const admitted = feedbackFindingCarriesNewSignal(rawFinding);
     const current = existing.get(signature);
     if (current !== undefined) {
@@ -99,7 +112,7 @@ export function mergeContinuousFeedbackCheckpoint(
         line: rawFinding.line ?? current.line,
         lastSeenAt: input.checkedAt,
         occurrences: current.occurrences + 1,
-        status: admitted ? "open" : "suppressed",
+        status: admitted || current.status === "open" ? "open" : "suppressed",
         reviewerLane: input.reviewerLane,
       };
       existing.set(signature, updated);
@@ -130,7 +143,11 @@ export function mergeContinuousFeedbackCheckpoint(
   }
 
   return {
-    status: input.findings.some(feedbackFindingCarriesNewSignal)
+    // Post-merge truth: a checkpoint passes only when nothing is open —
+    // residual opens from prior checkpoints keep the state at "finding"
+    // even when the current arrivals were all suppressed (council R1:
+    // the journal must never say pass while a bounce can still fire).
+    status: nextFindings.some((finding) => finding.status === "open")
       ? "finding"
       : "pass",
     lastEvent: input.event,
