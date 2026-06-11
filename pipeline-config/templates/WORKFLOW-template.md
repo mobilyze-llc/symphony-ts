@@ -454,8 +454,8 @@ Do not use Codex app/connector MCP tools for Linear comments or documents in hea
    - [ ] ...
 
    ### Validation
-   - `<test command from spec>`
-   - `<any verify commands>`
+   - `<FOCUSED test command for the touched area — never a bare full-suite run like \`pnpm test\`; the full suite gates in CI (SYMPH-358)>`
+   - `<any other verify commands>`
 
    ### Notes
    - <timestamp> Investigation complete. Plan posted.
@@ -568,7 +568,9 @@ Read ALL comments on this Linear issue starting with `## Review Findings`. These
 2. Create a feature branch from the issue's suggested branch name{% if issue.branch_name %} (`{{ issue.branch_name }}`){% endif %}, or use `{{ issue.identifier | downcase }}/<short-description>`.
 3. Implement the task per the issue description.
 4. Write tests as needed.
-5. Run all `# Verify:` commands from the spec. You are not done until every verify command exits 0.
+5. Run the `# Verify:` commands from the spec under this contract (SYMPH-358):
+   - Always gate on: FOCUSED tests for the code you changed (e.g. `npx vitest run <test files>`), typecheck, lint, and build. These must exit 0 — failures here are yours to fix.
+   - Do NOT gate completion on a FULL test suite command (`pnpm test` or equivalent). This box runs multiple agents concurrently and the suite's timing-sensitive tests false-negative under load; the full suite gates your PR in CI, where runners are isolated. If the spec lists a full-suite command: run it once, and if it fails ONLY in tests unrelated to your diff while your focused validation passes, record the failing test names in the PR body under `## Tool Output > Full Suite` and proceed. Never emit `[STAGE_FAILED: verify]` for unrelated-suite failures when your focused validation is green.
 6. Run `pnpm format --write` to auto-format code, then run `pnpm lint` to verify no lint errors remain. If lint fails, fix the errors and re-run until clean. This must pass before creating the PR.
 7. Before creating the PR, capture structured tool output as bounded artifacts:
    - Run `node scripts/symphony-run-logged.mjs --label typecheck -- npx tsc --noEmit` when the helper exists, or redirect equivalent output to `.symphony/validation/typecheck.log`; include command, exit code, log path, and summary/tail in PR body under `## Tool Output > TypeScript`.
