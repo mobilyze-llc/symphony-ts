@@ -388,7 +388,7 @@ export const LINEAR_OPEN_ISSUES_BY_LABELS_QUERY = `
 export const LINEAR_ISSUE_STATE_TRANSITIONS_QUERY = `
   query IssueStateTransitions($issueId: String!) {
     issue(id: $issueId) {
-      history(last: 25) {
+      history(first: 50) {
         nodes {
           createdAt
           toState {
@@ -399,3 +399,7 @@ export const LINEAR_ISSUE_STATE_TRANSITIONS_QUERY = `
     }
   }
 `;
+// Linear's issue history connection is ordered NEWEST-FIRST: first
+// returns recent entries; last returns a stale window that silently
+// omits the operator's latest transitions (verified live, 2026-06-10 —
+// the resume-evidence path never saw the resume it was looking for).
