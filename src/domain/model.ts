@@ -1,3 +1,5 @@
+import type { ErrorSignatureClass } from "../errors/signature.js";
+
 export const ORCHESTRATOR_ISSUE_STATUSES = [
   "unclaimed",
   "claimed",
@@ -948,7 +950,10 @@ export interface OrchestratorState {
    * "transient", the issue is parked immediately instead of re-entering the
    * budget-escalation ladder.
    */
-  issueFailureSignatures: Record<string, { signature: string; class: string }>;
+  issueFailureSignatures: Record<
+    string,
+    { signature: string; class: ErrorSignatureClass }
+  >;
 }
 
 export const FAILURE_CLASSES = [

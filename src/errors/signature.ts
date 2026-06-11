@@ -102,8 +102,13 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
   { pattern: /\bconnection reset\b/, class: "transient" },
   { pattern: /\bsocket hang up\b/, class: "transient" },
   // Transient — HTTP 5xx (scoped to HTTP/status context so bare 5xx PIDs or
-  // exit-codes like "process 503 exited" do not get a transient exemption)
-  { pattern: /\b(?:status|http)\s*5\d\d\b/, class: "transient" },
+  // exit-codes like "process 503 exited" do not get a transient exemption).
+  // Covers: "status 503", "status code 503", "http 503",
+  //   "Request failed with status code 503" (axios canonical shape).
+  {
+    pattern: /\b(?:status(?:\s+code)?|http)\s*5\d\d\b/,
+    class: "transient",
+  },
   { pattern: /\binternal server error\b/, class: "transient" },
   { pattern: /\bservice unavailable\b/, class: "transient" },
   { pattern: /\bbad gateway\b/, class: "transient" },

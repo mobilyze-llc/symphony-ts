@@ -187,6 +187,27 @@ describe("normalizeErrorSignature", () => {
       expect(result.class).not.toBe("transient");
     });
 
+    it("classifies axios 'Request failed with status code 503' as transient", () => {
+      // Axios's canonical error shape — must match the widened 5xx pattern.
+      const result = normalizeErrorSignature(
+        "Request failed with status code 503",
+      );
+      expect(result.class).toBe("transient");
+    });
+
+    it("classifies axios 'Request failed with status code 500' as transient", () => {
+      const result = normalizeErrorSignature(
+        "Request failed with status code 500",
+      );
+      expect(result.class).toBe("transient");
+    });
+
+    it("does NOT classify 'process 503 exited' as transient (PID exclusion still holds)", () => {
+      // The PID/exit-code exclusion property must survive the regex widening.
+      const result = normalizeErrorSignature("process 503 exited");
+      expect(result.class).not.toBe("transient");
+    });
+
     it("classifies rate limit as transient", () => {
       const result = normalizeErrorSignature(
         "API error: rate limit exceeded, retry after 60s",

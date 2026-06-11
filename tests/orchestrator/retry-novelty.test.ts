@@ -378,6 +378,66 @@ describe("rework signature lifecycle (SYMPH-396 regression)", () => {
   });
 });
 
+describe("approveGate signature lifecycle (SYMPH-396 regression)", () => {
+  it("first failure after approveGate advances to a stage with a stale signature retries normally", async () => {
+    // Scenario: implement runs and stores a failure signature, then advances
+    // through a gate (review → merge). Later, approveGate from review sends
+    // back to implement (or to merge which has a stale signature). The first
+    // failure of the new visit must NOT park — approveGate must clear the
+    // destination stage's signature just as advanceStage and reworkGate do.
+    //
+    // Pipeline: implement → review (gate, onApprove=implement) to create a
+    // re-entry into the same stage via approveGate.
+    const orchestrator = createOrchestrator({
+      stages: createGateBackToImplementConfig(),
+    });
+
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    const epermError =
+      "EPERM: operation not permitted, open '/var/folders/xk/3q8vz5cd2r1/T/tmp-12/workspace/src/index.ts'";
+
+    // Step 1: implement fails once — signature stored for implement
+    const retry1 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: epermError,
+    });
+    expect(retry1).not.toBeNull();
+    expect(retry1!.delayType).toBe("failure");
+
+    const state = orchestrator.getState();
+    // Verify the signature was stored
+    expect(state.issueFailureSignatures["1:implement"]).toBeDefined();
+
+    // Step 2: Simulate advance to the gate stage (review) and then approveGate
+    // back to implement — reproduces the false-park path.
+    state.issueStages["1"] = "review";
+    // biome-ignore lint/performance/noDelete: test state reset requires real deletion
+    delete state.retryAttempts["1"];
+    state.claimed.delete("1");
+
+    const nextStage = orchestrator.approveGate("1");
+    expect(nextStage).toBe("implement");
+
+    // The stale signature must have been cleared by approveGate
+    expect(state.issueFailureSignatures["1:implement"]).toBeUndefined();
+
+    // Step 3: re-dispatch and fail with the same error — must get a normal retry
+    await orchestrator.pollTick();
+    const retry2 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: epermError,
+    });
+
+    // This should be a normal retry (first visit of the new implement run), not a park
+    expect(retry2).not.toBeNull();
+    expect(state.failed.has("1")).toBe(false);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -385,10 +445,11 @@ describe("rework signature lifecycle (SYMPH-396 regression)", () => {
 function createOrchestrator(overrides?: {
   updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
   postComment?: OrchestratorCoreOptions["postComment"];
+  stages?: StagesConfig;
 }) {
   const tracker = createTracker();
   const options: OrchestratorCoreOptions = {
-    config: createConfig(),
+    config: createConfig(overrides?.stages),
     tracker,
     spawnWorker: async () => ({
       workerHandle: { pid: 9001 },
@@ -419,7 +480,7 @@ function createTracker(): IssueTracker {
   };
 }
 
-function createConfig(): ResolvedWorkflowConfig {
+function createConfig(stages?: StagesConfig): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
     promptTemplate: "Prompt",
@@ -476,7 +537,7 @@ function createConfig(): ResolvedWorkflowConfig {
       refreshMs: 1_000,
       renderIntervalMs: 16,
     },
-    stages: createThreeStageConfig(),
+    stages: stages ?? createThreeStageConfig(),
     escalationState: "Blocked",
   };
 }
@@ -551,5 +612,55 @@ function createIssue(overrides?: Partial<Issue>): Issue {
     createdAt: "2026-03-01T00:00:00.000Z",
     updatedAt: "2026-03-01T00:00:00.000Z",
     ...overrides,
+  };
+}
+
+/**
+ * Pipeline: implement → review (gate, onApprove=implement).
+ * The gate's onApprove loops back to implement so approveGate re-enters
+ * a stage that may have a stale failure signature from a prior visit.
+ */
+function createGateBackToImplementConfig(): StagesConfig {
+  return {
+    initialStage: "implement",
+    fastTrack: null,
+    stages: {
+      implement: {
+        type: "agent",
+        runner: "claude-code",
+        model: "claude-sonnet-4-5",
+        prompt: "implement.liquid",
+        maxTurns: 30,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "review",
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: null,
+      },
+      review: {
+        type: "gate",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: "ensemble",
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: null,
+          onApprove: "implement",
+          onRework: null,
+        },
+        linearState: null,
+      },
+    },
   };
 }

@@ -51,7 +51,10 @@ import {
   parseFailureSignal,
 } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
-import { normalizeErrorSignature } from "../errors/signature.js";
+import {
+  type ErrorSignatureClass,
+  normalizeErrorSignature,
+} from "../errors/signature.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
   appendDispatcherRunJournalEntry,
@@ -2469,7 +2472,10 @@ export class OrchestratorCore {
     issueId: string,
     issueIdentifier: string,
     reason: string,
-    signatureMeta?: { failure_signature: string; failure_class: string },
+    signatureMeta?: {
+      failure_signature: string;
+      failure_class: ErrorSignatureClass;
+    },
   ): Promise<void> {
     const issueState = this.state.running[issueId]?.issue.state ?? null;
     try {
@@ -3160,6 +3166,10 @@ export class OrchestratorCore {
     }
 
     this.state.issueStages[issueId] = nextStageName;
+    // Clear any stored failure signature for the destination stage so a stale
+    // signature from a prior visit cannot false-park the first failure of the
+    // new visit (SYMPH-396 — same class as advanceStage / reworkGate fixes).
+    this.clearStageFailureSignature(issueId, nextStageName);
     return nextStageName;
   }
 
