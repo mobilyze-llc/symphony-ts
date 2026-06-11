@@ -51,6 +51,10 @@ import {
   parseFailureSignal,
 } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
+import {
+  type ErrorSignatureClass,
+  normalizeErrorSignature,
+} from "../errors/signature.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
   appendDispatcherRunJournalEntry,
@@ -1455,6 +1459,10 @@ export class OrchestratorCore {
       } catch {
         // Observability only.
       }
+      // Clear any stored failure signature for this stage so the first failure
+      // of the reworked run gets a normal retry rather than false-parking
+      // against a stale signature from a prior visit (SYMPH-396).
+      this.clearStageFailureSignature(issueId, stageName);
       this.scheduleRetry(issueId, 1, {
         identifier,
         error: null,
@@ -1546,6 +1554,7 @@ export class OrchestratorCore {
           identifier: retryEntry.identifier,
           error: `pipeline halted: ${haltIssue.identifier}`,
           delayType: retryEntry.delayType,
+          deferral: true,
         }),
       };
     }
@@ -1565,6 +1574,7 @@ export class OrchestratorCore {
           identifier: retryEntry.identifier,
           error: "rate-limit admission floor active",
           delayType: retryEntry.delayType,
+          deferral: true,
         }),
       };
     }
@@ -1582,6 +1592,9 @@ export class OrchestratorCore {
           identifier: retryEntry.identifier,
           error: "retry poll failed",
           delayType: retryEntry.delayType,
+          // Orchestrator-synthetic, not issue-attributable: a tracker poll
+          // exception must not feed the novelty short-circuit (council R5).
+          deferral: true,
         }),
       };
     }
@@ -1635,6 +1648,7 @@ export class OrchestratorCore {
           identifier: issue.identifier,
           error: "no available orchestrator slots",
           delayType: retryEntry.delayType,
+          deferral: true,
         }),
       };
     }
@@ -1690,6 +1704,7 @@ export class OrchestratorCore {
           identifier: issue.identifier,
           error: "dispatch paused by deterministic supervision",
           delayType: retryEntry.delayType,
+          deferral: true,
         }),
       };
     }
@@ -2087,6 +2102,9 @@ export class OrchestratorCore {
 
     // Move to the target stage (may be ahead of nextStageName if stages were skipped)
     this.state.issueStages[issueId] = targetStageName;
+    // Clear any stored failure signature for the incoming stage so a prior
+    // failed visit cannot false-park the first failure of this new visit (SYMPH-396).
+    this.clearStageFailureSignature(issueId, targetStageName);
     if (session !== undefined) {
       addPipelineActivity(
         session,
@@ -2477,6 +2495,10 @@ export class OrchestratorCore {
     issueId: string,
     issueIdentifier: string,
     reason: string,
+    signatureMeta?: {
+      failure_signature: string;
+      failure_class: ErrorSignatureClass;
+    },
   ): Promise<void> {
     const issueState = this.state.running[issueId]?.issue.state ?? null;
     try {
@@ -2496,6 +2518,7 @@ export class OrchestratorCore {
           status: "completed",
           reason,
           ...(issueState === null ? {} : { issueState }),
+          ...(signatureMeta ?? {}),
         },
       });
     } catch (error) {
@@ -2927,6 +2950,24 @@ export class OrchestratorCore {
     delete this.state.issueAcSnapshots[issueId];
     delete this.state.loopTraceJournal[issueId];
     delete this.state.continuousFeedback[issueId];
+    // Failure signatures are keyed by `${issueId}:${stage}` — purge all
+    const sigPrefix = `${issueId}:`;
+    for (const key of Object.keys(this.state.issueFailureSignatures)) {
+      if (key.startsWith(sigPrefix) || key === issueId) {
+        delete this.state.issueFailureSignatures[key];
+      }
+    }
+  }
+
+  /**
+   * Clear the stored failure signature for a single stage of an issue.
+   * Called when an issue advances to (or is reworked back to) a stage so that
+   * a stale signature from a prior visit cannot false-park the first failure of
+   * the new visit (SYMPH-396).
+   */
+  private clearStageFailureSignature(issueId: string, stage: string): void {
+    const sigKey = `${issueId}:${stage}`;
+    delete this.state.issueFailureSignatures[sigKey];
   }
 
   private markIssueRequiresExplicitResume(
@@ -3148,6 +3189,10 @@ export class OrchestratorCore {
     }
 
     this.state.issueStages[issueId] = nextStageName;
+    // Clear any stored failure signature for the destination stage so a stale
+    // signature from a prior visit cannot false-park the first failure of the
+    // new visit (SYMPH-396 — same class as advanceStage / reworkGate fixes).
+    this.clearStageFailureSignature(issueId, nextStageName);
     return nextStageName;
   }
 
@@ -3214,6 +3259,12 @@ export class OrchestratorCore {
 
     this.state.issueReworkCounts[issueId] = currentCount + 1;
     this.state.issueStages[issueId] = reworkTarget;
+
+    // Clear any stored failure signature for the rework target stage so the
+    // first failure of the new visit gets a normal retry rather than
+    // false-parking against a stale signature from a prior visit (SYMPH-396).
+    this.clearStageFailureSignature(issueId, reworkTarget);
+
     return reworkTarget;
   }
 
@@ -5068,6 +5119,12 @@ export class OrchestratorCore {
       identifier: string | null;
       error: string | null;
       delayType: "continuation" | "failure";
+      /** When true, this call is an admission deferral (no-slots or deterministic
+       * supervision pause) — not a real worker failure.  Deferrals must never
+       * participate in the novelty short-circuit: neither recording nor comparing
+       * failure signatures.  Two consecutive same-reason deferrals would otherwise
+       * produce identical signatures and falsely park a healthy queued issue. */
+      deferral?: boolean;
     },
   ): RetryEntry | null {
     // Max retry guard — only applies to failure retries, not continuations
@@ -5089,6 +5146,60 @@ export class OrchestratorCore {
         input.error ?? "max retry attempts exceeded",
       );
       return null;
+    }
+
+    // Retry-without-novelty short-circuit (SYMPH-396): record the normalized
+    // failure signature on every failure retry so subsequent attempts can
+    // detect a repeat. On attempt >= 2, if the incoming signature matches the
+    // stored one AND the class is not "transient", park immediately — retrying
+    // an identical permanent failure is futile.
+    //
+    // Admission deferrals (input.deferral === true) are explicitly excluded:
+    // a deferral is an orchestrator-synthetic "not yet" decision, not a real
+    // worker failure.  Two consecutive same-reason deferrals would otherwise
+    // produce identical signatures and falsely park a healthy queued issue
+    // before any worker attempt fires.
+    if (
+      input.delayType === "failure" &&
+      input.error !== null &&
+      !input.deferral
+    ) {
+      const stage = this.state.issueStages[issueId] ?? null;
+      const sigKey = `${issueId}:${stage ?? ""}`;
+      const incoming = normalizeErrorSignature(input.error);
+      const previous = this.state.issueFailureSignatures[sigKey];
+      if (
+        attempt >= 2 &&
+        previous !== undefined &&
+        incoming.signature === previous.signature &&
+        incoming.class !== "transient"
+      ) {
+        // Identical non-transient signature — park loudly, skip ladder
+        const parkReason = `retry futile: identical failure signature ${incoming.signature} (${incoming.class})`;
+        this.state.failed.add(issueId);
+        this.releaseClaim(issueId);
+        this.clearTerminalIssueRuntimeState(issueId);
+        void this.fireEscalationSideEffects(
+          issueId,
+          input.identifier ?? issueId,
+          parkReason,
+        );
+        void this.recordFailureExhausted(
+          issueId,
+          input.identifier ?? issueId,
+          parkReason,
+          {
+            failure_signature: incoming.signature,
+            failure_class: incoming.class,
+          },
+        );
+        return null;
+      }
+      // Record (or update) the signature for comparison on the next attempt
+      this.state.issueFailureSignatures[sigKey] = {
+        signature: incoming.signature,
+        class: incoming.class,
+      };
     }
 
     this.clearRetryEntry(issueId);

@@ -1,3 +1,5 @@
+import type { ErrorSignatureClass } from "../errors/signature.js";
+
 export const ORCHESTRATOR_ISSUE_STATUSES = [
   "unclaimed",
   "claimed",
@@ -941,6 +943,17 @@ export interface OrchestratorState {
   dispatcherLeases: Record<string, DispatcherLease>;
   managerRunJournal: ManagerRunJournal;
   managerRuns: Record<string, ManagerRunState>;
+  /**
+   * Last failure signature recorded per issue+stage key (`${issueId}:${stage}`).
+   * Used by the retry-without-novelty short-circuit (SYMPH-396): if the
+   * incoming failure signature matches the stored one and the class is not
+   * "transient", the issue is parked immediately instead of re-entering the
+   * budget-escalation ladder.
+   */
+  issueFailureSignatures: Record<
+    string,
+    { signature: string; class: ErrorSignatureClass }
+  >;
 }
 
 export const FAILURE_CLASSES = [
@@ -1093,5 +1106,6 @@ export function createInitialOrchestratorState(input: {
     dispatcherLeases: {},
     managerRunJournal: [],
     managerRuns: {},
+    issueFailureSignatures: {},
   };
 }
