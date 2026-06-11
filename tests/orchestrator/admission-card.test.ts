@@ -84,6 +84,30 @@ describe("formatAdmissionCard (SYMPH-379)", () => {
     expect(card).toContain("frozen acceptance criteria on record");
   });
 
+  it("renders the ambiguous-routing consult line and bounds the risk-file list", () => {
+    const manyRiskFiles = Array.from({ length: 10 }, (_, i) => `src/r${i}.ts`);
+    const card = formatAdmissionCard({
+      issueIdentifier: "SYMPH-996",
+      stageName: "implement",
+      decision: decision({
+        signals: {
+          ...decision().signals,
+          highRiskFiles: manyRiskFiles,
+        },
+        modelRouting: { allowed: true, reason: "ambiguous_routing" },
+      }),
+      budgetMultiplier: 1,
+      hasFrozenAcceptanceCriteria: false,
+    });
+
+    expect(card).toContain(
+      "model consult allowed: deterministic signals were ambiguous",
+    );
+    expect(card).toContain("**Risk surface:**");
+    expect(card).toContain("src/r7.ts (+2 more)");
+    expect(card).not.toContain("src/r8.ts");
+  });
+
   it("renders 'none declared' when the decision carries no declared scope", () => {
     const card = formatAdmissionCard({
       issueIdentifier: "SYMPH-997",

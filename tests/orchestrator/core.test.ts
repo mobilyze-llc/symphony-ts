@@ -2241,16 +2241,20 @@ describe("orchestrator core", () => {
 
   it("posts the admission card once, on first dispatch only (SYMPH-379)", async () => {
     const comments: string[] = [];
+    let spawnCount = 0;
     const orchestrator = new OrchestratorCore({
       config: createConfig({ admissionCard: { enabled: true } }),
       tracker: createTracker({
         candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
         statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
       }),
-      spawnWorker: async () => ({
-        workerHandle: { pid: 1001 },
-        monitorHandle: { ref: "monitor-1" },
-      }),
+      spawnWorker: async () => {
+        spawnCount += 1;
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
       now: () => new Date("2026-03-06T00:00:05.000Z"),
       postComment: async (_id, body) => {
         comments.push(body);
@@ -2269,14 +2273,15 @@ describe("orchestrator core", () => {
       "**Verification path:** acceptance criteria not yet frozen",
     );
 
-    // A continuation dispatch of the same issue does not re-card.
+    // A continuation dispatch of the same issue (normal exit without a
+    // completion signal) genuinely re-dispatches — and does not re-card.
     await orchestrator.onWorkerExit({
       issueId: "1",
       outcome: "normal",
-      agentMessage: "[STAGE_COMPLETE] done",
     });
     await orchestrator.onRetryTimer("1");
     await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(spawnCount).toBe(2);
     expect(
       comments.filter((body) => body.includes("## Admission Card")),
     ).toHaveLength(1);

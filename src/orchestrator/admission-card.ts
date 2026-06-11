@@ -57,13 +57,18 @@ export function formatAdmissionCard(input: AdmissionCardInput): string {
     ? "frozen acceptance criteria on record — implement satisfies them in-session; spec-fidelity judges the diff at review exit"
     : "acceptance criteria not yet frozen — the investigate exit gate authors and freezes them before implement";
   const modelRoutingLine = describeModelRouting(decision.modelRouting.reason);
+  const riskFiles = decision.signals.highRiskFiles;
   const riskLines =
-    decision.signals.highRiskFiles.length === 0
+    riskFiles.length === 0
       ? []
       : [
-          `**Risk surface:** touches high-risk files — ${decision.signals.highRiskFiles
+          `**Risk surface:** touches high-risk files — ${riskFiles
             .slice(0, MAX_SCOPE_FILES)
-            .join(", ")}`,
+            .join(", ")}${
+            riskFiles.length > MAX_SCOPE_FILES
+              ? ` (+${riskFiles.length - MAX_SCOPE_FILES} more)`
+              : ""
+          }`,
         ];
 
   return [
