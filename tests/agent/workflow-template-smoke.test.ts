@@ -366,8 +366,17 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(template).toContain(
       "+refs/heads/$BASE_BRANCH:refs/heads/$BASE_BRANCH",
     );
-    expect(template).not.toContain("fetch --prune origin");
-    expect(template).toContain('WORKTREE_BASE="origin/$BASE_BRANCH"');
+    // SYMPH-372: stale remote-tracking refs are pruned on fetch, and the
+    // worktree base is a FULL refname so a poisoned refs/heads/origin/*
+    // entry can never make the short name ambiguous (the 2026-06-11
+    // incident). Pruning with explicit refspecs only affects the refspec
+    // destinations — refs/heads/worktree/* branches are never touched.
+    expect(template).toContain("fetch --prune origin");
+    expect(template).toContain(
+      'WORKTREE_BASE="refs/remotes/origin/$BASE_BRANCH"',
+    );
+    expect(template).toContain('WORKTREE_BASE="refs/heads/$BASE_BRANCH"');
+    expect(template).toContain("poisoned local ref");
     expect(template).toContain(
       'git -C "$BARE_CLONE" worktree add "$WORKSPACE_DIR" -b "$BRANCH_NAME" "$WORKTREE_BASE"',
     );

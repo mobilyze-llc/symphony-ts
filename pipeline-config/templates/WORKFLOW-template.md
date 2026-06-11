@@ -105,7 +105,12 @@ runner:
 
 hooks:
   after_create: |
-    set -euo pipefail
+    set -eu
+    # pipefail is a bash/ksh extension; the hook runs via `sh -lc`, which is
+    # bash on macOS but dash on Linux (where `set -o pipefail` exits 2).
+    # Enable it when available; every pipeline below tolerates upstream
+    # failure individually, so dash degrades safely (SYMPH-372).
+    (set -o pipefail) 2>/dev/null && set -o pipefail || true
     if [ -z "${REPO_URL:-}" ]; then
       echo "ERROR: REPO_URL environment variable is not set" >&2
       exit 1
@@ -135,18 +140,38 @@ hooks:
       echo "Using existing bare clone at $BARE_CLONE"
     fi
 
-    # --- Fetch latest refs into bare clone ---
+    # --- Self-heal poisoned local refs (SYMPH-372) ---
+    # Worktrees share refs with this bare clone, so a stray agent command
+    # like `git checkout -b origin/main` plants refs/heads/origin/* here and
+    # makes every short "origin/<branch>" name ambiguous for ALL workers.
+    # Such refs are never legitimate in the shared clone: delete them loudly.
+    git -C "$BARE_CLONE" for-each-ref --format="%(refname)" "refs/heads/origin/" |
+    while IFS= read -r poisoned; do
+      # branch -D (porcelain) natively refuses to delete a branch that a
+      # LIVE worktree has checked out — update-ref -d would yank it and
+      # orphan that worktree's next commit. Refusal is safe: full-refname
+      # resolution below keeps this hook immune to the ambiguity anyway.
+      if git -C "$BARE_CLONE" branch -D "${poisoned#refs/heads/}" >/dev/null 2>&1; then
+        echo "WARNING: removed poisoned local ref $poisoned from shared bare clone (SYMPH-372)" >&2
+      else
+        echo "WARNING: could not remove poisoned local ref $poisoned (checked out in a live worktree?) — clean up manually (SYMPH-372)" >&2
+      fi
+    done
+
+    # --- Fetch latest refs into bare clone (pruning stale remote refs) ---
     BASE_BRANCH="${SYMPHONY_BASE_BRANCH:-main}"
-    if ! git -C "$BARE_CLONE" fetch origin \
+    if ! git -C "$BARE_CLONE" fetch --prune origin \
       "+refs/heads/$BASE_BRANCH:refs/heads/$BASE_BRANCH" \
       "+refs/heads/*:refs/remotes/origin/*" 2>/dev/null; then
       echo "WARNING: fetch failed, using cached refs" >&2
     fi
 
+    # Resolve the worktree base to a FULL refname so short-name ambiguity
+    # (the SYMPH-372 incident) can never alter which commit workers build on.
     if git -C "$BARE_CLONE" show-ref --verify --quiet "refs/remotes/origin/$BASE_BRANCH"; then
-      WORKTREE_BASE="origin/$BASE_BRANCH"
+      WORKTREE_BASE="refs/remotes/origin/$BASE_BRANCH"
     elif git -C "$BARE_CLONE" show-ref --verify --quiet "refs/heads/$BASE_BRANCH"; then
-      WORKTREE_BASE="$BASE_BRANCH"
+      WORKTREE_BASE="refs/heads/$BASE_BRANCH"
     else
       echo "ERROR: Could not resolve base branch $BASE_BRANCH in $BARE_CLONE" >&2
       exit 1
