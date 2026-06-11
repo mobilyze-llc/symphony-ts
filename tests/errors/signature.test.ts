@@ -24,6 +24,37 @@ describe("normalizeErrorSignature", () => {
       expect(attempt1.signature).toBe(attempt2.signature);
     });
 
+    it("normalizes lock-slot digits so claude.0.lock ≡ claude.1.lock (SYMPH-396)", () => {
+      // Codex lock files vary by slot number across runs; they must hash identically.
+      const slot0 = normalizeErrorSignature(
+        "EPERM: operation not permitted, open '/Users/user/.cmux-spawn/locks/claude.0.lock'",
+      );
+      const slot1 = normalizeErrorSignature(
+        "EPERM: operation not permitted, open '/Users/user/.cmux-spawn/locks/claude.1.lock'",
+      );
+      expect(slot0.signature).toBe(slot1.signature);
+    });
+
+    it("normalizes SYMPH-332-shaped fixture with lock slot and /var/folders artifact path (cross-run stability)", () => {
+      // Realistic shape: PermissionError on a cmux lock file + /var/folders artifact
+      const run1 = normalizeErrorSignature(
+        "PermissionError: [Errno 1] Operation not permitted: '/Users/alice/.cmux-spawn/locks/claude.0.lock'\n  also: /var/folders/q2/8h3k_abc1/T/workspace/src/index.ts",
+      );
+      const run2 = normalizeErrorSignature(
+        "PermissionError: [Errno 1] Operation not permitted: '/Users/bob/.cmux-spawn/locks/claude.3.lock'\n  also: /var/folders/zz/9p1m_xyz2/T/workspace/src/index.ts",
+      );
+      expect(run1.signature).toBe(run2.signature);
+    });
+
+    it("trims trailing quote from basename captured by path regex", () => {
+      const result = normalizeErrorSignature(
+        "EPERM: operation not permitted, open '/some/path/foo.ts'",
+      );
+      // The trailing quote after the basename should be stripped from <path:...>
+      expect(result.normalizedText).not.toMatch(/<path:[^>]*'>/);
+      expect(result.normalizedText).toContain("foo.ts");
+    });
+
     it("strips UUIDs", () => {
       const result = normalizeErrorSignature(
         "workspace 550e8400-e29b-41d4-a716-446655440000 failed",
@@ -139,11 +170,55 @@ describe("normalizeErrorSignature", () => {
       expect(result.class).toBe("transient");
     });
 
+    it("classifies 'status code 503 Service Unavailable' as transient (HTTP context)", () => {
+      const result = normalizeErrorSignature("HTTP 503 Service Unavailable");
+      expect(result.class).toBe("transient");
+    });
+
+    it("does NOT classify bare pid/port '503' in 'process 503 exited' as transient (no HTTP context)", () => {
+      // A bare 5xx process id must not get a transient exemption that suppresses
+      // the park short-circuit.
+      const result = normalizeErrorSignature("process 503 exited");
+      expect(result.class).not.toBe("transient");
+    });
+
+    it("does NOT classify 'Command failed: kill -9 503' as transient (bare 5xx pid)", () => {
+      const result = normalizeErrorSignature("Command failed: kill -9 503");
+      expect(result.class).not.toBe("transient");
+    });
+
     it("classifies rate limit as transient", () => {
       const result = normalizeErrorSignature(
         "API error: rate limit exceeded, retry after 60s",
       );
       expect(result.class).toBe("transient");
+    });
+
+    it("classifies 'Forbidden: too many requests, retry later' as transient (rate-limit before auth)", () => {
+      // The rate-limit rules must win over the 'forbidden' permanent rule.
+      const result = normalizeErrorSignature(
+        "Forbidden: too many requests, retry later",
+      );
+      expect(result.class).toBe("transient");
+    });
+
+    it("classifies '429 too many requests' as transient (rate-limit before auth)", () => {
+      const result = normalizeErrorSignature("HTTP 429 too many requests");
+      expect(result.class).toBe("transient");
+    });
+
+    it("classifies 'Access denied: rate limit exceeded' as transient (rate-limit before auth)", () => {
+      const result = normalizeErrorSignature(
+        "Access denied: rate limit exceeded",
+      );
+      expect(result.class).toBe("transient");
+    });
+
+    it("classifies plain 'forbidden' (no rate-limit context) as permanent", () => {
+      const result = normalizeErrorSignature(
+        "403 Forbidden: insufficient permissions",
+      );
+      expect(result.class).toBe("permanent");
     });
 
     it("classifies unknown errors as unknown", () => {

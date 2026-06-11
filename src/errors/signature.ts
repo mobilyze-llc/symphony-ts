@@ -54,13 +54,21 @@ interface ClassificationRule {
 
 /**
  * Rules are checked in order; the first match wins.
- * Patterns are tested against the *normalized* text (lower-cased).
+ * Patterns are tested against the raw (un-normalized, lower-cased) text so
+ * that numeric patterns (e.g. HTTP 5xx) are not obscured by number-stripping.
  */
 const CLASSIFICATION_RULES: ClassificationRule[] = [
   // Permanent — permission / access denied
   { pattern: /\beperm\b/, class: "permanent" },
   { pattern: /\beacces\b/, class: "permanent" },
   { pattern: /\bpermission denied\b/, class: "permanent" },
+  // Transient — rate limits (must precede catch-all auth permanents so that
+  // messages like "Forbidden: too many requests" classify as transient)
+  { pattern: /\brate.?limit\b/, class: "transient" },
+  { pattern: /\btoo many requests\b/, class: "transient" },
+  { pattern: /\bquota exceeded\b/, class: "transient" },
+  { pattern: /\bthrottle\b/, class: "transient" },
+  // Permanent — access / auth (after rate-limit rules)
   { pattern: /\baccess denied\b/, class: "permanent" },
   // Permanent — file not found on a deterministic path
   { pattern: /\benoent\b/, class: "permanent" },
@@ -71,11 +79,19 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
   { pattern: /\binvalid argument\b/, class: "permanent" },
   { pattern: /\billegal option\b/, class: "permanent" },
   { pattern: /\bno such file or directory\b/, class: "permanent" },
-  // Permanent — auth / credentials
+  // Permanent — auth / credentials (after rate-limit rules)
   { pattern: /\bauthentication failed\b/, class: "permanent" },
   { pattern: /\bcredential\b/, class: "permanent" },
-  { pattern: /\bunauthorized\b/, class: "permanent" },
-  { pattern: /\bforbidden\b/, class: "permanent" },
+  {
+    // "unauthorized" but NOT when it's a 429/rate-limit context
+    pattern: /\bunauthorized\b(?!.*(?:too many|rate.?limit|429))/,
+    class: "permanent",
+  },
+  {
+    // "forbidden" but NOT when it's a too-many-requests context
+    pattern: /\bforbidden\b(?!.*(?:too many|rate.?limit|429))/,
+    class: "permanent",
+  },
   { pattern: /\binvalid token\b/, class: "permanent" },
   // Transient — network / timeout
   { pattern: /\btimeout\b/, class: "transient" },
@@ -85,16 +101,12 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
   { pattern: /\bconnection refused\b/, class: "transient" },
   { pattern: /\bconnection reset\b/, class: "transient" },
   { pattern: /\bsocket hang up\b/, class: "transient" },
-  // Transient — HTTP 5xx
-  { pattern: /\b5\d\d\b/, class: "transient" },
+  // Transient — HTTP 5xx (scoped to HTTP/status context so bare 5xx PIDs or
+  // exit-codes like "process 503 exited" do not get a transient exemption)
+  { pattern: /\b(?:status|http)\s*5\d\d\b/, class: "transient" },
   { pattern: /\binternal server error\b/, class: "transient" },
   { pattern: /\bservice unavailable\b/, class: "transient" },
   { pattern: /\bbad gateway\b/, class: "transient" },
-  // Transient — rate limits
-  { pattern: /\brate.?limit\b/, class: "transient" },
-  { pattern: /\btoo many requests\b/, class: "transient" },
-  { pattern: /\bquota exceeded\b/, class: "transient" },
-  { pattern: /\bthrottle\b/, class: "transient" },
 ];
 
 // ---------------------------------------------------------------------------
@@ -114,8 +126,12 @@ export function normalizeErrorSignature(raw: string): NormalizedErrorSignature {
 
   // 1. Strip absolute paths (keep the basename so the error remains readable)
   text = text.replace(RE_ABSOLUTE_PATH, (match) => {
-    const basename = match.split(/[\\/]/).filter(Boolean).pop() ?? match;
-    return `<path:${basename}>`;
+    const raw = match.split(/[\\/]/).filter(Boolean).pop() ?? match;
+    // Trim trailing non-path punctuation (quotes, colons) so basenames are clean
+    const trimmed = raw.replace(/['"`:,;]+$/, "");
+    // Normalize single-digit lock/sock slot numbers so claude.0.lock ≡ claude.1.lock
+    const normalized = trimmed.replace(/(\.\d+)\.(lock|sock)$/i, ".<n>.$2");
+    return `<path:${normalized}>`;
   });
 
   // 2. Strip UUIDs
@@ -136,15 +152,15 @@ export function normalizeErrorSignature(raw: string): NormalizedErrorSignature {
   const normalizedText = text;
   const hash = createHash("sha1").update(normalizedText).digest("hex");
   const signature = hash.slice(0, 7);
-  // Classify against the *original* text so that patterns relying on numbers
+  // Classify against the *raw* text so that patterns relying on numbers
   // (e.g. HTTP 5xx status codes) are not obscured by number-stripping.
-  const errorClass = classifyNormalized(raw);
+  const errorClass = classifyRaw(raw);
 
   return { signature, normalizedText, class: errorClass };
 }
 
-function classifyNormalized(normalizedText: string): ErrorSignatureClass {
-  const lower = normalizedText.toLowerCase();
+function classifyRaw(rawText: string): ErrorSignatureClass {
+  const lower = rawText.toLowerCase();
   for (const rule of CLASSIFICATION_RULES) {
     if (rule.pattern.test(lower)) {
       return rule.class;

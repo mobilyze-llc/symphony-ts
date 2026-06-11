@@ -2076,6 +2076,9 @@ export class OrchestratorCore {
 
     // Move to the target stage (may be ahead of nextStageName if stages were skipped)
     this.state.issueStages[issueId] = targetStageName;
+    // Clear any stored failure signature for the incoming stage so a prior
+    // failed visit cannot false-park the first failure of this new visit (SYMPH-396).
+    this.clearStageFailureSignature(issueId, targetStageName);
     if (session !== undefined) {
       addPipelineActivity(
         session,
@@ -2927,6 +2930,17 @@ export class OrchestratorCore {
     }
   }
 
+  /**
+   * Clear the stored failure signature for a single stage of an issue.
+   * Called when an issue advances to (or is reworked back to) a stage so that
+   * a stale signature from a prior visit cannot false-park the first failure of
+   * the new visit (SYMPH-396).
+   */
+  private clearStageFailureSignature(issueId: string, stage: string): void {
+    const sigKey = `${issueId}:${stage}`;
+    delete this.state.issueFailureSignatures[sigKey];
+  }
+
   private markIssueRequiresExplicitResume(
     issueId: string,
     issueState?: string | null,
@@ -3212,6 +3226,12 @@ export class OrchestratorCore {
 
     this.state.issueReworkCounts[issueId] = currentCount + 1;
     this.state.issueStages[issueId] = reworkTarget;
+
+    // Clear any stored failure signature for the rework target stage so the
+    // first failure of the new visit gets a normal retry rather than
+    // false-parking against a stale signature from a prior visit (SYMPH-396).
+    this.clearStageFailureSignature(issueId, reworkTarget);
+
     return reworkTarget;
   }
 

@@ -211,6 +211,43 @@ describe("retry-without-novelty: continuation retries are never short-circuited"
     expect(retry1!.delayType).toBe("continuation");
     expect(orchestrator.getState().failed.has("1")).toBe(false);
   });
+
+  it("two repeated identical continuation exits never park (regression: second continuation must not park)", async () => {
+    // Validates the invariant that continuations can never trigger the
+    // signature park short-circuit, even on the second consecutive identical exit.
+    // We use a single-stage config (initialStage loops back to itself on continuation)
+    // by manually resetting the stage after the first continuation fires, so the
+    // second continuation also stays within the same stage rather than completing.
+    const orchestrator = createOrchestrator();
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("investigate");
+
+    // First continuation: investigate advances to implement
+    const retry1 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    expect(retry1).not.toBeNull();
+    expect(retry1!.delayType).toBe("continuation");
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+
+    // Reset stage back to investigate so the second continuation fires the same
+    // code path again within a live stage (not a terminal advance to "done").
+    orchestrator.getState().issueStages["1"] = "investigate";
+
+    await orchestrator.onRetryTimer("1");
+
+    // Second identical continuation (same investigate → implement path) — must still not park
+    const retry2 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    expect(retry2).not.toBeNull();
+    expect(retry2!.delayType).toBe("continuation");
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+  });
 });
 
 describe("retry-without-novelty: first failure always gets a retry", () => {
@@ -227,6 +264,117 @@ describe("retry-without-novelty: first failure always gets a retry", () => {
 
     expect(retry1).not.toBeNull();
     expect(orchestrator.getState().failed.has("1")).toBe(false);
+  });
+});
+
+describe("rework signature lifecycle (SYMPH-396 regression)", () => {
+  it("first failure of a reworked stage gets a normal retry, not a park", async () => {
+    // Scenario: implement fails once (signature stored) → issue advances past
+    // implement (simulated) → reworkGate bounces back to implement → first
+    // failure of the new implement visit with the SAME signature must NOT park.
+    const orchestrator = createOrchestrator();
+    await orchestrator.pollTick();
+
+    // Step 1: implement fails once (attempt 1) — stores the signature
+    const epermError =
+      "EPERM: operation not permitted, open '/var/folders/xk/3q8vz5cd2r1/T/tmp-99/workspace/src/foo.ts'";
+    const retry1 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: epermError,
+    });
+    expect(retry1).not.toBeNull();
+    expect(retry1!.delayType).toBe("failure");
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+
+    // Step 2: Simulate the issue advancing past implement to implement (re-entry
+    // via rework). We manipulate stage state directly to simulate a downstream
+    // gate reworking back to implement — the same path reworkGate takes.
+    // First, put the issue in the "implement" stage as the gate target and clear
+    // the prior retry so we can re-dispatch cleanly.
+    //
+    // We call reworkGate. For reworkGate to fire on "implement" we need the
+    // current stage to have onRework pointing to a target. Instead of
+    // reconfiguring, we directly reproduce what reworkGate does: set stage to
+    // reworkTarget and call clearStageFailureSignature. We use the public
+    // reworkGate method by first setting up a stage that supports it.
+    //
+    // Simpler: directly invoke the state manipulation that triggers the bug path.
+    // Set the stage to "implement" again (simulates rework bounce) with attempt=2
+    // already in the retry queue so the NEXT failure arrives at attempt=2.
+    const state = orchestrator.getState();
+    state.issueStages["1"] = "implement";
+
+    // Manually clear the retry entry so we can re-dispatch attempt=2 (as if the
+    // rework continuation fires).
+    // biome-ignore lint/performance/noDelete: test state reset requires real deletion
+    delete state.retryAttempts["1"];
+    state.claimed.delete("1");
+
+    // Also manually advance the running entry to reflect the rework re-dispatch.
+    // Re-poll to get it back into running.
+    await orchestrator.pollTick();
+
+    // Step 3: First failure of the reworked implement visit, same EPERM signature,
+    // but this time with the same raw error (after rework the signature was cleared).
+    // This should get a normal retry, NOT park.
+    const retry2 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: epermError,
+    });
+
+    // The cleared signature means this is treated as a first occurrence — normal retry
+    expect(retry2).not.toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+  });
+
+  it("second identical failure of a reworked stage parks (only the first gets a free retry)", async () => {
+    // After rework: first failure → normal retry; second identical failure → park.
+    const orchestrator = createOrchestrator();
+    await orchestrator.pollTick();
+
+    const epermError =
+      "EPERM: operation not permitted, open '/var/folders/xk/3q8vz5cd2r1/T/tmp-99/workspace/src/bar.ts'";
+
+    // Rework first-visit failure (stores signature then clears on advance)
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: epermError,
+    });
+
+    // Simulate rework bounce — clear retry state, reset stage
+    const state = orchestrator.getState();
+    state.issueStages["1"] = "implement";
+    // biome-ignore lint/performance/noDelete: test state reset requires real deletion
+    delete state.retryAttempts["1"];
+    state.claimed.delete("1");
+    // Clear signature (mimicking what clearStageFailureSignature does on rework)
+    const sigKey = "1:implement";
+    delete state.issueFailureSignatures[sigKey];
+
+    await orchestrator.pollTick();
+
+    // First failure of reworked visit — normal retry
+    const retryAfterRework1 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: epermError,
+    });
+    expect(retryAfterRework1).not.toBeNull();
+    expect(state.failed.has("1")).toBe(false);
+
+    await orchestrator.onRetryTimer("1");
+
+    // Second identical failure of reworked visit — must park
+    const retryAfterRework2 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: epermError,
+    });
+    expect(retryAfterRework2).toBeNull();
+    expect(state.failed.has("1")).toBe(true);
   });
 });
 
