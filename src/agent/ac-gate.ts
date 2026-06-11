@@ -67,8 +67,24 @@ export function extractAcceptanceCriteria(
   }
   const bodyStart = headingMatch.index + headingLine.length;
   const rest = message.slice(bodyStart);
-  const nextHeading = new RegExp(`^#{1,${headingLevel}}\\s`, "m").exec(rest);
-  const body = nextHeading === null ? rest : rest.slice(0, nextHeading.index);
+  // Static scan instead of a dynamically built RegExp (semgrep
+  // non-literal-regexp): the section ends at the first heading whose
+  // level is the same or higher (fewer or equal #'s); deeper
+  // subheadings stay in the body.
+  let boundary = -1;
+  const headingScan = /^(#{1,6})\s/gm;
+  for (
+    let scan = headingScan.exec(rest);
+    scan !== null;
+    scan = headingScan.exec(rest)
+  ) {
+    const level = scan[1]?.length;
+    if (level !== undefined && level <= headingLevel) {
+      boundary = scan.index;
+      break;
+    }
+  }
+  const body = boundary === -1 ? rest : rest.slice(0, boundary);
   const cleanedBody = body
     .split("\n")
     .filter((line) => !STAGE_MARKER_LINE_REGEX.test(line))
