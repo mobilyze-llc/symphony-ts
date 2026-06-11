@@ -60,6 +60,36 @@ describe("parseRateLimitSnapshot", () => {
     expect(snapshot?.secondary).toBeNull();
   });
 
+  it("parses the live camelCase codex payload shape with windowDurationMins", () => {
+    const snapshot = parseRateLimitSnapshot({
+      limitId: "codex",
+      primary: {
+        usedPercent: 0,
+        windowDurationMins: 300,
+        resetsAt: 1781132023,
+      },
+      secondary: {
+        usedPercent: 98,
+        windowDurationMins: 10080,
+        resetsAt: 1781137743,
+      },
+      planType: "pro",
+    });
+
+    expect(snapshot).toEqual({
+      primary: {
+        usedPercent: 0,
+        windowMinutes: 300,
+        resetsAt: 1781132023,
+      },
+      secondary: {
+        usedPercent: 98,
+        windowMinutes: 10080,
+        resetsAt: 1781137743,
+      },
+    });
+  });
+
   it("normalizes epoch-millisecond resets_at to seconds", () => {
     const snapshot = parseRateLimitSnapshot({
       primary: { used_percent: 10, resets_at: 1781093929000 },

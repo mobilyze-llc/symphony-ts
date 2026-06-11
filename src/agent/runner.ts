@@ -11,10 +11,6 @@ import {
   type CodexTurnResult,
 } from "../codex/app-server-client.js";
 import { createLinearGraphqlDynamicTool } from "../codex/linear-graphql-tool.js";
-import {
-  observeRateLimitWindow,
-  parseRateLimitSnapshot,
-} from "../codex/rate-limits.js";
 import { createWorkpadSyncDynamicTool } from "../codex/workpad-sync-tool.js";
 import {
   DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
@@ -48,7 +44,6 @@ import { applyCodexEventToSession } from "../logging/session-metrics.js";
 import {
   type HardStopDecision,
   type ModeScopedPermissionPolicy,
-  type RateLimitUsageObservations,
   evaluateBudgetHardStop,
   evaluateIterationHardStop,
   evaluateNoProgressHardStop,
@@ -297,31 +292,9 @@ export class AgentRunner {
     let hardStop: HardStopDecision | null = null;
     let previousProgressSignature: string | null = null;
     let repeatedNoProgressTurns = 0;
-    const rateLimitUsage: RateLimitUsageObservations = {
-      primary: null,
-      secondary: null,
-    };
     const rateLimitBudgetConfigured =
       hardStops.maxPrimaryWindowPctPerUnit !== null ||
       hardStops.maxSecondaryWindowPctPerUnit !== null;
-    const observeRateLimits = (raw: Record<string, unknown> | null): void => {
-      const snapshot = parseRateLimitSnapshot(raw);
-      if (snapshot === null) {
-        return;
-      }
-      if (snapshot.primary !== null) {
-        rateLimitUsage.primary = observeRateLimitWindow(
-          rateLimitUsage.primary,
-          snapshot.primary,
-        );
-      }
-      if (snapshot.secondary !== null) {
-        rateLimitUsage.secondary = observeRateLimitWindow(
-          rateLimitUsage.secondary,
-          snapshot.secondary,
-        );
-      }
-    };
     const requestLiveBudgetStop = (decision: HardStopDecision): void => {
       if (hardStop !== null) {
         return;
@@ -447,14 +420,13 @@ export class AgentRunner {
           const telemetry = applyCodexEventToSession(liveSession, event);
           if (event.rateLimits !== undefined) {
             rateLimits = event.rateLimits;
-            observeRateLimits(event.rateLimits);
             if (rateLimitBudgetConfigured && hardStop === null) {
               const rateLimitHardStop = evaluateRateLimitBudgetHardStop({
                 config: hardStops,
                 turnCount: liveSession.turnCount,
                 totalTokens: liveSession.totalStageTotalTokens,
                 cacheReadTokens: liveSession.totalStageCacheReadTokens,
-                rateLimitUsage,
+                rateLimitUsage: liveSession.rateLimitWindows,
               });
               if (rateLimitHardStop !== null) {
                 requestLiveBudgetStop(rateLimitHardStop);
@@ -549,7 +521,6 @@ export class AgentRunner {
           throw error;
         }
         rateLimits = lastTurn.rateLimits;
-        observeRateLimits(lastTurn.rateLimits);
 
         applyCodexEventToSession(liveSession, {
           event:
@@ -616,7 +587,7 @@ export class AgentRunner {
             turnCount: liveSession.turnCount,
             totalTokens: liveSession.totalStageTotalTokens,
             cacheReadTokens: liveSession.totalStageCacheReadTokens,
-            rateLimitUsage,
+            rateLimitUsage: liveSession.rateLimitWindows,
           });
           if (hardStop !== null) {
             break;
