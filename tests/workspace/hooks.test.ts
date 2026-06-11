@@ -157,11 +157,14 @@ describe("WorkspaceHookRunner", () => {
     expect(execute).toHaveBeenCalledWith("echo hello", {
       cwd: "/tmp/workspace",
       timeoutMs: 100,
-      env: { SYMPHONY_STAGE: "implement" },
+      env: expect.objectContaining({
+        SYMPHONY_STAGE: "implement",
+        GIT_CEILING_DIRECTORIES: expect.stringContaining("/tmp"),
+      }),
     });
   });
 
-  it("omits env when not provided", async () => {
+  it("always injects the git isolation env, even without caller env", async () => {
     const execute = vi.fn().mockResolvedValue({
       exitCode: 0,
       signal: null,
@@ -187,6 +190,9 @@ describe("WorkspaceHookRunner", () => {
     expect(execute).toHaveBeenCalledWith("echo hello", {
       cwd: "/tmp/workspace",
       timeoutMs: 100,
+      env: expect.objectContaining({
+        GIT_CEILING_DIRECTORIES: expect.stringContaining("/tmp"),
+      }),
     });
   });
 

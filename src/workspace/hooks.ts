@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 
 import { ERROR_CODES } from "../errors/codes.js";
+import { gitIsolationEnv } from "./git-isolation.js";
 
 const DEFAULT_OUTPUT_LIMIT = 4_000;
 
@@ -126,7 +127,12 @@ export class WorkspaceHookRunner {
       const result = await this.#execute(script, {
         cwd: options.workspacePath,
         timeoutMs: this.#config.timeoutMs,
-        ...(options.env !== undefined ? { env: options.env } : {}),
+        // Git discovery from hook scripts must never escape the workspace
+        // parent (SYMPH-373); callers can still extend or override.
+        env: {
+          ...gitIsolationEnv(options.workspacePath),
+          ...options.env,
+        },
       });
       const durationMs = Date.now() - startedAt;
 

@@ -76,6 +76,40 @@ describe("WorkspaceManager", () => {
     expect(hookCalls).toEqual([first.path]);
   });
 
+  it("removes the workspace and propagates when isolation verification fails", async () => {
+    const root = await createRoot();
+    const verifyIsolation = vi
+      .fn()
+      .mockRejectedValue(new Error("workspace escapes"));
+    const manager = new WorkspaceManager({ root, verifyIsolation });
+
+    await expect(manager.createForIssue("issue-123")).rejects.toMatchObject({
+      code: ERROR_CODES.workspaceCreateFailed,
+    });
+
+    expect(verifyIsolation).toHaveBeenCalledWith(join(root, "issue-123"));
+    // The poisoned directory must be gone so the next attempt self-heals
+    // with a fresh creation instead of reusing the broken workspace.
+    const retryManager = new WorkspaceManager({
+      root,
+      verifyIsolation: null,
+    });
+    const retry = await retryManager.createForIssue("issue-123");
+    expect(retry.createdNow).toBe(true);
+  });
+
+  it("verifies isolation on reused workspaces, not only fresh creations", async () => {
+    const root = await createRoot();
+    const verifyIsolation = vi.fn().mockResolvedValue(undefined);
+    const manager = new WorkspaceManager({ root, verifyIsolation });
+
+    await manager.createForIssue("issue-123");
+    const reused = await manager.createForIssue("issue-123");
+
+    expect(reused.createdNow).toBe(false);
+    expect(verifyIsolation).toHaveBeenCalledTimes(2);
+  });
+
   it("runs beforeRemove as a best-effort hook when deleting an existing workspace", async () => {
     const root = await createRoot();
     const hookCalls: string[] = [];
