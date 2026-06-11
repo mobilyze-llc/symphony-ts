@@ -4328,16 +4328,26 @@ describe("pipeline notifications", () => {
     fakeRunner.reject("1", new Error("agent crashed"));
     await host.waitForIdle();
 
-    expect(notifier.events).toHaveLength(2);
+    // Events: dispatched + failure_exhausted (SYMPH-397) + issue_failed
+    // (order between failure_exhausted and issue_failed is async-dependent)
+    expect(notifier.events).toHaveLength(3);
     expect(notifier.events[0]).toMatchObject({
       type: "issue_dispatched",
       issueIdentifier: "ISSUE-1",
     });
-    expect(notifier.events[1]).toMatchObject({
-      type: "issue_failed",
-      issueIdentifier: "ISSUE-1",
-      retriesExhausted: true,
-    });
+    expect(notifier.events).toContainEqual(
+      expect.objectContaining({
+        type: "failure_exhausted",
+        issueIdentifier: "ISSUE-1",
+      }),
+    );
+    expect(notifier.events).toContainEqual(
+      expect.objectContaining({
+        type: "issue_failed",
+        issueIdentifier: "ISSUE-1",
+        retriesExhausted: true,
+      }),
+    );
   });
 
   it("does not emit issue_failed for an intentional manual stop", async () => {
@@ -4412,8 +4422,13 @@ describe("pipeline notifications", () => {
     });
     await host.waitForIdle();
 
+    // Events: dispatched + hard_stop_budget (SYMPH-397)
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
+      expect.objectContaining({
+        type: "hard_stop_budget",
+        issueIdentifier: "ISSUE-1",
+      }),
     ]);
 
     const snapshot = await host.getRuntimeSnapshot();
@@ -5232,6 +5247,9 @@ function createConfig(): ResolvedWorkflowConfig {
     server: {
       port: null,
       slackNotifyChannel: null,
+    },
+    notifications: {
+      slackEnabled: true,
     },
     observability: {
       dashboardEnabled: true,

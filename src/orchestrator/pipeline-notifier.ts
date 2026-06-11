@@ -125,6 +125,86 @@ export interface IssueDroppedEvent {
   reason: string;
 }
 
+// ---------------------------------------------------------------------------
+// Watchdog / lifecycle alert events (SYMPH-397)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fired when an issue's retry budget is exhausted or it is parked for
+ * operator review (includes loud-parking via the novelty short-circuit).
+ * severity: critical
+ */
+export interface FailureExhaustedEvent {
+  type: "failure_exhausted";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  reason: string;
+  /** Normalized failure signature when available (from SYMPH-396). */
+  failureSignature: string | null;
+  /** Failure class when available. */
+  failureClass: string | null;
+}
+
+/**
+ * Fired when a hard stop pauses an issue due to hitting the budget ceiling
+ * (token, dollar, or window-% limit) and the escalation ladder could not
+ * absorb it.
+ * severity: warning
+ */
+export interface HardStopBudgetEvent {
+  type: "hard_stop_budget";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  trigger: string;
+  reason: string;
+  totalTokens: number;
+  estimatedCostUsd: number;
+}
+
+/**
+ * Fired for each step of the deterministic budget-escalation ladder.
+ * severity: info
+ */
+export interface EscalationStepEvent {
+  type: "escalation_step";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  step: number;
+  maxSteps: number;
+  multiplier: number;
+  trigger: string;
+}
+
+/**
+ * Fired when an ensemble gate returns ERROR or [STAGE_FAILED].
+ * severity: warning
+ */
+export interface GateFailedEvent {
+  type: "gate_failed";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  reason: string;
+}
+
+/**
+ * Info-tier alert placeholder — interface only; no formatter case required
+ * until the first info-severity event is defined.
+ * severity: info
+ */
+export interface InfoAlertEvent {
+  type: "info_alert";
+  issueIdentifier: string;
+  message: string;
+}
+
 export type PipelineNotificationEvent =
   | PipelineStartedEvent
   | PipelineStoppedEvent
@@ -133,7 +213,32 @@ export type PipelineNotificationEvent =
   | StallKilledEvent
   | InfraErrorEvent
   | IssueDispatchedEvent
-  | IssueDroppedEvent;
+  | IssueDroppedEvent
+  | FailureExhaustedEvent
+  | HardStopBudgetEvent
+  | EscalationStepEvent
+  | GateFailedEvent
+  | InfoAlertEvent;
+
+/** Severity tier for a notification event. */
+export type NotificationSeverity = "critical" | "warning" | "info";
+
+/** Returns the severity tier for a given event type. */
+export function getNotificationSeverity(
+  event: PipelineNotificationEvent,
+): NotificationSeverity {
+  switch (event.type) {
+    case "failure_exhausted":
+      return "critical";
+    case "hard_stop_budget":
+    case "stall_killed":
+    case "infra_error":
+    case "gate_failed":
+      return "warning";
+    default:
+      return "info";
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -652,6 +757,86 @@ export function formatNotification(
 
       return { text, blocks };
     }
+
+    // -----------------------------------------------------------------------
+    // Watchdog / lifecycle alert events (SYMPH-397)
+    // -----------------------------------------------------------------------
+
+    case "failure_exhausted": {
+      const issueLine =
+        event.issueUrl !== null
+          ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
+          : `${event.issueIdentifier}: ${event.issueTitle}`;
+      const parts: string[] = [
+        `:rotating_light: *Retries exhausted* — ${issueLine}`,
+      ];
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(`Reason: ${event.reason}`);
+      if (event.failureSignature !== null) {
+        const classSuffix =
+          event.failureClass !== null ? ` (${event.failureClass})` : "";
+        parts.push(`Signature: ${event.failureSignature}${classSuffix}`);
+      }
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "hard_stop_budget": {
+      const issueLine =
+        event.issueUrl !== null
+          ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
+          : `${event.issueIdentifier}: ${event.issueTitle}`;
+      const parts: string[] = [`:warning: *Budget ceiling hit* — ${issueLine}`];
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(
+        `Trigger: ${event.trigger} · ~$${event.estimatedCostUsd.toFixed(2)} · ${formatTokensCompact(event.totalTokens)} tokens`,
+      );
+      parts.push(`Reason: ${event.reason}`);
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "escalation_step": {
+      const issueLine =
+        event.issueUrl !== null
+          ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
+          : `${event.issueIdentifier}: ${event.issueTitle}`;
+      const parts: string[] = [
+        `:ladder: *Budget escalation step ${event.step}/${event.maxSteps}* — ${issueLine}`,
+      ];
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(
+        `Auto-resuming at ${event.multiplier}x budget after ${event.trigger}`,
+      );
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "gate_failed": {
+      const issueLine =
+        event.issueUrl !== null
+          ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
+          : `${event.issueIdentifier}: ${event.issueTitle}`;
+      const parts: string[] = [`:x: *Gate failed* — ${issueLine}`];
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(`Reason: ${event.reason}`);
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "info_alert": {
+      return {
+        text: `:information_source: *${event.issueIdentifier}* — ${event.message}\n${version}`,
+      };
+    }
   }
 }
 
@@ -691,6 +876,41 @@ export function createSlackPoster(input: {
         text,
         ...(blocks !== undefined ? { blocks } : {}),
       });
+    },
+  };
+}
+
+/**
+ * Create a webhook-based poster for Incoming Webhook URLs
+ * (SYMPHONY_SLACK_WEBHOOK_URL). The channel parameter is ignored — webhook
+ * URLs are pre-routed to a single channel by Slack. This poster never logs
+ * the URL, per the fail-open / no-URL-in-logs contract.
+ */
+export function createWebhookPoster(input: {
+  webhookUrl: string;
+  /** Injected only in tests — never pass in production code. */
+  _fetchOverride?: typeof fetch;
+}): NotificationPoster {
+  return {
+    async post(
+      _channel: string,
+      text: string,
+      blocks?: SlackBlock[],
+    ): Promise<void> {
+      const fetchFn = input._fetchOverride ?? fetch;
+      const body = JSON.stringify({
+        text,
+        ...(blocks !== undefined ? { blocks } : {}),
+      });
+      const response = await fetchFn(input.webhookUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!response.ok) {
+        throw new Error(`Slack webhook returned HTTP ${response.status}`);
+      }
     },
   };
 }

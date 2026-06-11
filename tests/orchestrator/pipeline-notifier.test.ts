@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   PipelineNotifier,
+  createWebhookPoster,
   formatDurationMs,
   formatNotification,
   formatStageTimeline,
   formatTokensCompact,
+  getNotificationSeverity,
 } from "../../src/orchestrator/pipeline-notifier.js";
 import type {
   NotificationPoster,
@@ -1275,5 +1277,227 @@ describe("formatTokensCompact", () => {
     expect(formatTokensCompact(1_000_000)).toBe("1M");
     expect(formatTokensCompact(1_200_000)).toBe("1.2M");
     expect(formatTokensCompact(10_000_000)).toBe("10M");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SYMPH-397: watchdog / lifecycle alert event formatting
+// ---------------------------------------------------------------------------
+
+describe("formatNotification — watchdog events (SYMPH-397)", () => {
+  it("formats failure_exhausted with signature and class", () => {
+    const result = formatNotification({
+      type: "failure_exhausted",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Fix bug",
+      issueUrl: "https://linear.app/mobilyze-llc/issue/SYMPH-42",
+      stageName: "implement",
+      reason: "max retries exceeded",
+      failureSignature: "hash:abc123",
+      failureClass: "permanent",
+    });
+    expect(result.text).toContain("Retries exhausted");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Stage: implement");
+    expect(result.text).toContain("Reason: max retries exceeded");
+    expect(result.text).toContain("Signature: hash:abc123 (permanent)");
+    expect(result.text).toContain(
+      "<https://linear.app/mobilyze-llc/issue/SYMPH-42|SYMPH-42>",
+    );
+  });
+
+  it("formats failure_exhausted without signature", () => {
+    const result = formatNotification({
+      type: "failure_exhausted",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Fix bug",
+      issueUrl: null,
+      stageName: null,
+      reason: "unrecoverable spec failure",
+      failureSignature: null,
+      failureClass: null,
+    });
+    expect(result.text).toContain("Retries exhausted");
+    expect(result.text).not.toContain("Signature:");
+    expect(result.text).not.toContain("Stage:");
+  });
+
+  it("formats hard_stop_budget with cost and token summary", () => {
+    const result = formatNotification({
+      type: "hard_stop_budget",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      stageName: "implement",
+      trigger: "token_budget",
+      reason: "Token budget exceeded.",
+      totalTokens: 250_000,
+      estimatedCostUsd: 3.21,
+    });
+    expect(result.text).toContain("Budget ceiling hit");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Stage: implement");
+    expect(result.text).toContain("token_budget");
+    expect(result.text).toContain("$3.21");
+    expect(result.text).toContain("250k tokens");
+  });
+
+  it("formats escalation_step with step/maxSteps and multiplier", () => {
+    const result = formatNotification({
+      type: "escalation_step",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      stageName: "implement",
+      step: 2,
+      maxSteps: 3,
+      multiplier: 4,
+      trigger: "token_budget",
+    });
+    expect(result.text).toContain("Budget escalation step 2/3");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("4x budget");
+    expect(result.text).toContain("token_budget");
+  });
+
+  it("formats gate_failed with stage and reason", () => {
+    const result = formatNotification({
+      type: "gate_failed",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: "https://linear.app/mobilyze-llc/issue/SYMPH-42",
+      stageName: "review",
+      reason: "Ensemble review failed: missing tests",
+    });
+    expect(result.text).toContain("Gate failed");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Stage: review");
+    expect(result.text).toContain(
+      "Reason: Ensemble review failed: missing tests",
+    );
+  });
+
+  it("formats gate_failed without stage", () => {
+    const result = formatNotification({
+      type: "gate_failed",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      stageName: null,
+      reason: "[STAGE_FAILED]",
+    });
+    expect(result.text).toContain("Gate failed");
+    expect(result.text).not.toContain("Stage:");
+  });
+
+  it("formats info_alert with message", () => {
+    const result = formatNotification({
+      type: "info_alert",
+      issueIdentifier: "SYMPH-42",
+      message: "Some informational notice",
+    });
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Some informational notice");
+  });
+});
+
+describe("getNotificationSeverity (SYMPH-397)", () => {
+  it("classifies failure_exhausted as critical", () => {
+    expect(
+      getNotificationSeverity({
+        type: "failure_exhausted",
+        issueIdentifier: "X",
+        issueTitle: "X",
+        issueUrl: null,
+        stageName: null,
+        reason: "r",
+        failureSignature: null,
+        failureClass: null,
+      }),
+    ).toBe("critical");
+  });
+
+  it("classifies hard_stop_budget as warning", () => {
+    expect(
+      getNotificationSeverity({
+        type: "hard_stop_budget",
+        issueIdentifier: "X",
+        issueTitle: "X",
+        issueUrl: null,
+        stageName: null,
+        trigger: "t",
+        reason: "r",
+        totalTokens: 0,
+        estimatedCostUsd: 0,
+      }),
+    ).toBe("warning");
+  });
+
+  it("classifies gate_failed as warning", () => {
+    expect(
+      getNotificationSeverity({
+        type: "gate_failed",
+        issueIdentifier: "X",
+        issueTitle: "X",
+        issueUrl: null,
+        stageName: null,
+        reason: "r",
+      }),
+    ).toBe("warning");
+  });
+
+  it("classifies escalation_step as info", () => {
+    expect(
+      getNotificationSeverity({
+        type: "escalation_step",
+        issueIdentifier: "X",
+        issueTitle: "X",
+        issueUrl: null,
+        stageName: null,
+        step: 1,
+        maxSteps: 3,
+        multiplier: 2,
+        trigger: "t",
+      }),
+    ).toBe("info");
+  });
+
+  it("classifies pipeline_started as info", () => {
+    expect(
+      getNotificationSeverity({
+        type: "pipeline_started",
+        productName: "symphony",
+        dashboardUrl: null,
+      }),
+    ).toBe("info");
+  });
+});
+
+describe("createWebhookPoster (SYMPH-397)", () => {
+  it("POSTs JSON to the webhook URL with text payload", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const mockFetch = vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return { ok: true } as Response;
+    });
+    const poster = createWebhookPoster({
+      webhookUrl: "https://hooks.slack.com/services/TEST/WEBHOOK",
+      // biome-ignore lint/suspicious/noExplicitAny: test override
+      _fetchOverride: mockFetch as any,
+    });
+    await poster.post("ignored-channel", "Hello world");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("https://hooks.slack.com/services/TEST/WEBHOOK");
+    const body = JSON.parse(calls[0]?.init.body as string) as { text: string };
+    expect(body.text).toBe("Hello world");
+  });
+
+  it("throws when webhook returns non-ok status", async () => {
+    const poster = createWebhookPoster({
+      webhookUrl: "https://hooks.slack.com/services/TEST/WEBHOOK",
+      // biome-ignore lint/suspicious/noExplicitAny: test override
+      _fetchOverride: vi.fn(async () => ({ ok: false, status: 400 }) as any),
+    });
+    await expect(poster.post("c", "text")).rejects.toThrow("HTTP 400");
   });
 });

@@ -642,6 +642,89 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         }
         return runEnsembleGate(gateOptions);
       },
+      // Watchdog / lifecycle alert callbacks (SYMPH-397).
+      // Capture notifier in a local so biome can narrow the non-null assertion
+      // without needing the !-operator on a class property.
+      ...(this.notifier !== null
+        ? ((_notifier) => ({
+            onFailureExhausted: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              reason: string;
+              stageName: string | null;
+              failureSignature: string | null;
+              failureClass: string | null;
+            }) => {
+              _notifier.notify({
+                type: "failure_exhausted",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueIdentifier,
+                issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
+                stageName: input.stageName,
+                reason: input.reason,
+                failureSignature: input.failureSignature,
+                failureClass: input.failureClass,
+              });
+            },
+            onHardStopBudget: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              stageName: string | null;
+              trigger: string;
+              reason: string;
+              totalTokens: number;
+              estimatedCostUsd: number;
+            }) => {
+              _notifier.notify({
+                type: "hard_stop_budget",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueIdentifier,
+                issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
+                stageName: input.stageName,
+                trigger: input.trigger,
+                reason: input.reason,
+                totalTokens: input.totalTokens,
+                estimatedCostUsd: input.estimatedCostUsd,
+              });
+            },
+            onEscalationStep: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              stageName: string | null;
+              step: number;
+              maxSteps: number;
+              multiplier: number;
+              trigger: string;
+            }) => {
+              _notifier.notify({
+                type: "escalation_step",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueIdentifier,
+                issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
+                stageName: input.stageName,
+                step: input.step,
+                maxSteps: input.maxSteps,
+                multiplier: input.multiplier,
+                trigger: input.trigger,
+              });
+            },
+            onGateFailed: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              stageName: string | null;
+              reason: string;
+            }) => {
+              _notifier.notify({
+                type: "gate_failed",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueIdentifier,
+                issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
+                stageName: input.stageName,
+                reason: input.reason,
+              });
+            },
+          }))(this.notifier)
+        : {}),
     };
 
     this.orchestrator = new OrchestratorCore(orchestratorOptions);
@@ -833,6 +916,16 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
 
     return null;
+  }
+
+  /**
+   * Best-effort resolution of the Linear URL for an issue ID from runtime
+   * state. Returns null when the issue is no longer in the running or retry
+   * maps — that is acceptable; callers use it only for notification enrichment.
+   */
+  private resolveIssueUrlBestEffort(issueId: string): string | null {
+    const state = this.orchestrator.getState();
+    return state.running[issueId]?.issue.url ?? null;
   }
 
   private findInMemoryLoopTraceByIssueKey(

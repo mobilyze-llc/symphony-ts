@@ -87,6 +87,7 @@ export function resolveWorkflowConfig(
   const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
   const server = asRecord(config.server);
+  const notifications = asRecord(config.notifications);
   const observability = asRecord(config.observability);
 
   return {
@@ -264,6 +265,9 @@ export function resolveWorkflowConfig(
         readString(server.slack_notify_channel) ??
         environment.SLACK_NOTIFY_CHANNEL ??
         null,
+    },
+    notifications: {
+      slackEnabled: readBoolean(notifications.slack) ?? true,
     },
     observability: {
       dashboardEnabled:
