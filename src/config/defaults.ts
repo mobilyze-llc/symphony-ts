@@ -131,6 +131,9 @@ export const SPEC_DEFAULTS = Object.freeze({
   acGate: {
     enabled: false,
   },
+  specFidelity: {
+    enabled: false,
+  },
   runner: {
     kind: DEFAULT_RUNNER_KIND,
   },

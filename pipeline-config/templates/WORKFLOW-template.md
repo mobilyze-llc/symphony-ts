@@ -79,6 +79,11 @@ pause_triage:
 ac_gate:
   enabled: true
 
+# SYMPH-343: independent spec-fidelity judge at review exit (local model,
+# diff-vs-ACs, advisory until SYMPH-355 publishes it as a required status).
+spec_fidelity:
+  enabled: true
+
 codex:
   command: codex --disable plugins --disable hooks --disable plugin_hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use --disable multi_agent --disable goals --disable memories --disable tool_call_mcp_elicitation --config 'model_reasoning_effort="low"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server
   ephemeral_home: true
