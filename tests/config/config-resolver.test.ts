@@ -498,6 +498,31 @@ describe("config-resolver", () => {
     }
   });
 
+  it("single-homing guard: present-but-blank owner_host fails closed", () => {
+    for (const blank of ["", "   "]) {
+      const resolved = resolveWorkflowConfig(
+        {
+          workflowPath: "/repo/WORKFLOW.md",
+          promptTemplate: "Prompt",
+          config: {
+            owner_host: blank,
+            tracker: { api_key: "token", project_slug: "proj" },
+          },
+        },
+        {},
+      );
+
+      const validation = validateDispatchConfig(resolved, {
+        hostname: "pro14",
+      });
+      expect(validation.ok).toBe(false);
+      if (!validation.ok) {
+        expect(validation.error.code).toBe(ERROR_CODES.configInvalid);
+        expect(validation.error.message).toContain("owner_host");
+      }
+    }
+  });
+
   it("single-homing guard: no owner_host means any host may dispatch", () => {
     const resolved = resolveWorkflowConfig(
       {

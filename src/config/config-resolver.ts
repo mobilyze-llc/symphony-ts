@@ -316,8 +316,16 @@ export function validateDispatchConfig(
     );
   }
 
-  const ownerHost = config.ownerHost?.trim();
-  if (ownerHost) {
+  if (config.ownerHost !== null && config.ownerHost !== undefined) {
+    const ownerHost = config.ownerHost.trim();
+    if (ownerHost === "") {
+      // A safety guard that is present but blank reads as intent to
+      // restrict, not intent to disable — fail closed on the typo.
+      return invalid(
+        ERROR_CODES.configInvalid,
+        "owner_host must be a non-empty hostname label when set; omit the key to allow any host.",
+      );
+    }
     const machine = options?.hostname ?? hostname();
     if (normalizeHostLabel(machine) !== normalizeHostLabel(ownerHost)) {
       return invalid(
