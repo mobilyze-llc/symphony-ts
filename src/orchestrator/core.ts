@@ -537,7 +537,11 @@ export class OrchestratorCore {
       ) {
         const recovered = this.recoverDecorrelatedGateOutcome(entry);
 
-        if (recovered?.status === "skipped_prototype") {
+        if (entry.metadata.terminal === true) {
+          this.state.failed.add(entry.issueId);
+          this.releaseClaim(entry.issueId);
+          this.clearTerminalIssueRuntimeState(entry.issueId);
+        } else if (recovered?.status === "skipped_prototype") {
           this.state.completed.add(entry.issueId);
           this.releaseClaim(entry.issueId);
           this.clearTerminalIssueRuntimeState(entry.issueId);
@@ -4183,10 +4187,9 @@ export class OrchestratorCore {
           stageName,
           stage,
         );
-        const gateCycle = Math.max(
-          this.state.issueReworkCounts[issue.id] ?? 0,
-          this.state.issueGateErrorCounts[issue.id] ?? 0,
-        );
+        const gateCycle =
+          (this.state.issueReworkCounts[issue.id] ?? 0) +
+          (this.state.issueGateErrorCounts[issue.id] ?? 0);
         const gateLeaseId = createDispatcherLeaseId({
           operation: "gate",
           issueId: issue.id,

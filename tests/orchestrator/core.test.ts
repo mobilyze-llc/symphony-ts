@@ -4411,6 +4411,106 @@ describe("decorrelated terminal gates", () => {
     );
   });
 
+  it("replays a terminal gate infrastructure error as parked after restart", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runJournal: DispatcherRunJournal = [
+      createJournalEntry({
+        sequence: 1,
+        idempotencyKey: "gate:1:review_gate:initial:gate-cycle-1:result",
+        kind: "gate_result",
+        operation: "gate",
+        stage: "review_gate",
+        leaseId: "gate:1:review_gate:initial:gate-cycle-1",
+        leaseStatus: "completed",
+        completedAt: "2026-03-06T00:00:00.000Z",
+        metadata: {
+          aggregate: "error",
+          terminal: true,
+          terminalReason: "gate_error_limit_exceeded",
+        },
+      }),
+    ];
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "pass" as const,
+      results: [],
+      comment: "should not run",
+    }));
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["mode:full"],
+          }),
+        ],
+      }),
+      runEnsembleGate,
+      runJournal,
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(runEnsembleGate).not.toHaveBeenCalled();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
+    expect(orchestrator.getState().issueGateErrorCounts["1"]).toBeUndefined();
+  });
+
+  it("uses total review rework and gate-error attempts for gate lease cycles", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runJournal: DispatcherRunJournal = [];
+    const runEnsembleGate = vi
+      .fn()
+      .mockResolvedValueOnce({
+        aggregate: "fail" as const,
+        results: [],
+        comment: "blocking review finding",
+      })
+      .mockResolvedValue({
+        aggregate: "error" as const,
+        results: [],
+        comment: "All lanes failed via cmux-spawn exit code 1",
+      });
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["mode:full"],
+          }),
+        ],
+      }),
+      runEnsembleGate,
+      gateErrorLimit: 3,
+      writeRunJournalEntry: async (entry) => {
+        runJournal.push(entry);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+    await waitForGateOutcomeCount(orchestrator, "1", 1);
+    await orchestrator.onRetryTimer("1");
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+    await waitForGateOutcomeCount(orchestrator, "1", 2);
+    await orchestrator.onRetryTimer("1");
+
+    const gateStartedCycles = runJournal
+      .filter(
+        (entry) => entry.kind === "gate_started" && entry.operation === "gate",
+      )
+      .map((entry) => entry.metadata.gateCycle);
+
+    expect(gateStartedCycles).toEqual([0, 1, 2]);
+  });
+
   it("replays max-rework production gate failure as terminal after restart", async () => {
     const config = createImplementThenGateConfigWithReviewers();
     const runJournal: DispatcherRunJournal = [];
