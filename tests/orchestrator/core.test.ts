@@ -5427,6 +5427,115 @@ describe("max retry safety net", () => {
   });
 });
 
+describe("spec failure cluster recording (SYMPH-398)", () => {
+  // Verifies council R3: spec-class failures that bypass scheduleRetry must
+  // still reach the signature cluster registry so systemic detection, the
+  // circuit breaker, and watchdog filing work for broken prompt templates or
+  // other issues that spec-fail every issue identically.
+
+  it("records spec failures into the cluster registry and fires SYSTEMIC at K=2", async () => {
+    const systemicEvents: Array<{
+      clusterSize: number;
+      breakerOpened: boolean;
+      canFileWatchdogTicket: boolean;
+      issueIdentifiers: string[];
+    }> = [];
+
+    const config = createConfig({
+      agent: { maxRetryAttempts: 0, maxConcurrentAgents: 2 },
+      watchdog: {
+        systemicThreshold: 2,
+        circuitBreaker: true,
+        maxFilingsPerHour: 3,
+      },
+    });
+    // Add a single-stage pipeline so stageName is non-null, which is required
+    // for the circuit breaker to open (shouldOpenBreaker requires stageName !== null).
+    config.stages = {
+      initialStage: "implement",
+      fastTrack: null,
+      stages: {
+        implement: {
+          type: "agent",
+          runner: "claude-code",
+          model: "claude-opus-4",
+          prompt: "implement.liquid",
+          maxTurns: 8,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: null,
+        },
+      },
+    };
+
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1", priority: 1 }),
+          createIssue({ id: "2", identifier: "ISSUE-2", priority: 2 }),
+        ],
+        statesById: [
+          { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+          { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+        ],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      onSystemicCluster: (input) => {
+        systemicEvents.push({
+          clusterSize: input.clusterSize,
+          breakerOpened: input.breakerOpened,
+          canFileWatchdogTicket: input.canFileWatchdogTicket,
+          issueIdentifiers: input.issueIdentifiers,
+        });
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    // Dispatch both issues
+    await orchestrator.pollTick();
+    expect(Object.keys(orchestrator.getState().running)).toHaveLength(2);
+
+    // First issue spec-fails — below threshold, no SYSTEMIC yet
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: spec]\nBroken prompt template.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(systemicEvents).toHaveLength(0);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+
+    // Second issue spec-fails with the same normalized reason — SYSTEMIC fires
+    await orchestrator.onWorkerExit({
+      issueId: "2",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: spec]\nBroken prompt template.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(systemicEvents).toHaveLength(1);
+    expect(systemicEvents[0]!.clusterSize).toBe(2);
+    expect(systemicEvents[0]!.breakerOpened).toBe(true);
+    expect(systemicEvents[0]!.canFileWatchdogTicket).toBe(true);
+    expect(systemicEvents[0]!.issueIdentifiers).toEqual(
+      expect.arrayContaining(["ISSUE-1", "ISSUE-2"]),
+    );
+
+    // Both issues must be parked
+    expect(orchestrator.getState().failed.has("2")).toBe(true);
+    expect(orchestrator.getState().failureExhaustedIds.has("1")).toBe(true);
+    expect(orchestrator.getState().failureExhaustedIds.has("2")).toBe(true);
+  });
+});
+
 describe("completed issue resume guard", () => {
   it("does NOT re-dispatch a completed issue still in 'In Review' state", () => {
     const config = createConfig({

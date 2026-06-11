@@ -53,6 +53,7 @@ import {
 import { ERROR_CODES } from "../errors/codes.js";
 import {
   type ErrorSignatureClass,
+  type NormalizedErrorSignature,
   normalizeErrorSignature,
 } from "../errors/signature.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
@@ -2256,10 +2257,33 @@ export class OrchestratorCore {
     agentMessage: string | undefined,
   ): RetryEntry | null {
     if (failureClass === "spec") {
-      // Spec failures are unrecoverable — escalate immediately
+      // Spec failures are unrecoverable — escalate immediately.
+      //
+      // Cluster recording must happen here (SYMPH-398): spec failures skip
+      // scheduleRetry entirely, so without this call a systemic spec-class
+      // failure (e.g. a broken prompt template spec-failing every issue) would
+      // never reach the cluster registry, the circuit breaker, or the watchdog
+      // filer.  We capture stageName before clearTerminalIssueRuntimeState
+      // erases it, and record into the cluster AFTER the terminal-state clear
+      // so that clearIssueFromCluster (called inside clearTerminalIssueRuntimeState)
+      // runs first — otherwise the record is immediately overwritten by the clear.
+      const stageName = this.state.issueStages[issueId] ?? null;
+      const specFailureText = "unrecoverable spec failure";
+      const incoming = normalizeErrorSignature(specFailureText);
+
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
       this.clearTerminalIssueRuntimeState(issueId);
+
+      // Record into the cluster after the terminal-state clear so the clear
+      // doesn't erase this membership before the threshold check fires.
+      this.recordFailureInCluster(
+        issueId,
+        runningEntry.identifier,
+        incoming,
+        stageName,
+      );
+
       void this.fireEscalationSideEffects(
         issueId,
         runningEntry.identifier,
@@ -2269,7 +2293,11 @@ export class OrchestratorCore {
         issueId,
         runningEntry.identifier,
         runningEntry.issue.title,
-        "unrecoverable spec failure",
+        specFailureText,
+        {
+          failure_signature: incoming.signature,
+          failure_class: incoming.class,
+        },
       );
       return null;
     }
@@ -5396,6 +5424,51 @@ export class OrchestratorCore {
     return stopRequest;
   }
 
+  /**
+   * Record a failure into the cross-ticket signature cluster registry and fire
+   * onSystemicCluster if the cluster crosses the alert threshold. This is the
+   * single seam that both scheduleRetry and any park-without-retry path must
+   * call so that all failure classes (including "spec") participate in systemic
+   * detection and circuit-breaker logic.
+   *
+   * The caller is responsible for normalizing the error text via
+   * normalizeErrorSignature before passing it in; the method takes the already-
+   * decomposed fields so it can also be used by paths that compute the signature
+   * themselves for other purposes (e.g. the novelty short-circuit).
+   */
+  private recordFailureInCluster(
+    issueId: string,
+    issueIdentifier: string,
+    incoming: NormalizedErrorSignature,
+    stageName: string | null,
+  ): void {
+    const clusterResult = this.signatureClusterRegistry.recordFailure({
+      signature: incoming.signature,
+      errorClass: incoming.class,
+      normalizedText: incoming.normalizedText,
+      issueId,
+      issueIdentifier,
+      stageName,
+      now: this.now(),
+    });
+    if (clusterResult.shouldAlert) {
+      try {
+        this.onSystemicCluster?.({
+          signature: clusterResult.signature,
+          errorClass: clusterResult.errorClass,
+          stageName,
+          clusterSize: clusterResult.clusterSize,
+          issueIdentifiers: clusterResult.members.map((m) => m.issueIdentifier),
+          breakerOpened: clusterResult.shouldOpenBreaker,
+          canFileWatchdogTicket: clusterResult.canFileWatchdogTicket,
+          members: clusterResult.members,
+        });
+      } catch {
+        // Cluster callbacks are fire-and-forget; never surface into the loop
+      }
+    }
+  }
+
   private scheduleRetry(
     issueId: string,
     attempt: number,
@@ -5501,35 +5574,14 @@ export class OrchestratorCore {
       };
 
       // Cross-ticket signature clustering (SYMPH-398): record this failure in
-      // the registry. Fire onSystemicCluster when the cluster crosses the
-      // threshold — once per signature, re-fire on growth.
-      const clusterResult = this.signatureClusterRegistry.recordFailure({
-        signature: incoming.signature,
-        errorClass: incoming.class,
-        normalizedText: incoming.normalizedText,
+      // the registry via the shared seam so spec-park and other non-retry paths
+      // can call the same logic without duplication.
+      this.recordFailureInCluster(
         issueId,
-        issueIdentifier: input.identifier ?? issueId,
-        stageName: stage,
-        now: this.now(),
-      });
-      if (clusterResult.shouldAlert) {
-        try {
-          this.onSystemicCluster?.({
-            signature: clusterResult.signature,
-            errorClass: clusterResult.errorClass,
-            stageName: stage,
-            clusterSize: clusterResult.clusterSize,
-            issueIdentifiers: clusterResult.members.map(
-              (m) => m.issueIdentifier,
-            ),
-            breakerOpened: clusterResult.shouldOpenBreaker,
-            canFileWatchdogTicket: clusterResult.canFileWatchdogTicket,
-            members: clusterResult.members,
-          });
-        } catch {
-          // Cluster callbacks are fire-and-forget; never surface into the loop
-        }
-      }
+        input.identifier ?? issueId,
+        incoming,
+        stage,
+      );
     }
 
     this.clearRetryEntry(issueId);
