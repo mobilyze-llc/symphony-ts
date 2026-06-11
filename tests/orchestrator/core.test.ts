@@ -2012,6 +2012,94 @@ describe("orchestrator core", () => {
     expect(orchestrator.getState().completed.has("1")).toBe(true);
   });
 
+  it("fires the advisory spec-fidelity judge at review exit and records the verdict", async () => {
+    const deferred: Array<() => Promise<void>> = [];
+    const comments: string[] = [];
+    const judged: string[] = [];
+    const baseConfig = createConfig();
+    const config = {
+      ...baseConfig,
+      specFidelity: { enabled: true },
+      stages: {
+        initialStage: "review",
+        fastTrack: null,
+        stages: {
+          review: {
+            type: "agent" as const,
+            runner: null,
+            model: null,
+            maxTurns: null,
+            maxRework: null,
+            gateType: null,
+            prompt: null,
+            promptPath: null,
+            reviewers: [],
+            hardStops: null,
+            linearState: null,
+            mcpServers: {},
+            timeoutMs: null,
+            concurrency: null,
+            transitions: {
+              onComplete: null,
+              onRework: "review",
+              onApprove: null,
+            },
+          },
+        },
+      },
+    };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      postComment: async (_id, body) => {
+        comments.push(body);
+      },
+      runSpecFidelityJudge: async (evidence) => {
+        judged.push(evidence.issueIdentifier);
+        return {
+          verdict: "rework",
+          findings: "AC1 FAIL: named test absent from diff.",
+        };
+      },
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE] review done",
+    });
+
+    // Advisory: the stage advanced normally without waiting on the judge.
+    expect(retryEntry).toBeNull();
+    expect(judged).toEqual(["ISSUE-1"]);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const verdictTask = deferred[deferred.length - 1];
+    await verdictTask?.();
+
+    expect(
+      comments.some((body) =>
+        body.includes("Spec-fidelity verdict (independent judge): rework"),
+      ),
+    ).toBe(true);
+    const journal = orchestrator
+      .getState()
+      .dispatcherRunJournal.filter((e) => e.kind === "spec_fidelity");
+    expect(journal).toHaveLength(1);
+  });
+
   it("never consults triage for non-budget hard stops or while the floor is blocked", async () => {
     const triageCalls: string[] = [];
     const makeOrchestrator = (rateLimitAdmission?: {
@@ -6687,6 +6775,7 @@ function createConfig(overrides?: {
   budgetEscalation?: ResolvedWorkflowConfig["budgetEscalation"];
   pauseTriage?: ResolvedWorkflowConfig["pauseTriage"];
   acGate?: ResolvedWorkflowConfig["acGate"];
+  specFidelity?: ResolvedWorkflowConfig["specFidelity"];
 }): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
@@ -6745,6 +6834,7 @@ function createConfig(overrides?: {
       maxResumes: 2,
     },
     acGate: overrides?.acGate ?? { enabled: false },
+    specFidelity: overrides?.specFidelity ?? { enabled: false },
     server: {
       port: null,
       slackNotifyChannel: null,

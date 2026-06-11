@@ -175,6 +175,9 @@ function createConfig(overrides?: {
     acGate: {
       enabled: false,
     },
+    specFidelity: {
+      enabled: false,
+    },
     budgetEscalation: {
       maxSteps: null,
       multiplier: 2,

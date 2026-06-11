@@ -265,6 +265,18 @@ export interface OrchestratorCoreOptions {
     issueDescription: string | null;
     completionMessage: string | null;
   }) => Promise<{ verdict: "pass" | "rework"; feedback: string } | null>;
+  /**
+   * Spec-fidelity judge lane (SYMPH-343): independent local-model verdict
+   * over the workspace diff vs acceptance criteria at review-stage exit.
+   * Advisory — the verdict journals and comments; resolve null for "no
+   * opinion" (fail open, never blocks).
+   */
+  runSpecFidelityJudge?: (evidence: {
+    issueId: string;
+    issueIdentifier: string;
+    issueTitle: string;
+    reviewMessage: string | null;
+  }) => Promise<{ verdict: "pass" | "rework"; findings: string } | null>;
   updateIssueState?: (
     issueId: string,
     issueIdentifier: string,
@@ -322,6 +334,8 @@ export class OrchestratorCore {
   private readonly scheduleDeferred?: OrchestratorCoreOptions["scheduleDeferred"];
 
   private readonly runAcGate?: OrchestratorCoreOptions["runAcGate"];
+
+  private readonly runSpecFidelityJudge?: OrchestratorCoreOptions["runSpecFidelityJudge"];
 
   private readonly updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
 
@@ -381,6 +395,7 @@ export class OrchestratorCore {
     this.runPauseTriage = options.runPauseTriage;
     this.scheduleDeferred = options.scheduleDeferred;
     this.runAcGate = options.runAcGate;
+    this.runSpecFidelityJudge = options.runSpecFidelityJudge;
     this.updateIssueState = options.updateIssueState;
     this.autoCloseParentIssue = options.autoCloseParentIssue;
     this.getRunningSupervisionSnapshots =
@@ -1404,6 +1419,44 @@ export class OrchestratorCore {
     });
   }
 
+  private async recordSpecFidelityVerdict(input: {
+    issueId: string;
+    identifier: string;
+    stageName: string;
+    verdict: { verdict: "pass" | "rework"; findings: string };
+  }): Promise<void> {
+    try {
+      await this.recordRunJournalEntry({
+        idempotencyKey: `spec_fidelity:${input.issueId}:${input.stageName}:${this.now().toISOString()}`,
+        timestamp: this.now().toISOString(),
+        kind: "spec_fidelity",
+        issueId: input.issueId,
+        issueIdentifier: input.identifier,
+        operation: "dispatcher",
+        stage: input.stageName,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary: `Spec-fidelity verdict for ${input.identifier}: ${input.verdict.verdict}.`,
+        metadata: {
+          status: "completed",
+          verdict: input.verdict.verdict,
+          findings: input.verdict.findings,
+        },
+      });
+    } catch {
+      // Audit best-effort.
+    }
+    try {
+      await this.postComment?.(
+        input.issueId,
+        `## Spec-fidelity verdict (independent judge): ${input.verdict.verdict}\n${input.verdict.findings}`,
+      );
+    } catch {
+      // Observability only.
+    }
+  }
+
   async onRetryTimer(issueId: string): Promise<RetryTimerResult> {
     await this.expireDispatcherLeases();
 
@@ -1767,6 +1820,52 @@ export class OrchestratorCore {
             );
           });
         return null;
+      }
+
+      const exitedStageDef =
+        exitedStageName !== null && this.config.stages !== null
+          ? this.config.stages.stages[exitedStageName]
+          : undefined;
+      if (
+        this.config.specFidelity.enabled &&
+        this.runSpecFidelityJudge !== undefined &&
+        this.scheduleDeferred !== undefined &&
+        exitedStageName !== null &&
+        exitedStageDef?.transitions.onRework != null
+      ) {
+        // Advisory judge lane (SYMPH-343): fires alongside the normal
+        // advance — nothing waits on the model, nothing is blocked. The
+        // verdict lands later as a serialized journal+comment task.
+        const scheduleDeferred = this.scheduleDeferred;
+        const stageForVerdict = exitedStageName;
+        void this.runSpecFidelityJudge({
+          issueId: input.issueId,
+          issueIdentifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
+          reviewMessage: runningEntry.lastCodexMessage,
+        })
+          .catch((error) => {
+            console.warn(
+              `[orchestrator] spec-fidelity judge failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return null;
+          })
+          .then((verdict) => {
+            if (verdict === null) {
+              return;
+            }
+            scheduleDeferred(() =>
+              this.recordSpecFidelityVerdict({
+                issueId: input.issueId,
+                identifier: runningEntry.identifier,
+                stageName: stageForVerdict,
+                verdict,
+              }),
+            );
+          })
+          .catch(() => {
+            // Chain must never become an unhandled rejection.
+          });
       }
 
       const transition = this.advanceStage(

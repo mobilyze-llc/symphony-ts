@@ -102,6 +102,16 @@ export interface WorkflowAcGateConfig {
   enabled: boolean;
 }
 
+/**
+ * Spec-fidelity judge lane (SYMPH-343): at review-stage exit the local
+ * model renders an independent verdict over the actual diff vs the tagged
+ * acceptance criteria. Advisory in this slice (journal + comment); becomes
+ * enforcing when SYMPH-355 publishes it as a required commit status.
+ */
+export interface WorkflowSpecFidelityConfig {
+  enabled: boolean;
+}
+
 export interface WorkflowPauseTriageConfig {
   baseUrl: string | null;
   model: string | null;
@@ -208,6 +218,7 @@ export interface ResolvedWorkflowConfig {
   budgetEscalation: WorkflowBudgetEscalationConfig;
   pauseTriage: WorkflowPauseTriageConfig;
   acGate: WorkflowAcGateConfig;
+  specFidelity: WorkflowSpecFidelityConfig;
   runner: WorkflowRunnerConfig;
   continuousFeedback?: WorkflowContinuousFeedbackConfig;
   codex: WorkflowCodexConfig;

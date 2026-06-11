@@ -20,6 +20,7 @@ import type {
   AgentRunnerEvent,
 } from "../agent/runner.js";
 import { AgentRunner } from "../agent/runner.js";
+import { runSpecFidelityJudge } from "../agent/spec-fidelity.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
   DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
@@ -115,7 +116,7 @@ import type {
   TimerScheduler,
 } from "./core.js";
 import { OrchestratorCore } from "./core.js";
-import { runEnsembleGate } from "./gate-handler.js";
+import { getDiff, runEnsembleGate } from "./gate-handler.js";
 import { reduceManagerRunJournal } from "./manager-run.js";
 import type { PipelineNotificationSink } from "./pipeline-notifier.js";
 import {
@@ -489,6 +490,31 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           config: this.config.pauseTriage,
           evidence,
         }),
+      runSpecFidelityJudge: async (evidence) => {
+        // Harness-measured evidence: the actual workspace diff, resolved
+        // from the same sanitized path the workspace manager uses. A
+        // missing/unreadable workspace yields a null diff and the judge
+        // declines to opine (fail open).
+        let diff: string | null = null;
+        try {
+          const { workspacePath } = this.workspaceManager.resolveForIssue(
+            evidence.issueId,
+          );
+          diff = getDiff(workspacePath);
+        } catch {
+          diff = null;
+        }
+        return runSpecFidelityJudge({
+          config: this.config.pauseTriage,
+          evidence: {
+            issueIdentifier: evidence.issueIdentifier,
+            issueTitle: evidence.issueTitle,
+            acceptanceCriteria: null,
+            diff,
+            reviewMessage: evidence.reviewMessage,
+          },
+        });
+      },
       onIssueDropped: ({ identifier, title, url, reason }) => {
         this.notifier?.notify({
           type: "issue_dropped",

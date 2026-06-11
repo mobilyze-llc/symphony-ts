@@ -81,6 +81,7 @@ export function resolveWorkflowConfig(
   const budgetEscalation = asRecord(config.budget_escalation);
   const pauseTriage = asRecord(config.pause_triage);
   const acGate = asRecord(config.ac_gate);
+  const specFidelity = asRecord(config.spec_fidelity);
   const runner = asRecord(config.runner);
   const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
@@ -214,6 +215,9 @@ export function resolveWorkflowConfig(
     },
     acGate: {
       enabled: acGate.enabled === true,
+    },
+    specFidelity: {
+      enabled: specFidelity.enabled === true,
     },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,
