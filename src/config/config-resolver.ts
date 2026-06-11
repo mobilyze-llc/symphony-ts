@@ -82,6 +82,7 @@ export function resolveWorkflowConfig(
   const pauseTriage = asRecord(config.pause_triage);
   const acGate = asRecord(config.ac_gate);
   const specFidelity = asRecord(config.spec_fidelity);
+  const admissionCard = asRecord(config.admission_card);
   const runner = asRecord(config.runner);
   const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
@@ -218,6 +219,9 @@ export function resolveWorkflowConfig(
     },
     specFidelity: {
       enabled: specFidelity.enabled === true,
+    },
+    admissionCard: {
+      enabled: admissionCard.enabled === true,
     },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,
