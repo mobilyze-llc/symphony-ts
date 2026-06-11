@@ -818,7 +818,15 @@ export interface DecorrelatedGateOutcome {
 export type ContinuousFeedbackEvent = "commit" | "diff" | "checkpoint";
 export type ContinuousFeedbackStatus = "pass" | "finding";
 export type ContinuousFeedbackFindingSeverity = "info" | "warning" | "blocking";
-export type ContinuousFeedbackFindingStatus = "open" | "resolved" | "bounced";
+export type ContinuousFeedbackFindingStatus =
+  | "open"
+  | "resolved"
+  | "bounced"
+  /**
+   * Failed the injection-hygiene policy (SYMPH-378): no evidence grounding
+   * and not a blocker. Journaled for measurement; never bounces or comments.
+   */
+  | "suppressed";
 
 export interface ContinuousFeedbackLane {
   runner: string;

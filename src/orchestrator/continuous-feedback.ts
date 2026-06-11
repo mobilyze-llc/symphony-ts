@@ -46,6 +46,22 @@ export function ensureDecorrelatedFeedbackLane(
   };
 }
 
+/**
+ * Injection-hygiene policy (SYMPH-378): mid-flight feedback must carry NEW
+ * signal — a confirmed blocker, a concrete correction, or a scope stop —
+ * never restatement of the task or a raised proof bar. The mechanical
+ * proxy: a finding must either be `blocking` (blockers and scope stops) or
+ * cite a concrete location (`file`). Ungrounded advisory findings are the
+ * restatement shape; they get status `suppressed` — journaled for
+ * measurement, never bounced, never commented. The semantic half of the
+ * policy lives in the reviewer-lane prompt (continuous-feedback-provider).
+ */
+export function feedbackFindingCarriesNewSignal(
+  finding: ContinuousFeedbackFindingInput,
+): boolean {
+  return finding.severity === "blocking" || finding.file != null;
+}
+
 export function mergeContinuousFeedbackCheckpoint(
   previous: ContinuousFeedbackIssueState | undefined,
   input: ContinuousFeedbackCheckpointInput,
@@ -68,6 +84,10 @@ export function mergeContinuousFeedbackCheckpoint(
 
   for (const rawFinding of input.findings) {
     const signature = normalizeFeedbackSignature(rawFinding);
+    // Classified on every arrival: a previously suppressed finding that
+    // returns WITH evidence is admitted; grounding never carries over
+    // from a prior sighting.
+    const admitted = feedbackFindingCarriesNewSignal(rawFinding);
     const current = existing.get(signature);
     if (current !== undefined) {
       const updated: ContinuousFeedbackFinding = {
@@ -79,7 +99,7 @@ export function mergeContinuousFeedbackCheckpoint(
         line: rawFinding.line ?? current.line,
         lastSeenAt: input.checkedAt,
         occurrences: current.occurrences + 1,
-        status: "open",
+        status: admitted ? "open" : "suppressed",
         reviewerLane: input.reviewerLane,
       };
       existing.set(signature, updated);
@@ -102,7 +122,7 @@ export function mergeContinuousFeedbackCheckpoint(
       firstSeenAt: input.checkedAt,
       lastSeenAt: input.checkedAt,
       occurrences: 1,
-      status: "open",
+      status: admitted ? "open" : "suppressed",
       reviewerLane: input.reviewerLane,
     };
     existing.set(signature, finding);
@@ -110,7 +130,9 @@ export function mergeContinuousFeedbackCheckpoint(
   }
 
   return {
-    status: input.findings.length === 0 ? "pass" : "finding",
+    status: input.findings.some(feedbackFindingCarriesNewSignal)
+      ? "finding"
+      : "pass",
     lastEvent: input.event,
     lastCheckedAt: input.checkedAt,
     reviewerLane: input.reviewerLane,
