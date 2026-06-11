@@ -556,6 +556,14 @@ When you are done:
 
 You are in the IMPLEMENT stage. Read the latest Linear issue comments/workpad/resume notes first for targeted investigation findings, relevant files, code patterns, architecture context, and test strategy. Do not trust repo-root scratch files such as `workpad.md` or `INVESTIGATION-BRIEF.md` unless they explicitly name the current issue and stage. Follow the workpad Read Order section when it exists — do NOT re-read files not listed there unless you discover a dependency not covered in Key Dependencies. The investigation agent already read the codebase; your job is to change it, not re-explore it.
 
+{% if acceptance_criteria != "" %}
+## Acceptance Criteria (frozen at gate pass — immutable)
+
+These are the gate-passed acceptance criteria recorded for this issue (SYMPH-374). They are the criteria your diff will be judged against at review exit, harness-side — editing or checking off the workpad copy does NOT change them. Satisfy them; never reinterpret or weaken them. If one is unsatisfiable as written, explain why and output `[STAGE_FAILED: spec]`.
+
+{{ acceptance_criteria }}
+{% endif %}
+
 {% if reworkCount > 0 %}
 ## REWORK ATTEMPT {{ reworkCount }}
 
