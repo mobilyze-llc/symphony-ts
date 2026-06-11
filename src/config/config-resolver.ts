@@ -400,8 +400,9 @@ function quoteHookScriptPath(path: string): string {
   // workflow directory it resolved against may introduce spaces or other
   // shell-special characters, and the hook runs through `sh -lc` where a bare
   // word would split or glob (SYMPH-285). Bare-word-safe paths stay
-  // byte-identical with prior behavior; `$` is in the safe set because env
-  // refs like `./$PRODUCT/hooks/x.sh` expand identically bare or quoted.
+  // byte-identical with prior behavior; `$` is in the safe set so env refs
+  // like `./$PRODUCT/hooks/x.sh` keep their historical bare-word expansion
+  // semantics (bare expansion word-splits its result; quoted does not).
   if (/^[A-Za-z0-9_\-./~+@%:,=$]+$/.test(path)) {
     return path;
   }

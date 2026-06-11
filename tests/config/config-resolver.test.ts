@@ -302,6 +302,24 @@ describe("config-resolver", () => {
     );
   });
 
+  it("escapes backticks in quoted hook paths", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/we`ird path/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        hooks: {
+          after_create: "./hooks/after-create.sh",
+        },
+      },
+    });
+
+    // An unescaped backtick inside double quotes would be legacy command
+    // substitution when the hook runs through `sh -lc`.
+    expect(resolved.hooks.afterCreate).toBe(
+      `"${join("/repo/we\\`ird path", "hooks/after-create.sh")}"`,
+    );
+  });
+
   it("leaves multi-line hook scripts verbatim", () => {
     const script = [
       "set -euo pipefail",
