@@ -32,8 +32,22 @@ export function gitIsolationEnv(
   };
 }
 
+/**
+ * Remove environment variables that point git at an explicit repository.
+ *
+ * GIT_CEILING_DIRECTORIES only bounds upward DISCOVERY — an inherited
+ * GIT_DIR/GIT_WORK_TREE bypasses discovery entirely and would aim agent
+ * and hook git commands at the operator's repo. Every workspace-scoped
+ * spawn env must pass through this scrub. Mutates and returns `env`.
+ */
+export function scrubGitPointerEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  delete env.GIT_DIR;
+  delete env.GIT_WORK_TREE;
+  return env;
+}
+
 export interface GitProbeResult {
-  exitCode: number | null;
+  exitCode: number;
   stdout: string;
   stderr: string;
 }
@@ -74,24 +88,39 @@ const execFileGitProbe: GitProbe = (args, options) =>
   });
 
 function probeEnv(workspacePath: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...gitIsolationEnv(workspacePath),
-  };
   // Force on-disk discovery: an inherited GIT_DIR/GIT_WORK_TREE would make
   // the probe report the operator's repo instead of the workspace's.
-  delete env.GIT_DIR;
-  delete env.GIT_WORK_TREE;
-  return env;
+  return scrubGitPointerEnv({
+    ...process.env,
+    ...gitIsolationEnv(workspacePath),
+  });
 }
 
-async function pathExists(path: string): Promise<boolean> {
+async function hasGitEntryAt(workspacePath: string): Promise<boolean> {
   try {
-    await fs.lstat(path);
+    await fs.lstat(join(workspacePath, ".git"));
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    // EACCES and friends: we cannot tell whether git metadata exists, so
+    // we cannot certify isolation — fail closed with the real cause.
+    throw new WorkspacePathError(
+      ERROR_CODES.workspaceVerifyFailed,
+      `Cannot inspect workspace git metadata at ${workspacePath}: ${String(error)}`,
+      { cause: error },
+    );
   }
+}
+
+function isSpawnEnoent(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === "ENOENT"
+  );
 }
 
 async function realpathOrSelf(path: string): Promise<string> {
@@ -121,7 +150,7 @@ export async function verifyWorkspaceGitIsolation(
 ): Promise<void> {
   const probe = options?.probe ?? execFileGitProbe;
   const env = probeEnv(workspacePath);
-  const hasGitEntry = await pathExists(join(workspacePath, ".git"));
+  const hasGitEntry = await hasGitEntryAt(workspacePath);
 
   let result: GitProbeResult;
   try {
@@ -132,13 +161,16 @@ export async function verifyWorkspaceGitIsolation(
       { cwd: workspacePath, env },
     );
   } catch (error) {
-    if (!hasGitEntry) {
-      // No git metadata and no working git binary: discovery cannot escape.
+    if (!hasGitEntry && isSpawnEnoent(error)) {
+      // No git metadata AND no git binary on the host: nothing an agent
+      // runs can perform git discovery either, so isolation holds.
       return;
     }
+    // Any other probe failure (timeout, EACCES, vanished cwd) leaves the
+    // workspace unverified — fail closed rather than assume safety.
     throw new WorkspacePathError(
       ERROR_CODES.workspaceVerifyFailed,
-      `Workspace has git metadata but the git probe could not run: ${workspacePath}`,
+      `Workspace git isolation could not be verified (probe failed): ${workspacePath}`,
       { cause: error },
     );
   }

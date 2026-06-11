@@ -25,7 +25,10 @@ import {
 } from "../policy/hard-stops.js";
 import { getDefaultCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
 import { VERSION } from "../version.js";
-import { gitIsolationEnv } from "../workspace/git-isolation.js";
+import {
+  gitIsolationEnv,
+  scrubGitPointerEnv,
+} from "../workspace/git-isolation.js";
 
 const DEFAULT_SYSTEM_SKILL_NAMES = Object.freeze([
   "imagegen",
@@ -432,7 +435,10 @@ export class CodexAppServerClient {
           ERROR_CODES.codexLaunchFailed,
         );
       }
-      return { ...process.env, ...gitIsolationEnv(this.options.cwd) };
+      return scrubGitPointerEnv({
+        ...process.env,
+        ...gitIsolationEnv(this.options.cwd),
+      });
     }
 
     await this.cleanupEphemeralCodexHome();
@@ -466,11 +472,11 @@ export class CodexAppServerClient {
       );
     }
 
-    return {
+    return scrubGitPointerEnv({
       ...process.env,
       ...gitIsolationEnv(this.options.cwd),
       CODEX_HOME: codexHome,
-    };
+    });
   }
 
   private sweepStaleEphemeralCodexHomesOnce(): void {

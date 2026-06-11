@@ -9,6 +9,7 @@ import { ERROR_CODES } from "../../src/errors/codes.js";
 import {
   type GitProbe,
   gitIsolationEnv,
+  scrubGitPointerEnv,
   verifyWorkspaceGitIsolation,
 } from "../../src/workspace/git-isolation.js";
 import { WorkspacePathError } from "../../src/workspace/path-safety.js";
@@ -32,6 +33,21 @@ describe("gitIsolationEnv", () => {
     expect(env.GIT_CEILING_DIRECTORIES).toBe(
       `/operator/ceiling:${resolve("/some/root")}`,
     );
+  });
+});
+
+describe("scrubGitPointerEnv", () => {
+  it("removes GIT_DIR and GIT_WORK_TREE, preserving everything else", () => {
+    const env = scrubGitPointerEnv({
+      GIT_DIR: "/operator/repo/.git",
+      GIT_WORK_TREE: "/operator/repo",
+      GIT_CEILING_DIRECTORIES: "/kept",
+      PATH: "/usr/bin",
+    });
+    expect(env.GIT_DIR).toBeUndefined();
+    expect(env.GIT_WORK_TREE).toBeUndefined();
+    expect(env.GIT_CEILING_DIRECTORIES).toBe("/kept");
+    expect(env.PATH).toBe("/usr/bin");
   });
 });
 
@@ -182,9 +198,11 @@ describe("verifyWorkspaceGitIsolation (injected probe)", () => {
     ).rejects.toThrow(WorkspacePathError);
   });
 
-  it("passes a git-less workspace when the probe itself cannot run", async () => {
+  it("passes a git-less workspace only when git itself is absent (spawn ENOENT)", async () => {
     const probe: GitProbe = async () => {
-      throw new Error("spawn git ENOENT");
+      const error = new Error("spawn git ENOENT") as NodeJS.ErrnoException;
+      error.code = "ENOENT";
+      throw error;
     };
 
     await expect(
@@ -192,10 +210,28 @@ describe("verifyWorkspaceGitIsolation (injected probe)", () => {
     ).resolves.toBe(undefined);
   });
 
+  it("fails closed when the probe fails for any non-ENOENT reason (timeout, EACCES)", async () => {
+    const probe: GitProbe = async () => {
+      const error = new Error(
+        "execFile timed out after 10000ms",
+      ) as NodeJS.ErrnoException & { killed?: boolean };
+      error.killed = true;
+      throw error;
+    };
+
+    await expect(
+      verifyWorkspaceGitIsolation(workspace, { probe }),
+    ).rejects.toMatchObject({
+      code: ERROR_CODES.workspaceVerifyFailed,
+    });
+  });
+
   it("fails closed when git metadata exists but the probe cannot run", async () => {
     await fs.mkdir(join(workspace, ".git"));
     const probe: GitProbe = async () => {
-      throw new Error("spawn git ENOENT");
+      const error = new Error("spawn git ENOENT") as NodeJS.ErrnoException;
+      error.code = "ENOENT";
+      throw error;
     };
 
     await expect(

@@ -159,9 +159,37 @@ describe("WorkspaceHookRunner", () => {
       timeoutMs: 100,
       env: expect.objectContaining({
         SYMPHONY_STAGE: "implement",
-        GIT_CEILING_DIRECTORIES: expect.stringContaining("/tmp"),
+        GIT_CEILING_DIRECTORIES: expect.stringMatching(/(^|:)\/tmp$/),
       }),
     });
+  });
+
+  it("does not let caller env weaken the git isolation ceiling", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      stdout: "",
+      stderr: "",
+    });
+    const runner = new WorkspaceHookRunner({
+      config: {
+        afterCreate: null,
+        beforeRun: "echo hello",
+        afterRun: null,
+        beforeRemove: null,
+        timeoutMs: 100,
+      },
+      execute,
+    });
+
+    await runner.run({
+      name: "beforeRun",
+      workspacePath: "/tmp/workspace",
+      env: { GIT_CEILING_DIRECTORIES: "" },
+    });
+
+    const env = execute.mock.calls[0]?.[1]?.env as Record<string, string>;
+    expect(env.GIT_CEILING_DIRECTORIES).toMatch(/(^|:)\/tmp$/);
   });
 
   it("always injects the git isolation env, even without caller env", async () => {
@@ -191,7 +219,7 @@ describe("WorkspaceHookRunner", () => {
       cwd: "/tmp/workspace",
       timeoutMs: 100,
       env: expect.objectContaining({
-        GIT_CEILING_DIRECTORIES: expect.stringContaining("/tmp"),
+        GIT_CEILING_DIRECTORIES: expect.stringMatching(/(^|:)\/tmp$/),
       }),
     });
   });

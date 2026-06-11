@@ -99,7 +99,7 @@ describe("ClaudeCodeRunner", () => {
         permissionMode: "bypassPermissions",
         env: {
           SYMPHONY_PIPELINE: "1",
-          GIT_CEILING_DIRECTORIES: expect.stringContaining("/tmp"),
+          GIT_CEILING_DIRECTORIES: expect.stringMatching(/(^|:)\/tmp$/),
         },
         settingSources: ["user", "project"],
         maxBudgetUsd: 50,
@@ -636,7 +636,7 @@ describe("ClaudeCodeRunner", () => {
         permissionMode: "bypassPermissions",
         env: {
           SYMPHONY_PIPELINE: "1",
-          GIT_CEILING_DIRECTORIES: expect.stringContaining("/tmp"),
+          GIT_CEILING_DIRECTORIES: expect.stringMatching(/(^|:)\/tmp$/),
         },
         settingSources: ["user", "project"],
         maxBudgetUsd: 50,
