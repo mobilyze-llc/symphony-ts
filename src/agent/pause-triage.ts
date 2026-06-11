@@ -65,11 +65,12 @@ export function isPauseTriageConfigured(
 }
 
 // Measured: deepseek-v4-flash on the operator's box needs ~29s for a
-// triage-sized prompt when idle, and the box also serves long review
-// jobs. The worker-exit path is not latency-sensitive — a two-minute
-// wait beats a wrong park (the first live consult aborted at 30s and
-// parked an issue whose verdict, reproduced, was "continue").
-const DEFAULT_TRIAGE_TIMEOUT_MS = 120_000;
+// triage-sized prompt when idle, and the box also serves multi-minute
+// review jobs that queue ahead of us. Under park-then-revise nothing
+// waits on this call — the issue parks immediately and the verdict can
+// only upgrade the park later — so the budget is sized to survive deep
+// queue contention rather than to bound a stall.
+const DEFAULT_TRIAGE_TIMEOUT_MS = 600_000;
 
 // Node's Happy-Eyeballs autoselection gives each address family's TCP
 // handshake 250ms before interleaving to the next family. Handshakes to
