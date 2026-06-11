@@ -11,6 +11,25 @@ import type { RightSizingDecision } from "../domain/model.js";
 
 const MAX_SCOPE_FILES = 8;
 
+function describeModelRouting(
+  reason: RightSizingDecision["modelRouting"]["reason"],
+): string {
+  switch (reason) {
+    case "not_needed":
+      return "deterministic route sufficed (no model consult)";
+    case "ambiguous_routing":
+      return "model consult allowed: deterministic signals were ambiguous";
+    case "risk_trigger":
+      return "model consult allowed: risk trigger";
+    default: {
+      // Exhaustiveness guard: a new routing reason must be described here
+      // rather than silently rendering as some other reason's label.
+      const unhandled: never = reason;
+      return `model consult: ${String(unhandled)}`;
+    }
+  }
+}
+
 export interface AdmissionCardInput {
   issueIdentifier: string;
   stageName: string | null;
@@ -37,12 +56,7 @@ export function formatAdmissionCard(input: AdmissionCardInput): string {
   const verificationLine = input.hasFrozenAcceptanceCriteria
     ? "frozen acceptance criteria on record — implement satisfies them in-session; spec-fidelity judges the diff at review exit"
     : "acceptance criteria not yet frozen — the investigate exit gate authors and freezes them before implement";
-  const modelRoutingLine =
-    decision.modelRouting.reason === "not_needed"
-      ? "deterministic route sufficed (no model consult)"
-      : decision.modelRouting.reason === "ambiguous_routing"
-        ? "model consult allowed: deterministic signals were ambiguous"
-        : "model consult allowed: risk trigger";
+  const modelRoutingLine = describeModelRouting(decision.modelRouting.reason);
   const riskLines =
     decision.signals.highRiskFiles.length === 0
       ? []
@@ -57,7 +71,7 @@ export function formatAdmissionCard(input: AdmissionCardInput): string {
     "",
     `**Issue:** ${input.issueIdentifier}`,
     `**Decision:** admit → ${input.stageName ?? "initial stage"}`,
-    `**Eligibility:** passed deterministic eligibility and disjointness checks`,
+    "**Eligibility:** passed deterministic eligibility and disjointness checks",
     `**Right-sizing:** \`${decision.mode}\` via \`${decision.classifier}\` — ${decision.reason}`,
     `**Model routing:** ${modelRoutingLine}`,
     `**Budget:** ${budgetLine}`,

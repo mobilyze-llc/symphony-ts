@@ -495,6 +495,15 @@ export class OrchestratorCore {
         this.clearResumeRequirement(entry.issueId);
       }
 
+      if (entry.kind === "right_sizing") {
+        // Restore the first-dispatch marker (SYMPH-379): a journaled
+        // right_sizing entry proves this issue already dispatched, so a
+        // post-restart dispatch must not re-post the admission card.
+        // Entries replay in sequence order; a later terminal entry clears
+        // the marker via clearTerminalIssueRuntimeState.
+        this.state.issueFirstDispatchedAt[entry.issueId] ??= entry.timestamp;
+      }
+
       if (
         entry.kind === "ac_gate" &&
         entry.metadata.status === "completed" &&
@@ -4285,23 +4294,31 @@ export class OrchestratorCore {
     ) {
       // Admission card (SYMPH-379): publish the decision the dispatcher
       // already journaled. Fire-and-forget — observability never gates
-      // dispatch.
-      void this.postComment(
-        issue.id,
-        formatAdmissionCard({
-          issueIdentifier: issue.identifier,
-          stageName,
-          decision: rightSizingDecision,
-          budgetMultiplier: this.budgetMultiplierForIssue(issue.id),
-          hasFrozenAcceptanceCriteria:
-            this.state.issueAcSnapshots[issue.id] !== undefined,
-        }),
-      ).catch((err) => {
+      // dispatch, so even a synchronous formatter or transport fault is
+      // contained here.
+      try {
+        void this.postComment(
+          issue.id,
+          formatAdmissionCard({
+            issueIdentifier: issue.identifier,
+            stageName,
+            decision: rightSizingDecision,
+            budgetMultiplier: this.budgetMultiplierForIssue(issue.id),
+            hasFrozenAcceptanceCriteria:
+              this.state.issueAcSnapshots[issue.id] !== undefined,
+          }),
+        ).catch((err) => {
+          console.warn(
+            `[orchestrator] Failed to post admission card for ${issue.identifier}:`,
+            err,
+          );
+        });
+      } catch (err) {
         console.warn(
           `[orchestrator] Failed to post admission card for ${issue.identifier}:`,
           err,
         );
-      });
+      }
     }
     await this.recordDispatcherDecisionEvent({
       decisionId: `${issue.id}:${stageName ?? "no-stage"}:${attemptKey}:right_sizing`,

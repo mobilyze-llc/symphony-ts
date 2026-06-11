@@ -83,4 +83,21 @@ describe("formatAdmissionCard (SYMPH-379)", () => {
     );
     expect(card).toContain("frozen acceptance criteria on record");
   });
+
+  it("renders 'none declared' when the decision carries no declared scope", () => {
+    const card = formatAdmissionCard({
+      issueIdentifier: "SYMPH-997",
+      stageName: "investigate",
+      decision: decision({
+        signals: {
+          ...decision().signals,
+          declaredScopeFiles: [],
+        },
+      }),
+      budgetMultiplier: 1,
+      hasFrozenAcceptanceCriteria: false,
+    });
+
+    expect(card).toContain("**Declared scope:** none declared");
+  });
 });
