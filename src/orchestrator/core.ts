@@ -1447,6 +1447,10 @@ export class OrchestratorCore {
       } catch {
         // Observability only.
       }
+      // Clear any stored failure signature for this stage so the first failure
+      // of the reworked run gets a normal retry rather than false-parking
+      // against a stale signature from a prior visit (SYMPH-396).
+      this.clearStageFailureSignature(issueId, stageName);
       this.scheduleRetry(issueId, 1, {
         identifier,
         error: null,

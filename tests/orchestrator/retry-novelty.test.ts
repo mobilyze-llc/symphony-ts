@@ -606,6 +606,159 @@ describe("admission deferrals are exempt from novelty short-circuit (SYMPH-396 P
 });
 
 // ---------------------------------------------------------------------------
+// AC-gate rework path clears stage failure signature (SYMPH-396 R4)
+// ---------------------------------------------------------------------------
+
+describe("AC-gate rework clears stage failure signature (SYMPH-396 R4)", () => {
+  /**
+   * Scenario:
+   *   1. investigate runs and fails — signature stored, normal retry (attempt 1).
+   *   2. investigate re-runs and completes — AC gate fires with "rework" verdict.
+   *      The rework path MUST clear the stored failure signature.
+   *   3. The reworked investigate run fails again with the same error text.
+   *      Because the signature was cleared, this is treated as a fresh first
+   *      occurrence: normal retry is scheduled (not an immediate park).
+   *   4. The next identical failure parks (signature was re-stored at step 3).
+   */
+  it("clears the stage signature on AC-gate rework so the reworked run's first identical failure retries normally", async () => {
+    const deferred: Array<() => Promise<void>> = [];
+    const acVerdict: { verdict: "pass" | "rework"; feedback: string } | null = {
+      verdict: "rework",
+      feedback: "AC is untestable",
+    };
+
+    const stages: StagesConfig = {
+      initialStage: "investigate",
+      fastTrack: null,
+      stages: {
+        investigate: {
+          type: "agent",
+          runner: "claude-code",
+          model: "claude-opus-4",
+          prompt: "investigate.liquid",
+          maxTurns: 8,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "implement",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        implement: {
+          type: "agent",
+          runner: "claude-code",
+          model: "claude-sonnet-4-5",
+          prompt: "implement.liquid",
+          maxTurns: 30,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: null,
+        },
+      },
+    };
+
+    const config = { ...createConfig(stages), acGate: { enabled: true } };
+
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 9001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+      runAcGate: async () => acVerdict,
+      now: () => new Date("2026-06-11T12:00:00.000Z"),
+    });
+
+    // === Step 1: investigate dispatched; fails once — signature stored. ===
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("investigate");
+
+    const epermError =
+      "EPERM: operation not permitted, open '/var/folders/xk/3q8/T/ws/src/index.ts'";
+
+    const retry1 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: epermError,
+    });
+    // First failure — must get a normal retry (not parked).
+    expect(retry1).not.toBeNull();
+    expect(retry1!.delayType).toBe("failure");
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+
+    const sigKey = "1:investigate";
+    expect(
+      orchestrator.getState().issueFailureSignatures[sigKey],
+    ).toBeDefined();
+
+    // === Step 2: re-run; completes normally — AC gate fires with "rework". ===
+    await orchestrator.onRetryTimer("1");
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE] workpad updated",
+    });
+
+    // Let the deferred AC-gate task execute.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const deferredTask = deferred.shift();
+    expect(deferredTask).toBeDefined();
+    await deferredTask!();
+
+    // Rework continuation retry should be scheduled; failure signature cleared.
+    expect(orchestrator.getState().retryAttempts["1"]?.delayType).toBe(
+      "continuation",
+    );
+    expect(
+      orchestrator.getState().issueFailureSignatures[sigKey],
+    ).toBeUndefined();
+
+    // === Step 3: reworked run dispatched; fails with the same error. ===
+    // Because the signature was cleared, this is a fresh first occurrence.
+    await orchestrator.onRetryTimer("1");
+
+    const retryAfterRework = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: epermError,
+    });
+    // Must NOT park — this is the first time the signature is seen after the clear.
+    expect(retryAfterRework).not.toBeNull();
+    expect(retryAfterRework!.delayType).toBe("failure");
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    // Signature re-stored for this new visit.
+    expect(
+      orchestrator.getState().issueFailureSignatures[sigKey],
+    ).toBeDefined();
+
+    // === Step 4: second identical failure in this visit parks. ===
+    await orchestrator.onRetryTimer("1");
+
+    const retryAfterRework2 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: epermError,
+    });
+    expect(retryAfterRework2).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
