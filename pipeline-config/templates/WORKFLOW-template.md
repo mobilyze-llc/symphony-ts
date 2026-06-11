@@ -335,6 +335,9 @@ stages:
     type: agent
     runner: codex
     max_turns: 30
+    # Without this, issues admitted from Todo/Resume keep that stale state
+    # for the whole implement run — dashboards show running work as queued.
+    linear_state: In Progress
     mcp_servers:
       code-review-graph:
         command: uvx
