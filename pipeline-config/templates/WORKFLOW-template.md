@@ -142,16 +142,15 @@ hooks:
     # Such refs are never legitimate in the shared clone: delete them loudly.
     git -C "$BARE_CLONE" for-each-ref --format="%(refname)" "refs/heads/origin/" |
     while IFS= read -r poisoned; do
-      # update-ref is plumbing and would yank a ref out from under a LIVE
-      # worktree that has it checked out (next commit there becomes an
-      # orphaned root-commit). Skip those loudly; full-refname resolution
-      # below keeps this hook immune to the ambiguity either way.
-      if git -C "$BARE_CLONE" worktree list --porcelain | grep -qx "branch $poisoned"; then
-        echo "WARNING: poisoned local ref $poisoned is checked out in a live worktree; skipping deletion — clean up manually (SYMPH-372)" >&2
-        continue
+      # branch -D (porcelain) natively refuses to delete a branch that a
+      # LIVE worktree has checked out — update-ref -d would yank it and
+      # orphan that worktree's next commit. Refusal is safe: full-refname
+      # resolution below keeps this hook immune to the ambiguity anyway.
+      if git -C "$BARE_CLONE" branch -D "${poisoned#refs/heads/}" >/dev/null 2>&1; then
+        echo "WARNING: removed poisoned local ref $poisoned from shared bare clone (SYMPH-372)" >&2
+      else
+        echo "WARNING: could not remove poisoned local ref $poisoned (checked out in a live worktree?) — clean up manually (SYMPH-372)" >&2
       fi
-      echo "WARNING: removing poisoned local ref $poisoned from shared bare clone (SYMPH-372)" >&2
-      git -C "$BARE_CLONE" update-ref -d "$poisoned" || true
     done
 
     # --- Fetch latest refs into bare clone (pruning stale remote refs) ---

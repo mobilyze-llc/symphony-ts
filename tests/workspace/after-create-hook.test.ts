@@ -157,7 +157,7 @@ describe("after_create hook (WORKFLOW-template.md, real execution)", () => {
     expect(newSeedHead).not.toBe(staleSha);
 
     const stderr = hookLogs.map((l) => l.stderr ?? "").join("\n");
-    expect(stderr).toContain("removing poisoned local ref");
+    expect(stderr).toContain("removed poisoned local ref");
   });
 
   it("skips (and warns about) a poisoned ref that a live worktree has checked out", async () => {

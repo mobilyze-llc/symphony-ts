@@ -376,7 +376,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       'WORKTREE_BASE="refs/remotes/origin/$BASE_BRANCH"',
     );
     expect(template).toContain('WORKTREE_BASE="refs/heads/$BASE_BRANCH"');
-    expect(template).toContain("removing poisoned local ref");
+    expect(template).toContain("poisoned local ref");
     expect(template).toContain(
       'git -C "$BARE_CLONE" worktree add "$WORKSPACE_DIR" -b "$BRANCH_NAME" "$WORKTREE_BASE"',
     );
