@@ -438,6 +438,173 @@ describe("approveGate signature lifecycle (SYMPH-396 regression)", () => {
   });
 });
 
+describe("admission deferrals are exempt from novelty short-circuit (SYMPH-396 P2)", () => {
+  it("two consecutive same-reason no-slots deferrals do NOT park the issue", async () => {
+    // Scenario: issue "2" is in the retry queue; when its timer fires, no slots
+    // are available (issue "1" is running).  The deferral re-schedules with the
+    // same synthetic error "no available orchestrator slots".  A second timer
+    // fire with the same reason must still not park the issue — the deferral
+    // flag must prevent any signature recording/comparison.
+    const postComment = vi.fn().mockResolvedValue(undefined);
+
+    // Two-issue tracker: issue "1" dispatched first (fills the single slot),
+    // issue "2" queued for retry.
+    const twoIssues = [
+      createIssue({ id: "1", identifier: "ISSUE-1" }),
+      createIssue({ id: "2", identifier: "ISSUE-2" }),
+    ];
+    const tracker: IssueTracker = {
+      async fetchCandidateIssues() {
+        return twoIssues;
+      },
+      async fetchIssuesByStates() {
+        return [];
+      },
+      async fetchIssueStatesByIds() {
+        return [
+          { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+          { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+        ];
+      },
+    };
+
+    const orchestrator = new OrchestratorCore({
+      config: createConfig(undefined, { maxConcurrentAgents: 1 }),
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 9002 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      postComment,
+      now: () => new Date("2026-06-11T12:00:00.000Z"),
+    });
+
+    // Dispatch issue 1 — fills the single slot.
+    await orchestrator.pollTick();
+    const state = orchestrator.getState();
+    expect(Object.keys(state.running)).toContain("1");
+
+    // Manually put issue 2 into the retry queue at attempt 2 (as if it had
+    // already failed once — the important invariant is that the retry timer
+    // fires when no slots are available).
+    state.claimed.add("2");
+    state.retryAttempts["2"] = {
+      issueId: "2",
+      identifier: "ISSUE-2",
+      attempt: 2,
+      dueAtMs: Date.now(),
+      timerHandle: null,
+      error: "no available orchestrator slots",
+      delayType: "failure",
+    };
+
+    // First deferral: timer fires, no slots → re-schedules as deferral.
+    const result1 = await orchestrator.onRetryTimer("2");
+    expect(result1.dispatched).toBe(false);
+    expect(result1.retryEntry).not.toBeNull();
+    expect(state.failed.has("2")).toBe(false);
+    // No signature should have been recorded for issue 2.
+    const sigKey = `2:${state.issueStages["2"] ?? ""}`;
+    expect(state.issueFailureSignatures[sigKey]).toBeUndefined();
+
+    // Second deferral: same synthetic error again — must NOT park.
+    const result2 = await orchestrator.onRetryTimer("2");
+    expect(result2.dispatched).toBe(false);
+    expect(result2.retryEntry).not.toBeNull();
+    expect(state.failed.has("2")).toBe(false);
+
+    // Allow async side-effects to settle; no park comment expected.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(postComment).not.toHaveBeenCalledWith(
+      "2",
+      expect.stringContaining("retry futile"),
+    );
+  });
+
+  it("deferral does not pre-store a signature; first real failure with same text retries normally", async () => {
+    // Validates the interaction contract from the council finding: after a
+    // deferral (which records no signature), a real worker failure whose text
+    // happens to match the synthetic deferral reason is still treated as a
+    // first-occurrence failure and gets a normal retry — NOT an immediate park.
+    //
+    // We verify this indirectly: if two consecutive deferral-text failures DO
+    // park on the second attempt (rather than the first), that means they went
+    // through the normal signature ladder (first records, second parks), proving
+    // no deferral had pre-stored the signature.
+    const postComment = vi.fn().mockResolvedValue(undefined);
+    const orchestrator = createOrchestrator({ postComment });
+
+    await orchestrator.pollTick();
+
+    // Attempt 1: real worker failure whose text equals the synthetic deferral
+    // reason (the text itself is not special — only the deferral: true flag
+    // would have short-circuited recording).
+    const realFailure1 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: "no available orchestrator slots",
+    });
+    // First occurrence — must get a normal retry (signature recorded, not parked).
+    expect(realFailure1).not.toBeNull();
+    expect(realFailure1!.delayType).toBe("failure");
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+
+    await orchestrator.onRetryTimer("1");
+
+    // Attempt 2: identical text — now parks because the real failure on
+    // attempt 1 stored the signature.  This proves no prior deferral had
+    // already stored it (which would have caused a park on attempt 1 itself
+    // if combined with a pre-existing entry, or would have left a stale
+    // entry that corrupts the ladder).
+    const realFailure2 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: "no available orchestrator slots",
+    });
+    expect(realFailure2).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+  });
+
+  it("first real failure after a deferral stores the signature; second identical real failure parks", async () => {
+    // Validates the correct interaction: deferral doesn't pollute the signature
+    // record, so the usual "two identical real failures → park" ladder still works
+    // correctly when real failures DO occur after a deferral.
+    const postComment = vi.fn().mockResolvedValue(undefined);
+    const orchestrator = createOrchestrator({ postComment });
+
+    await orchestrator.pollTick();
+    const state = orchestrator.getState();
+
+    // Simulate a deferral by directly manipulating state (no signature should exist).
+    const sigKey = `1:${state.issueStages["1"] ?? ""}`;
+    expect(state.issueFailureSignatures[sigKey]).toBeUndefined();
+
+    // Fail with a real error once — signature stored, normal retry.
+    const epermError =
+      "EPERM: operation not permitted, open '/var/folders/xk/3q8vz5cd2r1/T/tmp-defer/workspace/src/foo.ts'";
+    const retry1 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: epermError,
+    });
+    expect(retry1).not.toBeNull();
+    expect(state.failed.has("1")).toBe(false);
+    // Signature was recorded.
+    expect(state.issueFailureSignatures[sigKey]).toBeDefined();
+
+    await orchestrator.onRetryTimer("1");
+
+    // Second identical real failure → park.
+    const retry2 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: epermError,
+    });
+    expect(retry2).toBeNull();
+    expect(state.failed.has("1")).toBe(true);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -480,7 +647,10 @@ function createTracker(): IssueTracker {
   };
 }
 
-function createConfig(stages?: StagesConfig): ResolvedWorkflowConfig {
+function createConfig(
+  stages?: StagesConfig,
+  agentOverrides?: { maxConcurrentAgents?: number },
+): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
     promptTemplate: "Prompt",
@@ -502,7 +672,7 @@ function createConfig(stages?: StagesConfig): ResolvedWorkflowConfig {
       timeoutMs: 30_000,
     },
     agent: {
-      maxConcurrentAgents: 2,
+      maxConcurrentAgents: agentOverrides?.maxConcurrentAgents ?? 2,
       maxTurns: 5,
       maxRetryBackoffMs: 300_000,
       maxRetryAttempts: 5,

@@ -1538,6 +1538,7 @@ export class OrchestratorCore {
           identifier: retryEntry.identifier,
           error: `pipeline halted: ${haltIssue.identifier}`,
           delayType: retryEntry.delayType,
+          deferral: true,
         }),
       };
     }
@@ -1557,6 +1558,7 @@ export class OrchestratorCore {
           identifier: retryEntry.identifier,
           error: "rate-limit admission floor active",
           delayType: retryEntry.delayType,
+          deferral: true,
         }),
       };
     }
@@ -1627,6 +1629,7 @@ export class OrchestratorCore {
           identifier: issue.identifier,
           error: "no available orchestrator slots",
           delayType: retryEntry.delayType,
+          deferral: true,
         }),
       };
     }
@@ -1682,6 +1685,7 @@ export class OrchestratorCore {
           identifier: issue.identifier,
           error: "dispatch paused by deterministic supervision",
           delayType: retryEntry.delayType,
+          deferral: true,
         }),
       };
     }
@@ -5055,6 +5059,12 @@ export class OrchestratorCore {
       identifier: string | null;
       error: string | null;
       delayType: "continuation" | "failure";
+      /** When true, this call is an admission deferral (no-slots or deterministic
+       * supervision pause) — not a real worker failure.  Deferrals must never
+       * participate in the novelty short-circuit: neither recording nor comparing
+       * failure signatures.  Two consecutive same-reason deferrals would otherwise
+       * produce identical signatures and falsely park a healthy queued issue. */
+      deferral?: boolean;
     },
   ): RetryEntry | null {
     // Max retry guard — only applies to failure retries, not continuations
@@ -5083,7 +5093,17 @@ export class OrchestratorCore {
     // detect a repeat. On attempt >= 2, if the incoming signature matches the
     // stored one AND the class is not "transient", park immediately — retrying
     // an identical permanent failure is futile.
-    if (input.delayType === "failure" && input.error !== null) {
+    //
+    // Admission deferrals (input.deferral === true) are explicitly excluded:
+    // a deferral is an orchestrator-synthetic "not yet" decision, not a real
+    // worker failure.  Two consecutive same-reason deferrals would otherwise
+    // produce identical signatures and falsely park a healthy queued issue
+    // before any worker attempt fires.
+    if (
+      input.delayType === "failure" &&
+      input.error !== null &&
+      !input.deferral
+    ) {
       const stage = this.state.issueStages[issueId] ?? null;
       const sigKey = `${issueId}:${stage ?? ""}`;
       const incoming = normalizeErrorSignature(input.error);
