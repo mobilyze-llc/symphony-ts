@@ -2233,6 +2233,10 @@ describe("orchestrator core", () => {
     });
     expect(judgedAcs).toEqual([expectedSnapshot]);
     expect(orchestrator.getState().completed.has("1")).toBe(true);
+
+    // Terminal completion clears the snapshot — a redispatched issue id
+    // must never be judged against a stale rubric (council R1 P1).
+    expect(orchestrator.getState().issueAcSnapshots["1"]).toBeUndefined();
   });
 
   it("rehydrates gate-passed AC snapshots from the run journal (SYMPH-374)", () => {
@@ -2285,6 +2289,88 @@ describe("orchestrator core", () => {
     expect(orchestrator.getState().issueAcSnapshots).toEqual({
       "1": "### Acceptance Criteria\n- [ ] `check: ok`",
     });
+  });
+
+  it("clears a replay-rehydrated AC snapshot on fresh admission — a new run never inherits a prior run's rubric (SYMPH-374)", async () => {
+    const dispatchedAcs: Array<string | null> = [];
+    const baseConfig = createConfig();
+    const config = {
+      ...baseConfig,
+      stages: {
+        initialStage: "investigate",
+        fastTrack: null,
+        stages: {
+          investigate: {
+            type: "agent" as const,
+            runner: null,
+            model: null,
+            maxTurns: null,
+            maxRework: null,
+            gateType: null,
+            prompt: null,
+            promptPath: null,
+            reviewers: [],
+            hardStops: null,
+            linearState: null,
+            mcpServers: {},
+            timeoutMs: null,
+            concurrency: null,
+            transitions: {
+              onComplete: null,
+              onRework: null,
+              onApprove: null,
+            },
+          },
+        },
+      },
+    };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async (input) => {
+        dispatchedAcs.push(input.acceptanceCriteria);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      runJournal: [
+        {
+          sequence: 1,
+          idempotencyKey: "ac_gate:stale:1",
+          timestamp: "2026-03-05T00:00:05.000Z",
+          kind: "ac_gate" as const,
+          issueId: "1",
+          issueIdentifier: "ISSUE-1",
+          operation: "dispatcher" as const,
+          stage: "investigate",
+          attempt: null,
+          ownerId: "orchestrator-core",
+          lease: null,
+          summary: "AC gate verdict from a prior completed run.",
+          metadata: {
+            status: "completed",
+            verdict: "pass",
+            acceptanceCriteria: "### Acceptance Criteria\n- stale rubric",
+          },
+        },
+      ],
+    });
+
+    // Rehydration restored the prior run's snapshot...
+    expect(orchestrator.getState().issueAcSnapshots["1"]).toBe(
+      "### Acceptance Criteria\n- stale rubric",
+    );
+
+    // ...but a fresh admission (no live or gate-recovered stage) must not
+    // inherit it: dispatch serves null and the stale entry is gone.
+    await orchestrator.pollTick();
+    expect(dispatchedAcs).toEqual([null]);
+    expect(orchestrator.getState().issueAcSnapshots["1"]).toBeUndefined();
   });
 
   it("never consults triage for non-budget hard stops or while the floor is blocked", async () => {

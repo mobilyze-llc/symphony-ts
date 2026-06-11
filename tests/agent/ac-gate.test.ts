@@ -56,7 +56,7 @@ describe("extractAcceptanceCriteria", () => {
     );
   });
 
-  it("runs to end of message when no later heading exists", () => {
+  it("runs to end of message but strips orchestration markers", () => {
     const message = [
       "### Acceptance Criteria",
       "- [ ] `check: pnpm build exits 0`",
@@ -65,12 +65,20 @@ describe("extractAcceptanceCriteria", () => {
     ].join("\n");
 
     expect(extractAcceptanceCriteria(message)).toBe(
-      [
-        "### Acceptance Criteria",
-        "- [ ] `check: pnpm build exits 0`",
-        "",
-        "[STAGE_COMPLETE]",
-      ].join("\n"),
+      ["### Acceptance Criteria", "- [ ] `check: pnpm build exits 0`"].join(
+        "\n",
+      ),
+    );
+
+    const failed = [
+      "### Acceptance Criteria",
+      "- [ ] `check: pnpm lint exits 0`",
+      "  [STAGE_FAILED: verify]  ",
+    ].join("\n");
+    expect(extractAcceptanceCriteria(failed)).toBe(
+      ["### Acceptance Criteria", "- [ ] `check: pnpm lint exits 0`"].join(
+        "\n",
+      ),
     );
   });
 

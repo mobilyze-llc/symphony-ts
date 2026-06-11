@@ -26,6 +26,13 @@ export interface AcGateVerdict {
 }
 
 const AC_HEADING_REGEX = /^(#{2,4})\s*Acceptance Criteria\b[^\n]*$/im;
+/**
+ * Orchestration control markers must never freeze into the canonical
+ * rubric — when the AC section is the last heading in the completion
+ * message, the trailing [STAGE_COMPLETE] would otherwise be captured.
+ */
+const STAGE_MARKER_LINE_REGEX =
+  /^\s*\[STAGE_(?:COMPLETE|FAILED:[^\]\n]*)\]\s*$/;
 /** Matches the judge prompt's evidence bound (buildSpecFidelityPrompt). */
 const MAX_AC_SNAPSHOT_CHARS = 8000;
 
@@ -51,15 +58,41 @@ export function extractAcceptanceCriteria(
     return null;
   }
   const headingLine = headingMatch[0];
-  const headingLevel = headingMatch[1]?.length ?? 3;
-  const bodyStart = headingMatch.index + headingLine.length;
-  const rest = message.slice(bodyStart);
-  const nextHeading = new RegExp(`^#{1,${headingLevel}}\\s`, "m").exec(rest);
-  const body = nextHeading === null ? rest : rest.slice(0, nextHeading.index);
-  if (body.trim().length === 0) {
+  // Group 1 is non-optional, so this guard is unreachable at runtime —
+  // it satisfies noUncheckedIndexedAccess without inventing a fallback
+  // level that could silently mis-parse a future regex change.
+  const headingLevel = headingMatch[1]?.length;
+  if (headingLevel === undefined) {
     return null;
   }
-  return `${headingLine.trim()}\n${body.trim()}`.slice(
+  const bodyStart = headingMatch.index + headingLine.length;
+  const rest = message.slice(bodyStart);
+  // Static scan instead of a dynamically built RegExp (semgrep
+  // non-literal-regexp): the section ends at the first heading whose
+  // level is the same or higher (fewer or equal #'s); deeper
+  // subheadings stay in the body.
+  let boundary = -1;
+  const headingScan = /^(#{1,6})\s/gm;
+  for (
+    let scan = headingScan.exec(rest);
+    scan !== null;
+    scan = headingScan.exec(rest)
+  ) {
+    const level = scan[1]?.length;
+    if (level !== undefined && level <= headingLevel) {
+      boundary = scan.index;
+      break;
+    }
+  }
+  const body = boundary === -1 ? rest : rest.slice(0, boundary);
+  const cleanedBody = body
+    .split("\n")
+    .filter((line) => !STAGE_MARKER_LINE_REGEX.test(line))
+    .join("\n");
+  if (cleanedBody.trim().length === 0) {
+    return null;
+  }
+  return `${headingLine.trim()}\n${cleanedBody.trim()}`.slice(
     0,
     MAX_AC_SNAPSHOT_CHARS,
   );
