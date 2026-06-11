@@ -1,3 +1,7 @@
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -5,6 +9,7 @@ import {
   type WorkspaceHookError,
   type WorkspaceHookLogEntry,
   WorkspaceHookRunner,
+  resolveWorkflowConfig,
 } from "../../src/index.js";
 
 describe("WorkspaceHookRunner", () => {
@@ -222,6 +227,52 @@ describe("WorkspaceHookRunner", () => {
         GIT_CEILING_DIRECTORIES: expect.stringMatching(/(^|:)\/tmp$/),
       }),
     });
+  });
+
+  it("executes a resolved hook path containing spaces end-to-end (SYMPH-285)", async () => {
+    // Disposable workspace smoke: a real workflow dir with a space in its
+    // name, a real hook script, the real shell executor — no mocks.
+    const workflowDir = await mkdtemp(join(tmpdir(), "symphony hooks "));
+    const workspaceDir = await mkdtemp(join(tmpdir(), "symphony-ws-"));
+    try {
+      const hooksDir = join(workflowDir, "hooks");
+      await mkdir(hooksDir);
+      const scriptPath = join(hooksDir, "after-create.sh");
+      await writeFile(scriptPath, "#!/bin/sh\necho hook-ran\n");
+      await chmod(scriptPath, 0o755);
+
+      const resolved = resolveWorkflowConfig({
+        workflowPath: join(workflowDir, "WORKFLOW.md"),
+        promptTemplate: "Prompt",
+        config: {
+          hooks: {
+            after_create: "./hooks/after-create.sh",
+          },
+        },
+      });
+
+      const logs: WorkspaceHookLogEntry[] = [];
+      const runner = new WorkspaceHookRunner({
+        config: resolved.hooks,
+        log: (entry) => {
+          logs.push(entry);
+        },
+      });
+
+      await expect(
+        runner.run({
+          name: "afterCreate",
+          workspacePath: workspaceDir,
+        }),
+      ).resolves.toBe(true);
+      const completed = logs.find(
+        (entry) => entry.event === "workspace_hook_completed",
+      );
+      expect(completed?.stdout).toContain("hook-ran");
+    } finally {
+      await rm(workflowDir, { recursive: true, force: true });
+      await rm(workspaceDir, { recursive: true, force: true });
+    }
   });
 
   it("suppresses errors in best-effort mode", async () => {

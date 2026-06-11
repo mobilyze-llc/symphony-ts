@@ -383,9 +383,33 @@ function readHookScript(
     return resolvedScript;
   }
 
-  return (
-    resolvePathValue(trimmedScript, workflowPath, environment) ?? resolvedScript
+  const resolvedPath = resolvePathValue(
+    trimmedScript,
+    workflowPath,
+    environment,
   );
+  if (resolvedPath === null) {
+    return resolvedScript;
+  }
+
+  return quoteHookScriptPath(resolvedPath);
+}
+
+function quoteHookScriptPath(path: string): string {
+  // The configured value had no whitespace (isSinglePathHookScript), but the
+  // workflow directory it resolved against may introduce spaces or other
+  // shell-special characters, and the hook runs through `sh -lc` where a bare
+  // word would split or glob (SYMPH-285). Bare-word-safe paths stay
+  // byte-identical with prior behavior; `$` is in the safe set so env refs
+  // like `./$PRODUCT/hooks/x.sh` keep their historical bare-word expansion
+  // semantics (bare expansion word-splits its result; quoted does not).
+  if (/^[A-Za-z0-9_\-./~+@%:,=$]+$/.test(path)) {
+    return path;
+  }
+
+  // Double quotes, NOT single: `$VAR` segments left for the shell (e.g.
+  // `./$PRODUCT/hooks/before-run.sh`) must keep expanding at execution time.
+  return `"${path.replace(/([\\"`])/g, "\\$1")}"`;
 }
 
 function isSinglePathHookScript(script: string): boolean {

@@ -245,6 +245,81 @@ describe("config-resolver", () => {
     );
   });
 
+  it("quotes resolved hook paths when the workflow directory contains spaces", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/My Pipeline Config/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        hooks: {
+          after_create: "./hooks/after-create.sh",
+          before_run: "test -x ./hooks/before-run.sh && ./hooks/before-run.sh",
+        },
+      },
+    });
+
+    expect(resolved.hooks.afterCreate).toBe(
+      `"${join("/repo/My Pipeline Config", "hooks/after-create.sh")}"`,
+    );
+    // Shell command hooks stay verbatim even under a spaced workflow dir.
+    expect(resolved.hooks.beforeRun).toBe(
+      "test -x ./hooks/before-run.sh && ./hooks/before-run.sh",
+    );
+  });
+
+  it("keeps $VAR segments expandable when quoting spaced hook paths", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/My Pipeline Config/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          hooks: {
+            before_run: "./$PRODUCT/hooks/before-run.sh",
+          },
+        },
+      },
+      {},
+    );
+
+    // Double-quoted, with $PRODUCT left unescaped for runtime expansion.
+    expect(resolved.hooks.beforeRun).toBe(
+      `"${join("/repo/My Pipeline Config", "$PRODUCT/hooks/before-run.sh")}"`,
+    );
+  });
+
+  it("escapes double quotes and backslashes in quoted hook paths", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: '/repo/we"ird path/WORKFLOW.md',
+      promptTemplate: "Prompt",
+      config: {
+        hooks: {
+          after_create: "./hooks/after-create.sh",
+        },
+      },
+    });
+
+    expect(resolved.hooks.afterCreate).toBe(
+      `"${join('/repo/we\\"ird path', "hooks/after-create.sh")}"`,
+    );
+  });
+
+  it("escapes backticks in quoted hook paths", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/we`ird path/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        hooks: {
+          after_create: "./hooks/after-create.sh",
+        },
+      },
+    });
+
+    // An unescaped backtick inside double quotes would be legacy command
+    // substitution when the hook runs through `sh -lc`.
+    expect(resolved.hooks.afterCreate).toBe(
+      `"${join("/repo/we\\`ird path", "hooks/after-create.sh")}"`,
+    );
+  });
+
   it("leaves multi-line hook scripts verbatim", () => {
     const script = [
       "set -euo pipefail",
