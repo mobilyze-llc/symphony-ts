@@ -570,8 +570,9 @@ Do not emit `[STAGE_COMPLETE]` until the machine-checkable criteria above pass �
 - For every `test:` criterion: the named test exists in your diff (or demonstrably pre-exists and is extended) AND passes. Run it through the bounded-log path (`scripts/symphony-run-logged.mjs` when present) and record per criterion: command, exit code, log path.
 - For every `check:` criterion: run the named command and confirm the expected result. Record command + exit code per criterion.
 - For every `judge:` criterion: PRODUCE the evidence the criterion names (artifact, comment, log) and cite where it lives. Never grade your own `judge:` criteria — an independent judge does that at review exit.
-- A failing `test:`/`check:` criterion gets at most 3 fix-and-rerun attempts. Exhausted → output `[STAGE_FAILED: verify]` naming the specific criterion and its last output.
-- Your FINAL completion message (the one with `[STAGE_COMPLETE]`) must list every criterion with its evidence line (`<tag> — <command> — exit <code> — <log path or citation>`). Keep each line bounded; full output stays in `.symphony/validation/`.
+- A failing `test:`/`check:` criterion gets at most 3 fix-and-rerun attempts (the bound is per criterion). Exhausted → output `[STAGE_FAILED: verify]` naming the specific criterion and its last output.
+- A frozen `check:` criterion that names a full-suite command (e.g. `pnpm test`) inherits the full-suite contract from the Implementation Steps: the unrelated-failure carve-out applies; failures related to your diff never qualify for it.
+- Your FINAL completion message (the one with `[STAGE_COMPLETE]`) must list every criterion with its evidence line — `test:`/`check:` as `<tag> — <command> — exit <code> — <log path>`; `judge:` as `<tag> — judge — <evidence citation>`. Keep each line bounded; full output stays in `.symphony/validation/`.
 - These criteria are read-only to you. If satisfying one would require editing or weakening it, that is `[STAGE_FAILED: spec]` with an explanation, never a quiet reinterpretation.
 {% endif %}
 
@@ -647,8 +648,8 @@ linear-pp-cli comments edit <COMMENT_UUID> --body-file workpad.md --agent
 
 ## Completion Signals
 When you are done:
-- If all verify commands pass, every frozen acceptance criterion has its evidence line (per the Inner verification loop), live proof is captured or explicitly waived, and the PR is created: output `[STAGE_COMPLETE]`
-- If you cannot resolve a verify failure (or a failing `test:`/`check:` criterion) after 3 attempts: output `[STAGE_FAILED: verify]` with the failing command/criterion and output
+- If all verify commands pass, every frozen acceptance criterion (when any exist) has its evidence line — `test:`/`check:` with command + exit code + log path, `judge:` with its citation — live proof is captured or explicitly waived (or stated n/a), and the PR is created: output `[STAGE_COMPLETE]`
+- If you cannot resolve a verify failure (or a failing `test:`/`check:` criterion) after 3 attempts on that command or criterion: output `[STAGE_FAILED: verify]` with the failing command/criterion and output
 - If the spec is ambiguous, contradictory, or a frozen criterion is unsatisfiable as written: output `[STAGE_FAILED: spec]` with an explanation
 - If you hit infrastructure issues (API limits, network errors): output `[STAGE_FAILED: infra]` with details
 
@@ -676,7 +677,7 @@ Before running the council gate, verify the implement stage honored its evidence
 
 {{ acceptance_criteria }}
 {% else %}If the workpad records gate-passed acceptance criteria, each has an evidence line in the implement completion message or PR body (`test:`/`check:`: command + exit code + log path; `judge:`: the named evidence cited).{% endif %}
-2. The PR body or workpad carries exactly one live-proof disposition: live evidence (screenshot/endpoint capture), `live-proof: waived — <reason>`, or `live-proof: n/a — <reason>`. Runtime-touching diffs with neither evidence nor an explicit waiver fail this check.
+2. The PR body carries exactly one live-proof disposition: live evidence (screenshot/endpoint capture), `live-proof: waived — <reason>`, or `live-proof: n/a — <reason>` (the workpad copy is advisory; a missing PR-body disposition fails this check). Runtime-touching diffs with neither evidence nor an explicit waiver fail this check.
 
 If a check fails, post a `## Review Findings` comment naming the missing evidence and output `[STAGE_FAILED: review]` — do not run the council gate on work that skipped its evidence contract.
 

@@ -429,6 +429,14 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(withAcs).toContain("Never grade your own `judge:` criteria");
     expect(withAcs).toContain("live-proof: waived");
     expect(withAcs).toContain("live-proof: n/a");
+    // Enforcement clauses, not just instruction vocabulary (council R1):
+    expect(withAcs).toContain(
+      "live proof is captured or explicitly waived (or stated n/a)",
+    );
+    expect(withAcs).toContain(
+      "`judge:` as `<tag> — judge — <evidence citation>`",
+    );
+    expect(withAcs).toContain("the bound is per criterion");
 
     // Without gate-passed ACs the loop contract is absent (nothing to
     // iterate on) but the live-proof contract still applies.
@@ -454,9 +462,24 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     });
     expect(output).toContain("Pre-gate evidence check");
     expect(output).toContain("live-proof: waived");
+    expect(output).toContain("The PR body carries exactly one live-proof");
     expect(output).toContain(
       "do not run the council gate on work that skipped its evidence contract",
     );
+
+    // The without-ACs else branch is new code too — render and assert it
+    // (council R1: untested Liquid branches are how strictVariables bites).
+    const withoutAcs = await renderPrompt({
+      workflow: { promptTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "review",
+      reworkCount: 0,
+    });
+    expect(withoutAcs).toContain(
+      "If the workpad records gate-passed acceptance criteria",
+    );
+    expect(withoutAcs).toContain("Pre-gate evidence check");
   });
 
   it("review stage does NOT contain description", async () => {

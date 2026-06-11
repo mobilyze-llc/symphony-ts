@@ -53,8 +53,12 @@ describe("spec-fidelity judge", () => {
         expect(prompt).toContain("export const bar = 1;");
         // ...framed as worker-claimed where applicable.
         expect(prompt).toContain("worker message is self-reported");
-        // Live-proof rule (SYMPH-377) is part of the judging contract.
+        // Live-proof rule (SYMPH-377) is part of the judging contract,
+        // including the n/a-only-for-no-runtime-boundary restriction.
         expect(prompt).toContain("live-proof: waived");
+        expect(prompt).toContain(
+          "valid ONLY for diffs with no runtime boundary",
+        );
         expect(String(input)).toContain("studio2.local:8000");
         return chatCompletionResponse(
           '{"verdict":"pass","findings":"AC1 PASS: named test present in diff."}',
