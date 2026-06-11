@@ -39,6 +39,12 @@ export interface RenderPromptInput {
   attempt: number | null;
   stageName?: string | null;
   reworkCount?: number;
+  /**
+   * Frozen gate-passed AC snapshot (SYMPH-374). Always rendered into the
+   * context as `acceptance_criteria` ("" when absent) so templates can
+   * reference it unconditionally under strictVariables.
+   */
+  acceptanceCriteria?: string | null;
   modePolicy?: ModeScopedPermissionPolicy | null;
 }
 
@@ -64,6 +70,7 @@ export async function renderPrompt(input: RenderPromptInput): Promise<string> {
       attempt: input.attempt,
       stageName: input.stageName ?? null,
       reworkCount: input.reworkCount ?? 0,
+      acceptance_criteria: input.acceptanceCriteria ?? "",
     });
 
     return withModePermissionEnvelope({

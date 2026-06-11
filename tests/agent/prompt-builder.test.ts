@@ -104,6 +104,36 @@ describe("prompt builder", () => {
     expect(promptNull).toBe("no-stage");
   });
 
+  it("renders the frozen AC snapshot as acceptance_criteria with an empty-string default (SYMPH-374)", async () => {
+    const template =
+      '{% if acceptance_criteria != "" %}AC:{{ acceptance_criteria }}{% else %}no-acs{% endif %}';
+
+    const withSnapshot = await renderPrompt({
+      workflow: { promptTemplate: template },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      acceptanceCriteria: "### Acceptance Criteria\n- [ ] `check: ok`",
+    });
+    expect(withSnapshot).toBe("AC:### Acceptance Criteria\n- [ ] `check: ok`");
+
+    // Absent and explicit-null both render the default — strictVariables
+    // must never throw for templates that reference acceptance_criteria.
+    const absent = await renderPrompt({
+      workflow: { promptTemplate: template },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+    expect(absent).toBe("no-acs");
+
+    const explicitNull = await renderPrompt({
+      workflow: { promptTemplate: template },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      acceptanceCriteria: null,
+    });
+    expect(explicitNull).toBe("no-acs");
+  });
+
   it("uses the rendered workflow prompt for the first turn and continuation guidance after that", async () => {
     const first = await buildTurnPrompt({
       workflow: {

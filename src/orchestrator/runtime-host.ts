@@ -455,6 +455,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         isFirstDispatch,
         rightSizingDecision,
         budgetMultiplier,
+        acceptanceCriteria,
       }) => {
         const lastRework = this.lastNotifiedReworkCount.get(issue.id) ?? 0;
         const isNewRework = !isFirstDispatch && reworkCount > lastRework;
@@ -478,6 +479,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           stageName,
           reworkCount,
           rightSizingDecision,
+          acceptanceCriteria,
           budgetMultiplier,
         );
       },
@@ -513,7 +515,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           evidence: {
             issueIdentifier: evidence.issueIdentifier,
             issueTitle: evidence.issueTitle,
-            acceptanceCriteria: null,
+            // Frozen gate-passed snapshot resolved by core from journal-
+            // backed state (SYMPH-374) — never workpad or worker-supplied.
+            acceptanceCriteria: evidence.acceptanceCriteria,
             diff,
             reviewMessage: evidence.reviewMessage,
           },
@@ -1841,6 +1845,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     stageName: string | null,
     reworkCount: number,
     rightSizingDecision: RightSizingDecision,
+    acceptanceCriteria: string | null = null,
     budgetMultiplier = 1,
   ): Promise<{
     workerHandle: WorkerExecution;
@@ -1894,6 +1899,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         stage,
         stageName,
         reworkCount,
+        acceptanceCriteria,
         budgetMultiplier: Math.max(1, budgetMultiplier),
         modePolicy: createModeScopedPermissionPolicy({
           mode: rightSizingDecision.mode,

@@ -1,3 +1,4 @@
+import { extractAcceptanceCriteria } from "../agent/ac-gate.js";
 import type {
   PauseTriageEvidence,
   PauseTriageVerdict,
@@ -218,6 +219,11 @@ export interface OrchestratorCoreOptions {
     rightSizingDecision: RightSizingDecision;
     /** base * multiplier^escalationSteps for this issue (SYMPH-337); 1 when unescalated. */
     budgetMultiplier: number;
+    /**
+     * Frozen gate-passed AC snapshot for prompt rendering (SYMPH-374);
+     * null before the gate has passed (e.g. the investigate stage itself).
+     */
+    acceptanceCriteria: string | null;
   }) => Promise<SpawnWorkerResult> | SpawnWorkerResult;
   onIssueDropped?: (input: {
     issueId: string;
@@ -275,6 +281,11 @@ export interface OrchestratorCoreOptions {
     issueId: string;
     issueIdentifier: string;
     issueTitle: string;
+    /**
+     * Canonical AC snapshot frozen at AC-gate pass (SYMPH-374), or null
+     * when no gate passed for this issue (gate disabled / legacy issue).
+     */
+    acceptanceCriteria: string | null;
     reviewMessage: string | null;
   }) => Promise<{ verdict: "pass" | "rework"; findings: string } | null>;
   updateIssueState?: (
@@ -481,6 +492,21 @@ export class OrchestratorCore {
 
       if (isDispatcherAdmissionEntry(entry)) {
         this.clearResumeRequirement(entry.issueId);
+      }
+
+      if (
+        entry.kind === "ac_gate" &&
+        entry.metadata.status === "completed" &&
+        (entry.metadata.verdict === "pass" ||
+          entry.metadata.verdict === "pass_open") &&
+        typeof entry.metadata.acceptanceCriteria === "string" &&
+        entry.metadata.acceptanceCriteria.length > 0
+      ) {
+        // Rehydrate the frozen AC snapshot (SYMPH-374). Entries replay in
+        // sequence order, so the latest gate-passed snapshot wins and a
+        // later terminal entry clears it via clearTerminalIssueRuntimeState.
+        this.state.issueAcSnapshots[entry.issueId] =
+          entry.metadata.acceptanceCriteria;
       }
 
       if (
@@ -1333,12 +1359,21 @@ export class OrchestratorCore {
    * same stage (the rework prompt path reads those comments); null →
    * FAIL OPEN: advance with a warning. Guards no-op if anything moved the
    * issue meanwhile.
+   *
+   * On pass/pass_open the AC section of the completion message is frozen
+   * as the issue's canonical rubric (SYMPH-374): journaled for replay and
+   * held in state for the spec-fidelity judge and implement prompts. The
+   * workpad copy stays operator-visible but is never trusted again — the
+   * implement worker is instructed to edit it (checking items off), so a
+   * downstream stage must not be able to re-author what it is judged
+   * against.
    */
   private async applyAcGateVerdict(input: {
     issueId: string;
     identifier: string;
     stageName: string;
     verdict: { verdict: "pass" | "rework"; feedback: string } | null;
+    completionMessage: string | null;
   }): Promise<void> {
     const { issueId, identifier, stageName, verdict } = input;
 
@@ -1357,6 +1392,14 @@ export class OrchestratorCore {
         : verdict.verdict === "pass"
           ? "pass"
           : "rework";
+
+    const acceptanceCriteria =
+      action === "rework"
+        ? null
+        : extractAcceptanceCriteria(input.completionMessage);
+    if (acceptanceCriteria !== null) {
+      this.state.issueAcSnapshots[issueId] = acceptanceCriteria;
+    }
 
     try {
       await this.recordRunJournalEntry({
@@ -1378,6 +1421,7 @@ export class OrchestratorCore {
           status: "completed",
           verdict: action,
           feedback: verdict?.feedback ?? null,
+          acceptanceCriteria,
         },
       });
     } catch {
@@ -1792,11 +1836,16 @@ export class OrchestratorCore {
         // The claim stays held so nothing re-dispatches meanwhile; a
         // null verdict fails OPEN at the applier.
         const scheduleDeferred = this.scheduleDeferred;
+        // The completion message is the one that carried [STAGE_COMPLETE]
+        // (the AC echo lives there per the contract); fall back to the
+        // session's last message when the exit carried no message body.
+        const completionMessage =
+          input.agentMessage ?? runningEntry.lastCodexMessage;
         void this.runAcGate({
           issueIdentifier: runningEntry.identifier,
           issueTitle: runningEntry.issue.title,
           issueDescription: runningEntry.issue.description ?? null,
-          completionMessage: runningEntry.lastCodexMessage,
+          completionMessage,
         })
           .catch((error) => {
             console.warn(
@@ -1811,6 +1860,7 @@ export class OrchestratorCore {
                 identifier: runningEntry.identifier,
                 stageName: exitedStageName,
                 verdict,
+                completionMessage,
               }),
             );
           })
@@ -1842,6 +1892,9 @@ export class OrchestratorCore {
           issueId: input.issueId,
           issueIdentifier: runningEntry.identifier,
           issueTitle: runningEntry.issue.title,
+          // The frozen gate-passed snapshot, never the workpad (SYMPH-374).
+          acceptanceCriteria:
+            this.state.issueAcSnapshots[input.issueId] ?? null,
           reviewMessage: runningEntry.lastCodexMessage,
         })
           .catch((error) => {
@@ -2907,6 +2960,7 @@ export class OrchestratorCore {
     delete this.state.issueRightSizingDecisions[issueId];
     delete this.state.issueBudgetEscalations[issueId];
     delete this.state.issuePauseTriageResumes[issueId];
+    delete this.state.issueAcSnapshots[issueId];
     delete this.state.loopTraceJournal[issueId];
     delete this.state.continuousFeedback[issueId];
   }
@@ -4383,6 +4437,7 @@ export class OrchestratorCore {
         isFirstDispatch,
         rightSizingDecision,
         budgetMultiplier: this.budgetMultiplierForIssue(issue.id),
+        acceptanceCriteria: this.state.issueAcSnapshots[issue.id] ?? null,
       });
       const runEntry: RunningEntry = {
         ...createEmptyLiveSession(),

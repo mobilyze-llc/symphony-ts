@@ -128,6 +128,11 @@ export interface AgentRunInput {
   stage?: StageDefinition | null;
   stageName?: string | null;
   reworkCount?: number;
+  /**
+   * Frozen gate-passed AC snapshot (SYMPH-374), rendered into the prompt
+   * as `acceptance_criteria`; null/absent before the gate has passed.
+   */
+  acceptanceCriteria?: string | null;
   modePolicy?: ModeScopedPermissionPolicy;
   /**
    * Budget-escalation multiplier for this unit (SYMPH-337): scales the
@@ -515,6 +520,7 @@ export class AgentRunner {
           attempt: input.attempt,
           stageName: input.stageName ?? null,
           reworkCount: input.reworkCount ?? 0,
+          acceptanceCriteria: input.acceptanceCriteria ?? null,
           modePolicy: input.modePolicy ?? null,
           turnNumber,
           maxTurns: effectiveMaxTurns,

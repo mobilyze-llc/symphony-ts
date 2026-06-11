@@ -25,6 +25,46 @@ export interface AcGateVerdict {
   feedback: string;
 }
 
+const AC_HEADING_REGEX = /^(#{2,4})\s*Acceptance Criteria\b[^\n]*$/im;
+/** Matches the judge prompt's evidence bound (buildSpecFidelityPrompt). */
+const MAX_AC_SNAPSHOT_CHARS = 8000;
+
+/**
+ * Extract the Acceptance Criteria section from an investigate completion
+ * message (the worker echoes the workpad AC section there per the
+ * contract). The snapshot frozen at gate pass is the CANONICAL rubric
+ * (SYMPH-374): downstream stages and judges read it from the journal,
+ * never from the operator-visible workpad — which the implement worker is
+ * instructed to edit (checking off items) and must not be able to re-author.
+ *
+ * The section runs from the AC heading to the next heading of the same or
+ * higher level. Returns null when no heading or no content is found.
+ */
+export function extractAcceptanceCriteria(
+  message: string | null,
+): string | null {
+  if (message === null) {
+    return null;
+  }
+  const headingMatch = AC_HEADING_REGEX.exec(message);
+  if (headingMatch === null) {
+    return null;
+  }
+  const headingLine = headingMatch[0];
+  const headingLevel = headingMatch[1]?.length ?? 3;
+  const bodyStart = headingMatch.index + headingLine.length;
+  const rest = message.slice(bodyStart);
+  const nextHeading = new RegExp(`^#{1,${headingLevel}}\\s`, "m").exec(rest);
+  const body = nextHeading === null ? rest : rest.slice(0, nextHeading.index);
+  if (body.trim().length === 0) {
+    return null;
+  }
+  return `${headingLine.trim()}\n${body.trim()}`.slice(
+    0,
+    MAX_AC_SNAPSHOT_CHARS,
+  );
+}
+
 const VERDICT_SCHEMA = z.object({
   verdict: z.enum(["pass", "rework"]),
   feedback: z.string().min(1).max(4000),
