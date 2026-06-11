@@ -422,6 +422,21 @@ describe("runHeadlessCouncilGate", () => {
 
     expect(result.verdict).toBe("error");
     expect(result.degradedConditions).toContain("cmux-preflight-failed");
+    await expect(
+      readFile(join(harness.artifactDir, "cmux-preflight.stderr"), "utf-8"),
+    ).resolves.toContain("cmux unavailable");
+    await expect(
+      readFile(join(harness.artifactDir, "cmux-preflight.stdout"), "utf-8"),
+    ).resolves.toBe("{}");
+    await expect(
+      readFile(join(harness.artifactDir, "council-report.md"), "utf-8"),
+    ).resolves.toContain("cmux-preflight-failed");
+    const resultJson = JSON.parse(
+      await readFile(join(harness.artifactDir, "review-result.json"), "utf-8"),
+    ) as { verdict: string };
+    expect(resultJson).toMatchObject({
+      verdict: "error",
+    });
   });
 
   it("fails closed when cmux returns malformed lane JSON", async () => {
@@ -477,6 +492,27 @@ describe("runHeadlessCouncilGate", () => {
       state: "complete",
       verdict: "pass",
     });
+    await expect(
+      readFile(join(harness.artifactDir, "claude-opus.cli.stderr"), "utf-8"),
+    ).resolves.toContain("disk full");
+    const cliJson = JSON.parse(
+      await readFile(
+        join(harness.artifactDir, "claude-opus.cli.json"),
+        "utf-8",
+      ),
+    ) as { state: string; message: string; artifact_path: string | null };
+    expect(cliJson).toEqual({
+      state: "error",
+      message: "Review lane execution failed: disk full",
+      artifact_path: null,
+    });
+    const resultJson = JSON.parse(
+      await readFile(join(harness.artifactDir, "review-result.json"), "utf-8"),
+    ) as { verdict: string };
+    expect(resultJson.verdict).toBe("error");
+    await expect(
+      readFile(join(harness.artifactDir, "council-report.md"), "utf-8"),
+    ).resolves.toContain("claude-opus");
   });
 
   it("fails closed when a reviewer times out", async () => {
@@ -955,6 +991,23 @@ describe("runHeadlessCouncilGate", () => {
       state: "error",
       verdict: "error",
       message: "Codex lead execution failed: codex adapter crashed",
+    });
+    await expect(
+      readFile(
+        join(harness.artifactDir, "codex-high-lead.cli.stderr"),
+        "utf-8",
+      ),
+    ).resolves.toContain("codex adapter crashed");
+    const cliJson = JSON.parse(
+      await readFile(
+        join(harness.artifactDir, "codex-high-lead.cli.json"),
+        "utf-8",
+      ),
+    ) as { state: string; message: string; artifact_path: string | null };
+    expect(cliJson).toEqual({
+      state: "error",
+      message: "Codex lead execution failed: codex adapter crashed",
+      artifact_path: null,
     });
   });
 

@@ -807,7 +807,7 @@ export interface DecorrelatedGateOutcome {
   gateStage: string | null;
   mode: RightSizingMode;
   status: DecorrelatedGateStatus;
-  aggregate: "pass" | "fail" | null;
+  aggregate: "pass" | "fail" | "error" | null;
   checkedAt: string;
   workerLane: DecorrelatedGateLane;
   reviewerLanes: DecorrelatedGateLane[];
@@ -926,6 +926,7 @@ export interface OrchestratorState {
   issueBudgetEscalations: Record<string, number>;
   issuePauseTriageResumes: Record<string, number>;
   issueReworkCounts: Record<string, number>;
+  issueGateErrorCounts: Record<string, number>;
   issuePassedStages: Record<string, string[]>;
   issueFirstDispatchedAt: Record<string, string>;
   issueExecutionHistory: Record<string, ExecutionHistory>;
@@ -1094,6 +1095,7 @@ export function createInitialOrchestratorState(input: {
     issueBudgetEscalations: {},
     issuePauseTriageResumes: {},
     issueReworkCounts: {},
+    issueGateErrorCounts: {},
     issuePassedStages: {},
     issueFirstDispatchedAt: {},
     issueExecutionHistory: {},

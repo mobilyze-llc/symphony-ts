@@ -325,6 +325,8 @@ export interface OrchestratorCoreOptions {
   runJournal?: DispatcherRunJournal;
   leaseOwnerId?: string;
   leaseTtlMs?: number;
+  /** Consecutive ensemble gate ERROR results before parking as infra-blocked. */
+  gateErrorLimit?: number;
   writeRunJournalEntry?: (
     entry: DispatcherRunJournalEntry,
   ) => Promise<void> | void;
@@ -375,6 +377,8 @@ export class OrchestratorCore {
 
   private readonly leaseTtlMs: number;
 
+  private readonly gateErrorLimit: number;
+
   private readonly writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
 
   private readonly reportedSupervisionFindings = new Set<string>();
@@ -423,6 +427,7 @@ export class OrchestratorCore {
     this.now = options.now ?? (() => new Date());
     this.leaseOwnerId = options.leaseOwnerId ?? "orchestrator-core";
     this.leaseTtlMs = options.leaseTtlMs ?? DEFAULT_DISPATCHER_LEASE_TTL_MS;
+    this.gateErrorLimit = Math.max(1, Math.trunc(options.gateErrorLimit ?? 2));
     this.writeRunJournalEntry = options.writeRunJournalEntry;
     this.state = createInitialOrchestratorState({
       pollIntervalMs: options.config.polling.intervalMs,
@@ -615,6 +620,17 @@ export class OrchestratorCore {
       this.state.failed.add(entry.issueId);
       this.releaseClaim(entry.issueId);
       this.clearTerminalIssueRuntimeState(entry.issueId);
+      return;
+    }
+
+    if (outcome.aggregate === "error") {
+      const consecutiveGateErrors = toOptionalNumber(
+        entry.metadata.consecutiveGateErrors,
+      );
+      if (consecutiveGateErrors !== null) {
+        this.state.issueGateErrorCounts[entry.issueId] = consecutiveGateErrors;
+      }
+      this.state.issueStages[entry.issueId] = entry.stage;
       return;
     }
 
@@ -2591,8 +2607,12 @@ export class OrchestratorCore {
       const result = await this.runEnsembleGate!({ issue, stage });
       let reworkTarget: string | null = null;
       const reworkCountBeforeGate = this.state.issueReworkCounts[issue.id] ?? 0;
+      let terminal = false;
+      let terminalReason: string | null = null;
+      let consecutiveGateErrors: number | null = null;
 
       if (result.aggregate === "pass") {
+        delete this.state.issueGateErrorCounts[issue.id];
         const nextStage = this.approveGate(issue.id);
         if (nextStage !== null) {
           this.scheduleRetry(issue.id, 1, {
@@ -2601,7 +2621,33 @@ export class OrchestratorCore {
             delayType: "continuation",
           });
         }
+      } else if (result.aggregate === "error") {
+        consecutiveGateErrors =
+          (this.state.issueGateErrorCounts[issue.id] ?? 0) + 1;
+        this.state.issueGateErrorCounts[issue.id] = consecutiveGateErrors;
+
+        if (consecutiveGateErrors >= this.gateErrorLimit) {
+          terminal = true;
+          terminalReason = "gate_error_limit_exceeded";
+          const reason = `Ensemble review gate infrastructure errors reached limit (${consecutiveGateErrors}/${this.gateErrorLimit}); code was not judged. Last gate output: ${result.comment.slice(0, 500)}`;
+          this.state.failed.add(issue.id);
+          this.releaseClaim(issue.id);
+          this.clearTerminalIssueRuntimeState(issue.id);
+          await this.recordFailureExhausted(issue.id, issue.identifier, reason);
+          await this.fireEscalationSideEffects(
+            issue.id,
+            issue.identifier,
+            reason,
+          );
+        } else {
+          this.scheduleRetry(issue.id, 1, {
+            identifier: issue.identifier,
+            error: `Ensemble review gate infrastructure error (${consecutiveGateErrors}/${this.gateErrorLimit}): ${result.comment.slice(0, 200)}`,
+            delayType: "continuation",
+          });
+        }
       } else {
+        delete this.state.issueGateErrorCounts[issue.id];
         reworkTarget = this.reworkGate(issue.id);
         if (reworkTarget !== null && reworkTarget !== "escalated") {
           this.scheduleRetry(issue.id, 1, {
@@ -2650,10 +2696,21 @@ export class OrchestratorCore {
           issue,
           stageName,
           gateContext,
-          status: result.aggregate === "pass" ? "passed" : "failed",
+          status:
+            result.aggregate === "pass"
+              ? "passed"
+              : result.aggregate === "error"
+                ? "blocked"
+                : "failed",
           aggregate: result.aggregate,
           reworkTarget: reworkTarget === "escalated" ? null : reworkTarget,
-          summary: `Decorrelated gate ${stageName ?? "unnamed"} ${result.aggregate === "pass" ? "passed" : "failed"} for ${issue.identifier}.`,
+          summary: `Decorrelated gate ${stageName ?? "unnamed"} ${
+            result.aggregate === "pass"
+              ? "passed"
+              : result.aggregate === "error"
+                ? "errored"
+                : "failed"
+          } for ${issue.identifier}.`,
         });
       }
       await this.completeDispatcherLease({
@@ -2674,14 +2731,18 @@ export class OrchestratorCore {
           verifierSeparated: gateContext?.verifierSeparated ?? null,
           authoritative:
             gateContext === null ? null : gateContext.mode !== "prototype",
+          status: result.aggregate === "error" ? "blocked" : null,
           reworkTarget: reworkTarget === "escalated" ? null : reworkTarget,
           reworkCount:
             reworkTarget === "escalated"
               ? reworkCountBeforeGate
               : (this.state.issueReworkCounts[issue.id] ?? null),
-          terminal: reworkTarget === "escalated",
+          consecutiveGateErrors,
+          gateErrorLimit: this.gateErrorLimit,
+          terminal: terminal || reworkTarget === "escalated",
           terminalReason:
-            reworkTarget === "escalated" ? "max_rework_exceeded" : null,
+            terminalReason ??
+            (reworkTarget === "escalated" ? "max_rework_exceeded" : null),
         },
       });
     } catch {
@@ -2913,7 +2974,7 @@ export class OrchestratorCore {
     stageName: string | null;
     gateContext: DecorrelatedGateContext;
     status: "passed" | "failed" | "blocked" | "skipped_prototype";
-    aggregate: "pass" | "fail" | null;
+    aggregate: "pass" | "fail" | "error" | null;
     reworkTarget: string | null;
     summary: string;
   }): void {
@@ -2947,6 +3008,7 @@ export class OrchestratorCore {
     delete this.state.issueRightSizingDecisions[issueId];
     delete this.state.issueBudgetEscalations[issueId];
     delete this.state.issuePauseTriageResumes[issueId];
+    delete this.state.issueGateErrorCounts[issueId];
     delete this.state.issueAcSnapshots[issueId];
     delete this.state.loopTraceJournal[issueId];
     delete this.state.continuousFeedback[issueId];
@@ -4121,7 +4183,10 @@ export class OrchestratorCore {
           stageName,
           stage,
         );
-        const gateCycle = this.state.issueReworkCounts[issue.id] ?? 0;
+        const gateCycle = Math.max(
+          this.state.issueReworkCounts[issue.id] ?? 0,
+          this.state.issueGateErrorCounts[issue.id] ?? 0,
+        );
         const gateLeaseId = createDispatcherLeaseId({
           operation: "gate",
           issueId: issue.id,
@@ -5456,11 +5521,16 @@ function toDecorrelatedGateStatus(
   if (metadata.aggregate === "fail") {
     return "failed";
   }
+  if (metadata.aggregate === "error") {
+    return "blocked";
+  }
   return null;
 }
 
-function toGateAggregate(value: unknown): "pass" | "fail" | null {
-  return value === "pass" || value === "fail" ? value : null;
+function toGateAggregate(value: unknown): "pass" | "fail" | "error" | null {
+  return value === "pass" || value === "fail" || value === "error"
+    ? value
+    : null;
 }
 
 function toRightSizingMode(value: unknown): RightSizingMode | null {

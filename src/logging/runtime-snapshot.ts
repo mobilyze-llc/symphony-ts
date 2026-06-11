@@ -132,7 +132,7 @@ export interface RuntimeSnapshotDecorrelatedGateOutcome {
   gate_stage: string | null;
   mode: "prototype" | "thin" | "full";
   status: "passed" | "failed" | "blocked" | "skipped_prototype";
-  aggregate: "pass" | "fail" | null;
+  aggregate: "pass" | "fail" | "error" | null;
   checked_at: string;
   worker_lane: {
     runner: string;

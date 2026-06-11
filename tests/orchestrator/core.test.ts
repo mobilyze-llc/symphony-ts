@@ -4274,6 +4274,7 @@ describe("decorrelated terminal gates", () => {
 
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
     expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+    expect(orchestrator.getState().issueGateErrorCounts["1"]).toBeUndefined();
     expect(orchestrator.getState().decorrelatedGateOutcomes["1"]).toEqual([
       expect.objectContaining({
         mode: "full",
@@ -4284,6 +4285,130 @@ describe("decorrelated terminal gates", () => {
         reworkTarget: "implement",
       }),
     ]);
+  });
+
+  it("records a gate infrastructure error without routing the unit back to implement rework", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "error" as const,
+      results: [],
+      comment: "All lanes failed via cmux-spawn exit code 1",
+    }));
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["mode:full"],
+          }),
+        ],
+      }),
+      runEnsembleGate,
+      gateErrorLimit: 2,
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+    await waitForGateOutcome(orchestrator, "1");
+
+    const state = orchestrator.getState();
+    expect(state.issueStages["1"]).toBe("review_gate");
+    expect(state.issueReworkCounts["1"]).toBeUndefined();
+    expect(state.issueGateErrorCounts["1"]).toBe(1);
+    expect(state.retryAttempts["1"]).toMatchObject({
+      delayType: "continuation",
+      error: expect.stringContaining("infrastructure error"),
+    });
+    expect(state.decorrelatedGateOutcomes["1"]).toEqual([
+      expect.objectContaining({
+        mode: "full",
+        status: "blocked",
+        aggregate: "error",
+        verifierSeparated: true,
+        authoritative: true,
+        reworkTarget: null,
+      }),
+    ]);
+  });
+
+  it("parks loudly after consecutive gate infrastructure errors reach the configured cap", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runJournal: DispatcherRunJournal = [];
+    const comments: string[] = [];
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "error" as const,
+      results: [],
+      comment: "All lanes failed via cmux-spawn exit code 1",
+    }));
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["mode:full"],
+          }),
+        ],
+      }),
+      runEnsembleGate,
+      gateErrorLimit: 2,
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+      writeRunJournalEntry: async (entry) => {
+        runJournal.push(entry);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+    await waitForGateOutcomeCount(orchestrator, "1", 1);
+    await orchestrator.onRetryTimer("1");
+    await waitForGateOutcomeCount(orchestrator, "1", 2);
+
+    const state = orchestrator.getState();
+    expect(runEnsembleGate).toHaveBeenCalledTimes(2);
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.issueStages["1"]).toBeUndefined();
+    expect(state.issueReworkCounts["1"]).toBeUndefined();
+    expect(state.issueGateErrorCounts["1"]).toBeUndefined();
+    expect(comments.join("\n")).toContain(
+      "infrastructure errors reached limit",
+    );
+    expect(comments.join("\n")).toContain("code was not judged");
+    expect(runJournal).toContainEqual(
+      expect.objectContaining({
+        kind: "failure_exhausted",
+        issueId: "1",
+        metadata: expect.objectContaining({
+          reason: expect.stringContaining(
+            "infrastructure errors reached limit",
+          ),
+        }),
+      }),
+    );
+    expect(
+      runJournal.filter(
+        (entry) => entry.kind === "gate_result" && entry.operation === "gate",
+      ),
+    ).toContainEqual(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          aggregate: "error",
+          status: "blocked",
+          terminal: true,
+          terminalReason: "gate_error_limit_exceeded",
+          consecutiveGateErrors: 2,
+          gateErrorLimit: 2,
+          reworkTarget: null,
+        }),
+      }),
+    );
   });
 
   it("replays max-rework production gate failure as terminal after restart", async () => {
@@ -7026,6 +7151,7 @@ function createOrchestrator(overrides?: {
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   postComment?: OrchestratorCoreOptions["postComment"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
+  gateErrorLimit?: OrchestratorCoreOptions["gateErrorLimit"];
   now?: () => Date;
   runJournal?: DispatcherRunJournal;
 }) {
@@ -7088,6 +7214,10 @@ function createOrchestrator(overrides?: {
 
   if (overrides?.timerScheduler !== undefined) {
     options.timerScheduler = overrides.timerScheduler;
+  }
+
+  if (overrides?.gateErrorLimit !== undefined) {
+    options.gateErrorLimit = overrides.gateErrorLimit;
   }
 
   return new OrchestratorCore(options);

@@ -629,12 +629,12 @@ function findReservedLaneIds(
   ].sort();
 }
 
-function reviewerLaneExecutionErrorResult(
+async function reviewerLaneExecutionErrorResult(
   lane: HeadlessReviewerLaneConfig,
   artifactDir: string,
   error: unknown,
-): HeadlessLaneResult {
-  return {
+): Promise<HeadlessLaneResult> {
+  const result: HeadlessLaneResult = {
     laneId: lane.laneId,
     agent: lane.agent,
     role: lane.role,
@@ -648,13 +648,27 @@ function reviewerLaneExecutionErrorResult(
     stderrPath: `${artifactDir}/${lane.laneId}.cli.stderr`,
     message: `Review lane execution failed: ${formatError(error)}`,
   };
+  await writeFile(result.stderrPath ?? "", `${formatError(error)}\n`);
+  await writeFile(
+    result.cliJsonPath ?? "",
+    `${JSON.stringify(
+      {
+        state: "error",
+        message: result.message,
+        artifact_path: null,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return result;
 }
 
-function codexLeadExecutionErrorResult(
+async function codexLeadExecutionErrorResult(
   artifactDir: string,
   error: unknown,
-): HeadlessLaneResult {
-  return {
+): Promise<HeadlessLaneResult> {
+  const result: HeadlessLaneResult = {
     laneId: CODEX_LEAD_LANE_ID,
     agent: "codex",
     role: CODEX_LEAD_ROLE,
@@ -668,6 +682,20 @@ function codexLeadExecutionErrorResult(
     stderrPath: `${artifactDir}/${CODEX_LEAD_LANE_ID}.cli.stderr`,
     message: `Codex lead execution failed: ${formatError(error)}`,
   };
+  await writeFile(result.stderrPath ?? "", `${formatError(error)}\n`);
+  await writeFile(
+    result.cliJsonPath ?? "",
+    `${JSON.stringify(
+      {
+        state: "error",
+        message: result.message,
+        artifact_path: null,
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  return result;
 }
 
 async function parseLaneResult(input: {
