@@ -217,6 +217,7 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "budget_escalation",
   "pause_triage",
   "failure_exhausted",
+  "ac_gate",
   "operator_input_required",
   "continuous_feedback",
 ] as const;

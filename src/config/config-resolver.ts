@@ -80,6 +80,7 @@ export function resolveWorkflowConfig(
   const rateLimitAdmission = asRecord(config.rate_limit_admission);
   const budgetEscalation = asRecord(config.budget_escalation);
   const pauseTriage = asRecord(config.pause_triage);
+  const acGate = asRecord(config.ac_gate);
   const runner = asRecord(config.runner);
   const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
@@ -210,6 +211,9 @@ export function resolveWorkflowConfig(
       maxResumes:
         readPositiveInteger(pauseTriage.max_resumes) ??
         DEFAULT_PAUSE_TRIAGE_MAX_RESUMES,
+    },
+    acGate: {
+      enabled: acGate.enabled === true,
     },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,

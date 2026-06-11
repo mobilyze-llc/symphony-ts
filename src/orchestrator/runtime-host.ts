@@ -12,6 +12,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
 import { promisify } from "node:util";
 
+import { runAcGate } from "../agent/ac-gate.js";
 import { runPauseTriage } from "../agent/pause-triage.js";
 import type {
   AgentRunInput,
@@ -483,6 +484,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           evidence,
         }),
       scheduleDeferred: (task) => void this.enqueue(task),
+      runAcGate: (evidence) =>
+        runAcGate({
+          config: this.config.pauseTriage,
+          evidence,
+        }),
       onIssueDropped: ({ identifier, title, url, reason }) => {
         this.notifier?.notify({
           type: "issue_dropped",
