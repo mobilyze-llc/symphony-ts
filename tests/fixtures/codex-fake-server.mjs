@@ -483,6 +483,31 @@ async function handleMessage(message) {
       return;
     }
 
+    if (scenario === "late-tool-exit") {
+      setTimeout(() => {
+        writeJson({
+          id: "late-tool-1",
+          method: "item/tool/call",
+          params: {
+            toolName: "slow_tool",
+            input: {},
+          },
+        });
+        setTimeout(() => {
+          writeJson({
+            method: "turn/completed",
+            params: {
+              message: "Exiting before tool response",
+            },
+          });
+          setTimeout(() => {
+            process.exit(0);
+          }, 5);
+        }, 5);
+      }, 10);
+      return;
+    }
+
     if (turnCount === 1) {
       setTimeout(() => {
         process.stderr.write("diagnostic from stderr\n");

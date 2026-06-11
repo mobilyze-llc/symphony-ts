@@ -19,6 +19,7 @@ import {
   CodexAppServerClient,
   type CodexAppServerClientError,
   type CodexClientEvent,
+  type CodexDynamicTool,
   detectHeadlessCommandOutputRisk,
   sweepStaleCodexHomes,
 } from "../../src/codex/app-server-client.js";
@@ -1445,6 +1446,99 @@ describe("CodexAppServerClient", () => {
     );
 
     await client.close();
+  });
+
+  it("handles dynamic tool response after child exit without unhandled rejection", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const slowTool: CodexDynamicTool = {
+      name: "slow_tool",
+      description: "A tool that resolves after a delay",
+      execute: () =>
+        new Promise((resolve) => {
+          setTimeout(() => {
+            resolve({ ok: true });
+          }, 100);
+        }),
+    };
+
+    const client = createClient("late-tool-exit", workspace, events, {
+      dynamicTools: [slowTool],
+    });
+    const unhandled: Error[] = [];
+    const onUnhandled = (error: unknown): void => {
+      unhandled.push(error instanceof Error ? error : new Error(String(error)));
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      const result = await client.startSession({
+        prompt: "Late tool call",
+        title: "SYMPH-332: Regression",
+      });
+
+      expect(result.status).toBe("completed");
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 200);
+      });
+
+      // Exactly one drop event, carrying both the drop marker and the
+      // request id — two loose toContainEqual checks could both match a
+      // single unrelated event via objectContaining subset semantics.
+      const dropEvents = events.filter(
+        (event) =>
+          event.event === "other_message" &&
+          typeof event.message === "string" &&
+          event.message.includes("response dropped"),
+      );
+      expect(dropEvents).toHaveLength(1);
+      expect(dropEvents[0]?.message).toContain("request late-tool-1");
+      expect(unhandled).toHaveLength(0);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      await client.close();
+    }
+  });
+
+  it("converts an unserializable successful tool result into a reported failure instead of an unhandled rejection", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const circular: Record<string, unknown> = { ok: true };
+    circular.self = circular;
+    const circularTool: CodexDynamicTool = {
+      // The late-tool-exit fake-server scenario invokes "slow_tool" by name;
+      // this variant resolves instantly so the send races AHEAD of the
+      // child's exit and exercises the serialization-failure path.
+      name: "slow_tool",
+      description: "A tool whose successful result cannot be serialized",
+      execute: () => Promise.resolve(circular),
+    };
+
+    const client = createClient("late-tool-exit", workspace, events, {
+      dynamicTools: [circularTool],
+    });
+    const unhandled: Error[] = [];
+    const onUnhandled = (error: unknown): void => {
+      unhandled.push(error instanceof Error ? error : new Error(String(error)));
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      await client.startSession({
+        prompt: "Circular tool call",
+        title: "SYMPH-332: serialization regression",
+      });
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 200);
+      });
+
+      expect(unhandled).toHaveLength(0);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      await client.close();
+    }
   });
 });
 
