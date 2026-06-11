@@ -46,6 +46,9 @@ import {
   DEFAULT_TERMINAL_STATES,
   DEFAULT_TRACKER_KIND,
   DEFAULT_TURN_TIMEOUT_MS,
+  DEFAULT_WATCHDOG_CIRCUIT_BREAKER,
+  DEFAULT_WATCHDOG_MAX_FILINGS_PER_HOUR,
+  DEFAULT_WATCHDOG_SYSTEMIC_THRESHOLD,
   DEFAULT_WORKSPACE_ROOT,
 } from "./defaults.js";
 import type {
@@ -83,6 +86,7 @@ export function resolveWorkflowConfig(
   const acGate = asRecord(config.ac_gate);
   const specFidelity = asRecord(config.spec_fidelity);
   const admissionCard = asRecord(config.admission_card);
+  const watchdog = asRecord(config.watchdog);
   const runner = asRecord(config.runner);
   const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
@@ -223,6 +227,17 @@ export function resolveWorkflowConfig(
     },
     admissionCard: {
       enabled: admissionCard.enabled === true,
+    },
+    watchdog: {
+      systemicThreshold:
+        readPositiveInteger(watchdog.systemic_threshold) ??
+        DEFAULT_WATCHDOG_SYSTEMIC_THRESHOLD,
+      circuitBreaker:
+        readBoolean(watchdog.circuit_breaker) ??
+        DEFAULT_WATCHDOG_CIRCUIT_BREAKER,
+      maxFilingsPerHour:
+        readPositiveInteger(watchdog.max_filings_per_hour) ??
+        DEFAULT_WATCHDOG_MAX_FILINGS_PER_HOUR,
     },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,

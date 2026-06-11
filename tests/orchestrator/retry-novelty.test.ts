@@ -862,6 +862,11 @@ function createConfig(
       renderIntervalMs: 16,
     },
     admissionCard: { enabled: false },
+    watchdog: {
+      systemicThreshold: 2,
+      circuitBreaker: true,
+      maxFilingsPerHour: 3,
+    },
     stages: stages ?? createThreeStageConfig(),
     escalationState: "Blocked",
   };

@@ -7429,6 +7429,7 @@ function createConfig(overrides?: {
   acGate?: ResolvedWorkflowConfig["acGate"];
   specFidelity?: ResolvedWorkflowConfig["specFidelity"];
   admissionCard?: ResolvedWorkflowConfig["admissionCard"];
+  watchdog?: ResolvedWorkflowConfig["watchdog"];
 }): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
@@ -7489,6 +7490,11 @@ function createConfig(overrides?: {
     acGate: overrides?.acGate ?? { enabled: false },
     specFidelity: overrides?.specFidelity ?? { enabled: false },
     admissionCard: overrides?.admissionCard ?? { enabled: false },
+    watchdog: overrides?.watchdog ?? {
+      systemicThreshold: 2,
+      circuitBreaker: true,
+      maxFilingsPerHour: 3,
+    },
     server: {
       port: null,
       slackNotifyChannel: null,

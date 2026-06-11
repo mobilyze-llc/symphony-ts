@@ -54,6 +54,7 @@ import type {
   RunningEntry,
 } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
+import type { ErrorSignatureClass } from "../errors/signature.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
   type LoopTraceArtifactLocator,
@@ -125,6 +126,10 @@ import {
   loadPersistedRateLimitSnapshot,
   persistRateLimitSnapshot,
 } from "./rate-limit-persistence.js";
+import {
+  type ClusterMember,
+  formatWatchdogTicketBody,
+} from "./signature-cluster.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
 import { writeTrackerIssueFromBoundary } from "./tracker-write.js";
 
@@ -727,7 +732,61 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 reason: input.reason,
               });
             },
+            onSystemicCluster: (input: {
+              signature: string;
+              normalizedText: string;
+              errorClass: string;
+              stageName: string | null;
+              clusterSize: number;
+              issueIdentifiers: string[];
+              breakerOpened: boolean;
+              canFileWatchdogTicket: boolean;
+              members: ClusterMember[];
+            }) => {
+              // Fire the SYSTEMIC Slack alert (once-per-signature, re-alert on growth)
+              _notifier.notify({
+                type: "systemic_cluster_alert",
+                signature: input.signature,
+                normalizedText: input.normalizedText,
+                errorClass: input.errorClass,
+                stageName: input.stageName,
+                clusterSize: input.clusterSize,
+                issueIdentifiers: input.issueIdentifiers,
+                breakerOpened: input.breakerOpened,
+                watchdogTicketFiling: input.canFileWatchdogTicket,
+              });
+
+              // Watchdog ticket filer — best-effort, never blocks the loop
+              if (input.canFileWatchdogTicket) {
+                void this.fileWatchdogTicketBestEffort(input);
+              }
+            },
           }))(this.notifier)
+        : {}),
+      // Watchdog ticket filer without a notifier: the circuit breaker operates
+      // purely inside the SignatureClusterRegistry; the host always wires the
+      // ticket-filing side of onSystemicCluster regardless of whether a Slack
+      // notifier is present. When both notifier and tracker are present the
+      // notifier spread above covers the full path; this branch handles the
+      // tracker-only case where notifier is null.
+      ...(this.notifier === null
+        ? {
+            onSystemicCluster: (input: {
+              signature: string;
+              normalizedText: string;
+              errorClass: string;
+              stageName: string | null;
+              clusterSize: number;
+              issueIdentifiers: string[];
+              breakerOpened: boolean;
+              canFileWatchdogTicket: boolean;
+              members: ClusterMember[];
+            }) => {
+              if (input.canFileWatchdogTicket) {
+                void this.fileWatchdogTicketBestEffort(input);
+              }
+            },
+          }
         : {}),
     };
 
@@ -930,6 +989,97 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private resolveIssueUrlBestEffort(issueId: string): string | null {
     const state = this.orchestrator.getState();
     return state.running[issueId]?.issue.url ?? null;
+  }
+
+  /**
+   * File a watchdog ticket for a SYSTEMIC failure cluster. Best-effort — any
+   * failure is logged and swallowed. Uses the first cluster member's issue ID
+   * to resolve team context from the tracker (SYMPH-398).
+   */
+  private async fileWatchdogTicketBestEffort(input: {
+    signature: string;
+    normalizedText: string;
+    errorClass: string;
+    stageName: string | null;
+    members: ClusterMember[];
+  }): Promise<void> {
+    if (!(this.tracker instanceof LinearTrackerClient)) {
+      return;
+    }
+    const firstMember = input.members[0];
+    if (firstMember === undefined) {
+      return;
+    }
+    try {
+      const tracker = this.tracker;
+
+      // Derive team context: prefer config.tracker fields, fall back to member
+      // issue lookup so the filer works even when teamId is not pre-populated.
+      let teamId = this.config.tracker.teamId;
+      let teamKey = this.config.tracker.teamKey;
+      if (!teamId || !teamKey) {
+        const refs = await tracker.fetchIssueReferencesByIds([
+          firstMember.issueId,
+        ]);
+        const ref = refs[0];
+        if (ref?.teamId && ref.teamKey) {
+          teamId = ref.teamId;
+          teamKey = ref.teamKey;
+        }
+      }
+      if (!teamId || !teamKey) {
+        // Derive team key from the identifier (e.g. "SYMPH-123" → "SYMPH") as a
+        // last resort so simple setups without explicit teamId still work.
+        teamKey ??= firstMember.issueIdentifier.split("-")[0] ?? "";
+        if (!teamId || !teamKey) {
+          await this.logger?.warn(
+            "watchdog_ticket_filing_skipped",
+            "Cannot file watchdog ticket: team context not resolvable.",
+            {
+              outcome: "degraded",
+              signature: input.signature,
+              issue_id: firstMember.issueId,
+            },
+          );
+          return;
+        }
+      }
+
+      const title = `[watchdog] SYSTEMIC failure cluster: ${input.signature}`;
+      const body = formatWatchdogTicketBody({
+        signature: input.signature,
+        normalizedText: input.normalizedText,
+        errorClass: input.errorClass as ErrorSignatureClass,
+        members: input.members,
+        stageName: input.stageName,
+        observedAt: new Date().toISOString(),
+      });
+      const result = await tracker.createWatchdogIssue({
+        teamId,
+        teamKey,
+        title,
+        description: body,
+      });
+      await this.logger?.info(
+        "watchdog_ticket_filed",
+        `Watchdog ticket ${result.created ? "created" : "deduped"}: ${result.identifier}`,
+        {
+          outcome: result.created ? "created" : "deduped",
+          signature: input.signature,
+          identifier: result.identifier,
+        },
+      );
+    } catch (err) {
+      await this.logger?.warn(
+        "watchdog_ticket_filing_failed",
+        "Failed to file watchdog ticket.",
+        {
+          outcome: "degraded",
+          signature: input.signature,
+          reason: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
   }
 
   private findInMemoryLoopTraceByIssueKey(

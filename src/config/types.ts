@@ -177,6 +177,27 @@ export interface WorkflowObservabilityConfig {
   renderIntervalMs: number;
 }
 
+/**
+ * Watchdog L1c configuration (SYMPH-398): cross-ticket signature clustering,
+ * stage circuit breaker, and watchdog ticket filer.
+ */
+export interface WorkflowWatchdogConfig {
+  /**
+   * Minimum number of distinct issues sharing a failure signature before it
+   * is declared SYSTEMIC. Default: 2.
+   */
+  systemicThreshold: number;
+  /**
+   * Whether to open the stage circuit breaker when a signature becomes
+   * SYSTEMIC. Default: true.
+   */
+  circuitBreaker: boolean;
+  /**
+   * Maximum watchdog tickets filed per signature per hour. Default: 3.
+   */
+  maxFilingsPerHour: number;
+}
+
 export const STAGE_TYPES = ["agent", "gate", "terminal"] as const;
 export type StageType = (typeof STAGE_TYPES)[number];
 
@@ -239,6 +260,7 @@ export interface ResolvedWorkflowConfig {
   acGate: WorkflowAcGateConfig;
   specFidelity: WorkflowSpecFidelityConfig;
   admissionCard: WorkflowAdmissionCardConfig;
+  watchdog: WorkflowWatchdogConfig;
   runner: WorkflowRunnerConfig;
   continuousFeedback?: WorkflowContinuousFeedbackConfig;
   codex: WorkflowCodexConfig;

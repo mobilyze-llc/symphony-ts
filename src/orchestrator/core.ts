@@ -86,6 +86,7 @@ import {
   formatReviewFindingsComment,
 } from "./gate-handler.js";
 import { createRightSizingDecision } from "./right-sizing.js";
+import { SignatureClusterRegistry } from "./signature-cluster.js";
 import {
   type IgnoredSetupInstructionCollision,
   type SupervisionFinding,
@@ -381,6 +382,22 @@ export interface OrchestratorCoreOptions {
     stageName: string | null;
     reason: string;
   }) => void;
+  /**
+   * Called when a failure signature becomes SYSTEMIC (SYMPH-398): K distinct
+   * issues share the same normalized signature. Fired once-per-signature and
+   * re-fired when the cluster grows. Fire-and-forget.
+   */
+  onSystemicCluster?: (input: {
+    signature: string;
+    normalizedText: string;
+    errorClass: string;
+    stageName: string | null;
+    clusterSize: number;
+    issueIdentifiers: string[];
+    breakerOpened: boolean;
+    canFileWatchdogTicket: boolean;
+    members: import("./signature-cluster.js").ClusterMember[];
+  }) => void;
 }
 
 export class OrchestratorCore {
@@ -438,6 +455,10 @@ export class OrchestratorCore {
 
   private readonly onGateFailed?: OrchestratorCoreOptions["onGateFailed"];
 
+  private readonly onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
+
+  private readonly signatureClusterRegistry: SignatureClusterRegistry;
+
   private readonly reportedSupervisionFindings = new Set<string>();
 
   private readonly reportedIgnoredSetupInstructionCollisions =
@@ -489,6 +510,12 @@ export class OrchestratorCore {
     this.onHardStopBudget = options.onHardStopBudget;
     this.onEscalationStep = options.onEscalationStep;
     this.onGateFailed = options.onGateFailed;
+    this.onSystemicCluster = options.onSystemicCluster;
+    this.signatureClusterRegistry = new SignatureClusterRegistry({
+      systemicThreshold: options.config.watchdog.systemicThreshold,
+      circuitBreakerEnabled: options.config.watchdog.circuitBreaker,
+      maxFilingsPerHour: options.config.watchdog.maxFilingsPerHour,
+    });
     this.state = createInitialOrchestratorState({
       pollIntervalMs: options.config.polling.intervalMs,
       maxConcurrentAgents: options.config.agent.maxConcurrentAgents,
@@ -787,6 +814,9 @@ export class OrchestratorCore {
         // failure_exhausted alert again if it exhausts retries in this new
         // lifecycle (SYMPH-397).
         this.state.failureExhaustedIds.delete(issue.id);
+        // Clear from signature cluster so a resumed issue re-counts fresh
+        // if it fails again (SYMPH-398).
+        this.signatureClusterRegistry.clearIssueFromCluster(issue.id);
         this.clearResumeRequirement(issue.id);
       } else {
         return false;
@@ -804,6 +834,9 @@ export class OrchestratorCore {
         // Clear exhaustion-dedup marker so the resumed issue starts a fresh
         // exhaustion lifecycle (SYMPH-397).
         this.state.failureExhaustedIds.delete(issue.id);
+        // Clear from signature cluster so a resumed issue re-counts fresh
+        // if it fails again (SYMPH-398).
+        this.signatureClusterRegistry.clearIssueFromCluster(issue.id);
       } else {
         return false;
       }
@@ -3107,6 +3140,10 @@ export class OrchestratorCore {
         delete this.state.issueFailureSignatures[key];
       }
     }
+    // Remove the issue from all signature cluster entries (SYMPH-398).
+    // At terminal cleanup we want the slot freed so a future lifecycle is
+    // re-counted from scratch.
+    this.signatureClusterRegistry.clearIssueFromCluster(issueId);
   }
 
   /**
@@ -4411,6 +4448,41 @@ export class OrchestratorCore {
 
       // Track the issue's current stage
       this.state.issueStages[issue.id] = stageName;
+
+      // Circuit breaker check (SYMPH-398): if the breaker is open for this
+      // stage, park the issue loudly at the dispatch boundary and refuse to
+      // spawn a worker. The breaker resets when the operator acts (resume /
+      // re-dispatch path calls resetCircuitBreaker). This check runs after
+      // stage resolution so we have a real stage name.
+      if (
+        stageName !== null &&
+        this.signatureClusterRegistry.isBreakerOpen(stageName)
+      ) {
+        const breakerEntry =
+          this.signatureClusterRegistry.getBreakerEntry(stageName);
+        const parkReason = `circuit breaker open for stage "${stageName}" (signature ${breakerEntry?.signature ?? "unknown"}): systemic failure cluster detected — operator action required`;
+        this.state.failed.add(issue.id);
+        this.releaseClaim(issue.id);
+        this.clearTerminalIssueRuntimeState(issue.id);
+        void this.fireEscalationSideEffects(
+          issue.id,
+          issue.identifier,
+          parkReason,
+        );
+        void this.recordFailureExhausted(
+          issue.id,
+          issue.identifier,
+          issue.title,
+          parkReason,
+        );
+        console.log(
+          `[orchestrator] ${issue.identifier}: parked at dispatch — circuit breaker open for stage "${stageName}"`,
+        );
+        return {
+          dispatched: false,
+          rightSizingDecision: null,
+        };
+      }
     }
 
     const isFirstDispatch = !this.state.issueFirstDispatchedAt[issue.id];
@@ -5385,6 +5457,38 @@ export class OrchestratorCore {
         signature: incoming.signature,
         class: incoming.class,
       };
+
+      // Cross-ticket signature clustering (SYMPH-398): record this failure in
+      // the registry. Fire onSystemicCluster when the cluster crosses the
+      // threshold — once per signature, re-fire on growth.
+      const clusterResult = this.signatureClusterRegistry.recordFailure({
+        signature: incoming.signature,
+        errorClass: incoming.class,
+        normalizedText: incoming.normalizedText,
+        issueId,
+        issueIdentifier: input.identifier ?? issueId,
+        stageName: stage,
+        now: this.now(),
+      });
+      if (clusterResult.shouldAlert) {
+        try {
+          this.onSystemicCluster?.({
+            signature: clusterResult.signature,
+            normalizedText: clusterResult.normalizedText,
+            errorClass: clusterResult.errorClass,
+            stageName: stage,
+            clusterSize: clusterResult.clusterSize,
+            issueIdentifiers: clusterResult.members.map(
+              (m) => m.issueIdentifier,
+            ),
+            breakerOpened: clusterResult.shouldOpenBreaker,
+            canFileWatchdogTicket: clusterResult.canFileWatchdogTicket,
+            members: clusterResult.members,
+          });
+        } catch {
+          // Cluster callbacks are fire-and-forget; never surface into the loop
+        }
+      }
     }
 
     this.clearRetryEntry(issueId);

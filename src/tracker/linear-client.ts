@@ -13,6 +13,7 @@ import {
   LINEAR_CANDIDATE_ISSUES_QUERY,
   LINEAR_CREATE_COMMENT_MUTATION,
   LINEAR_CREATE_ISSUE_MUTATION,
+  LINEAR_CREATE_ISSUE_WITH_STATE_MUTATION,
   LINEAR_ISSUES_BY_LABELS_QUERY,
   LINEAR_ISSUES_BY_STATES_QUERY,
   LINEAR_ISSUE_DETAILS_BY_IDS_QUERY,
@@ -25,6 +26,7 @@ import {
   LINEAR_ISSUE_UPDATE_MUTATION,
   LINEAR_OPEN_ISSUES_BY_LABELS_QUERY,
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
+  LINEAR_SEARCH_ISSUES_BY_TITLE_AND_TEAM_QUERY,
   LINEAR_WORKFLOW_STATES_QUERY,
 } from "./linear-queries.js";
 import type { IssueStateSnapshot, IssueTracker } from "./tracker.js";
@@ -108,7 +110,24 @@ interface LinearCommentCreateData {
 interface LinearIssueCreateData {
   issueCreate?: {
     success?: boolean;
-    issue?: { id?: string; identifier?: string; title?: string };
+    issue?: {
+      id?: string;
+      identifier?: string;
+      title?: string;
+      state?: { name?: string };
+    };
+  };
+}
+
+interface LinearSearchIssuesByTitleData {
+  issues?: {
+    nodes?: Array<{
+      id?: string;
+      identifier?: string;
+      title?: string;
+      description?: string | null;
+      state?: { name?: string; type?: string } | null;
+    }>;
   };
 }
 
@@ -673,6 +692,120 @@ export class LinearTrackerClient implements IssueTracker {
     };
     this.parentCache.set(issueId, result);
     return result;
+  }
+
+  /**
+   * File a watchdog ticket (SYMPH-398). Resolves the Triage state ID for the
+   * team; falls back to Backlog if Triage is not present. Deduplicates by
+   * exact title match within the team — if an open issue with the same title
+   * exists, returns it without creating a new one.
+   *
+   * Never auto-releases: state resolution intentionally targets Triage/Backlog
+   * so the ticket stays visible until an operator acts.
+   */
+  async createWatchdogIssue(input: {
+    teamId: string;
+    teamKey: string;
+    title: string;
+    description: string;
+  }): Promise<{
+    id: string;
+    identifier: string;
+    title: string;
+    created: boolean;
+  }> {
+    // 1. Dedup by title — look for an existing non-terminal open issue
+    const existingResponse =
+      await this.postGraphql<LinearSearchIssuesByTitleData>(
+        LINEAR_SEARCH_ISSUES_BY_TITLE_AND_TEAM_QUERY,
+        { teamKey: input.teamKey, title: input.title, first: 5 },
+      );
+    const existingNodes = existingResponse.issues?.nodes ?? [];
+    for (const node of existingNodes) {
+      if (
+        typeof node?.id === "string" &&
+        typeof node.identifier === "string" &&
+        typeof node.title === "string"
+      ) {
+        const stateType = node.state?.type;
+        // Skip completed/cancelled issues so we always file fresh for new
+        // cluster generations.
+        if (stateType !== "completed" && stateType !== "cancelled") {
+          return {
+            id: node.id,
+            identifier: node.identifier,
+            title: node.title,
+            created: false,
+          };
+        }
+      }
+    }
+
+    // 2. Resolve target state: Triage first, then Backlog
+    const statesResponse = await this.postGraphql<LinearWorkflowStatesData>(
+      LINEAR_WORKFLOW_STATES_QUERY,
+      { teamId: input.teamKey },
+    );
+    const states = statesResponse.workflowStates?.nodes ?? [];
+    let targetStateId: string | null = null;
+    for (const preferred of ["Triage", "Backlog"]) {
+      const found = states.find(
+        (s) =>
+          typeof s.name === "string" &&
+          s.name.toLowerCase() === preferred.toLowerCase(),
+      );
+      if (found !== undefined && typeof found.id === "string") {
+        targetStateId = found.id;
+        break;
+      }
+    }
+
+    if (targetStateId === null) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        `Could not find Triage or Backlog state for team "${input.teamKey}".`,
+        { details: { states } },
+      );
+    }
+
+    // 3. Create the issue
+    const response = await this.postGraphql<LinearIssueCreateData>(
+      LINEAR_CREATE_ISSUE_WITH_STATE_MUTATION,
+      {
+        teamId: input.teamId,
+        title: input.title,
+        stateId: targetStateId,
+        description: input.description,
+      },
+    );
+
+    if (response.issueCreate?.success !== true) {
+      throw new TrackerError(
+        ERROR_CODES.linearGraphqlErrors,
+        "Linear issueCreate (watchdog) mutation did not return success.",
+        { details: response },
+      );
+    }
+
+    const issue = response.issueCreate.issue;
+    if (
+      typeof issue?.id !== "string" ||
+      typeof issue.identifier !== "string" ||
+      typeof issue.title !== "string"
+    ) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear issueCreate (watchdog) returned incomplete issue data.",
+        { details: response },
+      );
+    }
+
+    return {
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      created: true,
+    };
   }
 
   async executeRawGraphql(
