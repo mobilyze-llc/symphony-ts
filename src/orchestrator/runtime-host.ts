@@ -96,6 +96,7 @@ import {
 } from "../policy/hard-stops.js";
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
+import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
 import type { IssueTracker } from "../tracker/tracker.js";
 import { getDisplayVersion } from "../version.js";
@@ -3337,10 +3338,8 @@ async function readCodexSessionLogsForIssue(
   workspaceRoot: string,
   workspaceKey: string,
 ): Promise<CodexSessionLogEntry[]> {
-  const artifactRoot = join(
+  const artifactRoot = getDurableCodexSessionArtifactDirectory(
     workspaceRoot,
-    ".symphony",
-    "codex-sessions",
     workspaceKey,
   );
   try {

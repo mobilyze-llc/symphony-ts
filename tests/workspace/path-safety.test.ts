@@ -8,6 +8,7 @@ import {
   assertWorkspacePathWithinRoot,
   resolveWorkspacePath,
   sanitizeWorkspaceKey,
+  toWorkspaceArtifactKey,
   validateWorkspaceCwd,
 } from "../../src/workspace/path-safety.js";
 
@@ -17,6 +18,22 @@ describe("workspace path safety", () => {
       "issue_123_needs_review",
     );
     expect(sanitizeWorkspaceKey("你好 world")).toBe("___world");
+    expect(sanitizeWorkspaceKey("../unsafe-issue-id")).toBe(
+      ".._unsafe-issue-id",
+    );
+  });
+
+  it("escapes workspace keys into artifact path segments", () => {
+    expect(toWorkspaceArtifactKey(".._unsafe-issue-id")).toBe(
+      "%2E%2E_unsafe-issue-id",
+    );
+    expect(toWorkspaceArtifactKey("ISSUE-1")).toBe("ISSUE-1");
+
+    expect(() => toWorkspaceArtifactKey("../unsafe")).toThrowError(
+      expect.objectContaining({
+        code: ERROR_CODES.workspacePathInvalid,
+      }),
+    );
   });
 
   it("builds an absolute workspace path under the configured root", () => {

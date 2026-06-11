@@ -49,7 +49,10 @@ import type {
   IssueStateSnapshot,
   IssueTracker,
 } from "../../src/tracker/tracker.js";
-import { sanitizeWorkspaceKey } from "../../src/workspace/path-safety.js";
+import {
+  sanitizeWorkspaceKey,
+  toWorkspaceArtifactKey,
+} from "../../src/workspace/path-safety.js";
 import { WorkspaceManager } from "../../src/workspace/workspace-manager.js";
 
 beforeEach(() => {
@@ -892,12 +895,13 @@ describe("OrchestratorRuntimeHost", () => {
   it("reads durable Codex session logs from the sanitized workspace key", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-artifact-key-"));
     try {
-      const unsafeIssueId = "unsafe issue/id";
+      const unsafeIssueId = "../unsafe-issue-id";
       const workspaceKey = sanitizeWorkspaceKey(unsafeIssueId);
+      const artifactKey = toWorkspaceArtifactKey(workspaceKey);
       const safeArtifactPath = join(
         workspaceRoot,
         ".symphony/codex-sessions",
-        workspaceKey,
+        artifactKey,
         "home-a/sessions/2026/rollout-safe.jsonl",
       );
       const rawArtifactPath = join(
@@ -955,6 +959,70 @@ describe("OrchestratorRuntimeHost", () => {
           bytes: 14,
         },
       ]);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("loads cold terminal details for issue ids whose workspace key contains dot-dot", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-loop-dotdot-"));
+    try {
+      const issueId = "../unsafe-issue-id";
+      const issueIdentifier = "ISSUE-UNSAFE-DOTDOT";
+      const workspaceKey = sanitizeWorkspaceKey(issueId);
+      const artifactKey = toWorkspaceArtifactKey(workspaceKey);
+
+      await writeLoopTraceJournal(
+        {
+          workspaceRoot,
+          workspaceKey,
+        },
+        [
+          {
+            sequence: 1,
+            timestamp: "2026-03-06T00:02:00.000Z",
+            kind: "stage_transition",
+            issueId,
+            issueIdentifier,
+            stage: "implement",
+            attempt: null,
+            sessionId: "thread-dotdot",
+            summary: "Stage implement moved to released.",
+            stageTransition: {
+              from: "implement",
+              to: "implement",
+              status: "released",
+            },
+          },
+        ],
+      );
+
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const coldHost = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({ candidates: [] }),
+        agentRunner: new FakeAgentRunner(),
+        now: () => new Date("2026-03-06T00:02:05.000Z"),
+      });
+
+      const details = await coldHost.getIssueDetails(issueIdentifier);
+
+      expect(details).toMatchObject({
+        issue_id: issueId,
+        issue_identifier: issueIdentifier,
+        status: "released",
+        loop_trace_journal: {
+          path: join(
+            workspaceRoot,
+            ".symphony/loop-traces",
+            `${artifactKey}.jsonl`,
+          ),
+          total_entries: 1,
+          stored_entries: 1,
+          truncated: false,
+        },
+      });
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
     }

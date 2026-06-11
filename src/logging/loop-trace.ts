@@ -12,6 +12,7 @@ import {
   type LoopTraceToolAction,
   type LoopTraceWorkerExit,
 } from "../domain/model.js";
+import { toWorkspaceArtifactKey } from "../workspace/path-safety.js";
 
 export const LOOP_TRACE_JOURNAL_MAX_ENTRIES = 200;
 export const LOOP_TRACE_PREVIEW_MAX_ENTRIES = 5;
@@ -155,7 +156,7 @@ export function getLoopTraceArtifactPath(
   return join(
     locator.workspaceRoot,
     LOOP_TRACE_ARTIFACT_DIR,
-    `${locator.workspaceKey}.jsonl`,
+    `${toWorkspaceArtifactKey(locator.workspaceKey)}.jsonl`,
   );
 }
 
@@ -170,7 +171,12 @@ export function getLoopTraceIssueIndexPath(workspaceRoot: string): string {
 export async function readLoopTraceJournal(
   locator: LoopTraceArtifactLocator,
 ): Promise<LoopTraceJournal> {
-  const artifactPath = getLoopTraceArtifactPath(locator);
+  return readLoopTraceJournalFile(getLoopTraceArtifactPath(locator));
+}
+
+async function readLoopTraceJournalFile(
+  artifactPath: string,
+): Promise<LoopTraceJournal> {
   let raw: string;
   try {
     raw = await fs.readFile(artifactPath, "utf8");
@@ -241,10 +247,7 @@ export async function findLoopTraceJournalByIssueIdentifier(
     LOOP_TRACE_ARTIFACT_DIR,
     indexed.artifact,
   );
-  const journal = await readLoopTraceJournal({
-    workspaceRoot,
-    workspaceKey: indexed.artifact.slice(0, -".jsonl".length),
-  });
+  const journal = await readLoopTraceJournalFile(artifactPath);
   if (journal.some((entry) => entry.issueIdentifier === issueIdentifier)) {
     return {
       artifactPath,
