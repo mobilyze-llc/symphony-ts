@@ -2185,7 +2185,11 @@ describe("orchestrator core", () => {
             mcpServers: {},
             timeoutMs: null,
             concurrency: null,
-            transitions: { onComplete: "implement", onRework: null },
+            transitions: {
+              onComplete: "implement",
+              onRework: null,
+              onApprove: null,
+            },
           },
           implement: {
             type: "agent" as const,
@@ -2202,7 +2206,7 @@ describe("orchestrator core", () => {
             mcpServers: {},
             timeoutMs: null,
             concurrency: null,
-            transitions: { onComplete: null, onRework: null },
+            transitions: { onComplete: null, onRework: null, onApprove: null },
           },
         },
       },
