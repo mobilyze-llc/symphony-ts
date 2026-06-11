@@ -56,8 +56,6 @@ export interface SignatureClusterEntry {
    * fires when current size > lastAlertSize.
    */
   lastAlertSize: number;
-  /** Whether the circuit breaker is open for this signature. */
-  breakerOpen: boolean;
 }
 
 export interface CircuitBreakerEntry {
@@ -144,7 +142,6 @@ export class SignatureClusterRegistry {
         normalizedText,
         members: new Map(),
         lastAlertSize: 0,
-        breakerOpen: false,
       };
       this.clusters.set(signature, entry);
     }
@@ -161,18 +158,27 @@ export class SignatureClusterRegistry {
     const clusterSize = entry.members.size;
     const isSystemic = clusterSize >= this.systemicThreshold;
     const shouldAlert = isSystemic && clusterSize > entry.lastAlertSize;
+
+    // Breaker reopening is decoupled from the alert-once-on-growth gate.
+    // A recurrence that keeps the cluster systemic must reopen the breaker
+    // even when no new alert is due (e.g. canary resumed → recurred at the
+    // same cluster size where lastAlertSize was already set). The sole source
+    // of breaker state is stageBreakers; per-entry flags are not used.
+    const currentBreaker =
+      stageName !== null ? this.stageBreakers.get(stageName) : undefined;
+    const stageHasBreakerForThisSignature =
+      currentBreaker !== undefined && currentBreaker.signature === signature;
     const shouldOpenBreaker =
-      shouldAlert &&
+      isSystemic &&
       this.circuitBreakerEnabled &&
       stageName !== null &&
-      !entry.breakerOpen;
+      !stageHasBreakerForThisSignature;
 
     if (shouldAlert) {
       entry.lastAlertSize = clusterSize;
     }
 
     if (shouldOpenBreaker && stageName !== null) {
-      entry.breakerOpen = true;
       const breakerEntry: CircuitBreakerEntry = {
         stageName,
         signature,
@@ -218,20 +224,12 @@ export class SignatureClusterRegistry {
 
   /**
    * Reset the circuit breaker for a single stage (full close, not half-open).
-   * The corresponding signature's `breakerOpen` flag is also cleared so the
-   * breaker can reopen on a subsequent recurrence and re-alerts on growth
-   * remain possible.
+   * Breaker state lives exclusively in stageBreakers; deleting the entry is
+   * sufficient. The cluster entry's lastAlertSize is untouched so re-growth
+   * past the current size triggers a fresh SYSTEMIC alert.
    */
   resetCircuitBreaker(stageName: string): void {
-    const breaker = this.stageBreakers.get(stageName);
-    if (breaker === undefined) {
-      return;
-    }
     this.stageBreakers.delete(stageName);
-    const entry = this.clusters.get(breaker.signature);
-    if (entry !== undefined) {
-      entry.breakerOpen = false;
-    }
   }
 
   /**
@@ -257,10 +255,17 @@ export class SignatureClusterRegistry {
    * Remove an issue from all cluster entries. Called ONLY on resume /
    * re-dispatch (never at terminal park) so a resumed issue is re-counted
    * fresh while a parked issue keeps counting toward SYSTEMIC.
+   *
+   * lastAlertSize is clamped down to the new membership size so that when the
+   * resumed issue recurs and the cluster grows back to its previous size, the
+   * growth-based re-alert fires again (Fix 1: canary recurrence re-alerting).
    */
   clearIssueFromCluster(issueId: string): void {
     for (const entry of this.clusters.values()) {
-      entry.members.delete(issueId);
+      if (entry.members.delete(issueId)) {
+        // Clamp lastAlertSize so re-growth past the shrunken size re-alerts.
+        entry.lastAlertSize = Math.min(entry.lastAlertSize, entry.members.size);
+      }
     }
   }
 

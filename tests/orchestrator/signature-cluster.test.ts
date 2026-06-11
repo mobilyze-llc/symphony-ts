@@ -190,27 +190,31 @@ describe("SignatureClusterRegistry — circuit breaker lifecycle", () => {
     const resetStages = reg.resetBreakersForIssue("id-1");
     expect(resetStages).toEqual(["implement"]);
     expect(reg.isBreakerOpen("implement")).toBe(false);
-    // breakerOpen flag is cleared so the breaker can reopen.
-    expect(reg.getClusters().get(sigA.signature)?.breakerOpen).toBe(false);
 
     // Half-open canary: a recurrence of the same signature re-crosses
-    // threshold and reopens the breaker through the normal path.
+    // threshold and reopens the breaker through the normal path. With the
+    // decoupled-reopening fix, the breaker fires as soon as the cluster is
+    // systemic again and the stage is clear — on the id-1 recurrence itself
+    // (cluster = {id-1, id-2}, size 2 >= threshold, no breaker on stage).
     reg.clearIssueFromCluster("id-1"); // resume also re-counts the issue fresh
-    reg.recordFailure({
+    const canary = reg.recordFailure({
       ...sigA,
       issueId: "id-1",
       issueIdentifier: "SYMPH-1",
       stageName: "implement",
       now: atOffset(2 * MIN),
     });
-    const reopened = reg.recordFailure({
+    expect(canary.shouldOpenBreaker).toBe(true);
+    expect(reg.isBreakerOpen("implement")).toBe(true);
+    // A further failure with the same (or a new) issue does not double-open.
+    const further = reg.recordFailure({
       ...sigB,
       issueId: "id-3",
       issueIdentifier: "SYMPH-3",
       stageName: "implement",
       now: atOffset(3 * MIN),
     });
-    expect(reopened.shouldOpenBreaker).toBe(true);
+    expect(further.shouldOpenBreaker).toBe(false); // breaker already open
     expect(reg.isBreakerOpen("implement")).toBe(true);
   });
 
@@ -307,6 +311,145 @@ describe("SignatureClusterRegistry — circuit breaker lifecycle", () => {
       now: atOffset(3 * MIN),
     });
     expect(reg.getBreakerEntry("implement")?.signature).toBe(sigOom.signature);
+  });
+
+  it("resume canary recurrence reopens the breaker even when cluster returns to the previously-alerted size (Fix 1+2)", () => {
+    // Regression: resume shrinks membership but does not lower lastAlertSize.
+    // When the canary recurs the cluster returns to size 2 which is NOT > 2,
+    // so shouldAlert was false; and the old code gated shouldOpenBreaker on
+    // shouldAlert, so the breaker stayed closed. Both fixes together ensure:
+    //   (a) lastAlertSize is clamped on clear, so re-growth re-alerts, and
+    //   (b) breaker reopening is decoupled from the alert gate.
+    //
+    // Note: sigA and sigB normalize to the same signature (verified above), so
+    // id-1 (sigA) and id-2 (sigB) belong to the same cluster. After clearing
+    // id-1, the cluster shrinks to {id-2} size=1. When id-1 recurs it is the
+    // *first* call that re-crosses the threshold (size becomes 2 again), so the
+    // alert and breaker reopen on that call, not on a subsequent one.
+    const reg = new SignatureClusterRegistry({
+      systemicThreshold: 2,
+      circuitBreakerEnabled: true,
+    });
+    const sigA = normalized(EPERM_RAW_A);
+    const sigB = normalized(EPERM_RAW_B);
+    expect(sigA.signature).toBe(sigB.signature); // same cluster
+
+    // id-1 + id-2 open the breaker; lastAlertSize = 2.
+    reg.recordFailure({
+      ...sigA,
+      issueId: "id-1",
+      issueIdentifier: "SYMPH-1",
+      stageName: "implement",
+      now: T0,
+    });
+    reg.recordFailure({
+      ...sigB,
+      issueId: "id-2",
+      issueIdentifier: "SYMPH-2",
+      stageName: "implement",
+      now: atOffset(MIN),
+    });
+    expect(reg.isBreakerOpen("implement")).toBe(true);
+
+    // Operator resumes id-1: clear + reset breaker. Cluster now has {id-2}
+    // size=1; lastAlertSize is clamped to 1 (was 2).
+    reg.resetBreakersForIssue("id-1");
+    reg.clearIssueFromCluster("id-1");
+    expect(reg.isBreakerOpen("implement")).toBe(false);
+    expect(reg.getClusters().get(sigA.signature)?.lastAlertSize).toBe(1);
+
+    // id-1 fails again — cluster grows from 1 → 2. shouldAlert fires (2 > 1).
+    // Breaker is decoupled from the alert gate, so it also reopens here even
+    // though under the old code it would not (shouldOpenBreaker was gated on
+    // shouldAlert which was false when size == lastAlertSize == 2 pre-fix).
+    const canary = reg.recordFailure({
+      ...sigA,
+      issueId: "id-1",
+      issueIdentifier: "SYMPH-1",
+      stageName: "implement",
+      now: atOffset(2 * MIN),
+    });
+    expect(canary.shouldAlert).toBe(true);
+    expect(canary.shouldOpenBreaker).toBe(true);
+    expect(reg.isBreakerOpen("implement")).toBe(true);
+  });
+
+  it("displaced signature can reopen the breaker after reset (Fix 2: per-stage truth)", () => {
+    // Regression: when signature B overwrites signature A's breaker on a stage,
+    // A's entry kept breakerOpen=true. After reset, A could never reopen.
+    // With the single-source-of-truth refactor, openness is derived exclusively
+    // from stageBreakers, so A can always reopen once the stage is clear.
+    const reg = new SignatureClusterRegistry({
+      systemicThreshold: 2,
+      circuitBreakerEnabled: true,
+    });
+    const sigEperm = normalized(EPERM_RAW_A);
+    const sigOom = normalized("FATAL: JavaScript heap out of memory");
+
+    // Sig A (eperm) opens the breaker first.
+    reg.recordFailure({
+      ...sigEperm,
+      issueId: "id-1",
+      issueIdentifier: "SYMPH-1",
+      stageName: "implement",
+      now: T0,
+    });
+    reg.recordFailure({
+      ...sigEperm,
+      issueId: "id-2",
+      issueIdentifier: "SYMPH-2",
+      stageName: "implement",
+      now: atOffset(MIN),
+    });
+    expect(reg.getBreakerEntry("implement")?.signature).toBe(
+      sigEperm.signature,
+    );
+
+    // Sig B (OOM) crosses threshold and displaces A from the stage breaker.
+    reg.recordFailure({
+      ...sigOom,
+      issueId: "id-3",
+      issueIdentifier: "SYMPH-3",
+      stageName: "implement",
+      now: atOffset(2 * MIN),
+    });
+    reg.recordFailure({
+      ...sigOom,
+      issueId: "id-4",
+      issueIdentifier: "SYMPH-4",
+      stageName: "implement",
+      now: atOffset(3 * MIN),
+    });
+    expect(reg.getBreakerEntry("implement")?.signature).toBe(sigOom.signature);
+
+    // Operator resets the breaker (e.g. resumes id-3).
+    reg.resetBreakersForIssue("id-3");
+    expect(reg.isBreakerOpen("implement")).toBe(false);
+
+    // Now a new issue fails with sig A. The stage is clear, so sig A must be
+    // able to reopen the breaker — the displaced-entry bug would block this.
+    reg.clearIssueFromCluster("id-1");
+    reg.clearIssueFromCluster("id-2");
+    reg.recordFailure({
+      ...sigEperm,
+      issueId: "id-1",
+      issueIdentifier: "SYMPH-1",
+      stageName: "implement",
+      now: atOffset(4 * MIN),
+    });
+    const reopened = reg.recordFailure({
+      ...sigEperm,
+      issueId: "id-2",
+      issueIdentifier: "SYMPH-2",
+      stageName: "implement",
+      now: atOffset(5 * MIN),
+    });
+
+    expect(reopened.shouldOpenBreaker).toBe(true);
+    expect(reg.isBreakerOpen("implement")).toBe(true);
+    expect(reg.getBreakerEntry("implement")?.signature).toBe(
+      sigEperm.signature,
+    );
   });
 });
 
