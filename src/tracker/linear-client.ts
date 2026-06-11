@@ -580,7 +580,7 @@ export class LinearTrackerClient implements IssueTracker {
   ): Promise<void> {
     const statesResponse = await this.postGraphql<LinearWorkflowStatesData>(
       LINEAR_WORKFLOW_STATES_QUERY,
-      { teamId: teamKey },
+      { teamKey },
     );
 
     const states = statesResponse.workflowStates?.nodes;
@@ -744,7 +744,7 @@ export class LinearTrackerClient implements IssueTracker {
     // 2. Resolve target state: Triage first, then Backlog
     const statesResponse = await this.postGraphql<LinearWorkflowStatesData>(
       LINEAR_WORKFLOW_STATES_QUERY,
-      { teamId: input.teamKey },
+      { teamKey: input.teamKey },
     );
     const states = statesResponse.workflowStates?.nodes ?? [];
     let targetStateId: string | null = null;
@@ -764,7 +764,7 @@ export class LinearTrackerClient implements IssueTracker {
       throw new TrackerError(
         ERROR_CODES.linearUnknownPayload,
         `Could not find Triage or Backlog state for team "${input.teamKey}".`,
-        { details: { states } },
+        { details: { teamKey: input.teamKey, stateCount: states.length } },
       );
     }
 

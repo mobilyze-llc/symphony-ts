@@ -214,8 +214,6 @@ export interface SystemicClusterAlertEvent {
   type: "systemic_cluster_alert";
   /** 7-char signature hash. */
   signature: string;
-  /** Normalized error text (sanitized). */
-  normalizedText: string;
   /** Failure class: permanent | transient | unknown. */
   errorClass: string;
   /** Affected stage name, or null if unknown. */
@@ -864,7 +862,11 @@ export function formatNotification(
       if (event.watchdogTicketFiling) {
         parts.push(":ticket: Watchdog ticket being filed");
       }
-      parts.push("```", event.normalizedText.slice(0, 240), "```", version);
+      // The raw normalized error text is deliberately omitted here: it can
+      // carry secrets or adversarial content from worker output. The signature
+      // hash + class + affected issues are the operator triage signal; the raw
+      // text lives on the linked member issues (SYMPH-398).
+      parts.push(version);
       return { text: parts.join("\n") };
     }
   }

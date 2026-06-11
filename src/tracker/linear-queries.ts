@@ -101,8 +101,8 @@ export const LINEAR_ISSUE_STATES_BY_IDS_QUERY = `
 `.trim();
 
 export const LINEAR_WORKFLOW_STATES_QUERY = `
-  query SymphonyWorkflowStates($teamId: String!) {
-    workflowStates(filter: { team: { key: { eq: $teamId } } }) {
+  query SymphonyWorkflowStates($teamKey: String!) {
+    workflowStates(filter: { team: { key: { eq: $teamKey } } }) {
       nodes {
         id
         name

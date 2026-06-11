@@ -6,6 +6,7 @@ import type {
 } from "../../src/config/types.js";
 import type { DispatcherRunJournal, Issue } from "../../src/domain/model.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
+import { normalizeErrorSignature } from "../../src/errors/signature.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
@@ -363,6 +364,134 @@ describe("orchestrator core", () => {
       dueAtMs: Date.parse("2026-03-06T00:00:06.000Z"),
     });
     expect(timers.scheduled[0]?.delayMs).toBe(1_000);
+  });
+
+  it("fires onSystemicCluster when two distinct issues fail with the same signature (SYMPH-398 wiring)", async () => {
+    const calls: Array<{
+      signature: string;
+      clusterSize: number;
+      issueIdentifiers: string[];
+      canFileWatchdogTicket: boolean;
+    }> = [];
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2" }),
+      ],
+      statesById: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      timerScheduler: createFakeTimerScheduler(),
+      onSystemicCluster: (input) => {
+        calls.push({
+          signature: input.signature,
+          clusterSize: input.clusterSize,
+          issueIdentifiers: input.issueIdentifiers,
+          canFileWatchdogTicket: input.canFileWatchdogTicket,
+        });
+      },
+    });
+
+    await orchestrator.pollTick();
+    // The same deterministic failure reason for both issues normalizes to one
+    // signature, so the second distinct issue tips the cluster to SYSTEMIC.
+    const reason =
+      "EPERM: operation not permitted, open '.git/index.lock' (permanent)";
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason,
+      endedAt: new Date("2026-03-06T00:00:05.000Z"),
+    });
+    expect(calls).toHaveLength(0); // one distinct issue — not systemic yet
+
+    await orchestrator.onWorkerExit({
+      issueId: "2",
+      outcome: "abnormal",
+      reason,
+      endedAt: new Date("2026-03-06T00:00:06.000Z"),
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.clusterSize).toBe(2);
+    expect(calls[0]?.issueIdentifiers.sort()).toEqual(["ISSUE-1", "ISSUE-2"]);
+    expect(calls[0]?.canFileWatchdogTicket).toBe(true);
+  });
+
+  it("recordWatchdogFiling feeds the rate limiter so subsequent alerts report canFile=false (SYMPH-398)", async () => {
+    const calls: Array<{ canFileWatchdogTicket: boolean }> = [];
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2" }),
+        createIssue({ id: "3", identifier: "ISSUE-3" }),
+      ],
+      statesById: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+        { id: "3", identifier: "ISSUE-3", state: "In Progress" },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        agent: { maxConcurrentAgents: 3 },
+        watchdog: {
+          systemicThreshold: 2,
+          circuitBreaker: true,
+          maxFilingsPerHour: 1,
+        },
+      }),
+      timerScheduler: createFakeTimerScheduler(),
+      onSystemicCluster: (input) => {
+        calls.push({ canFileWatchdogTicket: input.canFileWatchdogTicket });
+      },
+    });
+
+    await orchestrator.pollTick();
+    const reason =
+      "EPERM: operation not permitted, open '.git/index.lock' (permanent)";
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason,
+      endedAt: new Date("2026-03-06T00:00:05.000Z"),
+    });
+    await orchestrator.onWorkerExit({
+      issueId: "2",
+      outcome: "abnormal",
+      reason,
+      endedAt: new Date("2026-03-06T00:00:06.000Z"),
+    });
+    // First systemic alert: filing is permitted.
+    expect(calls.at(-1)?.canFileWatchdogTicket).toBe(true);
+
+    // Simulate the host having filed the ticket (the wiring the runtime host
+    // performs after a successful createWatchdogIssue). The orchestrator
+    // computes the signature from the formatted worker-exit reason, so the
+    // recorded filing must use the same derivation to land on the same bucket.
+    const filedSignature = normalizeErrorSignature(
+      `worker exited: ${reason}`,
+    ).signature;
+    orchestrator.recordWatchdogFiling({
+      signature: filedSignature,
+      issueIdentifier: "WATCH-1",
+    });
+
+    // A third distinct issue grows the cluster → re-alert, but with the rate
+    // limit now consumed the alert reports canFile=false.
+    await orchestrator.onWorkerExit({
+      issueId: "3",
+      outcome: "abnormal",
+      reason,
+      endedAt: new Date("2026-03-06T00:00:07.000Z"),
+    });
+    expect(calls.at(-1)?.canFileWatchdogTicket).toBe(false);
   });
 
   it("records a hard_stop_trigger journal entry and does not continue a paused unit", async () => {
@@ -7299,6 +7428,7 @@ function createOrchestrator(overrides?: {
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   postComment?: OrchestratorCoreOptions["postComment"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
+  onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
   now?: () => Date;
   runJournal?: DispatcherRunJournal;
 }) {
@@ -7357,6 +7487,10 @@ function createOrchestrator(overrides?: {
 
   if (overrides?.postComment !== undefined) {
     options.postComment = overrides.postComment;
+  }
+
+  if (overrides?.onSystemicCluster !== undefined) {
+    options.onSystemicCluster = overrides.onSystemicCluster;
   }
 
   if (overrides?.timerScheduler !== undefined) {

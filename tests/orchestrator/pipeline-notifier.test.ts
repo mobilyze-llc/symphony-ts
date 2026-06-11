@@ -953,6 +953,46 @@ describe("formatNotification", () => {
     expect(titleBlock.text.text).toBe("*Add pagination*");
     expect(titleBlock.text.text).not.toContain("View in Linear");
   });
+
+  it("formats systemic_cluster_alert with breaker + watchdog and no raw error text", () => {
+    const result = formatNotification({
+      type: "systemic_cluster_alert",
+      signature: "abc1234",
+      errorClass: "permanent",
+      stageName: "implement",
+      clusterSize: 3,
+      issueIdentifiers: ["SYMPH-1", "SYMPH-2", "SYMPH-3"],
+      breakerOpened: true,
+      watchdogTicketFiling: true,
+    });
+    expect(result.text).toContain("SYSTEMIC failure cluster");
+    expect(result.text).toContain("abc1234");
+    expect(result.text).toContain("permanent");
+    expect(result.text).toContain("stage `implement`");
+    expect(result.text).toContain("3 affected issues");
+    expect(result.text).toContain("SYMPH-1, SYMPH-2, SYMPH-3");
+    expect(result.text).toContain("Circuit breaker OPENED");
+    expect(result.text).toContain("Watchdog ticket being filed");
+  });
+
+  it("systemic_cluster_alert omits breaker/watchdog lines when both false", () => {
+    const result = formatNotification({
+      type: "systemic_cluster_alert",
+      signature: "def5678",
+      errorClass: "unknown",
+      stageName: null,
+      clusterSize: 2,
+      issueIdentifiers: ["SYMPH-9", "SYMPH-10"],
+      breakerOpened: false,
+      watchdogTicketFiling: false,
+    });
+    expect(result.text).toContain("unknown stage");
+    expect(result.text).not.toContain("Circuit breaker OPENED");
+    expect(result.text).not.toContain("Watchdog ticket being filed");
+    // The raw normalized error text must never be embedded in the Slack
+    // message — only the hash + class + affected issues are the egress surface.
+    expect(result.text).not.toContain("```");
+  });
 });
 
 describe("PipelineNotifier", () => {

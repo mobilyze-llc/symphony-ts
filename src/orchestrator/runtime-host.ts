@@ -734,7 +734,6 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             },
             onSystemicCluster: (input: {
               signature: string;
-              normalizedText: string;
               errorClass: string;
               stageName: string | null;
               clusterSize: number;
@@ -747,7 +746,6 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               _notifier.notify({
                 type: "systemic_cluster_alert",
                 signature: input.signature,
-                normalizedText: input.normalizedText,
                 errorClass: input.errorClass,
                 stageName: input.stageName,
                 clusterSize: input.clusterSize,
@@ -773,7 +771,6 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ? {
             onSystemicCluster: (input: {
               signature: string;
-              normalizedText: string;
               errorClass: string;
               stageName: string | null;
               clusterSize: number;
@@ -998,7 +995,6 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
    */
   private async fileWatchdogTicketBestEffort(input: {
     signature: string;
-    normalizedText: string;
     errorClass: string;
     stageName: string | null;
     members: ClusterMember[];
@@ -1027,28 +1023,31 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           teamKey = ref.teamKey;
         }
       }
+      // Derive team key from the identifier (e.g. "SYMPH-123" → "SYMPH") as a
+      // last resort so simple setups without explicit teamId still work.
+      teamKey ||= firstMember.issueIdentifier.split("-")[0] ?? "";
+      // teamId is mandatory for issueCreate; an empty teamId reaches Linear and
+      // is rejected, and the catch would swallow it silently. Fail LOUDLY and
+      // skip rather than attempt a create that can never succeed (SYMPH-398).
       if (!teamId || !teamKey) {
-        // Derive team key from the identifier (e.g. "SYMPH-123" → "SYMPH") as a
-        // last resort so simple setups without explicit teamId still work.
-        teamKey ??= firstMember.issueIdentifier.split("-")[0] ?? "";
-        if (!teamId || !teamKey) {
-          await this.logger?.warn(
-            "watchdog_ticket_filing_skipped",
-            "Cannot file watchdog ticket: team context not resolvable.",
-            {
-              outcome: "degraded",
-              signature: input.signature,
-              issue_id: firstMember.issueId,
-            },
-          );
-          return;
-        }
+        await this.logger?.warn(
+          "watchdog_ticket_filing_skipped",
+          "Cannot file watchdog ticket: team context not resolvable.",
+          {
+            outcome: "degraded",
+            signature: input.signature,
+            issue_id: firstMember.issueId,
+            reason: !teamId
+              ? "teamId could not be resolved (config.tracker.teamId unset and not derivable from member issues)"
+              : "teamKey could not be resolved",
+          },
+        );
+        return;
       }
 
       const title = `[watchdog] SYSTEMIC failure cluster: ${input.signature}`;
       const body = formatWatchdogTicketBody({
         signature: input.signature,
-        normalizedText: input.normalizedText,
         errorClass: input.errorClass as ErrorSignatureClass,
         members: input.members,
         stageName: input.stageName,
@@ -1059,6 +1058,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         teamKey,
         title,
         description: body,
+      });
+      // Record the filing so the per-signature rate limiter can suppress
+      // duplicates without a tracker round-trip (SYMPH-398). Record on both
+      // created and deduped outcomes — a deduped result still consumed a filing
+      // opportunity and the throttle window should reflect that.
+      this.orchestrator.recordWatchdogFiling({
+        signature: input.signature,
+        issueIdentifier: result.identifier,
       });
       await this.logger?.info(
         "watchdog_ticket_filed",

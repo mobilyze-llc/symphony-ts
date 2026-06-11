@@ -87,6 +87,7 @@ import {
 } from "./gate-handler.js";
 import { createRightSizingDecision } from "./right-sizing.js";
 import { SignatureClusterRegistry } from "./signature-cluster.js";
+import type { ClusterMember } from "./signature-cluster.js";
 import {
   type IgnoredSetupInstructionCollision,
   type SupervisionFinding,
@@ -389,14 +390,13 @@ export interface OrchestratorCoreOptions {
    */
   onSystemicCluster?: (input: {
     signature: string;
-    normalizedText: string;
     errorClass: string;
     stageName: string | null;
     clusterSize: number;
     issueIdentifiers: string[];
     breakerOpened: boolean;
     canFileWatchdogTicket: boolean;
-    members: import("./signature-cluster.js").ClusterMember[];
+    members: ClusterMember[];
   }) => void;
 }
 
@@ -815,8 +815,11 @@ export class OrchestratorCore {
         // lifecycle (SYMPH-397).
         this.state.failureExhaustedIds.delete(issue.id);
         // Clear from signature cluster so a resumed issue re-counts fresh
-        // if it fails again (SYMPH-398).
+        // if it fails again, and close any stage breaker opened for it so the
+        // resumed issue is not immediately re-parked at the dispatch boundary
+        // (SYMPH-398 — these two must happen together or the resume deadlocks).
         this.signatureClusterRegistry.clearIssueFromCluster(issue.id);
+        this.resetBreakersForResumedIssue(issue.id);
         this.clearResumeRequirement(issue.id);
       } else {
         return false;
@@ -835,8 +838,11 @@ export class OrchestratorCore {
         // exhaustion lifecycle (SYMPH-397).
         this.state.failureExhaustedIds.delete(issue.id);
         // Clear from signature cluster so a resumed issue re-counts fresh
-        // if it fails again (SYMPH-398).
+        // if it fails again, and close any stage breaker opened for it so the
+        // resumed issue is not immediately re-parked at the dispatch boundary
+        // (SYMPH-398 — these two must happen together or the resume deadlocks).
         this.signatureClusterRegistry.clearIssueFromCluster(issue.id);
+        this.resetBreakersForResumedIssue(issue.id);
       } else {
         return false;
       }
@@ -3140,10 +3146,44 @@ export class OrchestratorCore {
         delete this.state.issueFailureSignatures[key];
       }
     }
-    // Remove the issue from all signature cluster entries (SYMPH-398).
-    // At terminal cleanup we want the slot freed so a future lifecycle is
-    // re-counted from scratch.
-    this.signatureClusterRegistry.clearIssueFromCluster(issueId);
+    // NOTE (SYMPH-398): signature-cluster membership is deliberately NOT
+    // cleared here. A terminally-parked issue must keep counting toward
+    // SYSTEMIC so a second, distinct issue failing later with the same
+    // signature tips the cluster (the SYMPH-330/332 motivation). Membership
+    // clears only on resume / re-dispatch of the issue (isDispatchEligible),
+    // which is also where any breaker opened for it is reset.
+  }
+
+  /**
+   * Close any stage circuit breaker that was opened for a resumed issue
+   * (SYMPH-398). Resume is an explicit operator action, so we fully close the
+   * breaker; the resumed issue's first dispatch is the half-open canary — a
+   * recurrence of the same signature re-crosses threshold and reopens the
+   * breaker through the normal recordFailure path.
+   */
+  private resetBreakersForResumedIssue(issueId: string): void {
+    const reset = this.signatureClusterRegistry.resetBreakersForIssue(issueId);
+    for (const stageName of reset) {
+      console.log(
+        `[orchestrator] circuit breaker reset for stage "${stageName}" on resume of ${issueId}`,
+      );
+    }
+  }
+
+  /**
+   * Record a successful watchdog ticket filing in the signature-cluster
+   * registry so the per-signature rate limiter (max_filings_per_hour) can
+   * suppress duplicates (SYMPH-398). Uses the injected clock for determinism.
+   */
+  recordWatchdogFiling(input: {
+    signature: string;
+    issueIdentifier: string;
+  }): void {
+    this.signatureClusterRegistry.recordWatchdogFiling({
+      signature: input.signature,
+      issueIdentifier: input.issueIdentifier,
+      now: this.now(),
+    });
   }
 
   /**
@@ -4451,8 +4491,10 @@ export class OrchestratorCore {
 
       // Circuit breaker check (SYMPH-398): if the breaker is open for this
       // stage, park the issue loudly at the dispatch boundary and refuse to
-      // spawn a worker. The breaker resets when the operator acts (resume /
-      // re-dispatch path calls resetCircuitBreaker). This check runs after
+      // spawn a worker. The breaker resets when the operator resumes an issue
+      // it was opened for (isDispatchEligible -> resetBreakersForResumedIssue);
+      // the resumed issue's first dispatch is the half-open canary and a
+      // recurrence reopens the breaker via recordFailure. This check runs after
       // stage resolution so we have a real stage name.
       if (
         stageName !== null &&
@@ -5474,7 +5516,6 @@ export class OrchestratorCore {
         try {
           this.onSystemicCluster?.({
             signature: clusterResult.signature,
-            normalizedText: clusterResult.normalizedText,
             errorClass: clusterResult.errorClass,
             stageName: stage,
             clusterSize: clusterResult.clusterSize,

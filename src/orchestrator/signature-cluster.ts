@@ -8,17 +8,27 @@
  *     (once-per-signature, re-alert on count growth).
  *   - Which stages are open-circuited. An open breaker parks arriving issues
  *     at the dispatch boundary with a distinct reason; it resets when the
- *     operator acts (the existing resume / re-dispatch paths clear it by
- *     calling resetCircuitBreaker explicitly — there is no self-healing timer).
+ *     operator resumes any issue that the breaker was opened for, via
+ *     resetBreakersForIssue (there is no self-healing timer). The first
+ *     dispatch after that reset is the half-open canary: if the same signature
+ *     recurs and re-crosses threshold, recordFailure reopens the breaker
+ *     through the normal path.
  *   - Rate-limited watchdog ticket filing (max_filings_per_hour per
- *     signature). The registry holds the last-filed timestamp per sig so the
+ *     signature). The registry holds the filing timestamps per sig so the
  *     filer can suppress duplicates without a tracker round-trip.
  *
- * LIFECYCLE DISCIPLINE: every per-issue entry added here MUST be removed at
- * two points:
- *   1. clearIssueFromCluster — called by OrchestratorCore.clearTerminalIssueRuntimeState
- *   2. Same clearing at resume / re-dispatch points so a resumed issue that
- *      fails again is counted fresh rather than carrying stale membership.
+ * LIFECYCLE DISCIPLINE: cluster membership is the count of DISTINCT issues that
+ * have seen a signature, and it must survive terminal park — a parked issue
+ * still counts so a second, distinct issue failing later tips the cluster to
+ * SYSTEMIC (the SYMPH-330/332 motivation). Membership is therefore removed at
+ * exactly ONE point: clearIssueFromCluster, called only on resume / re-dispatch
+ * of that issue, so a resumed issue is counted fresh rather than carrying stale
+ * membership. It is deliberately NOT removed at terminal cleanup.
+ *
+ * The registry is pure in-memory with no journal hydration: on process restart
+ * the cluster is empty and SYSTEMIC counting restarts from zero. That is
+ * acceptable for the current 2-3-worker, in-memory design (see CLAUDE.md
+ * "in-memory state only"); cross-restart systemic memory is out of scope here.
  */
 
 import type { ErrorSignatureClass } from "../errors/signature.js";
@@ -169,12 +179,9 @@ export class SignatureClusterRegistry {
         openedAt: now.toISOString(),
         openedForIssueIds: [...entry.members.keys()],
       };
-      // Only open a single breaker per stage (latest signature wins if two
-      // signatures simultaneously reach threshold on the same stage).
-      const existing = this.stageBreakers.get(stageName);
-      if (existing === undefined || existing.signature === signature) {
-        this.stageBreakers.set(stageName, breakerEntry);
-      }
+      // One breaker per stage; the latest signature to cross threshold wins so
+      // the reported reason/signature reflects the most recent systemic cause.
+      this.stageBreakers.set(stageName, breakerEntry);
     }
 
     const canFile = shouldAlert && this.canFileWatchdogTicket(signature, now);
@@ -185,7 +192,9 @@ export class SignatureClusterRegistry {
       shouldOpenBreaker,
       canFileWatchdogTicket: canFile,
       clusterSize,
-      members: [...entry.members.values()],
+      // Only materialize the member snapshot when a consumer will read it
+      // (alert/breaker/file decisions key off shouldAlert).
+      members: shouldAlert ? [...entry.members.values()] : [],
       signature,
       normalizedText,
       errorClass,
@@ -208,9 +217,10 @@ export class SignatureClusterRegistry {
   }
 
   /**
-   * Reset the circuit breaker for a stage. Called when the operator acts
-   * (resume / re-dispatch path). The corresponding signature's `breakerOpen`
-   * flag is also cleared so that re-alerts on growth remain possible.
+   * Reset the circuit breaker for a single stage (full close, not half-open).
+   * The corresponding signature's `breakerOpen` flag is also cleared so the
+   * breaker can reopen on a subsequent recurrence and re-alerts on growth
+   * remain possible.
    */
   resetCircuitBreaker(stageName: string): void {
     const breaker = this.stageBreakers.get(stageName);
@@ -225,8 +235,28 @@ export class SignatureClusterRegistry {
   }
 
   /**
-   * Remove an issue from all cluster entries. Called at terminal cleanup
-   * and at resume/re-dispatch so a resumed issue is re-counted fresh.
+   * Reset every stage breaker that was opened for the given issue. Called when
+   * the operator resumes / re-dispatches an issue: that explicit action says
+   * "I've looked at this, try again," so we close the stage breaker fully. The
+   * resumed issue's first dispatch is the half-open canary — if the same
+   * signature recurs it re-crosses threshold and recordFailure reopens the
+   * breaker through the normal path. Returns the stage names that were reset.
+   */
+  resetBreakersForIssue(issueId: string): string[] {
+    const reset: string[] = [];
+    for (const breaker of [...this.stageBreakers.values()]) {
+      if (breaker.openedForIssueIds.includes(issueId)) {
+        this.resetCircuitBreaker(breaker.stageName);
+        reset.push(breaker.stageName);
+      }
+    }
+    return reset;
+  }
+
+  /**
+   * Remove an issue from all cluster entries. Called ONLY on resume /
+   * re-dispatch (never at terminal park) so a resumed issue is re-counted
+   * fresh while a parked issue keeps counting toward SYSTEMIC.
    */
   clearIssueFromCluster(issueId: string): void {
     for (const entry of this.clusters.values()) {
@@ -235,14 +265,18 @@ export class SignatureClusterRegistry {
   }
 
   /**
-   * Record that a watchdog ticket was filed for a signature.
+   * Record that a watchdog ticket was filed for a signature. Prunes records
+   * older than one hour on write so the backing array stays bounded.
    */
   recordWatchdogFiling(input: {
     signature: string;
     issueIdentifier: string;
     now: Date;
   }): void {
-    const existing = this.filingRecords.get(input.signature) ?? [];
+    const oneHourAgoMs = input.now.getTime() - 60 * 60 * 1000;
+    const existing = (this.filingRecords.get(input.signature) ?? []).filter(
+      (r) => Date.parse(r.filedAt) > oneHourAgoMs,
+    );
     existing.push({
       signature: input.signature,
       filedAt: input.now.toISOString(),
@@ -304,23 +338,21 @@ export interface RecordFailureResult {
  *   - A machine-parseable signature hash marker for dedupe-by-search
  *   - Evidence bundle (cluster members, stage, class)
  *   - Never-auto-release instruction
+ *
+ * The raw normalized error text is deliberately NOT embedded: it can carry
+ * secrets (URLs/query params, emails, bearer tokens) or adversarial /
+ * prompt-injection content from worker output. The signature hash + failure
+ * class + member issue identifiers + stage are the full operator triage
+ * signal; an operator inspects the linked member issues for the raw text.
  */
 export function formatWatchdogTicketBody(input: {
   signature: string;
-  normalizedText: string;
   errorClass: ErrorSignatureClass;
   members: ClusterMember[];
   stageName: string | null;
   observedAt: string;
 }): string {
-  const {
-    signature,
-    normalizedText,
-    errorClass,
-    members,
-    stageName,
-    observedAt,
-  } = input;
+  const { signature, errorClass, members, stageName, observedAt } = input;
 
   // Machine-parseable marker used for deduplication by title + body search.
   const marker = `<!-- watchdog-signature:${signature} -->`;
@@ -335,13 +367,9 @@ export function formatWatchdogTicketBody(input: {
     `**Cluster size:** ${members.length}`,
     `**First observed at:** ${observedAt}`,
     "",
-    "## Normalized Error Pattern",
-    "",
-    "```",
-    normalizedText,
-    "```",
-    "",
     "## Affected Issues",
+    "",
+    "_Inspect the linked issues below for the raw failure output._",
     "",
   ];
 
