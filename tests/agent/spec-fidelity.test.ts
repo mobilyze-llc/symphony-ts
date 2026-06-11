@@ -1,0 +1,101 @@
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  type SpecFidelityEvidence,
+  runSpecFidelityJudge,
+} from "../../src/agent/spec-fidelity.js";
+
+const CONFIG = {
+  baseUrl: "http://studio2.local:8000/v1",
+  model: "deepseek-v4-flash",
+  apiKey: "test-key",
+  maxResumes: 2,
+};
+
+const EVIDENCE: SpecFidelityEvidence = {
+  issueIdentifier: "SYMPH-999",
+  issueTitle: "Test issue",
+  acceptanceCriteria:
+    "### Acceptance Criteria\n- [ ] `test: tests/foo.test.ts covers bar`",
+  diff: "diff --git a/src/foo.ts b/src/foo.ts\n+export const bar = 1;",
+  reviewMessage: "[STAGE_COMPLETE] review done. live-proof: n/a — library code",
+};
+
+function chatCompletionResponse(content: string): Response {
+  return new Response(
+    JSON.stringify({
+      id: "chatcmpl-1",
+      object: "chat.completion",
+      created: 1781128000,
+      model: "deepseek-v4-flash",
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content },
+          finish_reason: "stop",
+        },
+      ],
+      usage: { prompt_tokens: 900, completion_tokens: 40, total_tokens: 940 },
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } },
+  );
+}
+
+describe("spec-fidelity judge", () => {
+  it("sends the frozen ACs, diff, and live-proof rule to the local endpoint and returns the verdict", async () => {
+    const fetchFn = vi.fn(
+      async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        const prompt = JSON.stringify(body.messages ?? body.prompt ?? "");
+        // Harness-measured evidence reaches the judge...
+        expect(prompt).toContain("SYMPH-999");
+        expect(prompt).toContain("tests/foo.test.ts covers bar");
+        expect(prompt).toContain("export const bar = 1;");
+        // ...framed as worker-claimed where applicable.
+        expect(prompt).toContain("worker message is self-reported");
+        // Live-proof rule (SYMPH-377) is part of the judging contract,
+        // including the n/a-only-for-no-runtime-boundary restriction.
+        expect(prompt).toContain("live-proof: waived");
+        expect(prompt).toContain(
+          "valid ONLY for diffs with no runtime boundary",
+        );
+        expect(String(input)).toContain("studio2.local:8000");
+        return chatCompletionResponse(
+          '{"verdict":"pass","findings":"AC1 PASS: named test present in diff."}',
+        );
+      },
+    );
+
+    const verdict = await runSpecFidelityJudge({
+      config: CONFIG,
+      evidence: EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    expect(verdict).toEqual({
+      verdict: "pass",
+      findings: "AC1 PASS: named test present in diff.",
+    });
+  });
+
+  it("declines to opine when the diff is missing or the endpoint is unconfigured (fail open)", async () => {
+    const fetchFn = vi.fn();
+
+    expect(
+      await runSpecFidelityJudge({
+        config: CONFIG,
+        evidence: { ...EVIDENCE, diff: null },
+        fetchFn: fetchFn as unknown as typeof fetch,
+      }),
+    ).toBeNull();
+    expect(
+      await runSpecFidelityJudge({
+        config: { ...CONFIG, baseUrl: null },
+        evidence: EVIDENCE,
+        fetchFn: fetchFn as unknown as typeof fetch,
+      }),
+    ).toBeNull();
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+});
