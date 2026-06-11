@@ -483,6 +483,34 @@ async function handleMessage(message) {
       return;
     }
 
+    if (scenario === "late-tool-exit") {
+      // Send a dynamic tool call request, then immediately complete and exit.
+      // The client's tool.execute() will resolve after we're already gone.
+      setTimeout(() => {
+        writeJson({
+          id: "late-tool-1",
+          method: "item/tool/call",
+          params: {
+            toolName: "slow_tool",
+            input: {},
+          },
+        });
+        // Complete the turn and exit before the tool response arrives.
+        setTimeout(() => {
+          writeJson({
+            method: "turn/completed",
+            params: {
+              message: "Exiting before tool response",
+            },
+          });
+          setTimeout(() => {
+            process.exit(0);
+          }, 5);
+        }, 5);
+      }, 10);
+      return;
+    }
+
     if (turnCount === 1) {
       setTimeout(() => {
         process.stderr.write("diagnostic from stderr\n");

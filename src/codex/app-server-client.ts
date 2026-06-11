@@ -1195,24 +1195,41 @@ export class CodexAppServerClient {
     tool: CodexDynamicTool,
     message: JsonObject,
   ): Promise<void> {
+    let toolResult: object;
     try {
-      const result = await tool.execute(extractToolInput(message));
-      this.send({
-        id: requestId,
-        result,
-      });
-    } catch (error) {
-      this.send({
-        id: requestId,
-        result: {
-          success: false,
-          error: {
-            code: ERROR_CODES.codexDynamicToolRejected,
-            message: `Dynamic tool ${tool.name} failed: ${toErrorMessage(error)}`,
+      toolResult = await tool.execute(extractToolInput(message));
+    } catch (execError) {
+      try {
+        this.send({
+          id: requestId,
+          result: {
+            success: false,
+            error: {
+              code: ERROR_CODES.codexDynamicToolRejected,
+              message: `Dynamic tool ${tool.name} failed: ${toErrorMessage(execError)}`,
+            },
           },
-        },
-      });
+        });
+      } catch {
+        this.emitToolResponseDropped(tool.name);
+      }
+      return;
     }
+    try {
+      this.send({
+        id: requestId,
+        result: toolResult,
+      });
+    } catch {
+      this.emitToolResponseDropped(tool.name);
+    }
+  }
+
+  private emitToolResponseDropped(toolName: string): void {
+    this.emit({
+      event: "other_message",
+      message: `Dynamic tool "${toolName}" response dropped: app-server process already exited.`,
+    });
   }
 }
 
