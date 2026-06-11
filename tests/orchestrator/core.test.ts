@@ -2161,6 +2161,113 @@ describe("orchestrator core", () => {
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
   });
 
+  it("enforces a live write collision by stopping exactly the lower-precedence lane", async () => {
+    const comments: Array<{ issueId: string; body: string }> = [];
+    const baseConfig = createConfig();
+    const config = {
+      ...baseConfig,
+      stages: {
+        initialStage: "investigate",
+        fastTrack: null,
+        stages: {
+          investigate: {
+            type: "agent" as const,
+            runner: null,
+            model: null,
+            maxTurns: null,
+            maxRework: null,
+            gateType: null,
+            prompt: null,
+            promptPath: null,
+            reviewers: [],
+            hardStops: null,
+            linearState: null,
+            mcpServers: {},
+            timeoutMs: null,
+            concurrency: null,
+            transitions: {
+              onComplete: "implement",
+              onRework: null,
+              onApprove: null,
+            },
+          },
+          implement: {
+            type: "agent" as const,
+            runner: null,
+            model: null,
+            maxTurns: null,
+            maxRework: null,
+            gateType: null,
+            prompt: null,
+            promptPath: null,
+            reviewers: [],
+            hardStops: null,
+            linearState: null,
+            mcpServers: {},
+            timeoutMs: null,
+            concurrency: null,
+            transitions: { onComplete: null, onRework: null, onApprove: null },
+          },
+        },
+      },
+    };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1" }),
+          createIssue({ id: "2", identifier: "ISSUE-2" }),
+        ],
+        statesById: [
+          { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+          { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+        ],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      postComment: async (issueId, body) => {
+        comments.push({ issueId, body });
+      },
+      getRunningSupervisionSnapshots: async (entries) =>
+        entries.map((entry) => ({
+          workerId: entry.issue.id,
+          issueIdentifier: entry.identifier,
+          branchName: `branch-${entry.issue.id}`,
+          declaredFileScope: [],
+          changedFiles: ["src/orchestrator/runtime-host.ts"],
+          evalFileScope: [],
+        })),
+    });
+
+    await orchestrator.pollTick();
+    expect(Object.keys(orchestrator.getState().running)).toHaveLength(2);
+
+    // Advance issue 1 to implement so it outranks issue 2 (investigate).
+    orchestrator.getState().issueStages["1"] = "implement";
+    orchestrator.getState().issueStages["2"] = "investigate";
+
+    const result = await orchestrator.pollTick();
+    const collisionStops = result.stopRequests.filter(
+      (stop) => stop.issueId === "2",
+    );
+    expect(collisionStops).toHaveLength(1);
+    expect(result.stopRequests.some((stop) => stop.issueId === "1")).toBe(
+      false,
+    );
+    expect(
+      comments.some(
+        (c) =>
+          c.issueId === "2" &&
+          c.body.includes(
+            "Supervision enforcement: paused for write collision",
+          ),
+      ),
+    ).toBe(true);
+  });
+
   it("refuses all dispatch when rate-limit headroom is below the configured floor", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],

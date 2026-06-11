@@ -693,7 +693,8 @@ export class OrchestratorCore {
     await this.expireDispatcherLeases();
 
     const reconcileResult = await this.reconcileRunningIssues();
-    await this.superviseRunningWorkers();
+    const supervisionStops = await this.superviseRunningWorkers();
+    reconcileResult.stopRequests.push(...supervisionStops);
     const validation = validateDispatchConfig(this.config);
     if (!validation.ok) {
       return {
@@ -4346,10 +4347,10 @@ export class OrchestratorCore {
     return stopRequests;
   }
 
-  private async superviseRunningWorkers(): Promise<void> {
+  private async superviseRunningWorkers(): Promise<StopRequest[]> {
     const runningEntries = Object.values(this.state.running);
     if (runningEntries.length === 0) {
-      return;
+      return [];
     }
 
     const snapshots =
@@ -4365,10 +4366,87 @@ export class OrchestratorCore {
     );
     const findings = detectSupervisionFindings(snapshots);
     if (findings.length === 0) {
-      return;
+      return [];
     }
 
     await this.reportSupervisionFindings("running", findings);
+    return await this.enforceWriteCollisions(findings);
+  }
+
+  /**
+   * SYMPH-363: a confirmed live write collision pauses exactly one lane —
+   * detection without enforcement let two colliding workers burn for 25
+   * minutes after a correct re-steer comment. Precedence is deterministic:
+   * later pipeline stage survives, then the earlier first-dispatch, then
+   * lexicographic identifier. The loser stops through the standard stop
+   * machinery (parks loudly, resumable via the normal Resume path) with a
+   * resume-plan comment.
+   */
+  private async enforceWriteCollisions(
+    findings: readonly SupervisionFinding[],
+  ): Promise<StopRequest[]> {
+    const stops: StopRequest[] = [];
+    for (const finding of findings) {
+      if (finding.kind !== "actual_write_collision") {
+        continue;
+      }
+      const entries = finding.workerIds
+        .map((workerId) => this.state.running[workerId])
+        .filter((entry): entry is RunningEntry => entry !== undefined);
+      if (entries.length < 2) {
+        continue;
+      }
+
+      const ranked = [...entries].sort((a, b) => {
+        const stageDelta =
+          this.stagePrecedence(b.issue.id) - this.stagePrecedence(a.issue.id);
+        if (stageDelta !== 0) {
+          return stageDelta;
+        }
+        const aFirstRaw = this.state.issueFirstDispatchedAt[a.issue.id];
+        const bFirstRaw = this.state.issueFirstDispatchedAt[b.issue.id];
+        const aFirst =
+          aFirstRaw === undefined ? Number.MAX_VALUE : Date.parse(aFirstRaw);
+        const bFirst =
+          bFirstRaw === undefined ? Number.MAX_VALUE : Date.parse(bFirstRaw);
+        if (aFirst !== bFirst) {
+          return aFirst - bFirst;
+        }
+        return a.identifier.localeCompare(b.identifier);
+      });
+
+      const survivor = ranked[0];
+      for (const loser of ranked.slice(1)) {
+        if (survivor === undefined || loser === undefined) {
+          continue;
+        }
+        if (stops.some((stop) => stop.issueId === loser.issue.id)) {
+          continue;
+        }
+        try {
+          await this.postComment?.(
+            loser.issue.id,
+            [
+              "## Supervision enforcement: paused for write collision",
+              `${loser.identifier} and ${survivor.identifier} are changing the same files (${finding.files.join(", ")}). ${survivor.identifier} has precedence (further along / earlier dispatch); this lane is paused.`,
+              `Resume plan: move this issue to Resume after ${survivor.identifier}'s PR merges — the workspace base refresh will reconcile the overlap.`,
+            ].join("\n"),
+          );
+        } catch {
+          // Observability only.
+        }
+        stops.push(await this.requestStop(loser, false, "manual_stop"));
+      }
+    }
+    return stops;
+  }
+
+  private stagePrecedence(issueId: string): number {
+    const stageName = this.state.issueStages[issueId];
+    if (stageName === undefined || this.config.stages === null) {
+      return -1;
+    }
+    return Object.keys(this.config.stages.stages).indexOf(stageName);
   }
 
   private buildRunningAdmissionSnapshots(): WorkerSupervisionSnapshot[] {
