@@ -4427,7 +4427,7 @@ export class OrchestratorCore {
           await this.postComment?.(
             loser.issue.id,
             [
-              `## Supervision enforcement: paused for write collision`,
+              "## Supervision enforcement: paused for write collision",
               `${loser.identifier} and ${survivor.identifier} are changing the same files (${finding.files.join(", ")}). ${survivor.identifier} has precedence (further along / earlier dispatch); this lane is paused.`,
               `Resume plan: move this issue to Resume after ${survivor.identifier}'s PR merges — the workspace base refresh will reconcile the overlap.`,
             ].join("\n"),
