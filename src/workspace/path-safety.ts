@@ -4,6 +4,8 @@ import { toWorkspaceKey } from "../domain/model.js";
 import { ERROR_CODES, type ErrorCode } from "../errors/codes.js";
 
 const SAFE_WORKSPACE_KEY_PATTERN = /^[A-Za-z0-9._-]+$/;
+const WORKSPACE_ARTIFACT_KEY_ESCAPE_PATTERN = /[%.]/g;
+const WORKSPACE_ARTIFACT_KEY_ESCAPE_PREFIX = "%";
 
 export interface WorkspacePathInfo {
   workspaceRoot: string;
@@ -28,6 +30,23 @@ export function sanitizeWorkspaceKey(issueKeySource: string): string {
 export function isWorkspaceKeySafe(workspaceKey: string): boolean {
   return (
     workspaceKey.length > 0 && SAFE_WORKSPACE_KEY_PATTERN.test(workspaceKey)
+  );
+}
+
+export function toWorkspaceArtifactKey(workspaceKey: string): string {
+  assertWorkspaceKeySafe(workspaceKey);
+
+  // Keep workspace key semantics stable for workspace paths. Artifact names use
+  // a separate escaped path segment so keys containing ".." are discoverable
+  // without weakening artifact path-traversal checks.
+  return workspaceKey.replace(
+    WORKSPACE_ARTIFACT_KEY_ESCAPE_PATTERN,
+    (character) =>
+      `${WORKSPACE_ARTIFACT_KEY_ESCAPE_PREFIX}${character
+        .charCodeAt(0)
+        .toString(16)
+        .padStart(2, "0")
+        .toUpperCase()}`,
   );
 }
 
