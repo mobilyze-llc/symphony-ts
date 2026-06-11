@@ -427,6 +427,94 @@ describe("config-resolver", () => {
     });
   });
 
+  it("resolves owner_host and defaults it to null when absent", () => {
+    const withOwner = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          owner_host: "pro14",
+          tracker: { api_key: "token", project_slug: "proj" },
+        },
+      },
+      {},
+    );
+    expect(withOwner.ownerHost).toBe("pro14");
+
+    const withoutOwner = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          tracker: { api_key: "token", project_slug: "proj" },
+        },
+      },
+      {},
+    );
+    expect(withoutOwner.ownerHost).toBeNull();
+  });
+
+  it("single-homing guard: dispatch passes when the machine matches owner_host (label-wise, case-insensitive)", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          owner_host: "pro14",
+          tracker: { api_key: "token", project_slug: "proj" },
+        },
+      },
+      {},
+    );
+
+    expect(
+      validateDispatchConfig(resolved, { hostname: "PRO14.local" }),
+    ).toEqual({ ok: true });
+    expect(validateDispatchConfig(resolved, { hostname: "pro14" })).toEqual({
+      ok: true,
+    });
+  });
+
+  it("single-homing guard: dispatch fails loudly on a non-owner host (SYMPH-383)", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          owner_host: "pro14",
+          tracker: { api_key: "token", project_slug: "proj" },
+        },
+      },
+      {},
+    );
+
+    const validation = validateDispatchConfig(resolved, {
+      hostname: "pro16.local",
+    });
+    expect(validation.ok).toBe(false);
+    if (!validation.ok) {
+      expect(validation.error.code).toBe(ERROR_CODES.ownerHostMismatch);
+      expect(validation.error.message).toContain("single-homed");
+    }
+  });
+
+  it("single-homing guard: no owner_host means any host may dispatch", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          tracker: { api_key: "token", project_slug: "proj" },
+        },
+      },
+      {},
+    );
+
+    expect(
+      validateDispatchConfig(resolved, { hostname: "anything.example" }),
+    ).toEqual({ ok: true });
+  });
+
   it("resolves env-backed workspace roots and expands the home directory", () => {
     const envBacked = resolveWorkflowConfig(
       {

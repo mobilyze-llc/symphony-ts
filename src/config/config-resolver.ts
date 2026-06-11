@@ -1,4 +1,4 @@
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { isAbsolute, normalize, resolve, sep } from "node:path";
 
 import type { WorkflowDefinition } from "../domain/model.js";
@@ -274,11 +274,18 @@ export function resolveWorkflowConfig(
     },
     stages: resolveStagesConfig(config.stages),
     escalationState: readString(config.escalation_state),
+    ownerHost: readString(config.owner_host),
   };
+}
+
+/** First hostname label, case-folded: "PRO14.local" and "pro14" compare equal. */
+function normalizeHostLabel(value: string): string {
+  return value.trim().toLowerCase().split(".")[0] ?? "";
 }
 
 export function validateDispatchConfig(
   config: ResolvedWorkflowConfig,
+  options?: { hostname?: string },
 ): DispatchValidationResult {
   const trackerKind = config.tracker.kind?.trim();
   if (!trackerKind) {
@@ -307,6 +314,17 @@ export function validateDispatchConfig(
       ERROR_CODES.configInvalid,
       "tracker.project_slug must be configured before dispatch.",
     );
+  }
+
+  const ownerHost = config.ownerHost?.trim();
+  if (ownerHost) {
+    const machine = options?.hostname ?? hostname();
+    if (normalizeHostLabel(machine) !== normalizeHostLabel(ownerHost)) {
+      return invalid(
+        ERROR_CODES.ownerHostMismatch,
+        `owner_host '${ownerHost}' does not match this machine '${machine}' — this workflow is single-homed to one orchestrator host (SYMPH-383); refusing to dispatch.`,
+      );
+    }
   }
 
   if (config.codex.command.trim() === "") {

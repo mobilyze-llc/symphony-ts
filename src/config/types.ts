@@ -226,6 +226,13 @@ export interface ResolvedWorkflowConfig {
   observability: WorkflowObservabilityConfig;
   stages: StagesConfig | null;
   escalationState: string | null;
+  /**
+   * Single-homing guard (SYMPH-383): when set, only the machine whose
+   * hostname's first label matches may dispatch this workflow. A second
+   * host fails loudly at startup instead of silently racing the first
+   * for the same tracker project. Absent/null means any host may run it.
+   */
+  ownerHost?: string | null;
 }
 
 export interface DispatchValidationFailure {
