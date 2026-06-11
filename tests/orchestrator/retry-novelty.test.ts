@@ -855,6 +855,7 @@ function createConfig(
       minSecondaryHeadroomPct: null,
     },
     server: { port: null, slackNotifyChannel: null },
+    notifications: { slackEnabled: true },
     observability: {
       dashboardEnabled: false,
       refreshMs: 1_000,

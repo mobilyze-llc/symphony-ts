@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   PipelineNotifier,
+  createWebhookPoster,
   formatDurationMs,
   formatNotification,
   formatStageTimeline,
@@ -1275,5 +1276,230 @@ describe("formatTokensCompact", () => {
     expect(formatTokensCompact(1_000_000)).toBe("1M");
     expect(formatTokensCompact(1_200_000)).toBe("1.2M");
     expect(formatTokensCompact(10_000_000)).toBe("10M");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SYMPH-397: watchdog / lifecycle alert event formatting
+// ---------------------------------------------------------------------------
+
+describe("formatNotification — watchdog events (SYMPH-397)", () => {
+  it("formats failure_exhausted with signature and class", () => {
+    const result = formatNotification({
+      type: "failure_exhausted",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Fix bug",
+      issueUrl: "https://linear.app/mobilyze-llc/issue/SYMPH-42",
+      stageName: "implement",
+      reason: "max retries exceeded",
+      failureSignature: "hash:abc123",
+      failureClass: "permanent",
+    });
+    expect(result.text).toContain("Retries exhausted");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Stage: implement");
+    expect(result.text).toContain("Reason: max retries exceeded");
+    expect(result.text).toContain("Signature: hash:abc123 (permanent)");
+    expect(result.text).toContain(
+      "<https://linear.app/mobilyze-llc/issue/SYMPH-42|SYMPH-42>",
+    );
+  });
+
+  it("formats failure_exhausted without signature", () => {
+    const result = formatNotification({
+      type: "failure_exhausted",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Fix bug",
+      issueUrl: null,
+      stageName: null,
+      reason: "unrecoverable spec failure",
+      failureSignature: null,
+      failureClass: null,
+    });
+    expect(result.text).toContain("Retries exhausted");
+    expect(result.text).not.toContain("Signature:");
+    expect(result.text).not.toContain("Stage:");
+  });
+
+  it("formats hard_stop_budget with cost and token summary", () => {
+    const result = formatNotification({
+      type: "hard_stop_budget",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      stageName: "implement",
+      trigger: "token_budget",
+      reason: "Token budget exceeded.",
+      totalTokens: 250_000,
+      estimatedCostUsd: 3.21,
+    });
+    expect(result.text).toContain("Budget ceiling hit");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Stage: implement");
+    expect(result.text).toContain("token_budget");
+    expect(result.text).toContain("$3.21");
+    expect(result.text).toContain("250k tokens");
+  });
+
+  it("formats escalation_step with step/maxSteps and multiplier", () => {
+    const result = formatNotification({
+      type: "escalation_step",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      stageName: "implement",
+      step: 2,
+      maxSteps: 3,
+      multiplier: 4,
+      trigger: "token_budget",
+    });
+    expect(result.text).toContain("Budget escalation step 2/3");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("4x budget");
+    expect(result.text).toContain("token_budget");
+  });
+
+  it("formats gate_failed with stage and reason", () => {
+    const result = formatNotification({
+      type: "gate_failed",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: "https://linear.app/mobilyze-llc/issue/SYMPH-42",
+      stageName: "review",
+      reason: "Ensemble review failed: missing tests",
+    });
+    expect(result.text).toContain("Gate failed");
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Stage: review");
+    expect(result.text).toContain(
+      "Reason: Ensemble review failed: missing tests",
+    );
+  });
+
+  it("formats gate_failed without stage", () => {
+    const result = formatNotification({
+      type: "gate_failed",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      stageName: null,
+      reason: "[STAGE_FAILED]",
+    });
+    expect(result.text).toContain("Gate failed");
+    expect(result.text).not.toContain("Stage:");
+  });
+
+  it("formats info_alert with message", () => {
+    const result = formatNotification({
+      type: "info_alert",
+      issueIdentifier: "SYMPH-42",
+      message: "Some informational notice",
+    });
+    expect(result.text).toContain("SYMPH-42");
+    expect(result.text).toContain("Some informational notice");
+  });
+});
+
+describe("createWebhookPoster (SYMPH-397)", () => {
+  it("POSTs JSON to the webhook URL with text payload", async () => {
+    const calls: Array<{ url: string; init: RequestInit }> = [];
+    const mockFetch = vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, init });
+      return { ok: true } as Response;
+    });
+    const poster = createWebhookPoster({
+      webhookUrl: "https://hooks.slack.com/services/TEST/WEBHOOK",
+      // biome-ignore lint/suspicious/noExplicitAny: test override
+      _fetchOverride: mockFetch as any,
+    });
+    await poster.post("ignored-channel", "Hello world");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("https://hooks.slack.com/services/TEST/WEBHOOK");
+    const body = JSON.parse(calls[0]?.init.body as string) as { text: string };
+    expect(body.text).toBe("Hello world");
+  });
+
+  it("throws when webhook returns non-ok status", async () => {
+    const poster = createWebhookPoster({
+      webhookUrl: "https://hooks.slack.com/services/TEST/WEBHOOK",
+      // biome-ignore lint/suspicious/noExplicitAny: test override
+      _fetchOverride: vi.fn(async () => ({ ok: false, status: 400 }) as any),
+    });
+    await expect(poster.post("c", "text")).rejects.toThrow("HTTP 400");
+  });
+
+  it("redacts secret URL from transport error — malformed URL does not appear in thrown message", async () => {
+    // A malformed webhook URL containing a secret token would normally produce
+    // "Failed to parse URL from http://hooks.slack.com/services/T00/SuperSecretToken123"
+    // in the thrown error. The wrapper must collapse all transport errors to a
+    // fixed, URL-free message so the secret cannot reach log aggregation.
+    const secretToken = "SuperSecretToken123";
+    const malformedUrl = `http://hooks.slack.com:bad/services/T00/${secretToken}`;
+    const poster = createWebhookPoster({ webhookUrl: malformedUrl });
+    await expect(poster.post("c", "text")).rejects.toSatisfy((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      return !msg.includes(secretToken) && !msg.includes(malformedUrl);
+    });
+  });
+
+  it("transport error is wrapped as 'Slack webhook delivery failed: <name>'", async () => {
+    // Verify the fixed-message shape so callers can rely on it for alerting.
+    const throwingFetch: typeof fetch = async () => {
+      throw new TypeError("fetch failed");
+    };
+    const poster = createWebhookPoster({
+      webhookUrl: "https://hooks.slack.com/services/TEST/WEBHOOK",
+      _fetchOverride: throwingFetch,
+    });
+    await expect(poster.post("c", "text")).rejects.toThrow(
+      "Slack webhook delivery failed: TypeError",
+    );
+  });
+
+  it("AbortSignal timeout path wraps the error without leaking URL", async () => {
+    // Simulate the AbortError that AbortSignal.timeout(5_000) would throw.
+    const throwingFetch: typeof fetch = async () => {
+      throw new DOMException(
+        "The operation was aborted due to timeout",
+        "TimeoutError",
+      );
+    };
+    const poster = createWebhookPoster({
+      webhookUrl: "https://hooks.slack.com/services/TEST/WEBHOOK",
+      _fetchOverride: throwingFetch,
+    });
+    await expect(poster.post("c", "text")).rejects.toThrow(
+      "Slack webhook delivery failed: TimeoutError",
+    );
+  });
+});
+
+describe("PipelineNotifier — fail-open contract (SYMPH-397)", () => {
+  it("notify() swallows a rejecting webhook poster and does not throw", async () => {
+    // The notifier's fail-open guarantee must hold even when the poster rejects.
+    const rejector = createWebhookPoster({
+      webhookUrl: "https://hooks.slack.com/services/FAKE/WEBHOOK",
+      // biome-ignore lint/suspicious/noExplicitAny: test override
+      _fetchOverride: vi.fn(async () => ({ ok: false, status: 503 }) as any),
+    });
+    const errors: unknown[] = [];
+    const notifier = new PipelineNotifier({
+      channel: "webhook",
+      poster: rejector,
+      onError: (err) => errors.push(err),
+    });
+
+    // Must not throw synchronously or asynchronously
+    notifier.notify({
+      type: "pipeline_started",
+      productName: "test",
+      dashboardUrl: null,
+    });
+
+    await notifier.flush(200);
+
+    // Error was captured by onError, not propagated
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as Error).message).toContain("HTTP 503");
   });
 });

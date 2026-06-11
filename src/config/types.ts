@@ -161,6 +161,16 @@ export interface WorkflowServerConfig {
   slackNotifyChannel: string | null;
 }
 
+/**
+ * Per-product notification settings. Controls whether Slack alerts are
+ * delivered for this WORKFLOW regardless of whether the webhook env var is
+ * set globally.
+ */
+export interface WorkflowNotificationsConfig {
+  /** When false, all Slack alerts are suppressed for this product. Default: true. */
+  slackEnabled: boolean;
+}
+
 export interface WorkflowObservabilityConfig {
   dashboardEnabled: boolean;
   refreshMs: number;
@@ -233,6 +243,7 @@ export interface ResolvedWorkflowConfig {
   continuousFeedback?: WorkflowContinuousFeedbackConfig;
   codex: WorkflowCodexConfig;
   server: WorkflowServerConfig;
+  notifications: WorkflowNotificationsConfig;
   observability: WorkflowObservabilityConfig;
   stages: StagesConfig | null;
   escalationState: string | null;

@@ -328,6 +328,59 @@ export interface OrchestratorCoreOptions {
   writeRunJournalEntry?: (
     entry: DispatcherRunJournalEntry,
   ) => Promise<void> | void;
+  /**
+   * Called when an issue's retries are exhausted or it is loud-parked
+   * (SYMPH-397). Fire-and-forget; failures must never surface into the
+   * scheduling loop.
+   */
+  onFailureExhausted?: (input: {
+    issueId: string;
+    issueIdentifier: string;
+    issueTitle: string;
+    reason: string;
+    stageName: string | null;
+    failureSignature: string | null;
+    failureClass: string | null;
+  }) => void;
+  /**
+   * Called when a hard-stop budget ceiling parks an issue and the escalation
+   * ladder cannot absorb it (SYMPH-397). Fire-and-forget.
+   */
+  onHardStopBudget?: (input: {
+    issueId: string;
+    issueIdentifier: string;
+    issueTitle: string;
+    stageName: string | null;
+    trigger: string;
+    reason: string;
+    totalTokens: number;
+    estimatedCostUsd: number;
+  }) => void;
+  /**
+   * Called on each successful step of the budget-escalation ladder
+   * (SYMPH-397). Fire-and-forget.
+   */
+  onEscalationStep?: (input: {
+    issueId: string;
+    issueIdentifier: string;
+    issueTitle: string;
+    stageName: string | null;
+    step: number;
+    maxSteps: number;
+    multiplier: number;
+    trigger: string;
+  }) => void;
+  /**
+   * Called when an ensemble gate returns a non-pass aggregate (SYMPH-397).
+   * Fire-and-forget.
+   */
+  onGateFailed?: (input: {
+    issueId: string;
+    issueIdentifier: string;
+    issueTitle: string;
+    stageName: string | null;
+    reason: string;
+  }) => void;
 }
 
 export class OrchestratorCore {
@@ -377,6 +430,14 @@ export class OrchestratorCore {
 
   private readonly writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
 
+  private readonly onFailureExhausted?: OrchestratorCoreOptions["onFailureExhausted"];
+
+  private readonly onHardStopBudget?: OrchestratorCoreOptions["onHardStopBudget"];
+
+  private readonly onEscalationStep?: OrchestratorCoreOptions["onEscalationStep"];
+
+  private readonly onGateFailed?: OrchestratorCoreOptions["onGateFailed"];
+
   private readonly reportedSupervisionFindings = new Set<string>();
 
   private readonly reportedIgnoredSetupInstructionCollisions =
@@ -424,6 +485,10 @@ export class OrchestratorCore {
     this.leaseOwnerId = options.leaseOwnerId ?? "orchestrator-core";
     this.leaseTtlMs = options.leaseTtlMs ?? DEFAULT_DISPATCHER_LEASE_TTL_MS;
     this.writeRunJournalEntry = options.writeRunJournalEntry;
+    this.onFailureExhausted = options.onFailureExhausted;
+    this.onHardStopBudget = options.onHardStopBudget;
+    this.onEscalationStep = options.onEscalationStep;
+    this.onGateFailed = options.onGateFailed;
     this.state = createInitialOrchestratorState({
       pollIntervalMs: options.config.polling.intervalMs,
       maxConcurrentAgents: options.config.agent.maxConcurrentAgents,
@@ -718,6 +783,10 @@ export class OrchestratorCore {
       if (this.canConsumeResumeRequirement(issue.id, normalizedState)) {
         this.state.completed.delete(issue.id);
         this.state.failed.delete(issue.id);
+        // Clear exhaustion-dedup marker so a re-dispatched issue can fire the
+        // failure_exhausted alert again if it exhausts retries in this new
+        // lifecycle (SYMPH-397).
+        this.state.failureExhaustedIds.delete(issue.id);
         this.clearResumeRequirement(issue.id);
       } else {
         return false;
@@ -732,6 +801,9 @@ export class OrchestratorCore {
       if (resumeStates.has(normalizedState)) {
         this.state.completed.delete(issue.id);
         this.state.failed.delete(issue.id);
+        // Clear exhaustion-dedup marker so the resumed issue starts a fresh
+        // exhaustion lifecycle (SYMPH-397).
+        this.state.failureExhaustedIds.delete(issue.id);
       } else {
         return false;
       }
@@ -1073,6 +1145,22 @@ export class OrchestratorCore {
       await this.postComment?.(issueId, comment);
     } catch {
       // Observability is best-effort; the resume must not depend on Linear.
+    }
+
+    // Fire-and-forget escalation step notification (SYMPH-397).
+    try {
+      this.onEscalationStep?.({
+        issueId,
+        issueIdentifier: runningEntry.identifier,
+        issueTitle: runningEntry.issue.title,
+        stageName,
+        step: nextStep,
+        maxSteps: ladder.maxSteps,
+        multiplier: nextMultiplier,
+        trigger: hardStop.trigger,
+      });
+    } catch {
+      // Notification failures are always swallowed
     }
 
     return this.scheduleRetry(issueId, 1, {
@@ -1982,6 +2070,7 @@ export class OrchestratorCore {
       nextRetryAttempt(runningEntry.retryAttempt),
       {
         identifier: runningEntry.identifier,
+        issueTitle: runningEntry.issue.title,
         error: formatWorkerExitReason(input.reason),
         delayType: "failure",
       },
@@ -2140,6 +2229,7 @@ export class OrchestratorCore {
       void this.recordFailureExhausted(
         issueId,
         runningEntry.identifier,
+        runningEntry.issue.title,
         "unrecoverable spec failure",
       );
       return null;
@@ -2152,6 +2242,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error: `agent reported failure: ${failureClass}`,
           delayType: "failure",
         },
@@ -2185,6 +2276,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error: "agent reported failure: review",
           delayType: "failure",
         },
@@ -2198,6 +2290,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error: "agent reported failure: review",
           delayType: "failure",
         },
@@ -2246,6 +2339,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error: "agent reported failure: review",
           delayType: "failure",
         },
@@ -2271,6 +2365,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error:
             "agent reported failure: review (no rework target on downstream gate)",
           delayType: "failure",
@@ -2346,6 +2441,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error: "agent reported failure: rebase",
           delayType: "failure",
         },
@@ -2359,6 +2455,7 @@ export class OrchestratorCore {
         nextRetryAttempt(runningEntry.retryAttempt),
         {
           identifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
           error: "agent reported failure: rebase",
           delayType: "failure",
         },
@@ -2401,6 +2498,7 @@ export class OrchestratorCore {
       nextRetryAttempt(runningEntry.retryAttempt),
       {
         identifier: runningEntry.identifier,
+        issueTitle: runningEntry.issue.title,
         error: "agent reported failure: rebase",
         delayType: "failure",
       },
@@ -2494,13 +2592,18 @@ export class OrchestratorCore {
   private async recordFailureExhausted(
     issueId: string,
     issueIdentifier: string,
+    issueTitle: string,
     reason: string,
     signatureMeta?: {
       failure_signature: string;
       failure_class: ErrorSignatureClass;
     },
   ): Promise<void> {
+    // Mark immediately (before any await) so runtime-host's fireWorkerNotification
+    // can check this set synchronously after onWorkerExit returns.
+    this.state.failureExhaustedIds.add(issueId);
     const issueState = this.state.running[issueId]?.issue.state ?? null;
+    const stageName = this.state.issueStages[issueId] ?? null;
     try {
       await this.recordRunJournalEntry({
         idempotencyKey: `failure_exhausted:${issueId}:${this.now().toISOString()}`,
@@ -2509,7 +2612,7 @@ export class OrchestratorCore {
         issueId,
         issueIdentifier,
         operation: "dispatcher",
-        stage: this.state.issueStages[issueId] ?? null,
+        stage: stageName,
         attempt: null,
         ownerId: this.leaseOwnerId,
         lease: null,
@@ -2525,6 +2628,20 @@ export class OrchestratorCore {
       console.warn(
         `[orchestrator] failed to journal exhaustion for ${issueIdentifier}: ${error instanceof Error ? error.message : String(error)}`,
       );
+    }
+    // Fire-and-forget notification — never propagate into the scheduling loop
+    try {
+      this.onFailureExhausted?.({
+        issueId,
+        issueIdentifier,
+        issueTitle,
+        reason,
+        stageName,
+        failureSignature: signatureMeta?.failure_signature ?? null,
+        failureClass: signatureMeta?.failure_class ?? null,
+      });
+    } catch {
+      // Notification failures are always swallowed
     }
   }
 
@@ -2684,7 +2801,22 @@ export class OrchestratorCore {
             reworkTarget === "escalated" ? "max_rework_exceeded" : null,
         },
       });
-    } catch {
+      // Fire gate failure notification after the lease is durably completed so
+      // the alert reflects a fully-journalled outcome (ordering hardening).
+      if (result.aggregate !== "pass") {
+        try {
+          this.onGateFailed?.({
+            issueId: issue.id,
+            issueIdentifier: issue.identifier,
+            issueTitle: issue.title,
+            stageName,
+            reason: result.comment.slice(0, 200),
+          });
+        } catch {
+          // Notification failures are always swallowed
+        }
+      }
+    } catch (gateError) {
       // Gate handler failure — release claim so the issue can be retried on next poll.
       await this.recordRunJournalEntry({
         idempotencyKey: `${leaseId}:error:${this.now().toISOString()}`,
@@ -2719,6 +2851,21 @@ export class OrchestratorCore {
         },
       });
       this.releaseClaim(issue.id);
+      // Fire-and-forget gate error notification (SYMPH-397).
+      try {
+        this.onGateFailed?.({
+          issueId: issue.id,
+          issueIdentifier: issue.identifier,
+          issueTitle: issue.title,
+          stageName,
+          reason:
+            gateError instanceof Error
+              ? gateError.message.slice(0, 200)
+              : "[STAGE_FAILED]",
+        });
+      } catch {
+        // Notification failures are always swallowed
+      }
     }
   }
 
@@ -2950,6 +3097,9 @@ export class OrchestratorCore {
     delete this.state.issueAcSnapshots[issueId];
     delete this.state.loopTraceJournal[issueId];
     delete this.state.continuousFeedback[issueId];
+    // Clear the exhaustion-dedup marker so a resumed issue can fire the alert
+    // again if it exhausts retries in a new lifecycle (SYMPH-397).
+    this.state.failureExhaustedIds.delete(issueId);
     // Failure signatures are keyed by `${issueId}:${stage}` — purge all
     const sigPrefix = `${issueId}:`;
     for (const key of Object.keys(this.state.issueFailureSignatures)) {
@@ -3779,6 +3929,25 @@ export class OrchestratorCore {
       runningEntry.identifier,
       comment,
     );
+
+    // Fire-and-forget budget-ceiling notification (SYMPH-397).
+    // Only alert for budget-category outcomes (not iteration_cap, no_progress, etc.)
+    if (isBudgetEscalationTrigger(input.hardStop.trigger)) {
+      try {
+        this.onHardStopBudget?.({
+          issueId,
+          issueIdentifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
+          stageName: input.stageName,
+          trigger: input.hardStop.trigger,
+          reason: input.hardStop.reason,
+          totalTokens: input.hardStop.totalTokens,
+          estimatedCostUsd: input.hardStop.estimatedCostUsd,
+        });
+      } catch {
+        // Notification failures are always swallowed
+      }
+    }
   }
 
   private async handleOperatorInputRequiredPause(
@@ -4535,6 +4704,7 @@ export class OrchestratorCore {
       this.state.running[issue.id] = failedEntry;
       this.scheduleRetry(issue.id, nextRetryAttempt(attempt), {
         identifier: issue.identifier,
+        issueTitle: issue.title,
         error: errorMessage,
         delayType: "failure",
       });
@@ -5117,6 +5287,9 @@ export class OrchestratorCore {
     attempt: number,
     input: {
       identifier: string | null;
+      /** Issue title to thread into failure-exhausted notifications. When omitted,
+       * the title is resolved from state.running (which may already be cleared). */
+      issueTitle?: string;
       error: string | null;
       delayType: "continuation" | "failure";
       /** When true, this call is an admission deferral (no-slots or deterministic
@@ -5132,6 +5305,11 @@ export class OrchestratorCore {
       input.delayType === "failure" &&
       attempt > this.config.agent.maxRetryAttempts
     ) {
+      const exhaustedTitle =
+        input.issueTitle ??
+        this.state.running[issueId]?.issue.title ??
+        input.identifier ??
+        issueId;
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
       this.clearTerminalIssueRuntimeState(issueId);
@@ -5143,6 +5321,7 @@ export class OrchestratorCore {
       void this.recordFailureExhausted(
         issueId,
         input.identifier ?? issueId,
+        exhaustedTitle,
         input.error ?? "max retry attempts exceeded",
       );
       return null;
@@ -5176,6 +5355,11 @@ export class OrchestratorCore {
       ) {
         // Identical non-transient signature — park loudly, skip ladder
         const parkReason = `retry futile: identical failure signature ${incoming.signature} (${incoming.class})`;
+        const parkedTitle =
+          input.issueTitle ??
+          this.state.running[issueId]?.issue.title ??
+          input.identifier ??
+          issueId;
         this.state.failed.add(issueId);
         this.releaseClaim(issueId);
         this.clearTerminalIssueRuntimeState(issueId);
@@ -5187,6 +5371,7 @@ export class OrchestratorCore {
         void this.recordFailureExhausted(
           issueId,
           input.identifier ?? issueId,
+          parkedTitle,
           parkReason,
           {
             failure_signature: incoming.signature,
