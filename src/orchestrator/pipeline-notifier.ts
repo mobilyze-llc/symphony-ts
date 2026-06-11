@@ -204,6 +204,30 @@ export interface InfoAlertEvent {
   message: string;
 }
 
+/**
+ * Fired when a normalized failure signature has been seen in K>=threshold
+ * distinct issues — declared SYSTEMIC (SYMPH-398).
+ * severity: critical
+ * Re-fires when the cluster grows beyond the last-alerted size.
+ */
+export interface SystemicClusterAlertEvent {
+  type: "systemic_cluster_alert";
+  /** 7-char signature hash. */
+  signature: string;
+  /** Failure class: permanent | transient | unknown. */
+  errorClass: string;
+  /** Affected stage name, or null if unknown. */
+  stageName: string | null;
+  /** Number of distinct issues in the cluster. */
+  clusterSize: number;
+  /** Identifiers of all affected issues. */
+  issueIdentifiers: string[];
+  /** Whether the stage circuit breaker is being opened. */
+  breakerOpened: boolean;
+  /** Whether a watchdog ticket is being filed. */
+  watchdogTicketFiling: boolean;
+}
+
 export type PipelineNotificationEvent =
   | PipelineStartedEvent
   | PipelineStoppedEvent
@@ -217,7 +241,8 @@ export type PipelineNotificationEvent =
   | HardStopBudgetEvent
   | EscalationStepEvent
   | GateFailedEvent
-  | InfoAlertEvent;
+  | InfoAlertEvent
+  | SystemicClusterAlertEvent;
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -815,6 +840,34 @@ export function formatNotification(
       return {
         text: `:information_source: *${event.issueIdentifier}* — ${event.message}\n${version}`,
       };
+    }
+
+    case "systemic_cluster_alert": {
+      const stageLabel =
+        event.stageName !== null
+          ? `stage \`${event.stageName}\``
+          : "unknown stage";
+      const issueList =
+        event.issueIdentifiers.length > 0
+          ? event.issueIdentifiers.join(", ")
+          : "none";
+      const parts: string[] = [
+        `:rotating_light: *SYSTEMIC failure cluster* — signature \`${event.signature}\``,
+        `Class: \`${event.errorClass}\` · ${stageLabel} · ${event.clusterSize} affected issues`,
+        `Issues: ${issueList}`,
+      ];
+      if (event.breakerOpened) {
+        parts.push(`:electric_plug: Circuit breaker OPENED for ${stageLabel}`);
+      }
+      if (event.watchdogTicketFiling) {
+        parts.push(":ticket: Watchdog ticket being filed");
+      }
+      // The raw normalized error text is deliberately omitted here: it can
+      // carry secrets or adversarial content from worker output. The signature
+      // hash + class + affected issues are the operator triage signal; the raw
+      // text lives on the linked member issues (SYMPH-398).
+      parts.push(version);
+      return { text: parts.join("\n") };
     }
   }
 }

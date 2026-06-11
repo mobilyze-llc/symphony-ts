@@ -673,6 +673,11 @@ function createConfig(
     admissionCard: {
       enabled: false,
     },
+    watchdog: {
+      systemicThreshold: 2,
+      circuitBreaker: true,
+      maxFilingsPerHour: 3,
+    },
     budgetEscalation: {
       maxSteps: null,
       multiplier: 2,

@@ -78,6 +78,11 @@ export const DEFAULT_LINEAR_NETWORK_TIMEOUT_MS = 30_000;
 
 export const WORKFLOW_FILENAME = "WORKFLOW.md";
 
+// Watchdog L1c defaults (SYMPH-398)
+export const DEFAULT_WATCHDOG_SYSTEMIC_THRESHOLD = 2;
+export const DEFAULT_WATCHDOG_CIRCUIT_BREAKER = true;
+export const DEFAULT_WATCHDOG_MAX_FILINGS_PER_HOUR = 3;
+
 export const SPEC_DEFAULTS = Object.freeze({
   tracker: {
     kind: DEFAULT_TRACKER_KIND,

@@ -101,8 +101,8 @@ export const LINEAR_ISSUE_STATES_BY_IDS_QUERY = `
 `.trim();
 
 export const LINEAR_WORKFLOW_STATES_QUERY = `
-  query SymphonyWorkflowStates($teamId: String!) {
-    workflowStates(filter: { team: { key: { eq: $teamId } } }) {
+  query SymphonyWorkflowStates($teamKey: String!) {
+    workflowStates(filter: { team: { key: { eq: $teamKey } } }) {
       nodes {
         id
         name
@@ -403,3 +403,67 @@ export const LINEAR_ISSUE_STATE_TRANSITIONS_QUERY = `
 // returns recent entries; last returns a stale window that silently
 // omits the operator's latest transitions (verified live, 2026-06-10 —
 // the resume-evidence path never saw the resume it was looking for).
+
+/**
+ * Mutation to create an issue with an explicit stateId (SYMPH-398 watchdog
+ * ticket filer). The stateId must be resolved beforehand via
+ * LINEAR_WORKFLOW_STATES_QUERY.
+ */
+export const LINEAR_CREATE_ISSUE_WITH_STATE_MUTATION = `
+  mutation SymphonyCreateIssueWithState(
+    $teamId: String!
+    $title: String!
+    $stateId: String!
+    $description: String
+  ) {
+    issueCreate(input: {
+      teamId: $teamId
+      title: $title
+      stateId: $stateId
+      description: $description
+    }) {
+      success
+      issue {
+        id
+        identifier
+        title
+        state {
+          name
+        }
+      }
+    }
+  }
+`.trim();
+
+/**
+ * Search for an existing open issue by title prefix within a team (SYMPH-398).
+ * Used to deduplicate watchdog tickets by searching for the signature marker
+ * in the title.
+ */
+export const LINEAR_SEARCH_ISSUES_BY_TITLE_AND_TEAM_QUERY = `
+  query SymphonySearchIssuesByTitleAndTeam(
+    $teamKey: String!
+    $title: String!
+    $first: Int!
+  ) {
+    issues(
+      first: $first
+      filter: {
+        team: { key: { eq: $teamKey } }
+        title: { eq: $title }
+      }
+      orderBy: updatedAt
+    ) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        state {
+          name
+          type
+        }
+      }
+    }
+  }
+`.trim();

@@ -53,6 +53,7 @@ import {
 import { ERROR_CODES } from "../errors/codes.js";
 import {
   type ErrorSignatureClass,
+  type NormalizedErrorSignature,
   normalizeErrorSignature,
 } from "../errors/signature.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
@@ -86,6 +87,8 @@ import {
   formatReviewFindingsComment,
 } from "./gate-handler.js";
 import { createRightSizingDecision } from "./right-sizing.js";
+import { SignatureClusterRegistry } from "./signature-cluster.js";
+import type { ClusterMember } from "./signature-cluster.js";
 import {
   type IgnoredSetupInstructionCollision,
   type SupervisionFinding,
@@ -381,6 +384,21 @@ export interface OrchestratorCoreOptions {
     stageName: string | null;
     reason: string;
   }) => void;
+  /**
+   * Called when a failure signature becomes SYSTEMIC (SYMPH-398): K distinct
+   * issues share the same normalized signature. Fired once-per-signature and
+   * re-fired when the cluster grows. Fire-and-forget.
+   */
+  onSystemicCluster?: (input: {
+    signature: string;
+    errorClass: string;
+    stageName: string | null;
+    clusterSize: number;
+    issueIdentifiers: string[];
+    breakerOpened: boolean;
+    canFileWatchdogTicket: boolean;
+    members: ClusterMember[];
+  }) => void;
 }
 
 export class OrchestratorCore {
@@ -438,6 +456,10 @@ export class OrchestratorCore {
 
   private readonly onGateFailed?: OrchestratorCoreOptions["onGateFailed"];
 
+  private readonly onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
+
+  private readonly signatureClusterRegistry: SignatureClusterRegistry;
+
   private readonly reportedSupervisionFindings = new Set<string>();
 
   private readonly reportedIgnoredSetupInstructionCollisions =
@@ -489,6 +511,12 @@ export class OrchestratorCore {
     this.onHardStopBudget = options.onHardStopBudget;
     this.onEscalationStep = options.onEscalationStep;
     this.onGateFailed = options.onGateFailed;
+    this.onSystemicCluster = options.onSystemicCluster;
+    this.signatureClusterRegistry = new SignatureClusterRegistry({
+      systemicThreshold: options.config.watchdog.systemicThreshold,
+      circuitBreakerEnabled: options.config.watchdog.circuitBreaker,
+      maxFilingsPerHour: options.config.watchdog.maxFilingsPerHour,
+    });
     this.state = createInitialOrchestratorState({
       pollIntervalMs: options.config.polling.intervalMs,
       maxConcurrentAgents: options.config.agent.maxConcurrentAgents,
@@ -787,6 +815,12 @@ export class OrchestratorCore {
         // failure_exhausted alert again if it exhausts retries in this new
         // lifecycle (SYMPH-397).
         this.state.failureExhaustedIds.delete(issue.id);
+        // Clear from signature cluster so a resumed issue re-counts fresh
+        // if it fails again, and close any stage breaker opened for it so the
+        // resumed issue is not immediately re-parked at the dispatch boundary
+        // (SYMPH-398 — these two must happen together or the resume deadlocks).
+        this.signatureClusterRegistry.clearIssueFromCluster(issue.id);
+        this.resetBreakersForResumedIssue(issue.id);
         this.clearResumeRequirement(issue.id);
       } else {
         return false;
@@ -804,6 +838,12 @@ export class OrchestratorCore {
         // Clear exhaustion-dedup marker so the resumed issue starts a fresh
         // exhaustion lifecycle (SYMPH-397).
         this.state.failureExhaustedIds.delete(issue.id);
+        // Clear from signature cluster so a resumed issue re-counts fresh
+        // if it fails again, and close any stage breaker opened for it so the
+        // resumed issue is not immediately re-parked at the dispatch boundary
+        // (SYMPH-398 — these two must happen together or the resume deadlocks).
+        this.signatureClusterRegistry.clearIssueFromCluster(issue.id);
+        this.resetBreakersForResumedIssue(issue.id);
       } else {
         return false;
       }
@@ -2217,10 +2257,33 @@ export class OrchestratorCore {
     agentMessage: string | undefined,
   ): RetryEntry | null {
     if (failureClass === "spec") {
-      // Spec failures are unrecoverable — escalate immediately
+      // Spec failures are unrecoverable — escalate immediately.
+      //
+      // Cluster recording must happen here (SYMPH-398): spec failures skip
+      // scheduleRetry entirely, so without this call a systemic spec-class
+      // failure (e.g. a broken prompt template spec-failing every issue) would
+      // never reach the cluster registry, the circuit breaker, or the watchdog
+      // filer.  We capture stageName before clearTerminalIssueRuntimeState
+      // erases it, and record into the cluster AFTER the terminal-state clear
+      // so that clearIssueFromCluster (called inside clearTerminalIssueRuntimeState)
+      // runs first — otherwise the record is immediately overwritten by the clear.
+      const stageName = this.state.issueStages[issueId] ?? null;
+      const specFailureText = "unrecoverable spec failure";
+      const incoming = normalizeErrorSignature(specFailureText);
+
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
       this.clearTerminalIssueRuntimeState(issueId);
+
+      // Record into the cluster after the terminal-state clear so the clear
+      // doesn't erase this membership before the threshold check fires.
+      this.recordFailureInCluster(
+        issueId,
+        runningEntry.identifier,
+        incoming,
+        stageName,
+      );
+
       void this.fireEscalationSideEffects(
         issueId,
         runningEntry.identifier,
@@ -2230,7 +2293,11 @@ export class OrchestratorCore {
         issueId,
         runningEntry.identifier,
         runningEntry.issue.title,
-        "unrecoverable spec failure",
+        specFailureText,
+        {
+          failure_signature: incoming.signature,
+          failure_class: incoming.class,
+        },
       );
       return null;
     }
@@ -3107,6 +3174,44 @@ export class OrchestratorCore {
         delete this.state.issueFailureSignatures[key];
       }
     }
+    // NOTE (SYMPH-398): signature-cluster membership is deliberately NOT
+    // cleared here. A terminally-parked issue must keep counting toward
+    // SYSTEMIC so a second, distinct issue failing later with the same
+    // signature tips the cluster (the SYMPH-330/332 motivation). Membership
+    // clears only on resume / re-dispatch of the issue (isDispatchEligible),
+    // which is also where any breaker opened for it is reset.
+  }
+
+  /**
+   * Close any stage circuit breaker that was opened for a resumed issue
+   * (SYMPH-398). Resume is an explicit operator action, so we fully close the
+   * breaker; the resumed issue's first dispatch is the half-open canary — a
+   * recurrence of the same signature re-crosses threshold and reopens the
+   * breaker through the normal recordFailure path.
+   */
+  private resetBreakersForResumedIssue(issueId: string): void {
+    const reset = this.signatureClusterRegistry.resetBreakersForIssue(issueId);
+    for (const stageName of reset) {
+      console.log(
+        `[orchestrator] circuit breaker reset for stage "${stageName}" on resume of ${issueId}`,
+      );
+    }
+  }
+
+  /**
+   * Record a successful watchdog ticket filing in the signature-cluster
+   * registry so the per-signature rate limiter (max_filings_per_hour) can
+   * suppress duplicates (SYMPH-398). Uses the injected clock for determinism.
+   */
+  recordWatchdogFiling(input: {
+    signature: string;
+    issueIdentifier: string;
+  }): void {
+    this.signatureClusterRegistry.recordWatchdogFiling({
+      signature: input.signature,
+      issueIdentifier: input.issueIdentifier,
+      now: this.now(),
+    });
   }
 
   /**
@@ -4411,6 +4516,43 @@ export class OrchestratorCore {
 
       // Track the issue's current stage
       this.state.issueStages[issue.id] = stageName;
+
+      // Circuit breaker check (SYMPH-398): if the breaker is open for this
+      // stage, park the issue loudly at the dispatch boundary and refuse to
+      // spawn a worker. The breaker resets when the operator resumes an issue
+      // it was opened for (isDispatchEligible -> resetBreakersForResumedIssue);
+      // the resumed issue's first dispatch is the half-open canary and a
+      // recurrence reopens the breaker via recordFailure. This check runs after
+      // stage resolution so we have a real stage name.
+      if (
+        stageName !== null &&
+        this.signatureClusterRegistry.isBreakerOpen(stageName)
+      ) {
+        const breakerEntry =
+          this.signatureClusterRegistry.getBreakerEntry(stageName);
+        const parkReason = `circuit breaker open for stage "${stageName}" (signature ${breakerEntry?.signature ?? "unknown"}): systemic failure cluster detected — operator action required`;
+        this.state.failed.add(issue.id);
+        this.releaseClaim(issue.id);
+        this.clearTerminalIssueRuntimeState(issue.id);
+        void this.fireEscalationSideEffects(
+          issue.id,
+          issue.identifier,
+          parkReason,
+        );
+        void this.recordFailureExhausted(
+          issue.id,
+          issue.identifier,
+          issue.title,
+          parkReason,
+        );
+        console.log(
+          `[orchestrator] ${issue.identifier}: parked at dispatch — circuit breaker open for stage "${stageName}"`,
+        );
+        return {
+          dispatched: false,
+          rightSizingDecision: null,
+        };
+      }
     }
 
     const isFirstDispatch = !this.state.issueFirstDispatchedAt[issue.id];
@@ -5282,6 +5424,51 @@ export class OrchestratorCore {
     return stopRequest;
   }
 
+  /**
+   * Record a failure into the cross-ticket signature cluster registry and fire
+   * onSystemicCluster if the cluster crosses the alert threshold. This is the
+   * single seam that both scheduleRetry and any park-without-retry path must
+   * call so that all failure classes (including "spec") participate in systemic
+   * detection and circuit-breaker logic.
+   *
+   * The caller is responsible for normalizing the error text via
+   * normalizeErrorSignature before passing it in; the method takes the already-
+   * decomposed fields so it can also be used by paths that compute the signature
+   * themselves for other purposes (e.g. the novelty short-circuit).
+   */
+  private recordFailureInCluster(
+    issueId: string,
+    issueIdentifier: string,
+    incoming: NormalizedErrorSignature,
+    stageName: string | null,
+  ): void {
+    const clusterResult = this.signatureClusterRegistry.recordFailure({
+      signature: incoming.signature,
+      errorClass: incoming.class,
+      normalizedText: incoming.normalizedText,
+      issueId,
+      issueIdentifier,
+      stageName,
+      now: this.now(),
+    });
+    if (clusterResult.shouldAlert) {
+      try {
+        this.onSystemicCluster?.({
+          signature: clusterResult.signature,
+          errorClass: clusterResult.errorClass,
+          stageName,
+          clusterSize: clusterResult.clusterSize,
+          issueIdentifiers: clusterResult.members.map((m) => m.issueIdentifier),
+          breakerOpened: clusterResult.shouldOpenBreaker,
+          canFileWatchdogTicket: clusterResult.canFileWatchdogTicket,
+          members: clusterResult.members,
+        });
+      } catch {
+        // Cluster callbacks are fire-and-forget; never surface into the loop
+      }
+    }
+  }
+
   private scheduleRetry(
     issueId: string,
     attempt: number,
@@ -5385,6 +5572,16 @@ export class OrchestratorCore {
         signature: incoming.signature,
         class: incoming.class,
       };
+
+      // Cross-ticket signature clustering (SYMPH-398): record this failure in
+      // the registry via the shared seam so spec-park and other non-retry paths
+      // can call the same logic without duplication.
+      this.recordFailureInCluster(
+        issueId,
+        input.identifier ?? issueId,
+        incoming,
+        stage,
+      );
     }
 
     this.clearRetryEntry(issueId);
