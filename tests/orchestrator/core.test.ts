@@ -1913,6 +1913,8 @@ describe("orchestrator core", () => {
             hardStops: null,
             linearState: null,
             mcpServers: {},
+            timeoutMs: null,
+            concurrency: null,
             transitions: { onComplete: "implement", onRework: null },
           },
           implement: {
@@ -1928,6 +1930,8 @@ describe("orchestrator core", () => {
             hardStops: null,
             linearState: null,
             mcpServers: {},
+            timeoutMs: null,
+            concurrency: null,
             transitions: { onComplete: null, onRework: null },
           },
         },
