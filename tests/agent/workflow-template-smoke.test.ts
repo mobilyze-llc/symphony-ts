@@ -429,7 +429,10 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(withAcs).toContain("Never grade your own `judge:` criteria");
     expect(withAcs).toContain("live-proof: waived");
     expect(withAcs).toContain("live-proof: n/a");
-    // Enforcement clauses, not just instruction vocabulary (council R1):
+    expect(withAcs).toContain("live-proof: evidence");
+    // Enforcement clauses, not just instruction vocabulary (council R1).
+    // The disposition line must reach BOTH council-visible channels (R2):
+    expect(withAcs).toContain("BOTH the PR body (append with `gh pr edit");
     expect(withAcs).toContain(
       "live proof is captured or explicitly waived (or stated n/a)",
     );

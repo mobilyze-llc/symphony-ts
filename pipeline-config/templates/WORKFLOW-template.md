@@ -640,11 +640,11 @@ linear-pp-cli comments edit <COMMENT_UUID> --body-file workpad.md --agent
 4. Do NOT update the workpad after every small code change — only at the milestones above.
 5. If no workpad comment exists (e.g., investigation stage was skipped), create one using the template from the investigate stage instructions.
 
-10. **Live proof (SYMPH-377).** Classify your change's runtime boundary, then prove it or explicitly waive it — never neither:
-   - **Runtime-touching** (UI, API responses visible to users, frontend assets, user-facing behavior): exercise the changed path against the real built artifact after validation passes. Take a screenshot (e.g., `npx playwright screenshot`) or capture the live endpoint response, upload via the fileUpload flow in **Media in Workpads**, and add it to the workpad under Notes: `![live proof after validation](assetUrl)`.
-   - **Runtime-touching but unprovable here** (missing credentials, account, device, or safe live target): finish all code/test/validation work, then record exactly one waiver line in BOTH the workpad Notes and the PR body: `live-proof: waived — <exact missing access>`. Never infer a waiver from green tests or confidence in mocks; the waiver must be explicit and item-scoped.
-   - **No runtime boundary** (library code, configs, internal refactors, docs, CI, test-only): state it in one line in the PR body: `live-proof: n/a — <why no live boundary applies>`.
-   - Re-prove (or re-waive) after any rework that touches the proven path.
+10. **Live proof (SYMPH-377).** Classify your change's runtime boundary, then prove it or explicitly waive it — never neither. Whatever the case, you finish by recording exactly ONE disposition line in BOTH the PR body (append with `gh pr edit <number> --body-file` if the PR already exists) AND your final completion message (the one with `[STAGE_COMPLETE]`):
+   - **Runtime-touching** (UI, API responses visible to users, frontend assets, user-facing behavior): exercise the changed path against the real built artifact after validation passes. Take a screenshot (e.g., `npx playwright screenshot`) or capture the live endpoint response, upload via the fileUpload flow in **Media in Workpads**, embed it in the workpad under Notes (`![live proof after validation](assetUrl)`), and record the disposition line: `live-proof: evidence — <assetUrl or capture reference>`.
+   - **Runtime-touching but unprovable here** (missing credentials, account, device, or safe live target): finish all code/test/validation work, then record the disposition line `live-proof: waived — <exact missing access>` (also copy it into the workpad Notes). Never infer a waiver from green tests or confidence in mocks; the waiver must be explicit and item-scoped.
+   - **No runtime boundary** (library code, configs, internal refactors, docs, CI, test-only): the disposition line is `live-proof: n/a — <why no live boundary applies>`.
+   - Re-prove (or re-waive) after any rework that touches the proven path, updating the disposition line in both places.
 
 ## Completion Signals
 When you are done:
@@ -677,7 +677,7 @@ Before running the council gate, verify the implement stage honored its evidence
 
 {{ acceptance_criteria }}
 {% else %}If the workpad records gate-passed acceptance criteria, each has an evidence line in the implement completion message or PR body (`test:`/`check:`: command + exit code + log path; `judge:`: the named evidence cited).{% endif %}
-2. The PR body carries exactly one live-proof disposition: live evidence (screenshot/endpoint capture), `live-proof: waived — <reason>`, or `live-proof: n/a — <reason>` (the workpad copy is advisory; a missing PR-body disposition fails this check). Runtime-touching diffs with neither evidence nor an explicit waiver fail this check.
+2. The PR body carries exactly one live-proof disposition line: `live-proof: evidence — <citation>`, `live-proof: waived — <reason>`, or `live-proof: n/a — <reason>` (the workpad artifact copy is supporting material; a missing PR-body disposition line fails this check). Runtime-touching diffs whose disposition is neither `evidence` nor an explicit `waived` fail this check.
 
 If a check fails, post a `## Review Findings` comment naming the missing evidence and output `[STAGE_FAILED: review]` — do not run the council gate on work that skipped its evidence contract.
 
