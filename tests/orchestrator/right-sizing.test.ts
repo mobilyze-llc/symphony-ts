@@ -178,6 +178,9 @@ function createConfig(
       apiKey: null,
       maxResumes: 2,
     },
+    acGate: {
+      enabled: false,
+    },
     budgetEscalation: {
       maxSteps: null,
       multiplier: 2,

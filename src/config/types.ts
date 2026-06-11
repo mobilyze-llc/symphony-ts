@@ -92,6 +92,16 @@ export interface WorkflowBudgetEscalationConfig {
  * failure fails closed to the operator pause. maxResumes bounds how many
  * triage-authorized continuations one issue may receive.
  */
+/**
+ * AC falsifiability gate (SYMPH-354): at investigate exit the local model
+ * scores the workpad's acceptance criteria. Uses the pause_triage endpoint
+ * settings; FAIL-OPEN — a judge hiccup advances the stage with a warning,
+ * only a rendered "rework" verdict bounces.
+ */
+export interface WorkflowAcGateConfig {
+  enabled: boolean;
+}
+
 export interface WorkflowPauseTriageConfig {
   baseUrl: string | null;
   model: string | null;
@@ -197,6 +207,7 @@ export interface ResolvedWorkflowConfig {
   rateLimitAdmission: WorkflowRateLimitAdmissionConfig;
   budgetEscalation: WorkflowBudgetEscalationConfig;
   pauseTriage: WorkflowPauseTriageConfig;
+  acGate: WorkflowAcGateConfig;
   runner: WorkflowRunnerConfig;
   continuousFeedback?: WorkflowContinuousFeedbackConfig;
   codex: WorkflowCodexConfig;

@@ -128,6 +128,9 @@ export const SPEC_DEFAULTS = Object.freeze({
   pauseTriage: {
     maxResumes: DEFAULT_PAUSE_TRIAGE_MAX_RESUMES,
   },
+  acGate: {
+    enabled: false,
+  },
   runner: {
     kind: DEFAULT_RUNNER_KIND,
   },

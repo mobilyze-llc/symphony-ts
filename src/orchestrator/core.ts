@@ -254,6 +254,17 @@ export interface OrchestratorCoreOptions {
    * that can only UPGRADE a still-standing park into a resume.
    */
   scheduleDeferred?: (task: () => Promise<void>) => void;
+  /**
+   * AC falsifiability gate (SYMPH-354): render a pass/rework verdict over
+   * the investigate worker's completion message. Resolve null to fail OPEN
+   * (advance with a warning) — judge outages must not halt the fleet.
+   */
+  runAcGate?: (evidence: {
+    issueIdentifier: string;
+    issueTitle: string;
+    issueDescription: string | null;
+    completionMessage: string | null;
+  }) => Promise<{ verdict: "pass" | "rework"; feedback: string } | null>;
   updateIssueState?: (
     issueId: string,
     issueIdentifier: string,
@@ -309,6 +320,8 @@ export class OrchestratorCore {
   private readonly runPauseTriage?: OrchestratorCoreOptions["runPauseTriage"];
 
   private readonly scheduleDeferred?: OrchestratorCoreOptions["scheduleDeferred"];
+
+  private readonly runAcGate?: OrchestratorCoreOptions["runAcGate"];
 
   private readonly updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
 
@@ -367,6 +380,7 @@ export class OrchestratorCore {
     this.postComment = options.postComment;
     this.runPauseTriage = options.runPauseTriage;
     this.scheduleDeferred = options.scheduleDeferred;
+    this.runAcGate = options.runAcGate;
     this.updateIssueState = options.updateIssueState;
     this.autoCloseParentIssue = options.autoCloseParentIssue;
     this.getRunningSupervisionSnapshots =
@@ -1298,6 +1312,98 @@ export class OrchestratorCore {
     });
   }
 
+  /**
+   * Route a deferred AC-gate verdict (SYMPH-354). pass → advance stage and
+   * continue; rework → post the feedback as Review Findings and rerun the
+   * same stage (the rework prompt path reads those comments); null →
+   * FAIL OPEN: advance with a warning. Guards no-op if anything moved the
+   * issue meanwhile.
+   */
+  private async applyAcGateVerdict(input: {
+    issueId: string;
+    identifier: string;
+    stageName: string;
+    verdict: { verdict: "pass" | "rework"; feedback: string } | null;
+  }): Promise<void> {
+    const { issueId, identifier, stageName, verdict } = input;
+
+    if (
+      issueId in this.state.running ||
+      this.state.retryAttempts[issueId] !== undefined ||
+      this.state.resumeRequired.has(issueId) ||
+      this.state.issueStages[issueId] !== stageName
+    ) {
+      return;
+    }
+
+    const action =
+      verdict === null
+        ? "pass_open"
+        : verdict.verdict === "pass"
+          ? "pass"
+          : "rework";
+
+    try {
+      await this.recordRunJournalEntry({
+        idempotencyKey: `ac_gate:${issueId}:${stageName}:${this.now().toISOString()}`,
+        timestamp: this.now().toISOString(),
+        kind: "ac_gate",
+        issueId,
+        issueIdentifier: identifier,
+        operation: "dispatcher",
+        stage: stageName,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary:
+          verdict === null
+            ? `AC gate unavailable for ${identifier}; advancing (fail open).`
+            : `AC gate verdict for ${identifier}: ${verdict.verdict}.`,
+        metadata: {
+          status: "completed",
+          verdict: action,
+          feedback: verdict?.feedback ?? null,
+        },
+      });
+    } catch {
+      // Audit best-effort.
+    }
+
+    if (action === "rework" && verdict !== null) {
+      try {
+        await this.postComment?.(
+          issueId,
+          `## Review Findings (AC gate)\n${verdict.feedback}\nRevise the workpad acceptance criteria per the contract (test:/check:/judge: tags, falsifiable, covering the ticket intent) and complete the stage again.`,
+        );
+      } catch {
+        // Observability only.
+      }
+      this.scheduleRetry(issueId, 1, {
+        identifier,
+        error: null,
+        delayType: "continuation",
+      });
+      return;
+    }
+
+    if (verdict === null) {
+      console.warn(
+        `[orchestrator] AC gate unavailable for ${identifier}; advancing fail-open.`,
+      );
+    }
+    const transition = this.advanceStage(issueId, identifier);
+    if (transition === "completed") {
+      this.state.completed.add(issueId);
+      this.releaseClaim(issueId);
+      return;
+    }
+    this.scheduleRetry(issueId, 1, {
+      identifier,
+      error: null,
+      delayType: "continuation",
+    });
+  }
+
   async onRetryTimer(issueId: string): Promise<RetryTimerResult> {
     await this.expireDispatcherLeases();
 
@@ -1619,6 +1725,48 @@ export class OrchestratorCore {
       );
       if (feedbackBounce !== undefined) {
         return feedbackBounce;
+      }
+
+      if (
+        this.config.acGate.enabled &&
+        this.runAcGate !== undefined &&
+        this.scheduleDeferred !== undefined &&
+        exitedStageName !== null &&
+        exitedStageName === this.config.stages?.initialStage
+      ) {
+        // Hold-then-route (SYMPH-354): the stage neither advances nor
+        // parks until the local model scores the acceptance criteria.
+        // The claim stays held so nothing re-dispatches meanwhile; a
+        // null verdict fails OPEN at the applier.
+        const scheduleDeferred = this.scheduleDeferred;
+        void this.runAcGate({
+          issueIdentifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
+          issueDescription: runningEntry.issue.description ?? null,
+          completionMessage: runningEntry.lastCodexMessage,
+        })
+          .catch((error) => {
+            console.warn(
+              `[orchestrator] AC gate failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return null;
+          })
+          .then((verdict) => {
+            scheduleDeferred(() =>
+              this.applyAcGateVerdict({
+                issueId: input.issueId,
+                identifier: runningEntry.identifier,
+                stageName: exitedStageName,
+                verdict,
+              }),
+            );
+          })
+          .catch((error) => {
+            console.warn(
+              `[orchestrator] AC gate chain failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+        return null;
       }
 
       const transition = this.advanceStage(

@@ -73,6 +73,12 @@ pause_triage:
   api_key: $LOCAL_LLM_API_KEY
   max_resumes: 2
 
+# SYMPH-354: local-model falsifiability gate at investigate exit. Fail-open
+# (judge outages never halt the fleet); a rework verdict bounces investigate
+# with specific feedback via Review Findings.
+ac_gate:
+  enabled: true
+
 codex:
   command: codex --disable plugins --disable hooks --disable plugin_hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use --disable multi_agent --disable goals --disable memories --disable tool_call_mcp_elicitation --config 'model_reasoning_effort="low"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server
   ephemeral_home: true
@@ -458,8 +464,13 @@ Do not use Codex app/connector MCP tools for Linear comments or documents in hea
      - [ ] Substep if needed
 
    ### Acceptance Criteria
-   - [ ] Criterion from issue requirements
-   - [ ] ...
+   Every criterion MUST be falsifiable and tagged with a verification mode
+   (SYMPH-354). If the ticket already states ACs, adopt and formalize them —
+   ticket intent is authoritative; do not invent parallel criteria.
+   - [ ] `test:` names a specific test the implementation must add or extend (e.g. `test: tests/codex/rate-limits.test.ts covers expiry at resets_at`)
+   - [ ] `check:` a command plus its expected result (e.g. `check: npx tsc --noEmit exits 0`)
+   - [ ] `judge:` a falsifiable claim plus the evidence proving it (e.g. `judge: pause reasons report billable and raw tokens — visible in the hard-stop comment`)
+   Bad (will be bounced): restating the title, untestable opinions ("code is clean"), criteria without tags.
 
    ### Validation
    - `<FOCUSED test command for the touched area — never a bare full-suite run like \`pnpm test\`; the full suite gates in CI (SYMPH-358)>`
@@ -472,6 +483,7 @@ Do not use Codex app/connector MCP tools for Linear comments or documents in hea
    (Only add this section if something in the issue was genuinely unclear.)
    ```
 4. Fill the Plan and Acceptance Criteria sections from your investigation findings.
+5. In your FINAL completion message (the one containing `[STAGE_COMPLETE]`), repeat the Acceptance Criteria section verbatim — the AC gate reads it from there (SYMPH-354).
 
 ## Linear Workpad Orientation
 
