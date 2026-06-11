@@ -783,6 +783,10 @@ export class OrchestratorCore {
       if (this.canConsumeResumeRequirement(issue.id, normalizedState)) {
         this.state.completed.delete(issue.id);
         this.state.failed.delete(issue.id);
+        // Clear exhaustion-dedup marker so a re-dispatched issue can fire the
+        // failure_exhausted alert again if it exhausts retries in this new
+        // lifecycle (SYMPH-397).
+        this.state.failureExhaustedIds.delete(issue.id);
         this.clearResumeRequirement(issue.id);
       } else {
         return false;
@@ -797,6 +801,9 @@ export class OrchestratorCore {
       if (resumeStates.has(normalizedState)) {
         this.state.completed.delete(issue.id);
         this.state.failed.delete(issue.id);
+        // Clear exhaustion-dedup marker so the resumed issue starts a fresh
+        // exhaustion lifecycle (SYMPH-397).
+        this.state.failureExhaustedIds.delete(issue.id);
       } else {
         return false;
       }
@@ -3090,6 +3097,9 @@ export class OrchestratorCore {
     delete this.state.issueAcSnapshots[issueId];
     delete this.state.loopTraceJournal[issueId];
     delete this.state.continuousFeedback[issueId];
+    // Clear the exhaustion-dedup marker so a resumed issue can fire the alert
+    // again if it exhausts retries in a new lifecycle (SYMPH-397).
+    this.state.failureExhaustedIds.delete(issueId);
     // Failure signatures are keyed by `${issueId}:${stage}` — purge all
     const sigPrefix = `${issueId}:`;
     for (const key of Object.keys(this.state.issueFailureSignatures)) {
