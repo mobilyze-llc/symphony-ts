@@ -2,6 +2,10 @@ import { promises as fs } from "node:fs";
 
 import type { Workspace } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
+import {
+  type WorkspaceIsolationVerifier,
+  verifyWorkspaceGitIsolation,
+} from "./git-isolation.js";
 import type { WorkspaceHookRunner } from "./hooks.js";
 import {
   WorkspacePathError,
@@ -22,6 +26,12 @@ export interface WorkspaceManagerOptions {
   root: string;
   fs?: FileSystemLike;
   hooks?: WorkspaceHookRunner | null;
+  /**
+   * Fail-closed git-isolation check run on every workspace handed out —
+   * fresh creations AND reused directories (SYMPH-373). Pass `null` to
+   * disable (tests). Defaults to `verifyWorkspaceGitIsolation`.
+   */
+  verifyIsolation?: WorkspaceIsolationVerifier | null;
 }
 
 /**
@@ -90,11 +100,16 @@ export class WorkspaceManager {
   readonly root: string;
   readonly #fs: FileSystemLike;
   readonly #hooks: WorkspaceHookRunner | null;
+  readonly #verifyIsolation: WorkspaceIsolationVerifier | null;
 
   constructor(options: WorkspaceManagerOptions) {
     this.root = options.root;
     this.#fs = options.fs ?? fs;
     this.#hooks = isHookRunner(options.hooks) ? options.hooks : null;
+    this.#verifyIsolation =
+      options.verifyIsolation === undefined
+        ? verifyWorkspaceGitIsolation
+        : options.verifyIsolation;
   }
 
   resolveForIssue(issueId: string): WorkspacePathInfo {
@@ -150,6 +165,26 @@ export class WorkspaceManager {
             // Best-effort cleanup — the hook failure is the primary error.
           }
           throw hookError;
+        }
+      }
+
+      // Fail closed: never hand out a workspace whose git state can reach
+      // an enclosing repository or points at a stale worktree (SYMPH-373).
+      // Reused directories are checked too — a half-created workspace from
+      // a previous failed attempt must self-heal, not reach an agent.
+      if (this.#verifyIsolation) {
+        try {
+          await this.#verifyIsolation(workspacePath);
+        } catch (verifyError) {
+          try {
+            await this.#fs.rm(workspacePath, {
+              force: true,
+              recursive: true,
+            });
+          } catch {
+            // Best-effort cleanup — the verify failure is the primary error.
+          }
+          throw verifyError;
         }
       }
 
