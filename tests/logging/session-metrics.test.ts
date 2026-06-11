@@ -16,6 +16,7 @@ import {
   getAggregateSecondsRunning,
   summarizeCodexEvent,
 } from "../../src/logging/session-metrics.js";
+import { evaluateRateLimitBudgetHardStop } from "../../src/policy/hard-stops.js";
 
 describe("session metrics", () => {
   it("aggregates absolute usage totals without double-counting repeated updates", () => {
@@ -143,6 +144,67 @@ describe("session metrics", () => {
       }),
     );
     expect(running.rateLimitWindows.primary?.latestPercent).toBe(1.5);
+  });
+
+  it("uses session telemetry rate-limit window observations as the hard-stop input", () => {
+    const running = createRunningEntry();
+    const codexRateLimits = (primaryUsed: number, secondaryUsed: number) => ({
+      limit_id: "codex",
+      primary: {
+        used_percent: primaryUsed,
+        window_minutes: 300,
+        resets_at: 1781093929,
+      },
+      secondary: {
+        used_percent: secondaryUsed,
+        window_minutes: 10080,
+        resets_at: 1781137743,
+      },
+    });
+
+    applyCodexEventToSession(
+      running,
+      createEvent("notification", { rateLimits: codexRateLimits(40, 90) }),
+    );
+    applyCodexEventToSession(
+      running,
+      createEvent("notification", { rateLimits: codexRateLimits(45, 98) }),
+    );
+
+    const rateLimitUsage = running.rateLimitWindows;
+    expect(rateLimitUsage).toBe(running.rateLimitWindows);
+    expect(rateLimitUsage).toEqual({
+      primary: {
+        startPercent: 40,
+        latestPercent: 45,
+        lastResetsAt: 1781093929,
+      },
+      secondary: {
+        startPercent: 90,
+        latestPercent: 98,
+        lastResetsAt: 1781137743,
+      },
+    });
+
+    const hardStop = evaluateRateLimitBudgetHardStop({
+      config: {
+        maxIterations: 10,
+        noProgressTurns: 10,
+        maxTokensPerUnit: 1000,
+        maxDollarBudgetUsd: 10,
+        premiumBudgetPauseRatio: 0.8,
+        estimatedCostPer1kTokensUsd: 5,
+        cachedTokenCostRatio: 0.1,
+        maxPrimaryWindowPctPerUnit: 4,
+        maxSecondaryWindowPctPerUnit: 7,
+      },
+      turnCount: 1,
+      totalTokens: 0,
+      cacheReadTokens: 0,
+      rateLimitUsage,
+    });
+
+    expect(hardStop?.reason).toContain("primary window burned 5.0%");
   });
 
   it("tracks ended runtime and recomputes live aggregate snapshot time", () => {
