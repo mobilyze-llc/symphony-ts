@@ -631,9 +631,9 @@ export class OrchestratorCore {
       const consecutiveGateErrors = toOptionalNumber(
         entry.metadata.consecutiveGateErrors,
       );
-      if (consecutiveGateErrors !== null) {
-        this.state.issueGateErrorCounts[entry.issueId] = consecutiveGateErrors;
-      }
+      this.state.issueGateErrorCounts[entry.issueId] =
+        consecutiveGateErrors ??
+        (this.state.issueGateErrorCounts[entry.issueId] ?? 0) + 1;
       this.state.issueStages[entry.issueId] = entry.stage;
       return;
     }
@@ -4187,15 +4187,14 @@ export class OrchestratorCore {
           stageName,
           stage,
         );
-        const gateCycle =
-          (this.state.issueReworkCounts[issue.id] ?? 0) +
-          (this.state.issueGateErrorCounts[issue.id] ?? 0);
+        const gateCycle = this.state.issueReworkCounts[issue.id] ?? 0;
+        const gateErrorCycle = this.state.issueGateErrorCounts[issue.id] ?? 0;
         const gateLeaseId = createDispatcherLeaseId({
           operation: "gate",
           issueId: issue.id,
           stage: stageName,
           attempt,
-          suffix: `gate-cycle-${gateCycle}`,
+          suffix: `gate-cycle-${gateCycle}:gate-error-cycle-${gateErrorCycle}`,
         });
         const gateLease = await this.acquireDispatcherLease({
           leaseId: gateLeaseId,
@@ -4216,6 +4215,7 @@ export class OrchestratorCore {
             authoritative:
               gateContext === null ? null : gateContext.mode !== "prototype",
             gateCycle,
+            gateErrorCycle,
           },
         });
         if (gateLease === null) {
