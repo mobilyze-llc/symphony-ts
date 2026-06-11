@@ -16,3 +16,6 @@ pipeline-config/workspaces/
 /INVESTIGATION-BRIEF.md
 .herenow/
 localllm.txt
+
+# npm artifact — this repo is pnpm-only (pnpm-lock.yaml is the lockfile)
+package-lock.json
