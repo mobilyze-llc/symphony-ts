@@ -1,5 +1,8 @@
 ---
 base_config: ../templates/WORKFLOW-template.md
+# Single-homing guard (SYMPH-383): only this host may dispatch the symphony
+# product. A second orchestrator fails loudly at startup instead of racing.
+owner_host: pro14
 tracker:
   project_slug: fdba14472043
 agent:

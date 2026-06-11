@@ -12,6 +12,7 @@ export const ERROR_CODES = {
   workflowReloadRejected: "workflow_reload_rejected",
   configInvalid: "config_invalid",
   configEnvVarMissing: "config_env_var_missing",
+  ownerHostMismatch: "owner_host_mismatch",
   trackerKindUnsupported: "tracker_kind_unsupported",
   trackerCredentialsMissing: "tracker_credentials_missing",
   trackerRequestFailed: "tracker_request_failed",
