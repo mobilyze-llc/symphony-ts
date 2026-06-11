@@ -439,6 +439,17 @@ export class OrchestratorCore {
         );
       }
 
+      if (
+        entry.kind === "failure_exhausted" &&
+        entry.metadata.status === "completed"
+      ) {
+        this.markIssueRequiresExplicitResume(
+          entry.issueId,
+          readMetadataString(entry.metadata, "issueState"),
+          entry.timestamp,
+        );
+      }
+
       if (isDispatcherAdmissionEntry(entry)) {
         this.clearResumeRequirement(entry.issueId);
       }
@@ -1843,6 +1854,11 @@ export class OrchestratorCore {
         runningEntry.identifier,
         "Agent reported unrecoverable spec failure. Escalating for manual review.",
       );
+      void this.recordFailureExhausted(
+        issueId,
+        runningEntry.identifier,
+        "unrecoverable spec failure",
+      );
       return null;
     }
 
@@ -2186,6 +2202,44 @@ export class OrchestratorCore {
    * Fire escalation side effects (updateIssueState + postComment).
    * Best-effort: failures are logged, not propagated.
    */
+  /**
+   * Durable record of a retry-exhausted (or spec-failed) issue (SYMPH-359):
+   * without it, exhausted issues vanish from the dashboard and a restart
+   * forgets the park entirely, re-dispatching work the orchestrator gave
+   * up on. Replay re-creates the explicit-resume requirement.
+   */
+  private async recordFailureExhausted(
+    issueId: string,
+    issueIdentifier: string,
+    reason: string,
+  ): Promise<void> {
+    const issueState = this.state.running[issueId]?.issue.state ?? null;
+    try {
+      await this.recordRunJournalEntry({
+        idempotencyKey: `failure_exhausted:${issueId}:${this.now().toISOString()}`,
+        timestamp: this.now().toISOString(),
+        kind: "failure_exhausted",
+        issueId,
+        issueIdentifier,
+        operation: "dispatcher",
+        stage: this.state.issueStages[issueId] ?? null,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary: `Retries exhausted for ${issueIdentifier}: ${reason}. Parked for operator.`,
+        metadata: {
+          status: "completed",
+          reason,
+          ...(issueState === null ? {} : { issueState }),
+        },
+      });
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to journal exhaustion for ${issueIdentifier}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   private async fireEscalationSideEffects(
     issueId: string,
     issueIdentifier: string,
@@ -2195,16 +2249,28 @@ export class OrchestratorCore {
       this.config.escalationState !== null &&
       this.updateIssueState !== undefined
     ) {
-      try {
-        await this.updateIssueState(
-          issueId,
-          issueIdentifier,
-          this.config.escalationState,
-        );
-      } catch (err) {
+      // One retry: transient tracker 5xx dropped a live escalation
+      // transition tonight, leaving an exhausted issue invisible in a
+      // dashboard-neutral state with only a console line as evidence.
+      let lastError: unknown = null;
+      for (let attemptNo = 0; attemptNo < 2; attemptNo += 1) {
+        try {
+          await this.updateIssueState(
+            issueId,
+            issueIdentifier,
+            this.config.escalationState,
+          );
+          lastError = null;
+          break;
+        } catch (err) {
+          lastError = err;
+          await new Promise((resolve) => setTimeout(resolve, 3_000));
+        }
+      }
+      if (lastError !== null) {
         console.warn(
           `[orchestrator] Failed to update escalation state for ${issueIdentifier}:`,
-          err,
+          lastError,
         );
       }
     }
@@ -4641,6 +4707,11 @@ export class OrchestratorCore {
         issueId,
         input.identifier ?? issueId,
         `Max retry attempts (${this.config.agent.maxRetryAttempts}) exceeded. Escalating for manual review.`,
+      );
+      void this.recordFailureExhausted(
+        issueId,
+        input.identifier ?? issueId,
+        input.error ?? "max retry attempts exceeded",
       );
       return null;
     }
