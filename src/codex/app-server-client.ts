@@ -1251,7 +1251,7 @@ export class CodexAppServerClient {
             },
           },
         },
-        `dynamic tool "${tool.name}" error`,
+        `dynamic tool "${tool.name}" error for request ${String(requestId)}`,
       );
       return;
     }
@@ -1261,7 +1261,7 @@ export class CodexAppServerClient {
         id: requestId,
         result: toolResult,
       },
-      `dynamic tool "${tool.name}" result`,
+      `dynamic tool "${tool.name}" result for request ${String(requestId)}`,
     );
   }
 }

@@ -1489,6 +1489,12 @@ describe("CodexAppServerClient", () => {
           message: expect.stringContaining("response dropped"),
         }),
       );
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          event: "other_message",
+          message: expect.stringContaining("request late-tool-1"),
+        }),
+      );
       expect(unhandled).toHaveLength(0);
     } finally {
       process.off("unhandledRejection", onUnhandled);
