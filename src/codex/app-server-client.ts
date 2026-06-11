@@ -51,6 +51,12 @@ const DEFAULT_CLIENT_INFO = Object.freeze({
 });
 
 const DEFAULT_MAX_LINE_BYTES = 10 * 1024 * 1024;
+/**
+ * Single source of truth for the throw in send() and the drop predicate in
+ * sendResponseOrDrop() — a drift between the two silently turns late-response
+ * drops back into unhandled rejections (SYMPH-332).
+ */
+const NOT_WRITABLE_MESSAGE = "Codex app-server process is not writable.";
 const SUPPORTED_CODEX_SANDBOX_TYPES =
   "danger-full-access, dangerFullAccess, read-only, readOnly, workspace-write, workspaceWrite";
 
@@ -1125,7 +1131,7 @@ export class CodexAppServerClient {
     } catch (error) {
       if (
         !(error instanceof CodexAppServerClientError) ||
-        error.message !== "Codex app-server process is not writable."
+        error.message !== NOT_WRITABLE_MESSAGE
       ) {
         throw error;
       }
@@ -1141,7 +1147,7 @@ export class CodexAppServerClient {
     const child = this.child;
     if (child === null || child.stdin.destroyed) {
       throw new CodexAppServerClientError(
-        "Codex app-server process is not writable.",
+        NOT_WRITABLE_MESSAGE,
         ERROR_CODES.codexProtocolError,
       );
     }
@@ -1256,13 +1262,36 @@ export class CodexAppServerClient {
       return;
     }
 
-    this.sendResponseOrDrop(
-      {
-        id: requestId,
-        result: toolResult,
-      },
-      `dynamic tool "${tool.name}" result for request ${String(requestId)}`,
-    );
+    try {
+      this.sendResponseOrDrop(
+        {
+          id: requestId,
+          result: toolResult,
+        },
+        `dynamic tool "${tool.name}" result for request ${String(requestId)}`,
+      );
+    } catch (sendError) {
+      // A successful tool result that cannot be serialized/sent (circular
+      // structure, BigInt, ...) must become a reported dynamic-tool
+      // failure — not an unhandled rejection escaping this detached
+      // promise, which is the exact hazard this client guards against
+      // (SYMPH-332). The failure envelope below is all primitives, so it
+      // serializes; if the process died meanwhile, sendResponseOrDrop
+      // drops it.
+      this.sendResponseOrDrop(
+        {
+          id: requestId,
+          result: {
+            success: false,
+            error: {
+              code: ERROR_CODES.codexDynamicToolRejected,
+              message: `Dynamic tool ${tool.name} result could not be sent: ${toErrorMessage(sendError)}`,
+            },
+          },
+        },
+        `dynamic tool "${tool.name}" result-send failure for request ${String(requestId)}`,
+      );
+    }
   }
 }
 

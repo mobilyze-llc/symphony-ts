@@ -1483,18 +1483,57 @@ describe("CodexAppServerClient", () => {
         setTimeout(resolve, 200);
       });
 
-      expect(events).toContainEqual(
-        expect.objectContaining({
-          event: "other_message",
-          message: expect.stringContaining("response dropped"),
-        }),
+      // Exactly one drop event, carrying both the drop marker and the
+      // request id — two loose toContainEqual checks could both match a
+      // single unrelated event via objectContaining subset semantics.
+      const dropEvents = events.filter(
+        (event) =>
+          event.event === "other_message" &&
+          typeof event.message === "string" &&
+          event.message.includes("response dropped"),
       );
-      expect(events).toContainEqual(
-        expect.objectContaining({
-          event: "other_message",
-          message: expect.stringContaining("request late-tool-1"),
-        }),
-      );
+      expect(dropEvents).toHaveLength(1);
+      expect(dropEvents[0]?.message).toContain("request late-tool-1");
+      expect(unhandled).toHaveLength(0);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      await client.close();
+    }
+  });
+
+  it("converts an unserializable successful tool result into a reported failure instead of an unhandled rejection", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const circular: Record<string, unknown> = { ok: true };
+    circular.self = circular;
+    const circularTool: CodexDynamicTool = {
+      // The late-tool-exit fake-server scenario invokes "slow_tool" by name;
+      // this variant resolves instantly so the send races AHEAD of the
+      // child's exit and exercises the serialization-failure path.
+      name: "slow_tool",
+      description: "A tool whose successful result cannot be serialized",
+      execute: () => Promise.resolve(circular),
+    };
+
+    const client = createClient("late-tool-exit", workspace, events, {
+      dynamicTools: [circularTool],
+    });
+    const unhandled: Error[] = [];
+    const onUnhandled = (error: unknown): void => {
+      unhandled.push(error instanceof Error ? error : new Error(String(error)));
+    };
+    process.on("unhandledRejection", onUnhandled);
+
+    try {
+      await client.startSession({
+        prompt: "Circular tool call",
+        title: "SYMPH-332: serialization regression",
+      });
+
+      await new Promise((resolve) => {
+        setTimeout(resolve, 200);
+      });
+
       expect(unhandled).toHaveLength(0);
     } finally {
       process.off("unhandledRejection", onUnhandled);
