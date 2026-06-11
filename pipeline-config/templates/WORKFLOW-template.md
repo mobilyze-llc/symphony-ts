@@ -562,6 +562,17 @@ You are in the IMPLEMENT stage. Read the latest Linear issue comments/workpad/re
 These are the gate-passed acceptance criteria recorded for this issue (SYMPH-374). They are the criteria your diff will be judged against at review exit, harness-side — editing or checking off the workpad copy does NOT change them. Satisfy them; never reinterpret or weaken them. If one is unsatisfiable as written, explain why and output `[STAGE_FAILED: spec]`.
 
 {{ acceptance_criteria }}
+
+### Inner verification loop (SYMPH-375)
+
+Do not emit `[STAGE_COMPLETE]` until the machine-checkable criteria above pass — iterate in this session rather than exiting and letting review bounce you:
+
+- For every `test:` criterion: the named test exists in your diff (or demonstrably pre-exists and is extended) AND passes. Run it through the bounded-log path (`scripts/symphony-run-logged.mjs` when present) and record per criterion: command, exit code, log path.
+- For every `check:` criterion: run the named command and confirm the expected result. Record command + exit code per criterion.
+- For every `judge:` criterion: PRODUCE the evidence the criterion names (artifact, comment, log) and cite where it lives. Never grade your own `judge:` criteria — an independent judge does that at review exit.
+- A failing `test:`/`check:` criterion gets at most 3 fix-and-rerun attempts. Exhausted → output `[STAGE_FAILED: verify]` naming the specific criterion and its last output.
+- Your FINAL completion message (the one with `[STAGE_COMPLETE]`) must list every criterion with its evidence line (`<tag> — <command> — exit <code> — <log path or citation>`). Keep each line bounded; full output stays in `.symphony/validation/`.
+- These criteria are read-only to you. If satisfying one would require editing or weakening it, that is `[STAGE_FAILED: spec]` with an explanation, never a quiet reinterpretation.
 {% endif %}
 
 {% if reworkCount > 0 %}
@@ -628,17 +639,17 @@ linear-pp-cli comments edit <COMMENT_UUID> --body-file workpad.md --agent
 4. Do NOT update the workpad after every small code change — only at the milestones above.
 5. If no workpad comment exists (e.g., investigation stage was skipped), create one using the template from the investigate stage instructions.
 
-10. **If your changes are app-touching** (UI, API responses visible to users, frontend assets), capture a screenshot after validation passes and embed it in the workpad:
-   - Take a screenshot (e.g., `npx playwright screenshot` or `curl` the endpoint and save the response).
-   - Upload it using the fileUpload flow described in the **Media in Workpads** section.
-   - Add the image to the workpad comment under Notes: `![screenshot after validation](assetUrl)`.
-   - Skip this step for non-visual changes (library code, configs, internal refactors).
+10. **Live proof (SYMPH-377).** Classify your change's runtime boundary, then prove it or explicitly waive it — never neither:
+   - **Runtime-touching** (UI, API responses visible to users, frontend assets, user-facing behavior): exercise the changed path against the real built artifact after validation passes. Take a screenshot (e.g., `npx playwright screenshot`) or capture the live endpoint response, upload via the fileUpload flow in **Media in Workpads**, and add it to the workpad under Notes: `![live proof after validation](assetUrl)`.
+   - **Runtime-touching but unprovable here** (missing credentials, account, device, or safe live target): finish all code/test/validation work, then record exactly one waiver line in BOTH the workpad Notes and the PR body: `live-proof: waived — <exact missing access>`. Never infer a waiver from green tests or confidence in mocks; the waiver must be explicit and item-scoped.
+   - **No runtime boundary** (library code, configs, internal refactors, docs, CI, test-only): state it in one line in the PR body: `live-proof: n/a — <why no live boundary applies>`.
+   - Re-prove (or re-waive) after any rework that touches the proven path.
 
 ## Completion Signals
 When you are done:
-- If all verify commands pass and PR is created: output `[STAGE_COMPLETE]`
-- If you cannot resolve a verify failure after 3 attempts: output `[STAGE_FAILED: verify]` with the failing command and output
-- If the spec is ambiguous or contradictory: output `[STAGE_FAILED: spec]` with an explanation
+- If all verify commands pass, every frozen acceptance criterion has its evidence line (per the Inner verification loop), live proof is captured or explicitly waived, and the PR is created: output `[STAGE_COMPLETE]`
+- If you cannot resolve a verify failure (or a failing `test:`/`check:` criterion) after 3 attempts: output `[STAGE_FAILED: verify]` with the failing command/criterion and output
+- If the spec is ambiguous, contradictory, or a frozen criterion is unsatisfiable as written: output `[STAGE_FAILED: spec]` with an explanation
 - If you hit infrastructure issues (API limits, network errors): output `[STAGE_FAILED: infra]` with details
 
 Headless worker permissions are preconfigured. Do not request sandbox, network,
@@ -656,6 +667,18 @@ Do NOT run `/self-moa-review`, `/codex-review`, direct `claude -p`, or any other
 ### Re-review After Rework (rework #{{ reworkCount }})
 This is a re-review after a rework cycle. Run the same headless council gate again and verify the previous `## Review Findings` are resolved.
 {% endif %}
+
+### Pre-gate evidence check (SYMPH-375 / SYMPH-377)
+
+Before running the council gate, verify the implement stage honored its evidence contract — these are mechanical checks, not judgment:
+
+1. {% if acceptance_criteria != "" %}Each frozen acceptance criterion below has an evidence line in the implement completion message or PR body (`test:`/`check:`: command + exit code + log path; `judge:`: the named evidence cited). The frozen criteria:
+
+{{ acceptance_criteria }}
+{% else %}If the workpad records gate-passed acceptance criteria, each has an evidence line in the implement completion message or PR body (`test:`/`check:`: command + exit code + log path; `judge:`: the named evidence cited).{% endif %}
+2. The PR body or workpad carries exactly one live-proof disposition: live evidence (screenshot/endpoint capture), `live-proof: waived — <reason>`, or `live-proof: n/a — <reason>`. Runtime-touching diffs with neither evidence nor an explicit waiver fail this check.
+
+If a check fails, post a `## Review Findings` comment naming the missing evidence and output `[STAGE_FAILED: review]` — do not run the council gate on work that skipped its evidence contract.
 
 ### Run the headless council gate
 

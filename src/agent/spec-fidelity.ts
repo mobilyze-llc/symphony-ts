@@ -135,6 +135,7 @@ function buildSpecFidelityPrompt(evidence: SpecFidelityEvidence): string {
     "- For each `check:`/`judge:` AC: cite the diff hunks that satisfy it, or state what is missing.",
     '- Verdict "pass" only when every AC is satisfied with diff evidence; otherwise "rework" with the specific gaps.',
     "- No acceptance criteria at all = rework with findings asking for them.",
+    "- Live proof (SYMPH-377): when the diff touches user-visible runtime behavior (UI, API responses, frontend assets), the worker message must carry live-proof evidence OR an explicit `live-proof: waived — <reason>` / `live-proof: n/a — <reason>` line. A runtime-touching diff with neither is a finding (note it; it need not alone flip the verdict).",
     "",
     'Respond with JSON only: {"verdict": "pass" | "rework", "findings": "<one line per AC: PASS/FAIL + evidence>"}',
   ].join("\n");

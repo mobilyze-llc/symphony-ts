@@ -414,6 +414,51 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).not.toMatch(/You MUST NOT/);
   });
 
+  it("implement stage carries the inner verification loop and live-proof contracts (SYMPH-375/377)", async () => {
+    const withAcs = await renderPrompt({
+      workflow: { promptTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "implement",
+      reworkCount: 0,
+      acceptanceCriteria:
+        "### Acceptance Criteria\n- [ ] `check: pnpm lint exits 0`",
+    });
+    expect(withAcs).toContain("Inner verification loop (SYMPH-375)");
+    expect(withAcs).toContain("at most 3 fix-and-rerun attempts");
+    expect(withAcs).toContain("Never grade your own `judge:` criteria");
+    expect(withAcs).toContain("live-proof: waived");
+    expect(withAcs).toContain("live-proof: n/a");
+
+    // Without gate-passed ACs the loop contract is absent (nothing to
+    // iterate on) but the live-proof contract still applies.
+    const withoutAcs = await renderPrompt({
+      workflow: { promptTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "implement",
+      reworkCount: 0,
+    });
+    expect(withoutAcs).not.toContain("Inner verification loop (SYMPH-375)");
+    expect(withoutAcs).toContain("live-proof: waived");
+  });
+
+  it("review stage carries the pre-gate evidence check (SYMPH-375/377)", async () => {
+    const output = await renderPrompt({
+      workflow: { promptTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "review",
+      reworkCount: 0,
+      acceptanceCriteria: "### Acceptance Criteria\n- [ ] `check: x`",
+    });
+    expect(output).toContain("Pre-gate evidence check");
+    expect(output).toContain("live-proof: waived");
+    expect(output).toContain(
+      "do not run the council gate on work that skipped its evidence contract",
+    );
+  });
+
   it("review stage does NOT contain description", async () => {
     const output = await renderPrompt({
       workflow: { promptTemplate },
