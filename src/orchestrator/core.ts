@@ -51,6 +51,7 @@ import {
   parseFailureSignal,
 } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
+import { normalizeErrorSignature } from "../errors/signature.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
   appendDispatcherRunJournalEntry,
@@ -2465,6 +2466,7 @@ export class OrchestratorCore {
     issueId: string,
     issueIdentifier: string,
     reason: string,
+    signatureMeta?: { failure_signature: string; failure_class: string },
   ): Promise<void> {
     const issueState = this.state.running[issueId]?.issue.state ?? null;
     try {
@@ -2484,6 +2486,7 @@ export class OrchestratorCore {
           status: "completed",
           reason,
           ...(issueState === null ? {} : { issueState }),
+          ...(signatureMeta ?? {}),
         },
       });
     } catch (error) {
@@ -2915,6 +2918,13 @@ export class OrchestratorCore {
     delete this.state.issueAcSnapshots[issueId];
     delete this.state.loopTraceJournal[issueId];
     delete this.state.continuousFeedback[issueId];
+    // Failure signatures are keyed by `${issueId}:${stage}` — purge all
+    const sigPrefix = `${issueId}:`;
+    for (const key of Object.keys(this.state.issueFailureSignatures)) {
+      if (key.startsWith(sigPrefix) || key === issueId) {
+        delete this.state.issueFailureSignatures[key];
+      }
+    }
   }
 
   private markIssueRequiresExplicitResume(
@@ -5036,6 +5046,50 @@ export class OrchestratorCore {
         input.error ?? "max retry attempts exceeded",
       );
       return null;
+    }
+
+    // Retry-without-novelty short-circuit (SYMPH-396): record the normalized
+    // failure signature on every failure retry so subsequent attempts can
+    // detect a repeat. On attempt >= 2, if the incoming signature matches the
+    // stored one AND the class is not "transient", park immediately — retrying
+    // an identical permanent failure is futile.
+    if (input.delayType === "failure" && input.error !== null) {
+      const stage = this.state.issueStages[issueId] ?? null;
+      const sigKey = `${issueId}:${stage ?? ""}`;
+      const incoming = normalizeErrorSignature(input.error);
+      const previous = this.state.issueFailureSignatures[sigKey];
+      if (
+        attempt >= 2 &&
+        previous !== undefined &&
+        incoming.signature === previous.signature &&
+        incoming.class !== "transient"
+      ) {
+        // Identical non-transient signature — park loudly, skip ladder
+        const parkReason = `retry futile: identical failure signature ${incoming.signature} (${incoming.class})`;
+        this.state.failed.add(issueId);
+        this.releaseClaim(issueId);
+        this.clearTerminalIssueRuntimeState(issueId);
+        void this.fireEscalationSideEffects(
+          issueId,
+          input.identifier ?? issueId,
+          parkReason,
+        );
+        void this.recordFailureExhausted(
+          issueId,
+          input.identifier ?? issueId,
+          parkReason,
+          {
+            failure_signature: incoming.signature,
+            failure_class: incoming.class,
+          },
+        );
+        return null;
+      }
+      // Record (or update) the signature for comparison on the next attempt
+      this.state.issueFailureSignatures[sigKey] = {
+        signature: incoming.signature,
+        class: incoming.class,
+      };
     }
 
     this.clearRetryEntry(issueId);
