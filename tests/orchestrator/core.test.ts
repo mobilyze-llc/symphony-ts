@@ -1022,6 +1022,57 @@ describe("orchestrator core", () => {
     expect(updateIssueState).not.toHaveBeenCalled();
   });
 
+  it("consumes a pending stage failure after explicit Resume instead of dropping the failure signal", async () => {
+    let issueState = "Todo";
+    const spawnedIssueIds: string[] = [];
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker: async ({ issue }) => {
+        spawnedIssueIds.push(issue.id);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "Focused validation failed.\n[STAGE_FAILED: verify]",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 150_000,
+        estimatedCostUsd: 40,
+      },
+    });
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+
+    expect(resumed.dispatchedIssueIds).toEqual([]);
+    expect(spawnedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+    expect(orchestrator.getState().retryAttempts["1"]).toMatchObject({
+      delayType: "failure",
+      error: "agent reported failure: verify",
+      identifier: "ISSUE-1",
+    });
+  });
+
   it("consumes a pending stage completion after budget escalation instead of rerunning the completed stage", async () => {
     const spawnedStageNames: Array<string | null> = [];
     const config = createConfig({
@@ -4222,6 +4273,29 @@ describe("dispatcher run journal restart recovery", () => {
       delayType: "continuation",
       identifier: "ISSUE-1",
     });
+
+    const replaySpawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1002 },
+      monitorHandle: { ref: "monitor-2" },
+    }));
+    const replayedAfterConsumption = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker: replaySpawnWorker,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    const replayedPoll = await replayedAfterConsumption.pollTick();
+    expect(replayedPoll.dispatchedIssueIds).toEqual(["1"]);
+    expect(replaySpawnWorker).toHaveBeenCalledWith(
+      expect.objectContaining({ stageName: "implement" }),
+    );
+    expect(replayedAfterConsumption.getState().resumeRequired.has("1")).toBe(
+      false,
+    );
   });
 
   it("journals retry exhaustion and keeps the park across restart replay", async () => {

@@ -237,6 +237,9 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   // replayed into issueExecutionHistory so per-issue cumulative spend
   // survives restarts without a bespoke persistence store.
   "stage_record",
+  // Durable consumption marker for a terminal stage signal that arrived
+  // together with a budget hard stop (SYMPH-440).
+  "pending_stage_signal",
 ] as const;
 
 // ---------------------------------------------------------------------------

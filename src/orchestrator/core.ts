@@ -45,6 +45,7 @@ import {
   type DispatcherOperation,
   type DispatcherRunJournal,
   type DispatcherRunJournalEntry,
+  FAILURE_CLASSES,
   type FailureClass,
   type Issue,
   type LiveSession,
@@ -1018,6 +1019,13 @@ export class OrchestratorCore {
       }
 
       if (
+        entry.kind === "pending_stage_signal" &&
+        entry.metadata.status === "consumed"
+      ) {
+        this.recoverConsumedPendingStageSignal(entry);
+      }
+
+      if (
         entry.kind === "tracker_write" &&
         entry.idempotencyKey.includes(":terminal:") &&
         entry.idempotencyKey.endsWith(":completed")
@@ -1272,6 +1280,24 @@ export class OrchestratorCore {
       ...pending,
       setBySequence: entry.sequence,
     };
+  }
+
+  private recoverConsumedPendingStageSignal(
+    entry: DispatcherRunJournalEntry,
+  ): void {
+    delete this.state.issuePendingStageSignals[entry.issueId];
+    this.clearResumeRequirement(entry.issueId);
+    const resultingStageName = readMetadataString(
+      entry.metadata,
+      "resultingStageName",
+    );
+    if (resultingStageName !== null) {
+      this.state.issueStages[entry.issueId] = resultingStageName;
+    }
+    if (entry.metadata.completed === true) {
+      this.state.completed.add(entry.issueId);
+      this.clearTerminalIssueRuntimeState(entry.issueId);
+    }
   }
 
   private recoverDecorrelatedGateOutcome(
@@ -1980,14 +2006,15 @@ export class OrchestratorCore {
     }
 
     if (pendingStageSignal !== null) {
-      this.state.issuePendingStageSignals[issueId] = {
+      const storedPendingStageSignal = {
         ...pendingStageSignal,
         setBySequence: escalationEntry.sequence,
       };
+      this.state.issuePendingStageSignals[issueId] = storedPendingStageSignal;
       return this.consumePendingStageSignal(
         issueId,
         runningEntry,
-        pendingStageSignal,
+        storedPendingStageSignal,
       );
     }
 
@@ -2160,10 +2187,11 @@ export class OrchestratorCore {
     if (willResume) {
       this.state.issuePauseTriageResumes[issueId] = resumesUsed + 1;
       if (pendingStageSignal !== null && pauseTriageEntry !== null) {
-        this.state.issuePendingStageSignals[issueId] = {
+        const storedPendingStageSignal = {
           ...pendingStageSignal,
           setBySequence: pauseTriageEntry.sequence,
         };
+        this.state.issuePendingStageSignals[issueId] = storedPendingStageSignal;
       }
     }
 
@@ -2204,10 +2232,12 @@ export class OrchestratorCore {
     }
 
     if (pendingStageSignal !== null) {
+      const storedPendingStageSignal =
+        this.state.issuePendingStageSignals[issueId] ?? pendingStageSignal;
       return this.consumePendingStageSignal(
         issueId,
         runningEntry,
-        pendingStageSignal,
+        storedPendingStageSignal,
       );
     }
 
@@ -2624,7 +2654,7 @@ export class OrchestratorCore {
         issueIdentifier: runningEntry.identifier,
         issueTitle: runningEntry.issue.title,
         acceptanceCriteria: this.state.issueAcSnapshots[issueId] ?? null,
-        reviewMessage: agentMessage ?? runningEntry.lastCodexMessage,
+        reviewMessage: runningEntry.lastCodexMessage,
       })
         .catch((error) => {
           console.warn(
@@ -2679,24 +2709,62 @@ export class OrchestratorCore {
     }
     runningEntry.lastCodexMessage = pendingStageSignal.agentMessage;
 
+    let retryEntry: RetryEntry | null;
     if (pendingStageSignal.signal === "failure") {
       if (pendingStageSignal.failureClass === null) {
         return null;
       }
-      return this.handleFailureSignal(
+      retryEntry = this.handleFailureSignal(
         issueId,
         runningEntry,
         pendingStageSignal.failureClass,
         pendingStageSignal.agentMessage,
       );
+    } else {
+      retryEntry = await this.handleNormalStageExit(
+        issueId,
+        runningEntry,
+        pendingStageSignal.stageName,
+        pendingStageSignal.agentMessage,
+      );
     }
 
-    return this.handleNormalStageExit(
+    await this.recordPendingStageSignalConsumed(
       issueId,
       runningEntry,
-      pendingStageSignal.stageName,
-      pendingStageSignal.agentMessage,
+      pendingStageSignal,
     );
+    return retryEntry;
+  }
+
+  private async recordPendingStageSignalConsumed(
+    issueId: string,
+    runningEntry: RunningEntry,
+    pendingStageSignal: PendingStageSignal,
+  ): Promise<void> {
+    const resultingStageName = this.state.issueStages[issueId] ?? null;
+    await this.recordRunJournalEntry({
+      idempotencyKey: `pending_stage_signal:${issueId}:${pendingStageSignal.setBySequence ?? "live"}:consumed`,
+      timestamp: this.now().toISOString(),
+      kind: "pending_stage_signal",
+      issueId,
+      issueIdentifier: runningEntry.identifier,
+      operation: "dispatcher",
+      stage: pendingStageSignal.stageName,
+      attempt: pendingStageSignal.attempt,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Consumed pending ${pendingStageSignal.signal} signal for ${runningEntry.identifier} after budget-pause authorization.`,
+      metadata: {
+        status: "consumed",
+        sourceSequence: pendingStageSignal.setBySequence,
+        signal: pendingStageSignal.signal,
+        failureClass: pendingStageSignal.failureClass,
+        sourceStageName: pendingStageSignal.stageName,
+        resultingStageName,
+        completed: this.state.completed.has(issueId),
+      },
+    });
   }
 
   private async recordSpecFidelityVerdict(input: {
@@ -7039,6 +7107,25 @@ export class OrchestratorCore {
     let stage: StageDefinition | null = null;
     let stageName: string | null = null;
     const attemptKey = formatAttemptKey(attempt);
+    const pendingStageSignal = this.state.issuePendingStageSignals[issue.id];
+    if (pendingStageSignal !== undefined) {
+      const pendingRunningEntry = createPendingRunningEntry({
+        issue,
+        identifier: issue.identifier,
+        attempt: pendingStageSignal.attempt,
+        stageName: pendingStageSignal.stageName,
+        agentMessage: pendingStageSignal.agentMessage,
+      });
+      await this.consumePendingStageSignal(
+        issue.id,
+        pendingRunningEntry,
+        pendingStageSignal,
+      );
+      return {
+        dispatched: false,
+        rightSizingDecision: null,
+      };
+    }
 
     if (stagesConfig !== null) {
       const cachedStage = this.state.issueStages[issue.id];
@@ -7069,26 +7156,6 @@ export class OrchestratorCore {
         // run starting now re-freezes its rubric at its own gate pass;
         // fast-tracked runs legitimately have none.
         delete this.state.issueAcSnapshots[issue.id];
-      }
-
-      const pendingStageSignal = this.state.issuePendingStageSignals[issue.id];
-      if (pendingStageSignal !== undefined) {
-        const pendingRunningEntry = createPendingRunningEntry({
-          issue,
-          identifier: issue.identifier,
-          attempt: pendingStageSignal.attempt,
-          stageName: pendingStageSignal.stageName,
-          agentMessage: pendingStageSignal.agentMessage,
-        });
-        await this.consumePendingStageSignal(
-          issue.id,
-          pendingRunningEntry,
-          pendingStageSignal,
-        );
-        return {
-          dispatched: false,
-          rightSizingDecision: null,
-        };
       }
 
       if (stage !== null && stage.type === "terminal") {
@@ -9040,11 +9107,7 @@ function readPendingStageSignalMetadata(
 
 function isFailureClass(value: string | null): value is FailureClass {
   return (
-    value === "verify" ||
-    value === "review" ||
-    value === "rebase" ||
-    value === "spec" ||
-    value === "infra"
+    value !== null && (FAILURE_CLASSES as readonly string[]).includes(value)
   );
 }
 
