@@ -114,7 +114,7 @@ Labels: {{ issue.labels | join: ", " }}
 
 {% if stageName == "review" %}
 ## Stage: Review
-You are the review-gate operator, not the reviewer. Every PR, including low-risk PRs, must pass the headless council gate before merge.
+You are the review-gate operator, not the reviewer. Council is a loop over the merge candidate: every PR, including low-risk PRs, must pass the headless council gate before merge, and every material post-review change must get a convergence rerun against the new HEAD.
 
 Do NOT run `/self-moa-review`, `/codex-review`, direct `claude -p`, or any other direct Claude invocation. Claude must run through CMUX via `symphony-council-review-gate`.
 
@@ -151,10 +151,12 @@ run_council_gate \
   --repo "$REPO" \
   --pr "$PR_NUMBER" \
   --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
+  --mode {% if reworkCount > 0 %}convergence{% else %}full{% endif %} \
+  --round {{ reworkCount | plus: 1 }} \
   --timeout-seconds 1800
 ```
 
-Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`.
+Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`. The machine result must contain `review_metadata.reviewed_head_sha`, `review_metadata.base_sha`, `review_metadata.round`, `review_metadata.mode`, and a clean verdict.
 
 If the gate reports `PASS`, output `[STAGE_COMPLETE]`.
 If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/malformed: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.

@@ -381,7 +381,7 @@ When you are done:
 
 {% if stageName == "review" %}
 ## Stage: Review
-You are the review-gate operator, not the reviewer. Every PR, including low-risk PRs, must pass the headless council gate before merge.
+You are the review-gate operator, not the reviewer. Council is a loop over the merge candidate: every PR, including low-risk PRs, must pass the headless council gate before merge, and every material post-review change must get a convergence rerun against the new HEAD.
 
 Do NOT run `/self-moa-review`, `/codex-review`, direct `claude -p`, or any other direct Claude invocation. Claude must run through CMUX via `symphony-council-review-gate`.
 
@@ -418,10 +418,12 @@ run_council_gate \
   --repo "$REPO" \
   --pr "$PR_NUMBER" \
   --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
+  --mode {% if reworkCount > 0 %}convergence{% else %}full{% endif %} \
+  --round {{ reworkCount | plus: 1 }} \
   --timeout-seconds 1800
 ```
 
-Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`.
+Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`. The machine result must contain `review_metadata.reviewed_head_sha`, `review_metadata.base_sha`, `review_metadata.round`, `review_metadata.mode`, and a clean verdict.
 
 If the gate reports `PASS`, output `[STAGE_COMPLETE]`.
 If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/malformed: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
@@ -430,6 +432,7 @@ If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/mal
 {% if stageName == "merge" %}
 ## Stage: Merge
 You are in the MERGE stage. The PR has been reviewed and approved.
+- Before merging, assert the latest clean council artifact still covers the current PR head with `symphony-council-review-gate --assert-fresh-review <path-to-latest-clean-review-result.json> --issue-id {{ issue.identifier }} --artifact-dir "$ARTIFACT_DIR" --workspace "$PWD" --repo "$REPO" --pr "$PR_NUMBER"`. If it emits `code: "stale_review"` or `rerun convergence review against HEAD.`, do not merge; return to review and run convergence against HEAD.
 - Merge the PR via `gh pr merge --squash --delete-branch --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")`
 - Verify the merge succeeded on the main branch
 - Do NOT modify code in this stage

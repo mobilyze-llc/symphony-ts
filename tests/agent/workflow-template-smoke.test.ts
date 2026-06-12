@@ -514,16 +514,25 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       reworkCount: 0,
     });
     expect(output).not.toContain(DESCRIPTION_SENTINEL);
+    expect(output).toContain("every PR, including low-risk PRs");
     expect(output).toContain(
-      "Every PR, including low-risk PRs, must pass the headless council gate",
+      "must pass the headless council gate before merge",
     );
+    expect(output).toContain("Council is a loop over the merge candidate");
+    expect(output).toContain("material post-review change");
     expect(output).toContain("symphony-council-review-gate");
     expect(output).toContain("CMUX_SPAWN_BIN");
     expect(output).toContain("SYMPHONY_COUNCIL_REVIEW_GATE");
     expect(output).toContain("command -v cmux-spawn");
     expect(output).toContain("command -v symphony-council-review-gate");
     expect(output).toContain("run_council_gate");
+    expect(output).toContain("--mode full");
+    expect(output).toContain("--round 1");
     expect(output).toContain("--timeout-seconds 1800");
+    expect(output).toContain("review_metadata.reviewed_head_sha");
+    expect(output).toContain("review_metadata.base_sha");
+    expect(output).toContain("review_metadata.round");
+    expect(output).toContain("review_metadata.mode");
     expect(output).toContain("Claude must run through CMUX");
     expect(output).not.toContain("Build the local CLI");
     expect(output).not.toContain(
@@ -531,6 +540,20 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     );
     expect(output).not.toContain("Load and execute the /self-moa-review skill");
     expect(output).not.toContain("issue description contains the frozen spec");
+  });
+
+  it("review rework renders convergence mode and incremented round", async () => {
+    const output = await renderPrompt({
+      workflow: { promptTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "review",
+      reworkCount: 2,
+    });
+
+    expect(output).toContain("### Re-review After Rework (rework #2)");
+    expect(output).toContain("--mode convergence");
+    expect(output).toContain("--round 3");
   });
 
   it("merge stage does NOT contain description and HAS prohibitions", async () => {
@@ -544,6 +567,9 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).not.toContain(DESCRIPTION_SENTINEL);
     expect(output).toMatch(/MUST NOT/);
     expect(output).toContain("Your ONLY job is to merge the PR");
+    expect(output).toContain("--assert-fresh-review");
+    expect(output).toContain('code: "stale_review"');
+    expect(output).toContain("rerun convergence review against HEAD.");
   });
 
   it("null stageName renders without error (backward compat)", async () => {

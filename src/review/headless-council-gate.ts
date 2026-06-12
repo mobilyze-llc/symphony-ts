@@ -22,6 +22,7 @@ const DIFF_INJECTION_TOKEN_PATTERN =
 const execFileAsync = promisify(execFile);
 
 export type HeadlessGateVerdict = "pass" | "fail" | "error";
+export type CouncilReviewMode = "full" | "convergence";
 export type HeadlessLaneState =
   | "complete"
   | "failed"
@@ -66,6 +67,8 @@ export interface HeadlessCouncilGateInput {
   timeoutSeconds?: number;
   reviewerLanes?: readonly HeadlessReviewerLaneConfig[];
   codexLead?: boolean;
+  round?: number;
+  mode?: CouncilReviewMode;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -75,7 +78,17 @@ export interface ReviewContext {
   prNumber: number | null;
   baseRef: string;
   headRef: string;
+  baseSha: string | null;
+  headSha: string | null;
   diff: string;
+}
+
+export interface CouncilReviewMetadata {
+  reviewed_head_sha: string | null;
+  base_sha: string | null;
+  round: number;
+  mode: CouncilReviewMode;
+  verdict: HeadlessGateVerdict;
 }
 
 export interface HeadlessLaneResult {
@@ -106,6 +119,7 @@ export interface HeadlessCouncilGateResult {
     baseRef: string | null;
     headRef: string | null;
   };
+  review_metadata: CouncilReviewMetadata;
   lanes: HeadlessLaneResult[];
   degradedConditions: string[];
   artifactPaths: {
@@ -113,6 +127,47 @@ export interface HeadlessCouncilGateResult {
     diff: string | null;
     resultJson: string;
     councilReport: string;
+  };
+  summary: string;
+}
+
+export type CouncilFreshnessCode =
+  | "fresh"
+  | "stale_review"
+  | "invalid_review_artifact"
+  | "head_resolution_failed";
+
+export interface CouncilFreshnessInput {
+  issueId: string;
+  workspace: string;
+  artifactDir: string;
+  reviewResultPath: string;
+  repo?: string;
+  prNumber?: number;
+  baseRef?: string;
+  headRef?: string;
+  allowedChangePatterns?: readonly string[];
+  env?: NodeJS.ProcessEnv;
+}
+
+export interface CouncilFreshnessResult {
+  schemaVersion: 1;
+  issueId: string;
+  verdict: "pass" | "error";
+  code: CouncilFreshnessCode;
+  reviewedHeadSha: string | null;
+  currentHeadSha: string | null;
+  baseSha: string | null;
+  reviewMode: CouncilReviewMode | null;
+  reviewRound: number | null;
+  materialChangedFiles: string[];
+  allowlistedChangedFiles: string[];
+  allowedChangePatterns: string[];
+  guidance: string | null;
+  artifactPaths: {
+    artifactDir: string;
+    reviewResult: string;
+    freshnessResult: string;
   };
   summary: string;
 }
@@ -152,12 +207,25 @@ export async function runHeadlessCouncilGate(
   const cmuxSpawnBin =
     input.cmuxSpawnBin ?? env.CMUX_SPAWN_BIN ?? DEFAULT_CMUX_SPAWN_BIN;
   const timeoutSeconds = input.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
+  const round = normalizeReviewRound(input.round);
+  const mode = input.mode ?? "full";
   const startedAt = now().toISOString();
 
   const resultPaths = {
     resultJson: `${artifactDir}/review-result.json`,
     councilReport: `${artifactDir}/council-report.md`,
   };
+
+  const buildReviewMetadata = (
+    context: Partial<ReviewContext>,
+    verdict: HeadlessGateVerdict,
+  ): CouncilReviewMetadata => ({
+    reviewed_head_sha: context.headSha ?? null,
+    base_sha: context.baseSha ?? null,
+    round,
+    mode,
+    verdict,
+  });
 
   const fail = async (
     verdict: HeadlessGateVerdict,
@@ -179,6 +247,7 @@ export async function runHeadlessCouncilGate(
         baseRef: context.baseRef ?? input.baseRef ?? null,
         headRef: context.headRef ?? input.headRef ?? null,
       },
+      review_metadata: buildReviewMetadata(context, verdict),
       lanes,
       degradedConditions,
       artifactPaths: {
@@ -367,6 +436,7 @@ export async function runHeadlessCouncilGate(
       baseRef: context.baseRef,
       headRef: context.headRef,
     },
+    review_metadata: buildReviewMetadata(context, verdict),
     lanes,
     degradedConditions,
     artifactPaths: {
@@ -375,6 +445,232 @@ export async function runHeadlessCouncilGate(
       ...resultPaths,
     },
     summary,
+  });
+}
+
+export async function assertFreshCouncilReview(
+  input: CouncilFreshnessInput,
+  dependencies: Pick<
+    HeadlessCouncilGateDependencies,
+    "runCommand" | "now"
+  > = {},
+): Promise<CouncilFreshnessResult> {
+  const runCommand = dependencies.runCommand ?? execFileCommand;
+  const env = input.env ?? process.env;
+  const artifactDir = resolve(input.artifactDir);
+  const workspace = resolve(input.workspace);
+  const reviewResultPath = resolve(input.reviewResultPath);
+  const freshnessResultPath = `${artifactDir}/review-freshness-result.json`;
+  await mkdir(artifactDir, { recursive: true });
+
+  const writeFreshnessResult = async (
+    result: Omit<CouncilFreshnessResult, "artifactPaths">,
+  ): Promise<CouncilFreshnessResult> => {
+    const completeResult: CouncilFreshnessResult = {
+      ...result,
+      artifactPaths: {
+        artifactDir,
+        reviewResult: reviewResultPath,
+        freshnessResult: freshnessResultPath,
+      },
+    };
+    await writeFile(
+      freshnessResultPath,
+      `${JSON.stringify(completeResult, null, 2)}\n`,
+    );
+    return completeResult;
+  };
+
+  let reviewResult: HeadlessCouncilGateResult;
+  try {
+    reviewResult = JSON.parse(
+      await readFile(reviewResultPath, "utf-8"),
+    ) as HeadlessCouncilGateResult;
+  } catch (error) {
+    return await writeFreshnessResult({
+      schemaVersion: 1,
+      issueId: input.issueId,
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha: null,
+      currentHeadSha: null,
+      baseSha: null,
+      reviewMode: null,
+      reviewRound: null,
+      materialChangedFiles: [],
+      allowlistedChangedFiles: [],
+      allowedChangePatterns: [...(input.allowedChangePatterns ?? [])],
+      guidance: "rerun convergence review against HEAD.",
+      summary: `Council review artifact could not be read or parsed: ${formatError(error)}`,
+    });
+  }
+
+  const metadata = reviewResult.review_metadata;
+  const reviewedHeadSha = stringOrNull(metadata?.reviewed_head_sha);
+  const baseSha = stringOrNull(metadata?.base_sha);
+  if (reviewResult.issueId !== input.issueId) {
+    return await writeFreshnessResult({
+      schemaVersion: 1,
+      issueId: input.issueId,
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha,
+      currentHeadSha: null,
+      baseSha,
+      reviewMode: metadata?.mode ?? null,
+      reviewRound: metadata?.round ?? null,
+      materialChangedFiles: [],
+      allowlistedChangedFiles: [],
+      allowedChangePatterns: [...(input.allowedChangePatterns ?? [])],
+      guidance: "rerun convergence review against HEAD.",
+      summary: `Council review artifact issueId ${JSON.stringify(reviewResult.issueId)} does not match expected ${JSON.stringify(input.issueId)}.`,
+    });
+  }
+  if (
+    reviewResult.schemaVersion !== 1 ||
+    reviewResult.verdict !== "pass" ||
+    metadata?.verdict !== "pass" ||
+    reviewedHeadSha === null
+  ) {
+    return await writeFreshnessResult({
+      schemaVersion: 1,
+      issueId: input.issueId,
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha,
+      currentHeadSha: null,
+      baseSha,
+      reviewMode: metadata?.mode ?? null,
+      reviewRound: metadata?.round ?? null,
+      materialChangedFiles: [],
+      allowlistedChangedFiles: [],
+      allowedChangePatterns: [...(input.allowedChangePatterns ?? [])],
+      guidance: "rerun convergence review against HEAD.",
+      summary:
+        "Council review artifact is not a clean PASS with reviewed_head_sha metadata.",
+    });
+  }
+
+  let currentHeadSha: string;
+  let currentBaseSha: string | null;
+  try {
+    const current = await resolveCurrentReviewHead(input, {
+      runCommand,
+      workspace,
+      env,
+    });
+    currentHeadSha = current.headSha;
+    currentBaseSha = current.baseSha;
+  } catch (error) {
+    return await writeFreshnessResult({
+      schemaVersion: 1,
+      issueId: input.issueId,
+      verdict: "error",
+      code: "head_resolution_failed",
+      reviewedHeadSha,
+      currentHeadSha: null,
+      baseSha,
+      reviewMode: metadata.mode,
+      reviewRound: metadata.round,
+      materialChangedFiles: [],
+      allowlistedChangedFiles: [],
+      allowedChangePatterns: [...(input.allowedChangePatterns ?? [])],
+      guidance: "rerun convergence review against HEAD.",
+      summary: `Could not resolve current PR/head SHA: ${formatError(error)}`,
+    });
+  }
+
+  if (currentHeadSha === reviewedHeadSha) {
+    return await writeFreshnessResult({
+      schemaVersion: 1,
+      issueId: input.issueId,
+      verdict: "pass",
+      code: "fresh",
+      reviewedHeadSha,
+      currentHeadSha,
+      baseSha: currentBaseSha ?? baseSha,
+      reviewMode: metadata.mode,
+      reviewRound: metadata.round,
+      materialChangedFiles: [],
+      allowlistedChangedFiles: [],
+      allowedChangePatterns: [...(input.allowedChangePatterns ?? [])],
+      guidance: null,
+      summary: "Council review artifact is fresh for the current HEAD.",
+    });
+  }
+
+  let changedFiles: string[];
+  try {
+    changedFiles = await listChangedFilesBetweenHeads({
+      reviewedHeadSha,
+      currentHeadSha,
+      workspace,
+      env,
+      runCommand,
+    });
+  } catch (error) {
+    return await writeFreshnessResult({
+      schemaVersion: 1,
+      issueId: input.issueId,
+      verdict: "error",
+      code: "stale_review",
+      reviewedHeadSha,
+      currentHeadSha,
+      baseSha: currentBaseSha ?? baseSha,
+      reviewMode: metadata.mode,
+      reviewRound: metadata.round,
+      materialChangedFiles: [],
+      allowlistedChangedFiles: [],
+      allowedChangePatterns: [...(input.allowedChangePatterns ?? [])],
+      guidance: "rerun convergence review against HEAD.",
+      summary: `Council review artifact is stale and changed files could not be classified: ${formatError(error)}`,
+    });
+  }
+
+  const allowedPatterns = [...(input.allowedChangePatterns ?? [])];
+  const allowlistedChangedFiles = changedFiles.filter((file) =>
+    isAllowlistedChangedFile(file, allowedPatterns),
+  );
+  const materialChangedFiles = changedFiles.filter(
+    (file) => !isAllowlistedChangedFile(file, allowedPatterns),
+  );
+
+  if (materialChangedFiles.length > 0) {
+    return await writeFreshnessResult({
+      schemaVersion: 1,
+      issueId: input.issueId,
+      verdict: "error",
+      code: "stale_review",
+      reviewedHeadSha,
+      currentHeadSha,
+      baseSha: currentBaseSha ?? baseSha,
+      reviewMode: metadata.mode,
+      reviewRound: metadata.round,
+      materialChangedFiles,
+      allowlistedChangedFiles,
+      allowedChangePatterns: allowedPatterns,
+      guidance: "rerun convergence review against HEAD.",
+      summary:
+        "Council review artifact is stale for the current HEAD; rerun convergence review against HEAD.",
+    });
+  }
+
+  return await writeFreshnessResult({
+    schemaVersion: 1,
+    issueId: input.issueId,
+    verdict: "pass",
+    code: "fresh",
+    reviewedHeadSha,
+    currentHeadSha,
+    baseSha: currentBaseSha ?? baseSha,
+    reviewMode: metadata.mode,
+    reviewRound: metadata.round,
+    materialChangedFiles,
+    allowlistedChangedFiles,
+    allowedChangePatterns: allowedPatterns,
+    guidance: null,
+    summary:
+      "Council review artifact head differs, but every changed file is explicitly allowlisted.",
   });
 }
 
@@ -417,6 +713,16 @@ function parseThinkingEffort(
   return fallback;
 }
 
+function normalizeReviewRound(value: number | undefined): number {
+  if (value === undefined) {
+    return 1;
+  }
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error("Council review round must be a positive integer.");
+  }
+  return value;
+}
+
 async function loadReviewContext(
   input: HeadlessCouncilGateInput,
   deps: {
@@ -432,6 +738,8 @@ async function loadReviewContext(
       prNumber: input.prNumber ?? null,
       baseRef: input.baseRef ?? "origin/main",
       headRef: input.headRef ?? "HEAD",
+      baseSha: null,
+      headSha: null,
       diff: await readBoundedDiffFile(input.diffPath),
     };
   }
@@ -446,7 +754,7 @@ async function loadReviewContext(
         "--repo",
         input.repo,
         "--json",
-        "baseRefName,headRefName",
+        "baseRefName,headRefName,baseRefOid,headRefOid",
       ],
       {
         cwd: deps.workspace,
@@ -460,6 +768,8 @@ async function loadReviewContext(
     const pr = JSON.parse(view.stdout) as {
       baseRefName?: string;
       headRefName?: string;
+      baseRefOid?: string;
+      headRefOid?: string;
     };
     const diff = await deps.runCommand(
       "gh",
@@ -479,12 +789,16 @@ async function loadReviewContext(
       prNumber: input.prNumber,
       baseRef: pr.baseRefName ?? input.baseRef ?? "main",
       headRef: pr.headRefName ?? input.headRef ?? "HEAD",
+      baseSha: stringOrNull(pr.baseRefOid),
+      headSha: stringOrNull(pr.headRefOid),
       diff: assertDiffWithinLimit(diff.stdout, "GitHub PR diff"),
     };
   }
 
   const baseRef = input.baseRef ?? "origin/main";
   const headRef = input.headRef ?? "HEAD";
+  const baseSha = await revParseRef(baseRef, deps);
+  const headSha = await revParseRef(headRef, deps);
   const diff = await deps.runCommand(
     "git",
     ["diff", `${baseRef}...${headRef}`],
@@ -503,8 +817,185 @@ async function loadReviewContext(
     prNumber: input.prNumber ?? null,
     baseRef,
     headRef,
+    baseSha,
+    headSha,
     diff: assertDiffWithinLimit(diff.stdout, "git diff"),
   };
+}
+
+async function resolveCurrentReviewHead(
+  input: CouncilFreshnessInput,
+  deps: {
+    runCommand: CommandRunner;
+    workspace: string;
+    env: NodeJS.ProcessEnv;
+  },
+): Promise<{ baseSha: string | null; headSha: string }> {
+  if (input.prNumber !== undefined && input.repo !== undefined) {
+    const view = await deps.runCommand(
+      "gh",
+      [
+        "pr",
+        "view",
+        String(input.prNumber),
+        "--repo",
+        input.repo,
+        "--json",
+        "baseRefOid,headRefOid",
+      ],
+      {
+        cwd: deps.workspace,
+        env: deps.env,
+        timeoutMs: DEFAULT_PREFLIGHT_TIMEOUT_MS,
+      },
+    );
+    if (view.exitCode !== 0) {
+      throw new Error(`gh pr view failed: ${view.stderr || view.stdout}`);
+    }
+    const pr = JSON.parse(view.stdout) as {
+      baseRefOid?: string;
+      headRefOid?: string;
+    };
+    const headSha = stringOrNull(pr.headRefOid);
+    if (headSha === null) {
+      throw new Error("gh pr view did not return headRefOid");
+    }
+    return { baseSha: stringOrNull(pr.baseRefOid), headSha };
+  }
+
+  return {
+    baseSha:
+      input.baseRef === undefined
+        ? null
+        : await revParseRef(input.baseRef, deps),
+    headSha: await revParseRef(input.headRef ?? "HEAD", deps),
+  };
+}
+
+async function revParseRef(
+  ref: string,
+  deps: {
+    runCommand: CommandRunner;
+    workspace: string;
+    env: NodeJS.ProcessEnv;
+  },
+): Promise<string> {
+  const result = await deps.runCommand("git", ["rev-parse", ref], {
+    cwd: deps.workspace,
+    env: deps.env,
+    timeoutMs: DEFAULT_PREFLIGHT_TIMEOUT_MS,
+  });
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `git rev-parse ${ref} failed: ${result.stderr || result.stdout}`,
+    );
+  }
+  return result.stdout.trim();
+}
+
+async function listChangedFilesBetweenHeads(input: {
+  reviewedHeadSha: string;
+  currentHeadSha: string;
+  workspace: string;
+  env: NodeJS.ProcessEnv;
+  runCommand: CommandRunner;
+}): Promise<string[]> {
+  const result = await input.runCommand(
+    "git",
+    ["diff", "--name-only", input.reviewedHeadSha, input.currentHeadSha],
+    {
+      cwd: input.workspace,
+      env: input.env,
+      timeoutMs: DEFAULT_PREFLIGHT_TIMEOUT_MS,
+    },
+  );
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `git diff --name-only failed: ${result.stderr || result.stdout}`,
+    );
+  }
+  return result.stdout
+    .split(/\r?\n/)
+    .map((file) => file.trim())
+    .filter((file) => file !== "")
+    .sort();
+}
+
+function isAllowlistedChangedFile(
+  filePath: string,
+  allowedPatterns: readonly string[],
+): boolean {
+  return allowedPatterns.some((pattern) =>
+    matchesGlobLikePattern(pattern, filePath),
+  );
+}
+
+function matchesGlobLikePattern(pattern: string, filePath: string): boolean {
+  const failedStates = new Set<string>();
+
+  function matches(patternIndex: number, fileIndex: number): boolean {
+    const state = `${patternIndex}:${fileIndex}`;
+    if (failedStates.has(state)) {
+      return false;
+    }
+
+    if (patternIndex === pattern.length) {
+      return fileIndex === filePath.length;
+    }
+
+    // This is an explicit operator allowlist dialect: ** crosses path
+    // separators wherever it appears, while * and ? stay within one segment.
+    if (pattern.startsWith("**", patternIndex)) {
+      for (
+        let nextFileIndex = fileIndex;
+        nextFileIndex <= filePath.length;
+        nextFileIndex += 1
+      ) {
+        if (matches(patternIndex + 2, nextFileIndex)) {
+          return true;
+        }
+      }
+      failedStates.add(state);
+      return false;
+    }
+
+    const token = pattern[patternIndex];
+
+    if (token === "*") {
+      let nextFileIndex = fileIndex;
+      while (true) {
+        if (matches(patternIndex + 1, nextFileIndex)) {
+          return true;
+        }
+        if (
+          nextFileIndex >= filePath.length ||
+          filePath[nextFileIndex] === "/"
+        ) {
+          break;
+        }
+        nextFileIndex += 1;
+      }
+      failedStates.add(state);
+      return false;
+    }
+
+    if (token === "?") {
+      if (fileIndex < filePath.length && filePath[fileIndex] !== "/") {
+        return matches(patternIndex + 1, fileIndex + 1);
+      }
+      failedStates.add(state);
+      return false;
+    }
+
+    if (filePath[fileIndex] === token) {
+      return matches(patternIndex + 1, fileIndex + 1);
+    }
+
+    failedStates.add(state);
+    return false;
+  }
+
+  return matches(0, 0);
 }
 
 async function runReviewerLane(input: {

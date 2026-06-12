@@ -3,7 +3,11 @@
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
-import { runHeadlessCouncilGate } from "../review/headless-council-gate.js";
+import {
+  type CouncilReviewMode,
+  assertFreshCouncilReview,
+  runHeadlessCouncilGate,
+} from "../review/headless-council-gate.js";
 
 interface ParsedArgs {
   issueId: string;
@@ -17,6 +21,10 @@ interface ParsedArgs {
   cmuxSpawnBin?: string;
   timeoutSeconds?: number;
   codexLead?: boolean;
+  round?: number;
+  mode?: CouncilReviewMode;
+  assertFreshReview?: string;
+  allowedChangePatterns: string[];
 }
 
 class UsageError extends Error {
@@ -32,6 +40,7 @@ export function parseCouncilReviewGateArgs(
 ): ParsedArgs {
   const parsed: Partial<ParsedArgs> = {
     workspace: cwd,
+    allowedChangePatterns: [],
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -90,8 +99,30 @@ export function parseCouncilReviewGateArgs(
       );
       continue;
     }
+    if (token === "--round") {
+      parsed.round = readPositiveInteger(
+        readValue(argv, ++index, token),
+        token,
+      );
+      continue;
+    }
+    if (token === "--mode") {
+      parsed.mode = readMode(readValue(argv, ++index, token), token);
+      continue;
+    }
     if (token === "--no-codex-lead") {
       parsed.codexLead = false;
+      continue;
+    }
+    if (token === "--assert-fresh-review") {
+      parsed.assertFreshReview = readValue(argv, ++index, token);
+      continue;
+    }
+    if (token === "--allow-stale-path") {
+      parsed.allowedChangePatterns = [
+        ...(parsed.allowedChangePatterns ?? []),
+        readValue(argv, ++index, token),
+      ];
       continue;
     }
 
@@ -109,6 +140,14 @@ export function parseCouncilReviewGateArgs(
   }
   if (parsed.prNumber !== undefined && parsed.repo === undefined) {
     throw new UsageError("--repo is required when --pr is provided.");
+  }
+  if (
+    parsed.assertFreshReview !== undefined &&
+    (parsed.mode !== undefined || parsed.round !== undefined)
+  ) {
+    throw new UsageError(
+      "--mode and --round are only valid when running a council review, not with --assert-fresh-review.",
+    );
   }
 
   return parsed as ParsedArgs;
@@ -134,9 +173,30 @@ export async function runCouncilReviewGateCli(
     return 2;
   }
 
-  const result = await runHeadlessCouncilGate(parsed);
+  const result =
+    parsed.assertFreshReview === undefined
+      ? await runHeadlessCouncilGate(parsed)
+      : await assertFreshCouncilReview({
+          issueId: parsed.issueId,
+          workspace: parsed.workspace,
+          artifactDir: parsed.artifactDir,
+          reviewResultPath: parsed.assertFreshReview,
+          allowedChangePatterns: parsed.allowedChangePatterns,
+          ...(parsed.repo === undefined ? {} : { repo: parsed.repo }),
+          ...(parsed.prNumber === undefined
+            ? {}
+            : { prNumber: parsed.prNumber }),
+          ...(parsed.baseRef === undefined ? {} : { baseRef: parsed.baseRef }),
+          ...(parsed.headRef === undefined ? {} : { headRef: parsed.headRef }),
+        });
   io.stdout(`${JSON.stringify(result, null, 2)}\n`);
-  return result.verdict === "pass" ? 0 : 1;
+  if (result.verdict === "pass") {
+    return 0;
+  }
+  if (parsed.assertFreshReview !== undefined && "code" in result) {
+    return result.code === "stale_review" ? 1 : 2;
+  }
+  return 1;
 }
 
 function readValue(
@@ -159,6 +219,13 @@ function readPositiveInteger(value: string, flag: string): number {
   return parsed;
 }
 
+function readMode(value: string, flag: string): CouncilReviewMode {
+  if (value === "full" || value === "convergence") {
+    return value;
+  }
+  throw new UsageError(`${flag} must be "full" or "convergence".`);
+}
+
 function isValidRepoSlug(value: string): boolean {
   return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value);
 }
@@ -179,6 +246,10 @@ function renderUsage(): string {
     "  --cmux-spawn-bin PATH         cmux-spawn executable path",
     "  --timeout-seconds N           Per-lane timeout in seconds",
     "  --no-codex-lead               Skip Codex lead triage and mark degraded",
+    "  --round N                     Council loop round number (default: 1)",
+    "  --mode full|convergence       Council loop mode (default: full)",
+    "  --assert-fresh-review PATH    Assert an existing clean review-result.json covers current HEAD",
+    "  --allow-stale-path GLOB       Explicit freshness allowlist; repeatable; ** crosses /, * and ? do not",
     "",
   ].join("\n");
 }
