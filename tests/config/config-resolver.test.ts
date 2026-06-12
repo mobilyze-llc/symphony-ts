@@ -460,6 +460,23 @@ describe("config-resolver", () => {
     expect(resolved.server.host).toBe("0.0.0.0");
   });
 
+  it("normalizes blank server.host to null instead of a wildcard bind", () => {
+    for (const blank of ["", "   ", "\t"]) {
+      const resolved = resolveWorkflowConfig({
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          server: {
+            port: 8080,
+            host: blank,
+          },
+        },
+      });
+
+      expect(resolved.server.host).toBeNull();
+    }
+  });
+
   it("defaults server.host to null so the dashboard binds loopback", () => {
     const resolved = resolveWorkflowConfig({
       workflowPath: "/repo/WORKFLOW.md",

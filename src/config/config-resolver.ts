@@ -307,7 +307,9 @@ export function resolveWorkflowConfig(
       port: readNonNegativeInteger(server.port),
       // Default null → dashboard server binds loopback. Non-loopback values
       // (e.g. "0.0.0.0") expose an unauthenticated mutating surface (SYMPH-449).
-      host: readString(server.host) ?? null,
+      // Blank/whitespace would reach listen(port, "") and bind WILDCARD in
+      // Node — normalize to null so a quoted-blank YAML value stays loopback.
+      host: readString(server.host)?.trim() || null,
       slackNotifyChannel:
         readString(server.slack_notify_channel) ??
         environment.SLACK_NOTIFY_CHANNEL ??
