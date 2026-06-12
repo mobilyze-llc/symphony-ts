@@ -340,7 +340,9 @@ function createConfig(): ResolvedWorkflowConfig {
       endpoint: "https://api.linear.app/graphql",
       apiKey: "token",
       projectSlug: "project",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      // SYMPH-409 contract: active_states must include the Resume
+      // readmission state or validateDispatchConfig fails the poll tick.
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       terminalStates: ["Done", "Canceled"],
     },
     polling: { intervalMs: 30_000 },
