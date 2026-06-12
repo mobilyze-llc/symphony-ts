@@ -3466,8 +3466,10 @@ export class OrchestratorCore {
   ): boolean {
     const stageName = this.state.issueStages[issueId] ?? null;
     if (!isReviewSubstrateStallMessage(agentMessage)) {
+      const hadSubstrateStall =
+        this.state.issueReviewInfrastructureStalls[issueId] !== undefined;
       delete this.state.issueReviewInfrastructureStalls[issueId];
-      if (stageName !== null) {
+      if (hadSubstrateStall && stageName !== null) {
         delete this.state.issueFailureSignatures[`${issueId}:${stageName}`];
       }
       return false;
@@ -3475,9 +3477,6 @@ export class OrchestratorCore {
 
     if (stageName !== "review") {
       delete this.state.issueReviewInfrastructureStalls[issueId];
-      if (stageName !== null) {
-        delete this.state.issueFailureSignatures[`${issueId}:${stageName}`];
-      }
       return false;
     }
 

@@ -327,7 +327,49 @@ describe("failure signal routing in onWorkerExit", () => {
     ).toBe(false);
   });
 
-  it("does not let a non-review substrate-stall marker inherit a stale infra signature", async () => {
+  it("still parks repeated non-substrate review infra failures as no-novelty", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const firstRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Tracker API temporarily unavailable.\n[STAGE_FAILED: infra]",
+    });
+    expect(firstRetry).not.toBeNull();
+    await orchestrator.onRetryTimer("1");
+
+    const secondRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Tracker API temporarily unavailable.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(secondRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "failure_exhausted" &&
+            entry.summary.includes("retry futile"),
+        ),
+    ).toBe(true);
+  });
+
+  it("treats non-review substrate-stall text as ordinary infra for novelty", async () => {
     const orchestrator = createStagedOrchestrator({
       stages: createAgentReviewWorkflowConfig(),
     });
@@ -351,9 +393,8 @@ describe("failure signal routing in onWorkerExit", () => {
         "Worker log mentioned substrate_stall:claude-opus outside the review gate.\n[STAGE_FAILED: infra]",
     });
 
-    expect(substrateTextRetry).not.toBeNull();
-    expect(orchestrator.getState().failed.has("1")).toBe(false);
-    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(substrateTextRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
     expect(
       orchestrator
         .getState()
@@ -362,7 +403,7 @@ describe("failure signal routing in onWorkerExit", () => {
             entry.kind === "failure_exhausted" &&
             entry.summary.includes("retry futile"),
         ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("clears substrate-stall review state when a real review finding reworks code", async () => {
