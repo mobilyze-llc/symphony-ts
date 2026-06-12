@@ -2602,9 +2602,164 @@ describe("OrchestratorRuntimeHost", () => {
         reason: "Linear API request failed with HTTP 400.",
         error_code: ERROR_CODES.linearApiStatus,
         http_status: 400,
-        details: labelDiagnostics,
+        // Serialized JSON, never "[object Object]" (SYMPH-413).
+        details: JSON.stringify(labelDiagnostics),
       }),
     );
+  });
+
+  it("emits a tracker_write_failed Slack alert with serialized details on follow-up write failures", async () => {
+    const tracker = new LinearTrackerClient({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "token",
+      projectSlug: "project",
+      activeStates: ["Todo", "In Progress", "In Review"],
+      fetchFn: vi.fn(),
+    });
+    vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+      createIssue({ id: "1", identifier: "ISSUE-1" }),
+      createIssue({ id: "2", identifier: "ISSUE-2", priority: 2 }),
+    ]);
+    vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+      { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+      { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+    ]);
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockResolvedValue([]);
+    const writeDiagnostics = {
+      operationName: "SymphonyOpenIssuesByTitle",
+      variables: { projectId: "project-1" },
+      responseBody: {
+        errors: [
+          {
+            message:
+              'Variable "$projectId" of type "String!" used in position expecting type "ID".',
+            extensions: { code: "GRAPHQL_VALIDATION_FAILED" },
+          },
+        ],
+      },
+    };
+    vi.spyOn(tracker, "fetchIssueReferencesByIds").mockRejectedValue(
+      new TrackerError(
+        ERROR_CODES.linearApiStatus,
+        "Linear API request failed with HTTP 400.",
+        { status: 400, details: writeDiagnostics },
+      ),
+    );
+
+    const fakeRunner = new FakeAgentRunner();
+    const notifierEvents: PipelineNotificationEvent[] = [];
+    const readWorkspaceChangedFiles = vi.fn(async (workspacePath: string) =>
+      workspacePath.endsWith("/1")
+        ? ["src/shared/config.ts"]
+        : ["src/shared/config.ts", "src/features/two.ts"],
+    );
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier: {
+        notify(event: PipelineNotificationEvent) {
+          notifierEvents.push(event);
+        },
+      },
+      readWorkspaceChangedFiles,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.pollOnce();
+
+    expect(notifierEvents).toContainEqual(
+      expect.objectContaining({
+        type: "tracker_write_failed",
+        followUpTitle:
+          "Dispatcher follow-up: actual_write_collision for ISSUE-1 + ISSUE-2",
+        sourceIssueIds: ["1", "2"],
+        reason: "Linear API request failed with HTTP 400.",
+        httpStatus: 400,
+        details: JSON.stringify(writeDiagnostics),
+      }),
+    );
+    const alert = notifierEvents.find(
+      (event) => event.type === "tracker_write_failed",
+    );
+    expect(alert).toBeDefined();
+    if (alert !== undefined && alert.type === "tracker_write_failed") {
+      expect(alert.details).not.toContain("[object Object]");
+      expect(alert.details).toContain("GRAPHQL_VALIDATION_FAILED");
+    }
+  });
+
+  it("truncates oversized tracker_write_failed details at the 500-char Slack bound", async () => {
+    const tracker = new LinearTrackerClient({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "token",
+      projectSlug: "project",
+      activeStates: ["Todo", "In Progress", "In Review"],
+      fetchFn: vi.fn(),
+    });
+    vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+      createIssue({ id: "1", identifier: "ISSUE-1" }),
+      createIssue({ id: "2", identifier: "ISSUE-2", priority: 2 }),
+    ]);
+    vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+      { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+      { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+    ]);
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockResolvedValue([]);
+    // A diagnostic payload whose serialized form far exceeds the 500-char
+    // Slack bound, so the notifier-path truncation is actually exercised
+    // (SYMPH-413 council finding: the existing fixture was ~271 chars).
+    const writeDiagnostics = {
+      operationName: "SymphonyOpenIssuesByTitle",
+      responseBody: { errors: [{ message: "x".repeat(2_000) }] },
+    };
+    vi.spyOn(tracker, "fetchIssueReferencesByIds").mockRejectedValue(
+      new TrackerError(
+        ERROR_CODES.linearApiStatus,
+        "Linear API request failed with HTTP 400.",
+        { status: 400, details: writeDiagnostics },
+      ),
+    );
+
+    const fakeRunner = new FakeAgentRunner();
+    const notifierEvents: PipelineNotificationEvent[] = [];
+    const readWorkspaceChangedFiles = vi.fn(async (workspacePath: string) =>
+      workspacePath.endsWith("/1")
+        ? ["src/shared/config.ts"]
+        : ["src/shared/config.ts", "src/features/two.ts"],
+    );
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier: {
+        notify(event: PipelineNotificationEvent) {
+          notifierEvents.push(event);
+        },
+      },
+      readWorkspaceChangedFiles,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.pollOnce();
+
+    const alert = notifierEvents.find(
+      (event) => event.type === "tracker_write_failed",
+    );
+    expect(alert).toBeDefined();
+    if (alert !== undefined && alert.type === "tracker_write_failed") {
+      expect(alert.details).not.toBeNull();
+      expect(alert.details?.length).toBeLessThanOrEqual(500);
+      expect(alert.details?.endsWith("…[truncated]")).toBe(true);
+    }
   });
 
   it("logs a triggered re-steer when a worker branch base changes after admission", async () => {

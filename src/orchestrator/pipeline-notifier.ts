@@ -230,6 +230,24 @@ export interface SystemicClusterAlertEvent {
 }
 
 /**
+ * Fired when a dispatcher follow-up issue write to the tracker fails
+ * (SYMPH-413). Without this alert, supervision findings (e.g.
+ * branch_divergence) silently never reach the board.
+ * severity: warning
+ */
+export interface TrackerWriteFailedEvent {
+  type: "tracker_write_failed";
+  /** Title of the follow-up issue that failed to write. */
+  followUpTitle: string;
+  /** Identifiers/IDs of the source issues the follow-up was filed for. */
+  sourceIssueIds: string[];
+  reason: string;
+  httpStatus: number | null;
+  /** Bounded, pre-serialized tracker error details (never raw objects). */
+  details: string | null;
+}
+
+/**
  * Fired when an issue's dispatch verdict CHANGES to gate or halt (SYMPH-405).
  * Transitions-only: unchanged verdicts never re-fire.
  * severity: warning
@@ -291,6 +309,7 @@ export type PipelineNotificationEvent =
   | GateFailedEvent
   | InfoAlertEvent
   | SystemicClusterAlertEvent
+  | TrackerWriteFailedEvent
   | DispatchVerdictAlertEvent
   | DispatchPageAlertEvent
   | TriageEscalationEvent;
@@ -948,6 +967,27 @@ export function formatNotification(
       // carry secrets or adversarial content from worker output. The signature
       // hash + class + affected issues are the operator triage signal; the raw
       // text lives on the linked member issues (SYMPH-398).
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "tracker_write_failed": {
+      const sourceList =
+        event.sourceIssueIds.length > 0
+          ? event.sourceIssueIds.join(", ")
+          : "none";
+      const statusLabel =
+        event.httpStatus !== null ? ` (HTTP ${event.httpStatus})` : "";
+      const parts: string[] = [
+        `:warning: *Tracker follow-up write failed*${statusLabel} — ${sanitizeForSlack(event.followUpTitle)}`,
+        `Source issues: ${sourceList}`,
+        `Reason: ${sanitizeForSlack(event.reason)}`,
+      ];
+      if (event.details !== null) {
+        // details carries Linear API error bodies — sanitize like every other
+        // free-text egress surface (SYMPH-421).
+        parts.push(`Details: \`${sanitizeForSlack(event.details)}\``);
+      }
       parts.push(version);
       return { text: parts.join("\n") };
     }
