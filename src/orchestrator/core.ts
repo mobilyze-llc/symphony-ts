@@ -3475,6 +3475,9 @@ export class OrchestratorCore {
 
     if (stageName !== "review") {
       delete this.state.issueReviewInfrastructureStalls[issueId];
+      if (stageName !== null) {
+        delete this.state.issueFailureSignatures[`${issueId}:${stageName}`];
+      }
       return false;
     }
 

@@ -778,6 +778,8 @@ If `$ARTIFACT_DIR/review-result.json` reports `verdict: "error"` and a lane has 
 
 The orchestrator retries the review gate once for substrate-stall infrastructure. If another substrate stall follows, it parks the issue loudly as infra-blocked instead of dispatching implement rework (SYMPH-441).
 
+If `$ARTIFACT_DIR/review-result.json` is readable but reports any other `verdict: "error"` or degraded condition, fail closed as a review gate failure: post a `## Review Findings` comment naming the error/degraded condition and artifact directory, then output `[STAGE_FAILED: review]`. Do NOT output `[STAGE_COMPLETE]` for a non-PASS review-result.
+
 If artifacts are missing/malformed for any other reason, or the gate times out without a readable `review-result.json`: post a `## Review Findings` comment naming the missing/malformed artifact and output `[STAGE_FAILED: review]`.
 {% endif %}
 
