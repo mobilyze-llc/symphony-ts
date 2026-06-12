@@ -14,8 +14,11 @@ const CODEX_LEAD_LANE_ID = "codex-high-lead";
 const CODEX_LEAD_ROLE = "codex-lead-triage";
 const CODEX_LEAD_MODEL = "codex-high";
 const DEFAULT_LANE_STALL_GRACE_SECONDS = 60;
+// SYMPHONY_UNTRUSTED_DIFF matches as a substring (no word boundaries): the
+// real boundary token is `SYMPHONY_UNTRUSTED_DIFF_<uuid>` and `\b` fails on
+// `_`-suffixed identifiers.
 const DIFF_INJECTION_TOKEN_PATTERN =
-  /\b(DIFF_DATA|BEGIN_SYMPHONY_UNTRUSTED_DIFF|END_SYMPHONY_UNTRUSTED_DIFF|diff --git)\b/;
+  /(DIFF_DATA|SYMPHONY_UNTRUSTED_DIFF|diff --git)/;
 const execFileAsync = promisify(execFile);
 
 export type HeadlessGateVerdict = "pass" | "fail" | "error";
@@ -272,9 +275,14 @@ export async function runHeadlessCouncilGate(
     );
   }
 
+  const laneStallDeadlineOverride = dependencies.laneStallDeadlineMs;
   const laneStallDeadlineMs =
-    dependencies.laneStallDeadlineMs ??
-    commandTimeoutMs(timeoutSeconds) + DEFAULT_LANE_STALL_GRACE_SECONDS * 1000;
+    laneStallDeadlineOverride !== undefined &&
+    Number.isFinite(laneStallDeadlineOverride) &&
+    laneStallDeadlineOverride > 0
+      ? laneStallDeadlineOverride
+      : commandTimeoutMs(timeoutSeconds) +
+        DEFAULT_LANE_STALL_GRACE_SECONDS * 1000;
 
   let lanes = await Promise.all(
     reviewerLanes.map((lane) =>
@@ -686,7 +694,27 @@ async function withLaneStallDeadline(
   // naming the stalled lane instead of hanging with no review-result.json.
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<HeadlessLaneResult>((resolveDeadline) => {
-    timer = setTimeout(() => resolveDeadline(onStall()), deadlineMs);
+    timer = setTimeout(() => {
+      try {
+        resolveDeadline(onStall());
+      } catch (error) {
+        resolveDeadline({
+          laneId: "unknown-stalled-lane",
+          agent: "claude",
+          role: "unknown",
+          model: "unknown",
+          independentReviewer: false,
+          state: "timed_out",
+          verdict: "error",
+          degradedReason: "substrate_stall",
+          artifactPath: null,
+          promptPath: null,
+          cliJsonPath: null,
+          stderrPath: null,
+          message: `Lane stalled past ${deadlineMs}ms and the stall handler threw: ${formatError(error)}`,
+        });
+      }
+    }, deadlineMs);
     timer.unref?.();
   });
   try {
