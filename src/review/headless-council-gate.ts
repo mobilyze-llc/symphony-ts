@@ -2135,7 +2135,23 @@ function clampConfidence(value: number): number {
 function extractRepeatOf(text: string): string | null {
   return (
     /\brepeat(?:_of|\s+of)?\s*[:=]\s*([a-f0-9]{8,64})\b/i.exec(text)?.[1] ??
+    /\brepeats?(?:\s+(?:a\s+)?(?:prior\s+)?(?:finding\s+)?fingerprint)?\s+([a-f0-9]{8,64})\b/i.exec(
+      text,
+    )?.[1] ??
+    /^\s*(?:P1|P2|Track|Dismissed)\s*:\s*([a-f0-9]{8,64})\b/i.exec(text)?.[1] ??
+    extractRepeatOfFromTriageCells(text) ??
     null
+  );
+}
+
+function extractRepeatOfFromTriageCells(text: string): string | null {
+  const cells = text
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+  return (
+    cells.slice(0, 4).find((cell) => /^[a-f0-9]{8,64}$/i.test(cell)) ?? null
   );
 }
 
@@ -2319,6 +2335,19 @@ function parseArtifactVerdict(artifact: string): ParsedArtifactVerdict {
     }
     return { verdict: "pass", message: null, degradedReason: null };
   }
+  if (
+    token === "FINDINGS" &&
+    !artifactHasBlockingSections(trimmedArtifact) &&
+    !artifactSectionHasContent(trimmedArtifact, "Triage") &&
+    artifactHasNonBlockingFindings(trimmedArtifact)
+  ) {
+    return {
+      verdict: "pass",
+      message:
+        "Reviewer verdict was FINDINGS but only Track/Dismissed content was present.",
+      degradedReason: null,
+    };
+  }
   return {
     verdict: "fail",
     message: `Reviewer verdict was ${token}.`,
@@ -2330,6 +2359,13 @@ function artifactHasBlockingSections(artifact: string): boolean {
   return (
     artifactSectionHasContent(artifact, "P1 Must Fix") ||
     artifactSectionHasContent(artifact, "P2 Should Fix")
+  );
+}
+
+function artifactHasNonBlockingFindings(artifact: string): boolean {
+  return (
+    artifactSectionHasContent(artifact, "Track") ||
+    artifactSectionHasContent(artifact, "Dismissed Or Theoretical")
   );
 }
 

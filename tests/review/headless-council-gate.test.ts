@@ -1420,6 +1420,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(leadArtifact.findings[1]).toMatchObject({
       severity: "P2",
       leadDisposition: "refuted",
+      repeatOf: "abc12345",
     });
   });
 
@@ -1530,6 +1531,43 @@ describe("runHeadlessCouncilGate", () => {
       introducedIn: "pre_existing",
       leadDisposition: "track",
       relatedPaths: ["docs/operators.md"],
+    });
+  });
+
+  it("keeps Track-only FINDINGS as pass while preserving the Track finding", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "codex-high-lead": {
+          artifact:
+            "## Verdict\nFINDINGS\n\n## Triage\nNone\n\n## Track\n- Track:71c6507aa5c92114 | `repeatOf` extraction accepts narrow marker syntax | `src/review/headless-council-gate.ts` | confidence: 0.60",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    const leadLane = result.lanes.find(
+      (lane) => lane.laneId === "codex-high-lead",
+    )!;
+    expect(leadLane).toMatchObject({
+      verdict: "pass",
+      message:
+        "Reviewer verdict was FINDINGS but only Track/Dismissed content was present.",
+    });
+    expect(leadLane.structuredArtifact!.findings[0]).toMatchObject({
+      severity: "Track",
+      repeatOf: "71c6507aa5c92114",
+      confidence: 0.6,
     });
   });
 
