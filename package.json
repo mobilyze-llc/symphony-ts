@@ -17,7 +17,8 @@
     "symphony": "./dist/src/cli/main.js",
     "symphony-calibration-digest": "./dist/src/calibration/cli.js",
     "symphony-council-review-gate": "./dist/src/cli/council-review-gate.js",
-    "symphony-manager-run-import": "./dist/src/cli/manager-run-import.js"
+    "symphony-manager-run-import": "./dist/src/cli/manager-run-import.js",
+    "symphonyctl": "./dist/src/cli/symphonyctl.js"
   },
   "files": ["dist/src", "README.md"],
   "publishConfig": {

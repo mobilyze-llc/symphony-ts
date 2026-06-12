@@ -15,6 +15,8 @@ import { dirname, join, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
+import { z } from "zod";
+
 import {
   DEFAULT_OBSERVABILITY_REFRESH_MS,
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
@@ -22,11 +24,25 @@ import {
 import { ERROR_CODES } from "../errors/codes.js";
 import type { LoopTraceJournalResponse } from "../logging/loop-trace.js";
 import type { RuntimeSnapshot } from "../logging/runtime-snapshot.js";
+// The ONLY orchestrator import allowed in this file is the intent leaf
+// module (verb/actor vocabulary + types). The dashboard never reaches into
+// orchestrator state directly — every mutation goes through a host method
+// that routes the orchestrator's intent-verb layer (SYMPH-408; enforced by
+// tests/observability/dashboard-no-bypass.test.ts).
+import {
+  INTENT_ACTOR_KINDS,
+  INTENT_VERBS,
+  type IntentActor,
+  type IntentFence,
+  type IntentStatus,
+  type IntentVerb,
+} from "../orchestrator/intent.js";
 import { fetchClaudeUsageFromCli } from "./dashboard-claude-usage.js";
 import { toErrorMessage } from "./dashboard-format.js";
 import {
   isSnapshotTimeoutError,
   readRequestBody,
+  readRequestBodyText,
   readSnapshot,
   writeHtml,
   writeJson,
@@ -182,6 +198,41 @@ export interface PipelineStatusResponse {
   restart_safety?: PipelineRestartSafetyResponse;
 }
 
+/**
+ * Validated body of POST /api/v1/intents (SYMPH-408b). A thin transport
+ * envelope over the orchestrator's writeIntent primitive — the dashboard
+ * adds no verb semantics of its own.
+ */
+export interface IntentRequest {
+  verb: IntentVerb;
+  issueId?: string;
+  issueIdentifier?: string;
+  reason: string;
+  actor: IntentActor;
+  fence?: IntentFence;
+  hint?: string;
+  stage?: string;
+}
+
+export interface IntentRequestResult {
+  status: IntentStatus | "issue_not_found";
+  detail: string;
+  sequence: number | null;
+  verb: IntentVerb;
+  issue_id: string | null;
+  issue_identifier: string | null;
+}
+
+/**
+ * Operator attribution forwarded with pipeline-wide pause/resume so the
+ * journaled intent entry carries the real actor instead of an anonymous
+ * dashboard default (SYMPH-408b).
+ */
+export interface PipelineControlContext {
+  actor: IntentActor;
+  reason: string;
+}
+
 export interface DashboardServerHost {
   getRuntimeSnapshot(): RuntimeSnapshot | Promise<RuntimeSnapshot>;
   getIssueDetails(
@@ -192,15 +243,88 @@ export interface DashboardServerHost {
     issueIdentifier: string,
   ): StopIssueResponse | Promise<StopIssueResponse>;
   subscribeToSnapshots?(listener: () => void): () => void;
-  requestPipelinePause?():
-    | PipelineStatusResponse
-    | Promise<PipelineStatusResponse>;
-  requestPipelineResume?():
-    | PipelineStatusResponse
-    | Promise<PipelineStatusResponse>;
+  requestIntent?(
+    input: IntentRequest,
+  ): IntentRequestResult | Promise<IntentRequestResult>;
+  requestPipelinePause?(
+    context?: PipelineControlContext,
+  ): PipelineStatusResponse | Promise<PipelineStatusResponse>;
+  requestPipelineResume?(
+    context?: PipelineControlContext,
+  ): PipelineStatusResponse | Promise<PipelineStatusResponse>;
   getPipelineStatus?():
     | PipelineStatusResponse
     | Promise<PipelineStatusResponse>;
+}
+
+const intentActorSchema = z.object({
+  kind: z.enum(INTENT_ACTOR_KINDS),
+  host: z.string().min(1),
+  session: z.string().min(1).optional(),
+});
+
+const intentRequestSchema = z
+  .object({
+    verb: z.enum(INTENT_VERBS),
+    issueId: z.string().min(1).optional(),
+    issueIdentifier: z.string().min(1).optional(),
+    reason: z.string().min(1),
+    actor: intentActorSchema,
+    fence: z.object({ expectedParkSeq: z.number().int() }).optional(),
+    hint: z.string().min(1).optional(),
+    stage: z.string().min(1).optional(),
+  })
+  .refine(
+    (value) =>
+      value.issueId !== undefined || value.issueIdentifier !== undefined,
+    { message: "Either issueId or issueIdentifier is required." },
+  );
+
+/** Optional attribution body for the pipeline pause/resume endpoints. */
+const pipelineControlBodySchema = z.object({
+  actor: intentActorSchema.optional(),
+  reason: z.string().min(1).optional(),
+});
+
+function parseJsonBody(raw: string): unknown {
+  if (raw.trim() === "") {
+    return {};
+  }
+  return JSON.parse(raw);
+}
+
+/**
+ * Default actor for pipeline pause/resume requests that carry no
+ * attribution body: an operator clicking the dashboard.
+ */
+function defaultDashboardActor(): IntentActor {
+  return { kind: "operator", host: "dashboard" };
+}
+
+/** Drop undefined optionals so exactOptionalPropertyTypes is satisfied. */
+function toIntentActor(actor: z.infer<typeof intentActorSchema>): IntentActor {
+  return {
+    kind: actor.kind,
+    host: actor.host,
+    ...(actor.session === undefined ? {} : { session: actor.session }),
+  };
+}
+
+function toIntentRequest(
+  data: z.infer<typeof intentRequestSchema>,
+): IntentRequest {
+  return {
+    verb: data.verb,
+    reason: data.reason,
+    actor: toIntentActor(data.actor),
+    ...(data.issueId === undefined ? {} : { issueId: data.issueId }),
+    ...(data.issueIdentifier === undefined
+      ? {}
+      : { issueIdentifier: data.issueIdentifier }),
+    ...(data.fence === undefined ? {} : { fence: data.fence }),
+    ...(data.hint === undefined ? {} : { hint: data.hint }),
+    ...(data.stage === undefined ? {} : { stage: data.stage }),
+  };
 }
 
 /** Async function that runs `gh` with the given args and returns stdout. */
@@ -629,40 +753,111 @@ export function createDashboardRequestHandler(
         return;
       }
 
-      if (url.pathname === "/api/v1/pipeline/pause") {
+      if (url.pathname === "/api/v1/intents") {
         if (method !== "POST") {
           writeMethodNotAllowed(response, ["POST"]);
           return;
         }
 
-        if (options.host.requestPipelinePause === undefined) {
+        if (options.host.requestIntent === undefined) {
           writeJsonError(response, 501, "not_implemented", {
-            message: "Pipeline pause is not supported by this host.",
+            message: "Intent verbs are not supported by this host.",
           });
           return;
         }
 
-        await readRequestBody(request);
-        const result = await options.host.requestPipelinePause();
-        writeJson(response, 200, result);
+        const rawBody = await readRequestBodyText(request);
+        let parsedBody: unknown;
+        try {
+          parsedBody = parseJsonBody(rawBody);
+        } catch {
+          writeJsonError(response, 400, "invalid_request", {
+            message: "Request body is not valid JSON.",
+          });
+          return;
+        }
+
+        const parsed = intentRequestSchema.safeParse(parsedBody);
+        if (!parsed.success) {
+          writeJsonError(response, 400, "invalid_request", {
+            message: parsed.error.issues
+              .map((issue) =>
+                issue.path.length > 0
+                  ? `${issue.path.join(".")}: ${issue.message}`
+                  : issue.message,
+              )
+              .join("; "),
+          });
+          return;
+        }
+
+        const result = await options.host.requestIntent(
+          toIntentRequest(parsed.data),
+        );
+        const statusCode =
+          result.status === "issue_not_found"
+            ? 404
+            : result.status === "rejected_stale"
+              ? 409
+              : 200;
+        writeJson(response, statusCode, result);
         return;
       }
 
-      if (url.pathname === "/api/v1/pipeline/resume") {
+      if (
+        url.pathname === "/api/v1/pipeline/pause" ||
+        url.pathname === "/api/v1/pipeline/resume"
+      ) {
+        const action =
+          url.pathname === "/api/v1/pipeline/pause" ? "pause" : "resume";
         if (method !== "POST") {
           writeMethodNotAllowed(response, ["POST"]);
           return;
         }
 
-        if (options.host.requestPipelineResume === undefined) {
+        const handler =
+          action === "pause"
+            ? options.host.requestPipelinePause?.bind(options.host)
+            : options.host.requestPipelineResume?.bind(options.host);
+        if (handler === undefined) {
           writeJsonError(response, 501, "not_implemented", {
-            message: "Pipeline resume is not supported by this host.",
+            message: `Pipeline ${action} is not supported by this host.`,
           });
           return;
         }
 
-        await readRequestBody(request);
-        const result = await options.host.requestPipelineResume();
+        const rawBody = await readRequestBodyText(request);
+        let parsedBody: unknown;
+        try {
+          parsedBody = parseJsonBody(rawBody);
+        } catch {
+          writeJsonError(response, 400, "invalid_request", {
+            message: "Request body is not valid JSON.",
+          });
+          return;
+        }
+
+        const parsed = pipelineControlBodySchema.safeParse(parsedBody);
+        if (!parsed.success) {
+          writeJsonError(response, 400, "invalid_request", {
+            message: parsed.error.issues
+              .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+              .join("; "),
+          });
+          return;
+        }
+
+        // Attribution travels with the request so the journaled intent
+        // entry names the real actor; an attribution-less request is an
+        // operator on the dashboard (SYMPH-408b).
+        const result = await handler({
+          actor:
+            parsed.data.actor === undefined
+              ? defaultDashboardActor()
+              : toIntentActor(parsed.data.actor),
+          reason:
+            parsed.data.reason ?? `pipeline ${action} requested via dashboard`,
+        });
         writeJson(response, 200, result);
         return;
       }

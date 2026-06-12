@@ -52,6 +52,17 @@ export const INTENT_VERBS = [
 
 export type IntentVerb = (typeof INTENT_VERBS)[number];
 
+/**
+ * Synthetic issue scope for pipeline-wide intents (SYMPH-408b). Pipeline
+ * pause/resume has no Linear issue at journal time (the halt issue is the
+ * VIEW created after the intent is journaled), so pipeline-scoped entries
+ * carry this sentinel instead of a real issue id. Issue-verb replay
+ * reduction never matches these verbs, so the sentinel never collides with
+ * issue state.
+ */
+export const PIPELINE_INTENT_ISSUE_ID = "pipeline";
+export const PIPELINE_INTENT_ISSUE_IDENTIFIER = "PIPELINE";
+
 /** Actor vocabulary shared with the SYMPH-405 verdict-event family. */
 export const INTENT_ACTOR_KINDS = [
   "operator",

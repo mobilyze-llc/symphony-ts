@@ -89,7 +89,10 @@ import {
 import {
   type DashboardServerHost,
   type DashboardServerInstance,
+  type IntentRequest,
+  type IntentRequestResult,
   type IssueDetailResponse,
+  type PipelineControlContext,
   type PipelineRestartSafetyResponse,
   type PipelineStatusResponse,
   type RefreshResponse,
@@ -123,6 +126,7 @@ import type {
 } from "./core.js";
 import { OrchestratorCore } from "./core.js";
 import { getDiff, runEnsembleGate } from "./gate-handler.js";
+import type { IntentActor, IntentReason } from "./intent.js";
 import { reduceManagerRunJournal } from "./manager-run.js";
 import type { PipelineNotificationSink } from "./pipeline-notifier.js";
 import {
@@ -2100,9 +2104,134 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     };
   }
 
-  async requestPipelinePause(): Promise<PipelineStatusResponse> {
+  /**
+   * Thin transport adapter for POST /api/v1/intents (SYMPH-408b): resolve
+   * the issue, then route the orchestrator's writeIntent primitive. No verb
+   * semantics live here — idempotency, fencing, attribution, and replay are
+   * all writeIntent's.
+   */
+  async requestIntent(input: IntentRequest): Promise<IntentRequestResult> {
+    await this.ensureDispatcherRunJournalLoaded();
+
+    const resolved = await this.resolveIntentIssue(input);
+    if (resolved === null) {
+      return {
+        status: "issue_not_found",
+        detail: `Issue '${input.issueIdentifier ?? input.issueId ?? ""}' could not be resolved from runtime state or the tracker's active states.`,
+        sequence: null,
+        verb: input.verb,
+        issue_id: input.issueId ?? null,
+        issue_identifier: input.issueIdentifier ?? null,
+      };
+    }
+
+    const reason: IntentReason = {
+      class: `api:${input.verb}`,
+      human: input.reason,
+    };
+    const result = await this.orchestrator.writeIntent({
+      verb: input.verb,
+      issueId: resolved.issueId,
+      issueIdentifier: resolved.issueIdentifier,
+      actor: input.actor,
+      reason,
+      ...(input.fence === undefined ? {} : { fence: input.fence }),
+      ...(input.hint === undefined ? {} : { hint: input.hint }),
+      ...(input.stage === undefined ? {} : { stage: input.stage }),
+    });
+
+    return {
+      status: result.status,
+      detail: result.detail,
+      sequence: result.sequence,
+      verb: input.verb,
+      issue_id: resolved.issueId,
+      issue_identifier: resolved.issueIdentifier,
+    };
+  }
+
+  /**
+   * Resolve an intent target to an issue id: explicit id wins, then the
+   * in-memory running/retry lanes, then a tracker lookup across the
+   * configured active states (covers parked issues that hold no lane).
+   */
+  private async resolveIntentIssue(
+    input: IntentRequest,
+  ): Promise<{ issueId: string; issueIdentifier: string } | null> {
+    if (input.issueId !== undefined) {
+      return {
+        issueId: input.issueId,
+        issueIdentifier: input.issueIdentifier ?? input.issueId,
+      };
+    }
+
+    const identifier = input.issueIdentifier;
+    if (identifier === undefined) {
+      return null;
+    }
+
+    const state = this.orchestrator.getState();
+    const running = Object.values(state.running).find(
+      (entry) => entry.identifier === identifier,
+    );
+    if (running !== undefined) {
+      return { issueId: running.issue.id, issueIdentifier: identifier };
+    }
+
+    const retry = Object.values(state.retryAttempts).find(
+      (entry) => entry.identifier === identifier,
+    );
+    if (retry !== undefined) {
+      return { issueId: retry.issueId, issueIdentifier: identifier };
+    }
+
+    try {
+      const issues = await this.tracker.fetchIssuesByStates(
+        this.config.tracker.activeStates,
+      );
+      const match = issues.find((issue) => issue.identifier === identifier);
+      if (match !== undefined) {
+        return { issueId: match.id, issueIdentifier: identifier };
+      }
+    } catch {
+      // Tracker lookup is best-effort; fall through to not-found.
+    }
+
+    return null;
+  }
+
+  /** Actor recorded when a pipeline control request carries no attribution. */
+  private defaultPipelineControlActor(): IntentActor {
+    const label = hostname().split(".")[0];
+    return {
+      kind: "operator",
+      host: label === undefined || label === "" ? hostname() : label,
+    };
+  }
+
+  async requestPipelinePause(
+    context?: PipelineControlContext,
+  ): Promise<PipelineStatusResponse> {
+    await this.ensureDispatcherRunJournalLoaded();
     // Check for existing halt issues first (idempotent pause)
     const status = await this.getPipelineStatus();
+
+    // The intent is journaled FIRST, attributed to the requesting actor;
+    // the Linear halt-issue manipulation below is the VIEW applied after
+    // journaling (SYMPH-408). An already-paused pipeline records a no_op.
+    await this.orchestrator.journalPipelineIntent({
+      action: "pause",
+      status: status.paused ? "no_op" : "applied",
+      actor: context?.actor ?? this.defaultPipelineControlActor(),
+      reason: {
+        class: "operator_pipeline_pause",
+        human: context?.reason ?? "pipeline pause requested",
+      },
+      detail: status.paused
+        ? "pipeline already paused; halt issue view unchanged"
+        : "pipeline pause applied; halt issue view follows",
+    });
+
     if (status.paused) {
       return status;
     }
@@ -2139,14 +2268,34 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     };
   }
 
-  async requestPipelineResume(): Promise<PipelineStatusResponse> {
+  async requestPipelineResume(
+    context?: PipelineControlContext,
+  ): Promise<PipelineStatusResponse> {
+    await this.ensureDispatcherRunJournalLoaded();
+    const priorStatus = await this.getPipelineStatus();
+
+    // Journal-first, same as pause: the halt-issue cancellations below are
+    // the view applied after the intent entry exists (SYMPH-408).
+    await this.orchestrator.journalPipelineIntent({
+      action: "resume",
+      status: priorStatus.paused ? "applied" : "no_op",
+      actor: context?.actor ?? this.defaultPipelineControlActor(),
+      reason: {
+        class: "operator_pipeline_resume",
+        human: context?.reason ?? "pipeline resume requested",
+      },
+      detail: priorStatus.paused
+        ? "pipeline resume applied; halt issue cancellation follows"
+        : "pipeline not paused; halt issue view unchanged",
+    });
+
     if (!(this.tracker instanceof LinearTrackerClient)) {
-      return await this.getPipelineStatus();
+      return priorStatus;
     }
 
     const tracker = this.tracker as LinearTrackerClient;
     if (tracker.fetchOpenIssuesByLabels === undefined) {
-      return await this.getPipelineStatus();
+      return priorStatus;
     }
 
     const haltIssues = await tracker.fetchOpenIssuesByLabels(

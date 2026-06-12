@@ -49,6 +49,32 @@ export async function readRequestBody(request: IncomingMessage): Promise<void> {
   });
 }
 
+const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+
+/** Drain the request body as UTF-8 text, bounded to 64 KiB. */
+export async function readRequestBodyText(
+  request: IncomingMessage,
+): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    request.on("error", reject);
+    request.on("data", (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buffer.length;
+      if (total > MAX_REQUEST_BODY_BYTES) {
+        reject(new Error("Request body exceeds the 64 KiB limit."));
+        request.destroy();
+        return;
+      }
+      chunks.push(buffer);
+    });
+    request.on("end", () => {
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+  });
+}
+
 export function isSnapshotTimeoutError(error: unknown): boolean {
   return (
     error instanceof Error &&
