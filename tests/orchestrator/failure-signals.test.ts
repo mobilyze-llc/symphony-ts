@@ -228,6 +228,10 @@ describe("failure signal routing in onWorkerExit", () => {
     );
     expect(comments.join("\n")).toContain("Latest stalled lane set");
     expect(comments.join("\n")).not.toContain("same stalled lane set");
+    const exhausted = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((entry) => entry.kind === "failure_exhausted");
+    expect(exhausted?.metadata.failure_class).toBe("permanent");
   });
 
   it("clears substrate-stall review state when a real review finding reworks code", async () => {
@@ -266,6 +270,30 @@ describe("failure signal routing in onWorkerExit", () => {
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
   });
 
+  it("clears stale substrate-stall review state when entering a fresh review stage", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueReviewInfrastructureStalls["1"] = {
+      count: 1,
+      signature: "stale",
+      stalledLanes: ["claude-opus"],
+    };
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toBeUndefined();
+  });
+
   it("parks repeated unparseable substrate stalls even when prose changes", async () => {
     const orchestrator = createStagedOrchestrator({
       stages: createAgentReviewWorkflowConfig(),
@@ -283,7 +311,7 @@ describe("failure signal routing in onWorkerExit", () => {
       issueId: "1",
       outcome: "normal",
       agentMessage:
-        "Headless council gate error: substrate stall with no lane field.\n[STAGE_FAILED: infra]",
+        "Headless council gate error: substrate_stall: with no lane field.\n[STAGE_FAILED: infra]",
     });
     expect(firstRetry).not.toBeNull();
     expect(
@@ -299,11 +327,38 @@ describe("failure signal routing in onWorkerExit", () => {
       issueId: "1",
       outcome: "normal",
       agentMessage:
-        "Second run had different prose but the same substrate stall class.\n[STAGE_FAILED: infra]",
+        "Second run had different prose but the same substrate_stall: class.\n[STAGE_FAILED: infra]",
     });
 
     expect(secondRetry).toBeNull();
     expect(orchestrator.getState().failed.has("1")).toBe(true);
+  });
+
+  it("does not treat prose-only substrate stall mentions as review gate stalls", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Worker hit an unrelated infra error while reading docs about a substrate stall.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(retry).not.toBeNull();
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toBeUndefined();
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
   });
 
   it("parks the second substrate stall while preserving the full punctuated lane set", async () => {

@@ -141,7 +141,7 @@ const CONTINUATION_RETRY_DELAY_MS = 1_000;
  */
 const MAX_SAME_CRITERION_REVIEW_FAILURES = 3;
 const MAX_REVIEW_SUBSTRATE_STALL_FAILURES = 2;
-const SUBSTRATE_STALL_REGEX = /\bsubstrate[_ -]stall\b/i;
+const SUBSTRATE_STALL_REGEX = /\bsubstrate[_ -]stall:/i;
 const SUBSTRATE_STALL_PREFIXES = [
   "substrate_stall:",
   "substrate-stall:",
@@ -3148,7 +3148,6 @@ export class OrchestratorCore {
       passedStages.push(currentStageName);
       this.state.issuePassedStages[issueId] = passedStages;
     }
-    delete this.state.issueReviewInfrastructureStalls[issueId];
 
     // Skip stages that have already been passed (e.g., review after a merge-triggered rework)
     let targetStageName = nextStageName;
@@ -3161,6 +3160,9 @@ export class OrchestratorCore {
         break;
       }
       targetStageName = targetStage.transitions.onComplete;
+    }
+    if (currentStageName === "review" || targetStageName === "review") {
+      delete this.state.issueReviewInfrastructureStalls[issueId];
     }
 
     // Move to the target stage (may be ahead of nextStageName if stages were skipped)
@@ -3548,7 +3550,7 @@ export class OrchestratorCore {
       parkReason,
       {
         failure_signature: input.signature,
-        failure_class: "transient",
+        failure_class: "permanent",
       },
       {
         issueDescription: runningEntry.issue.description ?? "",
