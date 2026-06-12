@@ -124,10 +124,8 @@ export function parseSymphonyctlArgs(
     }
     const fence = flags.get("fence");
     if (fence !== undefined) {
-      if (!/^\d+$/.test(fence)) {
-        throw new SymphonyctlUsageError(
-          "--fence must be a non-negative integer.",
-        );
+      if (!/^[1-9]\d*$/.test(fence)) {
+        throw new SymphonyctlUsageError("--fence must be a positive integer.");
       }
       result.fence = Number.parseInt(fence, 10);
     }

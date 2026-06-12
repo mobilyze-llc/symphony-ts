@@ -194,7 +194,7 @@ describe("POST /api/v1/intents", () => {
     expect(requests).toHaveLength(0);
   });
 
-  it("rejects the pipeline sentinel as an intent target with 400 (case-insensitive)", async () => {
+  it("rejects the pipeline sentinel as an intent target with 400 (case- and whitespace-insensitive)", async () => {
     const requests: IntentRequest[] = [];
     const server = await startServer({
       requestIntent: (input) => {
@@ -207,6 +207,8 @@ describe("POST /api/v1/intents", () => {
       { issueId: "pipeline" },
       { issueId: "PIPELINE" },
       { issueIdentifier: "Pipeline" },
+      { issueId: " pipeline " },
+      { issueIdentifier: "\tPIPELINE\n" },
     ]) {
       const { issueIdentifier, ...rest } = validBody();
       const response = await postIntent(server.port, {
@@ -607,7 +609,7 @@ function createConfig(): ResolvedWorkflowConfig {
       minPrimaryHeadroomPct: null,
       minSecondaryHeadroomPct: null,
     },
-    server: { port: null, slackNotifyChannel: null },
+    server: { port: null, host: null, slackNotifyChannel: null },
     notifications: { slackEnabled: true },
     observability: {
       dashboardEnabled: false,

@@ -246,15 +246,16 @@ const SHUTDOWN_IDLE_TIMEOUT_MS = 30_000;
 const PIPELINE_HALT_LABEL = "pipeline-halt";
 
 /**
- * Case-insensitive match against the reserved pipeline sentinel
- * ("pipeline"/"PIPELINE") so issue-scoped intent verbs can never journal
- * under the pipeline-wide journal scope (SYMPH-408 council R1).
+ * Case- and whitespace-insensitive match against the reserved pipeline
+ * sentinel ("pipeline"/"PIPELINE"/" pipeline ") so issue-scoped intent verbs
+ * can never journal under the pipeline-wide journal scope (SYMPH-408 council
+ * R1/R2).
  */
 function isPipelineSentinelTarget(value: string | undefined): boolean {
   if (value === undefined) {
     return false;
   }
-  const lowered = value.toLowerCase();
+  const lowered = value.trim().toLowerCase();
   return (
     lowered === PIPELINE_INTENT_ISSUE_ID.toLowerCase() ||
     lowered === PIPELINE_INTENT_ISSUE_IDENTIFIER.toLowerCase()
@@ -2499,6 +2500,21 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       ["Done", "Cancelled"],
     );
 
+    // Race guard: the pipeline read as paused above, but the halt issues were
+    // resolved (or cancelled by another actor) between the two reads. Nothing
+    // was mutated, so this must journal no_op — "applied" means ≥1 cancelled.
+    if (haltIssues.length === 0) {
+      await this.journalPipelineIntentDegradedOk({
+        action: "resume",
+        status: "no_op",
+        actor,
+        reason,
+        detail: "no halt issues found; view unchanged",
+      });
+      const refreshed = await this.getPipelineStatus();
+      return refreshed;
+    }
+
     const teamKey = this.config.tracker.teamKey ?? "";
     for (const issue of haltIssues) {
       await tracker.updateIssueState(issue.id, "Cancelled", teamKey);
@@ -3309,6 +3325,9 @@ export async function startRuntimeService(
       : await startDashboardServer({
           host: runtimeHost,
           port: currentConfig.server.port,
+          ...(currentConfig.server.host === null
+            ? {}
+            : { hostname: currentConfig.server.host }),
           refreshMs: currentConfig.observability.refreshMs,
           renderIntervalMs: currentConfig.observability.renderIntervalMs,
           liveUpdatesEnabled: currentConfig.observability.dashboardEnabled,

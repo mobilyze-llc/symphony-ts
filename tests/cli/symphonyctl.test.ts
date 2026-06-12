@@ -86,8 +86,8 @@ describe("parseSymphonyctlArgs", () => {
     );
   });
 
-  it("rejects a non-digit --fence value", () => {
-    for (const fence of ["abc", "3.5", "-1", "3abc", "1e3", ""]) {
+  it("rejects a non-positive-integer --fence value", () => {
+    for (const fence of ["abc", "3.5", "-1", "3abc", "1e3", "", "0", "01"]) {
       expect(() =>
         parseSymphonyctlArgs(
           [

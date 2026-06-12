@@ -1951,7 +1951,11 @@ body {
           resumeBtn.disabled = true;
           resumeBtn.textContent = 'Resuming…';
           try {
-            const resp = await fetch(`${baseUrl}/api/v1/pipeline/resume`, { method: 'POST' });
+            const resp = await fetch(`${baseUrl}/api/v1/pipeline/resume`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({}),
+            });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const result = await resp.json();
             renderPipelineControl(result);
@@ -1967,7 +1971,11 @@ body {
         wireHoldToConfirm(pauseBtn, async () => {
           pauseBtn.disabled = true;
           try {
-            const resp = await fetch(`${baseUrl}/api/v1/pipeline/pause`, { method: 'POST' });
+            const resp = await fetch(`${baseUrl}/api/v1/pipeline/pause`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({}),
+            });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
             const result = await resp.json();
             renderPipelineControl(result);

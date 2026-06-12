@@ -138,12 +138,14 @@ describe("OrchestratorRuntimeHost.requestIntent", () => {
     expect(result.detail).toContain("stale fence");
   });
 
-  it("rejects the pipeline sentinel as an intent target (case-insensitive), journaling nothing", async () => {
+  it("rejects the pipeline sentinel as an intent target (case- and whitespace-insensitive), journaling nothing", async () => {
     const { host } = createHost();
     for (const target of [
       { issueId: "pipeline" },
       { issueId: "PIPELINE" },
       { issueIdentifier: "Pipeline" },
+      { issueId: " pipeline " },
+      { issueIdentifier: "\tPIPELINE\n" },
     ]) {
       const result = await host.requestIntent({
         verb: "park",
@@ -338,6 +340,38 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
     });
   });
 
+  it("resume journals a no_op (never applied) when the halt set drains between the paused check and the cancellation fetch", async () => {
+    const tracker = createLinearTracker();
+    const fetchByLabels = tracker.fetchOpenIssuesByLabels as ReturnType<
+      typeof vi.fn
+    >;
+    // First read (getPipelineStatus): paused. Second read (cancellation
+    // fetch): another actor already resolved the halt issue — empty set.
+    fetchByLabels
+      .mockResolvedValueOnce([
+        { id: "halt-1", identifier: "ENG-99", title: "Pipeline Halt" },
+      ])
+      .mockResolvedValue([]);
+    const updateIssueState = vi
+      .spyOn(tracker, "updateIssueState")
+      .mockResolvedValue(undefined);
+
+    const host = createHost({ tracker });
+    const status = await host.requestPipelineResume({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "resume after deploy",
+    });
+
+    expect(status.paused).toBe(false);
+    expect(updateIssueState).not.toHaveBeenCalled();
+    const entries = pipelineEntries(host, "pipeline_resume");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.metadata.status).toBe("no_op");
+    expect(entries[0]?.metadata.detail).toBe(
+      "no halt issues found; view unchanged",
+    );
+  });
+
   it("an attribution-less pause defaults to an operator actor on this host", async () => {
     const host = createHost();
     await host.requestPipelinePause();
@@ -455,7 +489,7 @@ function createConfig(workspaceRoot: string): ResolvedWorkflowConfig {
       minPrimaryHeadroomPct: null,
       minSecondaryHeadroomPct: null,
     },
-    server: { port: null, slackNotifyChannel: null },
+    server: { port: null, host: null, slackNotifyChannel: null },
     notifications: { slackEnabled: true },
     observability: {
       dashboardEnabled: false,

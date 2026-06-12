@@ -2103,6 +2103,7 @@ function createConfig(root: string, scenario: string): ResolvedWorkflowConfig {
     },
     server: {
       port: null,
+      host: null,
       slackNotifyChannel: null,
     },
     notifications: {

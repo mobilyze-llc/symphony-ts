@@ -7961,6 +7961,7 @@ function createConfig(overrides?: {
     },
     server: {
       port: null,
+      host: null,
       slackNotifyChannel: null,
     },
     notifications: {

@@ -49,6 +49,7 @@ describe("cli", () => {
       createConfig({
         server: {
           port: 3000,
+          host: null,
           slackNotifyChannel: null,
         },
       }),
@@ -340,6 +341,7 @@ function createConfig(
     },
     server: {
       port: null,
+      host: null,
       slackNotifyChannel: null,
     },
     notifications: {

@@ -269,14 +269,15 @@ const intentActorSchema = z.object({
 /**
  * The pipeline sentinel ("pipeline"/"PIPELINE") is a reserved synthetic
  * journal scope, never an addressable issue: an intent verb targeting it
- * must be rejected at the boundary (case-insensitive) before it can journal
- * issue-scoped state under the sentinel id.
+ * must be rejected at the boundary (case- and whitespace-insensitive, so
+ * " pipeline " cannot slip past) before it can journal issue-scoped state
+ * under the sentinel id.
  */
 function isPipelineSentinel(value: string | undefined): boolean {
   if (value === undefined) {
     return false;
   }
-  const lowered = value.toLowerCase();
+  const lowered = value.trim().toLowerCase();
   return (
     lowered === PIPELINE_INTENT_ISSUE_ID.toLowerCase() ||
     lowered === PIPELINE_INTENT_ISSUE_IDENTIFIER.toLowerCase()
@@ -992,6 +993,9 @@ export function createDashboardRequestHandler(
       writeNotFound(response, url.pathname);
     } catch (error) {
       if (error instanceof PayloadTooLargeError) {
+        // Belt-and-braces: drop the connection so a slow uploader's socket
+        // cannot linger on keep-alive after we abandoned its body mid-read.
+        response.setHeader("connection", "close");
         writeJsonError(response, 413, "payload_too_large", {
           message: toErrorMessage(error),
         });

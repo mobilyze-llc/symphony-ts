@@ -168,6 +168,16 @@ export interface WorkflowCodexConfig {
 
 export interface WorkflowServerConfig {
   port: number | null;
+  /**
+   * Bind address for the dashboard server (`server.host` in WORKFLOW
+   * frontmatter). `null` (the default) binds loopback (127.0.0.1).
+   *
+   * WARNING (SYMPH-449): setting this to "0.0.0.0" (or any non-loopback
+   * address) exposes an unauthenticated mutating HTTP surface — pipeline
+   * pause/resume, issue stop, deploy — to the network. Only opt in on a
+   * trusted network segment.
+   */
+  host: string | null;
   slackNotifyChannel: string | null;
 }
 

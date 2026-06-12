@@ -248,6 +248,16 @@ describe("mobile-dashboard.html", () => {
     expect(scriptSection).not.toMatch(/new EventSource.*deploy/);
   });
 
+  it("sends content-type application/json on pipeline pause/resume POSTs (415 gate)", () => {
+    const scriptSection = html.slice(html.indexOf("<script>"));
+    expect(scriptSection).toMatch(
+      /fetch\(`\$\{baseUrl\}\/api\/v1\/pipeline\/resume`[^)]*'content-type':\s*'application\/json'/s,
+    );
+    expect(scriptSection).toMatch(
+      /fetch\(`\$\{baseUrl\}\/api\/v1\/pipeline\/pause`[^)]*'content-type':\s*'application\/json'/s,
+    );
+  });
+
   it("includes stop confirmation bottom sheet", () => {
     expect(html).toContain("stop-sheet");
     expect(html).toContain("bottom-sheet");

@@ -83,6 +83,7 @@ describe("runtime integration", () => {
           },
           server: {
             port: 0,
+            host: null,
             slackNotifyChannel: null,
           },
         }),
@@ -688,6 +689,7 @@ function createConfig(
     },
     server: {
       port: null,
+      host: null,
       slackNotifyChannel: null,
     },
     notifications: {
