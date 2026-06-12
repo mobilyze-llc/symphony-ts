@@ -10,6 +10,7 @@ import {
   type CommandRunner,
   type HeadlessReviewerLaneConfig,
   type ReviewBundleProvenanceEntry,
+  type StructuredReviewerArtifact,
   assertFreshCouncilReview,
   defaultReviewerLanes,
   execFileCommand,
@@ -321,7 +322,6 @@ describe("runHeadlessCouncilGate", () => {
         },
       },
     });
-
     const result = await runHeadlessCouncilGate(
       {
         issueId: "MOB-88",
@@ -965,7 +965,6 @@ describe("runHeadlessCouncilGate", () => {
         },
       },
     });
-
     const result = await runHeadlessCouncilGate(
       {
         issueId: "MOB-88",
@@ -1224,9 +1223,23 @@ describe("runHeadlessCouncilGate", () => {
         "Artifact did not start with a parseable Verdict section at the first non-whitespace line.",
     });
     expect(lane.artifactPath).not.toBeNull();
+    expect(lane.rawArtifactPath).toBe(lane.artifactPath);
+    expect(lane.structuredArtifactPath).toBe(
+      join(harness.artifactDir, "claude-opus.structured.json"),
+    );
+    expect(lane.structuredArtifact).toMatchObject({
+      parseStatus: "malformed",
+      malformedReason:
+        "Artifact did not start with a parseable Verdict section at the first non-whitespace line.",
+      rawArtifactPath: lane.artifactPath,
+    });
     expect(result.degradedConditions).toContain(
       `malformed_artifact:claude-opus:${lane.artifactPath}`,
     );
+    const structuredArtifact = JSON.parse(
+      await readFile(lane.structuredArtifactPath!, "utf-8"),
+    ) as StructuredReviewerArtifact;
+    expect(structuredArtifact.parseStatus).toBe("malformed");
     const artifact = await readFile(lane.artifactPath!, "utf-8");
     expect(artifact).toContain("PASS");
     expect(artifact).toContain("symphony-review-bundle");
@@ -1234,6 +1247,328 @@ describe("runHeadlessCouncilGate", () => {
     expect(report).toContain(
       `malformed_artifact:claude-opus:${lane.artifactPath}`,
     );
+  });
+
+  it("writes versioned structured artifacts with fingerprinted findings", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "FINDINGS",
+            "",
+            "## P1 Must Fix",
+            "- file.ts:1 drops malformed reviewer artifacts. confidence: 0.91",
+            "",
+            "## P2 Should Fix",
+            "- tests/review/headless-council-gate.test.ts:120-130 misses repeated fingerprint coverage.",
+            "",
+            "## Track",
+            "- docs/review-runbook.md:5 document the legacy follow-up. confidence: 65%",
+            "",
+            "## Dismissed Or Theoretical",
+            "- The auth issue is theoretical; dismissed because no public route.",
+          ].join("\n"),
+        },
+      },
+    });
+    await writeFile(
+      harness.diffPath,
+      [
+        "diff --git a/file.ts b/file.ts",
+        "+const ok = true;",
+        "diff --git a/tests/review/headless-council-gate.test.ts b/tests/review/headless-council-gate.test.ts",
+        "+expect(path).toBe('tests/review/headless-council-gate.test.ts');",
+      ].join("\n"),
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(result.artifactPaths.structuredArtifacts).toEqual([
+      join(harness.artifactDir, "claude-opus.structured.json"),
+    ]);
+    const lane = result.lanes[0]!;
+    const structured = lane.structuredArtifact!;
+    expect(structured).toMatchObject({
+      schemaVersion: 1,
+      kind: "symphony-headless-council-reviewer-artifact",
+      parseStatus: "synthesized_from_markdown",
+      verdict: "fail",
+      lane: {
+        laneId: "claude-opus",
+        modelFamily: "anthropic",
+        independentReviewer: true,
+      },
+      routing: { mode: "full", round: 1 },
+    });
+    expect(structured.findings).toHaveLength(4);
+    expect(structured.findings[0]).toMatchObject({
+      severity: "P1",
+      emittedSeverity: "P1",
+      confidence: 0.91,
+      introducedIn: "original_diff",
+      leadDisposition: "open",
+      evidence: [
+        {
+          path: "file.ts",
+          lineStart: 1,
+          lineEnd: 1,
+          changedPath: true,
+        },
+      ],
+    });
+    expect(structured.findings[0]?.fingerprint).toMatch(/^[a-f0-9]{16}$/);
+    expect(structured.findings[1]).toMatchObject({
+      severity: "P2",
+      evidence: [
+        {
+          path: "tests/review/headless-council-gate.test.ts",
+          lineStart: 120,
+          lineEnd: 130,
+          changedPath: true,
+        },
+      ],
+    });
+    expect(structured.findings[2]).toMatchObject({
+      severity: "Track",
+      confidence: 0.65,
+      introducedIn: "pre_existing",
+      leadDisposition: "track",
+      relatedPaths: ["docs/review-runbook.md"],
+    });
+    expect(structured.findings[3]).toMatchObject({
+      severity: "Dismissed",
+      introducedIn: "pre_existing",
+      leadDisposition: "dismissed",
+      dismissalReason:
+        "The auth issue is theoretical; dismissed because no public route.",
+    });
+
+    const artifactFromDisk = JSON.parse(
+      await readFile(lane.structuredArtifactPath!, "utf-8"),
+    ) as StructuredReviewerArtifact;
+    expect(
+      artifactFromDisk.findings.map((finding) => finding.fingerprint),
+    ).toEqual(structured.findings.map((finding) => finding.fingerprint));
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain("## Structured Findings");
+    expect(report).toContain(structured.findings[0]!.fingerprint);
+    expect(report).toContain(lane.structuredArtifactPath!);
+  });
+
+  it("preserves P1 severity and explicit disposition from Codex lead triage", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "codex-high-lead": {
+          artifact: [
+            "## Verdict",
+            "FINDINGS",
+            "",
+            "## Triage",
+            "- P1 | open | new | file.ts:1 drops a blocking review artifact. confidence: 0.93",
+            "- P2 | refuted | abc12345 | tests/review/headless-council-gate.test.ts:12 is already covered.",
+            "",
+            "## Track",
+            "None",
+          ].join("\n"),
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    const leadArtifact = result.lanes.find(
+      (lane) => lane.laneId === "codex-high-lead",
+    )!.structuredArtifact!;
+    expect(leadArtifact.confidence).toBe(0.85);
+    expect(leadArtifact.findings[0]).toMatchObject({
+      severity: "P1",
+      emittedSeverity: "P1",
+      confidence: 0.93,
+      leadDisposition: "open",
+      introducedIn: "original_diff",
+      evidence: [
+        {
+          path: "file.ts",
+          lineStart: 1,
+          lineEnd: 1,
+          changedPath: true,
+        },
+      ],
+    });
+    expect(leadArtifact.findings[1]).toMatchObject({
+      severity: "P2",
+      leadDisposition: "refuted",
+      repeatOf: "abc12345",
+    });
+  });
+
+  it("keeps h3 subheadings inside artifact sections", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "FINDINGS",
+            "",
+            "## P1 Must Fix",
+            "- file.ts:1 drops malformed reviewer artifacts.",
+            "### Additional context",
+            "The failure affects convergence retries.",
+            "",
+            "## P2 Should Fix",
+            "None",
+          ].join("\n"),
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const p1Section = result.lanes[0]!.structuredArtifact!.sections.p1;
+    expect(p1Section).toContain("### Additional context");
+    expect(p1Section).toContain("The failure affects convergence retries.");
+    expect(result.lanes[0]!.structuredArtifact!.findings).toHaveLength(1);
+  });
+
+  it("treats unknown h2 headings as section boundaries without blocking PASS artifacts", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "PASS",
+            "",
+            "## P1 Must Fix",
+            "None",
+            "",
+            "## Notes",
+            "Reviewer context that must not become a P1 finding.",
+            "",
+            "## P2 Should Fix",
+            "None",
+          ].join("\n"),
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const structuredArtifact = result.lanes[0]!.structuredArtifact!;
+    expect(result.verdict).toBe("pass");
+    expect(structuredArtifact.sections.p1).toBe("None");
+    expect(structuredArtifact.findings).toHaveLength(0);
+  });
+
+  it("keeps Track-only PASS as pass while preserving the Track finding", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n\n## Track\n- docs/operators.md:9 add rollout notes for a pre-existing issue.",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    const findings = result.lanes[0]!.structuredArtifact!.findings;
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      severity: "Track",
+      introducedIn: "pre_existing",
+      leadDisposition: "track",
+      relatedPaths: ["docs/operators.md"],
+    });
+  });
+
+  it("keeps Track-only FINDINGS as pass while preserving the Track finding", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "codex-high-lead": {
+          artifact:
+            "## Verdict\nFINDINGS\n\n## Triage\nNone\n\n## Track\n- Track:71c6507aa5c92114 | `repeatOf` extraction accepts narrow marker syntax | `src/review/headless-council-gate.ts` | confidence: 0.60",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    const leadLane = result.lanes.find(
+      (lane) => lane.laneId === "codex-high-lead",
+    )!;
+    expect(leadLane).toMatchObject({
+      verdict: "pass",
+      message:
+        "Reviewer verdict was FINDINGS but only Track/Dismissed content was present.",
+    });
+    expect(leadLane.structuredArtifact!.findings[0]).toMatchObject({
+      severity: "Track",
+      repeatOf: "71c6507aa5c92114",
+      confidence: 0.6,
+    });
   });
 
   it("parses a valid structured artifact with no degraded reason", async () => {
@@ -2255,6 +2590,65 @@ describe("runHeadlessCouncilGate", () => {
       guidance: "rerun convergence review against HEAD.",
     });
   });
+
+  it("carries prior adjudicated finding fingerprints into convergence prompts", async () => {
+    const firstHarness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n\n## Track\n- docs/operators.md:9 pre-existing rollout note.",
+        },
+      },
+    });
+    const firstResult = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: firstHarness.workspace,
+        artifactDir: firstHarness.artifactDir,
+        diffPath: firstHarness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: firstHarness.runCommand },
+    );
+    const prior = firstResult.lanes[0]!.structuredArtifact!;
+    const priorFingerprint = prior.findings[0]!.fingerprint;
+
+    const secondHarness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nFINDINGS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\n- file.ts:1 regressed in the fix round.",
+        },
+      },
+    });
+    const secondResult = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: secondHarness.workspace,
+        artifactDir: secondHarness.artifactDir,
+        diffPath: secondHarness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        mode: "convergence",
+        round: 2,
+        priorStructuredArtifacts: [prior],
+      },
+      { runCommand: secondHarness.runCommand },
+    );
+
+    const prompt = await readFile(
+      join(secondHarness.artifactDir, "claude-opus.prompt.md"),
+      "utf-8",
+    );
+    expect(prompt).toContain(priorFingerprint);
+    expect(prompt).toContain("pre_existing");
+    expect(
+      secondResult.lanes[0]!.structuredArtifact!.findings[0],
+    ).toMatchObject({
+      introducedIn: "fix_round_2",
+    });
+  });
 });
 
 describe("execFileCommand", () => {
@@ -2531,6 +2925,7 @@ function cleanReviewResult(options: {
       artifactDir: "/tmp/council",
       diff: "/tmp/council/diff.patch",
       reviewBundle: "/tmp/council/review-bundle.json",
+      structuredArtifacts: [],
       resultJson: "/tmp/council/review-result.json",
       councilReport: "/tmp/council/council-report.md",
     },
