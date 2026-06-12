@@ -70,6 +70,7 @@ import type {
   HardStopDecision,
   HardStopTrigger,
 } from "../policy/hard-stops.js";
+import { sanitizeForLinear } from "../shared/egress.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 import { formatAdmissionCard } from "./admission-card.js";
 import {
@@ -1361,7 +1362,7 @@ export class OrchestratorCore {
         try {
           await this.postComment?.(
             issueId,
-            `Pause triage verdict: ${verdict.verdict}\n${verdict.rationale}`,
+            `Pause triage verdict: ${verdict.verdict}\n${sanitizeForLinear(verdict.rationale)}`,
           );
         } catch {
           // Observability only.
@@ -1375,7 +1376,7 @@ export class OrchestratorCore {
         issueId,
         [
           `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes})`,
-          verdict.rationale,
+          sanitizeForLinear(verdict.rationale),
           "Auto-resuming one continuation unit at the current budget ceiling.",
         ].join("\n"),
       );
@@ -1466,7 +1467,7 @@ export class OrchestratorCore {
         try {
           await this.postComment?.(
             issueId,
-            `Pause triage verdict: ${verdict.verdict}\n${verdict.rationale}`,
+            `Pause triage verdict: ${verdict.verdict}\n${sanitizeForLinear(verdict.rationale)}`,
           );
         } catch {
           // Observability only.
@@ -1482,7 +1483,7 @@ export class OrchestratorCore {
         issueId,
         [
           `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes})`,
-          verdict.rationale,
+          sanitizeForLinear(verdict.rationale),
           "Auto-resuming one continuation unit at the current budget ceiling.",
         ].join("\n"),
       );
@@ -1582,7 +1583,7 @@ export class OrchestratorCore {
       try {
         await this.postComment?.(
           issueId,
-          `## Review Findings (AC gate)\n${verdict.feedback}\nRevise the workpad acceptance criteria per the contract (test:/check:/judge: tags, falsifiable, covering the ticket intent) and complete the stage again.`,
+          `## Review Findings (AC gate)\n${sanitizeForLinear(verdict.feedback, { maxLen: 4000 })}\nRevise the workpad acceptance criteria per the contract (test:/check:/judge: tags, falsifiable, covering the ticket intent) and complete the stage again.`,
         );
       } catch {
         // Observability only.
@@ -1648,7 +1649,7 @@ export class OrchestratorCore {
     try {
       await this.postComment?.(
         input.issueId,
-        `## Spec-fidelity verdict (independent judge): ${input.verdict.verdict}\n${input.verdict.findings}`,
+        `## Spec-fidelity verdict (independent judge): ${input.verdict.verdict}\n${sanitizeForLinear(input.verdict.findings, { maxLen: 6000 })}`,
       );
     } catch {
       // Observability only.
@@ -2748,7 +2749,12 @@ export class OrchestratorCore {
     }
     if (this.postComment !== undefined) {
       try {
-        await this.postComment(issueId, comment);
+        // Choke point for every escalation/park comment: bodies can embed
+        // worker/runtime-authored reasons (e.g. Codex operator-input
+        // requests, hard-stop reasons), so the whole body is sanitized
+        // here. Deterministic caller strings pass through unchanged
+        // (sanitizeForLinear is identity on clean text). SYMPH-421.
+        await this.postComment(issueId, sanitizeForLinear(comment));
       } catch (err) {
         console.warn(
           `[orchestrator] Failed to post escalation comment for ${issueIdentifier}:`,
@@ -4143,11 +4149,17 @@ export class OrchestratorCore {
     if (this.postComment !== undefined) {
       void this.postComment(
         issueId,
-        formatContinuousFeedbackComment({
-          issueIdentifier: runningEntry.identifier,
-          stageName,
-          findings: openFindings,
-        }),
+        // Finding titles/details are authored by the cheap feedback-lane
+        // model; the wider cap keeps multi-finding lists intact while the
+        // fence/link/secret neutralization still applies (SYMPH-421).
+        sanitizeForLinear(
+          formatContinuousFeedbackComment({
+            issueIdentifier: runningEntry.identifier,
+            stageName,
+            findings: openFindings,
+          }),
+          { maxLen: 6000 },
+        ),
       ).catch((err) => {
         console.warn(
           `[orchestrator] Failed to post continuous feedback findings for ${runningEntry.identifier}:`,
