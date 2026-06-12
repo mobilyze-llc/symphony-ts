@@ -25,10 +25,14 @@
  * of that issue, so a resumed issue is counted fresh rather than carrying stale
  * membership. It is deliberately NOT removed at terminal cleanup.
  *
- * The registry is pure in-memory with no journal hydration: on process restart
- * the cluster is empty and SYSTEMIC counting restarts from zero. That is
- * acceptable for the current 2-3-worker, in-memory design (see CLAUDE.md
- * "in-memory state only"); cross-restart systemic memory is out of scope here.
+ * REPLAY HYDRATION (SYMPH-405): the orchestrator journals `cluster_transition`
+ * and `breaker_transition` events and feeds them back through hydrateCluster /
+ * hydrateBreakerOpen / resetCircuitBreaker on recovery, so a deploy in the
+ * middle of a systemic signature does not silently reset the count below K
+ * (the SYMPH-398 restart-amnesia hole). Each journaled cluster_transition
+ * carries the full membership snapshot; hydration is latest-entry-wins per
+ * signature. Resume-clearing is NOT replayed — a resumed issue is cleared by
+ * the live isDispatchEligible path after recovery.
  */
 
 import type { ErrorSignatureClass } from "../errors/signature.js";
@@ -147,6 +151,7 @@ export class SignatureClusterRegistry {
     }
 
     // Add or update membership for this issue
+    const memberAdded = !entry.members.has(issueId);
     entry.members.set(issueId, {
       issueId,
       issueIdentifier,
@@ -198,12 +203,14 @@ export class SignatureClusterRegistry {
       shouldOpenBreaker,
       canFileWatchdogTicket: canFile,
       clusterSize,
-      // Only materialize the member snapshot when a consumer will read it
-      // (alert/breaker/file decisions key off shouldAlert).
-      members: shouldAlert ? [...entry.members.values()] : [],
+      memberAdded,
+      // Always materialized: the cluster_transition journal entry (SYMPH-405)
+      // carries the full membership snapshot for replay hydration.
+      members: [...entry.members.values()],
       signature,
       normalizedText,
       errorClass,
+      lastAlertSize: entry.lastAlertSize,
     };
   }
 
@@ -238,17 +245,48 @@ export class SignatureClusterRegistry {
    * "I've looked at this, try again," so we close the stage breaker fully. The
    * resumed issue's first dispatch is the half-open canary — if the same
    * signature recurs it re-crosses threshold and recordFailure reopens the
-   * breaker through the normal path. Returns the stage names that were reset.
+   * breaker through the normal path. Returns the breaker entries that were
+   * reset (stage + signature) so the caller can journal the close transition.
    */
-  resetBreakersForIssue(issueId: string): string[] {
-    const reset: string[] = [];
+  resetBreakersForIssue(issueId: string): CircuitBreakerEntry[] {
+    const reset: CircuitBreakerEntry[] = [];
     for (const breaker of [...this.stageBreakers.values()]) {
       if (breaker.openedForIssueIds.includes(issueId)) {
         this.resetCircuitBreaker(breaker.stageName);
-        reset.push(breaker.stageName);
+        reset.push(breaker);
       }
     }
     return reset;
+  }
+
+  /**
+   * Replay hydration (SYMPH-405): replace the cluster entry for a signature
+   * with the journaled membership snapshot. Latest entry per signature wins
+   * (callers replay in journal sequence order).
+   */
+  hydrateCluster(input: {
+    signature: string;
+    errorClass: ErrorSignatureClass;
+    normalizedText: string;
+    members: ClusterMember[];
+    lastAlertSize: number;
+  }): void {
+    this.clusters.set(input.signature, {
+      signature: input.signature,
+      errorClass: input.errorClass,
+      normalizedText: input.normalizedText,
+      members: new Map(input.members.map((member) => [member.issueId, member])),
+      lastAlertSize: input.lastAlertSize,
+    });
+  }
+
+  /**
+   * Replay hydration (SYMPH-405): restore an open stage breaker from a
+   * journaled breaker_transition "opened" entry. A later "closed" entry is
+   * replayed via resetCircuitBreaker.
+   */
+  hydrateBreakerOpen(entry: CircuitBreakerEntry): void {
+    this.stageBreakers.set(entry.stageName, entry);
   }
 
   /**
@@ -328,10 +366,14 @@ export interface RecordFailureResult {
   shouldOpenBreaker: boolean;
   canFileWatchdogTicket: boolean;
   clusterSize: number;
+  /** True when this failure added a NEW distinct issue to the cluster. */
+  memberAdded: boolean;
   members: ClusterMember[];
   signature: string;
   normalizedText: string;
   errorClass: ErrorSignatureClass;
+  /** Cluster size at which the SYSTEMIC alert last fired (post-update). */
+  lastAlertSize: number;
 }
 
 // ---------------------------------------------------------------------------

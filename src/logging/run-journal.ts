@@ -22,6 +22,7 @@ export function getDispatcherRunJournalPath(workspaceRoot: string): string {
 export function appendDispatcherRunJournalEntry(
   journal: DispatcherRunJournal,
   entry: Omit<DispatcherRunJournalEntry, "sequence">,
+  minSequence = 1,
 ): {
   journal: DispatcherRunJournal;
   entry: DispatcherRunJournalEntry;
@@ -36,7 +37,7 @@ export function appendDispatcherRunJournalEntry(
 
   const nextEntry: DispatcherRunJournalEntry = {
     ...entry,
-    sequence: (journal.at(-1)?.sequence ?? 0) + 1,
+    sequence: Math.max((journal.at(-1)?.sequence ?? 0) + 1, minSequence),
   };
   return {
     journal: [...journal, nextEntry],

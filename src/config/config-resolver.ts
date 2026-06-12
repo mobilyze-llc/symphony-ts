@@ -54,6 +54,7 @@ import {
   DEFAULT_TERMINAL_STATES,
   DEFAULT_TRACKER_KIND,
   DEFAULT_TURN_TIMEOUT_MS,
+  DEFAULT_VERDICTS_PAGE_AFTER_TICKS,
   DEFAULT_WATCHDOG_CIRCUIT_BREAKER,
   DEFAULT_WATCHDOG_MAX_FILINGS_PER_HOUR,
   DEFAULT_WATCHDOG_SYSTEMIC_THRESHOLD,
@@ -103,6 +104,7 @@ export function resolveWorkflowConfig(
   const specFidelity = asRecord(config.spec_fidelity);
   const admissionCard = asRecord(config.admission_card);
   const watchdog = asRecord(config.watchdog);
+  const verdicts = asRecord(config.verdicts);
   const runner = asRecord(config.runner);
   const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
@@ -256,6 +258,11 @@ export function resolveWorkflowConfig(
         readPositiveInteger(watchdog.max_filings_per_hour) ??
         DEFAULT_WATCHDOG_MAX_FILINGS_PER_HOUR,
       stuckTriage: resolveStuckTriageConfig(watchdog.stuck_triage, environment),
+    },
+    verdicts: {
+      pageAfterTicks:
+        readPositiveInteger(verdicts.page_after_ticks) ??
+        DEFAULT_VERDICTS_PAGE_AFTER_TICKS,
     },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,

@@ -248,6 +248,34 @@ export interface TrackerWriteFailedEvent {
 }
 
 /**
+ * Fired when an issue's dispatch verdict CHANGES to gate or halt (SYMPH-405).
+ * Transitions-only: unchanged verdicts never re-fire.
+ * severity: warning
+ */
+export interface DispatchVerdictAlertEvent {
+  type: "dispatch_verdict_alert";
+  issueIdentifier: string;
+  disposition: "gate" | "halt";
+  reasonCode: string;
+  remedy: string | null;
+  /** Attribution: rendered as "by {kind}@{host}" (SYMPH-405 amendment 4). */
+  actor: { kind: string; host: string; session?: string };
+}
+
+/**
+ * Fired when the dispatch-starvation page condition latches (eligible
+ * candidates > 0 with zero dispatches for verdicts.page_after_ticks
+ * consecutive ticks) and again on recovery (SYMPH-405).
+ * severity: critical (page) / info (recovery)
+ */
+export interface DispatchPageAlertEvent {
+  type: "dispatch_page_alert";
+  kind: "page" | "recovery";
+  eligibleCount: number;
+  consecutiveTicks: number;
+}
+
+/**
  * Fired when the watchdog L2 stuck-triage lane escalates a parked ticket to
  * a human with the model's one-paragraph case (SYMPH-399).
  * severity: critical
@@ -282,6 +310,8 @@ export type PipelineNotificationEvent =
   | InfoAlertEvent
   | SystemicClusterAlertEvent
   | TrackerWriteFailedEvent
+  | DispatchVerdictAlertEvent
+  | DispatchPageAlertEvent
   | TriageEscalationEvent;
 
 // ---------------------------------------------------------------------------
@@ -960,6 +990,41 @@ export function formatNotification(
       }
       parts.push(version);
       return { text: parts.join("\n") };
+    }
+
+    case "dispatch_verdict_alert": {
+      const emoji =
+        event.disposition === "halt"
+          ? ":octagonal_sign:"
+          : ":vertical_traffic_light:";
+      const label =
+        event.disposition === "halt" ? "Dispatch HALTED" : "Dispatch GATED";
+      const parts: string[] = [
+        `${emoji} *${label}* — ${event.issueIdentifier} (\`${event.reasonCode}\`) by ${event.actor.kind}@${event.actor.host}`,
+      ];
+      if (event.remedy !== null) {
+        parts.push(`Remedy: ${event.remedy}`);
+      }
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "dispatch_page_alert": {
+      if (event.kind === "page") {
+        return {
+          text: [
+            `:rotating_light: *Dispatch starvation* — ${event.eligibleCount} eligible candidate(s), 0 dispatched for ${event.consecutiveTicks} consecutive ticks`,
+            "The pipeline has work but nothing is going out. Check the dispositions map in /api/v1/state for the blocking verdicts.",
+            version,
+          ].join("\n"),
+        };
+      }
+      return {
+        text: [
+          `:white_check_mark: *Dispatch recovered* — starvation cleared after ${event.consecutiveTicks} tick(s)`,
+          version,
+        ].join("\n"),
+      };
     }
   }
 }

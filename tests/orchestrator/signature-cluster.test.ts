@@ -188,7 +188,7 @@ describe("SignatureClusterRegistry — circuit breaker lifecycle", () => {
 
     // Operator resumes issue 1 → breaker closes (openedForIssueIds includes it).
     const resetStages = reg.resetBreakersForIssue("id-1");
-    expect(resetStages).toEqual(["implement"]);
+    expect(resetStages.map((entry) => entry.stageName)).toEqual(["implement"]);
     expect(reg.isBreakerOpen("implement")).toBe(false);
 
     // Half-open canary: a recurrence of the same signature re-crosses
