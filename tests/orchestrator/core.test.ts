@@ -1228,6 +1228,7 @@ describe("orchestrator core", () => {
 
     expect(spawnedStageNames).toEqual(["investigate"]);
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+    expect(orchestrator.getState().issuePauseTriageResumes["1"]).toBe(1);
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
     expect(retry).toMatchObject({
       issueId: "1",
@@ -1391,6 +1392,8 @@ describe("orchestrator core", () => {
     ).rejects.toThrow("journal disk unavailable");
 
     const state = orchestrator.getState();
+    expect(state.running["1"]).toBeDefined();
+    expect(state.claimed.has("1")).toBe(true);
     expect(state.issueStages["1"]).toBe("investigate");
     expect(state.issuePendingStageSignals["1"]).toMatchObject({
       signal: "complete",

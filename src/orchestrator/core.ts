@@ -2391,18 +2391,20 @@ export class OrchestratorCore {
       return;
     }
 
-    try {
-      await this.postComment?.(
-        issueId,
-        [
-          `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes}) — ${formatIntentAttribution(actor)}`,
-          sanitizeForLinear(verdict.rationale),
-          "Auto-resuming one continuation unit at the current budget ceiling.",
-        ].join("\n"),
-      );
-    } catch {
-      // Observability only.
-    }
+    const postContinueComment = async (): Promise<void> => {
+      try {
+        await this.postComment?.(
+          issueId,
+          [
+            `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes}) — ${formatIntentAttribution(actor)}`,
+            sanitizeForLinear(verdict.rationale),
+            "Auto-resuming one continuation unit at the current budget ceiling.",
+          ].join("\n"),
+        );
+      } catch {
+        // Observability only.
+      }
+    };
 
     const pendingStageSignal = this.state.issuePendingStageSignals[issueId];
     if (pendingStageSignal !== undefined) {
@@ -2417,11 +2419,14 @@ export class OrchestratorCore {
         }),
         pendingStageSignal,
       );
+      await postContinueComment();
       if (retryEntry !== null) {
         return;
       }
       return;
     }
+
+    await postContinueComment();
 
     this.scheduleRetry(issueId, 1, {
       identifier,
@@ -2704,7 +2709,10 @@ export class OrchestratorCore {
     runningEntry: RunningEntry,
     pendingStageSignal: PendingStageSignal,
   ): Promise<RetryEntry | null> {
-    const rollbackSnapshot = this.snapshotPendingStageConsumptionRollback();
+    const rollbackSnapshot = this.snapshotPendingStageConsumptionRollback(
+      issueId,
+      runningEntry,
+    );
     try {
       delete this.state.issuePendingStageSignals[issueId];
       if (pendingStageSignal.stageName !== null) {
@@ -2751,9 +2759,19 @@ export class OrchestratorCore {
     }
   }
 
-  private snapshotPendingStageConsumptionRollback(): PendingStageConsumptionRollbackSnapshot {
+  private snapshotPendingStageConsumptionRollback(
+    issueId: string,
+    runningEntry: RunningEntry,
+  ): PendingStageConsumptionRollbackSnapshot {
+    const state = cloneOrchestratorState(this.state);
+    if (
+      state.running[issueId] === undefined &&
+      runningEntry.workerHandle !== null
+    ) {
+      state.running[issueId] = cloneRunningEntry(runningEntry);
+    }
     return {
-      state: cloneOrchestratorState(this.state),
+      state,
       lastExitHistorySnapshot: cloneExecutionHistoryMap(
         this.lastExitHistorySnapshot,
       ),
@@ -9287,6 +9305,9 @@ function cloneRecord<T>(
 }
 
 function clonePlain<T>(value: T): T {
+  // Rollback snapshots intentionally require state payloads to stay structured-
+  // cloneable. Worker, monitor, and timer handles are excluded by their typed
+  // clone helpers and reattached by reference.
   return structuredClone(value);
 }
 
