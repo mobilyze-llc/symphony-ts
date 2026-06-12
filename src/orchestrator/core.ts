@@ -4027,7 +4027,10 @@ export class OrchestratorCore {
     const comment = [
       `Hard stop outcome: ${input.hardStop.outcome}`,
       `Trigger: ${input.hardStop.trigger}`,
-      `Reason: ${input.hardStop.reason}`,
+      // Field-level cap on the untrusted reason: the composed body must
+      // stay under the choke-point cap so a long reason can never truncate
+      // the deterministic resume instruction below (SYMPH-421).
+      `Reason: ${sanitizeForLinear(input.hardStop.reason, { maxLen: 1500 })}`,
       `Turns: ${input.hardStop.turnCount}`,
       `Total tokens: ${input.hardStop.totalTokens}`,
       `Estimated cost: $${input.hardStop.estimatedCostUsd.toFixed(2)}`,
@@ -4093,7 +4096,9 @@ export class OrchestratorCore {
 
     const comment = [
       "Headless Codex requested operator input during the worker turn.",
-      `Reason: ${input.reason}`,
+      // Field-level cap so the resume instruction below survives the
+      // choke-point cap regardless of reason length (SYMPH-421).
+      `Reason: ${sanitizeForLinear(input.reason, { maxLen: 1500 })}`,
       "",
       this.formatPauseResumeInstruction(runningEntry.issue.state, "retrying"),
     ].join("\n");
