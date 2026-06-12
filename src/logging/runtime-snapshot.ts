@@ -300,6 +300,12 @@ export interface RuntimeSnapshot {
    */
   watchdog: RuntimeSnapshotWatchdog;
   /**
+   * Council v2 review state (SYMPH-451), reduced from dispatcher journal
+   * events. Only scalar/safe metadata is projected: no reviewer prose,
+   * prompts, diff hunks, paths, or evidence payloads.
+   */
+  council_reviews?: Record<string, RuntimeSnapshotCouncilReview>;
+  /**
    * Fail-open component visibility (SYMPH-407 scope 5): every fail-open
    * element reports {enabled, degraded_reason?}.
    */
@@ -379,6 +385,66 @@ export interface RuntimeSnapshotWatchdogBreaker {
 export interface RuntimeSnapshotWatchdog {
   clusters: RuntimeSnapshotWatchdogCluster[];
   open_breakers: RuntimeSnapshotWatchdogBreaker[];
+}
+
+export interface RuntimeSnapshotCouncilReviewLane {
+  lane_id: string;
+  lane_agent: string | null;
+  lane_role: string | null;
+  lane_model: string | null;
+  lane_state: string | null;
+  lane_verdict: string | null;
+  independent_reviewer: boolean | null;
+  parse_status: string | null;
+  degraded_reason: string | null;
+  finding_count: number | null;
+}
+
+export interface RuntimeSnapshotCouncilReview {
+  issue_id: string;
+  issue_identifier: string;
+  status:
+    | "not_started"
+    | "in_progress"
+    | "passed"
+    | "failed"
+    | "degraded"
+    | "escalated"
+    | "unavailable";
+  availability: "available" | "unavailable";
+  current_round: number | null;
+  last_round: number | null;
+  routing_mode: string | null;
+  decorrelation_basis: {
+    repo: string | null;
+    pr_number: number | null;
+    base_ref: string | null;
+    head_ref: string | null;
+    base_sha: string | null;
+    head_sha: string | null;
+  };
+  author_family: string | null;
+  fixer_family: string | null;
+  bundle_hash: string | null;
+  reviewed_head_sha: string | null;
+  lanes: RuntimeSnapshotCouncilReviewLane[];
+  verdict: string | null;
+  finding_counts_by_disposition: Record<string, number>;
+  escalation: {
+    predicate: string;
+    reason: string | null;
+    sequence: number;
+  } | null;
+  degraded: {
+    status: "ok" | "degraded" | "malformed";
+    reasons: string[];
+    malformed_lane_count: number;
+  };
+  next_action: string;
+  cursor_range: {
+    first_sequence: number | null;
+    last_sequence: number | null;
+  };
 }
 
 /**
@@ -621,8 +687,382 @@ export function buildRuntimeSnapshot(
     rate_limit_views: buildRateLimitViews(state, enrichment),
     deploy_drift: enrichment?.deployDrift ?? null,
     watchdog: buildWatchdogSection(state, enrichment?.watchdog ?? null),
+    council_reviews: buildCouncilReviewSnapshots(state),
     components: enrichment?.components ?? {},
   };
+}
+
+const REVIEW_JOURNAL_EVENT_KINDS = new Set<DispatcherRunJournalEventKind>([
+  "review_round",
+  "fix_round",
+  "review_rework",
+  "review_lane",
+  "review_finding",
+  "review_synthesis",
+  "review_escalation",
+  "review_gate_result",
+]);
+
+const REVIEW_RELEVANT_STAGES = new Set([
+  "review",
+  "review_gate",
+  "merge",
+  "done",
+]);
+
+function buildCouncilReviewSnapshots(
+  state: OrchestratorState,
+): Record<string, RuntimeSnapshotCouncilReview> {
+  const issueIdentifiers = buildIssueIdentifierMap(state);
+  const issueIds = new Set<string>();
+
+  for (const entry of state.dispatcherRunJournal) {
+    if (REVIEW_JOURNAL_EVENT_KINDS.has(entry.kind)) {
+      issueIds.add(entry.issueId);
+      issueIdentifiers.set(entry.issueId, entry.issueIdentifier);
+    }
+  }
+  for (const [issueId, stage] of Object.entries(state.issueStages)) {
+    if (REVIEW_RELEVANT_STAGES.has(stage)) {
+      issueIds.add(issueId);
+    }
+  }
+  for (const [issueId, passedStages] of Object.entries(
+    state.issuePassedStages,
+  )) {
+    if (passedStages.some((stage) => REVIEW_RELEVANT_STAGES.has(stage))) {
+      issueIds.add(issueId);
+    }
+  }
+
+  const reviews: Record<string, RuntimeSnapshotCouncilReview> = {};
+  for (const issueId of [...issueIds].sort((left, right) =>
+    (issueIdentifiers.get(left) ?? left).localeCompare(
+      issueIdentifiers.get(right) ?? right,
+      "en",
+    ),
+  )) {
+    const entries = state.dispatcherRunJournal
+      .filter(
+        (entry) =>
+          entry.issueId === issueId &&
+          REVIEW_JOURNAL_EVENT_KINDS.has(entry.kind),
+      )
+      .sort((left, right) => left.sequence - right.sequence);
+    reviews[issueId] =
+      entries.length === 0
+        ? emptyCouncilReviewSnapshot(
+            issueId,
+            issueIdentifiers.get(issueId) ?? issueId,
+          )
+        : reduceCouncilReviewEntries(
+            issueId,
+            issueIdentifiers.get(issueId) ??
+              entries.at(-1)?.issueIdentifier ??
+              issueId,
+            entries,
+          );
+  }
+
+  return reviews;
+}
+
+function buildIssueIdentifierMap(
+  state: OrchestratorState,
+): Map<string, string> {
+  const identifiers = new Map<string, string>();
+  for (const entry of Object.values(state.running)) {
+    identifiers.set(entry.issue.id, entry.identifier);
+  }
+  for (const retry of Object.values(state.retryAttempts)) {
+    if (retry.identifier !== null) {
+      identifiers.set(retry.issueId, retry.identifier);
+    }
+  }
+  return identifiers;
+}
+
+function emptyCouncilReviewSnapshot(
+  issueId: string,
+  issueIdentifier: string,
+): RuntimeSnapshotCouncilReview {
+  return {
+    issue_id: issueId,
+    issue_identifier: issueIdentifier,
+    status: "not_started",
+    availability: "unavailable",
+    current_round: null,
+    last_round: null,
+    routing_mode: null,
+    decorrelation_basis: {
+      repo: null,
+      pr_number: null,
+      base_ref: null,
+      head_ref: null,
+      base_sha: null,
+      head_sha: null,
+    },
+    author_family: null,
+    fixer_family: null,
+    bundle_hash: null,
+    reviewed_head_sha: null,
+    lanes: [],
+    verdict: null,
+    finding_counts_by_disposition: {},
+    escalation: null,
+    degraded: {
+      status: "ok",
+      reasons: [],
+      malformed_lane_count: 0,
+    },
+    next_action: "await_review_events",
+    cursor_range: {
+      first_sequence: null,
+      last_sequence: null,
+    },
+  };
+}
+
+function reduceCouncilReviewEntries(
+  issueId: string,
+  issueIdentifier: string,
+  entries: DispatcherRunJournalEntry[],
+): RuntimeSnapshotCouncilReview {
+  const currentRound = entries.reduce<number | null>(
+    (round, entry) => latestNumber(round, entry.metadata.round),
+    null,
+  );
+  const lastCompletedRound = entries.reduce<number | null>(
+    (round, entry) =>
+      entry.kind === "review_gate_result"
+        ? latestNumber(round, entry.metadata.round)
+        : round,
+    null,
+  );
+  const stateRound = currentRound ?? lastCompletedRound;
+  const stateEntries =
+    stateRound === null
+      ? entries
+      : entries.filter(
+          (entry) => numberFieldOrNull(entry.metadata.round) === stateRound,
+        );
+  const lanes = new Map<string, RuntimeSnapshotCouncilReviewLane>();
+  const findingDispositionByFingerprint = new Map<string, string>();
+  const degradedReasons = new Set<string>();
+  let malformedLaneCount = 0;
+  let escalation: RuntimeSnapshotCouncilReview["escalation"] = null;
+  let gateVerdict: string | null = null;
+  let routingMode: string | null = null;
+  let repo: string | null = null;
+  let prNumber: number | null = null;
+  let baseRef: string | null = null;
+  let headRef: string | null = null;
+  let baseSha: string | null = null;
+  let headSha: string | null = null;
+  let bundleHash: string | null = null;
+  let reviewedHeadSha: string | null = null;
+  let authorFamily: string | null = null;
+  let fixerFamily: string | null = null;
+
+  for (const entry of stateEntries) {
+    const metadata = entry.metadata;
+    routingMode = latestString(routingMode, metadata.routing_mode);
+    repo = latestString(repo, metadata.repo);
+    prNumber = latestNumber(prNumber, metadata.pr_number);
+    baseRef = latestString(baseRef, metadata.base_ref);
+    headRef = latestString(headRef, metadata.head_ref);
+    baseSha = latestString(baseSha, metadata.base_sha);
+    headSha = latestString(headSha, metadata.head_sha);
+    bundleHash = latestString(bundleHash, metadata.bundle_hash);
+    reviewedHeadSha = latestString(reviewedHeadSha, metadata.reviewed_head_sha);
+    authorFamily = latestString(authorFamily, metadata.author_family);
+    fixerFamily = latestString(fixerFamily, metadata.fixer_family);
+
+    if (entry.kind === "review_lane") {
+      const parseStatus = stringField(metadata.parse_status);
+      const degradedReason = stringField(metadata.degraded_reason);
+      if (degradedReason !== null) {
+        degradedReasons.add(degradedReason);
+      }
+      if (parseStatus !== null && parseStatus !== "ok") {
+        malformedLaneCount += 1;
+      }
+      const laneId = stringField(metadata.lane_id);
+      if (laneId !== null) {
+        lanes.set(laneId, {
+          lane_id: laneId,
+          lane_agent: stringField(metadata.lane_agent),
+          lane_role: stringField(metadata.lane_role),
+          lane_model: stringField(metadata.lane_model),
+          lane_state: stringField(metadata.lane_state),
+          lane_verdict: stringField(metadata.lane_verdict),
+          independent_reviewer: booleanField(metadata.independent_reviewer),
+          parse_status: parseStatus,
+          degraded_reason: degradedReason,
+          finding_count: numberFieldOrNull(metadata.finding_count),
+        });
+      }
+    } else if (entry.kind === "review_finding") {
+      const disposition =
+        stringField(metadata.finding_disposition) ?? "unknown";
+      const fingerprint =
+        stringField(metadata.finding_fingerprint) ??
+        `sequence:${entry.sequence}`;
+      findingDispositionByFingerprint.set(fingerprint, disposition);
+    } else if (entry.kind === "review_escalation") {
+      const reason = stringField(metadata.escalation_reason);
+      escalation = {
+        predicate: reason ?? "review_escalation",
+        reason,
+        sequence: entry.sequence,
+      };
+      for (const condition of stringArrayField(metadata.degraded_conditions)) {
+        degradedReasons.add(condition);
+      }
+    } else if (entry.kind === "review_gate_result") {
+      gateVerdict = latestString(gateVerdict, metadata.gate_verdict);
+      const degradedCount = numberFieldOrNull(
+        metadata.degraded_condition_count,
+      );
+      if (degradedCount !== null && degradedCount > 0) {
+        degradedReasons.add("degraded_review_substrate");
+      }
+      reviewedHeadSha =
+        stringField(metadata.reviewed_head_sha) ??
+        stringField(metadata.head_sha) ??
+        reviewedHeadSha;
+    }
+  }
+
+  const findingCounts: Record<string, number> = {};
+  for (const disposition of findingDispositionByFingerprint.values()) {
+    findingCounts[disposition] = (findingCounts[disposition] ?? 0) + 1;
+  }
+
+  const degradedStatus =
+    malformedLaneCount > 0
+      ? "malformed"
+      : degradedReasons.size > 0
+        ? "degraded"
+        : "ok";
+  const status = councilReviewStatus({
+    gateVerdict,
+    escalation,
+    degradedStatus,
+    entries,
+  });
+
+  return {
+    issue_id: issueId,
+    issue_identifier: issueIdentifier,
+    status,
+    availability: "available",
+    current_round: currentRound,
+    last_round: lastCompletedRound,
+    routing_mode: routingMode,
+    decorrelation_basis: {
+      repo,
+      pr_number: prNumber,
+      base_ref: baseRef,
+      head_ref: headRef,
+      base_sha: baseSha,
+      head_sha: headSha,
+    },
+    author_family: authorFamily,
+    fixer_family: fixerFamily,
+    bundle_hash: bundleHash,
+    reviewed_head_sha: reviewedHeadSha ?? headSha,
+    lanes: [...lanes.values()].sort((left, right) =>
+      left.lane_id.localeCompare(right.lane_id, "en"),
+    ),
+    verdict: gateVerdict,
+    finding_counts_by_disposition: Object.fromEntries(
+      Object.entries(findingCounts).sort(([left], [right]) =>
+        left.localeCompare(right, "en"),
+      ),
+    ),
+    escalation,
+    degraded: {
+      status: degradedStatus,
+      reasons: [...degradedReasons].sort(),
+      malformed_lane_count: malformedLaneCount,
+    },
+    next_action: councilReviewNextAction(status, gateVerdict),
+    cursor_range: {
+      first_sequence: entries[0]?.sequence ?? null,
+      last_sequence: entries.at(-1)?.sequence ?? null,
+    },
+  };
+}
+
+function councilReviewStatus(input: {
+  gateVerdict: string | null;
+  escalation: RuntimeSnapshotCouncilReview["escalation"];
+  degradedStatus: RuntimeSnapshotCouncilReview["degraded"]["status"];
+  entries: DispatcherRunJournalEntry[];
+}): RuntimeSnapshotCouncilReview["status"] {
+  // A degraded substrate takes precedence over escalation because the
+  // escalation record is itself evidence that review signals need inspection.
+  if (input.degradedStatus !== "ok") {
+    return "degraded";
+  }
+  if (input.escalation !== null) {
+    return "escalated";
+  }
+  if (input.gateVerdict === "pass") {
+    return "passed";
+  }
+  if (input.gateVerdict === "fail" || input.gateVerdict === "error") {
+    return "failed";
+  }
+  return input.entries.some((entry) => entry.kind === "review_round")
+    ? "in_progress"
+    : "unavailable";
+}
+
+function councilReviewNextAction(
+  status: RuntimeSnapshotCouncilReview["status"],
+  gateVerdict: string | null,
+): string {
+  if (status === "passed") {
+    return "continue_pipeline";
+  }
+  if (status === "failed" || status === "escalated") {
+    return "rework_required";
+  }
+  if (status === "degraded" || status === "unavailable") {
+    return "inspect_review_substrate";
+  }
+  if (status === "in_progress" && gateVerdict === null) {
+    return "await_review_gate_result";
+  }
+  return "inspect_review_result";
+}
+
+function latestString(current: string | null, value: unknown): string | null {
+  return typeof value === "string" ? value : current;
+}
+
+function latestNumber(current: number | null, value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : current;
+}
+
+function stringField(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
+function numberFieldOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function booleanField(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function stringArrayField(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
 }
 
 /**
