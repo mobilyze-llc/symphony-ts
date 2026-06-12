@@ -45,10 +45,13 @@ import {
   type DispatcherOperation,
   type DispatcherRunJournal,
   type DispatcherRunJournalEntry,
+  type ExecutionHistory,
+  FAILURE_CLASSES,
   type FailureClass,
   type Issue,
   type LiveSession,
   type OrchestratorState,
+  type PendingStageSignal,
   type RetryEntry,
   type RightSizingDecision,
   type RightSizingMode,
@@ -57,6 +60,7 @@ import {
   VERDICT_DISPOSITIONS,
   type VerdictActor,
   type VerdictDisposition,
+  containsStageCompleteSignal,
   createEmptyLiveSession,
   createInitialOrchestratorState,
   normalizeIssueState,
@@ -174,6 +178,25 @@ interface ResumeRequiredGuard {
    * earlier park a no-op even when a re-park lands moments later.
    */
   parkSeq: number;
+}
+
+interface PendingStageConsumptionRollbackSnapshot {
+  state: OrchestratorState;
+  lastExitHistorySnapshot: Map<string, ExecutionHistory>;
+  resumeRequiredGuards: Map<string, ResumeRequiredGuard>;
+  issueParkGenerations: Map<string, number>;
+  triagedParkGenerations: Map<string, number>;
+  escalatedParkGenerations: Map<string, number | null>;
+  parkSequence: number;
+}
+
+interface BudgetPauseHandlingResult {
+  handled: boolean;
+  retryEntry: RetryEntry | null;
+}
+
+interface FailureSignalHandlingOptions {
+  emitSideEffects: boolean;
 }
 
 export type WorkerExitOutcome =
@@ -803,6 +826,7 @@ export class OrchestratorCore {
     this.lastVerdictKeys.clear();
     this.state.issueDispositions = {};
     this.state.resumeRequiredMarks = {};
+    this.state.issuePendingStageSignals = {};
     // Re-invocation safety (council R2): the stage_record reducer is
     // additive, so a replay against a different journal (runtime-host root
     // swap) must rebuild spend history from scratch — clear the
@@ -1004,6 +1028,7 @@ export class OrchestratorCore {
         if (step !== null) {
           this.state.issueBudgetEscalations[entry.issueId] = step;
         }
+        this.recoverPendingStageSignal(entry);
       }
 
       if (
@@ -1019,6 +1044,7 @@ export class OrchestratorCore {
         if (resumesUsed !== null) {
           this.state.issuePauseTriageResumes[entry.issueId] = resumesUsed + 1;
         }
+        this.recoverPendingStageSignal(entry);
       }
 
       if (
@@ -1043,6 +1069,13 @@ export class OrchestratorCore {
             history.push(record);
           }
         }
+      }
+
+      if (
+        entry.kind === "pending_stage_signal" &&
+        entry.metadata.status === "consumed"
+      ) {
+        this.recoverConsumedPendingStageSignal(entry);
       }
 
       if (
@@ -1287,7 +1320,70 @@ export class OrchestratorCore {
           setBySequence: entry.sequence,
         },
       );
+      this.recoverPendingStageSignal(entry);
     }
+  }
+
+  private recoverPendingStageSignal(entry: DispatcherRunJournalEntry): void {
+    if (
+      entry.kind !== "hard_stop_trigger" &&
+      entry.kind !== "budget_escalation" &&
+      entry.kind !== "pause_triage"
+    ) {
+      return;
+    }
+    const pending = readPendingStageSignalMetadata(entry);
+    if (pending === null) {
+      return;
+    }
+    if (this.state.issuePendingStageSignals[entry.issueId] !== undefined) {
+      return;
+    }
+    this.state.issuePendingStageSignals[entry.issueId] = {
+      ...pending,
+      setBySequence: entry.sequence,
+    };
+  }
+
+  private recoverConsumedPendingStageSignal(
+    entry: DispatcherRunJournalEntry,
+  ): void {
+    delete this.state.issuePendingStageSignals[entry.issueId];
+    this.clearResumeRequirement(entry.issueId);
+    const resultingStageName = readMetadataString(
+      entry.metadata,
+      "resultingStageName",
+    );
+    if (resultingStageName !== null) {
+      this.state.issueStages[entry.issueId] = resultingStageName;
+    }
+    if (entry.metadata.completed === true) {
+      this.state.completed.add(entry.issueId);
+      this.clearTerminalIssueRuntimeState(entry.issueId);
+      return;
+    }
+    const signal = readMetadataString(entry.metadata, "signal");
+    if (signal !== "failure") {
+      return;
+    }
+    const failureClass = readMetadataString(entry.metadata, "failureClass");
+    if (!isFailureClass(failureClass)) {
+      return;
+    }
+    const agentMessage =
+      readMetadataString(entry.metadata, "agentMessage") ?? undefined;
+    this.handleFailureSignal(
+      entry.issueId,
+      createPendingRunningEntry({
+        issue: createReplayIssue(entry.issueId, entry.issueIdentifier),
+        identifier: entry.issueIdentifier,
+        attempt: entry.attempt,
+        agentMessage: agentMessage ?? "",
+      }),
+      failureClass,
+      agentMessage,
+      { emitSideEffects: false },
+    );
   }
 
   private recoverDecorrelatedGateOutcome(
@@ -1905,17 +2001,18 @@ export class OrchestratorCore {
     runningEntry: RunningEntry,
     hardStop: HardStopDecision,
     stageName: string | null,
-  ): Promise<RetryEntry | null> {
+    pendingStageSignal: PendingStageSignal | null,
+  ): Promise<BudgetPauseHandlingResult> {
     if (hardStop.outcome !== "PAUSED-budget") {
-      return null;
+      return { handled: false, retryEntry: null };
     }
     if (!isBudgetEscalationTrigger(hardStop.trigger)) {
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const ladder = this.config.budgetEscalation;
     if (ladder.maxSteps === null) {
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const steps = this.state.issueBudgetEscalations[issueId] ?? 0;
@@ -1923,7 +2020,7 @@ export class OrchestratorCore {
       console.warn(
         `[orchestrator] Budget escalation exhausted for ${runningEntry.identifier} (${steps}/${ladder.maxSteps} steps used) — parking for operator.`,
       );
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const gate = this.evaluateRateLimitAdmissionGate();
@@ -1931,13 +2028,13 @@ export class OrchestratorCore {
       console.warn(
         `[orchestrator] Budget escalation deferred to operator for ${runningEntry.identifier}: ${gate.reason}`,
       );
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const nextStep = steps + 1;
     const nextMultiplier = ladder.multiplier ** nextStep;
 
-    await this.recordRunJournalEntry({
+    const escalationEntry = await this.recordRunJournalEntry({
       idempotencyKey: `budget_escalation:${issueId}:${stageName ?? "no-stage"}:${nextStep}`,
       timestamp: this.now().toISOString(),
       kind: "budget_escalation",
@@ -1957,6 +2054,7 @@ export class OrchestratorCore {
         multiplier: nextMultiplier,
         totalTokens: hardStop.totalTokens,
         estimatedCostUsd: hardStop.estimatedCostUsd,
+        ...pendingStageSignalMetadata(pendingStageSignal),
       },
     });
 
@@ -1993,11 +2091,30 @@ export class OrchestratorCore {
       // Notification failures are always swallowed
     }
 
-    return this.scheduleRetry(issueId, 1, {
-      identifier: runningEntry.identifier,
-      error: null,
-      delayType: "continuation",
-    });
+    if (pendingStageSignal !== null) {
+      const storedPendingStageSignal = {
+        ...pendingStageSignal,
+        setBySequence: escalationEntry.sequence,
+      };
+      this.state.issuePendingStageSignals[issueId] = storedPendingStageSignal;
+      return {
+        handled: true,
+        retryEntry: await this.consumePendingStageSignal(
+          issueId,
+          runningEntry,
+          storedPendingStageSignal,
+        ),
+      };
+    }
+
+    return {
+      handled: true,
+      retryEntry: this.scheduleRetry(issueId, 1, {
+        identifier: runningEntry.identifier,
+        error: null,
+        delayType: "continuation",
+      }),
+    };
   }
 
   /**
@@ -2013,25 +2130,26 @@ export class OrchestratorCore {
     runningEntry: RunningEntry,
     hardStop: HardStopDecision,
     stageName: string | null,
-  ): Promise<RetryEntry | null> {
+    pendingStageSignal: PendingStageSignal | null,
+  ): Promise<BudgetPauseHandlingResult> {
     if (this.runPauseTriage === undefined) {
-      return null;
+      return { handled: false, retryEntry: null };
     }
     if (hardStop.outcome !== "PAUSED-budget") {
-      return null;
+      return { handled: false, retryEntry: null };
     }
     if (!isBudgetEscalationTrigger(hardStop.trigger)) {
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const resumesUsed = this.state.issuePauseTriageResumes[issueId] ?? 0;
     if (resumesUsed >= this.config.pauseTriage.maxResumes) {
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const gate = this.evaluateRateLimitAdmissionGate();
     if (gate.blocked) {
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const evidence: PauseTriageEvidence = {
@@ -2083,6 +2201,7 @@ export class OrchestratorCore {
             this.applyDeferredPauseTriageVerdict({
               issueId,
               identifier: runningEntry.identifier,
+              issue: runningEntry.issue,
               stageName,
               trigger: hardStop.trigger,
               resumesUsedAtFire: resumesUsed,
@@ -2099,7 +2218,7 @@ export class OrchestratorCore {
             `[orchestrator] deferred pause triage chain failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
           );
         });
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     let verdict: PauseTriageVerdict | null = null;
@@ -2119,8 +2238,9 @@ export class OrchestratorCore {
     // consumed-resume count and the triage cap (maxResumes) can be exceeded
     // across a deploy. Park-side journaling stays best-effort because the
     // park is the safe default either way.
+    let pauseTriageEntry: DispatcherRunJournalEntry | null = null;
     try {
-      await this.recordRunJournalEntry({
+      pauseTriageEntry = await this.recordRunJournalEntry({
         idempotencyKey: `pause_triage:${issueId}:${stageName ?? "no-stage"}:${resumesUsed + 1}:${this.now().toISOString()}`,
         timestamp: this.now().toISOString(),
         kind: "pause_triage",
@@ -2142,6 +2262,7 @@ export class OrchestratorCore {
           rationale: verdict?.rationale ?? null,
           action: willResume ? "resumed" : "parked",
           resumesUsed,
+          ...pendingStageSignalMetadata(pendingStageSignal),
         },
       });
     } catch (error) {
@@ -2152,12 +2273,19 @@ export class OrchestratorCore {
         // Journal failure means the resume is NOT authorized: fall through
         // to the normal operator park without consuming a resume, so live
         // and replay agree on the count (both omit it).
-        return null;
+        return { handled: false, retryEntry: null };
       }
     }
 
     if (willResume) {
       this.state.issuePauseTriageResumes[issueId] = resumesUsed + 1;
+      if (pendingStageSignal !== null && pauseTriageEntry !== null) {
+        const storedPendingStageSignal = {
+          ...pendingStageSignal,
+          setBySequence: pauseTriageEntry.sequence,
+        };
+        this.state.issuePendingStageSignals[issueId] = storedPendingStageSignal;
+      }
     }
 
     if (verdict === null || verdict.verdict !== "continue") {
@@ -2171,7 +2299,7 @@ export class OrchestratorCore {
           // Observability only.
         }
       }
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     // Routed through the shared intent-verb layer (SYMPH-422 parity with
@@ -2196,6 +2324,19 @@ export class OrchestratorCore {
       // Observability only.
     }
 
+    if (pendingStageSignal !== null) {
+      const storedPendingStageSignal =
+        this.state.issuePendingStageSignals[issueId] ?? pendingStageSignal;
+      return {
+        handled: true,
+        retryEntry: await this.consumePendingStageSignal(
+          issueId,
+          runningEntry,
+          storedPendingStageSignal,
+        ),
+      };
+    }
+
     const resumeResult = await this.writeIntent({
       verb: "resume",
       issueId,
@@ -2208,7 +2349,10 @@ export class OrchestratorCore {
       stage: stageName,
       renderComment: false,
     });
-    return resumeResult.retryEntry ?? null;
+    return {
+      handled: true,
+      retryEntry: resumeResult.retryEntry ?? null,
+    };
   }
 
   /**
@@ -2223,6 +2367,7 @@ export class OrchestratorCore {
   private async applyDeferredPauseTriageVerdict(input: {
     issueId: string;
     identifier: string;
+    issue: Issue;
     stageName: string | null;
     trigger: HardStopTrigger;
     resumesUsedAtFire: number;
@@ -2275,6 +2420,9 @@ export class OrchestratorCore {
           rationale: verdict?.rationale ?? null,
           action,
           resumesUsed: input.resumesUsedAtFire,
+          ...pendingStageSignalMetadata(
+            this.state.issuePendingStageSignals[issueId] ?? null,
+          ),
         },
       });
     } catch (error) {
@@ -2330,18 +2478,38 @@ export class OrchestratorCore {
       return;
     }
 
-    try {
-      await this.postComment?.(
+    const postContinueComment = async (): Promise<void> => {
+      try {
+        await this.postComment?.(
+          issueId,
+          [
+            `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes}) — ${formatIntentAttribution(actor)}`,
+            sanitizeForLinear(verdict.rationale),
+            "Auto-resuming one continuation unit at the current budget ceiling.",
+          ].join("\n"),
+        );
+      } catch {
+        // Observability only.
+      }
+    };
+
+    const pendingStageSignal = this.state.issuePendingStageSignals[issueId];
+    if (pendingStageSignal !== undefined) {
+      await this.consumePendingStageSignal(
         issueId,
-        [
-          `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes}) — ${formatIntentAttribution(actor)}`,
-          sanitizeForLinear(verdict.rationale),
-          "Auto-resuming one continuation unit at the current budget ceiling.",
-        ].join("\n"),
+        createPendingRunningEntry({
+          issue: input.issue,
+          identifier,
+          attempt: pendingStageSignal.attempt,
+          agentMessage: pendingStageSignal.agentMessage,
+        }),
+        pendingStageSignal,
       );
-    } catch {
-      // Observability only.
+      await postContinueComment();
+      return;
     }
+
+    await postContinueComment();
 
     this.scheduleRetry(issueId, 1, {
       identifier,
@@ -2491,6 +2659,262 @@ export class OrchestratorCore {
       identifier,
       error: null,
       delayType: "continuation",
+    });
+  }
+
+  private async handleNormalStageExit(
+    issueId: string,
+    runningEntry: RunningEntry,
+    exitedStageName: string | null,
+    agentMessage: string | undefined,
+  ): Promise<RetryEntry | null> {
+    const feedbackBounce = await this.handleContinuousFeedbackBounce(
+      issueId,
+      runningEntry,
+      exitedStageName,
+    );
+    if (feedbackBounce !== undefined) {
+      return feedbackBounce;
+    }
+
+    if (
+      this.config.acGate.enabled &&
+      this.runAcGate !== undefined &&
+      this.scheduleDeferred !== undefined &&
+      exitedStageName !== null &&
+      exitedStageName === this.config.stages?.initialStage
+    ) {
+      // Hold-then-route (SYMPH-354): the stage neither advances nor parks
+      // until the local model scores the acceptance criteria. This same path
+      // is used when a deferred budget pause is resumed with a pending
+      // [STAGE_COMPLETE] signal (SYMPH-440): the budget gate has already
+      // authorized consumption, and the terminal completion message is still
+      // routed through the normal AC gate.
+      const scheduleDeferred = this.scheduleDeferred;
+      const completionMessage = agentMessage ?? runningEntry.lastCodexMessage;
+      // Normal exits already hold the claim from dispatch; pending-signal
+      // consumption reclaims it here so nothing redispatches while AC runs.
+      this.state.claimed.add(issueId);
+      void this.runAcGate({
+        issueIdentifier: runningEntry.identifier,
+        issueTitle: runningEntry.issue.title,
+        issueDescription: runningEntry.issue.description ?? null,
+        completionMessage,
+      })
+        .catch((error) => {
+          console.warn(
+            `[orchestrator] AC gate failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return null;
+        })
+        .then((verdict) => {
+          scheduleDeferred(() =>
+            this.applyAcGateVerdict({
+              issueId,
+              identifier: runningEntry.identifier,
+              issueTitle: runningEntry.issue.title,
+              stageName: exitedStageName,
+              verdict,
+              completionMessage,
+            }),
+          );
+        })
+        .catch((error) => {
+          console.warn(
+            `[orchestrator] AC gate chain failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      return null;
+    }
+
+    const exitedStageDef =
+      exitedStageName !== null && this.config.stages !== null
+        ? this.config.stages.stages[exitedStageName]
+        : undefined;
+    if (
+      this.config.specFidelity.enabled &&
+      this.runSpecFidelityJudge !== undefined &&
+      this.scheduleDeferred !== undefined &&
+      exitedStageName !== null &&
+      exitedStageDef?.transitions.onRework != null
+    ) {
+      // Advisory judge lane (SYMPH-343): fires alongside the normal advance.
+      const scheduleDeferred = this.scheduleDeferred;
+      const stageForVerdict = exitedStageName;
+      void this.runSpecFidelityJudge({
+        issueId,
+        issueIdentifier: runningEntry.identifier,
+        issueTitle: runningEntry.issue.title,
+        acceptanceCriteria: this.state.issueAcSnapshots[issueId] ?? null,
+        // Pending-signal consumption sets lastCodexMessage to the terminal
+        // message before routing through the normal exit path.
+        reviewMessage: runningEntry.lastCodexMessage,
+      })
+        .catch((error) => {
+          console.warn(
+            `[orchestrator] spec-fidelity judge failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+          return null;
+        })
+        .then((verdict) => {
+          if (verdict === null) {
+            return;
+          }
+          scheduleDeferred(() =>
+            this.recordSpecFidelityVerdict({
+              issueId,
+              identifier: runningEntry.identifier,
+              stageName: stageForVerdict,
+              verdict,
+            }),
+          );
+        })
+        .catch(() => {
+          // Chain must never become an unhandled rejection.
+        });
+    }
+
+    const transition = this.advanceStage(
+      issueId,
+      runningEntry.identifier,
+      runningEntry,
+    );
+    if (transition === "completed") {
+      this.state.completed.add(issueId);
+      this.releaseClaim(issueId);
+      return null;
+    }
+
+    return this.scheduleRetry(issueId, 1, {
+      identifier: runningEntry.identifier,
+      error: null,
+      delayType: "continuation",
+    });
+  }
+
+  private async consumePendingStageSignal(
+    issueId: string,
+    runningEntry: RunningEntry,
+    pendingStageSignal: PendingStageSignal,
+  ): Promise<RetryEntry | null> {
+    const rollbackSnapshot = this.snapshotPendingStageConsumptionRollback(
+      issueId,
+      runningEntry,
+    );
+    const originalLastCodexMessage = runningEntry.lastCodexMessage;
+    try {
+      delete this.state.issuePendingStageSignals[issueId];
+      if (pendingStageSignal.stageName !== null) {
+        this.state.issueStages[issueId] = pendingStageSignal.stageName;
+      }
+      runningEntry.lastCodexMessage = pendingStageSignal.agentMessage;
+
+      let retryEntry: RetryEntry | null;
+      if (pendingStageSignal.signal === "failure") {
+        await this.recordPendingStageSignalConsumed(
+          issueId,
+          runningEntry,
+          pendingStageSignal,
+        );
+        this.clearResumeRequirement(issueId);
+        retryEntry = this.handleFailureSignal(
+          issueId,
+          runningEntry,
+          pendingStageSignal.failureClass,
+          pendingStageSignal.agentMessage,
+        );
+      } else {
+        retryEntry = await this.handleNormalStageExit(
+          issueId,
+          runningEntry,
+          pendingStageSignal.stageName,
+          pendingStageSignal.agentMessage,
+        );
+        await this.recordPendingStageSignalConsumed(
+          issueId,
+          runningEntry,
+          pendingStageSignal,
+        );
+        this.clearResumeRequirement(issueId);
+      }
+      return retryEntry;
+    } catch (error) {
+      runningEntry.lastCodexMessage = originalLastCodexMessage;
+      this.clearRetryEntry(issueId);
+      this.restorePendingStageConsumptionRollback(rollbackSnapshot);
+      throw error;
+    }
+  }
+
+  private snapshotPendingStageConsumptionRollback(
+    issueId: string,
+    runningEntry: RunningEntry,
+  ): PendingStageConsumptionRollbackSnapshot {
+    const state = cloneOrchestratorState(this.state);
+    if (
+      state.running[issueId] === undefined &&
+      runningEntry.workerHandle !== null
+    ) {
+      state.running[issueId] = cloneRunningEntry(runningEntry);
+    }
+    return {
+      state,
+      lastExitHistorySnapshot: cloneExecutionHistoryMap(
+        this.lastExitHistorySnapshot,
+      ),
+      resumeRequiredGuards: cloneResumeRequiredGuards(
+        this.resumeRequiredGuards,
+      ),
+      issueParkGenerations: new Map(this.issueParkGenerations),
+      triagedParkGenerations: new Map(this.triagedParkGenerations),
+      escalatedParkGenerations: new Map(this.escalatedParkGenerations),
+      parkSequence: this.parkSequence,
+    };
+  }
+
+  private restorePendingStageConsumptionRollback(
+    snapshot: PendingStageConsumptionRollbackSnapshot,
+  ): void {
+    restoreOrchestratorState(this.state, snapshot.state);
+    restoreMap(this.lastExitHistorySnapshot, snapshot.lastExitHistorySnapshot);
+    restoreMap(this.resumeRequiredGuards, snapshot.resumeRequiredGuards);
+    restoreMap(this.issueParkGenerations, snapshot.issueParkGenerations);
+    restoreMap(this.triagedParkGenerations, snapshot.triagedParkGenerations);
+    restoreMap(
+      this.escalatedParkGenerations,
+      snapshot.escalatedParkGenerations,
+    );
+    this.parkSequence = snapshot.parkSequence;
+  }
+
+  private async recordPendingStageSignalConsumed(
+    issueId: string,
+    runningEntry: RunningEntry,
+    pendingStageSignal: PendingStageSignal,
+  ): Promise<void> {
+    const resultingStageName = this.state.issueStages[issueId] ?? null;
+    await this.recordRunJournalEntry({
+      idempotencyKey: `pending_stage_signal:${issueId}:${pendingStageSignal.setBySequence ?? "live"}:consumed`,
+      timestamp: this.now().toISOString(),
+      kind: "pending_stage_signal",
+      issueId,
+      issueIdentifier: runningEntry.identifier,
+      operation: "dispatcher",
+      stage: pendingStageSignal.stageName,
+      attempt: pendingStageSignal.attempt,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Consumed pending ${pendingStageSignal.signal} signal for ${runningEntry.identifier} after budget-pause authorization.`,
+      metadata: {
+        status: "consumed",
+        sourceSequence: pendingStageSignal.setBySequence,
+        signal: pendingStageSignal.signal,
+        failureClass: pendingStageSignal.failureClass,
+        sourceStageName: pendingStageSignal.stageName,
+        agentMessage: pendingStageSignal.agentMessage,
+        resultingStageName,
+        completed: this.state.completed.has(issueId),
+      },
     });
   }
 
@@ -2860,14 +3284,20 @@ export class OrchestratorCore {
 
     if (input.outcome === "normal") {
       if (input.hardStop !== undefined && input.hardStop !== null) {
+        const pendingStageSignal = createPendingStageSignal(
+          exitedStageName,
+          input.agentMessage,
+          runningEntry.retryAttempt,
+        );
         const escalation = await this.tryBudgetEscalation(
           input.issueId,
           runningEntry,
           input.hardStop,
           exitedStageName,
+          pendingStageSignal,
         );
-        if (escalation !== null) {
-          return escalation;
+        if (escalation.handled) {
+          return escalation.retryEntry;
         }
 
         const triageResume = await this.tryPauseTriageResume(
@@ -2875,14 +3305,16 @@ export class OrchestratorCore {
           runningEntry,
           input.hardStop,
           exitedStageName,
+          pendingStageSignal,
         );
-        if (triageResume !== null) {
-          return triageResume;
+        if (triageResume.handled) {
+          return triageResume.retryEntry;
         }
 
         await this.handleHardStopTrigger(input.issueId, runningEntry, {
           hardStop: input.hardStop,
           stageName: exitedStageName,
+          pendingStageSignal,
         });
         return null;
       }
@@ -2897,130 +3329,12 @@ export class OrchestratorCore {
         );
       }
 
-      const feedbackBounce = await this.handleContinuousFeedbackBounce(
+      return this.handleNormalStageExit(
         input.issueId,
         runningEntry,
         exitedStageName,
+        input.agentMessage,
       );
-      if (feedbackBounce !== undefined) {
-        return feedbackBounce;
-      }
-
-      if (
-        this.config.acGate.enabled &&
-        this.runAcGate !== undefined &&
-        this.scheduleDeferred !== undefined &&
-        exitedStageName !== null &&
-        exitedStageName === this.config.stages?.initialStage
-      ) {
-        // Hold-then-route (SYMPH-354): the stage neither advances nor
-        // parks until the local model scores the acceptance criteria.
-        // The claim stays held so nothing re-dispatches meanwhile; a
-        // null verdict fails OPEN at the applier.
-        const scheduleDeferred = this.scheduleDeferred;
-        // The completion message is the one that carried [STAGE_COMPLETE]
-        // (the AC echo lives there per the contract); fall back to the
-        // session's last message when the exit carried no message body.
-        const completionMessage =
-          input.agentMessage ?? runningEntry.lastCodexMessage;
-        void this.runAcGate({
-          issueIdentifier: runningEntry.identifier,
-          issueTitle: runningEntry.issue.title,
-          issueDescription: runningEntry.issue.description ?? null,
-          completionMessage,
-        })
-          .catch((error) => {
-            console.warn(
-              `[orchestrator] AC gate failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
-            );
-            return null;
-          })
-          .then((verdict) => {
-            scheduleDeferred(() =>
-              this.applyAcGateVerdict({
-                issueId: input.issueId,
-                identifier: runningEntry.identifier,
-                issueTitle: runningEntry.issue.title,
-                stageName: exitedStageName,
-                verdict,
-                completionMessage,
-              }),
-            );
-          })
-          .catch((error) => {
-            console.warn(
-              `[orchestrator] AC gate chain failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          });
-        return null;
-      }
-
-      const exitedStageDef =
-        exitedStageName !== null && this.config.stages !== null
-          ? this.config.stages.stages[exitedStageName]
-          : undefined;
-      if (
-        this.config.specFidelity.enabled &&
-        this.runSpecFidelityJudge !== undefined &&
-        this.scheduleDeferred !== undefined &&
-        exitedStageName !== null &&
-        exitedStageDef?.transitions.onRework != null
-      ) {
-        // Advisory judge lane (SYMPH-343): fires alongside the normal
-        // advance — nothing waits on the model, nothing is blocked. The
-        // verdict lands later as a serialized journal+comment task.
-        const scheduleDeferred = this.scheduleDeferred;
-        const stageForVerdict = exitedStageName;
-        void this.runSpecFidelityJudge({
-          issueId: input.issueId,
-          issueIdentifier: runningEntry.identifier,
-          issueTitle: runningEntry.issue.title,
-          // The frozen gate-passed snapshot, never the workpad (SYMPH-374).
-          acceptanceCriteria:
-            this.state.issueAcSnapshots[input.issueId] ?? null,
-          reviewMessage: runningEntry.lastCodexMessage,
-        })
-          .catch((error) => {
-            console.warn(
-              `[orchestrator] spec-fidelity judge failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
-            );
-            return null;
-          })
-          .then((verdict) => {
-            if (verdict === null) {
-              return;
-            }
-            scheduleDeferred(() =>
-              this.recordSpecFidelityVerdict({
-                issueId: input.issueId,
-                identifier: runningEntry.identifier,
-                stageName: stageForVerdict,
-                verdict,
-              }),
-            );
-          })
-          .catch(() => {
-            // Chain must never become an unhandled rejection.
-          });
-      }
-
-      const transition = this.advanceStage(
-        input.issueId,
-        runningEntry.identifier,
-        runningEntry,
-      );
-      if (transition === "completed") {
-        this.state.completed.add(input.issueId);
-        this.releaseClaim(input.issueId);
-        return null;
-      }
-
-      // Stage advanced or no stages configured — schedule continuation
-      return this.scheduleRetry(input.issueId, 1, {
-        identifier: runningEntry.identifier,
-        error: null,
-        delayType: "continuation",
-      });
     }
 
     const stopReason = parseStoppedAfterReason(input.reason);
@@ -3222,6 +3536,7 @@ export class OrchestratorCore {
     runningEntry: RunningEntry,
     failureClass: FailureClass,
     agentMessage: string | undefined,
+    options: FailureSignalHandlingOptions = { emitSideEffects: true },
   ): RetryEntry | null {
     if (failureClass === "spec") {
       // Spec failures are unrecoverable — escalate immediately.
@@ -3251,27 +3566,30 @@ export class OrchestratorCore {
         stageName,
       );
 
-      void this.fireEscalationSideEffects(
-        issueId,
-        runningEntry.identifier,
-        "Agent reported unrecoverable spec failure. Escalating for manual review.",
-      );
-      void this.recordFailureExhausted(
-        issueId,
-        runningEntry.identifier,
-        runningEntry.issue.title,
-        specFailureText,
-        {
-          failure_signature: incoming.signature,
-          failure_class: incoming.class,
-        },
-      );
+      if (options.emitSideEffects) {
+        void this.fireEscalationSideEffects(
+          issueId,
+          runningEntry.identifier,
+          "Agent reported unrecoverable spec failure. Escalating for manual review.",
+        );
+        void this.recordFailureExhausted(
+          issueId,
+          runningEntry.identifier,
+          runningEntry.issue.title,
+          specFailureText,
+          {
+            failure_signature: incoming.signature,
+            failure_class: incoming.class,
+          },
+        );
+      }
       return null;
     }
 
     if (failureClass === "verify" || failureClass === "infra") {
       if (
         failureClass === "infra" &&
+        options.emitSideEffects &&
         this.handleReviewInfrastructureStall(
           issueId,
           runningEntry,
@@ -3299,12 +3617,22 @@ export class OrchestratorCore {
     if (failureClass === "rebase") {
       delete this.state.issueReviewInfrastructureStalls[issueId];
       // Rebase failures — trigger rework if onRework configured, else retry
-      return this.handleRebaseFailure(issueId, runningEntry, agentMessage);
+      return this.handleRebaseFailure(
+        issueId,
+        runningEntry,
+        agentMessage,
+        options,
+      );
     }
 
     // failureClass === "review" — trigger rework via gate lookup
     delete this.state.issueReviewInfrastructureStalls[issueId];
-    return this.handleReviewFailure(issueId, runningEntry, agentMessage);
+    return this.handleReviewFailure(
+      issueId,
+      runningEntry,
+      agentMessage,
+      options,
+    );
   }
 
   /**
@@ -3316,6 +3644,7 @@ export class OrchestratorCore {
     issueId: string,
     runningEntry: RunningEntry,
     agentMessage: string | undefined,
+    options: FailureSignalHandlingOptions = { emitSideEffects: true },
   ): RetryEntry | null {
     // Same-criterion rework brake (SYMPH-402): rework cycles bypass the
     // retry path, so the SYMPH-396 retry-without-novelty short-circuit never
@@ -3325,7 +3654,7 @@ export class OrchestratorCore {
     // failed pre-gate criterion.
     const streak = this.trackReviewFailureStreak(issueId, agentMessage);
     if (streak.count >= MAX_SAME_CRITERION_REVIEW_FAILURES) {
-      this.parkRepeatedReviewFailure(issueId, runningEntry, streak);
+      this.parkRepeatedReviewFailure(issueId, runningEntry, streak, options);
       return null;
     }
 
@@ -3368,20 +3697,24 @@ export class OrchestratorCore {
       // Use reworkGate directly — it now supports agent stages with onRework
       const reworkTarget = this.reworkGate(issueId);
       if (reworkTarget === "escalated") {
-        void this.fireEscalationSideEffects(
-          issueId,
-          runningEntry.identifier,
-          "Agent review failure: max rework attempts exceeded. Escalating for manual review.",
-        );
+        if (options.emitSideEffects) {
+          void this.fireEscalationSideEffects(
+            issueId,
+            runningEntry.identifier,
+            "Agent review failure: max rework attempts exceeded. Escalating for manual review.",
+          );
+        }
         return null;
       }
       if (reworkTarget !== null) {
-        this.postReviewFindingsComment(
-          issueId,
-          runningEntry.identifier,
-          currentStageName,
-          agentMessage,
-        );
+        if (options.emitSideEffects) {
+          this.postReviewFindingsComment(
+            issueId,
+            runningEntry.identifier,
+            currentStageName,
+            agentMessage,
+          );
+        }
         return this.scheduleRetry(issueId, 1, {
           identifier: runningEntry.identifier,
           error: `agent review failure: rework to ${reworkTarget}`,
@@ -3436,21 +3769,25 @@ export class OrchestratorCore {
 
     if (reworkTarget === "escalated") {
       // reworkGate already cleaned up state — fire escalation side effects
-      void this.fireEscalationSideEffects(
-        issueId,
-        runningEntry.identifier,
-        "Agent review failure: max rework attempts exceeded. Escalating for manual review.",
-      );
+      if (options.emitSideEffects) {
+        void this.fireEscalationSideEffects(
+          issueId,
+          runningEntry.identifier,
+          "Agent review failure: max rework attempts exceeded. Escalating for manual review.",
+        );
+      }
       return null;
     }
 
     // Rework target set by reworkGate — post findings and schedule continuation
-    this.postReviewFindingsComment(
-      issueId,
-      runningEntry.identifier,
-      currentStageName,
-      agentMessage,
-    );
+    if (options.emitSideEffects) {
+      this.postReviewFindingsComment(
+        issueId,
+        runningEntry.identifier,
+        currentStageName,
+        agentMessage,
+      );
+    }
     return this.scheduleRetry(issueId, 1, {
       identifier: runningEntry.identifier,
       error: `agent review failure: rework to ${reworkTarget}`,
@@ -3623,6 +3960,7 @@ export class OrchestratorCore {
     issueId: string,
     runningEntry: RunningEntry,
     streak: { signature: string; count: number; matchedCriteria: string[] },
+    options: FailureSignalHandlingOptions = { emitSideEffects: true },
   ): void {
     const stageName = this.state.issueStages[issueId] ?? null;
     const criteriaBlock =
@@ -3646,29 +3984,31 @@ export class OrchestratorCore {
       },
       stageName,
     );
-    void this.fireEscalationSideEffects(
-      issueId,
-      runningEntry.identifier,
-      [
-        "## Parked: repeated review failure on the same criterion (SYMPH-402)",
-        "",
-        `The review stage failed ${streak.count} consecutive rounds with the same pre-gate criterion unsatisfied:`,
-        criteriaBlock,
-        "",
-        "The orchestrator parked this issue instead of starting another implement rework round. Likely cause: a frozen acceptance criterion that contradicts the SYMPH-358 verify contract (e.g. a bare full-suite `check:` while CI on the PR head SHA is green — CI is the contract's authority).",
-        "Operator action: inspect the frozen AC snapshot and the PR's CI status; correct the criterion or the evidence, then resume with a fresh Todo → Resume transition.",
-      ].join("\n"),
-    );
-    void this.recordFailureExhausted(
-      issueId,
-      runningEntry.identifier,
-      runningEntry.issue.title,
-      parkReason,
-      {
-        failure_signature: streak.signature,
-        failure_class: "permanent",
-      },
-    );
+    if (options.emitSideEffects) {
+      void this.fireEscalationSideEffects(
+        issueId,
+        runningEntry.identifier,
+        [
+          "## Parked: repeated review failure on the same criterion (SYMPH-402)",
+          "",
+          `The review stage failed ${streak.count} consecutive rounds with the same pre-gate criterion unsatisfied:`,
+          criteriaBlock,
+          "",
+          "The orchestrator parked this issue instead of starting another implement rework round. Likely cause: a frozen acceptance criterion that contradicts the SYMPH-358 verify contract (e.g. a bare full-suite `check:` while CI on the PR head SHA is green — CI is the contract's authority).",
+          "Operator action: inspect the frozen AC snapshot and the PR's CI status; correct the criterion or the evidence, then resume with a fresh Todo → Resume transition.",
+        ].join("\n"),
+      );
+      void this.recordFailureExhausted(
+        issueId,
+        runningEntry.identifier,
+        runningEntry.issue.title,
+        parkReason,
+        {
+          failure_signature: streak.signature,
+          failure_class: "permanent",
+        },
+      );
+    }
   }
 
   /**
@@ -3707,6 +4047,7 @@ export class OrchestratorCore {
     issueId: string,
     runningEntry: RunningEntry,
     agentMessage: string | undefined,
+    options: FailureSignalHandlingOptions = { emitSideEffects: true },
   ): RetryEntry | null {
     const stagesConfig = this.config.stages;
     if (stagesConfig === null) {
@@ -3744,20 +4085,24 @@ export class OrchestratorCore {
     ) {
       const reworkTarget = this.reworkGate(issueId);
       if (reworkTarget === "escalated") {
-        void this.fireEscalationSideEffects(
-          issueId,
-          runningEntry.identifier,
-          "Rebase failure: max rework attempts exceeded. Escalating for manual review.",
-        );
+        if (options.emitSideEffects) {
+          void this.fireEscalationSideEffects(
+            issueId,
+            runningEntry.identifier,
+            "Rebase failure: max rework attempts exceeded. Escalating for manual review.",
+          );
+        }
         return null;
       }
       if (reworkTarget !== null) {
-        this.postRebaseComment(
-          issueId,
-          runningEntry.identifier,
-          currentStageName,
-          agentMessage,
-        );
+        if (options.emitSideEffects) {
+          this.postRebaseComment(
+            issueId,
+            runningEntry.identifier,
+            currentStageName,
+            agentMessage,
+          );
+        }
         return this.scheduleRetry(issueId, 1, {
           identifier: runningEntry.identifier,
           error: `rebase failure: rework to ${reworkTarget}`,
@@ -4825,6 +5170,7 @@ export class OrchestratorCore {
 
   private clearTerminalIssueRuntimeState(issueId: string): void {
     delete this.state.issueStages[issueId];
+    delete this.state.issuePendingStageSignals[issueId];
     delete this.state.issueReworkCounts[issueId];
     delete this.state.issuePassedStages[issueId];
     delete this.state.issueExecutionHistory[issueId];
@@ -6576,6 +6922,7 @@ export class OrchestratorCore {
     input: {
       hardStop: HardStopDecision;
       stageName: string | null;
+      pendingStageSignal: PendingStageSignal | null;
     },
   ): Promise<void> {
     const hardStopEntry = await this.recordRunJournalEntry({
@@ -6599,8 +6946,16 @@ export class OrchestratorCore {
         totalTokens: input.hardStop.totalTokens,
         estimatedCostUsd: input.hardStop.estimatedCostUsd,
         issueState: runningEntry.issue.state,
+        ...pendingStageSignalMetadata(input.pendingStageSignal),
       },
     });
+
+    if (input.pendingStageSignal !== null) {
+      this.state.issuePendingStageSignals[issueId] = {
+        ...input.pendingStageSignal,
+        setBySequence: hardStopEntry.sequence,
+      };
+    }
 
     this.markIssueRequiresExplicitResume(
       issueId,
@@ -6936,6 +7291,30 @@ export class OrchestratorCore {
     let stage: StageDefinition | null = null;
     let stageName: string | null = null;
     const attemptKey = formatAttemptKey(attempt);
+    const pendingStageSignal = this.state.issuePendingStageSignals[issue.id];
+    if (pendingStageSignal !== undefined) {
+      const pendingRunningEntry = createPendingRunningEntry({
+        issue,
+        identifier: issue.identifier,
+        attempt: pendingStageSignal.attempt,
+        agentMessage: pendingStageSignal.agentMessage,
+      });
+      try {
+        await this.consumePendingStageSignal(
+          issue.id,
+          pendingRunningEntry,
+          pendingStageSignal,
+        );
+      } catch (error) {
+        console.warn(
+          `[orchestrator] Failed to consume pending stage signal for ${issue.identifier}; will retry on a later dispatch tick: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return {
+        dispatched: false,
+        rightSizingDecision: null,
+      };
+    }
 
     if (stagesConfig !== null) {
       const cachedStage = this.state.issueStages[issue.id];
@@ -8832,6 +9211,288 @@ function readMetadataNumber(
 ): number | null {
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function createPendingStageSignal(
+  stageName: string | null,
+  agentMessage: string | undefined,
+  attempt: number | null,
+  setBySequence: number | null = null,
+): PendingStageSignal | null {
+  if (agentMessage === undefined) {
+    return null;
+  }
+  const failureSignal = parseFailureSignal(agentMessage);
+  if (failureSignal !== null) {
+    return {
+      signal: "failure",
+      stageName,
+      attempt,
+      agentMessage,
+      failureClass: failureSignal.failureClass,
+      setBySequence,
+    };
+  }
+  if (containsStageCompleteSignal(agentMessage)) {
+    return {
+      signal: "complete",
+      stageName,
+      attempt,
+      agentMessage,
+      failureClass: null,
+      setBySequence,
+    };
+  }
+  return null;
+}
+
+function pendingStageSignalMetadata(
+  pending: PendingStageSignal | null,
+): Record<string, unknown> {
+  if (pending === null) {
+    return {};
+  }
+  return {
+    pendingStageSignal: pending.signal,
+    pendingStageName: pending.stageName,
+    pendingAttempt: pending.attempt,
+    pendingAgentMessage: pending.agentMessage,
+    pendingFailureClass: pending.failureClass,
+  };
+}
+
+function readPendingStageSignalMetadata(
+  entry: DispatcherRunJournalEntry,
+): PendingStageSignal | null {
+  const signal = readMetadataString(entry.metadata, "pendingStageSignal");
+  if (signal !== "complete" && signal !== "failure") {
+    return null;
+  }
+  const agentMessage = readMetadataString(
+    entry.metadata,
+    "pendingAgentMessage",
+  );
+  if (agentMessage === null) {
+    return null;
+  }
+  const stageName = readMetadataString(entry.metadata, "pendingStageName");
+  const attempt = readMetadataNumber(entry.metadata, "pendingAttempt");
+  const failureClass = readMetadataString(
+    entry.metadata,
+    "pendingFailureClass",
+  );
+  if (signal === "failure") {
+    if (!isFailureClass(failureClass)) {
+      console.warn(
+        `[orchestrator] pending stage signal recovery dropped failure signal for ${entry.issueIdentifier}: missing or invalid failure class in journal sequence ${entry.sequence}.`,
+      );
+      return null;
+    }
+    return {
+      signal,
+      stageName,
+      attempt: attempt ?? entry.attempt,
+      agentMessage,
+      failureClass,
+      setBySequence: entry.sequence,
+    };
+  }
+  return {
+    signal,
+    stageName,
+    attempt: attempt ?? entry.attempt,
+    agentMessage,
+    failureClass: null,
+    setBySequence: entry.sequence,
+  };
+}
+
+function isFailureClass(value: string | null): value is FailureClass {
+  return (
+    value !== null && (FAILURE_CLASSES as readonly string[]).includes(value)
+  );
+}
+
+function cloneOrchestratorState(state: OrchestratorState): OrchestratorState {
+  return {
+    pollIntervalMs: state.pollIntervalMs,
+    maxConcurrentAgents: state.maxConcurrentAgents,
+    running: cloneRecord(state.running, cloneRunningEntry),
+    claimed: new Set(state.claimed),
+    retryAttempts: cloneRecord(state.retryAttempts, cloneRetryEntry),
+    completed: new Set(state.completed),
+    failed: new Set(state.failed),
+    resumeRequired: new Set(state.resumeRequired),
+    resumeRequiredMarks: clonePlain(state.resumeRequiredMarks),
+    codexTotals: clonePlain(state.codexTotals),
+    codexRateLimits: clonePlain(state.codexRateLimits),
+    rateLimitAdmission: clonePlain(state.rateLimitAdmission),
+    issueStages: clonePlain(state.issueStages),
+    issuePendingStageSignals: clonePlain(state.issuePendingStageSignals),
+    issueBudgetEscalations: clonePlain(state.issueBudgetEscalations),
+    issuePauseTriageResumes: clonePlain(state.issuePauseTriageResumes),
+    issueReworkCounts: clonePlain(state.issueReworkCounts),
+    issuePassedStages: clonePlain(state.issuePassedStages),
+    issueFirstDispatchedAt: clonePlain(state.issueFirstDispatchedAt),
+    issueExecutionHistory: clonePlain(state.issueExecutionHistory),
+    issueRightSizingDecisions: clonePlain(state.issueRightSizingDecisions),
+    issueAcSnapshots: clonePlain(state.issueAcSnapshots),
+    decorrelatedGateOutcomes: clonePlain(state.decorrelatedGateOutcomes),
+    loopTraceJournal: clonePlain(state.loopTraceJournal),
+    continuousFeedback: clonePlain(state.continuousFeedback),
+    dispatcherRunJournal: clonePlain(state.dispatcherRunJournal),
+    dispatcherLeases: clonePlain(state.dispatcherLeases),
+    managerRunJournal: clonePlain(state.managerRunJournal),
+    managerRuns: clonePlain(state.managerRuns),
+    issueFailureSignatures: clonePlain(state.issueFailureSignatures),
+    issueDispositions: clonePlain(state.issueDispositions),
+    issueReviewFailureStreaks: clonePlain(state.issueReviewFailureStreaks),
+    issueReviewInfrastructureStalls: clonePlain(
+      state.issueReviewInfrastructureStalls,
+    ),
+    failureExhaustedIds: new Set(state.failureExhaustedIds),
+  };
+}
+
+function restoreOrchestratorState(
+  target: OrchestratorState,
+  snapshot: OrchestratorState,
+): void {
+  target.pollIntervalMs = snapshot.pollIntervalMs;
+  target.maxConcurrentAgents = snapshot.maxConcurrentAgents;
+  target.running = snapshot.running;
+  target.claimed = snapshot.claimed;
+  target.retryAttempts = snapshot.retryAttempts;
+  target.completed = snapshot.completed;
+  target.failed = snapshot.failed;
+  target.resumeRequired = snapshot.resumeRequired;
+  target.resumeRequiredMarks = snapshot.resumeRequiredMarks;
+  target.codexTotals = snapshot.codexTotals;
+  target.codexRateLimits = snapshot.codexRateLimits;
+  target.rateLimitAdmission = snapshot.rateLimitAdmission;
+  target.issueStages = snapshot.issueStages;
+  target.issuePendingStageSignals = snapshot.issuePendingStageSignals;
+  target.issueBudgetEscalations = snapshot.issueBudgetEscalations;
+  target.issuePauseTriageResumes = snapshot.issuePauseTriageResumes;
+  target.issueReworkCounts = snapshot.issueReworkCounts;
+  target.issuePassedStages = snapshot.issuePassedStages;
+  target.issueFirstDispatchedAt = snapshot.issueFirstDispatchedAt;
+  target.issueExecutionHistory = snapshot.issueExecutionHistory;
+  target.issueRightSizingDecisions = snapshot.issueRightSizingDecisions;
+  target.issueAcSnapshots = snapshot.issueAcSnapshots;
+  target.decorrelatedGateOutcomes = snapshot.decorrelatedGateOutcomes;
+  target.loopTraceJournal = snapshot.loopTraceJournal;
+  target.continuousFeedback = snapshot.continuousFeedback;
+  target.dispatcherRunJournal = snapshot.dispatcherRunJournal;
+  target.dispatcherLeases = snapshot.dispatcherLeases;
+  target.managerRunJournal = snapshot.managerRunJournal;
+  target.managerRuns = snapshot.managerRuns;
+  target.issueFailureSignatures = snapshot.issueFailureSignatures;
+  target.issueDispositions = snapshot.issueDispositions;
+  target.issueReviewFailureStreaks = snapshot.issueReviewFailureStreaks;
+  target.issueReviewInfrastructureStalls =
+    snapshot.issueReviewInfrastructureStalls;
+  target.failureExhaustedIds = snapshot.failureExhaustedIds;
+}
+
+function cloneRunningEntry(entry: RunningEntry): RunningEntry {
+  const { workerHandle, monitorHandle, ...cloneable } = entry;
+  return {
+    ...clonePlain(cloneable),
+    workerHandle,
+    monitorHandle,
+  };
+}
+
+function cloneRetryEntry(entry: RetryEntry): RetryEntry {
+  const { timerHandle, ...cloneable } = entry;
+  return {
+    ...clonePlain(cloneable),
+    timerHandle,
+  };
+}
+
+function cloneExecutionHistoryMap(
+  source: Map<string, ExecutionHistory>,
+): Map<string, ExecutionHistory> {
+  return new Map(
+    [...source.entries()].map(([issueId, history]) => [
+      issueId,
+      clonePlain(history),
+    ]),
+  );
+}
+
+function cloneResumeRequiredGuards(
+  source: Map<string, ResumeRequiredGuard>,
+): Map<string, ResumeRequiredGuard> {
+  return new Map(
+    [...source.entries()].map(([issueId, guard]) => [
+      issueId,
+      clonePlain(guard),
+    ]),
+  );
+}
+
+function cloneRecord<T>(
+  record: Record<string, T>,
+  cloneValue: (value: T) => T,
+): Record<string, T> {
+  return Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [key, cloneValue(value)]),
+  ) as Record<string, T>;
+}
+
+function clonePlain<T>(value: T): T {
+  // Rollback snapshots intentionally require state payloads to stay structured-
+  // cloneable. Worker, monitor, and timer handles are excluded by their typed
+  // clone helpers and reattached by reference.
+  return structuredClone(value);
+}
+
+function restoreMap<K, V>(target: Map<K, V>, snapshot: Map<K, V>): void {
+  target.clear();
+  for (const [key, value] of snapshot) {
+    target.set(key, value);
+  }
+}
+
+function createPendingRunningEntry(input: {
+  issue: Issue;
+  identifier: string;
+  attempt: number | null;
+  agentMessage: string;
+}): RunningEntry {
+  return {
+    ...createEmptyLiveSession(),
+    issue: input.issue,
+    identifier: input.identifier,
+    retryAttempt: normalizeRetryAttempt(input.attempt),
+    startedAt: formatEasternTimestamp(new Date(0)),
+    workerHandle: null,
+    monitorHandle: null,
+    failureReason: null,
+    lastCodexMessage: input.agentMessage,
+    lastCodexTimestamp: null,
+    turnCount: 0,
+  };
+}
+
+function createReplayIssue(issueId: string, issueIdentifier: string): Issue {
+  return {
+    id: issueId,
+    identifier: issueIdentifier,
+    title: issueIdentifier,
+    description: null,
+    priority: null,
+    state: "",
+    branchName: null,
+    url: null,
+    labels: [],
+    blockedBy: [],
+    createdAt: null,
+    updatedAt: null,
+  };
 }
 
 /**

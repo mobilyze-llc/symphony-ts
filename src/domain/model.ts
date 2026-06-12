@@ -237,6 +237,9 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   // replayed into issueExecutionHistory so per-issue cumulative spend
   // survives restarts without a bespoke persistence store.
   "stage_record",
+  // Durable consumption marker for a terminal stage signal that arrived
+  // together with a budget hard stop (SYMPH-440).
+  "pending_stage_signal",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -979,6 +982,27 @@ export interface ResumeRequiredMark {
   since: string;
 }
 
+interface PendingStageSignalBase {
+  stageName: string | null;
+  attempt: number | null;
+  agentMessage: string;
+  setBySequence: number | null;
+}
+
+export interface PendingStageCompletionSignal extends PendingStageSignalBase {
+  signal: "complete";
+  failureClass: null;
+}
+
+export interface PendingStageFailureSignal extends PendingStageSignalBase {
+  signal: "failure";
+  failureClass: FailureClass;
+}
+
+export type PendingStageSignal =
+  | PendingStageCompletionSignal
+  | PendingStageFailureSignal;
+
 export interface OrchestratorState {
   pollIntervalMs: number;
   maxConcurrentAgents: number;
@@ -1000,6 +1024,7 @@ export interface OrchestratorState {
   codexRateLimits: CodexRateLimits;
   rateLimitAdmission: RateLimitAdmissionState | null;
   issueStages: Record<string, string>;
+  issuePendingStageSignals: Record<string, PendingStageSignal>;
   issueBudgetEscalations: Record<string, number>;
   issuePauseTriageResumes: Record<string, number>;
   issueReworkCounts: Record<string, number>;
@@ -1205,6 +1230,7 @@ export function createInitialOrchestratorState(input: {
     codexRateLimits: null,
     rateLimitAdmission: null,
     issueStages: {},
+    issuePendingStageSignals: {},
     issueBudgetEscalations: {},
     issuePauseTriageResumes: {},
     issueReworkCounts: {},
