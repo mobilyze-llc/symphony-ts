@@ -142,7 +142,11 @@ const CONTINUATION_RETRY_DELAY_MS = 1_000;
 const MAX_SAME_CRITERION_REVIEW_FAILURES = 3;
 const MAX_REVIEW_SUBSTRATE_STALL_FAILURES = 2;
 const SUBSTRATE_STALL_REGEX = /\bsubstrate[_ -]?stall\b/i;
-const SUBSTRATE_STALL_CONDITION_REGEX = /\bsubstrate[_ -]?stall:([^\s,;]+)/gi;
+const SUBSTRATE_STALL_PREFIXES = [
+  "substrate_stall:",
+  "substrate-stall:",
+  "substrate stall:",
+];
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
@@ -8824,15 +8828,67 @@ function extractSubstrateStallLanes(text: string | null | undefined): string[] {
     return [];
   }
   const lanes = new Set<string>();
-  for (const match of text.matchAll(SUBSTRATE_STALL_CONDITION_REGEX)) {
-    if (match[1] !== undefined) {
-      const lane = match[1].replace(/[.)\]]+$/g, "");
-      if (lane !== "") {
-        lanes.add(lane);
-      }
+  const lowerText = text.toLowerCase();
+  let searchFrom = 0;
+  while (searchFrom < text.length) {
+    const match = findNextSubstrateStallPrefix(lowerText, searchFrom);
+    if (match === null) {
+      break;
     }
+    const laneStart = match.index + match.prefix.length;
+    let laneEnd = laneStart;
+    while (
+      laneEnd < text.length &&
+      !isSubstrateStallLaneDelimiter(text.charCodeAt(laneEnd))
+    ) {
+      laneEnd += 1;
+    }
+    const lane = trimSubstrateStallLane(text.slice(laneStart, laneEnd));
+    if (lane !== "") {
+      lanes.add(lane);
+    }
+    searchFrom = Math.max(laneEnd, match.index + 1);
   }
   return [...lanes].sort();
+}
+
+function findNextSubstrateStallPrefix(
+  lowerText: string,
+  searchFrom: number,
+): { index: number; prefix: string } | null {
+  let best: { index: number; prefix: string } | null = null;
+  for (const prefix of SUBSTRATE_STALL_PREFIXES) {
+    const index = lowerText.indexOf(prefix, searchFrom);
+    if (index !== -1 && (best === null || index < best.index)) {
+      best = { index, prefix };
+    }
+  }
+  return best;
+}
+
+function isSubstrateStallLaneDelimiter(charCode: number): boolean {
+  return (
+    charCode === 9 ||
+    charCode === 10 ||
+    charCode === 11 ||
+    charCode === 12 ||
+    charCode === 13 ||
+    charCode === 32 ||
+    charCode === 44 ||
+    charCode === 59
+  );
+}
+
+function trimSubstrateStallLane(value: string): string {
+  let end = value.length;
+  while (end > 0) {
+    const charCode = value.charCodeAt(end - 1);
+    if (charCode !== 41 && charCode !== 46 && charCode !== 93) {
+      break;
+    }
+    end -= 1;
+  }
+  return value.slice(0, end);
 }
 
 function hashReviewInfrastructureSignature(source: string): string {
