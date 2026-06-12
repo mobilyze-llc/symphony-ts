@@ -101,6 +101,7 @@ import {
   type IntentReason,
   type IntentVerb,
   type IntentWriteResult,
+  formatIntentActorKey,
   formatIntentAttribution,
 } from "./intent.js";
 import { createRightSizingDecision } from "./right-sizing.js";
@@ -569,6 +570,20 @@ export class OrchestratorCore {
   private readonly triagedParkGenerations = new Map<string, number>();
 
   /**
+   * Escalation-once-per-park guard (SYMPH-422 council P2): park generation
+   * whose escalate_human already applied. escalate_human is the one verb
+   * that returns "applied" while the park stands, so journal-key dedup is
+   * its only re-issue guard — and key dedup is exact string equality, which
+   * a key-format migration breaks (a #374-era entry never matches a
+   * re-issued new-format key, double-applying the escalation and posting a
+   * duplicate comment on upgrade restart). This marker makes the verb
+   * itself idempotent per park: a re-park (new generation) may escalate
+   * again; the same park never does. `null` records an escalation against
+   * a parked issue with no generation (defensive — parks always mint one).
+   */
+  private readonly escalatedParkGenerations = new Map<string, number | null>();
+
+  /**
    * Single retry_once grant per issue (SYMPH-399): the signature of the
    * park the grant was issued against. Consumed on the first post-grant
    * failure: an identical signature goes straight back to park with NO
@@ -713,6 +728,7 @@ export class OrchestratorCore {
           this.issueParkGenerations.delete(entry.issueId);
           this.triagedParkGenerations.delete(entry.issueId);
           this.retryOnceGrants.delete(entry.issueId);
+          this.escalatedParkGenerations.delete(entry.issueId);
 
           if (verb === "rework_with_hint") {
             // Restore the rework stage transition so a mid-rework restart
@@ -773,8 +789,25 @@ export class OrchestratorCore {
             }
           }
         }
+        if (verb === "escalate_human") {
+          // Restore the escalation-once-per-park marker (SYMPH-422 council
+          // P2). Matched on verb+status, NEVER on idempotency-key shape:
+          // pre-discriminator (#374-era) entries carry old-format keys that
+          // can never string-match a re-issued new-format key, so without
+          // this marker every upgrade restart double-applies each journaled
+          // escalation and posts a duplicate comment. The marker is scoped
+          // to the CURRENT replay-minted generation (journaled generation
+          // numbers do not survive a restart — replay re-mints them), so a
+          // later replayed release → re-park still permits re-escalation.
+          this.escalatedParkGenerations.set(
+            entry.issueId,
+            this.issueParkGenerations.get(entry.issueId) ?? null,
+          );
+        }
         // escalate_human leaves the park (replayed from its source event)
-        // standing; no_op / rejected_stale entries mutate nothing.
+        // standing; resume replays as a no-op (its continuation is
+        // in-memory scheduling and an un-parked issue is already
+        // dispatch-eligible); no_op / rejected_stale entries mutate nothing.
       }
 
       if (entry.kind === "right_sizing") {
@@ -1021,11 +1054,13 @@ export class OrchestratorCore {
         this.signatureClusterRegistry.clearIssueFromCluster(issue.id);
         this.resetBreakersForResumedIssue(issue.id);
         // SYMPH-399 lifecycle: a resumed issue starts a fresh park lifecycle —
-        // stale fence generations, triage-once markers, and retry grants must
-        // not survive into it (resume-then-recur must triage again).
+        // stale fence generations, triage-once markers, escalation markers,
+        // and retry grants must not survive into it (resume-then-recur must
+        // triage again).
         this.issueParkGenerations.delete(issue.id);
         this.triagedParkGenerations.delete(issue.id);
         this.retryOnceGrants.delete(issue.id);
+        this.escalatedParkGenerations.delete(issue.id);
         this.clearResumeRequirement(issue.id);
       } else {
         return false;
@@ -1054,6 +1089,7 @@ export class OrchestratorCore {
         this.issueParkGenerations.delete(issue.id);
         this.triagedParkGenerations.delete(issue.id);
         this.retryOnceGrants.delete(issue.id);
+        this.escalatedParkGenerations.delete(issue.id);
       } else {
         return false;
       }
@@ -1580,11 +1616,20 @@ export class OrchestratorCore {
       return null;
     }
 
+    // Routed through the shared intent-verb layer (SYMPH-422 parity with
+    // the deferred path's release intent): the continuation is a `resume`
+    // intent attributed to watchdog-l2, so the sync continue is journaled
+    // and replayable like every other verb caller. No park exists at this
+    // point (the park only fires after triage declines), so there is no
+    // generation to fence against — the verb's own not-parked/not-running
+    // preconditions are the guard.
+    const actor = this.watchdogL2Actor();
+
     try {
       await this.postComment?.(
         issueId,
         [
-          `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes})`,
+          `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes}) — ${formatIntentAttribution(actor)}`,
           sanitizeForLinear(verdict.rationale),
           "Auto-resuming one continuation unit at the current budget ceiling.",
         ].join("\n"),
@@ -1593,11 +1638,19 @@ export class OrchestratorCore {
       // Observability only.
     }
 
-    return this.scheduleRetry(issueId, 1, {
-      identifier: runningEntry.identifier,
-      error: null,
-      delayType: "continuation",
+    const resumeResult = await this.writeIntent({
+      verb: "resume",
+      issueId,
+      issueIdentifier: runningEntry.identifier,
+      actor,
+      reason: {
+        class: "pause_triage_continue",
+        human: `pause triage authorized resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes}`,
+      },
+      stage: stageName,
+      renderComment: false,
     });
+    return resumeResult.retryEntry ?? null;
   }
 
   /**
@@ -3826,6 +3879,7 @@ export class OrchestratorCore {
     this.issueParkGenerations.delete(issueId);
     this.triagedParkGenerations.delete(issueId);
     this.retryOnceGrants.delete(issueId);
+    this.escalatedParkGenerations.delete(issueId);
     // Failure signatures are keyed by `${issueId}:${stage}` — purge all
     const sigPrefix = `${issueId}:`;
     for (const key of Object.keys(this.state.issueFailureSignatures)) {
@@ -3977,6 +4031,7 @@ export class OrchestratorCore {
     this.issueParkGenerations.delete(issueId);
     this.triagedParkGenerations.delete(issueId);
     this.retryOnceGrants.delete(issueId);
+    this.escalatedParkGenerations.delete(issueId);
   }
 
   /**
@@ -4040,9 +4095,20 @@ export class OrchestratorCore {
   }): Promise<
     IntentWriteResult & {
       stopRequest?: StopRequest | null;
+      retryEntry?: RetryEntry | null;
     }
   > {
     const currentGen = this.issueParkGenerations.get(input.issueId) ?? null;
+
+    // Idempotency-key format (SYMPH-422; keys are opaque equality tokens,
+    // never parsed — schema_version is unaffected):
+    //   applied:        intent:{verb}:{issueId}:{kind}@{host}[#{session}]:gen-{N}
+    //   no_op:          intent:{verb}:{issueId}:{kind}@{host}[#{session}]:gen-{N}:no_op
+    //   rejected_stale: intent:{verb}:{issueId}:{kind}@{host}[#{session}]:fence-{E}-vs-{N}
+    // The actor discriminator keeps distinct actors' same-verb-same-generation
+    // intents as separate journal entries (attribution + rationale survive)
+    // while the same actor+session re-issuing identical writes still dedupes.
+    const actorKey = formatIntentActorKey(input.actor);
 
     if (
       input.fence !== undefined &&
@@ -4054,7 +4120,7 @@ export class OrchestratorCore {
         status: "rejected_stale",
         detail,
         generation: currentGen,
-        idempotencyKey: `intent:${input.verb}:${input.issueId}:fence-${input.fence.expectedParkSeq}-vs-${currentGen ?? "none"}`,
+        idempotencyKey: `intent:${input.verb}:${input.issueId}:${actorKey}:fence-${input.fence.expectedParkSeq}-vs-${currentGen ?? "none"}`,
       });
       return { status: "rejected_stale", detail, sequence };
     }
@@ -4069,8 +4135,8 @@ export class OrchestratorCore {
       generation: generationAfter,
       idempotencyKey:
         application.status === "no_op"
-          ? `intent:${input.verb}:${input.issueId}:gen-${currentGen ?? "none"}:no_op`
-          : `intent:${input.verb}:${input.issueId}:gen-${generationAfter ?? "none"}`,
+          ? `intent:${input.verb}:${input.issueId}:${actorKey}:gen-${currentGen ?? "none"}:no_op`
+          : `intent:${input.verb}:${input.issueId}:${actorKey}:gen-${generationAfter ?? "none"}`,
       ...(application.journalMetadata === undefined
         ? {}
         : { journalMetadata: application.journalMetadata }),
@@ -4101,6 +4167,9 @@ export class OrchestratorCore {
       ...(application.stopRequest !== undefined
         ? { stopRequest: application.stopRequest }
         : {}),
+      ...(application.retryEntry !== undefined
+        ? { retryEntry: application.retryEntry }
+        : {}),
     };
   }
 
@@ -4118,6 +4187,8 @@ export class OrchestratorCore {
     status: "applied" | "no_op";
     detail: string;
     stopRequest?: StopRequest | null;
+    /** The continuation scheduled by `resume` (mirrors halt's stopRequest). */
+    retryEntry?: RetryEntry | null;
     /**
      * Resolved values the replay reducer needs verbatim (e.g. the rework
      * target and post-increment count), journaled alongside the intent so
@@ -4245,6 +4316,21 @@ export class OrchestratorCore {
         if (!this.isIssueParked(issueId)) {
           return { status: "no_op", detail: "not parked" };
         }
+        // Idempotent per park generation (SYMPH-422 council P2): the park
+        // stands after an applied escalation, so without this guard any
+        // re-issue that slips past journal-key dedup (e.g. across a key
+        // format migration, or from a second actor) applies again and
+        // posts a duplicate escalation comment.
+        if (
+          this.escalatedParkGenerations.has(issueId) &&
+          this.escalatedParkGenerations.get(issueId) === currentGen
+        ) {
+          return {
+            status: "no_op",
+            detail: `already escalated for park generation ${currentGen ?? "none"}`,
+          };
+        }
+        this.escalatedParkGenerations.set(issueId, currentGen);
         // No state change: the park stands while a human is paged.
         return {
           status: "applied",
@@ -4263,6 +4349,35 @@ export class OrchestratorCore {
           "manual_stop",
         );
         return { status: "applied", detail: "halted", stopRequest };
+      }
+
+      case "resume": {
+        // One continuation unit for a budget-paused run that never parked
+        // (SYMPH-422: sync pause-triage continue). A standing park must go
+        // through release/retry_once instead — their preconditions and
+        // fence semantics own park clearing.
+        if (this.isIssueParked(issueId)) {
+          return {
+            status: "no_op",
+            detail: "parked — use release or retry_once to clear a park",
+          };
+        }
+        if (issueId in this.state.running) {
+          return { status: "no_op", detail: "already running" };
+        }
+        if (this.state.retryAttempts[issueId] !== undefined) {
+          return { status: "no_op", detail: "retry already scheduled" };
+        }
+        const retryEntry = this.scheduleRetry(issueId, 1, {
+          identifier: input.issueIdentifier,
+          error: null,
+          delayType: "continuation",
+        });
+        return {
+          status: "applied",
+          detail: "scheduled one continuation unit",
+          retryEntry,
+        };
       }
     }
   }
