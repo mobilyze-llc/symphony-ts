@@ -1586,3 +1586,161 @@ describe("formatNotification — tracker_write_failed (SYMPH-413)", () => {
     expect(result.text).not.toContain("Details:");
   });
 });
+
+describe("egress sanitization retrofit (SYMPH-421)", () => {
+  it("sanitizes issue_failed free-text reason in text and blocks", () => {
+    const longTail = "z".repeat(1_000);
+    const result = formatNotification({
+      type: "issue_failed",
+      issueIdentifier: "SYMPH-1",
+      issueTitle: "A title",
+      issueUrl: null,
+      failureReason: `worker said <https://evil.example|click> with GH_TOKEN=ghp_fake123 ${longTail}`,
+      retriesExhausted: false,
+      retryAttempt: null,
+    });
+    expect(result.text).toContain("&lt;https://evil.example|click&gt;");
+    expect(result.text).toContain("GH_TOKEN=[REDACTED]");
+    expect(result.text).not.toContain("ghp_fake123");
+    expect(result.text).toContain("[truncated by egress cap]");
+    const reasonBlock = (result.blocks ?? []).find(
+      (block) =>
+        block.type === "section" &&
+        block.text !== undefined &&
+        block.text.text.startsWith("Reason:"),
+    );
+    expect(reasonBlock).toBeDefined();
+    if (reasonBlock?.type === "section" && reasonBlock.text !== undefined) {
+      expect(reasonBlock.text.text).toContain("GH_TOKEN=[REDACTED]");
+      expect(reasonBlock.text.text).toContain(
+        "&lt;https://evil.example|click&gt;",
+      );
+    }
+  });
+
+  it("leaves a clean issue_failed reason byte-identical", () => {
+    const clean = "agent reported failure: review";
+    const result = formatNotification({
+      type: "issue_failed",
+      issueIdentifier: "SYMPH-1",
+      issueTitle: "A title",
+      issueUrl: null,
+      failureReason: clean,
+      retriesExhausted: false,
+      retryAttempt: null,
+    });
+    expect(result.text).toContain(`Reason: ${clean}`);
+  });
+
+  it("sanitizes the watchdog reason fields and info_alert message", () => {
+    const hostile = "park reason with secret=abc and <!channel> ping";
+    for (const event of [
+      {
+        type: "failure_exhausted",
+        issueIdentifier: "SYMPH-1",
+        issueTitle: "T",
+        issueUrl: null,
+        stageName: null,
+        reason: hostile,
+        failureSignature: null,
+        failureClass: null,
+      },
+      {
+        type: "hard_stop_budget",
+        issueIdentifier: "SYMPH-1",
+        issueTitle: "T",
+        issueUrl: null,
+        stageName: null,
+        trigger: "token_budget",
+        reason: hostile,
+        totalTokens: 1,
+        estimatedCostUsd: 0,
+      },
+      {
+        type: "gate_failed",
+        issueIdentifier: "SYMPH-1",
+        issueTitle: "T",
+        issueUrl: null,
+        stageName: null,
+        reason: hostile,
+      },
+      {
+        type: "issue_dropped",
+        issueIdentifier: "SYMPH-1",
+        issueTitle: "T",
+        issueUrl: null,
+        reason: hostile,
+      },
+    ] satisfies PipelineNotificationEvent[]) {
+      const result = formatNotification(event);
+      expect(result.text).toContain("secret=[REDACTED]");
+      expect(result.text).toContain("&lt;!channel&gt;");
+      expect(result.text).not.toContain("<!channel>");
+    }
+
+    const info = formatNotification({
+      type: "info_alert",
+      issueIdentifier: "SYMPH-1",
+      message: "note with api-key=oops and <!here>",
+    });
+    expect(info.text).toContain("api-key=[REDACTED]");
+    expect(info.text).toContain("&lt;!here&gt;");
+
+    const infra = formatNotification({
+      type: "infra_error",
+      issueIdentifier: "SYMPH-1",
+      issueTitle: "T",
+      errorReason: "spawn failed: token=tok_123 <runaway>",
+    });
+    expect(infra.text).toContain("token=[REDACTED]");
+    expect(infra.text).toContain("&lt;runaway&gt;");
+  });
+});
+
+describe("formatNotification triage_escalation (SYMPH-399)", () => {
+  it("formats the L2 escalation with classification, case, and attribution", () => {
+    const result = formatNotification({
+      type: "triage_escalation",
+      issueIdentifier: "SYMPH-332",
+      issueTitle: "Council gate loops review stage",
+      issueUrl: "https://linear.app/x/issue/SYMPH-332",
+      stageName: "review",
+      classification: "infra",
+      confidence: "high",
+      caseText:
+        "EPERM recurs across attempts with rotating temp paths; a human needs to inspect the host.",
+      attribution: "by watchdog-l2@pro14",
+    });
+
+    expect(result.text).toContain("Stuck-triage escalation");
+    expect(result.text).toContain(
+      "<https://linear.app/x/issue/SYMPH-332|SYMPH-332>",
+    );
+    expect(result.text).toContain("Stage: review");
+    expect(result.text).toContain("Classification: infra (confidence: high)");
+    expect(result.text).toContain("by watchdog-l2@pro14");
+    expect(result.text).toContain("a human needs to inspect the host");
+  });
+
+  it("sanitizes a hostile caseText (mrkdwn injection, credentials, 50k length)", () => {
+    const result = formatNotification({
+      type: "triage_escalation",
+      issueIdentifier: "SYMPH-332",
+      issueTitle: "Council gate loops review stage",
+      issueUrl: null,
+      stageName: null,
+      classification: "infra",
+      confidence: "high",
+      caseText: `ping <!channel> & set slack_token=xoxb-fake-1234 ${"w".repeat(50_000)}`,
+      attribution: "by watchdog-l2@pro14",
+    });
+
+    expect(result.text).toContain("&lt;!channel&gt;");
+    expect(result.text).not.toContain("<!channel>");
+    expect(result.text).toContain("slack_token=[REDACTED]");
+    expect(result.text).not.toContain("xoxb-fake-1234");
+    // Field-level Slack cap bounds the case line; the version trailer survives.
+    expect(result.text).toContain("[truncated by egress cap]");
+    expect(result.text.length).toBeLessThan(2000);
+  });
+});

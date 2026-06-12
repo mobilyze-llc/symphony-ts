@@ -1,3 +1,5 @@
+import type { ContractViolation } from "./config-contracts.js";
+
 export interface WorkflowHooksConfig {
   afterCreate: string | null;
   beforeRun: string | null;
@@ -178,6 +180,22 @@ export interface WorkflowObservabilityConfig {
 }
 
 /**
+ * Watchdog L2 stuck-ticket triage (SYMPH-399): when the deterministic
+ * watchdog parks a ticket (retry-without-novelty or circuit-breaker park),
+ * a local model classifies the failure and picks one bounded action.
+ * Default-DISABLED per product until calibration; parsed via Zod.
+ */
+export interface WorkflowStuckTriageConfig {
+  /** Master switch. When false the lane contributes zero side effects. */
+  enabled: boolean;
+  baseUrl: string | null;
+  model: string | null;
+  apiKey: string | null;
+  /** Verdict deadline; null uses the module default (600s). */
+  timeoutMs: number | null;
+}
+
+/**
  * Watchdog L1c configuration (SYMPH-398): cross-ticket signature clustering,
  * stage circuit breaker, and watchdog ticket filer.
  */
@@ -196,6 +214,11 @@ export interface WorkflowWatchdogConfig {
    * Maximum watchdog tickets filed per signature per hour. Default: 3.
    */
   maxFilingsPerHour: number;
+  /**
+   * Watchdog L2 stuck-ticket triage (SYMPH-399). Optional so existing
+   * configs and fixtures need no change; absent means disabled.
+   */
+  stuckTriage?: WorkflowStuckTriageConfig;
 }
 
 export const STAGE_TYPES = ["agent", "gate", "terminal"] as const;
@@ -276,6 +299,19 @@ export interface ResolvedWorkflowConfig {
    * for the same tracker project. Absent/null means any host may run it.
    */
   ownerHost?: string | null;
+  /**
+   * Config-contract escape hatch (SYMPH-409). `contracts.override: true`
+   * turns contract violations from dispatch-validation failures into
+   * suppressed warnings that are re-logged loudly at every startup and
+   * config reload. Optional so hand-built test fixtures keep compiling;
+   * resolveWorkflowConfig always sets it.
+   */
+  contracts?: WorkflowContractsConfig;
+}
+
+/** See {@link ResolvedWorkflowConfig.contracts}. */
+export interface WorkflowContractsConfig {
+  override: boolean;
 }
 
 export interface DispatchValidationFailure {
@@ -286,6 +322,13 @@ export interface DispatchValidationFailure {
 export type DispatchValidationResult =
   | {
       ok: true;
+      /**
+       * Contract violations suppressed by `contracts.override: true`
+       * (SYMPH-409). Present (non-empty) only when the override is active;
+       * the runtime host re-warns about each entry at every startup and
+       * config reload until the override is removed.
+       */
+      suppressedContractViolations?: ContractViolation[];
     }
   | {
       ok: false;

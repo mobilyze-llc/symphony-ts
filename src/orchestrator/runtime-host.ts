@@ -21,6 +21,7 @@ import type {
 } from "../agent/runner.js";
 import { AgentRunner } from "../agent/runner.js";
 import { runSpecFidelityJudge } from "../agent/spec-fidelity.js";
+import { runStuckTriage } from "../agent/stuck-triage.js";
 import { publishVerdictStatus } from "../agent/verdict-status.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
@@ -35,6 +36,7 @@ import {
   DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
 } from "../config/defaults.js";
 import type {
+  DispatchValidationResult,
   ResolvedWorkflowConfig,
   StageDefinition,
 } from "../config/types.js";
@@ -494,6 +496,22 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           config: this.config.pauseTriage,
           evidence,
         }),
+      // Watchdog L2 stuck-ticket triage (SYMPH-399). The module itself
+      // resolves null when the lane is unconfigured or disabled; the core
+      // additionally gates on watchdog.stuck_triage.enabled so a disabled
+      // lane produces zero side effects.
+      ...(this.config.watchdog.stuckTriage === undefined
+        ? {}
+        : {
+            runStuckTriage: (
+              evidence: Parameters<typeof runStuckTriage>[0]["evidence"],
+            ) =>
+              runStuckTriage({
+                // biome-ignore lint/style/noNonNullAssertion: guarded by the spread condition
+                config: this.config.watchdog.stuckTriage!,
+                evidence,
+              }),
+          }),
       scheduleDeferred: (task) => void this.enqueue(task),
       runAcGate: (evidence) =>
         runAcGate({
@@ -797,6 +815,29 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               if (input.canFileWatchdogTicket) {
                 void this.fileWatchdogTicketBestEffort(input);
               }
+            },
+            // Watchdog L2 escalate_human verdicts page through the same
+            // SYMPH-397 alert channel (SYMPH-399).
+            onTriageEscalation: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              issueTitle: string;
+              stageName: string | null;
+              classification: string;
+              confidence: string;
+              caseText: string;
+            }) => {
+              _notifier.notify({
+                type: "triage_escalation",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueTitle,
+                issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
+                stageName: input.stageName,
+                classification: input.classification,
+                confidence: input.confidence,
+                caseText: input.caseText,
+                attribution: `by watchdog-l2@${hostname().split(".")[0] ?? hostname()}`,
+              });
             },
           }))(this.notifier)
         : {}),
@@ -2821,6 +2862,11 @@ export async function startRuntimeService(
       logsRoot: options.logsRoot ?? null,
       ...(options.stdout === undefined ? {} : { stdout: options.stdout }),
     }));
+  await warnSuppressedContractViolations({
+    logger,
+    validation,
+    phase: "startup",
+  });
   let currentConfig = options.config;
   let tracker = options.tracker ?? createLinearTrackerFromConfig(currentConfig);
   let workspaceManager =
@@ -3106,6 +3152,35 @@ async function logPollCycleResult(
   });
 }
 
+/**
+ * Loud, repeated re-alert for `contracts.override: true` (SYMPH-409): every
+ * startup and config reload re-warns about each suppressed config-contract
+ * violation until the override is removed. The override never expires; this
+ * repetition is the bypass resistance.
+ */
+async function warnSuppressedContractViolations(input: {
+  logger: StructuredLogger;
+  validation: DispatchValidationResult;
+  phase: "startup" | "reload";
+}): Promise<void> {
+  if (!input.validation.ok) {
+    return;
+  }
+
+  for (const violation of input.validation.suppressedContractViolations ?? []) {
+    await input.logger.warn(
+      "config_contract_override_active",
+      `contracts.override is suppressing a config contract violation: ${violation.message} Remove contracts.override once the config is fixed — this warning repeats at every startup and reload.`,
+      {
+        phase: input.phase,
+        rule: violation.rule,
+        config_key: violation.key,
+        offending_value: violation.value,
+      },
+    );
+  }
+}
+
 async function createRuntimeWorkflowWatcher(input: {
   config: ResolvedWorkflowConfig;
   logger: StructuredLogger;
@@ -3131,6 +3206,12 @@ async function createRuntimeWorkflowWatcher(input: {
         );
         return;
       }
+
+      await warnSuppressedContractViolations({
+        logger: input.logger,
+        validation: snapshot.dispatchValidation,
+        phase: "reload",
+      });
 
       await input.onReload(snapshot.config);
       await input.logger.info(

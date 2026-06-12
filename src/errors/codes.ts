@@ -11,6 +11,7 @@ export const ERROR_CODES = {
   workflowFrontmatterNotMap: "workflow_frontmatter_not_map",
   workflowReloadRejected: "workflow_reload_rejected",
   configInvalid: "config_invalid",
+  configContractViolation: "config_contract_violation",
   configEnvVarMissing: "config_env_var_missing",
   ownerHostMismatch: "owner_host_mismatch",
   trackerKindUnsupported: "tracker_kind_unsupported",

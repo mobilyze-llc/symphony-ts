@@ -136,7 +136,7 @@ function createConfig(
       endpoint: "https://linear.example",
       apiKey: "token",
       projectSlug: "ENG",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       terminalStates: ["Done"],
     },
     polling: {

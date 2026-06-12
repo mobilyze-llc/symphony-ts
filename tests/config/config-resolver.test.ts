@@ -1131,3 +1131,83 @@ describe("config-resolver fast_track", () => {
     );
   });
 });
+
+describe("config-resolver watchdog.stuck_triage (SYMPH-399)", () => {
+  it("defaults to disabled when the block is absent", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      config: {},
+      promptTemplate: "Prompt",
+    });
+
+    expect(resolved.watchdog.stuckTriage).toEqual({
+      enabled: false,
+      baseUrl: null,
+      model: null,
+      apiKey: null,
+      timeoutMs: 600_000,
+    });
+  });
+
+  it("parses a full block and resolves $ENV api_key references", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        config: {
+          watchdog: {
+            stuck_triage: {
+              enabled: true,
+              base_url: "http://studio2.local:8000/v1",
+              model: "deepseek-v4-flash",
+              api_key: "$STUCK_TRIAGE_KEY",
+              timeout_ms: 120_000,
+            },
+          },
+        },
+        promptTemplate: "Prompt",
+      },
+      { STUCK_TRIAGE_KEY: "secret-token" } as NodeJS.ProcessEnv,
+    );
+
+    expect(resolved.watchdog.stuckTriage).toEqual({
+      enabled: true,
+      baseUrl: "http://studio2.local:8000/v1",
+      model: "deepseek-v4-flash",
+      apiKey: "secret-token",
+      timeoutMs: 120_000,
+    });
+  });
+
+  it("fails loudly on a malformed block instead of silently disabling", () => {
+    expect(() =>
+      resolveWorkflowConfig({
+        workflowPath: "/repo/WORKFLOW.md",
+        config: {
+          watchdog: {
+            stuck_triage: {
+              enabled: "yes",
+            },
+          },
+        },
+        promptTemplate: "Prompt",
+      }),
+    ).toThrowError(/stuck_triage/);
+  });
+
+  it("rejects unknown keys (declared-vs-consumed contract)", () => {
+    expect(() =>
+      resolveWorkflowConfig({
+        workflowPath: "/repo/WORKFLOW.md",
+        config: {
+          watchdog: {
+            stuck_triage: {
+              enabled: true,
+              base_uri: "http://typo.local",
+            },
+          },
+        },
+        promptTemplate: "Prompt",
+      }),
+    ).toThrowError(/stuck_triage/);
+  });
+});

@@ -473,6 +473,12 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       acceptanceCriteria: "### Acceptance Criteria\n- [ ] `check: x`",
     });
     expect(output).toContain("Pre-gate evidence check");
+    // Full-suite criteria defer to CI on the PR head SHA (SYMPH-358/402) —
+    // a frozen `check: pnpm test` must not be enforced as a local run.
+    expect(output).toContain("CI check-run success on the PR head SHA");
+    expect(output).toContain(
+      "do NOT fail this check over a red local full-suite log",
+    );
     expect(output).toContain("live-proof: waived");
     expect(output).toContain("The PR body carries exactly one live-proof");
     expect(output).toContain(
