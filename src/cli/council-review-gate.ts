@@ -28,6 +28,7 @@ interface ParsedArgs {
   round?: number;
   mode?: CouncilReviewMode;
   previousReviewedHeadSha?: string;
+  riskContractArtifactPaths: string[];
   assertFreshReview?: string;
   allowedChangePatterns: string[];
   journalWorkspaceRoot?: string;
@@ -58,6 +59,7 @@ export function parseCouncilReviewGateArgs(
   const parsed: Partial<ParsedArgs> = {
     workspace: cwd,
     allowedChangePatterns: [],
+    riskContractArtifactPaths: [],
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -134,6 +136,13 @@ export function parseCouncilReviewGateArgs(
       );
       continue;
     }
+    if (token === "--risk-contract-artifact") {
+      parsed.riskContractArtifactPaths = [
+        ...(parsed.riskContractArtifactPaths ?? []),
+        readValue(argv, ++index, token),
+      ];
+      continue;
+    }
     if (token === "--no-codex-lead") {
       parsed.codexLead = false;
       continue;
@@ -203,6 +212,14 @@ export function parseCouncilReviewGateArgs(
   ) {
     throw new UsageError(
       "--mode, --round, and --previous-reviewed-head are only valid when running a council review, not with --assert-fresh-review.",
+    );
+  }
+  if (
+    parsed.assertFreshReview !== undefined &&
+    (parsed.riskContractArtifactPaths ?? []).length > 0
+  ) {
+    throw new UsageError(
+      "--risk-contract-artifact is only valid when running a council review, not with --assert-fresh-review.",
     );
   }
   if (
@@ -364,6 +381,7 @@ function renderUsage(): string {
     "  --round N                     Council loop round number (default: 1)",
     "  --mode full|convergence       Council loop mode (default: full)",
     "  --previous-reviewed-head SHA  Previous reviewed head SHA for convergence metadata",
+    "  --risk-contract-artifact PATH Bounded risk-predicate state contract artifact path; repeatable",
     "  --assert-fresh-review PATH    Assert an existing clean review-result.json covers current HEAD",
     "  --allow-stale-path GLOB       Explicit freshness allowlist; repeatable; ** crosses /, * and ? do not",
     "  --journal-workspace-root DIR  Append sanitized review events to DIR/.symphony/run-journals/dispatcher.jsonl",

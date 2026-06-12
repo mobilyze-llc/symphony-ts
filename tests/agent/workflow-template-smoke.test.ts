@@ -145,6 +145,12 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
           "latest Linear issue comments/workpad/resume notes",
         );
         expect(prompt).toContain("Do not trust repo-root scratch files");
+        expect(prompt).toContain("Risk-Predicate State Contract Artifacts");
+        expect(prompt).toContain("journal_producer");
+        expect(prompt).toContain("### Risk Predicate State Contract");
+        expect(prompt).toContain("Live success");
+        expect(prompt).toContain("External side effects/idempotency");
+        expect(prompt).toContain("risk-contract-artifact: <path>");
       }
       expect(prompt).not.toMatch(/(^|[^A-Za-z0-9_])status=\$\?/);
       expect(prompt).not.toContain("Run `npm test 2>&1`");
@@ -178,6 +184,11 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(investigateRendered).toContain(
       "Do not trust repo-root scratch files",
     );
+    expect(investigateRendered).toContain(
+      "Risk-Predicate State Contract Artifacts",
+    );
+    expect(investigateRendered).toContain("journal_replay_reducer");
+    expect(investigateRendered).toContain("Duplicate/late consume");
   });
 
   it("does not ship root-level worker scratch artifacts", () => {
@@ -266,6 +277,11 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       });
       expect(investigateRendered).toContain("Investigation Token Brake");
       expect(investigateRendered).toContain("at most 6 shell/tool calls");
+      expect(investigateRendered).toContain(
+        "Risk-Predicate State Contract Artifacts",
+      );
+      expect(investigateRendered).toContain("state_journal_projection");
+      expect(investigateRendered).toContain("risk-contract-artifact: <path>");
 
       for (const stageName of ["implement", "review", "merge"]) {
         const stageRendered = await renderPrompt({
@@ -276,6 +292,9 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
         });
         expect(stageRendered).not.toContain("Investigation Token Brake");
         expect(stageRendered).not.toContain("at most 6 shell/tool calls");
+        expect(stageRendered).not.toContain(
+          "Risk-Predicate State Contract Artifacts",
+        );
       }
     }
   });
