@@ -226,6 +226,44 @@ describe("failure signal routing in onWorkerExit", () => {
     expect(comments.join("\n")).toContain(
       "Parked: review gate infrastructure blocked",
     );
+    expect(comments.join("\n")).toContain("Latest stalled lane set");
+    expect(comments.join("\n")).not.toContain("same stalled lane set");
+  });
+
+  it("clears substrate-stall review state when a real review finding reworks code", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: substrate_stall:claude-opus with no surviving P1/P2 code findings.\n[STAGE_FAILED: infra]",
+    });
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toBeDefined();
+
+    await orchestrator.onRetryTimer("1");
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "Real code finding survived.\n[STAGE_FAILED: review]",
+    });
+
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toBeUndefined();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
   });
 
   it("parks repeated unparseable substrate stalls even when prose changes", async () => {

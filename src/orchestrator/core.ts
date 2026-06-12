@@ -3243,6 +3243,9 @@ export class OrchestratorCore {
       ) {
         return null;
       }
+      if (failureClass === "verify") {
+        delete this.state.issueReviewInfrastructureStalls[issueId];
+      }
       // Retryable failures — use existing exponential backoff
       return this.scheduleRetry(
         issueId,
@@ -3257,11 +3260,13 @@ export class OrchestratorCore {
     }
 
     if (failureClass === "rebase") {
+      delete this.state.issueReviewInfrastructureStalls[issueId];
       // Rebase failures — trigger rework if onRework configured, else retry
       return this.handleRebaseFailure(issueId, runningEntry, agentMessage);
     }
 
     // failureClass === "review" — trigger rework via gate lookup
+    delete this.state.issueReviewInfrastructureStalls[issueId];
     return this.handleReviewFailure(issueId, runningEntry, agentMessage);
   }
 
@@ -3464,6 +3469,7 @@ export class OrchestratorCore {
 
     const stageName = this.state.issueStages[issueId] ?? null;
     if (stageName !== "review") {
+      delete this.state.issueReviewInfrastructureStalls[issueId];
       return false;
     }
 
@@ -3510,6 +3516,8 @@ export class OrchestratorCore {
         ? input.stalledLanes.join(", ")
         : "lane set not parseable from worker message";
     const parkReason = `review gate infrastructure blocked: ${input.count} consecutive substrate_stall failures for ${laneText} (signature ${input.signature}); parked instead of reworking code (SYMPH-441)`;
+    const reworkCount = this.state.issueReworkCounts[issueId] ?? 0;
+    const stageHistory = this.state.issueExecutionHistory[issueId] ?? [];
 
     this.state.failed.add(issueId);
     this.releaseClaim(issueId);
@@ -3521,7 +3529,7 @@ export class OrchestratorCore {
       [
         "## Parked: review gate infrastructure blocked (SYMPH-441)",
         "",
-        `The review gate reported ${input.count} consecutive substrate-stall infrastructure failures for the same stalled lane set: ${laneText}.`,
+        `The review gate reported ${input.count} consecutive substrate-stall infrastructure failures. Latest stalled lane set: ${laneText}.`,
         "",
         "This is not a council FAIL with code findings, and the orchestrator did not dispatch implement rework. Requeue after the council substrate is healthy or relaunch the review gate in a quiet window.",
         "",
@@ -3543,9 +3551,9 @@ export class OrchestratorCore {
         stageName,
         parkKind: "retry_exhausted",
         attemptCount: runningEntry.retryAttempt ?? 1,
-        reworkCount: this.state.issueReworkCounts[issueId] ?? 0,
+        reworkCount,
         failureRecords: [],
-        stageHistory: this.state.issueExecutionHistory[issueId] ?? [],
+        stageHistory,
       },
     );
   }
