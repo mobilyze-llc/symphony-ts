@@ -769,7 +769,16 @@ If a check fails, post a `## Review Findings` comment naming the missing evidenc
 ### Evaluate findings
 
 If the gate reports `PASS`, post a short workpad note with the artifact directory, then output `[STAGE_COMPLETE]` in a final message that also echoes the live-proof disposition line you verified in the pre-gate check (`live-proof: evidence|waived|n/a — …`) — the independent spec-fidelity judge reads your final message and checks for it (SYMPH-377).
-If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/malformed: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
+If the gate reports `FAIL` with surviving P1/P2 code findings: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
+
+If `$ARTIFACT_DIR/review-result.json` reports `verdict: "error"` and a lane has `degradedReason: "substrate_stall"` or a `degradedConditions` entry starting with `substrate_stall:`, while no lane has `verdict: "fail"` and the council report names no surviving P1/P2 code finding, treat this as review infrastructure, not implement rework:
+
+1. Post a short `## Review Infrastructure Retry` workpad/comment note naming the artifact directory, reviewed head SHA, and stalled lane(s).
+2. Output `[STAGE_FAILED: infra]` with `substrate_stall:<lane>` details. Do NOT output `[STAGE_FAILED: review]`.
+
+The orchestrator retries the review gate once for the same stalled-lane set. If the same substrate stall repeats, it parks the issue loudly as infra-blocked instead of dispatching implement rework (SYMPH-441).
+
+If artifacts are missing/malformed for any other reason, or the gate times out without a readable `review-result.json`: post a `## Review Findings` comment naming the missing/malformed artifact and output `[STAGE_FAILED: review]`.
 {% endif %}
 
 {% if stageName == "merge" %}

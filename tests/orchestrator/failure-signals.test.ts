@@ -173,6 +173,61 @@ describe("failure signal routing in onWorkerExit", () => {
     expect(retryEntry!.error).toBe("agent review failure: rework to implement");
   });
 
+  it("retries review gate substrate stalls once, then parks infra-blocked", async () => {
+    const comments: string[] = [];
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+
+    const substrateMessage =
+      "Headless council gate error: substrate_stall:claude-opus with no surviving P1/P2 code findings.\n[STAGE_FAILED: infra]";
+    const firstRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: substrateMessage,
+    });
+
+    expect(firstRetry).not.toBeNull();
+    expect(firstRetry!.error).toBe("agent reported failure: infra");
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toMatchObject({
+      count: 1,
+      stalledLanes: ["claude-opus"],
+    });
+
+    await orchestrator.onRetryTimer("1");
+    const secondRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: substrateMessage,
+    });
+
+    expect(secondRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(orchestrator.getState().failureExhaustedIds.has("1")).toBe(true);
+    expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
+    await Promise.resolve();
+    expect(comments.join("\n")).toContain(
+      "Parked: review gate infrastructure blocked",
+    );
+  });
+
   it("escalates review failure when max rework exceeded", async () => {
     const base = createGateWorkflowConfig();
     const stages: StagesConfig = {

@@ -139,6 +139,10 @@ const CONTINUATION_RETRY_DELAY_MS = 1_000;
  * round N, and a third round against an unchanged criterion is futile.
  */
 const MAX_SAME_CRITERION_REVIEW_FAILURES = 3;
+const MAX_REVIEW_SUBSTRATE_STALL_FAILURES = 2;
+const SUBSTRATE_STALL_REGEX = /\bsubstrate[_ -]?stall\b/i;
+const SUBSTRATE_STALL_CONDITION_REGEX =
+  /\bsubstrate[_ -]?stall:([A-Za-z0-9_.-]+)/gi;
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
@@ -3140,6 +3144,7 @@ export class OrchestratorCore {
       passedStages.push(currentStageName);
       this.state.issuePassedStages[issueId] = passedStages;
     }
+    delete this.state.issueReviewInfrastructureStalls[issueId];
 
     // Skip stages that have already been passed (e.g., review after a merge-triggered rework)
     let targetStageName = nextStageName;
@@ -3228,6 +3233,16 @@ export class OrchestratorCore {
     }
 
     if (failureClass === "verify" || failureClass === "infra") {
+      if (
+        failureClass === "infra" &&
+        this.handleReviewInfrastructureStall(
+          issueId,
+          runningEntry,
+          agentMessage,
+        )
+      ) {
+        return null;
+      }
       // Retryable failures — use existing exponential backoff
       return this.scheduleRetry(
         issueId,
@@ -3428,6 +3443,114 @@ export class OrchestratorCore {
       count,
       matchedCriteria: normalized.matchedCriteria,
     };
+  }
+
+  /**
+   * SYMPH-441: a substrate-stalled council gate is infrastructure, not code
+   * rework. The review worker reports the first occurrence as
+   * `[STAGE_FAILED: infra]`, which retries the same review stage. If the same
+   * stalled-lane set repeats, park loudly so operators can relaunch/requeue
+   * without burning another implement round.
+   */
+  private handleReviewInfrastructureStall(
+    issueId: string,
+    runningEntry: RunningEntry,
+    agentMessage: string | undefined,
+  ): boolean {
+    if (!isReviewSubstrateStallMessage(agentMessage)) {
+      delete this.state.issueReviewInfrastructureStalls[issueId];
+      return false;
+    }
+
+    const stageName = this.state.issueStages[issueId] ?? null;
+    if (stageName !== "review") {
+      return false;
+    }
+
+    const stalledLanes = extractSubstrateStallLanes(agentMessage);
+    const signatureSource =
+      stalledLanes.length > 0
+        ? `substrate_stall:${stalledLanes.join(",")}`
+        : (agentMessage ?? "substrate_stall");
+    const signature = normalizeErrorSignature(signatureSource).signature;
+    const previous = this.state.issueReviewInfrastructureStalls[issueId];
+    const count =
+      previous !== undefined && previous.signature === signature
+        ? previous.count + 1
+        : 1;
+    this.state.issueReviewInfrastructureStalls[issueId] = {
+      signature,
+      count,
+      stalledLanes,
+    };
+
+    if (count < MAX_REVIEW_SUBSTRATE_STALL_FAILURES) {
+      return false;
+    }
+
+    this.parkReviewInfrastructureBlocked(issueId, runningEntry, {
+      signature,
+      count,
+      stalledLanes,
+      agentMessage,
+    });
+    return true;
+  }
+
+  private parkReviewInfrastructureBlocked(
+    issueId: string,
+    runningEntry: RunningEntry,
+    input: {
+      signature: string;
+      count: number;
+      stalledLanes: string[];
+      agentMessage: string | undefined;
+    },
+  ): void {
+    const stageName = this.state.issueStages[issueId] ?? null;
+    const laneText =
+      input.stalledLanes.length > 0
+        ? input.stalledLanes.join(", ")
+        : "lane set not parseable from worker message";
+    const parkReason = `review gate infrastructure blocked: ${input.count} consecutive substrate_stall failures for ${laneText} (signature ${input.signature}); parked instead of reworking code (SYMPH-441)`;
+
+    this.state.failed.add(issueId);
+    this.releaseClaim(issueId);
+    this.clearTerminalIssueRuntimeState(issueId);
+
+    void this.fireEscalationSideEffects(
+      issueId,
+      runningEntry.identifier,
+      [
+        "## Parked: review gate infrastructure blocked (SYMPH-441)",
+        "",
+        `The review gate reported ${input.count} consecutive substrate-stall infrastructure failures for the same stalled lane set: ${laneText}.`,
+        "",
+        "This is not a council FAIL with code findings, and the orchestrator did not dispatch implement rework. Requeue after the council substrate is healthy or relaunch the review gate in a quiet window.",
+        "",
+        "Last review-stage message:",
+        sanitizeForLinear(input.agentMessage ?? "(missing)", { maxLen: 2000 }),
+      ].join("\n"),
+    );
+    void this.recordFailureExhausted(
+      issueId,
+      runningEntry.identifier,
+      runningEntry.issue.title,
+      parkReason,
+      {
+        failure_signature: input.signature,
+        failure_class: "transient",
+      },
+      {
+        issueDescription: runningEntry.issue.description ?? "",
+        stageName,
+        parkKind: "retry_exhausted",
+        attemptCount: runningEntry.retryAttempt ?? 1,
+        reworkCount: this.state.issueReworkCounts[issueId] ?? 0,
+        failureRecords: [],
+        stageHistory: this.state.issueExecutionHistory[issueId] ?? [],
+      },
+    );
   }
 
   /**
@@ -4653,6 +4776,7 @@ export class OrchestratorCore {
     delete this.state.issuePauseTriageResumes[issueId];
     delete this.state.issueAcSnapshots[issueId];
     delete this.state.issueReviewFailureStreaks[issueId];
+    delete this.state.issueReviewInfrastructureStalls[issueId];
     delete this.state.loopTraceJournal[issueId];
     delete this.state.continuousFeedback[issueId];
     // Clear the exhaustion-dedup marker so a resumed issue can fire the alert
@@ -8680,6 +8804,27 @@ function toClusterMembers(value: unknown): ClusterMember[] | null {
     });
   }
   return members;
+}
+
+function isReviewSubstrateStallMessage(
+  text: string | null | undefined,
+): boolean {
+  return (
+    text !== null && text !== undefined && SUBSTRATE_STALL_REGEX.test(text)
+  );
+}
+
+function extractSubstrateStallLanes(text: string | null | undefined): string[] {
+  if (text === null || text === undefined) {
+    return [];
+  }
+  const lanes = new Set<string>();
+  for (const match of text.matchAll(SUBSTRATE_STALL_CONDITION_REGEX)) {
+    if (match[1] !== undefined) {
+      lanes.add(match[1]);
+    }
+  }
+  return [...lanes].sort();
 }
 
 function defaultTimerScheduler(): TimerScheduler {
