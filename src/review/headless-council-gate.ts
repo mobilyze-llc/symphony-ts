@@ -91,7 +91,10 @@ export interface ReviewContext {
 
 export interface ReviewBundleReference {
   path: string;
+  /** SHA-256 of the written review-bundle.json bytes. */
   hash: string;
+  /** Canonical SHA-256 stored inside the bundle, excluding run-local paths. */
+  bundleHash: string;
   hashAlgorithm: "sha256";
 }
 
@@ -950,10 +953,17 @@ async function writeReviewBundle(
     workspace: options.workspace,
     env: options.env,
   });
-  const hashInput = {
-    schemaVersion: 1,
-    kind: "symphony-headless-council-review-bundle",
-    hashAlgorithm: "sha256",
+  const hashAlgorithm = "sha256" as const;
+  const kind: ReviewBundleArtifact["kind"] =
+    "symphony-headless-council-review-bundle";
+  const diffContent = {
+    sha256: sha256String(context.diff),
+    bytes: Buffer.byteLength(context.diff, "utf-8"),
+  };
+  const canonicalHashInput = {
+    schemaVersion: 1 as const,
+    kind,
+    hashAlgorithm,
     target: {
       issueId: input.issueId,
       repo: context.repo,
@@ -972,30 +982,32 @@ async function writeReviewBundle(
     scope: {
       changedPaths: extractChangedPathsFromDiff(context.diff),
     },
-    diff: {
-      path: options.diffPath,
-      sha256: sha256String(context.diff),
-      bytes: Buffer.byteLength(context.diff, "utf-8"),
-    },
+    diff: diffContent,
     gitStatus,
     provenance: normalizeReviewBundleProvenance(input.provenance ?? []),
     optionalInputs: {
       promptPaths: [...(input.promptPaths ?? [])],
       evidenceDatasetPaths: [...(input.evidenceDatasetPaths ?? [])],
     },
-  } satisfies Omit<ReviewBundleArtifact, "bundleHash">;
-  const bundleHash = sha256String(stableJsonStringify(hashInput));
+  };
+  const bundleHash = sha256String(stableJsonStringify(canonicalHashInput));
   const artifact: ReviewBundleArtifact = {
-    ...hashInput,
+    ...canonicalHashInput,
+    diff: {
+      path: options.diffPath,
+      ...diffContent,
+    },
     bundleHash,
   };
-  await writeFile(bundlePath, `${JSON.stringify(artifact, null, 2)}\n`);
+  const artifactJson = `${JSON.stringify(artifact, null, 2)}\n`;
+  await writeFile(bundlePath, artifactJson);
   return {
     artifact,
     reference: {
       path: bundlePath,
-      hash: bundleHash,
-      hashAlgorithm: "sha256",
+      hash: sha256String(artifactJson),
+      bundleHash,
+      hashAlgorithm,
     },
   };
 }
@@ -1804,9 +1816,11 @@ async function appendReviewBundleReferenceToLaneArtifacts(
   lanes: readonly HeadlessLaneResult[],
   reviewBundle: ReviewBundleReference,
 ): Promise<void> {
+  const existingFooterPattern =
+    /(?:\r?\n)?<!--\s*symphony-review-bundle\b[\s\S]*?-->(?:\r?\n)?/g;
   const footer = [
     "",
-    `<!-- symphony-review-bundle path=${JSON.stringify(reviewBundle.path)} hash=${JSON.stringify(reviewBundle.hash)} algorithm=${JSON.stringify(reviewBundle.hashAlgorithm)} -->`,
+    `<!-- symphony-review-bundle path=${JSON.stringify(reviewBundle.path)} hash=${JSON.stringify(reviewBundle.hash)} bundleHash=${JSON.stringify(reviewBundle.bundleHash)} algorithm=${JSON.stringify(reviewBundle.hashAlgorithm)} -->`,
     "",
   ].join("\n");
 
@@ -1819,10 +1833,10 @@ async function appendReviewBundleReferenceToLaneArtifacts(
         return;
       }
       const artifact = await readFile(lane.artifactPath, "utf-8");
-      if (/<!--\s*symphony-review-bundle\b/.test(artifact)) {
-        return;
-      }
-      await writeFile(lane.artifactPath, `${artifact}${footer}`);
+      const cleanedArtifact = artifact
+        .replace(existingFooterPattern, "")
+        .replace(/\n*$/, "");
+      await writeFile(lane.artifactPath, `${cleanedArtifact}${footer}`);
     }),
   );
 }
@@ -1859,18 +1873,19 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
     "## Review Bundle",
     "",
     `- Path: ${result.review_bundle?.path ?? "n/a"}`,
-    `- Hash: ${result.review_bundle?.hash ?? "n/a"}`,
+    `- File Hash: ${result.review_bundle?.hash ?? "n/a"}`,
+    `- Bundle Hash: ${result.review_bundle?.bundleHash ?? "n/a"}`,
     `- Algorithm: ${result.review_bundle?.hashAlgorithm ?? "n/a"}`,
     "",
     "## Lanes",
     "",
-    "| Lane | Agent | Role | Model | Independent | State | Verdict | Degraded | Bundle Hash | Artifact |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    "| Lane | Agent | Role | Model | Independent | State | Verdict | Degraded | Bundle File Hash | Bundle Hash | Artifact |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
   ];
 
   for (const lane of result.lanes) {
     lines.push(
-      `| ${lane.laneId} | ${lane.agent} | ${lane.role} | ${lane.model} | ${lane.independentReviewer ? "yes" : "no"} | ${lane.state} | ${lane.verdict} | ${lane.degradedReason ?? "n/a"} | ${lane.reviewBundle?.hash ?? "n/a"} | ${lane.artifactPath ?? "n/a"} |`,
+      `| ${lane.laneId} | ${lane.agent} | ${lane.role} | ${lane.model} | ${lane.independentReviewer ? "yes" : "no"} | ${lane.state} | ${lane.verdict} | ${lane.degradedReason ?? "n/a"} | ${lane.reviewBundle?.hash ?? "n/a"} | ${lane.reviewBundle?.bundleHash ?? "n/a"} | ${lane.artifactPath ?? "n/a"} |`,
     );
   }
 
@@ -1890,7 +1905,8 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
     `- Machine result: ${result.artifactPaths.resultJson}`,
     `- Human report: ${result.artifactPaths.councilReport}`,
     `- Review bundle: ${result.artifactPaths.reviewBundle ?? "n/a"}`,
-    `- Review bundle hash: ${result.review_bundle?.hash ?? "n/a"}`,
+    `- Review bundle file hash: ${result.review_bundle?.hash ?? "n/a"}`,
+    `- Review bundle canonical hash: ${result.review_bundle?.bundleHash ?? "n/a"}`,
     `- Diff: ${result.artifactPaths.diff ?? "n/a"}`,
     "",
   );
@@ -1917,7 +1933,8 @@ function buildReviewerPrompt(
     `Base: ${promptHeaderValue(context.baseRef, "unknown")}`,
     `Head: ${promptHeaderValue(context.headRef, "unknown")}`,
     `Review bundle path: ${promptHeaderValue(reviewBundle.path, "unknown")}`,
-    `Review bundle hash: ${promptHeaderValue(reviewBundle.hash, "unknown")}`,
+    `Review bundle file SHA-256: ${promptHeaderValue(reviewBundle.hash, "unknown")}`,
+    `Review bundle canonical hash: ${promptHeaderValue(reviewBundle.bundleHash, "unknown")}`,
     "",
     "You are read-only. Do not edit files, create commits, update PRs, or change Linear.",
     "Review only the frozen review bundle at the path above and the diff below. Prefer concrete correctness, safety, contract, or operator-risk findings.",
@@ -1970,7 +1987,8 @@ function buildCodexLeadPrompt(
         `- State: ${lane.state}`,
         `- Verdict: ${lane.verdict}`,
         `- Artifact: ${lane.artifactPath ?? "n/a"}`,
-        `- Review bundle hash: ${lane.reviewBundle?.hash ?? "n/a"}`,
+        `- Review bundle file SHA-256: ${lane.reviewBundle?.hash ?? "n/a"}`,
+        `- Review bundle canonical hash: ${lane.reviewBundle?.bundleHash ?? "n/a"}`,
         `- Message: ${lane.message ?? "n/a"}`,
       ].join("\n"),
     )
@@ -1985,7 +2003,8 @@ function buildCodexLeadPrompt(
     `Repository: ${promptHeaderValue(context.repo, "local workspace")}`,
     `PR: ${promptHeaderValue(context.prNumber, "local diff")}`,
     `Review bundle path: ${promptHeaderValue(reviewBundle.path, "unknown")}`,
-    `Review bundle hash: ${promptHeaderValue(reviewBundle.hash, "unknown")}`,
+    `Review bundle file SHA-256: ${promptHeaderValue(reviewBundle.hash, "unknown")}`,
+    `Review bundle canonical hash: ${promptHeaderValue(reviewBundle.bundleHash, "unknown")}`,
     "",
     "Read the frozen review bundle and reviewer artifacts named below. Fail if any P1/P2 code finding survives or if a reviewer artifact is missing/malformed.",
     "Do not convert degraded reviewer infrastructure into blocking code FINDINGS. If a lane reports substrate_stall and no P1/P2 code finding survives, output PASS for triage; the gate aggregate will still fail closed from the lane state and expose degradedReason: substrate_stall for the review-stage router.",
@@ -2047,29 +2066,40 @@ function normalizeReviewBundleProvenance(
 
 function extractChangedPathsFromDiff(diff: string): string[] {
   const paths = new Set<string>();
+  let inFileHeader = false;
   for (const line of diff.split(/\r?\n/)) {
     const diffGitMatch = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
     if (diffGitMatch !== null) {
       addDiffPath(paths, diffGitMatch[1]);
       addDiffPath(paths, diffGitMatch[2]);
+      inFileHeader = true;
       continue;
     }
 
-    const combinedDiffMatch = /^diff --cc (.+)$/.exec(line);
+    const combinedDiffMatch = /^diff --(?:cc|combined) (.+)$/.exec(line);
     if (combinedDiffMatch !== null) {
       addDiffPath(paths, combinedDiffMatch[1]);
+      inFileHeader = true;
       continue;
     }
 
-    const oldPathMatch = /^--- (?:a\/)?(.+)$/.exec(line);
+    if (/^@@@? /.test(line)) {
+      inFileHeader = false;
+      continue;
+    }
+
+    const oldPathMatch = inFileHeader ? /^--- (?:a\/)?(.+)$/.exec(line) : null;
     if (oldPathMatch !== null) {
       addDiffPath(paths, oldPathMatch[1]);
       continue;
     }
 
-    const newPathMatch = /^\+\+\+ (?:b\/)?(.+)$/.exec(line);
+    const newPathMatch = inFileHeader
+      ? /^\+\+\+ (?:b\/)?(.+)$/.exec(line)
+      : null;
     if (newPathMatch !== null) {
       addDiffPath(paths, newPathMatch[1]);
+      inFileHeader = false;
     }
   }
   return [...paths].sort();
