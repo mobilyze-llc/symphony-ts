@@ -642,6 +642,144 @@ describe("council R1 fix 2: replay restores rework stage transition", () => {
   });
 });
 
+describe("council R2: replay restores journaled rework target + count", () => {
+  const REWORK_VERDICT: StuckTriageVerdict = {
+    classification: "spec_defect",
+    action: "rework_with_hint",
+    hint: "Fix the spec.",
+    confidence: "high",
+    rationale: "Spec is wrong.",
+  };
+
+  function createStagesWithReworkBudget(maxRework: number): StagesConfig {
+    const base = createStagesWithRework();
+    return {
+      ...base,
+      stages: {
+        ...base.stages,
+        investigate: {
+          ...(base.stages.investigate as StagesConfig["stages"][string]),
+          maxRework,
+        },
+      },
+    };
+  }
+
+  it("journals the resolved target + count and replay restores both; the next rework beyond maxRework escalates", async () => {
+    const runStuckTriage = vi.fn().mockResolvedValue(REWORK_VERDICT);
+    const stages = createStagesWithReworkBudget(1);
+    const orchestrator = createOrchestrator({
+      runStuckTriage,
+      stuckTriage: ENABLED_TRIAGE,
+      stages,
+    });
+
+    await driveNoveltyPark(orchestrator);
+
+    // Live state: rework applied, count consumed.
+    expect(orchestrator.getState().issueStages["1"]).toBe("investigate");
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+
+    // The applied intent entry carries the resolved values.
+    const reworkIntent = intentEntries(orchestrator).find(
+      (entry) =>
+        entry.metadata.verb === "rework_with_hint" &&
+        entry.metadata.status === "applied",
+    );
+    expect(reworkIntent?.metadata.reworkTarget).toBe("investigate");
+    expect(reworkIntent?.metadata.reworkCount).toBe(1);
+
+    // Replay into a fresh orchestrator: both values are restored verbatim.
+    const replayed = createOrchestrator({
+      stages,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    expect(replayed.getState().issueStages["1"]).toBe("investigate");
+    expect(replayed.getState().issueReworkCounts["1"]).toBe(1);
+
+    // The consumed rework survives the replay: with maxRework: 1 already
+    // spent, another rework attempt escalates instead of running.
+    expect(replayed.reworkGate("1")).toBe("escalated");
+    expect(replayed.getState().failed.has("1")).toBe(true);
+  });
+
+  it("config drift: replay lands on the journaled target even when the current config's onRework points elsewhere", async () => {
+    const runStuckTriage = vi.fn().mockResolvedValue(REWORK_VERDICT);
+    const writeStages = createStagesWithReworkBudget(3);
+    const orchestrator = createOrchestrator({
+      runStuckTriage,
+      stuckTriage: ENABLED_TRIAGE,
+      stages: writeStages,
+    });
+    await driveNoveltyPark(orchestrator);
+    expect(orchestrator.getState().issueStages["1"]).toBe("investigate");
+
+    // The workflow changed between journal write and replay: investigate's
+    // onRework now points at "implement" instead of "investigate".
+    const driftedStages: StagesConfig = {
+      ...writeStages,
+      stages: {
+        ...writeStages.stages,
+        investigate: {
+          ...(writeStages.stages.investigate as StagesConfig["stages"][string]),
+          transitions: {
+            onComplete: "implement",
+            onApprove: null,
+            onRework: "implement",
+          },
+        },
+      },
+    };
+    const replayed = createOrchestrator({
+      stages: driftedStages,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+
+    // The journaled target wins — no config lookup at replay.
+    expect(replayed.getState().issueStages["1"]).toBe("investigate");
+    expect(replayed.getState().issueReworkCounts["1"]).toBe(1);
+  });
+
+  it("legacy entry without journaled values falls back to current-config derivation; count stays unrestored", async () => {
+    const runStuckTriage = vi.fn().mockResolvedValue(REWORK_VERDICT);
+    const stages = createStagesWithReworkBudget(3);
+    const orchestrator = createOrchestrator({
+      runStuckTriage,
+      stuckTriage: ENABLED_TRIAGE,
+      stages,
+    });
+    await driveNoveltyPark(orchestrator);
+
+    // Simulate a journal written before the resolved values were recorded:
+    // strip reworkTarget/reworkCount from the applied intent entry.
+    const legacyJournal = orchestrator
+      .getState()
+      .dispatcherRunJournal.map((entry) => {
+        if (
+          entry.kind === "intent" &&
+          entry.metadata.verb === "rework_with_hint" &&
+          entry.metadata.status === "applied"
+        ) {
+          const { reworkTarget, reworkCount, ...rest } = entry.metadata;
+          expect(reworkTarget).toBe("investigate");
+          expect(reworkCount).toBe(1);
+          return { ...entry, metadata: rest };
+        }
+        return entry;
+      });
+
+    const replayed = createOrchestrator({
+      stages,
+      runJournal: legacyJournal,
+    });
+
+    // Fallback: target derived from the current config's onRework; the
+    // consumed count cannot be recovered from a legacy entry.
+    expect(replayed.getState().issueStages["1"]).toBe("investigate");
+    expect(replayed.getState().issueReworkCounts["1"]).toBeUndefined();
+  });
+});
+
 describe("council R1 fix 3: hint egress neutralization", () => {
   it("hint containing triple-backticks and exceeding 4000 chars is posted stripped and capped", async () => {
     const postComment = vi.fn().mockResolvedValue(undefined);

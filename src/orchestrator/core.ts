@@ -716,15 +716,37 @@ export class OrchestratorCore {
           if (verb === "rework_with_hint") {
             // Restore the rework stage transition so a mid-rework restart
             // converges on the rework stage, not the pre-rework stage
-            // (SYMPH-399 P2 / SYMPH-368 pattern). The journal stage field
-            // holds the parked stage; the rework target is derived from config
-            // to avoid a second journal-schema field.
-            const parkedStage = entry.stage;
-            if (parkedStage !== null && this.config.stages !== null) {
-              const stageDef = this.config.stages.stages[parkedStage];
-              const reworkTarget = stageDef?.transitions.onRework ?? null;
-              if (reworkTarget !== null) {
-                this.state.issueStages[entry.issueId] = reworkTarget;
+            // (SYMPH-399 P2 / SYMPH-368 pattern). The entry's metadata
+            // carries the RESOLVED reworkTarget and post-increment
+            // reworkCount journaled at apply time (council R2): replaying
+            // them verbatim keeps the landing stage stable across config
+            // edits and prevents a crash-replay from forgetting the
+            // consumed rework and granting one extra pass beyond maxRework.
+            const journaledTarget = readMetadataString(
+              entry.metadata,
+              "reworkTarget",
+            );
+            const journaledCount = readMetadataNumber(
+              entry.metadata,
+              "reworkCount",
+            );
+            if (journaledTarget !== null && journaledCount !== null) {
+              this.state.issueStages[entry.issueId] = journaledTarget;
+              this.state.issueReworkCounts[entry.issueId] = journaledCount;
+            } else {
+              // Legacy entry written before the resolved values were
+              // journaled: fall back to deriving the target from the
+              // current config (best effort — may differ if the workflow
+              // changed since the write). The consumed count cannot be
+              // recovered from a legacy entry, so it stays unrestored and
+              // such an issue may get one extra rework after a replay.
+              const parkedStage = entry.stage;
+              if (parkedStage !== null && this.config.stages !== null) {
+                const stageDef = this.config.stages.stages[parkedStage];
+                const reworkTarget = stageDef?.transitions.onRework ?? null;
+                if (reworkTarget !== null) {
+                  this.state.issueStages[entry.issueId] = reworkTarget;
+                }
               }
             }
           }
@@ -4030,6 +4052,9 @@ export class OrchestratorCore {
         application.status === "no_op"
           ? `intent:${input.verb}:${input.issueId}:gen-${currentGen ?? "none"}:no_op`
           : `intent:${input.verb}:${input.issueId}:gen-${generationAfter ?? "none"}`,
+      ...(application.journalMetadata === undefined
+        ? {}
+        : { journalMetadata: application.journalMetadata }),
     });
 
     if (application.status === "applied" && input.renderComment !== false) {
@@ -4070,6 +4095,12 @@ export class OrchestratorCore {
     status: "applied" | "no_op";
     detail: string;
     stopRequest?: StopRequest | null;
+    /**
+     * Resolved values the replay reducer needs verbatim (e.g. the rework
+     * target and post-increment count), journaled alongside the intent so
+     * replay never re-derives them from a config that may have drifted.
+     */
+    journalMetadata?: Record<string, unknown>;
   }> {
     const { issueId } = input;
 
@@ -4176,6 +4207,14 @@ export class OrchestratorCore {
         return {
           status: "applied",
           detail: `released for rework to stage "${reworkTarget}"`,
+          // Journal the RESOLVED target and post-increment count so replay
+          // restores them verbatim — a config edit between write and replay
+          // must not change where the issue lands or grant an extra rework
+          // beyond maxRework (council R2: codex #2 / pi #3).
+          journalMetadata: {
+            reworkTarget,
+            reworkCount: this.state.issueReworkCounts[issueId] ?? 0,
+          },
         };
       }
 
@@ -4223,6 +4262,8 @@ export class OrchestratorCore {
     detail: string;
     generation: number | null;
     idempotencyKey: string;
+    /** Resolved values from applyIntentVerb that replay reads back verbatim. */
+    journalMetadata?: Record<string, unknown>;
   }): Promise<number | null> {
     const { input } = args;
     try {
@@ -4264,6 +4305,7 @@ export class OrchestratorCore {
             ? {}
             : { grantSignature: input.grantSignature }),
           ...(input.extraMetadata ?? {}),
+          ...(args.journalMetadata ?? {}),
         },
       });
       return entry.sequence;
@@ -7144,6 +7186,14 @@ function readMetadataString(
 ): string | null {
   const value = metadata[key];
   return typeof value === "string" ? value : null;
+}
+
+function readMetadataNumber(
+  metadata: Record<string, unknown>,
+  key: string,
+): number | null {
+  const value = metadata[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 /**
