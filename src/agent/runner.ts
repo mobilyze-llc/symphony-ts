@@ -342,10 +342,7 @@ export class AgentRunner {
       }
 
       if (canDeferLiveBudgetStopWithinGrace(decision, hardStops)) {
-        pendingLiveBudgetGraceStop = {
-          ...decision,
-          reason: `${decision.reason} Live token telemetry crossed the budget during an in-flight turn; allowing the in-flight turn to finish within ${formatLiveBudgetGracePct(hardStops.liveBudgetGraceRatio)} grace before pausing.`,
-        };
+        pendingLiveBudgetGraceStop = decision;
         return;
       }
 
@@ -671,24 +668,18 @@ export class AgentRunner {
           ...(lastTurn.message === null ? {} : { message: lastTurn.message }),
         });
 
-        // Early exit: agent signaled stage completion or failure
+        const hasStageCompleteSignal = containsStageCompleteSignal(
+          lastTurn.message,
+        );
+        const hasFailureSignal =
+          lastTurn.message !== null &&
+          parseFailureSignal(lastTurn.message) !== null;
+
+        // Early exit: agent signaled stage completion or failure.
         if (hardStop !== null) {
           break;
         }
-        if (containsStageCompleteSignal(lastTurn.message)) {
-          break;
-        }
-        if (
-          lastTurn.message !== null &&
-          parseFailureSignal(lastTurn.message) !== null
-        ) {
-          break;
-        }
-
-        // Turn failed at infrastructure level (e.g. abort/timeout) without an
-        // explicit agent failure signal — propagate so the orchestrator sees
-        // worker_exit_abnormal instead of the misleading worker_exit_normal.
-        if (lastTurn.status !== "completed") {
+        if (lastTurn.status !== "completed" && !hasFailureSignal) {
           throw new AgentRunnerError({
             message: lastTurn.message ?? "Agent turn failed unexpectedly.",
             status: "failed",
@@ -716,6 +707,9 @@ export class AgentRunner {
               ? `Live token telemetry crossed the budget during an in-flight turn; paused after the turn finished within ${formatLiveBudgetGracePct(hardStops.liveBudgetGraceRatio)} grace.`
               : `Live token telemetry crossed the budget during an in-flight turn; final completed-turn usage exceeded the ${formatLiveBudgetGracePct(hardStops.liveBudgetGraceRatio)} grace ceiling before another live update interrupted it.`,
           );
+          break;
+        }
+        if (hasStageCompleteSignal || hasFailureSignal) {
           break;
         }
         hardStop = postTurnBudgetStop;

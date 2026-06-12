@@ -513,7 +513,7 @@ describe("AgentRunner", () => {
               totalTokens: 21,
             },
             rateLimits: null,
-            message: "turn 1 finished inside grace",
+            message: "turn 1 finished inside grace\n[STAGE_COMPLETE]",
           };
         },
         continueTurn,
@@ -534,7 +534,7 @@ describe("AgentRunner", () => {
     expect(continueTurn).not.toHaveBeenCalled();
     expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
     expect(result.turnsCompleted).toBe(1);
-    expect(result.lastTurn?.message).toBe("turn 1 finished inside grace");
+    expect(result.lastTurn?.message).toContain("turn 1 finished inside grace");
     expect(result.hardStop).toMatchObject({
       outcome: "PAUSED-budget",
       trigger: "token_budget",
