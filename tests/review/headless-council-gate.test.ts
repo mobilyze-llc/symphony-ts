@@ -317,6 +317,71 @@ describe("runHeadlessCouncilGate", () => {
     );
   });
 
+  it("keeps review bundle creation nonfatal when git status capture throws", async () => {
+    const harness = await createHarness({
+      gitStatusReject: new Error("status exploded"),
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    const bundle = JSON.parse(
+      await readFile(result.artifactPaths.reviewBundle!, "utf-8"),
+    ) as { gitStatus: Record<string, unknown> };
+    expect(bundle.gitStatus).toMatchObject({
+      command: "git status --short --branch",
+      exitCode: -1,
+      stdout: "",
+      stderr: "status exploded",
+      summary: "git status unavailable: status exploded",
+    });
+  });
+
+  it("normalizes changed paths from combined and malformed quoted diff headers", async () => {
+    const harness = await createHarness();
+    await writeFile(
+      harness.diffPath,
+      [
+        "diff --cc merged.ts",
+        '--- "bad\\u12"',
+        "+++ b/good.ts",
+        "+changed",
+        "",
+      ].join("\n"),
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const bundle = JSON.parse(
+      await readFile(result.artifactPaths.reviewBundle!, "utf-8"),
+    ) as { scope: { changedPaths: string[] } };
+    expect(bundle.scope.changedPaths).toEqual([
+      "bad\\u12",
+      "good.ts",
+      "merged.ts",
+    ]);
+  });
+
   it("does not leave a machine PASS artifact when report writing fails", async () => {
     const harness = await createHarness();
     await mkdir(join(harness.artifactDir, "council-report.md"), {
@@ -2036,6 +2101,7 @@ async function createHarness(options?: {
   gitDiffNameOnly?: CommandResult;
   gitRevParse?: Record<string, CommandResult>;
   gitStatus?: CommandResult;
+  gitStatusReject?: Error;
   laneBehavior?: Record<string, LaneBehavior>;
 }) {
   const root = await mkdtemp(join(tmpdir(), "symphony-headless-gate-"));
@@ -2141,6 +2207,9 @@ async function createHarness(options?: {
     }
 
     if (command === "git" && args.join(" ") === "status --short --branch") {
+      if (options?.gitStatusReject !== undefined) {
+        throw options.gitStatusReject;
+      }
       return (
         options?.gitStatus ?? {
           exitCode: 0,

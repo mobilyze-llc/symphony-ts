@@ -1003,15 +1003,23 @@ async function captureGitStatusSummary(input: {
   workspace: string;
   env: NodeJS.ProcessEnv;
 }): Promise<ReviewBundleArtifact["gitStatus"]> {
-  const result = await input.runCommand(
-    "git",
-    ["status", "--short", "--branch"],
-    {
+  let result: CommandResult;
+  try {
+    result = await input.runCommand("git", ["status", "--short", "--branch"], {
       cwd: input.workspace,
       env: input.env,
       timeoutMs: DEFAULT_PREFLIGHT_TIMEOUT_MS,
-    },
-  );
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      command: "git status --short --branch",
+      exitCode: -1,
+      stdout: "",
+      stderr: message,
+      summary: `git status unavailable: ${message}`,
+    };
+  }
   const stdout = result.stdout.trimEnd();
   const stderr = result.stderr.trimEnd();
   return {
@@ -2045,6 +2053,12 @@ function extractChangedPathsFromDiff(diff: string): string[] {
       continue;
     }
 
+    const combinedDiffMatch = /^diff --cc (.+)$/.exec(line);
+    if (combinedDiffMatch !== null) {
+      addDiffPath(paths, combinedDiffMatch[1]);
+      continue;
+    }
+
     const oldPathMatch = /^--- (?:a\/)?(.+)$/.exec(line);
     if (oldPathMatch !== null) {
       addDiffPath(paths, oldPathMatch[1]);
@@ -2078,7 +2092,7 @@ function normalizeDiffPath(rawPath: string | undefined): string | null {
     try {
       return JSON.parse(withoutMetadata) as string;
     } catch {
-      return withoutMetadata;
+      return withoutMetadata.slice(1, -1);
     }
   }
   return withoutMetadata;
