@@ -45,6 +45,7 @@ import {
   type DispatcherOperation,
   type DispatcherRunJournal,
   type DispatcherRunJournalEntry,
+  type ExecutionHistory,
   FAILURE_CLASSES,
   type FailureClass,
   type Issue,
@@ -174,6 +175,16 @@ interface ResumeRequiredGuard {
    * earlier park a no-op even when a re-park lands moments later.
    */
   parkSeq: number;
+}
+
+interface PendingStageConsumptionRollbackSnapshot {
+  state: OrchestratorState;
+  lastExitHistorySnapshot: Map<string, ExecutionHistory>;
+  resumeRequiredGuards: Map<string, ResumeRequiredGuard>;
+  issueParkGenerations: Map<string, number>;
+  triagedParkGenerations: Map<string, number>;
+  escalatedParkGenerations: Map<string, number | null>;
+  parkSequence: number;
 }
 
 export type WorkerExitOutcome =
@@ -2109,6 +2120,7 @@ export class OrchestratorCore {
             this.applyDeferredPauseTriageVerdict({
               issueId,
               identifier: runningEntry.identifier,
+              issue: runningEntry.issue,
               stageName,
               trigger: hardStop.trigger,
               resumesUsedAtFire: resumesUsed,
@@ -2268,6 +2280,7 @@ export class OrchestratorCore {
   private async applyDeferredPauseTriageVerdict(input: {
     issueId: string;
     identifier: string;
+    issue: Issue;
     stageName: string | null;
     trigger: HardStopTrigger;
     resumesUsedAtFire: number;
@@ -2396,20 +2409,7 @@ export class OrchestratorCore {
       const retryEntry = await this.consumePendingStageSignal(
         issueId,
         createPendingRunningEntry({
-          issue: {
-            id: issueId,
-            identifier,
-            title: identifier,
-            description: null,
-            priority: null,
-            state: EXPLICIT_RESUME_STATE,
-            branchName: null,
-            url: null,
-            labels: [],
-            blockedBy: [],
-            createdAt: null,
-            updatedAt: null,
-          },
+          issue: input.issue,
           identifier,
           attempt: pendingStageSignal.attempt,
           stageName,
@@ -2599,8 +2599,9 @@ export class OrchestratorCore {
       // Hold-then-route (SYMPH-354): the stage neither advances nor parks
       // until the local model scores the acceptance criteria. This same path
       // is used when a deferred budget pause is resumed with a pending
-      // [STAGE_COMPLETE] signal (SYMPH-440), so the budget gate still wins
-      // first while the terminal completion message is not dropped.
+      // [STAGE_COMPLETE] signal (SYMPH-440): the budget gate has already
+      // authorized consumption, and the terminal completion message is still
+      // routed through the normal AC gate.
       const scheduleDeferred = this.scheduleDeferred;
       const completionMessage = agentMessage ?? runningEntry.lastCodexMessage;
       void this.runAcGate({
@@ -2703,38 +2704,82 @@ export class OrchestratorCore {
     runningEntry: RunningEntry,
     pendingStageSignal: PendingStageSignal,
   ): Promise<RetryEntry | null> {
-    delete this.state.issuePendingStageSignals[issueId];
-    if (pendingStageSignal.stageName !== null) {
-      this.state.issueStages[issueId] = pendingStageSignal.stageName;
-    }
-    runningEntry.lastCodexMessage = pendingStageSignal.agentMessage;
-
-    let retryEntry: RetryEntry | null;
-    if (pendingStageSignal.signal === "failure") {
-      if (pendingStageSignal.failureClass === null) {
-        return null;
+    const rollbackSnapshot = this.snapshotPendingStageConsumptionRollback();
+    try {
+      delete this.state.issuePendingStageSignals[issueId];
+      if (pendingStageSignal.stageName !== null) {
+        this.state.issueStages[issueId] = pendingStageSignal.stageName;
       }
-      retryEntry = this.handleFailureSignal(
-        issueId,
-        runningEntry,
-        pendingStageSignal.failureClass,
-        pendingStageSignal.agentMessage,
-      );
-    } else {
-      retryEntry = await this.handleNormalStageExit(
-        issueId,
-        runningEntry,
-        pendingStageSignal.stageName,
-        pendingStageSignal.agentMessage,
-      );
-    }
+      runningEntry.lastCodexMessage = pendingStageSignal.agentMessage;
 
-    await this.recordPendingStageSignalConsumed(
-      issueId,
-      runningEntry,
-      pendingStageSignal,
+      let retryEntry: RetryEntry | null;
+      if (pendingStageSignal.signal === "failure") {
+        if (pendingStageSignal.failureClass === null) {
+          await this.recordPendingStageSignalConsumed(
+            issueId,
+            runningEntry,
+            pendingStageSignal,
+          );
+          this.clearResumeRequirement(issueId);
+          return null;
+        }
+        retryEntry = this.handleFailureSignal(
+          issueId,
+          runningEntry,
+          pendingStageSignal.failureClass,
+          pendingStageSignal.agentMessage,
+        );
+      } else {
+        retryEntry = await this.handleNormalStageExit(
+          issueId,
+          runningEntry,
+          pendingStageSignal.stageName,
+          pendingStageSignal.agentMessage,
+        );
+      }
+
+      await this.recordPendingStageSignalConsumed(
+        issueId,
+        runningEntry,
+        pendingStageSignal,
+      );
+      this.clearResumeRequirement(issueId);
+      return retryEntry;
+    } catch (error) {
+      this.restorePendingStageConsumptionRollback(rollbackSnapshot);
+      throw error;
+    }
+  }
+
+  private snapshotPendingStageConsumptionRollback(): PendingStageConsumptionRollbackSnapshot {
+    return {
+      state: cloneOrchestratorState(this.state),
+      lastExitHistorySnapshot: cloneExecutionHistoryMap(
+        this.lastExitHistorySnapshot,
+      ),
+      resumeRequiredGuards: cloneResumeRequiredGuards(
+        this.resumeRequiredGuards,
+      ),
+      issueParkGenerations: new Map(this.issueParkGenerations),
+      triagedParkGenerations: new Map(this.triagedParkGenerations),
+      escalatedParkGenerations: new Map(this.escalatedParkGenerations),
+      parkSequence: this.parkSequence,
+    };
+  }
+
+  private restorePendingStageConsumptionRollback(
+    snapshot: PendingStageConsumptionRollbackSnapshot,
+  ): void {
+    restoreOrchestratorState(this.state, snapshot.state);
+    restoreMap(this.lastExitHistorySnapshot, snapshot.lastExitHistorySnapshot);
+    restoreMap(this.resumeRequiredGuards, snapshot.resumeRequiredGuards);
+    restoreMap(this.issueParkGenerations, snapshot.issueParkGenerations);
+    restoreMap(this.triagedParkGenerations, snapshot.triagedParkGenerations);
+    restoreMap(
+      this.escalatedParkGenerations,
+      snapshot.escalatedParkGenerations,
     );
-    return retryEntry;
+    this.parkSequence = snapshot.parkSequence;
   }
 
   private async recordPendingStageSignalConsumed(
@@ -9109,6 +9154,147 @@ function isFailureClass(value: string | null): value is FailureClass {
   return (
     value !== null && (FAILURE_CLASSES as readonly string[]).includes(value)
   );
+}
+
+function cloneOrchestratorState(state: OrchestratorState): OrchestratorState {
+  return {
+    pollIntervalMs: state.pollIntervalMs,
+    maxConcurrentAgents: state.maxConcurrentAgents,
+    running: cloneRecord(state.running, cloneRunningEntry),
+    claimed: new Set(state.claimed),
+    retryAttempts: cloneRecord(state.retryAttempts, cloneRetryEntry),
+    completed: new Set(state.completed),
+    failed: new Set(state.failed),
+    resumeRequired: new Set(state.resumeRequired),
+    resumeRequiredMarks: clonePlain(state.resumeRequiredMarks),
+    codexTotals: clonePlain(state.codexTotals),
+    codexRateLimits: clonePlain(state.codexRateLimits),
+    rateLimitAdmission: clonePlain(state.rateLimitAdmission),
+    issueStages: clonePlain(state.issueStages),
+    issuePendingStageSignals: clonePlain(state.issuePendingStageSignals),
+    issueBudgetEscalations: clonePlain(state.issueBudgetEscalations),
+    issuePauseTriageResumes: clonePlain(state.issuePauseTriageResumes),
+    issueReworkCounts: clonePlain(state.issueReworkCounts),
+    issuePassedStages: clonePlain(state.issuePassedStages),
+    issueFirstDispatchedAt: clonePlain(state.issueFirstDispatchedAt),
+    issueExecutionHistory: clonePlain(state.issueExecutionHistory),
+    issueRightSizingDecisions: clonePlain(state.issueRightSizingDecisions),
+    issueAcSnapshots: clonePlain(state.issueAcSnapshots),
+    decorrelatedGateOutcomes: clonePlain(state.decorrelatedGateOutcomes),
+    loopTraceJournal: clonePlain(state.loopTraceJournal),
+    continuousFeedback: clonePlain(state.continuousFeedback),
+    dispatcherRunJournal: clonePlain(state.dispatcherRunJournal),
+    dispatcherLeases: clonePlain(state.dispatcherLeases),
+    managerRunJournal: clonePlain(state.managerRunJournal),
+    managerRuns: clonePlain(state.managerRuns),
+    issueFailureSignatures: clonePlain(state.issueFailureSignatures),
+    issueDispositions: clonePlain(state.issueDispositions),
+    issueReviewFailureStreaks: clonePlain(state.issueReviewFailureStreaks),
+    issueReviewInfrastructureStalls: clonePlain(
+      state.issueReviewInfrastructureStalls,
+    ),
+    failureExhaustedIds: new Set(state.failureExhaustedIds),
+  };
+}
+
+function restoreOrchestratorState(
+  target: OrchestratorState,
+  snapshot: OrchestratorState,
+): void {
+  target.pollIntervalMs = snapshot.pollIntervalMs;
+  target.maxConcurrentAgents = snapshot.maxConcurrentAgents;
+  target.running = snapshot.running;
+  target.claimed = snapshot.claimed;
+  target.retryAttempts = snapshot.retryAttempts;
+  target.completed = snapshot.completed;
+  target.failed = snapshot.failed;
+  target.resumeRequired = snapshot.resumeRequired;
+  target.resumeRequiredMarks = snapshot.resumeRequiredMarks;
+  target.codexTotals = snapshot.codexTotals;
+  target.codexRateLimits = snapshot.codexRateLimits;
+  target.rateLimitAdmission = snapshot.rateLimitAdmission;
+  target.issueStages = snapshot.issueStages;
+  target.issuePendingStageSignals = snapshot.issuePendingStageSignals;
+  target.issueBudgetEscalations = snapshot.issueBudgetEscalations;
+  target.issuePauseTriageResumes = snapshot.issuePauseTriageResumes;
+  target.issueReworkCounts = snapshot.issueReworkCounts;
+  target.issuePassedStages = snapshot.issuePassedStages;
+  target.issueFirstDispatchedAt = snapshot.issueFirstDispatchedAt;
+  target.issueExecutionHistory = snapshot.issueExecutionHistory;
+  target.issueRightSizingDecisions = snapshot.issueRightSizingDecisions;
+  target.issueAcSnapshots = snapshot.issueAcSnapshots;
+  target.decorrelatedGateOutcomes = snapshot.decorrelatedGateOutcomes;
+  target.loopTraceJournal = snapshot.loopTraceJournal;
+  target.continuousFeedback = snapshot.continuousFeedback;
+  target.dispatcherRunJournal = snapshot.dispatcherRunJournal;
+  target.dispatcherLeases = snapshot.dispatcherLeases;
+  target.managerRunJournal = snapshot.managerRunJournal;
+  target.managerRuns = snapshot.managerRuns;
+  target.issueFailureSignatures = snapshot.issueFailureSignatures;
+  target.issueDispositions = snapshot.issueDispositions;
+  target.issueReviewFailureStreaks = snapshot.issueReviewFailureStreaks;
+  target.issueReviewInfrastructureStalls =
+    snapshot.issueReviewInfrastructureStalls;
+  target.failureExhaustedIds = snapshot.failureExhaustedIds;
+}
+
+function cloneRunningEntry(entry: RunningEntry): RunningEntry {
+  const { workerHandle, monitorHandle, ...cloneable } = entry;
+  return {
+    ...clonePlain(cloneable),
+    workerHandle,
+    monitorHandle,
+  };
+}
+
+function cloneRetryEntry(entry: RetryEntry): RetryEntry {
+  const { timerHandle, ...cloneable } = entry;
+  return {
+    ...clonePlain(cloneable),
+    timerHandle,
+  };
+}
+
+function cloneExecutionHistoryMap(
+  source: Map<string, ExecutionHistory>,
+): Map<string, ExecutionHistory> {
+  return new Map(
+    [...source.entries()].map(([issueId, history]) => [
+      issueId,
+      clonePlain(history),
+    ]),
+  );
+}
+
+function cloneResumeRequiredGuards(
+  source: Map<string, ResumeRequiredGuard>,
+): Map<string, ResumeRequiredGuard> {
+  return new Map(
+    [...source.entries()].map(([issueId, guard]) => [
+      issueId,
+      clonePlain(guard),
+    ]),
+  );
+}
+
+function cloneRecord<T>(
+  record: Record<string, T>,
+  cloneValue: (value: T) => T,
+): Record<string, T> {
+  return Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [key, cloneValue(value)]),
+  ) as Record<string, T>;
+}
+
+function clonePlain<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function restoreMap<K, V>(target: Map<K, V>, snapshot: Map<K, V>): void {
+  target.clear();
+  for (const [key, value] of snapshot) {
+    target.set(key, value);
+  }
 }
 
 function createPendingRunningEntry(input: {

@@ -1181,6 +1181,229 @@ describe("orchestrator core", () => {
     expect(spawnedStageNames).toEqual(["investigate", "implement"]);
   });
 
+  it("consumes a pending stage completion after sync pause-triage continue", async () => {
+    const spawnedStageNames: Array<string | null> = [];
+    const config = createInvestigateImplementConfig();
+    config.pauseTriage = {
+      baseUrl: "http://studio2.local:8000/v1",
+      model: "deepseek-v4-flash",
+      apiKey: null,
+      maxResumes: 1,
+    };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStageNames.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      runPauseTriage: async () => ({
+        verdict: "continue",
+        rationale: "The stage finished at the budget boundary.",
+      }),
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "Investigation finished.\n[STAGE_COMPLETE]",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250_001,
+        estimatedCostUsd: 5,
+      },
+    });
+
+    expect(spawnedStageNames).toEqual(["investigate"]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(retry).toMatchObject({
+      issueId: "1",
+      identifier: "ISSUE-1",
+      delayType: "continuation",
+    });
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "pending_stage_signal" &&
+            entry.metadata.status === "consumed" &&
+            entry.metadata.sourceSequence !== null,
+        ),
+    ).toBe(true);
+
+    const nextStage = await orchestrator.onRetryTimer("1");
+    expect(nextStage.dispatched).toBe(true);
+    expect(spawnedStageNames).toEqual(["investigate", "implement"]);
+  });
+
+  it("consumes a pending stage completion after deferred pause-triage continue without losing issue context", async () => {
+    const deferred: Array<() => Promise<void>> = [];
+    let resolveVerdict: (v: {
+      verdict: "continue";
+      rationale: string;
+    }) => void = () => {};
+    let acGateInput: {
+      issueTitle: string;
+      issueDescription: string | null;
+    } | null = null;
+    const spawnedStageNames: Array<string | null> = [];
+    const config = createInvestigateImplementConfig();
+    config.pauseTriage = {
+      baseUrl: "http://studio2.local:8000/v1",
+      model: "deepseek-v4-flash",
+      apiKey: null,
+      maxResumes: 1,
+    };
+    config.acGate = { enabled: true };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            title: "Preserve terminal signal",
+            description: "Use the real issue body for post-budget AC gating.",
+          }),
+        ],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStageNames.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      runPauseTriage: () =>
+        new Promise((resolve) => {
+          resolveVerdict = resolve;
+        }),
+      runAcGate: async (input) => {
+        acGateInput = {
+          issueTitle: input.issueTitle,
+          issueDescription: input.issueDescription,
+        };
+        return { verdict: "pass", feedback: "Completion is acceptable." };
+      },
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "Investigation finished.\n[STAGE_COMPLETE]",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250_001,
+        estimatedCostUsd: 5,
+      },
+    });
+
+    expect(retry).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(deferred).toHaveLength(1);
+    await deferred[0]?.();
+
+    resolveVerdict({
+      verdict: "continue",
+      rationale: "The completion marker arrived with the budget pause.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(deferred).toHaveLength(2);
+    await deferred[1]?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(acGateInput).toEqual({
+      issueTitle: "Preserve terminal signal",
+      issueDescription: "Use the real issue body for post-budget AC gating.",
+    });
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+    expect(spawnedStageNames).toEqual(["investigate"]);
+
+    expect(deferred).toHaveLength(3);
+    await deferred[2]?.();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().retryAttempts["1"]?.delayType).toBe(
+      "continuation",
+    );
+  });
+
+  it("rolls back pending stage consumption when the consumed marker cannot be persisted", async () => {
+    const config = createInvestigateImplementConfig();
+    config.budgetEscalation = { maxSteps: 1, multiplier: 2 };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      writeRunJournalEntry: async (entry) => {
+        if (entry.kind === "pending_stage_signal") {
+          throw new Error("journal disk unavailable");
+        }
+      },
+    });
+
+    await orchestrator.pollTick();
+    await expect(
+      orchestrator.onWorkerExit({
+        issueId: "1",
+        outcome: "normal",
+        agentMessage: "Investigation finished.\n[STAGE_COMPLETE]",
+        endedAt: new Date("2026-03-06T00:01:05.000Z"),
+        hardStop: {
+          outcome: "PAUSED-budget",
+          trigger: "token_budget",
+          reason: "Token budget exceeded.",
+          turnCount: 2,
+          totalTokens: 250_001,
+          estimatedCostUsd: 5,
+        },
+      }),
+    ).rejects.toThrow("journal disk unavailable");
+
+    const state = orchestrator.getState();
+    expect(state.issueStages["1"]).toBe("investigate");
+    expect(state.issuePendingStageSignals["1"]).toMatchObject({
+      signal: "complete",
+      stageName: "investigate",
+    });
+    expect(state.retryAttempts["1"]).toBeUndefined();
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) => entry.kind === "pending_stage_signal",
+      ),
+    ).toBe(false);
+  });
+
   it("keeps worker running state when dispatcher lease completion cannot be persisted", async () => {
     const timers = createFakeTimerScheduler();
     const orchestrator = createOrchestrator({
@@ -8465,6 +8688,71 @@ function createGateConfig(): ResolvedWorkflowConfig {
         transitions: {
           onComplete: null,
           onApprove: "done",
+          onRework: null,
+        },
+        linearState: null,
+      },
+      done: {
+        type: "terminal",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: null,
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: "Done",
+      },
+    },
+  };
+  return config;
+}
+
+function createInvestigateImplementConfig(): ResolvedWorkflowConfig {
+  const config = createConfig();
+  config.stages = {
+    initialStage: "investigate",
+    fastTrack: null,
+    stages: {
+      investigate: {
+        type: "agent",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "implement",
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: null,
+      },
+      implement: {
+        type: "agent",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "done",
+          onApprove: null,
           onRework: null,
         },
         linearState: null,
