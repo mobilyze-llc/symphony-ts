@@ -2070,7 +2070,7 @@ function createConfig(root: string, scenario: string): ResolvedWorkflowConfig {
         type: "workspace-write",
       },
       turnTimeoutMs: 1_000,
-      readTimeoutMs: 1_000,
+      readTimeoutMs: 5_000,
       stallTimeoutMs: 2_000,
     },
     pauseTriage: {
