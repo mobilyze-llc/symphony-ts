@@ -36,10 +36,13 @@ import {
   type IntentFence,
   type IntentStatus,
   type IntentVerb,
+  PIPELINE_INTENT_ISSUE_ID,
+  PIPELINE_INTENT_ISSUE_IDENTIFIER,
 } from "../orchestrator/intent.js";
 import { fetchClaudeUsageFromCli } from "./dashboard-claude-usage.js";
 import { toErrorMessage } from "./dashboard-format.js";
 import {
+  PayloadTooLargeError,
   isSnapshotTimeoutError,
   readRequestBody,
   readRequestBodyText,
@@ -215,7 +218,7 @@ export interface IntentRequest {
 }
 
 export interface IntentRequestResult {
-  status: IntentStatus | "issue_not_found";
+  status: IntentStatus | "issue_not_found" | "invalid_request";
   detail: string;
   sequence: number | null;
   verb: IntentVerb;
@@ -259,31 +262,59 @@ export interface DashboardServerHost {
 
 const intentActorSchema = z.object({
   kind: z.enum(INTENT_ACTOR_KINDS),
-  host: z.string().min(1),
-  session: z.string().min(1).optional(),
+  host: z.string().min(1).max(256),
+  session: z.string().min(1).max(256).optional(),
 });
+
+/**
+ * The pipeline sentinel ("pipeline"/"PIPELINE") is a reserved synthetic
+ * journal scope, never an addressable issue: an intent verb targeting it
+ * must be rejected at the boundary (case-insensitive) before it can journal
+ * issue-scoped state under the sentinel id.
+ */
+function isPipelineSentinel(value: string | undefined): boolean {
+  if (value === undefined) {
+    return false;
+  }
+  const lowered = value.toLowerCase();
+  return (
+    lowered === PIPELINE_INTENT_ISSUE_ID.toLowerCase() ||
+    lowered === PIPELINE_INTENT_ISSUE_IDENTIFIER.toLowerCase()
+  );
+}
 
 const intentRequestSchema = z
   .object({
     verb: z.enum(INTENT_VERBS),
-    issueId: z.string().min(1).optional(),
-    issueIdentifier: z.string().min(1).optional(),
-    reason: z.string().min(1),
+    issueId: z.string().min(1).max(256).optional(),
+    issueIdentifier: z.string().min(1).max(256).optional(),
+    reason: z.string().min(1).max(2048),
     actor: intentActorSchema,
-    fence: z.object({ expectedParkSeq: z.number().int() }).optional(),
-    hint: z.string().min(1).optional(),
-    stage: z.string().min(1).optional(),
+    fence: z
+      .object({ expectedParkSeq: z.number().int().positive() })
+      .optional(),
+    hint: z.string().min(1).max(1024).optional(),
+    stage: z.string().min(1).max(1024).optional(),
   })
   .refine(
     (value) =>
       value.issueId !== undefined || value.issueIdentifier !== undefined,
     { message: "Either issueId or issueIdentifier is required." },
+  )
+  .refine(
+    (value) =>
+      !isPipelineSentinel(value.issueId) &&
+      !isPipelineSentinel(value.issueIdentifier),
+    {
+      message:
+        "The pipeline sentinel is not an addressable issue; use the pipeline pause/resume endpoints.",
+    },
   );
 
 /** Optional attribution body for the pipeline pause/resume endpoints. */
 const pipelineControlBodySchema = z.object({
   actor: intentActorSchema.optional(),
-  reason: z.string().min(1).optional(),
+  reason: z.string().min(1).max(2048).optional(),
 });
 
 function parseJsonBody(raw: string): unknown {
@@ -291,6 +322,26 @@ function parseJsonBody(raw: string): unknown {
     return {};
   }
   return JSON.parse(raw);
+}
+
+/**
+ * Mutating JSON routes (intents, pipeline pause/resume) require an explicit
+ * `content-type: application/json` — a cheap cross-site / accidental-form
+ * POST guard on a server that may be bound beyond loopback. GET routes and
+ * body-ignoring POST routes are unchanged.
+ */
+function hasJsonContentType(request: IncomingMessage): boolean {
+  const header = request.headers["content-type"];
+  if (header === undefined) {
+    return false;
+  }
+  return header.split(";")[0]?.trim().toLowerCase() === "application/json";
+}
+
+function writeUnsupportedMediaType(response: ServerResponse): void {
+  writeJsonError(response, 415, "unsupported_media_type", {
+    message: "Content-Type must be application/json.",
+  });
 }
 
 /**
@@ -377,7 +428,7 @@ export interface DashboardServerInstance {
 }
 
 export function createDashboardServer(options: DashboardServerOptions): Server {
-  const hostname = options.hostname ?? "0.0.0.0";
+  const hostname = options.hostname ?? "127.0.0.1";
   const snapshotTimeoutMs =
     options.snapshotTimeoutMs ?? DEFAULT_SNAPSHOT_TIMEOUT_MS;
   const liveController = new DashboardLiveUpdatesController({
@@ -410,7 +461,7 @@ export async function startDashboardServer(
   },
 ): Promise<DashboardServerInstance> {
   const server = createDashboardServer(options);
-  const hostname = options.hostname ?? "0.0.0.0";
+  const hostname = options.hostname ?? "127.0.0.1";
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -449,7 +500,7 @@ export function createDashboardRequestHandler(
     liveController?: DashboardLiveUpdatesController;
   },
 ): (request: IncomingMessage, response: ServerResponse) => Promise<void> {
-  const hostname = options.hostname ?? "0.0.0.0";
+  const hostname = options.hostname ?? "127.0.0.1";
   const snapshotTimeoutMs =
     options.snapshotTimeoutMs ?? DEFAULT_SNAPSHOT_TIMEOUT_MS;
   const renderOptions: DashboardRenderOptions = {
@@ -766,6 +817,11 @@ export function createDashboardRequestHandler(
           return;
         }
 
+        if (!hasJsonContentType(request)) {
+          writeUnsupportedMediaType(response);
+          return;
+        }
+
         const rawBody = await readRequestBodyText(request);
         let parsedBody: unknown;
         try {
@@ -797,9 +853,11 @@ export function createDashboardRequestHandler(
         const statusCode =
           result.status === "issue_not_found"
             ? 404
-            : result.status === "rejected_stale"
-              ? 409
-              : 200;
+            : result.status === "invalid_request"
+              ? 400
+              : result.status === "rejected_stale"
+                ? 409
+                : 200;
         writeJson(response, statusCode, result);
         return;
       }
@@ -823,6 +881,11 @@ export function createDashboardRequestHandler(
           writeJsonError(response, 501, "not_implemented", {
             message: `Pipeline ${action} is not supported by this host.`,
           });
+          return;
+        }
+
+        if (!hasJsonContentType(request)) {
+          writeUnsupportedMediaType(response);
           return;
         }
 
@@ -928,6 +991,13 @@ export function createDashboardRequestHandler(
 
       writeNotFound(response, url.pathname);
     } catch (error) {
+      if (error instanceof PayloadTooLargeError) {
+        writeJsonError(response, 413, "payload_too_large", {
+          message: toErrorMessage(error),
+        });
+        return;
+      }
+
       if (isSnapshotTimeoutError(error)) {
         writeJsonError(response, 504, ERROR_CODES.snapshotTimedOut, {
           message: toErrorMessage(error),

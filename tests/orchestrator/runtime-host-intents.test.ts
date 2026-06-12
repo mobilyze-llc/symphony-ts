@@ -5,8 +5,11 @@
  *   tracker active states) and routes writeIntent — no verb semantics of
  *   its own.
  * - requestPipelinePause/Resume journal a pipeline-scoped, actor-attributed
- *   intent entry BEFORE any tracker (Linear halt-issue) manipulation: the
- *   Linear state change is a view applied after journaling intent.
+ *   intent entry that records the ACTUAL outcome: feasibility is checked
+ *   before mutating, `no_op` is journaled for already-satisfied/infeasible
+ *   requests, and `applied` is journaled only AFTER the Linear halt-issue
+ *   view mutation succeeded (a failed journal write at that point is
+ *   warn-only degraded mode).
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,7 +23,9 @@ import type {
 } from "../../src/config/types.js";
 import type { Issue } from "../../src/domain/model.js";
 import { StructuredLogger } from "../../src/logging/structured-logger.js";
+import { OrchestratorCore } from "../../src/orchestrator/core.js";
 import { OrchestratorRuntimeHost } from "../../src/orchestrator/runtime-host.js";
+import { LinearTrackerClient } from "../../src/tracker/linear-client.js";
 import type { IssueTracker } from "../../src/tracker/tracker.js";
 
 describe("OrchestratorRuntimeHost.requestIntent", () => {
@@ -132,6 +137,58 @@ describe("OrchestratorRuntimeHost.requestIntent", () => {
     expect(result.status).toBe("rejected_stale");
     expect(result.detail).toContain("stale fence");
   });
+
+  it("rejects the pipeline sentinel as an intent target (case-insensitive), journaling nothing", async () => {
+    const { host } = createHost();
+    for (const target of [
+      { issueId: "pipeline" },
+      { issueId: "PIPELINE" },
+      { issueIdentifier: "Pipeline" },
+    ]) {
+      const result = await host.requestIntent({
+        verb: "park",
+        ...target,
+        reason: "attempt to park the sentinel",
+        actor: { kind: "operator", host: "pro14" },
+      });
+      expect(result.status).toBe("invalid_request");
+      expect(result.sequence).toBeNull();
+    }
+    expect(intentEntries(host)).toHaveLength(0);
+    expect(host.getState().resumeRequired.has("pipeline")).toBe(false);
+  });
+
+  it("rejects a mismatched issueId/issueIdentifier pair when the tracker knows the real identifier", async () => {
+    const { host } = createHost({
+      activeIssues: [createIssue({ id: "42", identifier: "SYMPH-42" })],
+    });
+    const result = await host.requestIntent({
+      verb: "park",
+      issueId: "42",
+      issueIdentifier: "SYMPH-999",
+      reason: "park with a lying identifier",
+      actor: { kind: "operator", host: "pro14" },
+    });
+    expect(result.status).toBe("invalid_request");
+    expect(result.detail).toContain("SYMPH-42");
+    expect(intentEntries(host)).toHaveLength(0);
+    expect(host.getState().resumeRequired.has("42")).toBe(false);
+  });
+
+  it("uses the authoritative identifier when the supplied pair matches", async () => {
+    const { host } = createHost({
+      activeIssues: [createIssue({ id: "42", identifier: "SYMPH-42" })],
+    });
+    const result = await host.requestIntent({
+      verb: "park",
+      issueId: "42",
+      issueIdentifier: "SYMPH-42",
+      reason: "park with a matching pair",
+      actor: { kind: "operator", host: "pro14" },
+    });
+    expect(result.status).toBe("applied");
+    expect(result.issue_identifier).toBe("SYMPH-42");
+  });
 });
 
 describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
@@ -143,12 +200,12 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
     }
   });
 
-  function createHost() {
+  function createHost(input?: { tracker?: IssueTracker }) {
     const root = mkdtempSync(join(tmpdir(), "symphony-pipeline-intents-"));
     roots.push(root);
     const host = new OrchestratorRuntimeHost({
       config: createConfig(root),
-      tracker: createTracker({ activeIssues: [] }),
+      tracker: input?.tracker ?? createTracker({ activeIssues: [] }),
       logger: new StructuredLogger([]),
       agentRunner: {
         run: () =>
@@ -161,23 +218,58 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
     return host;
   }
 
-  it("pause journals an applied pipeline_pause intent attributed to the requesting actor", async () => {
-    const host = createHost();
-    await host.requestPipelinePause({
+  /**
+   * A real LinearTrackerClient (the pause/resume feasibility check is an
+   * instanceof) with the network methods stubbed.
+   */
+  function createLinearTracker(overrides?: { createIssueError?: Error }) {
+    const tracker = new LinearTrackerClient({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "token",
+      projectSlug: "project",
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
+      fetchFn: vi.fn(),
+    });
+    vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockResolvedValue([]);
+    const createIssueSpy = vi.spyOn(tracker, "createIssue");
+    if (overrides?.createIssueError !== undefined) {
+      createIssueSpy.mockRejectedValue(overrides.createIssueError);
+    } else {
+      createIssueSpy.mockResolvedValue({
+        id: "halt-1",
+        identifier: "ENG-99",
+        title: "Pipeline Halt",
+      });
+    }
+    return tracker;
+  }
+
+  function pipelineEntries(
+    host: OrchestratorRuntimeHost,
+    verb: "pipeline_pause" | "pipeline_resume",
+  ) {
+    return host
+      .getState()
+      .dispatcherRunJournal.filter(
+        (candidate) =>
+          candidate.kind === "intent" && candidate.metadata.verb === verb,
+      );
+  }
+
+  it("pause journals an applied pipeline_pause intent only after the halt issue is created", async () => {
+    const host = createHost({ tracker: createLinearTracker() });
+    const status = await host.requestPipelinePause({
       actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
       reason: "halting for deploy",
     });
+    expect(status.paused).toBe(true);
 
-    const entry = host
-      .getState()
-      .dispatcherRunJournal.find(
-        (candidate) =>
-          candidate.kind === "intent" &&
-          candidate.metadata.verb === "pipeline_pause",
-      );
+    const entry = pipelineEntries(host, "pipeline_pause")[0];
     expect(entry).toBeDefined();
     expect(entry?.metadata.status).toBe("applied");
     expect(entry?.metadata.scope).toBe("pipeline");
+    expect(entry?.metadata.detail).toContain("ENG-99");
     expect(entry?.metadata.actor).toEqual({
       kind: "operator",
       host: "pro14",
@@ -188,6 +280,39 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
       human: "halting for deploy",
     });
     expect(entry?.summary).toContain("by operator@pro14");
+  });
+
+  it("pause with a non-Linear tracker journals a feasibility no_op, never applied", async () => {
+    const host = createHost();
+    await host.requestPipelinePause({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "halting for deploy",
+    });
+
+    const entries = pipelineEntries(host, "pipeline_pause");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.metadata.status).toBe("no_op");
+    expect(entries[0]?.metadata.detail).toContain("infeasible");
+    expect(entries.some((entry) => entry.metadata.status === "applied")).toBe(
+      false,
+    );
+  });
+
+  it("pause journals nothing claiming applied when the halt-issue creation throws", async () => {
+    const host = createHost({
+      tracker: createLinearTracker({
+        createIssueError: new Error("linear is down"),
+      }),
+    });
+
+    await expect(
+      host.requestPipelinePause({
+        actor: { kind: "operator", host: "pro14" },
+        reason: "halting for deploy",
+      }),
+    ).rejects.toThrow("linear is down");
+
+    expect(pipelineEntries(host, "pipeline_pause")).toHaveLength(0);
   });
 
   it("resume on a non-paused pipeline journals a no_op pipeline_resume intent", async () => {
@@ -231,16 +356,42 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
   });
 
   it("pipeline-scoped intent entries do not leak issue state on replay", async () => {
-    const host = createHost();
+    const host = createHost({ tracker: createLinearTracker() });
     await host.requestPipelinePause({
       actor: { kind: "operator", host: "pro14" },
       reason: "halting for deploy",
     });
 
-    // The synthetic "pipeline" issue scope must never surface as a parked
-    // issue: replay reduction ignores pipeline_* verbs.
+    const journal = host.getState().dispatcherRunJournal;
+    expect(
+      journal.some(
+        (entry) =>
+          entry.kind === "intent" &&
+          entry.metadata.verb === "pipeline_pause" &&
+          entry.metadata.status === "applied",
+      ),
+    ).toBe(true);
+
+    // Live state never surfaces the synthetic "pipeline" scope...
     expect(host.getState().resumeRequired.has("pipeline")).toBe(false);
     expect(host.getState().resumeRequiredMarks.pipeline).toBeUndefined();
+
+    // ...and a TRUE replay (a fresh core recovered from the journal, the
+    // restart path) must not either: replay reduction ignores pipeline_*
+    // verbs, so the sentinel never appears as a parked issue.
+    const replayed = new OrchestratorCore({
+      config: createConfig("/tmp/workspaces"),
+      tracker: createTracker({ activeIssues: [] }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 9001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      runJournal: journal,
+      now: () => new Date("2026-06-12T12:00:00.000Z"),
+    });
+    expect(replayed.getState().resumeRequired.has("pipeline")).toBe(false);
+    expect(replayed.getState().resumeRequiredMarks.pipeline).toBeUndefined();
+    expect(replayed.getState().resumeRequired.size).toBe(0);
   });
 });
 

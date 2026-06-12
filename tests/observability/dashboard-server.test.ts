@@ -26,7 +26,9 @@ describe("dashboard server", () => {
     });
     servers.push(server);
 
-    expect(server.hostname).toBe("0.0.0.0");
+    // Loopback by default: exposure beyond the host is opt-in via the
+    // hostname option (SYMPH-408 council R1).
+    expect(server.hostname).toBe("127.0.0.1");
     expect(server.port).toBeGreaterThan(0);
 
     const dashboard = await sendRequest(server.port, {

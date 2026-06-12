@@ -5336,15 +5336,18 @@ export class OrchestratorCore {
    * Journal a pipeline-scoped intent (pause/resume of the WHOLE pipeline,
    * SYMPH-408b). Pipeline pause/resume has no issue and no park generation,
    * so it cannot ride writeIntent — but it must still be a journal-attributed
-   * intent entry written BEFORE the tracker view (the halt-issue
-   * manipulation) is applied. The verb is namespaced (`pipeline_pause` /
+   * intent entry recording the ACTUAL outcome: the caller journals `no_op`
+   * for already-satisfied or infeasible requests before touching the view,
+   * and `applied` only AFTER the tracker view mutation (the halt-issue
+   * manipulation) succeeded. The verb is namespaced (`pipeline_pause` /
    * `pipeline_resume`) so issue-verb replay reduction ignores these entries:
    * the halt-issue view is re-derived from the tracker, not from replay.
    *
    * Every request journals its own audit entry (the journal sequence is the
    * uniqueness discriminator); effect-level idempotency lives in the caller,
    * which records `no_op` when the pipeline is already in the requested
-   * state.
+   * state. A null return (failed journal append) after a successful view
+   * mutation is the caller's documented warn-only degraded mode.
    */
   async journalPipelineIntent(input: {
     action: "pause" | "resume";

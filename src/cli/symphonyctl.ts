@@ -124,11 +124,12 @@ export function parseSymphonyctlArgs(
     }
     const fence = flags.get("fence");
     if (fence !== undefined) {
-      const parsed = Number.parseInt(fence, 10);
-      if (Number.isNaN(parsed)) {
-        throw new SymphonyctlUsageError("--fence must be an integer.");
+      if (!/^\d+$/.test(fence)) {
+        throw new SymphonyctlUsageError(
+          "--fence must be a non-negative integer.",
+        );
       }
-      result.fence = parsed;
+      result.fence = Number.parseInt(fence, 10);
     }
     return result;
   }
@@ -145,9 +146,11 @@ function ctlActor(): { kind: "operator"; host: string; session: string } {
   };
 }
 
-/** An issue key is treated as an identifier (e.g. SYMPH-123), not a UUID. */
+/** Only a full UUID is treated as an issue id; anything else (e.g. SYMPH-123) is an identifier. */
 function issueBody(issue: string): Record<string, string> {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}/i.test(issue)
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    issue,
+  )
     ? { issueId: issue }
     : { issueIdentifier: issue };
 }

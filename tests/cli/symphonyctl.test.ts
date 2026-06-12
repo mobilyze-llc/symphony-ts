@@ -86,6 +86,26 @@ describe("parseSymphonyctlArgs", () => {
     );
   });
 
+  it("rejects a non-digit --fence value", () => {
+    for (const fence of ["abc", "3.5", "-1", "3abc", "1e3", ""]) {
+      expect(() =>
+        parseSymphonyctlArgs(
+          [
+            "intent",
+            "release",
+            "--issue",
+            "SYMPH-1",
+            "--reason",
+            "x",
+            "--fence",
+            fence,
+          ],
+          {},
+        ),
+      ).toThrow(SymphonyctlUsageError);
+    }
+  });
+
   it("parses pause with a reason", () => {
     expect(
       parseSymphonyctlArgs(["pause", "--reason", "deploy window"], {}),

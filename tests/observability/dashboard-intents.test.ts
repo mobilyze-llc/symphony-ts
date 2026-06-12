@@ -162,6 +162,79 @@ describe("POST /api/v1/intents", () => {
     const response = await postIntent(server.port, validBody());
     expect(response.statusCode).toBe(404);
   });
+
+  it("maps invalid_request to 400", async () => {
+    const server = await startServer({
+      requestIntent: () => ({
+        ...appliedResult(),
+        status: "invalid_request",
+        detail: "mismatched issue id/identifier pair",
+        sequence: null,
+      }),
+    });
+    const response = await postIntent(server.port, validBody());
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects a POST without content-type: application/json with 415", async () => {
+    const requests: IntentRequest[] = [];
+    const server = await startServer({
+      requestIntent: (input) => {
+        requests.push(input);
+        return appliedResult();
+      },
+    });
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/intents",
+      body: JSON.stringify(validBody()),
+    });
+    expect(response.statusCode).toBe(415);
+    expect(JSON.parse(response.body).error.code).toBe("unsupported_media_type");
+    expect(requests).toHaveLength(0);
+  });
+
+  it("rejects the pipeline sentinel as an intent target with 400 (case-insensitive)", async () => {
+    const requests: IntentRequest[] = [];
+    const server = await startServer({
+      requestIntent: (input) => {
+        requests.push(input);
+        return appliedResult();
+      },
+    });
+
+    for (const target of [
+      { issueId: "pipeline" },
+      { issueId: "PIPELINE" },
+      { issueIdentifier: "Pipeline" },
+    ]) {
+      const { issueIdentifier, ...rest } = validBody();
+      const response = await postIntent(server.port, {
+        ...rest,
+        verb: "park",
+        ...target,
+      });
+      expect(response.statusCode).toBe(400);
+    }
+    expect(requests).toHaveLength(0);
+  });
+
+  it("rejects a body over the 64 KiB cap with 413", async () => {
+    const server = await startServer({
+      requestIntent: () => appliedResult(),
+    });
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/intents",
+      body: JSON.stringify({
+        ...validBody(),
+        reason: "x".repeat(70 * 1024),
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(response.statusCode).toBe(413);
+    expect(JSON.parse(response.body).error.code).toBe("payload_too_large");
+  });
 });
 
 describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
@@ -224,6 +297,34 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
     expect(response.statusCode).toBe(200);
     expect(received[0]?.actor).toEqual({ kind: "operator", host: "dashboard" });
     expect(received[0]?.reason).toContain("dashboard");
+  });
+
+  it("rejects pause/resume without content-type: application/json with 415", async () => {
+    const received: Array<PipelineControlContext | undefined> = [];
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        requestPipelinePause: (context) => {
+          received.push(context);
+          return { paused: true, issues: [] };
+        },
+        requestPipelineResume: (context) => {
+          received.push(context);
+          return { paused: false, issues: [] };
+        },
+      }),
+    });
+    servers.push(server);
+
+    for (const path of ["/api/v1/pipeline/pause", "/api/v1/pipeline/resume"]) {
+      const response = await sendRequest(server.port, {
+        method: "POST",
+        path,
+        body: "{}",
+      });
+      expect(response.statusCode).toBe(415);
+    }
+    expect(received).toHaveLength(0);
   });
 });
 
