@@ -4,6 +4,7 @@ import {
   type CouncilRiskPredicateResult,
   type CouncilRiskPredicateTrigger,
 } from "../domain/model.js";
+import { comparePathStrings, uniqueSortedPaths } from "./path-ordering.js";
 
 interface CouncilRiskRule {
   trigger: CouncilRiskPredicateTrigger;
@@ -167,7 +168,7 @@ const TRIGGER_ORDER = new Map(
 export function classifyCouncilRiskPaths(
   paths: readonly string[],
 ): CouncilRiskPredicateResult {
-  const normalizedPaths = uniqueSorted(
+  const normalizedPaths = uniqueSortedPaths(
     paths.map(normalizePathForRiskPredicate).filter(isNonEmptyString),
   );
   const matches: CouncilRiskPredicateMatch[] = [];
@@ -191,7 +192,7 @@ export function classifyCouncilRiskPaths(
 
   return {
     triggerHits: uniqueByTriggerOrder(matches.map((match) => match.trigger)),
-    matchedPaths: uniqueSorted(matches.map((match) => match.path)),
+    matchedPaths: uniqueSortedPaths(matches.map((match) => match.path)),
     matches,
   };
 }
@@ -217,12 +218,6 @@ function isNonEmptyString(value: string): boolean {
   return value.length > 0;
 }
 
-function uniqueSorted(values: readonly string[]): string[] {
-  return [...new Set(values)].sort((left, right) =>
-    left.localeCompare(right, "en"),
-  );
-}
-
 function uniqueByTriggerOrder(
   values: readonly CouncilRiskPredicateTrigger[],
 ): CouncilRiskPredicateTrigger[] {
@@ -237,7 +232,7 @@ function compareRiskMatches(
   left: CouncilRiskPredicateMatch,
   right: CouncilRiskPredicateMatch,
 ): number {
-  const pathComparison = left.path.localeCompare(right.path, "en");
+  const pathComparison = comparePathStrings(left.path, right.path);
   if (pathComparison !== 0) {
     return pathComparison;
   }

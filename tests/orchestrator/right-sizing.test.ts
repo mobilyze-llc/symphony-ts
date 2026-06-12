@@ -153,6 +153,28 @@ describe("deterministic right-sizing", () => {
     expect(decision.modelRouting.allowed).toBe(true);
   });
 
+  it("keeps highRiskFiles as a compatibility alias for matched risk-predicate paths", () => {
+    const decision = createRightSizingDecision({
+      issue: createIssue(),
+      config: createConfig(),
+      stageName: "implement",
+      attempt: null,
+      changedFiles: [
+        "src/orchestrator/B.ts",
+        "src/orchestrator/a.ts",
+        "src/orchestrator/B.ts",
+      ],
+    });
+
+    expect(decision.signals.highRiskFiles).toBe(
+      decision.riskPredicate.matchedPaths,
+    );
+    expect(decision.signals.highRiskFiles).toEqual([
+      "src/orchestrator/a.ts",
+      "src/orchestrator/B.ts",
+    ]);
+  });
+
   it("treats journal-risk paths as right-sizing high-risk inputs", () => {
     const decision = createRightSizingDecision({
       issue: createIssue({
@@ -241,6 +263,24 @@ describe("Council v2 risk predicate", () => {
 
     expect(result.triggerHits).toEqual(["state_journal_projection"]);
     expect(result.matchedPaths).toEqual(["src/logging/runtime-snapshot.ts"]);
+  });
+
+  it("deduplicates and sorts matched paths with shared path ordering", () => {
+    const result = classifyCouncilRiskPaths([
+      "src/orchestrator/B.ts",
+      "src/orchestrator/a.ts",
+      "./src/orchestrator/B.ts",
+      " src/orchestrator/a.ts ",
+    ]);
+
+    expect(result.matchedPaths).toEqual([
+      "src/orchestrator/a.ts",
+      "src/orchestrator/B.ts",
+    ]);
+    expect(result.matches.map((match) => match.path)).toEqual([
+      "src/orchestrator/a.ts",
+      "src/orchestrator/B.ts",
+    ]);
   });
 
   it("does not fire for benign ordinary source files", () => {
