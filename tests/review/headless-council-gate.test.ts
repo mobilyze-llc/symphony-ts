@@ -8,6 +8,7 @@ import {
   type CommandResult,
   type CommandRunner,
   type HeadlessReviewerLaneConfig,
+  assertFreshCouncilReview,
   defaultReviewerLanes,
   execFileCommand,
   runHeadlessCouncilGate,
@@ -119,10 +120,18 @@ describe("runHeadlessCouncilGate", () => {
       lanes: Array<Record<string, unknown>>;
       issueId: string;
       verdict: string;
+      review_metadata: Record<string, unknown>;
     };
     expect(parsedResult).toMatchObject({
       issueId: "MOB-88",
       verdict: "pass",
+      review_metadata: {
+        reviewed_head_sha: null,
+        base_sha: null,
+        round: 1,
+        mode: "full",
+        verdict: "pass",
+      },
     });
     expect(
       parsedResult.lanes.some((lane) => Object.hasOwn(lane, "commandResult")),
@@ -202,7 +211,7 @@ describe("runHeadlessCouncilGate", () => {
         (command) =>
           command.command === "gh" &&
           command.args.join(" ") ===
-            "pr view 282 --repo mobilyze-llc/symphony-ts --json baseRefName,headRefName",
+            "pr view 282 --repo mobilyze-llc/symphony-ts --json baseRefName,headRefName,baseRefOid,headRefOid",
       ),
     ).toBe(true);
     expect(
@@ -283,6 +292,12 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.pr).toMatchObject({
       baseRef: "origin/main",
       headRef: "HEAD",
+    });
+    expect(result.review_metadata).toMatchObject({
+      reviewed_head_sha: "head-sha",
+      base_sha: "base-sha",
+      mode: "full",
+      round: 1,
     });
     expect(await readFile(result.artifactPaths.diff!, "utf-8")).toContain(
       "+from git",
@@ -1350,6 +1365,128 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.lanes).toHaveLength(1);
     expect(result.degradedConditions).toContain("codex-lead-disabled");
   });
+
+  it("records explicit convergence loop metadata", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        round: 2,
+        mode: "convergence",
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.review_metadata).toEqual({
+      reviewed_head_sha: null,
+      base_sha: null,
+      round: 2,
+      mode: "convergence",
+      verdict: "pass",
+    });
+  });
+
+  it("fails closed when a clean council artifact is stale after a source commit", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "new-head-sha",
+        }),
+        stderr: "",
+      },
+      gitDiffNameOnly: {
+        exitCode: 0,
+        stdout: "src/review/headless-council-gate.ts\n",
+        stderr: "",
+      },
+    });
+    const reviewResultPath = join(harness.artifactDir, "old-review.json");
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(cleanReviewResult({ reviewedHeadSha: "old-head-sha" }), null, 2)}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "stale_review",
+      reviewedHeadSha: "old-head-sha",
+      currentHeadSha: "new-head-sha",
+      materialChangedFiles: ["src/review/headless-council-gate.ts"],
+      guidance: "rerun convergence review against HEAD.",
+    });
+    expect(
+      await readFile(result.artifactPaths.freshnessResult, "utf-8"),
+    ).toContain('"code": "stale_review"');
+  });
+
+  it("passes freshness after convergence reviews the current PR head", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "new-head-sha",
+        }),
+        stderr: "",
+      },
+    });
+    const reviewResultPath = join(harness.artifactDir, "fresh-review.json");
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(
+        cleanReviewResult({
+          reviewedHeadSha: "new-head-sha",
+          mode: "convergence",
+          round: 2,
+        }),
+        null,
+        2,
+      )}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "pass",
+      code: "fresh",
+      reviewedHeadSha: "new-head-sha",
+      currentHeadSha: "new-head-sha",
+      reviewMode: "convergence",
+      reviewRound: 2,
+    });
+  });
 });
 
 describe("execFileCommand", () => {
@@ -1377,8 +1514,11 @@ interface LaneBehavior {
 async function createHarness(options?: {
   preflight?: { exitCode: number; stdout: string; stderr: string };
   ghPrView?: CommandResult;
+  ghPrViewFreshness?: CommandResult;
   ghPrDiff?: CommandResult;
   gitDiff?: CommandResult;
+  gitDiffNameOnly?: CommandResult;
+  gitRevParse?: Record<string, CommandResult>;
   laneBehavior?: Record<string, LaneBehavior>;
 }) {
   const root = await mkdtemp(join(tmpdir(), "symphony-headless-gate-"));
@@ -1416,12 +1556,26 @@ async function createHarness(options?: {
     }
 
     if (command === "gh" && args[0] === "pr" && args[1] === "view") {
+      if (args.includes("baseRefOid,headRefOid")) {
+        return (
+          options?.ghPrViewFreshness ?? {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              baseRefOid: "base-sha",
+              headRefOid: "head-sha",
+            }),
+            stderr: "",
+          }
+        );
+      }
       return (
         options?.ghPrView ?? {
           exitCode: 0,
           stdout: JSON.stringify({
             baseRefName: "main",
             headRefName: "codex/MOB-88-headless-cmux-council-gate",
+            baseRefOid: "base-sha",
+            headRefOid: "head-sha",
           }),
           stderr: "",
         }
@@ -1433,6 +1587,27 @@ async function createHarness(options?: {
         options?.ghPrDiff ?? {
           exitCode: 0,
           stdout: "diff --git a/file.ts b/file.ts\n+from gh\n",
+          stderr: "",
+        }
+      );
+    }
+
+    if (command === "git" && args[0] === "rev-parse") {
+      const ref = args[1]!;
+      return (
+        options?.gitRevParse?.[ref] ?? {
+          exitCode: 0,
+          stdout: ref === "origin/main" ? "base-sha\n" : "head-sha\n",
+          stderr: "",
+        }
+      );
+    }
+
+    if (command === "git" && args[0] === "diff" && args[1] === "--name-only") {
+      return (
+        options?.gitDiffNameOnly ?? {
+          exitCode: 0,
+          stdout: "",
           stderr: "",
         }
       );
@@ -1514,4 +1689,40 @@ function piLane(): HeadlessReviewerLaneConfig {
 function readFlag(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index === -1 ? undefined : args[index + 1];
+}
+
+function cleanReviewResult(options: {
+  reviewedHeadSha: string;
+  mode?: "full" | "convergence";
+  round?: number;
+}) {
+  return {
+    schemaVersion: 1,
+    issueId: "MOB-88",
+    verdict: "pass",
+    startedAt: "2026-06-12T00:00:00.000Z",
+    completedAt: "2026-06-12T00:01:00.000Z",
+    pr: {
+      repo: "mobilyze-llc/symphony-ts",
+      number: 282,
+      baseRef: "main",
+      headRef: "codex/MOB-88-headless-cmux-council-gate",
+    },
+    review_metadata: {
+      reviewed_head_sha: options.reviewedHeadSha,
+      base_sha: "base-sha",
+      round: options.round ?? 1,
+      mode: options.mode ?? "full",
+      verdict: "pass",
+    },
+    lanes: [],
+    degradedConditions: [],
+    artifactPaths: {
+      artifactDir: "/tmp/council",
+      diff: "/tmp/council/diff.patch",
+      resultJson: "/tmp/council/review-result.json",
+      councilReport: "/tmp/council/council-report.md",
+    },
+    summary: "Headless council review passed with 0 lanes.",
+  };
 }

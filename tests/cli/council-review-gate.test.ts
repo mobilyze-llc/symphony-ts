@@ -34,7 +34,56 @@ describe("parseCouncilReviewGateArgs", () => {
       workspace: "/repo",
       repo: "mobilyze-llc/symphony-ts",
       prNumber: 282,
+      allowedChangePatterns: [],
     });
+  });
+
+  it("parses council loop metadata and freshness assertion inputs", () => {
+    expect(
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "MOB-88",
+          "--artifact-dir",
+          "/tmp/review",
+          "--assert-fresh-review",
+          "/tmp/old/review-result.json",
+          "--mode",
+          "convergence",
+          "--round",
+          "2",
+          "--allow-stale-path",
+          ".symphony/reports/**",
+          "--allow-stale-path",
+          "docs/reports/*.html",
+        ],
+        "/cwd",
+      ),
+    ).toEqual({
+      issueId: "MOB-88",
+      artifactDir: "/tmp/review",
+      workspace: "/cwd",
+      assertFreshReview: "/tmp/old/review-result.json",
+      mode: "convergence",
+      round: 2,
+      allowedChangePatterns: [".symphony/reports/**", "docs/reports/*.html"],
+    });
+  });
+
+  it("rejects unknown council modes", () => {
+    expect(() =>
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "MOB-88",
+          "--artifact-dir",
+          "/tmp/review",
+          "--mode",
+          "maybe",
+        ],
+        "/cwd",
+      ),
+    ).toThrow('--mode must be "full" or "convergence"');
   });
 
   it("requires a repo when PR mode is used", () => {

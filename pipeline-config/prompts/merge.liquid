@@ -12,13 +12,29 @@ You are merging the PR for Linear issue {{ issue.identifier }}.
 
 1. Verify CI is green on the PR. Check via `gh pr checks` or `gh pr view --json statusCheckRollup`.
 2. If CI is not green, do NOT merge. Report the failure and stop.
-3. If the Mode Permission Envelope explicitly allows PR merge actions, squash merge the PR via:
+3. Assert the latest clean council artifact still covers the current PR head before merging. Use the `review-result.json` path from the last successful review-stage workpad note:
+   ```bash
+   PR_NUMBER=$(gh pr view --json number --jq '.number')
+   REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+   ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-freshness-{{ issue.identifier }}-$(date +%s)"
+   REVIEW_RESULT_PATH="<path-to-latest-clean-review-result.json>"
+
+   symphony-council-review-gate \
+     --issue-id {{ issue.identifier }} \
+     --artifact-dir "$ARTIFACT_DIR" \
+     --workspace "$PWD" \
+     --repo "$REPO" \
+     --pr "$PR_NUMBER" \
+     --assert-fresh-review "$REVIEW_RESULT_PATH"
+   ```
+   If this emits `code: "stale_review"` or the guidance `rerun convergence review against HEAD.`, do NOT merge. Return to review and run convergence against HEAD.
+4. If the Mode Permission Envelope explicitly allows PR merge actions, squash merge the PR via:
    ```
    gh pr merge --squash --delete-branch --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")
    ```
-4. If PR merge, auto-merge, admin, or bypass actions are denied by the Mode Permission Envelope, do not run merge commands. Report `BLOCKED-needs-human` and stop.
-5. Update the Linear issue state to "Done" using the `linear_graphql` tool only after a permitted merge succeeds.
-6. Verify the merge was successful by checking the PR status.
+5. If PR merge, auto-merge, admin, or bypass actions are denied by the Mode Permission Envelope, do not run merge commands. Report `BLOCKED-needs-human` and stop.
+6. Update the Linear issue state to "Done" using the `linear_graphql` tool only after a permitted merge succeeds.
+7. Verify the merge was successful by checking the PR status.
 
 ## Important
 

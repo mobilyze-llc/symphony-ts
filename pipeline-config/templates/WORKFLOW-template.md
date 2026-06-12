@@ -700,7 +700,7 @@ policy, output `[STAGE_FAILED: infra]` with the exact denied command and error.
 
 {% if stageName == "review" %}
 ## Stage: Review
-You are the review-gate operator, not the reviewer. Every PR, including low-risk PRs, must pass the headless council gate before merge.
+You are the review-gate operator, not the reviewer. Council is a loop over the merge candidate: every PR, including low-risk PRs, must pass the headless council gate before merge, and every material post-review change must get a convergence rerun against the new HEAD.
 
 Do NOT run `/self-moa-review`, `/codex-review`, direct `claude -p`, or any other direct Claude invocation. Claude must run through CMUX via `symphony-council-review-gate`.
 
@@ -759,9 +759,11 @@ If a check fails, post a `## Review Findings` comment naming the missing evidenc
      --repo "$REPO" \
      --pr "$PR_NUMBER" \
      --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
+     --mode {% if reworkCount > 0 %}convergence{% else %}full{% endif %} \
+     --round {{ reworkCount | plus: 1 }} \
      --timeout-seconds 1800
    ```
-3. Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`.
+3. Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`. The machine result must contain `review_metadata.reviewed_head_sha`, `review_metadata.base_sha`, `review_metadata.round`, `review_metadata.mode`, and a clean verdict.
 
 ### Evaluate findings
 
@@ -794,6 +796,36 @@ First, get the PR number for the current branch:
 ```
 PR_NUMBER=$(gh pr view --json number --jq '.number')
 ```
+Then assert the latest clean council artifact still covers the current PR head. Use the `review-result.json` path from the last successful review-stage workpad note:
+```
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-freshness-{{ issue.identifier }}-$(date +%s)"
+REVIEW_RESULT_PATH="<path-to-latest-clean-review-result.json>"
+
+run_council_gate() {
+  if [ -n "${SYMPHONY_COUNCIL_REVIEW_GATE:-}" ]; then
+    "$SYMPHONY_COUNCIL_REVIEW_GATE" "$@"
+  elif command -v symphony-council-review-gate >/dev/null 2>&1; then
+    symphony-council-review-gate "$@"
+  elif [ -f dist/src/cli/council-review-gate.js ]; then
+    pnpm build
+    node dist/src/cli/council-review-gate.js "$@"
+  else
+    echo "Set SYMPHONY_COUNCIL_REVIEW_GATE to the Symphony gate executable, install symphony-council-review-gate on PATH, or run from a built symphony-ts checkout." >&2
+    return 1
+  fi
+}
+
+run_council_gate \
+  --issue-id {{ issue.identifier }} \
+  --artifact-dir "$ARTIFACT_DIR" \
+  --workspace "$PWD" \
+  --repo "$REPO" \
+  --pr "$PR_NUMBER" \
+  --assert-fresh-review "$REVIEW_RESULT_PATH"
+```
+If this emits `code: "stale_review"` or the guidance `rerun convergence review against HEAD.`, do NOT merge. Move the issue back to review/rework, run a convergence review against HEAD, and only return to merge after the refreshed artifact is clean.
+
 Then merge:
 ```
 gh pr merge $PR_NUMBER --auto
