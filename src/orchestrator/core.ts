@@ -3464,12 +3464,15 @@ export class OrchestratorCore {
     runningEntry: RunningEntry,
     agentMessage: string | undefined,
   ): boolean {
+    const stageName = this.state.issueStages[issueId] ?? null;
     if (!isReviewSubstrateStallMessage(agentMessage)) {
       delete this.state.issueReviewInfrastructureStalls[issueId];
+      if (stageName !== null) {
+        delete this.state.issueFailureSignatures[`${issueId}:${stageName}`];
+      }
       return false;
     }
 
-    const stageName = this.state.issueStages[issueId] ?? null;
     if (stageName !== "review") {
       delete this.state.issueReviewInfrastructureStalls[issueId];
       return false;
@@ -3525,6 +3528,16 @@ export class OrchestratorCore {
     this.state.failed.add(issueId);
     this.releaseClaim(issueId);
     this.clearTerminalIssueRuntimeState(issueId);
+    this.recordFailureInCluster(
+      issueId,
+      runningEntry.identifier,
+      {
+        signature: input.signature,
+        normalizedText: parkReason,
+        class: "permanent",
+      },
+      stageName,
+    );
 
     void this.fireEscalationSideEffects(
       issueId,
