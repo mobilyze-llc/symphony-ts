@@ -1594,7 +1594,7 @@ function createConfig(overrides?: {
       endpoint: "https://api.linear.app/graphql",
       apiKey: "token",
       projectSlug: "project",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       terminalStates: ["Done", "Canceled"],
     },
     polling: {
