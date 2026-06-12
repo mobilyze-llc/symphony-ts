@@ -57,6 +57,11 @@ describe("spec-fidelity judge", () => {
         // including the n/a-only-for-no-runtime-boundary restriction.
         expect(prompt).toContain("live-proof: waived");
         expect(prompt).toContain(
+          "hyphen-minus separators after `evidence`, `waived`, or `n/a` as equivalent",
+        );
+        expect(prompt).toContain("live-proof: n/a — library code");
+        expect(prompt).not.toContain("live-proof: n/a - library code");
+        expect(prompt).toContain(
           "valid ONLY for diffs with no runtime boundary",
         );
         expect(String(input)).toContain("studio2.local:8000");
@@ -68,7 +73,11 @@ describe("spec-fidelity judge", () => {
 
     const verdict = await runSpecFidelityJudge({
       config: CONFIG,
-      evidence: EVIDENCE,
+      evidence: {
+        ...EVIDENCE,
+        reviewMessage:
+          "[STAGE_COMPLETE] review done.\nlive-proof: n/a - library code",
+      },
       fetchFn: fetchFn as unknown as typeof fetch,
     });
 
@@ -97,5 +106,93 @@ describe("spec-fidelity judge", () => {
       }),
     ).toBeNull();
     expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("normalizes live-proof separator variants before judging", async () => {
+    const variants = [
+      "live-proof: evidence - screenshot.png",
+      "live-proof: waived – missing staging account",
+      "live-proof: n/a — library code",
+    ];
+
+    for (const variant of variants) {
+      const fetchFn = vi.fn(
+        async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+          const body = JSON.parse(String(init?.body));
+          const prompt = JSON.stringify(body.messages ?? body.prompt ?? "");
+          const normalized = variant.replace(/ [—–-] /, " — ");
+          expect(prompt).toContain(normalized);
+          if (variant !== normalized) {
+            expect(prompt).not.toContain(variant);
+            expect(prompt).not.toContain(`\\n${variant}`);
+          }
+          return chatCompletionResponse(
+            '{"verdict":"pass","findings":"AC1 PASS: named test present in diff."}',
+          );
+        },
+      );
+
+      await runSpecFidelityJudge({
+        config: CONFIG,
+        evidence: {
+          ...EVIDENCE,
+          reviewMessage: `[STAGE_COMPLETE] review done.\n${variant}`,
+        },
+        fetchFn: fetchFn as unknown as typeof fetch,
+      });
+
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("does not normalize live-proof fragments split across lines", async () => {
+    const fetchFn = vi.fn(
+      async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        const prompt = JSON.stringify(body.messages ?? body.prompt ?? "");
+        expect(prompt).toContain("live-proof: evidence\\n- screenshot.png");
+        expect(prompt).not.toContain("live-proof: evidence — screenshot.png");
+        return chatCompletionResponse(
+          '{"verdict":"pass","findings":"AC1 PASS: named test present in diff."}',
+        );
+      },
+    );
+
+    await runSpecFidelityJudge({
+      config: CONFIG,
+      evidence: {
+        ...EVIDENCE,
+        reviewMessage:
+          "[STAGE_COMPLETE] review done.\nlive-proof: evidence\n- screenshot.png",
+      },
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not normalize incidental inline live-proof text", async () => {
+    const fetchFn = vi.fn(
+      async (_input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        const prompt = JSON.stringify(body.messages ?? body.prompt ?? "");
+        expect(prompt).toContain("not live-proof: evidence - screenshot.png");
+        return chatCompletionResponse(
+          '{"verdict":"pass","findings":"AC1 PASS: named test present in diff."}',
+        );
+      },
+    );
+
+    await runSpecFidelityJudge({
+      config: CONFIG,
+      evidence: {
+        ...EVIDENCE,
+        reviewMessage:
+          "[STAGE_COMPLETE] review done, not live-proof: evidence - screenshot.png",
+      },
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 });

@@ -439,6 +439,15 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(withAcs).toContain("live-proof: waived");
     expect(withAcs).toContain("live-proof: n/a");
     expect(withAcs).toContain("live-proof: evidence");
+    expect(withAcs).toContain("accept an em dash, en dash, or hyphen-minus");
+    const acceptedExamples = [
+      "live-proof: evidence - <citation>",
+      "live-proof: waived – <reason>",
+      "live-proof: n/a — <reason>",
+    ];
+    for (const example of acceptedExamples) {
+      expect(withAcs).toContain(`\`${example}\``);
+    }
     // Enforcement clauses, not just instruction vocabulary (council R1).
     // The disposition line must reach BOTH council-visible channels (R2):
     expect(withAcs).toContain("BOTH the PR body (append with `gh pr edit");
@@ -481,6 +490,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     );
     expect(output).toContain("live-proof: waived");
     expect(output).toContain("The PR body carries exactly one live-proof");
+    expect(output).toContain("punctuation variants are not evidence failures");
     expect(output).toContain(
       "do not run the council gate on work that skipped its evidence contract",
     );
