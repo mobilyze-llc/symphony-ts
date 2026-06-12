@@ -322,7 +322,6 @@ describe("runHeadlessCouncilGate", () => {
         },
       },
     });
-
     const result = await runHeadlessCouncilGate(
       {
         issueId: "MOB-88",
@@ -966,7 +965,6 @@ describe("runHeadlessCouncilGate", () => {
         },
       },
     });
-
     const result = await runHeadlessCouncilGate(
       {
         issueId: "MOB-88",
@@ -1274,6 +1272,15 @@ describe("runHeadlessCouncilGate", () => {
         },
       },
     });
+    await writeFile(
+      harness.diffPath,
+      [
+        "diff --git a/file.ts b/file.ts",
+        "+const ok = true;",
+        "diff --git a/tests/review/headless-council-gate.test.ts b/tests/review/headless-council-gate.test.ts",
+        "+expect(path).toBe('tests/review/headless-council-gate.test.ts');",
+      ].join("\n"),
+    );
 
     const result = await runHeadlessCouncilGate(
       {
@@ -1322,6 +1329,17 @@ describe("runHeadlessCouncilGate", () => {
       ],
     });
     expect(structured.findings[0]?.fingerprint).toMatch(/^[a-f0-9]{16}$/);
+    expect(structured.findings[1]).toMatchObject({
+      severity: "P2",
+      evidence: [
+        {
+          path: "tests/review/headless-council-gate.test.ts",
+          lineStart: 120,
+          lineEnd: 130,
+          changedPath: true,
+        },
+      ],
+    });
     expect(structured.findings[2]).toMatchObject({
       severity: "Track",
       confidence: 0.65,
