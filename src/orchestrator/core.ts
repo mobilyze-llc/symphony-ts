@@ -4553,7 +4553,11 @@ export class OrchestratorCore {
    * journal kind with the same `:terminal:` / `:completed` key shape the
    * runTrackerWriteOnce paths produce, so recoverFromRunJournal keeps a
    * single terminal-evidence predicate; metadata marks that no tracker
-   * call happened. Best-effort: a journal outage must never block live
+   * call happened. Consumer contract (council R3): a `:terminal:` +
+   * `:completed` tracker_write entry — real or synthetic — means only
+   * "this issue reached terminal completion"; it is NOT proof a tracker
+   * API call occurred. Consumers needing the latter must check
+   * metadata.skipped !== true. Best-effort: a journal outage must never block live
    * terminal completion — counters surviving replay after a failed write
    * is the documented degraded mode.
    */
