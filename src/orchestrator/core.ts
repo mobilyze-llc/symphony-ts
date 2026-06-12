@@ -3488,6 +3488,7 @@ export class OrchestratorCore {
       count,
       stalledLanes,
     };
+    delete this.state.issueFailureSignatures[`${issueId}:review`];
 
     if (count < MAX_REVIEW_SUBSTRATE_STALL_FAILURES) {
       return false;

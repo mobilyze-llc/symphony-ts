@@ -234,6 +234,45 @@ describe("failure signal routing in onWorkerExit", () => {
     expect(exhausted?.metadata.failure_class).toBe("permanent");
   });
 
+  it("does not let a prior review infra retry make the first substrate stall park as no-novelty", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const ordinaryInfraRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Tracker API temporarily unavailable.\n[STAGE_FAILED: infra]",
+    });
+    expect(ordinaryInfraRetry).not.toBeNull();
+    await orchestrator.onRetryTimer("1");
+
+    const firstSubstrateRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: substrate_stall:claude-opus with no surviving P1/P2 code findings.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(firstSubstrateRetry).not.toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toMatchObject({
+      count: 1,
+      stalledLanes: ["claude-opus"],
+    });
+  });
+
   it("clears substrate-stall review state when a real review finding reworks code", async () => {
     const orchestrator = createStagedOrchestrator({
       stages: createAgentReviewWorkflowConfig(),
