@@ -1091,7 +1091,7 @@ function createConfig(overrides?: {
       minPrimaryHeadroomPct: null,
       minSecondaryHeadroomPct: null,
     },
-    server: { port: null, slackNotifyChannel: null },
+    server: { port: null, host: null, slackNotifyChannel: null },
     notifications: { slackEnabled: true },
     observability: {
       dashboardEnabled: true,

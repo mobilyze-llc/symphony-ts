@@ -49,6 +49,48 @@ export async function readRequestBody(request: IncomingMessage): Promise<void> {
   });
 }
 
+const MAX_REQUEST_BODY_BYTES = 64 * 1024;
+
+/**
+ * Typed rejection for bodies over the 64 KiB cap so route handlers can map
+ * it to 413 instead of letting it escape to the generic 500 catch.
+ */
+export class PayloadTooLargeError extends Error {
+  constructor() {
+    super("Request body exceeds the 64 KiB limit.");
+    this.name = "PayloadTooLargeError";
+  }
+}
+
+/** Drain the request body as UTF-8 text, bounded to 64 KiB. */
+export async function readRequestBodyText(
+  request: IncomingMessage,
+): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    request.on("error", reject);
+    request.on("data", (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += buffer.length;
+      if (total > MAX_REQUEST_BODY_BYTES) {
+        // Stop consuming but do NOT destroy the socket: the route still
+        // needs to deliver a 413 response on it. Node closes the
+        // connection after the response when the request was not fully
+        // read.
+        request.removeAllListeners("data");
+        request.pause();
+        reject(new PayloadTooLargeError());
+        return;
+      }
+      chunks.push(buffer);
+    });
+    request.on("end", () => {
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+  });
+}
+
 export function isSnapshotTimeoutError(error: unknown): boolean {
   return (
     error instanceof Error &&

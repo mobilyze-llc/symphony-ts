@@ -107,6 +107,8 @@ import {
   type IntentReason,
   type IntentVerb,
   type IntentWriteResult,
+  PIPELINE_INTENT_ISSUE_ID,
+  PIPELINE_INTENT_ISSUE_IDENTIFIER,
   formatIntentActorKey,
   formatIntentAttribution,
 } from "./intent.js";
@@ -5474,6 +5476,68 @@ export class OrchestratorCore {
       // append must not crash the caller, but it must never be silent.
       console.warn(
         `[orchestrator] failed to journal intent ${input.verb} for ${input.issueIdentifier}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Journal a pipeline-scoped intent (pause/resume of the WHOLE pipeline,
+   * SYMPH-408b). Pipeline pause/resume has no issue and no park generation,
+   * so it cannot ride writeIntent — but it must still be a journal-attributed
+   * intent entry recording the ACTUAL outcome: the caller journals `no_op`
+   * for already-satisfied or infeasible requests before touching the view,
+   * and `applied` only AFTER the tracker view mutation (the halt-issue
+   * manipulation) succeeded. The verb is namespaced (`pipeline_pause` /
+   * `pipeline_resume`) so issue-verb replay reduction ignores these entries:
+   * the halt-issue view is re-derived from the tracker, not from replay.
+   *
+   * Every request journals its own audit entry (the journal sequence is the
+   * uniqueness discriminator); effect-level idempotency lives in the caller,
+   * which records `no_op` when the pipeline is already in the requested
+   * state. A null return (failed journal append) after a successful view
+   * mutation is the caller's documented warn-only degraded mode.
+   */
+  async journalPipelineIntent(input: {
+    action: "pause" | "resume";
+    status: "applied" | "no_op";
+    actor: IntentActor;
+    reason: IntentReason;
+    detail: string;
+  }): Promise<number | null> {
+    const verb = `pipeline_${input.action}`;
+    const actorKey = formatIntentActorKey(input.actor);
+    try {
+      const entry = await this.recordRunJournalEntry({
+        idempotencyKey: `intent:${verb}:${actorKey}:seq-${this.state.dispatcherRunJournal.length}`,
+        timestamp: this.now().toISOString(),
+        kind: "intent",
+        issueId: PIPELINE_INTENT_ISSUE_ID,
+        issueIdentifier: PIPELINE_INTENT_ISSUE_IDENTIFIER,
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary: `Intent ${verb} ${input.status} ${formatIntentAttribution(input.actor)}: ${input.detail}`,
+        metadata: {
+          schema_version: INTENT_SCHEMA_VERSION,
+          scope: "pipeline",
+          status: input.status,
+          verb,
+          actor: {
+            kind: input.actor.kind,
+            host: input.actor.host,
+            session: input.actor.session ?? null,
+          },
+          reason: { class: input.reason.class, human: input.reason.human },
+          detail: input.detail,
+        },
+      });
+      return entry.sequence;
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to journal pipeline intent ${verb}: ${error instanceof Error ? error.message : String(error)}`,
       );
       return null;
     }

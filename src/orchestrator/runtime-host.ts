@@ -90,7 +90,10 @@ import {
 import {
   type DashboardServerHost,
   type DashboardServerInstance,
+  type IntentRequest,
+  type IntentRequestResult,
   type IssueDetailResponse,
+  type PipelineControlContext,
   type PipelineRestartSafetyResponse,
   type PipelineStatusResponse,
   type RefreshResponse,
@@ -124,6 +127,12 @@ import type {
 } from "./core.js";
 import { OrchestratorCore } from "./core.js";
 import { getDiff, runEnsembleGate } from "./gate-handler.js";
+import {
+  type IntentActor,
+  type IntentReason,
+  PIPELINE_INTENT_ISSUE_ID,
+  PIPELINE_INTENT_ISSUE_IDENTIFIER,
+} from "./intent.js";
 import { reduceManagerRunJournal } from "./manager-run.js";
 import type { PipelineNotificationSink } from "./pipeline-notifier.js";
 import {
@@ -237,6 +246,23 @@ interface WorkerExecution {
 /** Maximum ms to wait for idle workers during shutdown before forcing exit. */
 const SHUTDOWN_IDLE_TIMEOUT_MS = 30_000;
 const PIPELINE_HALT_LABEL = "pipeline-halt";
+
+/**
+ * Case- and whitespace-insensitive match against the reserved pipeline
+ * sentinel ("pipeline"/"PIPELINE"/" pipeline ") so issue-scoped intent verbs
+ * can never journal under the pipeline-wide journal scope (SYMPH-408 council
+ * R1/R2).
+ */
+function isPipelineSentinelTarget(value: string | undefined): boolean {
+  if (value === undefined) {
+    return false;
+  }
+  const lowered = value.trim().toLowerCase();
+  return (
+    lowered === PIPELINE_INTENT_ISSUE_ID.toLowerCase() ||
+    lowered === PIPELINE_INTENT_ISSUE_IDENTIFIER.toLowerCase()
+  );
+}
 const PIPELINE_RESTART_GUIDANCE = [
   "Stage candidate tickets outside Pipeline first.",
   "Add dependency relations and acceptance criteria before adding the Pipeline project.",
@@ -2102,19 +2128,297 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     };
   }
 
-  async requestPipelinePause(): Promise<PipelineStatusResponse> {
-    // Check for existing halt issues first (idempotent pause)
+  /**
+   * Thin transport adapter for POST /api/v1/intents (SYMPH-408b): resolve
+   * the issue, then route the orchestrator's writeIntent primitive. No verb
+   * semantics live here — idempotency, fencing, attribution, and replay are
+   * all writeIntent's.
+   */
+  async requestIntent(input: IntentRequest): Promise<IntentRequestResult> {
+    await this.ensureDispatcherRunJournalLoaded();
+
+    // The pipeline sentinel is a reserved journal scope, never an
+    // addressable issue. The HTTP schema rejects it too; this check covers
+    // direct callers of requestIntent (defense in depth).
+    if (
+      isPipelineSentinelTarget(input.issueId) ||
+      isPipelineSentinelTarget(input.issueIdentifier)
+    ) {
+      return {
+        status: "invalid_request",
+        detail:
+          "The pipeline sentinel is not an addressable issue; use the pipeline pause/resume endpoints.",
+        sequence: null,
+        verb: input.verb,
+        issue_id: input.issueId ?? null,
+        issue_identifier: input.issueIdentifier ?? null,
+      };
+    }
+
+    const resolved = await this.resolveIntentIssue(input);
+    if (resolved.outcome === "mismatch") {
+      return {
+        status: "invalid_request",
+        detail: `issueIdentifier '${input.issueIdentifier ?? ""}' does not match the known identifier '${resolved.knownIdentifier}' for issue id '${input.issueId ?? ""}'.`,
+        sequence: null,
+        verb: input.verb,
+        issue_id: input.issueId ?? null,
+        issue_identifier: input.issueIdentifier ?? null,
+      };
+    }
+    if (resolved.outcome === "not_found") {
+      return {
+        status: "issue_not_found",
+        detail: `Issue '${input.issueIdentifier ?? input.issueId ?? ""}' could not be resolved from runtime state or the tracker's active states.`,
+        sequence: null,
+        verb: input.verb,
+        issue_id: input.issueId ?? null,
+        issue_identifier: input.issueIdentifier ?? null,
+      };
+    }
+
+    const reason: IntentReason = {
+      class: `api:${input.verb}`,
+      human: input.reason,
+    };
+    const result = await this.orchestrator.writeIntent({
+      verb: input.verb,
+      issueId: resolved.issueId,
+      issueIdentifier: resolved.issueIdentifier,
+      actor: input.actor,
+      reason,
+      ...(input.fence === undefined ? {} : { fence: input.fence }),
+      ...(input.hint === undefined ? {} : { hint: input.hint }),
+      ...(input.stage === undefined ? {} : { stage: input.stage }),
+    });
+
+    return {
+      status: result.status,
+      detail: result.detail,
+      sequence: result.sequence,
+      verb: input.verb,
+      issue_id: resolved.issueId,
+      issue_identifier: resolved.issueIdentifier,
+    };
+  }
+
+  /**
+   * Resolve an intent target to an issue id: explicit id wins, then the
+   * in-memory running/retry lanes, then a tracker lookup across the
+   * configured active states (covers parked issues that hold no lane).
+   *
+   * When BOTH issueId and issueIdentifier are supplied, the body's
+   * identifier is not trusted blindly: if the running/retry lanes or the
+   * tracker know the real identifier for that id, a mismatching pair is
+   * rejected ("mismatch" → 400 at the HTTP boundary) and a matching pair
+   * uses the authoritative identifier. If no source knows the id, the pair
+   * is accepted as supplied (the journal records what the caller asserted;
+   * we cannot verify what nothing knows).
+   */
+  private async resolveIntentIssue(
+    input: IntentRequest,
+  ): Promise<
+    | { outcome: "resolved"; issueId: string; issueIdentifier: string }
+    | { outcome: "not_found" }
+    | { outcome: "mismatch"; knownIdentifier: string }
+  > {
+    if (input.issueId !== undefined) {
+      const issueId = input.issueId;
+      // Verification (lanes + tracker) only runs when the caller asserted
+      // an identifier alongside the id; id-only requests stay a free path.
+      const knownIdentifier =
+        input.issueIdentifier === undefined
+          ? null
+          : await this.lookupKnownIssueIdentifier(issueId);
+      if (
+        input.issueIdentifier !== undefined &&
+        knownIdentifier !== null &&
+        knownIdentifier !== input.issueIdentifier
+      ) {
+        return { outcome: "mismatch", knownIdentifier };
+      }
+      return {
+        outcome: "resolved",
+        issueId,
+        issueIdentifier:
+          knownIdentifier ?? input.issueIdentifier ?? input.issueId,
+      };
+    }
+
+    const identifier = input.issueIdentifier;
+    if (identifier === undefined) {
+      return { outcome: "not_found" };
+    }
+
+    const state = this.orchestrator.getState();
+    const running = Object.values(state.running).find(
+      (entry) => entry.identifier === identifier,
+    );
+    if (running !== undefined) {
+      return {
+        outcome: "resolved",
+        issueId: running.issue.id,
+        issueIdentifier: identifier,
+      };
+    }
+
+    const retry = Object.values(state.retryAttempts).find(
+      (entry) => entry.identifier === identifier,
+    );
+    if (retry !== undefined) {
+      return {
+        outcome: "resolved",
+        issueId: retry.issueId,
+        issueIdentifier: identifier,
+      };
+    }
+
+    try {
+      const issues = await this.tracker.fetchIssuesByStates(
+        this.config.tracker.activeStates,
+      );
+      const match = issues.find((issue) => issue.identifier === identifier);
+      if (match !== undefined) {
+        return {
+          outcome: "resolved",
+          issueId: match.id,
+          issueIdentifier: identifier,
+        };
+      }
+    } catch (error) {
+      // Tracker lookup is best-effort; fall through to not-found — but the
+      // swallowed error must stay visible for diagnosis.
+      console.warn(
+        `[runtime-host] intent issue resolution tracker lookup failed for '${identifier}': ${toErrorMessage(error)}`,
+      );
+    }
+
+    return { outcome: "not_found" };
+  }
+
+  /**
+   * Best-effort authoritative identifier for an issue id: in-memory
+   * running/retry lanes first (free), then the tracker's active states.
+   * Returns null when no source knows the id.
+   */
+  private async lookupKnownIssueIdentifier(
+    issueId: string,
+  ): Promise<string | null> {
+    const state = this.orchestrator.getState();
+    const running = Object.values(state.running).find(
+      (entry) => entry.issue.id === issueId,
+    );
+    if (running !== undefined) {
+      return running.identifier;
+    }
+
+    const retry = Object.values(state.retryAttempts).find(
+      (entry) => entry.issueId === issueId,
+    );
+    if (retry !== undefined) {
+      return retry.identifier;
+    }
+
+    try {
+      const issues = await this.tracker.fetchIssuesByStates(
+        this.config.tracker.activeStates,
+      );
+      const match = issues.find((issue) => issue.id === issueId);
+      if (match !== undefined) {
+        return match.identifier;
+      }
+    } catch (error) {
+      console.warn(
+        `[runtime-host] intent identifier verification tracker lookup failed for id '${issueId}': ${toErrorMessage(error)}`,
+      );
+    }
+
+    return null;
+  }
+
+  /** Actor recorded when a pipeline control request carries no attribution. */
+  private defaultPipelineControlActor(): IntentActor {
+    const label = hostname().split(".")[0];
+    return {
+      kind: "operator",
+      host: label === undefined || label === "" ? hostname() : label,
+    };
+  }
+
+  /**
+   * Journal a pipeline intent entry and surface a journal-write failure as
+   * a warn-only degraded mode. Used AFTER the Linear view mutation: the
+   * view is already mutated, so a lost audit entry cannot abort it — it is
+   * the documented degraded mode (SYMPH-408 council R1).
+   */
+  private async journalPipelineIntentDegradedOk(input: {
+    action: "pause" | "resume";
+    status: "applied" | "no_op";
+    actor: IntentActor;
+    reason: IntentReason;
+    detail: string;
+  }): Promise<void> {
+    const sequence = await this.orchestrator.journalPipelineIntent(input);
+    if (sequence === null) {
+      console.warn(
+        `[runtime-host] pipeline ${input.action} ${input.status} but the intent journal write failed; view state stands, audit entry lost (degraded mode)`,
+      );
+    }
+  }
+
+  /**
+   * Pipeline pause/resume transaction contract (SYMPH-408 council R1):
+   *
+   * 1. Feasibility is determined BEFORE any mutation: an already-satisfied
+   *    request or a tracker that cannot apply the view journals a `no_op`
+   *    naming why, and the view is never touched.
+   * 2. The Linear view mutation runs next. If it throws, NOTHING is
+   *    journaled as `applied` — the error propagates to the caller and the
+   *    journal never claims an outcome that did not happen.
+   * 3. `applied` is journaled only AFTER the mutation succeeded. A failed
+   *    journal write at that point is warn-only degraded mode (the view is
+   *    already mutated; a lost audit entry is the documented degradation,
+   *    see journalPipelineIntentDegradedOk).
+   */
+  async requestPipelinePause(
+    context?: PipelineControlContext,
+  ): Promise<PipelineStatusResponse> {
+    await this.ensureDispatcherRunJournalLoaded();
+    const actor = context?.actor ?? this.defaultPipelineControlActor();
+    const reason: IntentReason = {
+      class: "operator_pipeline_pause",
+      human: context?.reason ?? "pipeline pause requested",
+    };
+
+    // Check for existing halt issues first (idempotent pause).
     const status = await this.getPipelineStatus();
     if (status.paused) {
+      await this.journalPipelineIntentDegradedOk({
+        action: "pause",
+        status: "no_op",
+        actor,
+        reason,
+        detail: "pipeline already paused; halt issue view unchanged",
+      });
       return status;
     }
 
-    if (!(this.tracker instanceof LinearTrackerClient)) {
-      return status;
-    }
-
-    const tracker = this.tracker as LinearTrackerClient;
-    if (tracker.createIssue === undefined) {
+    // Feasibility: the pause view requires a Linear tracker that can
+    // create halt issues. Infeasible requests journal a no_op naming why —
+    // never "applied" for a mutation that cannot run.
+    const tracker =
+      this.tracker instanceof LinearTrackerClient
+        ? (this.tracker as LinearTrackerClient)
+        : null;
+    if (tracker === null || tracker.createIssue === undefined) {
+      await this.journalPipelineIntentDegradedOk({
+        action: "pause",
+        status: "no_op",
+        actor,
+        reason,
+        detail:
+          "pipeline pause infeasible: tracker cannot create halt issues; view unchanged",
+      });
       return status;
     }
 
@@ -2125,11 +2429,21 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const projectId = trackerConfig.projectId ?? "";
     const haltLabelId = trackerConfig.haltLabelId ?? "";
 
+    // View mutation. A throw propagates and journals nothing: the journal
+    // must never claim "applied" for a halt issue that was never created.
     const created = await tracker.createIssue({
       teamId,
       title: "Pipeline Halt",
       projectId,
       labelIds: [haltLabelId],
+    });
+
+    await this.journalPipelineIntentDegradedOk({
+      action: "pause",
+      status: "applied",
+      actor,
+      reason,
+      detail: `pipeline pause applied; halt issue ${created.identifier} created`,
     });
 
     return {
@@ -2141,25 +2455,80 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     };
   }
 
-  async requestPipelineResume(): Promise<PipelineStatusResponse> {
-    if (!(this.tracker instanceof LinearTrackerClient)) {
-      return await this.getPipelineStatus();
+  /** See requestPipelinePause for the transaction ordering contract. */
+  async requestPipelineResume(
+    context?: PipelineControlContext,
+  ): Promise<PipelineStatusResponse> {
+    await this.ensureDispatcherRunJournalLoaded();
+    const actor = context?.actor ?? this.defaultPipelineControlActor();
+    const reason: IntentReason = {
+      class: "operator_pipeline_resume",
+      human: context?.reason ?? "pipeline resume requested",
+    };
+
+    const priorStatus = await this.getPipelineStatus();
+    if (!priorStatus.paused) {
+      await this.journalPipelineIntentDegradedOk({
+        action: "resume",
+        status: "no_op",
+        actor,
+        reason,
+        detail: "pipeline not paused; halt issue view unchanged",
+      });
+      return priorStatus;
     }
 
-    const tracker = this.tracker as LinearTrackerClient;
-    if (tracker.fetchOpenIssuesByLabels === undefined) {
-      return await this.getPipelineStatus();
+    // Feasibility: the resume view requires a Linear tracker that can
+    // enumerate and cancel halt issues.
+    const tracker =
+      this.tracker instanceof LinearTrackerClient
+        ? (this.tracker as LinearTrackerClient)
+        : null;
+    if (tracker === null || tracker.fetchOpenIssuesByLabels === undefined) {
+      await this.journalPipelineIntentDegradedOk({
+        action: "resume",
+        status: "no_op",
+        actor,
+        reason,
+        detail:
+          "pipeline resume infeasible: tracker cannot cancel halt issues; view unchanged",
+      });
+      return priorStatus;
     }
 
+    // View mutation. A throw propagates and journals nothing.
     const haltIssues = await tracker.fetchOpenIssuesByLabels(
       [PIPELINE_HALT_LABEL],
       ["Done", "Cancelled"],
     );
 
+    // Race guard: the pipeline read as paused above, but the halt issues were
+    // resolved (or cancelled by another actor) between the two reads. Nothing
+    // was mutated, so this must journal no_op — "applied" means ≥1 cancelled.
+    if (haltIssues.length === 0) {
+      await this.journalPipelineIntentDegradedOk({
+        action: "resume",
+        status: "no_op",
+        actor,
+        reason,
+        detail: "no halt issues found; view unchanged",
+      });
+      const refreshed = await this.getPipelineStatus();
+      return refreshed;
+    }
+
     const teamKey = this.config.tracker.teamKey ?? "";
     for (const issue of haltIssues) {
       await tracker.updateIssueState(issue.id, "Cancelled", teamKey);
     }
+
+    await this.journalPipelineIntentDegradedOk({
+      action: "resume",
+      status: "applied",
+      actor,
+      reason,
+      detail: `pipeline resume applied; ${haltIssues.length} halt issue(s) cancelled`,
+    });
 
     const status = await this.getPipelineStatus();
     return {
@@ -2958,6 +3327,9 @@ export async function startRuntimeService(
       : await startDashboardServer({
           host: runtimeHost,
           port: currentConfig.server.port,
+          ...(currentConfig.server.host === null
+            ? {}
+            : { hostname: currentConfig.server.host }),
           refreshMs: currentConfig.observability.refreshMs,
           renderIntervalMs: currentConfig.observability.renderIntervalMs,
           liveUpdatesEnabled: currentConfig.observability.dashboardEnabled,

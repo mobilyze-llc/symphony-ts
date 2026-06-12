@@ -449,6 +449,52 @@ describe("config-resolver", () => {
     expect(invalidString.server.port).toBeNull();
   });
 
+  it("parses server.host as the dashboard bind address opt-in", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        server: {
+          port: 8080,
+          host: "0.0.0.0",
+        },
+      },
+    });
+
+    expect(resolved.server.host).toBe("0.0.0.0");
+  });
+
+  it("normalizes blank server.host to null instead of a wildcard bind", () => {
+    for (const blank of ["", "   ", "\t"]) {
+      const resolved = resolveWorkflowConfig({
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          server: {
+            port: 8080,
+            host: blank,
+          },
+        },
+      });
+
+      expect(resolved.server.host).toBeNull();
+    }
+  });
+
+  it("defaults server.host to null so the dashboard binds loopback", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        server: {
+          port: 8080,
+        },
+      },
+    });
+
+    expect(resolved.server.host).toBeNull();
+  });
+
   it("uses the canonical LINEAR_API_KEY env var fallback", () => {
     const resolved = resolveWorkflowConfig(
       {

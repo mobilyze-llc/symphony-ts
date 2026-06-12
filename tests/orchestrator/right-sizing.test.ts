@@ -202,6 +202,7 @@ function createConfig(
     },
     server: {
       port: null,
+      host: null,
       slackNotifyChannel: null,
     },
     notifications: {
