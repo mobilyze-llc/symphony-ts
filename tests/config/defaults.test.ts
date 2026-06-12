@@ -7,6 +7,9 @@ import {
   DEFAULT_CODEX_COMMAND,
   DEFAULT_CODEX_DISABLE_SKILLS,
   DEFAULT_CODEX_EPHEMERAL_HOME,
+  DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
+  DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+  DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
   DEFAULT_HOOK_TIMEOUT_MS,
   DEFAULT_MAX_CONCURRENT_AGENTS,
   DEFAULT_MAX_RETRY_BACKOFF_MS,
@@ -39,6 +42,9 @@ describe("SPEC_DEFAULTS", () => {
     expect(DEFAULT_CODEX_COMMAND).toBe("codex app-server");
     expect(DEFAULT_CODEX_EPHEMERAL_HOME).toBe(false);
     expect(DEFAULT_CODEX_DISABLE_SKILLS).toBe(false);
+    expect(DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT).toBe(2_500);
+    expect(DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT).toBe(40_000);
+    expect(DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE).toBe(3);
     expect(DEFAULT_ACTIVE_STATES).toEqual([
       "Todo",
       "In Progress",
@@ -64,6 +70,15 @@ describe("SPEC_DEFAULTS", () => {
     );
     expect(SPEC_DEFAULTS.codex.disableSkills).toBe(
       DEFAULT_CODEX_DISABLE_SKILLS,
+    );
+    expect(SPEC_DEFAULTS.codex.toolOutputTokenLimit).toBe(
+      DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
+    );
+    expect(SPEC_DEFAULTS.codex.modelAutoCompactTokenLimit).toBe(
+      DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+    );
+    expect(SPEC_DEFAULTS.codex.maxHealthyCompactionsPerStage).toBe(
+      DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
     );
     expect(SPEC_DEFAULTS.tracker.activeStates).toBe(DEFAULT_ACTIVE_STATES);
     expect(SPEC_DEFAULTS.observability.dashboardEnabled).toBe(

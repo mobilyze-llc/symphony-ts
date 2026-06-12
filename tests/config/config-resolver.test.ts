@@ -11,7 +11,10 @@ import {
 } from "../../src/config/config-resolver.js";
 import {
   DEFAULT_CODEX_COMMAND,
+  DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
+  DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
   DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
+  DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
   DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
   DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
   DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
@@ -96,6 +99,15 @@ describe("config-resolver", () => {
     expect(resolved.codex.sessionRotationInputTokens).toBe(
       DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
     );
+    expect(resolved.codex.toolOutputTokenLimit).toBe(
+      DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
+    );
+    expect(resolved.codex.modelAutoCompactTokenLimit).toBe(
+      DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+    );
+    expect(resolved.codex.maxHealthyCompactionsPerStage).toBe(
+      DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
+    );
     expect(resolved.continuousFeedback).toEqual({
       enabled: DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
       events: [...DEFAULT_CONTINUOUS_FEEDBACK_EVENTS],
@@ -163,6 +175,9 @@ describe("config-resolver", () => {
             read_timeout_ms: "2500",
             stall_timeout_ms: "-1",
             session_rotation_input_tokens: "0",
+            tool_output_token_limit: "1234",
+            model_auto_compact_token_limit: "12345",
+            max_healthy_compactions_per_stage: "2",
           },
           server: {
             port: "8080",
@@ -215,6 +230,9 @@ describe("config-resolver", () => {
     expect(resolved.codex.readTimeoutMs).toBe(2_500);
     expect(resolved.codex.stallTimeoutMs).toBe(-1);
     expect(resolved.codex.sessionRotationInputTokens).toBe(0);
+    expect(resolved.codex.toolOutputTokenLimit).toBe(1_234);
+    expect(resolved.codex.modelAutoCompactTokenLimit).toBe(12_345);
+    expect(resolved.codex.maxHealthyCompactionsPerStage).toBe(2);
     expect(resolved.server.port).toBe(8080);
     expect(resolved.observability.dashboardEnabled).toBe(false);
     expect(resolved.observability.refreshMs).toBe(2_500);

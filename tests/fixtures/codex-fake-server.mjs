@@ -218,6 +218,56 @@ async function handleMessage(message) {
       return;
     }
 
+    if (scenario === "compaction-notification") {
+      setTimeout(() => {
+        writeJson({
+          method: "thread/autoCompact/completed",
+          params: {
+            reason: "model_auto_compact_token_limit",
+          },
+        });
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "Compacted turn finished",
+            usage: {
+              inputTokens: 100,
+              outputTokens: 10,
+              totalTokens: 110,
+            },
+          },
+        });
+      }, 10);
+      return;
+    }
+
+    if (scenario === "compact-payload-notification") {
+      setTimeout(() => {
+        writeJson({
+          method: "item/completed",
+          params: {
+            item: {
+              type: "tool_call_output",
+              status: "compact representation ready",
+              reason: "compact output payload",
+            },
+          },
+        });
+        writeJson({
+          method: "turn/completed",
+          params: {
+            message: "Ordinary compact payload finished",
+            usage: {
+              inputTokens: 100,
+              outputTokens: 10,
+              totalTokens: 110,
+            },
+          },
+        });
+      }, 10);
+      return;
+    }
+
     if (scenario === "agent-message-item") {
       setTimeout(() => {
         writeJson({

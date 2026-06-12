@@ -2295,6 +2295,12 @@ describe("OrchestratorRuntimeHost", () => {
       message: "turn cancelled by operator",
     });
     fakeRunner.emit("1", {
+      event: "compaction",
+      timestamp: "2026-03-06T00:00:02.500Z",
+      codexAppServerPid: "1001",
+      message: "thread/autoCompact/completed",
+    });
+    fakeRunner.emit("1", {
       event: "other_message",
       timestamp: "2026-03-06T00:00:03.000Z",
       codexAppServerPid: "1001",
@@ -2320,6 +2326,7 @@ describe("OrchestratorRuntimeHost", () => {
     ).toEqual(
       expect.arrayContaining([
         "turn cancelled by operator",
+        "thread/autoCompact/completed",
         "server emitted keepalive",
       ]),
     );

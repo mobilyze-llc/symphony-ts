@@ -26,6 +26,9 @@ import { runStuckTriage } from "../agent/stuck-triage.js";
 import { publishVerdictStatus } from "../agent/verdict-status.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
+  DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
+  DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+  DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
   DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
   DEFAULT_HARD_STOP_LIVE_BUDGET_GRACE_RATIO,
@@ -1120,6 +1123,17 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           rateLimitTelemetryPresent: state.codexRateLimits !== null,
         }),
         deployDrift: this.readDeployDriftNonBlocking(),
+        codexCaps: {
+          toolOutputTokenLimit:
+            this.config.codex.toolOutputTokenLimit ??
+            DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
+          modelAutoCompactTokenLimit:
+            this.config.codex.modelAutoCompactTokenLimit ??
+            DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+          maxHealthyCompactionsPerStage:
+            this.config.codex.maxHealthyCompactionsPerStage ??
+            DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
+        },
         rateLimitFile:
           this.rateLimitFileView === null
             ? null
@@ -2031,6 +2045,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     if (
       event.event === "notification" ||
+      event.event === "compaction" ||
       event.event === "turn_completed" ||
       event.event === "turn_failed" ||
       event.event === "turn_cancelled" ||

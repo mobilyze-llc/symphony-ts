@@ -1030,6 +1030,127 @@ describe("runtime snapshot", () => {
     expect(snapshot.running[0]!.health_reason).toContain("token");
   });
 
+  it("exposes resolved output caps and compactions per stage", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    state.issueExecutionHistory["issue-1"] = [
+      {
+        stageName: "investigate",
+        durationMs: 10_000,
+        totalTokens: 8_000,
+        turns: 1,
+        compactions: 1,
+        outcome: "completed",
+      },
+    ];
+    const now = new Date("2026-03-21T10:05:00.000Z");
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: new Date(now.getTime() - 60_000).toISOString(),
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "compaction",
+      lastCodexTimestamp: new Date(now.getTime() - 10_000).toISOString(),
+      lastCodexMessage: "thread/autoCompact/completed",
+      turnCount: 2,
+      codexInputTokens: 1_000,
+      codexOutputTokens: 200,
+      codexTotalTokens: 1_200,
+    });
+    entry.totalStageCompactions = 2;
+    state.running["issue-1"] = entry;
+    state.issueStages["issue-1"] = "implement";
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now,
+      enrichment: {
+        codexCaps: {
+          toolOutputTokenLimit: 1_234,
+          modelAutoCompactTokenLimit: 12_345,
+          maxHealthyCompactionsPerStage: 3,
+        },
+      },
+    });
+
+    expect(snapshot.running[0]!.output_caps).toEqual({
+      tool_output_token_limit: 1_234,
+      model_auto_compact_token_limit: 12_345,
+    });
+    expect(snapshot.running[0]!.churn).toEqual({
+      compactions_per_stage: {
+        investigate: 1,
+        implement: 2,
+      },
+      current_stage_compactions: 2,
+      max_healthy_compactions_per_stage: 3,
+    });
+  });
+
+  it("classifies health as yellow when current-stage compactions exceed the healthy envelope", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    const now = new Date("2026-03-21T10:05:00.000Z");
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: new Date(now.getTime() - 60_000).toISOString(),
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "compaction",
+      lastCodexTimestamp: new Date(now.getTime() - 10_000).toISOString(),
+      lastCodexMessage: "thread/autoCompact/completed",
+      turnCount: 2,
+      codexInputTokens: 1_000,
+      codexOutputTokens: 200,
+      codexTotalTokens: 1_200,
+    });
+    entry.totalStageTotalTokens = 1_200;
+    entry.totalStageCompactions = 4;
+    state.running["issue-1"] = entry;
+    state.issueStages["issue-1"] = "implement";
+
+    const snapshot = buildRuntimeSnapshot(state, { now });
+
+    expect(snapshot.running[0]!.health).toBe("yellow");
+    expect(snapshot.running[0]!.health_reason).toContain("compaction churn");
+    expect(snapshot.running[0]!.health_reason).toContain("implement stage");
+    expect(snapshot.running[0]!.health_reason).toContain("threshold 3");
+  });
+
+  it("preserves token-burn and compaction reasons when both thresholds trip", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    const now = new Date("2026-03-21T10:05:00.000Z");
+    const entry = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: new Date(now.getTime() - 60_000).toISOString(),
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "compaction",
+      lastCodexTimestamp: new Date(now.getTime() - 10_000).toISOString(),
+      lastCodexMessage: "thread/autoCompact/completed",
+      turnCount: 2,
+      codexInputTokens: 40_000,
+      codexOutputTokens: 2_000,
+      codexTotalTokens: 42_001,
+    });
+    entry.totalStageTotalTokens = 42_001;
+    entry.totalStageCompactions = 4;
+    state.running["issue-1"] = entry;
+    state.issueStages["issue-1"] = "implement";
+
+    const snapshot = buildRuntimeSnapshot(state, { now });
+
+    expect(snapshot.running[0]!.health).toBe("yellow");
+    expect(snapshot.running[0]!.health_reason).toContain("high token burn");
+    expect(snapshot.running[0]!.health_reason).toContain("compaction churn");
+  });
+
   it("tokens in running row reflect cumulative stage totals, not per-turn absolute counters", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,

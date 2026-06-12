@@ -18,7 +18,9 @@ import {
 } from "../codex/rate-limits.js";
 import { createWorkpadSyncDynamicTool } from "../codex/workpad-sync-tool.js";
 import {
+  DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
   DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
+  DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
   DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
   DEFAULT_HARD_STOP_LIVE_BUDGET_GRACE_RATIO,
@@ -114,6 +116,8 @@ export interface AgentRunnerCodexClientFactoryInput {
   readTimeoutMs: number;
   turnTimeoutMs: number;
   stallTimeoutMs: number;
+  toolOutputTokenLimit: number;
+  modelAutoCompactTokenLimit: number;
   artifactDirectory?: string;
   dynamicTools: CodexDynamicTool[];
   modePolicy?: ModeScopedPermissionPolicy;
@@ -458,6 +462,12 @@ export class AgentRunner {
           readTimeoutMs: this.config.codex.readTimeoutMs,
           turnTimeoutMs: this.config.codex.turnTimeoutMs,
           stallTimeoutMs: this.config.codex.stallTimeoutMs,
+          toolOutputTokenLimit:
+            this.config.codex.toolOutputTokenLimit ??
+            DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
+          modelAutoCompactTokenLimit:
+            this.config.codex.modelAutoCompactTokenLimit ??
+            DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
           artifactDirectory: getDurableCodexSessionArtifactDirectory(
             this.config.workspace.root,
             workspaceKey,
@@ -1401,6 +1411,8 @@ function createDefaultCodexClient(
     readTimeoutMs: input.readTimeoutMs,
     turnTimeoutMs: input.turnTimeoutMs,
     stallTimeoutMs: input.stallTimeoutMs,
+    toolOutputTokenLimit: input.toolOutputTokenLimit,
+    modelAutoCompactTokenLimit: input.modelAutoCompactTokenLimit,
     ...(input.artifactDirectory === undefined
       ? {}
       : { artifactDirectory: input.artifactDirectory }),
@@ -1682,6 +1694,7 @@ function isLiveUsageEvent(event: CodexClientEvent): boolean {
     case "notification":
     case "other_message":
     case "unsupported_tool_call":
+    case "compaction":
       return true;
     case "activity_heartbeat":
     case "approval_auto_approved":

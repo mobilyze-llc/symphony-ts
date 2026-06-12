@@ -1066,6 +1066,8 @@ function renderDashboardClientScript(
           var contextSection = contextItems.length > 0 ? '<div class="context-section">' + contextItems.join('') + '</div>' : '';
 
           var pt = row.pipeline_tokens || { input_tokens: 0, output_tokens: 0, total_tokens: row.total_pipeline_tokens, cache_read_tokens: 0, cache_write_tokens: 0 };
+          var outputCaps = row.output_caps || {};
+          var churn = row.churn || {};
           const tokenBreakdown =
             '<div class="detail-section">' +
             '<p class="detail-section-title">Token breakdown</p>' +
@@ -1077,6 +1079,9 @@ function renderDashboardClientScript(
             '<span class="detail-kv-label">Cache write</span><span class="detail-kv-value numeric">' + formatInteger(pt.cache_write_tokens) + '</span>' +
             '<span class="detail-kv-label">Reasoning</span><span class="detail-kv-value numeric">' + formatInteger(row.tokens && row.tokens.reasoning_tokens) + '</span>' +
             '<span class="detail-kv-label">Pipeline</span><span class="detail-kv-value numeric">' + formatInteger(row.total_pipeline_tokens) + '</span>' +
+            '<span class="detail-kv-label">Tool cap</span><span class="detail-kv-value numeric">' + formatInteger(outputCaps.tool_output_token_limit) + '</span>' +
+            '<span class="detail-kv-label">Auto compact</span><span class="detail-kv-value numeric">' + formatInteger(outputCaps.model_auto_compact_token_limit) + '</span>' +
+            '<span class="detail-kv-label">Compactions</span><span class="detail-kv-value numeric">' + formatInteger(churn.current_stage_compactions) + '</span>' +
             rateLimitWindowKv(row.rate_limit_window) +
             '</div></div>';
 
@@ -1626,6 +1631,8 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
     cache_read_tokens: 0,
     cache_write_tokens: 0,
   };
+  const outputCaps = row.output_caps;
+  const churn = row.churn;
   const tokenBreakdown = `
     <div class="detail-section">
       <p class="detail-section-title">Token breakdown</p>
@@ -1637,6 +1644,9 @@ function renderDetailPanel(row: RuntimeSnapshot["running"][number]): string {
         <span class="detail-kv-label">Cache write</span><span class="detail-kv-value numeric">${formatInteger(pt.cache_write_tokens)}</span>
         <span class="detail-kv-label">Reasoning</span><span class="detail-kv-value numeric">${formatInteger(row.tokens.reasoning_tokens)}</span>
         <span class="detail-kv-label">Pipeline</span><span class="detail-kv-value numeric">${formatInteger(row.total_pipeline_tokens)}</span>
+        <span class="detail-kv-label">Tool cap</span><span class="detail-kv-value numeric">${formatInteger(outputCaps?.tool_output_token_limit ?? Number.NaN)}</span>
+        <span class="detail-kv-label">Auto compact</span><span class="detail-kv-value numeric">${formatInteger(outputCaps?.model_auto_compact_token_limit ?? Number.NaN)}</span>
+        <span class="detail-kv-label">Compactions</span><span class="detail-kv-value numeric">${formatInteger(churn?.current_stage_compactions ?? Number.NaN)}</span>
         ${renderRateLimitWindowKv(row.rate_limit_window)}
       </div>
     </div>`;

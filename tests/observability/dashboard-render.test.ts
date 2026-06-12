@@ -351,6 +351,29 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain("300");
   });
 
+  it("token breakdown renders output caps and compaction churn", () => {
+    const snapshot = buildSnapshot({
+      output_caps: {
+        tool_output_token_limit: 2_500,
+        model_auto_compact_token_limit: 40_000,
+      },
+      churn: {
+        compactions_per_stage: {
+          investigate: 1,
+          implement: 4,
+        },
+        current_stage_compactions: 4,
+        max_healthy_compactions_per_stage: 3,
+      },
+    });
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+    expect(html).toContain("Tool cap");
+    expect(html).toContain("2,500");
+    expect(html).toContain("Auto compact");
+    expect(html).toContain("40,000");
+    expect(html).toContain("Compactions");
+  });
+
   it("detail panel renders rate-limit window usage when observed", () => {
     const snapshot = buildSnapshot({
       rate_limit_window: {

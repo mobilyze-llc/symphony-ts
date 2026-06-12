@@ -545,6 +545,38 @@ describe("session metrics", () => {
     expect(running.totalStageTotalTokens).toBe(0);
     expect(running.totalStageCacheReadTokens).toBe(0);
     expect(running.totalStageCacheWriteTokens).toBe(0);
+    expect(running.totalStageCompactions).toBe(0);
+  });
+
+  it("counts compactions in the current stage without changing token totals", () => {
+    const running = createRunningEntry();
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 3,
+    });
+
+    applyCodexEventToOrchestratorState(
+      state,
+      running,
+      createEvent("compaction", {
+        message: "thread/autoCompact/completed",
+      }),
+    );
+    applyCodexEventToOrchestratorState(
+      state,
+      running,
+      createEvent("compaction", {
+        message: "thread/autoCompact/completed",
+      }),
+    );
+
+    expect(running.totalStageCompactions).toBe(2);
+    expect(running.totalStageTotalTokens).toBe(0);
+    expect(state.codexTotals.totalTokens).toBe(0);
+    expect(running.recentActivity.at(-1)).toMatchObject({
+      toolName: "Compaction",
+      context: "thread/autoCompact/completed",
+    });
   });
 
   it("turn history ring buffer captures turn summaries", () => {
