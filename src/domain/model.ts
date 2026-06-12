@@ -223,6 +223,13 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "spec_fidelity",
   "operator_input_required",
   "continuous_feedback",
+  // Shared intent-verb layer (SYMPH-399 / SYMPH-408 carve-out): idempotent,
+  // fenced, attributed journal writes that operator/agents/watchdog-L2 all
+  // mutate through. metadata carries schema_version, verb, status, actor.
+  "intent",
+  // Watchdog L2 stuck-ticket triage verdicts (SYMPH-399; the kind reserved
+  // by SYMPH-405's verdict-event vocabulary).
+  "triage_verdict",
 ] as const;
 
 export type DispatcherRunJournalEventKind =

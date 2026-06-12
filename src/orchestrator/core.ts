@@ -1,8 +1,15 @@
+import { hostname } from "node:os";
+
 import { extractAcceptanceCriteria } from "../agent/ac-gate.js";
 import type {
   PauseTriageEvidence,
   PauseTriageVerdict,
 } from "../agent/pause-triage.js";
+import type {
+  StuckTriageEvidence,
+  StuckTriageParkKind,
+  StuckTriageVerdict,
+} from "../agent/stuck-triage.js";
 import type { CodexClientEvent } from "../codex/app-server-client.js";
 import {
   evaluateWindowHeadroom,
@@ -86,6 +93,15 @@ import {
   formatRebaseComment,
   formatReviewFindingsComment,
 } from "./gate-handler.js";
+import {
+  INTENT_SCHEMA_VERSION,
+  type IntentActor,
+  type IntentFence,
+  type IntentReason,
+  type IntentVerb,
+  type IntentWriteResult,
+  formatIntentAttribution,
+} from "./intent.js";
 import { createRightSizingDecision } from "./right-sizing.js";
 import { SignatureClusterRegistry } from "./signature-cluster.js";
 import type { ClusterMember } from "./signature-cluster.js";
@@ -212,6 +228,30 @@ interface ScheduledRetryContext {
   attempt: number;
   identifier: string | null;
   delayType: "continuation" | "failure";
+}
+
+/**
+ * Evidence captured at a watchdog park site BEFORE clearTerminalIssueRuntimeState
+ * erases the per-issue runtime state it digests (SYMPH-399). parkKind gates
+ * whether the L2 triage lane fires: only "novelty" and "breaker" parks are
+ * triaged; "retry_once_failed" explicitly never is (no second triage).
+ */
+interface WatchdogParkContext {
+  parkKind:
+    | StuckTriageParkKind
+    | "spec"
+    | "retry_exhausted"
+    | "retry_once_failed";
+  stageName: string | null;
+  issueDescription: string | null;
+  attemptCount: number | null;
+  reworkCount: number;
+  stageHistory: Array<{ stageName: string; outcome: string; turns: number }>;
+  failureRecords: Array<{
+    raw: string;
+    signature: string | null;
+    failureClass: string | null;
+  }>;
 }
 
 export interface OrchestratorCoreOptions {
@@ -399,6 +439,29 @@ export interface OrchestratorCoreOptions {
     canFileWatchdogTicket: boolean;
     members: ClusterMember[];
   }) => void;
+  /**
+   * Watchdog L2 stuck-ticket triage (SYMPH-399): render a bounded-action
+   * verdict over a watchdog park (novelty short-circuit or breaker park).
+   * Resolve null to fail closed — the park stands. Only consulted when
+   * `watchdog.stuck_triage.enabled` is true.
+   */
+  runStuckTriage?: (
+    evidence: StuckTriageEvidence,
+  ) => Promise<StuckTriageVerdict | null>;
+  /**
+   * Called when an L2 triage verdict escalates to a human (SYMPH-399),
+   * carrying the model's one-paragraph case. Posts through the SYMPH-397
+   * notifier. Fire-and-forget; failures never surface into the loop.
+   */
+  onTriageEscalation?: (input: {
+    issueId: string;
+    issueIdentifier: string;
+    issueTitle: string;
+    stageName: string | null;
+    classification: string;
+    confidence: string;
+    caseText: string;
+  }) => void;
 }
 
 export class OrchestratorCore {
@@ -458,6 +521,10 @@ export class OrchestratorCore {
 
   private readonly onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
 
+  private readonly runStuckTriage?: OrchestratorCoreOptions["runStuckTriage"];
+
+  private readonly onTriageEscalation?: OrchestratorCoreOptions["onTriageEscalation"];
+
   private readonly signatureClusterRegistry: SignatureClusterRegistry;
 
   private readonly reportedSupervisionFindings = new Set<string>();
@@ -481,6 +548,34 @@ export class OrchestratorCore {
   private readonly resumeRequiredGuards = new Map<
     string,
     ResumeRequiredGuard
+  >();
+
+  /**
+   * Current park generation per issue (SYMPH-399 intent fencing). Set on
+   * EVERY park path (stop-like pauses via recordIssueRequiresExplicitResume
+   * AND watchdog failure-exhausted parks); cleared on release/resume and at
+   * terminal cleanup. An intent verb carrying a stale generation is
+   * rejected without mutating anything.
+   */
+  private readonly issueParkGenerations = new Map<string, number>();
+
+  /**
+   * One-triage-per-park guard (SYMPH-399): park generation that already
+   * received a stuck-triage dispatch. A verdict is causally tied to exactly
+   * one park; a re-park (new generation) may triage again, the same park
+   * never does.
+   */
+  private readonly triagedParkGenerations = new Map<string, number>();
+
+  /**
+   * Single retry_once grant per issue (SYMPH-399): the signature of the
+   * park the grant was issued against. Consumed on the first post-grant
+   * failure: an identical signature goes straight back to park with NO
+   * second triage; a novel signature re-enters the normal ladder.
+   */
+  private readonly retryOnceGrants = new Map<
+    string,
+    { signature: string | null }
   >();
 
   constructor(options: OrchestratorCoreOptions) {
@@ -512,6 +607,8 @@ export class OrchestratorCore {
     this.onEscalationStep = options.onEscalationStep;
     this.onGateFailed = options.onGateFailed;
     this.onSystemicCluster = options.onSystemicCluster;
+    this.runStuckTriage = options.runStuckTriage;
+    this.onTriageEscalation = options.onTriageEscalation;
     this.signatureClusterRegistry = new SignatureClusterRegistry({
       systemicThreshold: options.config.watchdog.systemicThreshold,
       circuitBreakerEnabled: options.config.watchdog.circuitBreaker,
@@ -590,6 +687,93 @@ export class OrchestratorCore {
 
       if (isDispatcherAdmissionEntry(entry)) {
         this.clearResumeRequirement(entry.issueId);
+      }
+
+      // Intent events replay through the same reducer (SYMPH-399): a
+      // journaled release/retry/rework clears any earlier park so replay of
+      // park → release converges on released (SYMPH-368: operator releases
+      // used to be invisible to the journal and replay re-parked over them).
+      if (entry.kind === "intent" && entry.metadata.status === "applied") {
+        const verb = entry.metadata.verb;
+        if (verb === "park" || verb === "halt") {
+          this.markIssueRequiresExplicitResume(
+            entry.issueId,
+            readMetadataString(entry.metadata, "issueState"),
+            entry.timestamp,
+          );
+        } else if (
+          verb === "release" ||
+          verb === "retry_once" ||
+          verb === "rework_with_hint"
+        ) {
+          this.clearResumeRequirement(entry.issueId);
+          this.state.failed.delete(entry.issueId);
+          this.state.failureExhaustedIds.delete(entry.issueId);
+          this.issueParkGenerations.delete(entry.issueId);
+          this.triagedParkGenerations.delete(entry.issueId);
+          this.retryOnceGrants.delete(entry.issueId);
+
+          if (verb === "rework_with_hint") {
+            // Restore the rework stage transition so a mid-rework restart
+            // converges on the rework stage, not the pre-rework stage
+            // (SYMPH-399 P2 / SYMPH-368 pattern). The entry's metadata
+            // carries the RESOLVED reworkTarget and post-increment
+            // reworkCount journaled at apply time (council R2): replaying
+            // them verbatim keeps the landing stage stable across config
+            // edits and prevents a crash-replay from forgetting the
+            // consumed rework and granting one extra pass beyond maxRework.
+            const journaledTarget = readMetadataString(
+              entry.metadata,
+              "reworkTarget",
+            );
+            const journaledCount = readMetadataNumber(
+              entry.metadata,
+              "reworkCount",
+            );
+            if (journaledTarget !== null && journaledCount !== null) {
+              this.state.issueStages[entry.issueId] = journaledTarget;
+              this.state.issueReworkCounts[entry.issueId] = journaledCount;
+            } else {
+              // Legacy entry written before the resolved values were
+              // journaled: fall back to deriving the target from the
+              // current config (best effort — may differ if the workflow
+              // changed since the write). The consumed count cannot be
+              // recovered from a legacy entry, so it stays unrestored and
+              // such an issue may get one extra rework after a replay.
+              const parkedStage = entry.stage;
+              if (parkedStage !== null && this.config.stages !== null) {
+                const stageDef = this.config.stages.stages[parkedStage];
+                const reworkTarget = stageDef?.transitions.onRework ?? null;
+                if (reworkTarget !== null) {
+                  this.state.issueStages[entry.issueId] = reworkTarget;
+                }
+              }
+            }
+          }
+
+          if (verb === "retry_once") {
+            // Restore the single-retry grant so the post-restart granted
+            // attempt is still exempt from the novelty short-circuit
+            // (SYMPH-399 P3 — grant envelope survives restart in the grant
+            // window). The grant signature is journaled in grantSignature metadata.
+            const sig = readMetadataString(entry.metadata, "grantSignature");
+            this.retryOnceGrants.set(entry.issueId, {
+              signature: sig,
+            });
+            // Restore the granted stage so a post-restart dispatch reruns
+            // the SAME stage the grant was issued for, not the workflow
+            // initial stage (council R3). The live apply records the stage
+            // it granted on the entry; mirror its stage set + signature
+            // clear so the replayed grant window behaves identically.
+            const grantedStage = entry.stage;
+            if (grantedStage !== null) {
+              this.state.issueStages[entry.issueId] = grantedStage;
+              this.clearStageFailureSignature(entry.issueId, grantedStage);
+            }
+          }
+        }
+        // escalate_human leaves the park (replayed from its source event)
+        // standing; no_op / rejected_stale entries mutate nothing.
       }
 
       if (entry.kind === "right_sizing") {
@@ -738,6 +922,7 @@ export class OrchestratorCore {
    */
   async requestStopByIdentifier(
     issueIdentifier: string,
+    actor?: IntentActor,
   ): Promise<StopRequest | null> {
     const runningEntry = Object.values(this.state.running).find(
       (entry) => entry.identifier === issueIdentifier,
@@ -746,7 +931,20 @@ export class OrchestratorCore {
       return null;
     }
 
-    return await this.requestStop(runningEntry, true, "manual_stop");
+    // Routed through the shared intent-verb layer (SYMPH-399): manual halts
+    // are operator intent — journaled with attribution and replayable.
+    const result = await this.writeIntent({
+      verb: "halt",
+      issueId: runningEntry.issue.id,
+      issueIdentifier,
+      actor: actor ?? { kind: "operator", host: this.intentHost() },
+      reason: {
+        class: "manual_stop",
+        human: `manual stop requested for ${issueIdentifier}`,
+      },
+      issueState: runningEntry.issue.state,
+    });
+    return result.stopRequest ?? null;
   }
 
   /**
@@ -821,6 +1019,12 @@ export class OrchestratorCore {
         // (SYMPH-398 — these two must happen together or the resume deadlocks).
         this.signatureClusterRegistry.clearIssueFromCluster(issue.id);
         this.resetBreakersForResumedIssue(issue.id);
+        // SYMPH-399 lifecycle: a resumed issue starts a fresh park lifecycle —
+        // stale fence generations, triage-once markers, and retry grants must
+        // not survive into it (resume-then-recur must triage again).
+        this.issueParkGenerations.delete(issue.id);
+        this.triagedParkGenerations.delete(issue.id);
+        this.retryOnceGrants.delete(issue.id);
         this.clearResumeRequirement(issue.id);
       } else {
         return false;
@@ -844,6 +1048,11 @@ export class OrchestratorCore {
         // (SYMPH-398 — these two must happen together or the resume deadlocks).
         this.signatureClusterRegistry.clearIssueFromCluster(issue.id);
         this.resetBreakersForResumedIssue(issue.id);
+        // SYMPH-399 lifecycle: same fresh-lifecycle reset as the stop-like
+        // resume path above.
+        this.issueParkGenerations.delete(issue.id);
+        this.triagedParkGenerations.delete(issue.id);
+        this.retryOnceGrants.delete(issue.id);
       } else {
         return false;
       }
@@ -1475,13 +1684,35 @@ export class OrchestratorCore {
       return;
     }
 
-    this.clearResumeRequirement(issueId);
+    // Routed through the shared intent-verb layer (SYMPH-399): the un-park
+    // is a fenced release attributed to watchdog-l2, so a pause-triage
+    // resume and an operator resume are indistinguishable in the journal
+    // except for the actor field. The fence re-checks the park generation
+    // the eligibility guard above already validated (belt-and-braces).
+    const actor = this.watchdogL2Actor();
+    const releaseResult = await this.writeIntent({
+      verb: "release",
+      issueId,
+      issueIdentifier: identifier,
+      actor,
+      reason: {
+        class: "pause_triage_continue",
+        human: `pause triage authorized resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes}`,
+      },
+      ...(input.expectedParkSeq === null
+        ? {}
+        : { fence: { expectedParkSeq: input.expectedParkSeq } }),
+      renderComment: false,
+    });
+    if (releaseResult.status === "rejected_stale") {
+      return;
+    }
 
     try {
       await this.postComment?.(
         issueId,
         [
-          `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes})`,
+          `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes}) — ${formatIntentAttribution(actor)}`,
           verdict.rationale,
           "Auto-resuming one continuation unit at the current budget ceiling.",
         ].join("\n"),
@@ -2665,12 +2896,18 @@ export class OrchestratorCore {
       failure_signature: string;
       failure_class: ErrorSignatureClass;
     },
+    triageContext?: WatchdogParkContext,
   ): Promise<void> {
     // Mark immediately (before any await) so runtime-host's fireWorkerNotification
     // can check this set synchronously after onWorkerExit returns.
     this.state.failureExhaustedIds.add(issueId);
+    // Register the park generation synchronously too (SYMPH-399): a fenced
+    // intent verb issued against this park must observe a stable nonce, and
+    // the deferred triage verdict is causally tied to exactly this value.
+    const parkSeq = this.recordWatchdogPark(issueId);
     const issueState = this.state.running[issueId]?.issue.state ?? null;
-    const stageName = this.state.issueStages[issueId] ?? null;
+    const stageName =
+      triageContext?.stageName ?? this.state.issueStages[issueId] ?? null;
     try {
       await this.recordRunJournalEntry({
         idempotencyKey: `failure_exhausted:${issueId}:${this.now().toISOString()}`,
@@ -2710,6 +2947,410 @@ export class OrchestratorCore {
     } catch {
       // Notification failures are always swallowed
     }
+
+    // Watchdog L2 stuck-ticket triage (SYMPH-399): fired only for the
+    // watchdog park kinds (novelty short-circuit, breaker), at most once
+    // per park generation, and only when the lane is enabled.
+    this.maybeRunStuckTriage({
+      issueId,
+      issueIdentifier,
+      issueTitle,
+      parkReason: reason,
+      parkSeq,
+      failureSignature: signatureMeta?.failure_signature ?? null,
+      failureClass: signatureMeta?.failure_class ?? null,
+      triageContext,
+    });
+  }
+
+  /**
+   * Dispatch the L2 stuck-triage lane for a watchdog park (SYMPH-399),
+   * park-then-revise: nothing waits on the local model; the park already
+   * stands and the verdict, whenever it arrives, executes through fenced
+   * writeIntent calls that can only act on this exact park generation.
+   */
+  private maybeRunStuckTriage(input: {
+    issueId: string;
+    issueIdentifier: string;
+    issueTitle: string;
+    parkReason: string;
+    parkSeq: number;
+    failureSignature: string | null;
+    failureClass: string | null;
+    triageContext: WatchdogParkContext | undefined;
+  }): void {
+    const context = input.triageContext;
+    if (context === undefined) {
+      return;
+    }
+    const parkKind = context.parkKind;
+    if (parkKind !== "novelty" && parkKind !== "breaker") {
+      // spec / retry_exhausted parks are not L2's input class, and a
+      // retry_once_failed park must NEVER triage again (no second triage).
+      return;
+    }
+    const runStuckTriage = this.runStuckTriage;
+    if (runStuckTriage === undefined) {
+      return;
+    }
+    if (this.config.watchdog.stuckTriage?.enabled !== true) {
+      return;
+    }
+    // One-triage-per-park guard: a park generation triages at most once.
+    if (this.triagedParkGenerations.get(input.issueId) === input.parkSeq) {
+      return;
+    }
+    this.triagedParkGenerations.set(input.issueId, input.parkSeq);
+
+    const evidence: StuckTriageEvidence = {
+      issueIdentifier: input.issueIdentifier,
+      issueTitle: input.issueTitle,
+      issueDescription: context.issueDescription,
+      stageName: context.stageName,
+      parkKind,
+      parkReason: input.parkReason,
+      failureSignature: input.failureSignature,
+      failureClass: input.failureClass,
+      attemptCount: context.attemptCount,
+      reworkCount: context.reworkCount,
+      failureRecords: context.failureRecords,
+      stageHistory: context.stageHistory,
+    };
+
+    const apply = (verdict: StuckTriageVerdict | null) =>
+      this.applyStuckTriageVerdict({
+        issueId: input.issueId,
+        issueIdentifier: input.issueIdentifier,
+        issueTitle: input.issueTitle,
+        stageName: context.stageName,
+        parkKind,
+        parkSeq: input.parkSeq,
+        failureSignature: input.failureSignature,
+        failureClass: input.failureClass,
+        verdict,
+      });
+
+    const verdictPromise = runStuckTriage(evidence).catch((error) => {
+      console.warn(
+        `[orchestrator] stuck triage failed for ${input.issueIdentifier}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    });
+
+    const scheduleDeferred = this.scheduleDeferred;
+    if (scheduleDeferred !== undefined) {
+      void verdictPromise
+        .then((verdict) => {
+          scheduleDeferred(() => apply(verdict));
+        })
+        .catch((error) => {
+          // Final rejection boundary: the park already stands either way.
+          console.warn(
+            `[orchestrator] stuck triage chain failed for ${input.issueIdentifier}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      return;
+    }
+
+    void verdictPromise
+      .then((verdict) => apply(verdict))
+      .catch((error) => {
+        console.warn(
+          `[orchestrator] stuck triage apply failed for ${input.issueIdentifier}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+  }
+
+  /**
+   * Apply an out-of-band L2 triage verdict to a park that may no longer be
+   * standing (SYMPH-399). The envelope owns the bounds: low-confidence
+   * verdicts park; retry_once against a permanent failure class parks
+   * (retrying an identical permanent failure is futile — SYMPH-396's own
+   * rule); rework without a hint parks; everything executes through fenced
+   * writeIntent calls so a verdict for an earlier park is a no-op even if
+   * a re-park landed moments later.
+   */
+  private async applyStuckTriageVerdict(input: {
+    issueId: string;
+    issueIdentifier: string;
+    issueTitle: string;
+    stageName: string | null;
+    parkKind: StuckTriageParkKind;
+    parkSeq: number;
+    failureSignature: string | null;
+    failureClass: string | null;
+    verdict: StuckTriageVerdict | null;
+  }): Promise<void> {
+    const { issueId, issueIdentifier, verdict } = input;
+    const actor = this.watchdogL2Actor();
+
+    // Envelope-enforced bounds on the model's proposed action.
+    const notes: string[] = [];
+    let effectiveAction:
+      | "park"
+      | "retry_once"
+      | "rework_with_hint"
+      | "escalate_human";
+    if (verdict === null) {
+      effectiveAction = "park";
+      notes.push("triage unavailable — fail closed, park stands");
+    } else {
+      effectiveAction = verdict.action;
+      if (verdict.confidence === "low" && effectiveAction !== "park") {
+        notes.push(
+          `low-confidence ${verdict.action} coerced to park (fail closed)`,
+        );
+        effectiveAction = "park";
+      }
+      if (
+        effectiveAction === "retry_once" &&
+        input.failureClass === "permanent"
+      ) {
+        notes.push(
+          "retry_once for a permanent failure class coerced to park (identical permanent failures are futile to retry — SYMPH-396)",
+        );
+        effectiveAction = "park";
+      }
+      if (
+        effectiveAction === "rework_with_hint" &&
+        (verdict.hint === undefined || verdict.hint.trim() === "")
+      ) {
+        notes.push("rework_with_hint without a hint coerced to park");
+        effectiveAction = "park";
+      }
+    }
+
+    const stillParked =
+      this.isIssueParked(issueId) &&
+      !(issueId in this.state.running) &&
+      this.state.retryAttempts[issueId] === undefined &&
+      this.issueParkGenerations.get(issueId) === input.parkSeq;
+    const status =
+      verdict === null ? "unavailable" : stillParked ? "applied" : "stale";
+
+    // Journal the verdict together with the action the envelope actually
+    // executes — the audit trail can never claim an action that did not
+    // happen (pause-triage convention, PR #330 review P2).
+    try {
+      await this.recordRunJournalEntry({
+        idempotencyKey: `triage_verdict:${issueId}:gen-${input.parkSeq}`,
+        timestamp: this.now().toISOString(),
+        kind: "triage_verdict",
+        issueId,
+        issueIdentifier,
+        operation: "dispatcher",
+        stage: input.stageName,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary:
+          verdict === null
+            ? `Stuck triage unavailable for ${issueIdentifier}; park stands.`
+            : `Stuck triage verdict for ${issueIdentifier}: ${verdict.action} → ${effectiveAction} (${status}).`,
+        metadata: {
+          schema_version: INTENT_SCHEMA_VERSION,
+          status,
+          parkKind: input.parkKind,
+          parkGeneration: input.parkSeq,
+          classification: verdict?.classification ?? null,
+          modelAction: verdict?.action ?? null,
+          action: effectiveAction,
+          confidence: verdict?.confidence ?? null,
+          rationale: verdict?.rationale ?? null,
+          ...(verdict?.hint === undefined ? {} : { hint: verdict.hint }),
+          notes,
+          actor: {
+            kind: actor.kind,
+            host: actor.host,
+            session: actor.session ?? null,
+          },
+          ...(input.failureSignature === null
+            ? {}
+            : { failure_signature: input.failureSignature }),
+          ...(input.failureClass === null
+            ? {}
+            : { failure_class: input.failureClass }),
+        },
+      });
+    } catch {
+      // Audit is best-effort; the verdict outcome must still apply.
+    }
+
+    if (!stillParked) {
+      return;
+    }
+
+    // Human-visible verdict comment (pause-triage convention) with the
+    // mandatory actor attribution.
+    if (verdict !== null) {
+      const commentLines = [
+        `Stuck-ticket triage verdict: ${effectiveAction}${effectiveAction === verdict.action ? "" : ` (model proposed ${verdict.action})`} — ${formatIntentAttribution(actor)}`,
+        `Classification: ${verdict.classification} | confidence: ${verdict.confidence}`,
+        verdict.rationale,
+        ...notes.map((note) => `Note: ${note}`),
+      ];
+      try {
+        await this.postComment?.(issueId, commentLines.join("\n"));
+      } catch {
+        // Observability only.
+      }
+    }
+
+    const fence: IntentFence = { expectedParkSeq: input.parkSeq };
+    const reasonHuman =
+      verdict === null
+        ? "stuck triage unavailable"
+        : `stuck triage: ${verdict.classification} (${verdict.confidence}) — ${verdict.rationale}`;
+
+    switch (effectiveAction) {
+      case "park": {
+        // The park already stands — record the decision as an idempotent
+        // intent no_op so the journal shows L2 affirmed the park.
+        await this.writeIntent({
+          verb: "park",
+          issueId,
+          issueIdentifier,
+          actor,
+          reason: { class: "stuck_triage_park", human: reasonHuman },
+          fence,
+          renderComment: false,
+        });
+        return;
+      }
+
+      case "retry_once": {
+        await this.writeIntent({
+          verb: "retry_once",
+          issueId,
+          issueIdentifier,
+          actor,
+          reason: { class: "stuck_triage_retry_once", human: reasonHuman },
+          fence,
+          stage: input.stageName,
+          grantSignature: input.failureSignature,
+          renderComment: false,
+        });
+        return;
+      }
+
+      case "rework_with_hint": {
+        // biome-ignore lint/style/noNonNullAssertion: effectiveAction can only be rework_with_hint when verdict is non-null with a hint (envelope coercion above)
+        const hint = verdict!.hint!;
+        const result = await this.writeIntent({
+          verb: "rework_with_hint",
+          issueId,
+          issueIdentifier,
+          actor,
+          reason: { class: "stuck_triage_rework", human: reasonHuman },
+          fence,
+          stage: input.stageName,
+          hint,
+          renderComment: false,
+        });
+        if (result.status === "applied") {
+          // Route the hint through the structured rework-feedback comment
+          // the rework prompts already consume (Review Findings format).
+          // SYMPH-378's continuous-feedback channel is strictly mid-flight
+          // steering and cannot reach a parked issue.
+          const reworkStage =
+            this.state.issueStages[issueId] ?? input.stageName ?? "(unknown)";
+          // Neutralize the hint before posting: strip triple-backtick fences
+          // and cap length so model output cannot inject Markdown code-fence
+          // syntax into the rework prompt on re-ingestion (SYMPH-399 Q3).
+          const safeHint = neutralizeHintEgress(hint);
+          this.postReviewFindingsComment(
+            issueId,
+            issueIdentifier,
+            reworkStage,
+            [
+              `Watchdog triage hint (${formatIntentAttribution(actor)}):`,
+              "",
+              safeHint,
+            ].join("\n"),
+          );
+        } else {
+          try {
+            await this.postComment?.(
+              issueId,
+              `Stuck-ticket triage: rework_with_hint not executable (${result.detail}); park stands — ${formatIntentAttribution(actor)}`,
+            );
+          } catch {
+            // Observability only.
+          }
+        }
+        return;
+      }
+
+      case "escalate_human": {
+        await this.writeIntent({
+          verb: "escalate_human",
+          issueId,
+          issueIdentifier,
+          actor,
+          reason: { class: "stuck_triage_escalate", human: reasonHuman },
+          fence,
+          renderComment: false,
+        });
+        // Page through the SYMPH-397 notifier with the model's case.
+        try {
+          this.onTriageEscalation?.({
+            issueId,
+            issueIdentifier,
+            issueTitle: input.issueTitle,
+            stageName: input.stageName,
+            // biome-ignore lint/style/noNonNullAssertion: escalate_human only survives coercion when verdict is non-null
+            classification: verdict!.classification,
+            // biome-ignore lint/style/noNonNullAssertion: see above
+            confidence: verdict!.confidence,
+            // biome-ignore lint/style/noNonNullAssertion: see above
+            caseText: verdict!.rationale,
+          });
+        } catch {
+          // Notification failures are always swallowed
+        }
+        return;
+      }
+    }
+  }
+
+  /**
+   * Capture the evidence the L2 triage lane needs BEFORE
+   * clearTerminalIssueRuntimeState erases it (SYMPH-399).
+   */
+  private captureWatchdogParkContext(
+    issueId: string,
+    parkKind: WatchdogParkContext["parkKind"],
+    stageName: string | null,
+    rawError: string | null,
+    attemptCount: number | null,
+  ): WatchdogParkContext {
+    const running = this.state.running[issueId];
+    const incoming =
+      rawError === null ? null : normalizeErrorSignature(rawError);
+    return {
+      parkKind,
+      stageName,
+      issueDescription: running?.issue.description ?? null,
+      attemptCount,
+      reworkCount: this.state.issueReworkCounts[issueId] ?? 0,
+      stageHistory: (this.state.issueExecutionHistory[issueId] ?? []).map(
+        (record) => ({
+          stageName: record.stageName,
+          outcome: record.outcome,
+          turns: record.turns,
+        }),
+      ),
+      failureRecords:
+        rawError === null || incoming === null
+          ? []
+          : [
+              {
+                raw: rawError,
+                signature: incoming.signature,
+                failureClass: incoming.class,
+              },
+            ],
+    };
   }
 
   private async fireEscalationSideEffects(
@@ -3167,6 +3808,15 @@ export class OrchestratorCore {
     // Clear the exhaustion-dedup marker so a resumed issue can fire the alert
     // again if it exhausts retries in a new lifecycle (SYMPH-397).
     this.state.failureExhaustedIds.delete(issueId);
+    // SYMPH-399 lifecycle: intent fence generation, one-triage-per-park
+    // marker, and any unconsumed retry_once grant all die with the issue's
+    // runtime state. Park paths that call this method re-set the generation
+    // AFTER the clear (recordWatchdogPark runs later in those paths), so the
+    // ordering here is deliberate — mirror of the cluster-membership note
+    // below.
+    this.issueParkGenerations.delete(issueId);
+    this.triagedParkGenerations.delete(issueId);
+    this.retryOnceGrants.delete(issueId);
     // Failure signatures are keyed by `${issueId}:${stage}` — purge all
     const sigPrefix = `${issueId}:`;
     for (const key of Object.keys(this.state.issueFailureSignatures)) {
@@ -3254,11 +3904,429 @@ export class OrchestratorCore {
       pausedAt: pausedAt ?? this.now().toISOString(),
       parkSeq: this.parkSequence,
     });
+    // Intent-fence generation (SYMPH-399): stop-like pauses and watchdog
+    // parks share one monotonic counter so a fenced verb can never act on
+    // a park other than the one it was issued against.
+    this.issueParkGenerations.set(issueId, this.parkSequence);
   }
 
   private clearResumeRequirement(issueId: string): void {
     this.state.resumeRequired.delete(issueId);
     this.resumeRequiredGuards.delete(issueId);
+  }
+
+  // -------------------------------------------------------------------------
+  // Shared intent-verb layer (SYMPH-399 / SYMPH-408 carve-out "408a")
+  // -------------------------------------------------------------------------
+
+  /** First hostname label, mirroring the SYMPH-383 owner-host convention. */
+  private intentHost(): string {
+    const label = hostname().split(".")[0];
+    return label === undefined || label === "" ? hostname() : label;
+  }
+
+  /** Actor identity for watchdog L2 (stuck-triage) intent writes. */
+  private watchdogL2Actor(): IntentActor {
+    // Omit session (leaseOwnerId) — the UUID is operationally meaningless
+    // in attribution comments and adds noise without information (B-7).
+    return {
+      kind: "watchdog-l2",
+      host: this.intentHost(),
+    };
+  }
+
+  /**
+   * Register a watchdog park (failure-exhausted family) in the intent-fence
+   * generation map. Stop-like pauses get their generation through
+   * recordIssueRequiresExplicitResume; this covers the failed-set parks
+   * which never set resumeRequired live.
+   */
+  private recordWatchdogPark(issueId: string): number {
+    this.parkSequence += 1;
+    this.issueParkGenerations.set(issueId, this.parkSequence);
+    return this.parkSequence;
+  }
+
+  private isIssueParked(issueId: string): boolean {
+    return (
+      this.state.resumeRequired.has(issueId) || this.state.failed.has(issueId)
+    );
+  }
+
+  /**
+   * Reducer for releasing a parked issue (the resume blocks in
+   * isDispatchEligible apply the same set of clears). Cluster membership and
+   * breakers reset together with the park or the resume deadlocks
+   * (SYMPH-398).
+   */
+  private releaseParkedIssueState(issueId: string): void {
+    this.clearResumeRequirement(issueId);
+    this.state.failed.delete(issueId);
+    this.state.failureExhaustedIds.delete(issueId);
+    this.signatureClusterRegistry.clearIssueFromCluster(issueId);
+    this.resetBreakersForResumedIssue(issueId);
+    this.issueParkGenerations.delete(issueId);
+    this.triagedParkGenerations.delete(issueId);
+    this.retryOnceGrants.delete(issueId);
+  }
+
+  /**
+   * Re-establish park state after an intent verb released the park but the
+   * action could not proceed and the issue must stay parked (council R2).
+   * releaseParkedIssueState dropped the park generation and the
+   * failureExhaustedIds marker; without a fresh generation the re-park is
+   * fence-dead — no future fenced intent can ever match, and stale-fence
+   * protection is silently disabled for the issue. Mints a NEW generation
+   * (same bump recordWatchdogPark performs) and restores the exhausted
+   * marker for alert dedup.
+   *
+   * Deliberately does NOT re-register the issue in the signature cluster:
+   * no NEW failure occurred on these paths — the budget/precondition check
+   * merely refused the action. Re-park paths where a real failure fired
+   * (e.g. retry_once_failed) record into the cluster themselves.
+   */
+  private reestablishParkAfterRelease(issueId: string): void {
+    this.state.failureExhaustedIds.add(issueId);
+    this.recordWatchdogPark(issueId);
+  }
+
+  /**
+   * The shared intent-verb write primitive (SYMPH-399, carved out of
+   * SYMPH-408). One journal-write path for operator, agents, and watchdog
+   * L2 — never independent mutation paths. Semantics:
+   *
+   * - Idempotent: a verb that would not change state records a `no_op`;
+   *   duplicate identical writes dedupe on the journal idempotency key.
+   * - Fenced: `fence.expectedParkSeq` must match the issue's current park
+   *   generation (the park-then-revise nonce pattern) or the write is
+   *   `rejected_stale` and mutates nothing.
+   * - Attributed: the actor is journaled AND rendered into the
+   *   human-visible Linear comment ("by {kind}@{host}").
+   * - Replay-convergent: applied intent events replay through
+   *   recoverFromRunJournal, so park followed by release converges on
+   *   released (SYMPH-368 regression).
+   */
+  async writeIntent(input: {
+    verb: IntentVerb;
+    issueId: string;
+    issueIdentifier: string;
+    actor: IntentActor;
+    reason: IntentReason;
+    fence?: IntentFence;
+    /** Stage context: restored for retry_once; rework source for rework_with_hint. */
+    stage?: string | null;
+    /** Hint text for rework_with_hint (journaled; the caller renders it). */
+    hint?: string | null;
+    /** Tracker state at write time, journaled for replay parity. */
+    issueState?: string | null;
+    /** Signature the retry_once grant guards against (SYMPH-396 fields). */
+    grantSignature?: string | null;
+    /**
+     * When false, suppress the intent's own attribution comment (callers
+     * that render a richer attributed surface, e.g. triage verdicts, must
+     * include formatIntentAttribution themselves).
+     */
+    renderComment?: boolean;
+    extraMetadata?: Record<string, unknown>;
+  }): Promise<
+    IntentWriteResult & {
+      stopRequest?: StopRequest | null;
+    }
+  > {
+    const currentGen = this.issueParkGenerations.get(input.issueId) ?? null;
+
+    if (
+      input.fence !== undefined &&
+      input.fence.expectedParkSeq !== currentGen
+    ) {
+      const detail = `stale fence: expected park generation ${input.fence.expectedParkSeq}, current ${currentGen ?? "none"}`;
+      const sequence = await this.recordIntentJournalEntry({
+        input,
+        status: "rejected_stale",
+        detail,
+        generation: currentGen,
+        idempotencyKey: `intent:${input.verb}:${input.issueId}:fence-${input.fence.expectedParkSeq}-vs-${currentGen ?? "none"}`,
+      });
+      return { status: "rejected_stale", detail, sequence };
+    }
+
+    const application = await this.applyIntentVerb(input, currentGen);
+    const generationAfter =
+      this.issueParkGenerations.get(input.issueId) ?? currentGen;
+    const sequence = await this.recordIntentJournalEntry({
+      input,
+      status: application.status,
+      detail: application.detail,
+      generation: generationAfter,
+      idempotencyKey:
+        application.status === "no_op"
+          ? `intent:${input.verb}:${input.issueId}:gen-${currentGen ?? "none"}:no_op`
+          : `intent:${input.verb}:${input.issueId}:gen-${generationAfter ?? "none"}`,
+      ...(application.journalMetadata === undefined
+        ? {}
+        : { journalMetadata: application.journalMetadata }),
+    });
+
+    if (application.status === "applied" && input.renderComment !== false) {
+      try {
+        await this.postComment?.(
+          input.issueId,
+          [
+            `Intent applied: ${input.verb} — ${formatIntentAttribution(input.actor)}`,
+            `Reason: ${input.reason.human}`,
+          ].join("\n"),
+        );
+      } catch {
+        // Attribution comment is best-effort; the intent already applied.
+      }
+    }
+
+    return {
+      status: application.status,
+      detail: application.detail,
+      sequence,
+      ...(application.stopRequest !== undefined
+        ? { stopRequest: application.stopRequest }
+        : {}),
+    };
+  }
+
+  private async applyIntentVerb(
+    input: {
+      verb: IntentVerb;
+      issueId: string;
+      issueIdentifier: string;
+      stage?: string | null;
+      issueState?: string | null;
+      grantSignature?: string | null;
+    },
+    currentGen: number | null,
+  ): Promise<{
+    status: "applied" | "no_op";
+    detail: string;
+    stopRequest?: StopRequest | null;
+    /**
+     * Resolved values the replay reducer needs verbatim (e.g. the rework
+     * target and post-increment count), journaled alongside the intent so
+     * replay never re-derives them from a config that may have drifted.
+     */
+    journalMetadata?: Record<string, unknown>;
+  }> {
+    const { issueId } = input;
+
+    switch (input.verb) {
+      case "park": {
+        if (this.isIssueParked(issueId)) {
+          return { status: "no_op", detail: "already parked" };
+        }
+        this.markIssueRequiresExplicitResume(issueId, input.issueState ?? null);
+        return {
+          status: "applied",
+          detail: "parked; explicit resume required",
+        };
+      }
+
+      case "release": {
+        if (!this.isIssueParked(issueId)) {
+          return { status: "no_op", detail: "not parked" };
+        }
+        this.releaseParkedIssueState(issueId);
+        return { status: "applied", detail: "released" };
+      }
+
+      case "retry_once": {
+        if (!this.isIssueParked(issueId)) {
+          return { status: "no_op", detail: "not parked" };
+        }
+        this.releaseParkedIssueState(issueId);
+        this.retryOnceGrants.set(issueId, {
+          signature: input.grantSignature ?? null,
+        });
+        const stage = input.stage ?? null;
+        if (stage !== null) {
+          this.state.issueStages[issueId] = stage;
+          this.clearStageFailureSignature(issueId, stage);
+        }
+        this.scheduleRetry(issueId, 1, {
+          identifier: input.issueIdentifier,
+          error: null,
+          delayType: "continuation",
+        });
+        return {
+          status: "applied",
+          detail: `released for exactly one retry${stage === null ? "" : ` of stage "${stage}"`}`,
+        };
+      }
+
+      case "rework_with_hint": {
+        if (!this.isIssueParked(issueId)) {
+          return { status: "no_op", detail: "not parked" };
+        }
+        const stage = input.stage ?? null;
+        if (stage === null) {
+          // Fail closed: no stage context means the park stands.
+          return {
+            status: "no_op",
+            detail: "no stage context for rework_with_hint — park stands",
+          };
+        }
+        // Pre-check: reworkGate() requires a valid onRework target. Verify the
+        // path exists before releasing the park so a no-path result leaves the
+        // issue cleanly parked with no state mutation.
+        const stageDefinition = this.config.stages?.stages[stage];
+        const reworkPath = stageDefinition?.transitions.onRework ?? null;
+        if (reworkPath === null) {
+          return {
+            status: "no_op",
+            detail: `no on_rework target for stage "${stage}" — park stands`,
+          };
+        }
+        // Delegate to reworkGate() so the maxRework ceiling check, passedStages
+        // splice, and count increment are performed by the same audited path
+        // that all other rework calls use. This prevents an intent-path
+        // rework_with_hint from bypassing a maxRework: 0 guard (SYMPH-399 P2).
+        this.releaseParkedIssueState(issueId);
+        // Set the parked stage so reworkGate() reads the correct current stage.
+        this.state.issueStages[issueId] = stage;
+        const reworkTarget = this.reworkGate(issueId);
+        if (reworkTarget === "escalated") {
+          // reworkGate already set failed and cleared terminal state; the
+          // issue stays parked (failed). Journal as no_op so callers can
+          // distinguish "budget exhausted" from a clean rework application.
+          this.reestablishParkAfterRelease(issueId);
+          return {
+            status: "no_op",
+            detail: `rework budget exhausted for stage "${stage}" — park stands`,
+          };
+        }
+        if (reworkTarget === null) {
+          // Should not happen given the pre-check above, but fail closed.
+          this.state.failed.add(issueId);
+          this.reestablishParkAfterRelease(issueId);
+          return {
+            status: "no_op",
+            detail: `no on_rework target for stage "${stage}" — park stands`,
+          };
+        }
+        // reworkGate set issueStages[issueId] = reworkTarget and incremented count.
+        this.scheduleRetry(issueId, 1, {
+          identifier: input.issueIdentifier,
+          error: null,
+          delayType: "continuation",
+        });
+        return {
+          status: "applied",
+          detail: `released for rework to stage "${reworkTarget}"`,
+          // Journal the RESOLVED target and post-increment count so replay
+          // restores them verbatim — a config edit between write and replay
+          // must not change where the issue lands or grant an extra rework
+          // beyond maxRework (council R2: codex #2 / pi #3).
+          journalMetadata: {
+            reworkTarget,
+            reworkCount: this.state.issueReworkCounts[issueId] ?? 0,
+          },
+        };
+      }
+
+      case "escalate_human": {
+        if (!this.isIssueParked(issueId)) {
+          return { status: "no_op", detail: "not parked" };
+        }
+        // No state change: the park stands while a human is paged.
+        return {
+          status: "applied",
+          detail: `escalated to human; park stands (generation ${currentGen ?? "none"})`,
+        };
+      }
+
+      case "halt": {
+        const runningEntry = this.state.running[issueId];
+        if (runningEntry === undefined) {
+          return { status: "no_op", detail: "not running" };
+        }
+        const stopRequest = await this.requestStop(
+          runningEntry,
+          true,
+          "manual_stop",
+        );
+        return { status: "applied", detail: "halted", stopRequest };
+      }
+    }
+  }
+
+  private async recordIntentJournalEntry(args: {
+    input: {
+      verb: IntentVerb;
+      issueId: string;
+      issueIdentifier: string;
+      actor: IntentActor;
+      reason: IntentReason;
+      fence?: IntentFence;
+      stage?: string | null;
+      hint?: string | null;
+      issueState?: string | null;
+      grantSignature?: string | null;
+      extraMetadata?: Record<string, unknown>;
+    };
+    status: "applied" | "no_op" | "rejected_stale";
+    detail: string;
+    generation: number | null;
+    idempotencyKey: string;
+    /** Resolved values from applyIntentVerb that replay reads back verbatim. */
+    journalMetadata?: Record<string, unknown>;
+  }): Promise<number | null> {
+    const { input } = args;
+    try {
+      const entry = await this.recordRunJournalEntry({
+        idempotencyKey: args.idempotencyKey,
+        timestamp: this.now().toISOString(),
+        kind: "intent",
+        issueId: input.issueId,
+        issueIdentifier: input.issueIdentifier,
+        operation: "dispatcher",
+        stage: input.stage ?? this.state.issueStages[input.issueId] ?? null,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary: `Intent ${input.verb} ${args.status} for ${input.issueIdentifier} ${formatIntentAttribution(input.actor)}: ${args.detail}`,
+        metadata: {
+          schema_version: INTENT_SCHEMA_VERSION,
+          status: args.status,
+          verb: input.verb,
+          actor: {
+            kind: input.actor.kind,
+            host: input.actor.host,
+            session: input.actor.session ?? null,
+          },
+          reason: { class: input.reason.class, human: input.reason.human },
+          detail: args.detail,
+          parkGeneration: args.generation,
+          ...(input.fence === undefined
+            ? {}
+            : { fence: { expectedParkSeq: input.fence.expectedParkSeq } }),
+          ...(input.hint === undefined || input.hint === null
+            ? {}
+            : { hint: input.hint }),
+          ...(input.issueState === undefined || input.issueState === null
+            ? {}
+            : { issueState: input.issueState }),
+          ...(input.grantSignature === undefined ||
+          input.grantSignature === null
+            ? {}
+            : { grantSignature: input.grantSignature }),
+          ...(input.extraMetadata ?? {}),
+          ...(args.journalMetadata ?? {}),
+        },
+      });
+      return entry.sequence;
+    } catch (error) {
+      // The journal write is the audit trail, not the mutation: a failed
+      // append must not crash the caller, but it must never be silent.
+      console.warn(
+        `[orchestrator] failed to journal intent ${input.verb} for ${input.issueIdentifier}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
   }
 
   private observeResumeRequiredState(
@@ -4533,6 +5601,14 @@ export class OrchestratorCore {
         const parkReason = `circuit breaker open for stage "${stageName}" (signature ${breakerEntry?.signature ?? "unknown"}): systemic failure cluster detected — operator action required`;
         this.state.failed.add(issue.id);
         this.releaseClaim(issue.id);
+        const parkContext = this.captureWatchdogParkContext(
+          issue.id,
+          "breaker",
+          stageName,
+          null,
+          null,
+        );
+        parkContext.issueDescription = issue.description;
         this.clearTerminalIssueRuntimeState(issue.id);
         void this.fireEscalationSideEffects(
           issue.id,
@@ -4544,6 +5620,16 @@ export class OrchestratorCore {
           issue.identifier,
           issue.title,
           parkReason,
+          breakerEntry === null
+            ? undefined
+            : {
+                failure_signature: breakerEntry.signature,
+                failure_class:
+                  this.signatureClusterRegistry
+                    .getClusters()
+                    .get(breakerEntry.signature)?.errorClass ?? "unknown",
+              },
+          parkContext,
         );
         console.log(
           `[orchestrator] ${issue.identifier}: parked at dispatch — circuit breaker open for stage "${stageName}"`,
@@ -5499,6 +6585,13 @@ export class OrchestratorCore {
         issueId;
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
+      // Ordering invariant: clearTerminalIssueRuntimeState MUST run before
+      // recordFailureExhausted (which calls recordWatchdogPark). The clear
+      // deletes issuePassedStages[issueId] and issueStages[issueId] so that
+      // clearIssueFromCluster runs first; recordWatchdogPark then writes the
+      // fresh park generation into the now-cleared slot. Reversing this order
+      // would cause the park-generation write to be immediately overwritten
+      // by the clear (B-4 invariant, council R1).
       this.clearTerminalIssueRuntimeState(issueId);
       void this.fireEscalationSideEffects(
         issueId,
@@ -5534,6 +6627,72 @@ export class OrchestratorCore {
       const sigKey = `${issueId}:${stage ?? ""}`;
       const incoming = normalizeErrorSignature(input.error);
       const previous = this.state.issueFailureSignatures[sigKey];
+
+      // retry_once grant (SYMPH-399): the single triage-authorized retry is
+      // exempt from the novelty short-circuit, but a failure that recurs
+      // with the SAME signature goes straight back to park with NO second
+      // triage. The grant is consumed on its first post-grant failure
+      // either way; a genuinely novel failure re-enters the normal ladder.
+      const retryOnceGrant = this.retryOnceGrants.get(issueId);
+      if (retryOnceGrant !== undefined) {
+        this.retryOnceGrants.delete(issueId);
+        if (
+          retryOnceGrant.signature !== null &&
+          incoming.signature === retryOnceGrant.signature &&
+          incoming.class !== "transient"
+        ) {
+          const parkReason = `retry_once failed with identical signature ${incoming.signature} (${incoming.class}) — parking, no second triage`;
+          const parkedTitle =
+            input.issueTitle ??
+            this.state.running[issueId]?.issue.title ??
+            input.identifier ??
+            issueId;
+          this.state.failed.add(issueId);
+          this.releaseClaim(issueId);
+          const parkContext = this.captureWatchdogParkContext(
+            issueId,
+            "retry_once_failed",
+            stage,
+            input.error,
+            attempt,
+          );
+          // Ordering invariant: clearTerminalIssueRuntimeState MUST run before
+          // recordFailureExhausted (which calls recordWatchdogPark). See the
+          // comment on the max-retry path above for the full rationale (B-4).
+          this.clearTerminalIssueRuntimeState(issueId);
+          // Re-register this failure in the signature cluster (council R2):
+          // the retry_once intent's releaseParkedIssueState cleared the
+          // issue's cluster membership, and the early return below skips the
+          // shared recordFailureInCluster call at the bottom of this method —
+          // without this the systemic count permanently loses the issue.
+          // Recorded AFTER the terminal-state clear so the clear cannot erase
+          // the membership (same ordering as the spec-failure path).
+          this.recordFailureInCluster(
+            issueId,
+            input.identifier ?? issueId,
+            incoming,
+            stage,
+          );
+          void this.fireEscalationSideEffects(
+            issueId,
+            input.identifier ?? issueId,
+            parkReason,
+          );
+          void this.recordFailureExhausted(
+            issueId,
+            input.identifier ?? issueId,
+            parkedTitle,
+            parkReason,
+            {
+              failure_signature: incoming.signature,
+              failure_class: incoming.class,
+            },
+            parkContext,
+          );
+          return null;
+        }
+      }
+
       if (
         attempt >= 2 &&
         previous !== undefined &&
@@ -5549,6 +6708,16 @@ export class OrchestratorCore {
           issueId;
         this.state.failed.add(issueId);
         this.releaseClaim(issueId);
+        const parkContext = this.captureWatchdogParkContext(
+          issueId,
+          "novelty",
+          stage,
+          input.error,
+          attempt,
+        );
+        // Ordering invariant: clearTerminalIssueRuntimeState MUST run before
+        // recordFailureExhausted (which calls recordWatchdogPark). See the
+        // comment on the max-retry path above for the full rationale (B-4).
         this.clearTerminalIssueRuntimeState(issueId);
         void this.fireEscalationSideEffects(
           issueId,
@@ -5564,6 +6733,7 @@ export class OrchestratorCore {
             failure_signature: incoming.signature,
             failure_class: incoming.class,
           },
+          parkContext,
         );
         return null;
       }
@@ -6026,6 +7196,31 @@ function readMetadataString(
 ): string | null {
   const value = metadata[key];
   return typeof value === "string" ? value : null;
+}
+
+function readMetadataNumber(
+  metadata: Record<string, unknown>,
+  key: string,
+): number | null {
+  const value = metadata[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Neutralize model-generated text before it is posted as a rework-feedback
+ * comment that is later re-ingested by a downstream prompt. Strips
+ * triple-backtick fences (which could re-open a code block context in the
+ * next-hop prompt) and caps the total length so a runaway hint cannot produce
+ * an oversized Linear comment (SYMPH-399 Q3 / council R1 fix 3).
+ */
+const HINT_EGRESS_MAX_CHARS = 4000;
+function neutralizeHintEgress(text: string): string {
+  // Replace triple-backtick sequences with a single backtick to defuse
+  // Markdown code-fence syntax without destroying the surrounding content.
+  const stripped = text.replace(/```/g, "`");
+  return stripped.length > HINT_EGRESS_MAX_CHARS
+    ? `${stripped.slice(0, HINT_EGRESS_MAX_CHARS)}\n[hint truncated]`
+    : stripped;
 }
 
 function defaultTimerScheduler(): TimerScheduler {

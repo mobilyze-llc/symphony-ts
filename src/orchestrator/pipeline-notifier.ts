@@ -228,6 +228,25 @@ export interface SystemicClusterAlertEvent {
   watchdogTicketFiling: boolean;
 }
 
+/**
+ * Fired when the watchdog L2 stuck-triage lane escalates a parked ticket to
+ * a human with the model's one-paragraph case (SYMPH-399).
+ * severity: critical
+ */
+export interface TriageEscalationEvent {
+  type: "triage_escalation";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  classification: string;
+  confidence: string;
+  /** The model's one-paragraph case for paging a human. */
+  caseText: string;
+  /** Rendered actor attribution, e.g. "by watchdog-l2@pro14". */
+  attribution: string;
+}
+
 export type PipelineNotificationEvent =
   | PipelineStartedEvent
   | PipelineStoppedEvent
@@ -242,7 +261,8 @@ export type PipelineNotificationEvent =
   | EscalationStepEvent
   | GateFailedEvent
   | InfoAlertEvent
-  | SystemicClusterAlertEvent;
+  | SystemicClusterAlertEvent
+  | TriageEscalationEvent;
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -840,6 +860,25 @@ export function formatNotification(
       return {
         text: `:information_source: *${event.issueIdentifier}* — ${event.message}\n${version}`,
       };
+    }
+
+    case "triage_escalation": {
+      const issueLine =
+        event.issueUrl !== null
+          ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
+          : `${event.issueIdentifier}: ${event.issueTitle}`;
+      const parts: string[] = [
+        `:rotating_light: *Stuck-triage escalation* — ${issueLine}`,
+      ];
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(
+        `Classification: ${event.classification} (confidence: ${event.confidence}) · ${event.attribution}`,
+      );
+      parts.push(`Case: ${event.caseText}`);
+      parts.push(version);
+      return { text: parts.join("\n") };
     }
 
     case "systemic_cluster_alert": {

@@ -180,6 +180,22 @@ export interface WorkflowObservabilityConfig {
 }
 
 /**
+ * Watchdog L2 stuck-ticket triage (SYMPH-399): when the deterministic
+ * watchdog parks a ticket (retry-without-novelty or circuit-breaker park),
+ * a local model classifies the failure and picks one bounded action.
+ * Default-DISABLED per product until calibration; parsed via Zod.
+ */
+export interface WorkflowStuckTriageConfig {
+  /** Master switch. When false the lane contributes zero side effects. */
+  enabled: boolean;
+  baseUrl: string | null;
+  model: string | null;
+  apiKey: string | null;
+  /** Verdict deadline; null uses the module default (600s). */
+  timeoutMs: number | null;
+}
+
+/**
  * Watchdog L1c configuration (SYMPH-398): cross-ticket signature clustering,
  * stage circuit breaker, and watchdog ticket filer.
  */
@@ -198,6 +214,11 @@ export interface WorkflowWatchdogConfig {
    * Maximum watchdog tickets filed per signature per hour. Default: 3.
    */
   maxFilingsPerHour: number;
+  /**
+   * Watchdog L2 stuck-ticket triage (SYMPH-399). Optional so existing
+   * configs and fixtures need no change; absent means disabled.
+   */
+  stuckTriage?: WorkflowStuckTriageConfig;
 }
 
 export const STAGE_TYPES = ["agent", "gate", "terminal"] as const;
