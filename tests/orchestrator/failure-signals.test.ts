@@ -387,6 +387,32 @@ describe("failure signal routing in onWorkerExit", () => {
     ).toEqual(["claude-opus"]);
   });
 
+  it("preserves bracketed substrate-stall lane suffixes while trimming sentence periods", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: substrate_stall: team(west).\n[STAGE_FAILED: infra]",
+    });
+
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"]
+        ?.stalledLanes,
+    ).toEqual(["team(west)"]);
+  });
+
   it("parks the second substrate stall while preserving the full punctuated lane set", async () => {
     const orchestrator = createStagedOrchestrator({
       stages: createAgentReviewWorkflowConfig(),

@@ -8895,7 +8895,7 @@ function trimSubstrateStallLane(value: string): string {
   let end = value.length;
   while (end > 0) {
     const charCode = value.charCodeAt(end - 1);
-    if (charCode !== 41 && charCode !== 46 && charCode !== 93) {
+    if (charCode !== 46) {
       break;
     }
     end -= 1;
