@@ -1074,6 +1074,7 @@ describe("OrchestratorRuntimeHost", () => {
       "Todo",
       "In Progress",
       "In Review",
+      "Resume",
     ]);
     expect(status).toMatchObject({
       paused: false,
@@ -2459,7 +2460,7 @@ describe("OrchestratorRuntimeHost", () => {
       endpoint: "https://api.linear.app/graphql",
       apiKey: "token",
       projectSlug: "project",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       fetchFn: vi.fn(),
     });
     vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
@@ -2522,7 +2523,7 @@ describe("OrchestratorRuntimeHost", () => {
       endpoint: "https://api.linear.app/graphql",
       apiKey: "token",
       projectSlug: "project",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       fetchFn: vi.fn(),
     });
     vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
@@ -5321,7 +5322,7 @@ function createLinearTrackerForPipelineStatus(): LinearTrackerClient {
     endpoint: "https://api.linear.app/graphql",
     apiKey: "token",
     projectSlug: "pipeline",
-    activeStates: ["Todo", "In Progress", "In Review"],
+    activeStates: ["Todo", "In Progress", "In Review", "Resume"],
     fetchFn: vi.fn(),
   });
 }
@@ -5381,7 +5382,7 @@ function createConfig(): ResolvedWorkflowConfig {
       endpoint: "https://api.linear.app/graphql",
       apiKey: "token",
       projectSlug: "project",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       terminalStates: ["Done", "Canceled"],
     },
     polling: {

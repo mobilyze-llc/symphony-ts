@@ -545,6 +545,12 @@ describe("dispatch verdict events (SYMPH-405)", () => {
     // boundary; opened+closed dispatches normally.
     const openedOnly = breakerEntries().slice(0, 1);
     const replayConfig = createConfig();
+    replayConfig.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ];
     replayConfig.stages = createImplementStages();
     const replayed = createOrchestrator({
       config: replayConfig,
@@ -561,6 +567,12 @@ describe("dispatch verdict events (SYMPH-405)", () => {
     expect(replayed.getState().failed.has("9")).toBe(true);
 
     const bothConfig = createConfig();
+    bothConfig.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ];
     bothConfig.stages = createImplementStages();
     const recovered = createOrchestrator({
       config: bothConfig,

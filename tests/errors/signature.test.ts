@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeErrorSignature } from "../../src/errors/signature.js";
+import {
+  normalizeErrorSignature,
+  normalizeReviewFailureSignature,
+} from "../../src/errors/signature.js";
 
 describe("normalizeErrorSignature", () => {
   describe("normalization", () => {
@@ -248,5 +251,81 @@ describe("normalizeErrorSignature", () => {
       );
       expect(result.class).toBe("unknown");
     });
+  });
+});
+
+describe("normalizeReviewFailureSignature", () => {
+  const AC_SNAPSHOT = [
+    "### Acceptance Criteria",
+    "- [ ] `check: pnpm test exits 0`",
+    "- [ ] `judge: pause reasons report billable tokens`",
+  ].join("\n");
+
+  it("hashes the matched frozen criterion — stable across reworded refusals (SYMPH-402)", () => {
+    const round1 = normalizeReviewFailureSignature(
+      "[STAGE_FAILED: review] Pre-gate evidence check failed: no evidence line for `check: pnpm test exits 0`.",
+      AC_SNAPSHOT,
+    );
+    const round2 = normalizeReviewFailureSignature(
+      "[STAGE_FAILED: review] The frozen criterion check: pnpm test exits 0 has no exit-0 log; blocking the council gate.",
+      AC_SNAPSHOT,
+    );
+    expect(round1.matchedCriteria).toEqual(["check: pnpm test exits 0"]);
+    expect(round1.signature).toBe(round2.signature);
+    expect(round1.class).toBe("permanent");
+  });
+
+  it("different criteria produce different signatures", () => {
+    const checkFailure = normalizeReviewFailureSignature(
+      "missing evidence for `check: pnpm test exits 0`",
+      AC_SNAPSHOT,
+    );
+    const judgeFailure = normalizeReviewFailureSignature(
+      "missing evidence for `judge: pause reasons report billable tokens`",
+      AC_SNAPSHOT,
+    );
+    expect(checkFailure.signature).not.toBe(judgeFailure.signature);
+  });
+
+  it("falls back to the whole-message signature when no criterion matches", () => {
+    const a = normalizeReviewFailureSignature(
+      "[STAGE_FAILED: review] council gate FAIL: artifacts missing",
+      AC_SNAPSHOT,
+    );
+    const b = normalizeReviewFailureSignature(
+      "[STAGE_FAILED: review] council gate FAIL: artifacts missing",
+      AC_SNAPSHOT,
+    );
+    expect(a.matchedCriteria).toEqual([]);
+    expect(a.signature).toBe(b.signature);
+  });
+
+  it("handles null/empty messages and missing snapshots", () => {
+    const noMessage = normalizeReviewFailureSignature(null, null);
+    const emptyMessage = normalizeReviewFailureSignature("   ", null);
+    expect(noMessage.signature).toBe(emptyMessage.signature);
+    expect(noMessage.matchedCriteria).toEqual([]);
+  });
+
+  it("falls back when a message names two-or-more criteria — no false grouping across distinct failures (SYMPH-402 R1)", () => {
+    // A refusal that echoes the whole frozen AC block matches BOTH criteria.
+    // A set-hash would make rounds failing on different criteria collide into
+    // one streak and park a still-progressing issue. The signature must
+    // instead track the actual failure content (the whole-message fallback).
+    const block =
+      "frozen criteria: check: pnpm test exits 0 ; judge: pause reasons report billable tokens.";
+    const roundMissingCheck = normalizeReviewFailureSignature(
+      `[STAGE_FAILED: review] missing the check evidence. ${block}`,
+      AC_SNAPSHOT,
+    );
+    const roundMissingJudge = normalizeReviewFailureSignature(
+      `[STAGE_FAILED: review] missing the judge evidence. ${block}`,
+      AC_SNAPSHOT,
+    );
+    // Multi-match is not authoritative — both fall back, and the two genuinely
+    // different failures get DIFFERENT signatures (no false streak).
+    expect(roundMissingCheck.matchedCriteria).toEqual([]);
+    expect(roundMissingJudge.matchedCriteria).toEqual([]);
+    expect(roundMissingCheck.signature).not.toBe(roundMissingJudge.signature);
   });
 });

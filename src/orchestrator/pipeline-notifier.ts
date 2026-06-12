@@ -6,6 +6,7 @@
  */
 
 import type { ExecutionHistory, RightSizingDecision } from "../domain/model.js";
+import { sanitizeForSlack } from "../shared/egress.js";
 import { getDisplayVersion } from "../version.js";
 
 // ---------------------------------------------------------------------------
@@ -256,6 +257,25 @@ export interface DispatchPageAlertEvent {
   consecutiveTicks: number;
 }
 
+/**
+ * Fired when the watchdog L2 stuck-triage lane escalates a parked ticket to
+ * a human with the model's one-paragraph case (SYMPH-399).
+ * severity: critical
+ */
+export interface TriageEscalationEvent {
+  type: "triage_escalation";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  classification: string;
+  confidence: string;
+  /** The model's one-paragraph case for paging a human. */
+  caseText: string;
+  /** Rendered actor attribution, e.g. "by watchdog-l2@pro14". */
+  attribution: string;
+}
+
 export type PipelineNotificationEvent =
   | PipelineStartedEvent
   | PipelineStoppedEvent
@@ -272,7 +292,8 @@ export type PipelineNotificationEvent =
   | InfoAlertEvent
   | SystemicClusterAlertEvent
   | DispatchVerdictAlertEvent
-  | DispatchPageAlertEvent;
+  | DispatchPageAlertEvent
+  | TriageEscalationEvent;
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -530,6 +551,12 @@ export function formatNotification(
     }
 
     case "issue_failed": {
+      // Free-text failure reasons can carry worker/model-authored content;
+      // sanitize once and reuse (SYMPH-421).
+      const failureReason =
+        event.failureReason === null
+          ? null
+          : sanitizeForSlack(event.failureReason);
       const parts = [
         `:x: *Issue failed* — ${event.issueIdentifier}`,
         `*${event.issueTitle}*`,
@@ -537,8 +564,8 @@ export function formatNotification(
       if (event.issueUrl !== null) {
         parts.push(event.issueUrl);
       }
-      if (event.failureReason !== null) {
-        parts.push(`Reason: ${event.failureReason}`);
+      if (failureReason !== null) {
+        parts.push(`Reason: ${failureReason}`);
       }
       if (event.retriesExhausted) {
         parts.push(`Retries exhausted (attempt ${event.retryAttempt ?? "?"})`);
@@ -567,12 +594,12 @@ export function formatNotification(
         { type: "divider" },
       ];
 
-      if (event.failureReason !== null) {
+      if (failureReason !== null) {
         blocks.push({
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `Reason: ${event.failureReason}`,
+            text: `Reason: ${failureReason}`,
           },
         });
       }
@@ -646,10 +673,11 @@ export function formatNotification(
     }
 
     case "infra_error": {
+      const errorReason = sanitizeForSlack(event.errorReason);
       const text = [
         `:rotating_light: *Infra error* — ${event.issueIdentifier}`,
         `*${event.issueTitle}*`,
-        `Error: ${event.errorReason}`,
+        `Error: ${errorReason}`,
         version,
       ].join("\n");
 
@@ -668,7 +696,7 @@ export function formatNotification(
         },
         {
           type: "section",
-          text: { type: "mrkdwn", text: `Error: ${event.errorReason}` },
+          text: { type: "mrkdwn", text: `Error: ${errorReason}` },
         },
         {
           type: "context",
@@ -750,6 +778,7 @@ export function formatNotification(
     }
 
     case "issue_dropped": {
+      const dropReason = sanitizeForSlack(event.reason);
       const parts = [
         `:stop_button: *Issue left pipeline* — ${event.issueIdentifier}`,
         `*${event.issueTitle}*`,
@@ -757,7 +786,7 @@ export function formatNotification(
       if (event.issueUrl !== null) {
         parts.push(event.issueUrl);
       }
-      parts.push(`Reason: ${event.reason}`);
+      parts.push(`Reason: ${dropReason}`);
       parts.push(version);
       const text = parts.join("\n");
 
@@ -781,7 +810,7 @@ export function formatNotification(
         },
         {
           type: "section",
-          text: { type: "mrkdwn", text: `Reason: ${event.reason}` },
+          text: { type: "mrkdwn", text: `Reason: ${dropReason}` },
         },
         {
           type: "context",
@@ -797,6 +826,7 @@ export function formatNotification(
     // -----------------------------------------------------------------------
 
     case "failure_exhausted": {
+      const exhaustedReason = sanitizeForSlack(event.reason);
       const issueLine =
         event.issueUrl !== null
           ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
@@ -807,7 +837,7 @@ export function formatNotification(
       if (event.stageName !== null) {
         parts.push(`Stage: ${event.stageName}`);
       }
-      parts.push(`Reason: ${event.reason}`);
+      parts.push(`Reason: ${exhaustedReason}`);
       if (event.failureSignature !== null) {
         const classSuffix =
           event.failureClass !== null ? ` (${event.failureClass})` : "";
@@ -818,6 +848,7 @@ export function formatNotification(
     }
 
     case "hard_stop_budget": {
+      const hardStopReason = sanitizeForSlack(event.reason);
       const issueLine =
         event.issueUrl !== null
           ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
@@ -829,7 +860,7 @@ export function formatNotification(
       parts.push(
         `Trigger: ${event.trigger} · ~$${event.estimatedCostUsd.toFixed(2)} · ${formatTokensCompact(event.totalTokens)} tokens`,
       );
-      parts.push(`Reason: ${event.reason}`);
+      parts.push(`Reason: ${hardStopReason}`);
       parts.push(version);
       return { text: parts.join("\n") };
     }
@@ -853,6 +884,7 @@ export function formatNotification(
     }
 
     case "gate_failed": {
+      const gateReason = sanitizeForSlack(event.reason);
       const issueLine =
         event.issueUrl !== null
           ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
@@ -861,15 +893,35 @@ export function formatNotification(
       if (event.stageName !== null) {
         parts.push(`Stage: ${event.stageName}`);
       }
-      parts.push(`Reason: ${event.reason}`);
+      parts.push(`Reason: ${gateReason}`);
       parts.push(version);
       return { text: parts.join("\n") };
     }
 
     case "info_alert": {
       return {
-        text: `:information_source: *${event.issueIdentifier}* — ${event.message}\n${version}`,
+        text: `:information_source: *${event.issueIdentifier}* — ${sanitizeForSlack(event.message)}\n${version}`,
       };
+    }
+
+    case "triage_escalation": {
+      const issueLine =
+        event.issueUrl !== null
+          ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
+          : `${event.issueIdentifier}: ${event.issueTitle}`;
+      const parts: string[] = [
+        `:rotating_light: *Stuck-triage escalation* — ${issueLine}`,
+      ];
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(
+        `Classification: ${event.classification} (confidence: ${event.confidence}) · ${event.attribution}`,
+      );
+      // caseText is the model's verbatim rationale (SYMPH-421).
+      parts.push(`Case: ${sanitizeForSlack(event.caseText)}`);
+      parts.push(version);
+      return { text: parts.join("\n") };
     }
 
     case "systemic_cluster_alert": {

@@ -812,7 +812,7 @@ function createConfig(
       endpoint: "https://api.linear.app/graphql",
       apiKey: "token",
       projectSlug: "project",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       terminalStates: ["Done", "Canceled"],
     },
     polling: { intervalMs: 30_000 },
