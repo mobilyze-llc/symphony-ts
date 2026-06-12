@@ -100,6 +100,7 @@ import {
   type IntentReason,
   type IntentVerb,
   type IntentWriteResult,
+  formatIntentActorKey,
   formatIntentAttribution,
 } from "./intent.js";
 import { createRightSizingDecision } from "./right-sizing.js";
@@ -773,7 +774,9 @@ export class OrchestratorCore {
           }
         }
         // escalate_human leaves the park (replayed from its source event)
-        // standing; no_op / rejected_stale entries mutate nothing.
+        // standing; resume replays as a no-op (its continuation is
+        // in-memory scheduling and an un-parked issue is already
+        // dispatch-eligible); no_op / rejected_stale entries mutate nothing.
       }
 
       if (entry.kind === "right_sizing") {
@@ -1579,11 +1582,20 @@ export class OrchestratorCore {
       return null;
     }
 
+    // Routed through the shared intent-verb layer (SYMPH-422 parity with
+    // the deferred path's release intent): the continuation is a `resume`
+    // intent attributed to watchdog-l2, so the sync continue is journaled
+    // and replayable like every other verb caller. No park exists at this
+    // point (the park only fires after triage declines), so there is no
+    // generation to fence against — the verb's own not-parked/not-running
+    // preconditions are the guard.
+    const actor = this.watchdogL2Actor();
+
     try {
       await this.postComment?.(
         issueId,
         [
-          `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes})`,
+          `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes}) — ${formatIntentAttribution(actor)}`,
           verdict.rationale,
           "Auto-resuming one continuation unit at the current budget ceiling.",
         ].join("\n"),
@@ -1592,11 +1604,19 @@ export class OrchestratorCore {
       // Observability only.
     }
 
-    return this.scheduleRetry(issueId, 1, {
-      identifier: runningEntry.identifier,
-      error: null,
-      delayType: "continuation",
+    const resumeResult = await this.writeIntent({
+      verb: "resume",
+      issueId,
+      issueIdentifier: runningEntry.identifier,
+      actor,
+      reason: {
+        class: "pause_triage_continue",
+        human: `pause triage authorized resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes}`,
+      },
+      stage: stageName,
+      renderComment: false,
     });
+    return resumeResult.retryEntry ?? null;
   }
 
   /**
@@ -4031,9 +4051,20 @@ export class OrchestratorCore {
   }): Promise<
     IntentWriteResult & {
       stopRequest?: StopRequest | null;
+      retryEntry?: RetryEntry | null;
     }
   > {
     const currentGen = this.issueParkGenerations.get(input.issueId) ?? null;
+
+    // Idempotency-key format (SYMPH-422; keys are opaque equality tokens,
+    // never parsed — schema_version is unaffected):
+    //   applied:        intent:{verb}:{issueId}:{kind}@{host}[#{session}]:gen-{N}
+    //   no_op:          intent:{verb}:{issueId}:{kind}@{host}[#{session}]:gen-{N}:no_op
+    //   rejected_stale: intent:{verb}:{issueId}:{kind}@{host}[#{session}]:fence-{E}-vs-{N}
+    // The actor discriminator keeps distinct actors' same-verb-same-generation
+    // intents as separate journal entries (attribution + rationale survive)
+    // while the same actor+session re-issuing identical writes still dedupes.
+    const actorKey = formatIntentActorKey(input.actor);
 
     if (
       input.fence !== undefined &&
@@ -4045,7 +4076,7 @@ export class OrchestratorCore {
         status: "rejected_stale",
         detail,
         generation: currentGen,
-        idempotencyKey: `intent:${input.verb}:${input.issueId}:fence-${input.fence.expectedParkSeq}-vs-${currentGen ?? "none"}`,
+        idempotencyKey: `intent:${input.verb}:${input.issueId}:${actorKey}:fence-${input.fence.expectedParkSeq}-vs-${currentGen ?? "none"}`,
       });
       return { status: "rejected_stale", detail, sequence };
     }
@@ -4060,8 +4091,8 @@ export class OrchestratorCore {
       generation: generationAfter,
       idempotencyKey:
         application.status === "no_op"
-          ? `intent:${input.verb}:${input.issueId}:gen-${currentGen ?? "none"}:no_op`
-          : `intent:${input.verb}:${input.issueId}:gen-${generationAfter ?? "none"}`,
+          ? `intent:${input.verb}:${input.issueId}:${actorKey}:gen-${currentGen ?? "none"}:no_op`
+          : `intent:${input.verb}:${input.issueId}:${actorKey}:gen-${generationAfter ?? "none"}`,
       ...(application.journalMetadata === undefined
         ? {}
         : { journalMetadata: application.journalMetadata }),
@@ -4088,6 +4119,9 @@ export class OrchestratorCore {
       ...(application.stopRequest !== undefined
         ? { stopRequest: application.stopRequest }
         : {}),
+      ...(application.retryEntry !== undefined
+        ? { retryEntry: application.retryEntry }
+        : {}),
     };
   }
 
@@ -4105,6 +4139,8 @@ export class OrchestratorCore {
     status: "applied" | "no_op";
     detail: string;
     stopRequest?: StopRequest | null;
+    /** The continuation scheduled by `resume` (mirrors halt's stopRequest). */
+    retryEntry?: RetryEntry | null;
     /**
      * Resolved values the replay reducer needs verbatim (e.g. the rework
      * target and post-increment count), journaled alongside the intent so
@@ -4250,6 +4286,35 @@ export class OrchestratorCore {
           "manual_stop",
         );
         return { status: "applied", detail: "halted", stopRequest };
+      }
+
+      case "resume": {
+        // One continuation unit for a budget-paused run that never parked
+        // (SYMPH-422: sync pause-triage continue). A standing park must go
+        // through release/retry_once instead — their preconditions and
+        // fence semantics own park clearing.
+        if (this.isIssueParked(issueId)) {
+          return {
+            status: "no_op",
+            detail: "parked — use release or retry_once to clear a park",
+          };
+        }
+        if (issueId in this.state.running) {
+          return { status: "no_op", detail: "already running" };
+        }
+        if (this.state.retryAttempts[issueId] !== undefined) {
+          return { status: "no_op", detail: "retry already scheduled" };
+        }
+        const retryEntry = this.scheduleRetry(issueId, 1, {
+          identifier: input.issueIdentifier,
+          error: null,
+          delayType: "continuation",
+        });
+        return {
+          status: "applied",
+          detail: "scheduled one continuation unit",
+          retryEntry,
+        };
       }
     }
   }

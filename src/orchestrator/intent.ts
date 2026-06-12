@@ -39,6 +39,15 @@ export const INTENT_VERBS = [
   "retry_once",
   "rework_with_hint",
   "escalate_human",
+  /**
+   * Authorize one continuation unit for a budget-paused run that has NOT
+   * parked (SYMPH-422: the synchronous pause-triage continue path fires
+   * before any park exists, so `release` semantics cannot fit). Distinct
+   * from `release`, which clears a standing park. Replays as a no-op: the
+   * continuation retry is in-memory scheduling, and an un-parked issue is
+   * already dispatch-eligible after replay.
+   */
+  "resume",
 ] as const;
 
 export type IntentVerb = (typeof INTENT_VERBS)[number];
@@ -90,6 +99,25 @@ export interface IntentWriteResult {
  * surface (Linear comment, Slack alert) produced by an applied intent must
  * include this string.
  */
+/**
+ * Render the actor discriminator segment of an intent idempotency key
+ * (SYMPH-422). Two DIFFERENT actors minting same-verb-same-generation
+ * intents must journal separately — collapsing them loses the second
+ * actor's attribution and rationale (worst for state-preserving verbs like
+ * escalate_human and for no_op/rejected_stale audit entries). The session
+ * IS part of the discriminator: two CLI/MCP sessions from the same
+ * kind+host are distinct audit events. The orchestrator's own internal
+ * actors are sessionless and host-stable, so its retry-path re-issues of
+ * the same verb at the same generation still dedupe.
+ */
+export function formatIntentActorKey(actor: IntentActor): string {
+  const session =
+    actor.session === undefined || actor.session === null
+      ? ""
+      : `#${actor.session}`;
+  return `${actor.kind}@${actor.host}${session}`;
+}
+
 export function formatIntentAttribution(actor: IntentActor): string {
   const session =
     actor.session === undefined || actor.session === null

@@ -287,6 +287,228 @@ describe("writeIntent semantics 4: replay convergence (SYMPH-368 regression)", (
   });
 });
 
+describe("idempotency-key actor discriminator (SYMPH-422)", () => {
+  const WATCHDOG: IntentActor = { kind: "watchdog-l2", host: "pro14" };
+
+  it("distinct actors minting same-verb-same-generation intents journal separately", async () => {
+    const orchestrator = createOrchestrator();
+    await driveNoveltyPark(orchestrator);
+
+    // escalate_human is state-preserving: both writes are "applied" at the
+    // SAME park generation — exactly the collision the discriminator exists
+    // for (pre-SYMPH-422 the second actor's entry silently collapsed).
+    const first = await orchestrator.writeIntent({
+      verb: "escalate_human",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_escalate", human: "paging on-call" },
+    });
+    const second = await orchestrator.writeIntent({
+      verb: "escalate_human",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: WATCHDOG,
+      reason: { class: "stuck_triage_escalate", human: "model paged human" },
+    });
+    expect(first.status).toBe("applied");
+    expect(second.status).toBe("applied");
+
+    const escalations = intentEntries(orchestrator).filter(
+      (entry) => entry.metadata.verb === "escalate_human",
+    );
+    expect(escalations).toHaveLength(2);
+    const kinds = escalations.map(
+      (entry) => (entry.metadata.actor as { kind: string }).kind,
+    );
+    expect(kinds).toEqual(["operator", "watchdog-l2"]);
+  });
+
+  it("distinct actors' no_op audit entries journal separately", async () => {
+    const orchestrator = createOrchestrator();
+    await orchestrator.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_release", human: "release" },
+    });
+    await orchestrator.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: WATCHDOG,
+      reason: { class: "stuck_triage_release", human: "release" },
+    });
+    expect(intentEntries(orchestrator)).toHaveLength(2);
+  });
+
+  it("the same actor+session re-issuing an identical write still dedupes", async () => {
+    const orchestrator = createOrchestrator();
+    await driveNoveltyPark(orchestrator);
+
+    const sessionActor: IntentActor = {
+      kind: "operator",
+      host: "pro14",
+      session: "cli-7",
+    };
+    for (let i = 0; i < 3; i += 1) {
+      await orchestrator.writeIntent({
+        verb: "escalate_human",
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        actor: sessionActor,
+        reason: { class: "operator_escalate", human: "paging on-call" },
+      });
+    }
+    const escalations = intentEntries(orchestrator).filter(
+      (entry) => entry.metadata.verb === "escalate_human",
+    );
+    expect(escalations).toHaveLength(1);
+  });
+
+  it("the same kind+host with different sessions journal separately", async () => {
+    const orchestrator = createOrchestrator();
+    await driveNoveltyPark(orchestrator);
+
+    for (const session of ["cli-7", "cli-8"]) {
+      await orchestrator.writeIntent({
+        verb: "escalate_human",
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        actor: { kind: "operator", host: "pro14", session },
+        reason: { class: "operator_escalate", human: "paging on-call" },
+      });
+    }
+    const escalations = intentEntries(orchestrator).filter(
+      (entry) => entry.metadata.verb === "escalate_human",
+    );
+    expect(escalations).toHaveLength(2);
+  });
+
+  it("replay with multi-actor entries at one generation still converges", async () => {
+    const first = createOrchestrator();
+    await driveNoveltyPark(first);
+
+    await first.writeIntent({
+      verb: "escalate_human",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_escalate", human: "paging on-call" },
+    });
+    await first.writeIntent({
+      verb: "escalate_human",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: WATCHDOG,
+      reason: { class: "stuck_triage_escalate", human: "model paged human" },
+    });
+
+    // Both escalations are state-preserving: replay keeps the park standing.
+    const replayParked = createOrchestrator({
+      runJournal: first.getState().dispatcherRunJournal,
+    });
+    expect(replayParked.getState().resumeRequired.has("1")).toBe(true);
+
+    // A release after the multi-actor escalations still wins on replay
+    // (sequence order converges regardless of how many actors journaled).
+    await first.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_release", human: "released after page" },
+    });
+    const replayReleased = createOrchestrator({
+      runJournal: first.getState().dispatcherRunJournal,
+    });
+    expect(replayReleased.getState().resumeRequired.has("1")).toBe(false);
+    expect(replayReleased.getState().failed.has("1")).toBe(false);
+  });
+});
+
+describe("sync pause-triage continue routes through writeIntent (SYMPH-422)", () => {
+  const BUDGET_PAUSE = {
+    outcome: "PAUSED-budget" as const,
+    trigger: "token_budget" as const,
+    reason: "Token budget exceeded.",
+    turnCount: 2,
+    totalTokens: 250_001,
+    estimatedCostUsd: 5,
+  };
+
+  it("a continue verdict produces an applied resume intent attributed to watchdog-l2", async () => {
+    const orchestrator = createOrchestrator({
+      runPauseTriage: async () => ({
+        verdict: "continue",
+        rationale: "Real diff in progress; one unit should finish.",
+      }),
+    });
+
+    await orchestrator.pollTick();
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: BUDGET_PAUSE,
+    });
+
+    // Observable behavior is unchanged: one continuation, no park.
+    expect(retryEntry?.delayType).toBe("continuation");
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+    expect(orchestrator.getState().issuePauseTriageResumes["1"]).toBe(1);
+
+    // Parity gain: the continue is an intent journal entry like every
+    // other verb caller — attributed, reasoned, replayable.
+    const resumeEntry = intentEntries(orchestrator).find(
+      (entry) => entry.metadata.verb === "resume",
+    );
+    expect(resumeEntry).toBeDefined();
+    expect(resumeEntry?.metadata.status).toBe("applied");
+    const actor = resumeEntry?.metadata.actor as { kind: string };
+    expect(actor.kind).toBe("watchdog-l2");
+    const reason = resumeEntry?.metadata.reason as { class: string };
+    expect(reason.class).toBe("pause_triage_continue");
+  });
+
+  it("replay of a journaled resume converges on dispatch-eligible (no park)", async () => {
+    const first = createOrchestrator({
+      runPauseTriage: async () => ({
+        verdict: "continue",
+        rationale: "Real diff in progress; one unit should finish.",
+      }),
+    });
+    await first.pollTick();
+    await first.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: BUDGET_PAUSE,
+    });
+
+    const replayed = createOrchestrator({
+      runJournal: first.getState().dispatcherRunJournal,
+    });
+    expect(replayed.getState().resumeRequired.has("1")).toBe(false);
+    expect(replayed.getState().failed.has("1")).toBe(false);
+  });
+
+  it("resume on a parked issue is a no_op — release/retry_once own park clearing", async () => {
+    const orchestrator = createOrchestrator();
+    await driveNoveltyPark(orchestrator);
+
+    const result = await orchestrator.writeIntent({
+      verb: "resume",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "watchdog-l2", host: "pro14" },
+      reason: { class: "pause_triage_continue", human: "continue" },
+    });
+    expect(result.status).toBe("no_op");
+    expect(result.retryEntry).toBeUndefined();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Harness (mirrors tests/orchestrator/retry-novelty.test.ts)
 // ---------------------------------------------------------------------------
@@ -295,6 +517,7 @@ function createOrchestrator(overrides?: {
   postComment?: (issueId: string, body: string) => Promise<void>;
   updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
   runJournal?: OrchestratorCoreOptions["runJournal"];
+  runPauseTriage?: OrchestratorCoreOptions["runPauseTriage"];
 }): OrchestratorCore {
   const options: OrchestratorCoreOptions = {
     config: createConfig(),
@@ -311,6 +534,9 @@ function createOrchestrator(overrides?: {
       : {}),
     ...(overrides?.runJournal !== undefined
       ? { runJournal: overrides.runJournal }
+      : {}),
+    ...(overrides?.runPauseTriage !== undefined
+      ? { runPauseTriage: overrides.runPauseTriage }
       : {}),
     now: () => new Date("2026-06-11T12:00:00.000Z"),
   };
