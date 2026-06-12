@@ -2609,6 +2609,7 @@ export class OrchestratorCore {
       // routed through the normal AC gate.
       const scheduleDeferred = this.scheduleDeferred;
       const completionMessage = agentMessage ?? runningEntry.lastCodexMessage;
+      this.state.claimed.add(issueId);
       void this.runAcGate({
         issueIdentifier: runningEntry.identifier,
         issueTitle: runningEntry.issue.title,

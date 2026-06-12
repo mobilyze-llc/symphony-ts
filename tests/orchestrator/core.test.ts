@@ -1022,6 +1022,80 @@ describe("orchestrator core", () => {
     expect(updateIssueState).not.toHaveBeenCalled();
   });
 
+  it("holds a pending stage completion at the AC gate after explicit Resume without redispatching", async () => {
+    let issueState = "Todo";
+    const deferred: Array<() => Promise<void>> = [];
+    const spawnedStageNames: Array<string | null> = [];
+    const config = createInvestigateImplementConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    config.acGate = { enabled: true };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStageNames.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      runAcGate: async () => ({
+        verdict: "pass",
+        feedback: "Acceptance criteria are clear.",
+      }),
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "Investigation finished.\n[STAGE_COMPLETE]",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 150_000,
+        estimatedCostUsd: 40,
+      },
+    });
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(resumed.dispatchedIssueIds).toEqual([]);
+    expect(spawnedStageNames).toEqual(["investigate"]);
+    expect(orchestrator.getState().claimed.has("1")).toBe(true);
+    expect(deferred).toHaveLength(1);
+
+    const duplicatePoll = await orchestrator.pollTick();
+
+    expect(duplicatePoll.dispatchedIssueIds).toEqual([]);
+    expect(spawnedStageNames).toEqual(["investigate"]);
+
+    await deferred[0]?.();
+
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().retryAttempts["1"]).toMatchObject({
+      delayType: "continuation",
+      identifier: "ISSUE-1",
+    });
+
+    const nextStage = await orchestrator.onRetryTimer("1");
+    expect(nextStage.dispatched).toBe(true);
+    expect(spawnedStageNames).toEqual(["investigate", "implement"]);
+  });
+
   it("consumes a pending stage failure after explicit Resume instead of dropping the failure signal", async () => {
     let issueState = "Todo";
     const spawnedIssueIds: string[] = [];
