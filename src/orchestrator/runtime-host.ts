@@ -138,8 +138,7 @@ import { getDiff, runEnsembleGate } from "./gate-handler.js";
 import {
   type IntentActor,
   type IntentReason,
-  PIPELINE_INTENT_ISSUE_ID,
-  PIPELINE_INTENT_ISSUE_IDENTIFIER,
+  isPipelineSentinelValue,
 } from "./intent.js";
 import { reduceManagerRunJournal } from "./manager-run.js";
 import type { PipelineNotificationSink } from "./pipeline-notifier.js";
@@ -262,22 +261,6 @@ interface WorkerExecution {
 const SHUTDOWN_IDLE_TIMEOUT_MS = 30_000;
 const PIPELINE_HALT_LABEL = "pipeline-halt";
 
-/**
- * Case- and whitespace-insensitive match against the reserved pipeline
- * sentinel ("pipeline"/"PIPELINE"/" pipeline ") so issue-scoped intent verbs
- * can never journal under the pipeline-wide journal scope (SYMPH-408 council
- * R1/R2).
- */
-function isPipelineSentinelTarget(value: string | undefined): boolean {
-  if (value === undefined) {
-    return false;
-  }
-  const lowered = value.trim().toLowerCase();
-  return (
-    lowered === PIPELINE_INTENT_ISSUE_ID.toLowerCase() ||
-    lowered === PIPELINE_INTENT_ISSUE_IDENTIFIER.toLowerCase()
-  );
-}
 const PIPELINE_RESTART_GUIDANCE = [
   "Stage candidate tickets outside Pipeline first.",
   "Add dependency relations and acceptance criteria before adding the Pipeline project.",
@@ -1116,6 +1099,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   }
 
   async getRuntimeSnapshot(): Promise<RuntimeSnapshot> {
+    // The dashboard starts listening before the first poll cycle — hydrate
+    // the durable dispatcher journal eagerly so early reads see persisted
+    // entries instead of an empty in-memory journal. Idempotent and
+    // single-flight (shared hydration task with the poll path). Best-effort:
+    // a disk-read failure degrades to in-memory state, never fails the read.
+    await this.ensureDispatcherRunJournalLoaded().catch(() => undefined);
     await this.refreshManagerRunJournalForSnapshot();
     const state = this.orchestrator.getState();
     state.managerRuns = reduceManagerRunJournal(state.managerRunJournal, {
@@ -1149,10 +1138,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
    * sequence > since_seq, bounded. Reads the same in-memory journal the
    * snapshot reducers consume — no second source of truth.
    */
-  getStateDelta(input: {
+  async getStateDelta(input: {
     sinceSeq: number;
     limit?: number;
-  }): StateDeltaResponse {
+  }): Promise<StateDeltaResponse> {
+    // Same eager hydration as getRuntimeSnapshot: deltas must be served
+    // from the durable journal even before the first poll cycle runs.
+    await this.ensureDispatcherRunJournalLoaded().catch(() => undefined);
     return buildStateDelta(this.orchestrator.getState().dispatcherRunJournal, {
       sinceSeq: input.sinceSeq,
       ...(input.limit === undefined ? {} : { limit: input.limit }),
@@ -1450,9 +1442,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
    * Hydrate the last persisted Codex rate-limit snapshot into orchestrator
    * state once per process (SYMPH-336), so the dispatch admission floor can
    * engage from the first poll tick after a restart. Live telemetry always
-   * wins: hydration only applies while no snapshot has been observed yet.
-   * Stale data is safe — the admission gate ignores windows whose resets_at
-   * has passed.
+   * wins for orchestrator STATE: hydration only assigns it while no snapshot
+   * has been observed yet. The runner-file view, by contrast, is always
+   * loaded from the persisted file (it mirrors what the FILE says even when
+   * live telemetry superseded it). Stale data is safe — the admission gate
+   * ignores windows whose resets_at has passed.
    */
   private async ensureRateLimitSnapshotHydrated(): Promise<void> {
     if (this.rateLimitSnapshotHydrated) {
@@ -1461,9 +1455,6 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.rateLimitSnapshotHydrated = true;
 
     const state = this.orchestrator.getState();
-    if (state.codexRateLimits !== null) {
-      return;
-    }
 
     try {
       const persisted = await loadPersistedRateLimitSnapshot(
@@ -2254,8 +2245,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     // addressable issue. The HTTP schema rejects it too; this check covers
     // direct callers of requestIntent (defense in depth).
     if (
-      isPipelineSentinelTarget(input.issueId) ||
-      isPipelineSentinelTarget(input.issueIdentifier)
+      isPipelineSentinelValue(input.issueId) ||
+      isPipelineSentinelValue(input.issueIdentifier)
     ) {
       return {
         status: "invalid_request",

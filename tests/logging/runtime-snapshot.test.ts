@@ -2151,4 +2151,43 @@ describe("buildStateDelta (SYMPH-407)", () => {
     expect(delta.entries).toEqual([]);
     expect(delta.as_of_sequence).toBe(3);
   });
+
+  it("projects entries through the egress whitelist — no raw metadata passthrough", () => {
+    const clusterEntry: DispatcherRunJournalEntry = {
+      ...entryAt(1),
+      kind: "cluster_transition",
+      ownerId: "owner-1",
+      lease: null,
+      metadata: {
+        schema_version: 1,
+        transition: "grew",
+        signature: "sig-abc",
+        issueCount: 3,
+        stages: ["implement"],
+        details: {
+          errorClass: "agent_error",
+          normalizedText: "SECRET-prompt-injection-payload",
+          members: [{ issueId: "issue-9", issueIdentifier: "ABC-9" }],
+          lastAlertSize: 2,
+        },
+      },
+    };
+    const delta = buildStateDelta([clusterEntry], { sinceSeq: 0 });
+
+    expect(delta.entries).toHaveLength(1);
+    const projected = delta.entries[0]!;
+    // Whitelisted scalars survive; suppressed egress content does not.
+    expect(projected.metadata).toEqual({
+      transition: "grew",
+      signature: "sig-abc",
+    });
+    expect(projected).not.toHaveProperty("ownerId");
+    expect(projected).not.toHaveProperty("lease");
+    expect(projected).not.toHaveProperty("idempotencyKey");
+    const serialized = JSON.stringify(delta);
+    expect(serialized).not.toContain("normalizedText");
+    expect(serialized).not.toContain("SECRET-prompt-injection-payload");
+    expect(serialized).not.toContain("members");
+    expect(serialized).not.toContain("issue-9");
+  });
 });

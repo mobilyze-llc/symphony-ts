@@ -41,8 +41,7 @@ import {
   type IntentFence,
   type IntentStatus,
   type IntentVerb,
-  PIPELINE_INTENT_ISSUE_ID,
-  PIPELINE_INTENT_ISSUE_IDENTIFIER,
+  isPipelineSentinelValue,
 } from "../orchestrator/intent.js";
 import { fetchClaudeUsageFromCli } from "./dashboard-claude-usage.js";
 import { toErrorMessage } from "./dashboard-format.js";
@@ -280,24 +279,6 @@ const intentActorSchema = z.object({
   session: z.string().min(1).max(256).optional(),
 });
 
-/**
- * The pipeline sentinel ("pipeline"/"PIPELINE") is a reserved synthetic
- * journal scope, never an addressable issue: an intent verb targeting it
- * must be rejected at the boundary (case- and whitespace-insensitive, so
- * " pipeline " cannot slip past) before it can journal issue-scoped state
- * under the sentinel id.
- */
-function isPipelineSentinel(value: string | undefined): boolean {
-  if (value === undefined) {
-    return false;
-  }
-  const lowered = value.trim().toLowerCase();
-  return (
-    lowered === PIPELINE_INTENT_ISSUE_ID.toLowerCase() ||
-    lowered === PIPELINE_INTENT_ISSUE_IDENTIFIER.toLowerCase()
-  );
-}
-
 const intentRequestSchema = z
   .object({
     verb: z.enum(INTENT_VERBS),
@@ -318,8 +299,8 @@ const intentRequestSchema = z
   )
   .refine(
     (value) =>
-      !isPipelineSentinel(value.issueId) &&
-      !isPipelineSentinel(value.issueIdentifier),
+      !isPipelineSentinelValue(value.issueId) &&
+      !isPipelineSentinelValue(value.issueIdentifier),
     {
       message:
         "The pipeline sentinel is not an addressable issue; use the pipeline pause/resume endpoints.",

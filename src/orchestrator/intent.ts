@@ -63,6 +63,24 @@ export type IntentVerb = (typeof INTENT_VERBS)[number];
 export const PIPELINE_INTENT_ISSUE_ID = "pipeline";
 export const PIPELINE_INTENT_ISSUE_IDENTIFIER = "PIPELINE";
 
+/**
+ * Case- and whitespace-insensitive match against the reserved pipeline
+ * sentinel ("pipeline"/"PIPELINE"/" pipeline "). The sentinel is a synthetic
+ * journal scope, never an addressable issue: issue-scoped intent verbs must
+ * be rejected at every boundary before they can journal issue state under
+ * the pipeline-wide scope (SYMPH-408 council R1/R2).
+ */
+export function isPipelineSentinelValue(value: string | undefined): boolean {
+  if (value === undefined) {
+    return false;
+  }
+  const lowered = value.trim().toLowerCase();
+  return (
+    lowered === PIPELINE_INTENT_ISSUE_ID.toLowerCase() ||
+    lowered === PIPELINE_INTENT_ISSUE_IDENTIFIER.toLowerCase()
+  );
+}
+
 /** Actor vocabulary shared with the SYMPH-405 verdict-event family. */
 export const INTENT_ACTOR_KINDS = [
   "operator",

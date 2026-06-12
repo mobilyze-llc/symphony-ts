@@ -5,8 +5,10 @@ import type {
   ContinuousFeedbackIssueState,
   DecorrelatedGateOutcome,
   DispatcherDecisionQualitySummary,
+  DispatcherOperation,
   DispatcherRunJournal,
   DispatcherRunJournalEntry,
+  DispatcherRunJournalEventKind,
   IssueDispositionRecord,
   OrchestratorState,
   RecentActivityEntry,
@@ -731,6 +733,42 @@ function buildWatchdogSection(
 export const STATE_DELTA_DEFAULT_LIMIT = 100;
 export const STATE_DELTA_MAX_LIMIT = 500;
 
+/**
+ * Whitelisted scalar metadata projected onto delta entries. Raw journal
+ * metadata is an untyped bag that can carry suppressed egress content
+ * (cluster_transition `details.normalizedText`/`members` hold raw agent
+ * output the notifier and watchdog filer deliberately redact) — only these
+ * known-safe scalar fields ever cross the delta endpoint.
+ */
+export interface StateDeltaEntryMetadata {
+  status?: string;
+  verb?: string;
+  disposition?: string;
+  signature?: string;
+  transition?: string;
+  scope?: string;
+  step?: string;
+  resumesUsed?: number;
+}
+
+/**
+ * Redacted egress projection of a dispatcher journal entry — same
+ * field-projection discipline as the loop_trace_preview shape. Never a
+ * raw `DispatcherRunJournalEntry` passthrough.
+ */
+export interface StateDeltaEntry {
+  sequence: number;
+  timestamp: string;
+  kind: DispatcherRunJournalEventKind;
+  issueId: string;
+  issueIdentifier: string;
+  operation: DispatcherOperation;
+  stage: string | null;
+  attempt: number | null;
+  summary: string;
+  metadata: StateDeltaEntryMetadata;
+}
+
 export interface StateDeltaResponse {
   /** The cursor the caller supplied. */
   since_seq: number;
@@ -739,7 +777,49 @@ export interface StateDeltaResponse {
   count: number;
   /** True when more entries exist beyond `entries` (page was capped). */
   truncated: boolean;
-  entries: DispatcherRunJournalEntry[];
+  entries: StateDeltaEntry[];
+}
+
+const STATE_DELTA_METADATA_STRING_FIELDS = [
+  "status",
+  "verb",
+  "disposition",
+  "signature",
+  "transition",
+  "scope",
+  "step",
+] as const;
+
+function projectStateDeltaMetadata(
+  metadata: Record<string, unknown>,
+): StateDeltaEntryMetadata {
+  const projected: StateDeltaEntryMetadata = {};
+  for (const field of STATE_DELTA_METADATA_STRING_FIELDS) {
+    const value = metadata[field];
+    if (typeof value === "string") {
+      projected[field] = value;
+    }
+  }
+  const resumesUsed = metadata.resumesUsed;
+  if (typeof resumesUsed === "number") {
+    projected.resumesUsed = resumesUsed;
+  }
+  return projected;
+}
+
+function toStateDeltaEntry(entry: DispatcherRunJournalEntry): StateDeltaEntry {
+  return {
+    sequence: entry.sequence,
+    timestamp: entry.timestamp,
+    kind: entry.kind,
+    issueId: entry.issueId,
+    issueIdentifier: entry.issueIdentifier,
+    operation: entry.operation,
+    stage: entry.stage,
+    attempt: entry.attempt,
+    summary: entry.summary,
+    metadata: projectStateDeltaMetadata(entry.metadata),
+  };
 }
 
 /**
@@ -766,7 +846,7 @@ export function buildStateDelta(
       input.asOfSequence ?? journal.at(-1)?.sequence ?? input.sinceSeq,
     count: entries.length,
     truncated: matching.length > entries.length,
-    entries,
+    entries: entries.map(toStateDeltaEntry),
   };
 }
 
