@@ -6,19 +6,26 @@ import { formatAdmissionCard } from "../../src/orchestrator/admission-card.js";
 function decision(
   overrides: Partial<RightSizingDecision> = {},
 ): RightSizingDecision {
-  return {
+  const riskPredicate: RightSizingDecision["riskPredicate"] = {
+    triggerHits: [],
+    matchedPaths: [],
+    matches: [],
+  };
+  const baseDecision: RightSizingDecision = {
     classifier: "deterministic-v1",
     mode: "thin",
     stageName: "investigate",
     reason: "small declared scope, no high-risk files",
     rationale: ["scope under threshold"],
     triggerHits: [],
+    riskPredicate,
     signals: {
       explicitModeHint: null,
       declaredScopeFiles: ["src/a.ts", "src/b.ts"],
       changedFiles: [],
-      impactSurface: "internal",
+      impactSurface: "narrow",
       highRiskFiles: [],
+      riskPredicate,
       stageCount: 4,
       gateCount: 1,
       reviewerCount: 1,
@@ -31,8 +38,12 @@ function decision(
       budget: "low",
     },
     modelRouting: { allowed: false, reason: "not_needed" },
+  };
+
+  return {
+    ...baseDecision,
     ...overrides,
-  } as RightSizingDecision;
+  };
 }
 
 describe("formatAdmissionCard (SYMPH-379)", () => {
