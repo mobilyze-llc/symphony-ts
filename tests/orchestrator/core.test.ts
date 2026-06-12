@@ -1977,6 +1977,159 @@ describe("orchestrator core", () => {
     });
   });
 
+  it("retry timers do not bypass restart-replayed budget pauses", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const orchestrator = new OrchestratorCore({
+      config: createConfig(),
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: "Todo" }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "hard_stop:1:investigate:initial:token_budget:1",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:investigate:initial:token_budget:1",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            outcome: "PAUSED-budget",
+            trigger: "token_budget",
+            reason: "Token budget exceeded: 300000 >= 200000.",
+            issueState: "Todo",
+          },
+        }),
+      ],
+    });
+    orchestrator.getState().claimed.add("1");
+    orchestrator.getState().retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+      timerHandle: null,
+      error: "stale retry",
+      delayType: "continuation",
+    };
+
+    const result = await orchestrator.onRetryTimer("1");
+
+    expect(result).toEqual({
+      dispatched: false,
+      released: false,
+      retryEntry: null,
+    });
+    expect(spawnWorker).not.toHaveBeenCalled();
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(orchestrator.getState().claimed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().issueDispositions["1"]).toMatchObject({
+      disposition: "skip",
+      reasonCode: "requires_explicit_resume",
+    });
+  });
+
+  it("retry timers consume fresh Resume evidence for restart-replayed budget pauses", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const orchestrator = new OrchestratorCore({
+      config: createConfig(),
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: "Resume" }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "hard_stop:1:investigate:initial:token_budget:1",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:investigate:initial:token_budget:1",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            outcome: "PAUSED-budget",
+            trigger: "token_budget",
+            reason: "Token budget exceeded: 300000 >= 200000.",
+            issueState: "Todo",
+          },
+        }),
+      ],
+    });
+    orchestrator.getState().claimed.add("1");
+    orchestrator.getState().retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+      timerHandle: null,
+      error: "retry after operator resume",
+      delayType: "continuation",
+    };
+
+    const result = await orchestrator.onRetryTimer("1");
+
+    expect(result.dispatched).toBe(true);
+    expect(result.retryEntry).toBeNull();
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+    expect(orchestrator.getState().running["1"]).toBeDefined();
+  });
+
+  it("retry timers honor owner-host dispatch validation after config reload", async () => {
+    const fetchCandidates = vi.fn(() => [
+      createIssue({ id: "1", identifier: "ISSUE-1" }),
+    ]);
+    const config = createConfig();
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({ candidatesFn: fetchCandidates }),
+    });
+    orchestrator.getState().claimed.add("1");
+    orchestrator.getState().retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+      timerHandle: null,
+      error: "previous failure",
+      delayType: "failure",
+    };
+    orchestrator.updateConfig({
+      ...config,
+      ownerHost: "definitely-not-this-host",
+    });
+
+    const result = await orchestrator.onRetryTimer("1");
+
+    expect(fetchCandidates).not.toHaveBeenCalled();
+    expect(result.dispatched).toBe(false);
+    expect(result.released).toBe(false);
+    expect(result.retryEntry).toMatchObject({
+      issueId: "1",
+      attempt: 1,
+      identifier: "ISSUE-1",
+    });
+    expect(result.retryEntry?.error).toContain("owner_host");
+    expect(orchestrator.getState().issueDispositions["1"]).toMatchObject({
+      disposition: "gate",
+      reasonCode: ERROR_CODES.ownerHostMismatch,
+    });
+  });
+
   it("reschedules timer-fired retry failures when lease expiry persistence fails", async () => {
     const timers = createFakeTimerScheduler();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
