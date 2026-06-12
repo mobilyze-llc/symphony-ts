@@ -20,6 +20,7 @@ import type {
 import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
 import type {
   DispatcherRunJournal,
+  DispatcherRunJournalEntry,
   Issue,
   LoopTraceJournal,
   ManagerRunJournal,
@@ -55,12 +56,43 @@ import {
 } from "../../src/workspace/path-safety.js";
 import { WorkspaceManager } from "../../src/workspace/workspace-manager.js";
 
+const RATE_LIMIT_CLEANUP_SLEEP_BUFFER = new Int32Array(
+  new SharedArrayBuffer(4),
+);
+
 beforeEach(() => {
   rmSync(join("/tmp/workspaces", ".symphony", "run-journals"), {
     recursive: true,
     force: true,
   });
 });
+
+function removeWorkspaceWithRetry(workspaceRoot: string): void {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? error.code
+          : null;
+      if (
+        (code !== "ENOTEMPTY" && code !== "EBUSY" && code !== "EPERM") ||
+        attempt === 4
+      ) {
+        throw error;
+      }
+      // Test-only synchronous sleep: give macOS file handles a short window to settle.
+      Atomics.wait(RATE_LIMIT_CLEANUP_SLEEP_BUFFER, 0, 0, 25);
+    }
+  }
+}
+
+async function ignoreDispatcherRunJournalEntry(
+  _workspaceRoot: string,
+  _entry: DispatcherRunJournalEntry,
+): Promise<void> {}
 
 describe("OrchestratorRuntimeHost", () => {
   it("retains untracked files when HEAD-based git diffs fail in a fresh repo", async () => {
@@ -624,6 +656,7 @@ describe("OrchestratorRuntimeHost", () => {
           fakeRunner.onEvent = onEvent;
           return fakeRunner;
         },
+        writeDispatcherRunJournalEntry: ignoreDispatcherRunJournalEntry,
         now: () => new Date("2026-03-06T00:00:05.000Z"),
       });
 
@@ -647,7 +680,7 @@ describe("OrchestratorRuntimeHost", () => {
 
       // A cold host in the same workspace hydrates the snapshot before its
       // first tick, so the admission floor has data from tick one.
-      const coldTracker = createTracker();
+      const coldTracker = createTracker({ candidates: [] });
       const coldRunner = new FakeAgentRunner();
       const coldHost = new OrchestratorRuntimeHost({
         config,
@@ -656,13 +689,15 @@ describe("OrchestratorRuntimeHost", () => {
           coldRunner.onEvent = onEvent;
           return coldRunner;
         },
+        writeDispatcherRunJournalEntry: ignoreDispatcherRunJournalEntry,
         now: () => new Date("2026-03-06T00:10:00.000Z"),
       });
 
       await coldHost.pollOnce();
+      await coldHost.flushEvents();
       expect(coldHost.getState().codexRateLimits).toEqual(rateLimits);
     } finally {
-      rmSync(workspaceRoot, { recursive: true, force: true });
+      removeWorkspaceWithRetry(workspaceRoot);
     }
   });
 
@@ -698,10 +733,12 @@ describe("OrchestratorRuntimeHost", () => {
           fakeRunner.onEvent = onEvent;
           return fakeRunner;
         },
+        writeDispatcherRunJournalEntry: ignoreDispatcherRunJournalEntry,
         now: () => new Date("2026-03-06T00:00:05.000Z"),
       });
 
       const tick = await host.pollOnce();
+      await host.flushEvents();
 
       expect(tick.dispatchedIssueIds).toEqual([]);
       expect(host.getState().rateLimitAdmission).toMatchObject({
@@ -709,7 +746,7 @@ describe("OrchestratorRuntimeHost", () => {
         secondaryUsedPercent: 98,
       });
     } finally {
-      rmSync(workspaceRoot, { recursive: true, force: true });
+      removeWorkspaceWithRetry(workspaceRoot);
     }
   });
 
