@@ -447,6 +447,18 @@ export interface OrchestratorCoreOptions {
     reason: string;
   }) => void;
   /**
+   * Called when the AC falsifiability gate fails open (SYMPH-431).
+   * Fire-and-forget; a notifier failure must not block stage advancement.
+   */
+  onAcGateFailOpen?: (input: {
+    issueId: string;
+    issueIdentifier: string;
+    issueTitle: string;
+    stageName: string | null;
+    failOpenStreak: number;
+    severity: "warning" | "critical";
+  }) => void;
+  /**
    * Called when a failure signature becomes SYSTEMIC (SYMPH-398): K distinct
    * issues share the same normalized signature. Fired once-per-signature and
    * re-fired when the cluster grows. Fire-and-forget.
@@ -565,6 +577,8 @@ export class OrchestratorCore {
 
   private readonly onGateFailed?: OrchestratorCoreOptions["onGateFailed"];
 
+  private readonly onAcGateFailOpen?: OrchestratorCoreOptions["onAcGateFailOpen"];
+
   private readonly onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
 
   private readonly onVerdictTransition?: OrchestratorCoreOptions["onVerdictTransition"];
@@ -611,6 +625,8 @@ export class OrchestratorCore {
    * the number (never reissuing a rolled-back sequence) removes the class.
    */
   private burnedRunJournalSequence = 0;
+
+  private acGateFailOpenStreak = 0;
 
   private readonly reportedSupervisionFindings = new Set<string>();
 
@@ -705,6 +721,7 @@ export class OrchestratorCore {
     this.onHardStopBudget = options.onHardStopBudget;
     this.onEscalationStep = options.onEscalationStep;
     this.onGateFailed = options.onGateFailed;
+    this.onAcGateFailOpen = options.onAcGateFailOpen;
     this.onSystemicCluster = options.onSystemicCluster;
     this.onVerdictTransition = options.onVerdictTransition;
     this.onDispatchPage = options.onDispatchPage;
@@ -740,6 +757,7 @@ export class OrchestratorCore {
     this.state.issueDispositions = {};
     this.starvedTickCount = 0;
     this.pageAlertActive = false;
+    this.acGateFailOpenStreak = 0;
 
     const nowMs = this.now().getTime();
     for (const entry of this.state.dispatcherRunJournal) {
@@ -923,6 +941,12 @@ export class OrchestratorCore {
         // later terminal entry clears it via clearTerminalIssueRuntimeState.
         this.state.issueAcSnapshots[entry.issueId] =
           entry.metadata.acceptanceCriteria;
+      }
+      if (entry.kind === "ac_gate" && entry.metadata.status === "completed") {
+        this.acGateFailOpenStreak =
+          entry.metadata.verdict === "pass_open"
+            ? this.acGateFailOpenStreak + 1
+            : 0;
       }
 
       if (entry.kind === "dispatch_verdict") {
@@ -2175,11 +2199,12 @@ export class OrchestratorCore {
   private async applyAcGateVerdict(input: {
     issueId: string;
     identifier: string;
+    issueTitle: string;
     stageName: string;
     verdict: { verdict: "pass" | "rework"; feedback: string } | null;
     completionMessage: string | null;
   }): Promise<void> {
-    const { issueId, identifier, stageName, verdict } = input;
+    const { issueId, identifier, issueTitle, stageName, verdict } = input;
 
     if (
       issueId in this.state.running ||
@@ -2196,6 +2221,15 @@ export class OrchestratorCore {
         : verdict.verdict === "pass"
           ? "pass"
           : "rework";
+    const failOpenStreak =
+      action === "pass_open" ? this.acGateFailOpenStreak + 1 : 0;
+    const failOpenSeverity =
+      action === "pass_open"
+        ? failOpenStreak >= 2
+          ? "critical"
+          : "warning"
+        : null;
+    this.acGateFailOpenStreak = failOpenStreak;
 
     const acceptanceCriteria =
       action === "rework"
@@ -2226,6 +2260,8 @@ export class OrchestratorCore {
           verdict: action,
           feedback: verdict?.feedback ?? null,
           acceptanceCriteria,
+          failOpenStreak: action === "pass_open" ? failOpenStreak : null,
+          alertSeverity: failOpenSeverity,
         },
       });
     } catch (error) {
@@ -2263,6 +2299,18 @@ export class OrchestratorCore {
       console.warn(
         `[orchestrator] AC gate unavailable for ${identifier}; advancing fail-open.`,
       );
+      try {
+        this.onAcGateFailOpen?.({
+          issueId,
+          issueIdentifier: identifier,
+          issueTitle,
+          stageName,
+          failOpenStreak,
+          severity: failOpenSeverity ?? "warning",
+        });
+      } catch {
+        // Notification failures are always swallowed.
+      }
     }
     const transition = this.advanceStage(issueId, identifier);
     if (transition === "completed") {
@@ -2686,6 +2734,7 @@ export class OrchestratorCore {
               this.applyAcGateVerdict({
                 issueId: input.issueId,
                 identifier: runningEntry.identifier,
+                issueTitle: runningEntry.issue.title,
                 stageName: exitedStageName,
                 verdict,
                 completionMessage,

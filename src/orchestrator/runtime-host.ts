@@ -789,6 +789,24 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 reason: input.reason,
               });
             },
+            onAcGateFailOpen: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              issueTitle: string;
+              stageName: string | null;
+              failOpenStreak: number;
+              severity: "warning" | "critical";
+            }) => {
+              _notifier.notify({
+                type: "ac_gate_fail_open",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueTitle,
+                issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
+                stageName: input.stageName,
+                failOpenStreak: input.failOpenStreak,
+                severity: input.severity,
+              });
+            },
             onSystemicCluster: (input: {
               signature: string;
               errorClass: string;

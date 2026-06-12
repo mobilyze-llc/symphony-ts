@@ -1587,6 +1587,38 @@ describe("formatNotification — tracker_write_failed (SYMPH-413)", () => {
   });
 });
 
+describe("formatNotification — ac_gate_fail_open (SYMPH-431)", () => {
+  it("formats first and repeated AC gate fail-open alerts", () => {
+    const first = formatNotification({
+      type: "ac_gate_fail_open",
+      issueIdentifier: "SYMPH-338",
+      issueTitle: "Retry lane",
+      issueUrl: "https://linear.app/mobilyze-llc/issue/SYMPH-338",
+      stageName: "investigate",
+      failOpenStreak: 1,
+      severity: "warning",
+    });
+    expect(first.text).toContain("AC gate unavailable");
+    expect(first.text).toContain("advancing fail-open");
+    expect(first.text).toContain("Consecutive fail-opens: 1");
+    expect(first.text).toContain("Stage: investigate");
+
+    const repeated = formatNotification({
+      type: "ac_gate_fail_open",
+      issueIdentifier: "SYMPH-366",
+      issueTitle: "Repeated lane",
+      issueUrl: null,
+      stageName: null,
+      failOpenStreak: 2,
+      severity: "critical",
+    });
+    expect(repeated.text).toContain("Consecutive fail-opens: 2");
+    expect(repeated.text).toContain(
+      "acceptance-criteria enforcement is effectively disabled",
+    );
+  });
+});
+
 describe("egress sanitization retrofit (SYMPH-421)", () => {
   it("sanitizes issue_failed free-text reason in text and blocks", () => {
     const longTail = "z".repeat(1_000);

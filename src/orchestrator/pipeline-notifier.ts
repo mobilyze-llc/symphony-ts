@@ -196,6 +196,21 @@ export interface GateFailedEvent {
 }
 
 /**
+ * Fired when the AC falsifiability gate cannot render a verdict and the
+ * dispatcher advances fail-open (SYMPH-431).
+ * severity: warning on first outage, critical for consecutive outages.
+ */
+export interface AcGateFailOpenEvent {
+  type: "ac_gate_fail_open";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  failOpenStreak: number;
+  severity: "warning" | "critical";
+}
+
+/**
  * Info-tier alert event.
  * severity: info
  */
@@ -307,6 +322,7 @@ export type PipelineNotificationEvent =
   | HardStopBudgetEvent
   | EscalationStepEvent
   | GateFailedEvent
+  | AcGateFailOpenEvent
   | InfoAlertEvent
   | SystemicClusterAlertEvent
   | TrackerWriteFailedEvent
@@ -913,6 +929,29 @@ export function formatNotification(
         parts.push(`Stage: ${event.stageName}`);
       }
       parts.push(`Reason: ${gateReason}`);
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "ac_gate_fail_open": {
+      const issueLine =
+        event.issueUrl !== null
+          ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
+          : `${event.issueIdentifier}: ${event.issueTitle}`;
+      const emoji =
+        event.severity === "critical" ? ":rotating_light:" : ":warning:";
+      const parts: string[] = [
+        `${emoji} *AC gate unavailable — advancing fail-open* — ${issueLine}`,
+      ];
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(`Consecutive fail-opens: ${event.failOpenStreak}`);
+      if (event.severity === "critical") {
+        parts.push(
+          "Repeated AC gate outages mean acceptance-criteria enforcement is effectively disabled.",
+        );
+      }
       parts.push(version);
       return { text: parts.join("\n") };
     }
