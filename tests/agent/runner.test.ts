@@ -544,6 +544,84 @@ describe("AgentRunner", () => {
     expect(result.hardStop?.reason).toContain("10% grace");
   });
 
+  it("reports final completed-turn telemetry after deferred live budget grace", async () => {
+    const root = await createRoot();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const continueTurn = vi.fn();
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 20,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
+          estimatedCostPer1kTokensUsd: 0.01,
+          cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
+        },
+      },
+      tracker: createTracker(),
+      createCodexClient: (input) => ({
+        async startSession() {
+          input.onEvent({
+            event: "notification",
+            timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "live usage update",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+          });
+
+          return {
+            status: "completed" as const,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            sessionId: "thread-1-turn-1",
+            usage: {
+              inputTokens: 23,
+              outputTokens: 0,
+              totalTokens: 23,
+            },
+            rateLimits: null,
+            message: "turn 1 finished before another live update",
+          };
+        },
+        continueTurn,
+        close,
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(close).toHaveBeenCalledWith({ closureInitiator: "shutdown" });
+    expect(close).not.toHaveBeenCalledWith({
+      closureInitiator: "budget_hard_stop",
+    });
+    expect(continueTurn).not.toHaveBeenCalled();
+    expect(result.hardStop).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "token_budget",
+      totalTokens: 23,
+      billableTokens: 23,
+    });
+    expect(result.hardStop?.reason).toContain(
+      "final completed-turn usage exceeded",
+    );
+  });
+
   it("terminates an in-flight turn immediately when live budget telemetry exceeds grace", async () => {
     const root = await createRoot();
     const close = vi.fn().mockResolvedValue(undefined);
@@ -585,7 +663,7 @@ describe("AgentRunner", () => {
           const error = new Error(
             "Codex session closed while a turn was running.",
           ) as Error & { code: string };
-          error.code = ERROR_CODES.codexProtocolError;
+          error.code = ERROR_CODES.codexSessionClosedMidTurn;
           throw error;
         },
         continueTurn,
@@ -609,6 +687,225 @@ describe("AgentRunner", () => {
       totalTokens: 23,
     });
     expect(result.hardStop?.reason).toContain("grace ceiling");
+  });
+
+  it("terminates an in-flight turn immediately when live budget grace is disabled", async () => {
+    const root = await createRoot();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const continueTurn = vi.fn();
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 20,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0,
+          estimatedCostPer1kTokensUsd: 0.01,
+          cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
+        },
+      },
+      tracker: createTracker(),
+      createCodexClient: (input) => ({
+        async startSession() {
+          input.onEvent({
+            event: "notification",
+            timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "live usage update",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+          });
+
+          const error = new Error(
+            "Codex session closed while a turn was running.",
+          ) as Error & { code: string };
+          error.code = ERROR_CODES.codexSessionClosedMidTurn;
+          throw error;
+        },
+        continueTurn,
+        close,
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(close).toHaveBeenCalledWith({
+      closureInitiator: "budget_hard_stop",
+    });
+    expect(continueTurn).not.toHaveBeenCalled();
+    expect(result.hardStop).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "token_budget",
+      totalTokens: 21,
+    });
+    expect(result.hardStop?.reason).not.toContain("grace ceiling");
+  });
+
+  it("uses the premium-spend threshold when applying live budget grace", async () => {
+    const root = await createRoot();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const continueTurn = vi.fn();
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 10_000,
+          maxDollarBudgetUsd: 1,
+          premiumBudgetPauseRatio: 0.8,
+          liveBudgetGraceRatio: 0.1,
+          estimatedCostPer1kTokensUsd: 1,
+          cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
+        },
+      },
+      tracker: createTracker(),
+      createCodexClient: (input) => ({
+        async startSession() {
+          input.onEvent({
+            event: "notification",
+            timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "live usage update",
+            usage: {
+              inputTokens: 890,
+              outputTokens: 0,
+              totalTokens: 890,
+            },
+          });
+
+          const error = new Error(
+            "Codex session closed while a turn was running.",
+          ) as Error & { code: string };
+          error.code = ERROR_CODES.codexSessionClosedMidTurn;
+          throw error;
+        },
+        continueTurn,
+        close,
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(close).toHaveBeenCalledWith({
+      closureInitiator: "budget_hard_stop",
+    });
+    expect(continueTurn).not.toHaveBeenCalled();
+    expect(result.hardStop).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "premium_spend_near_ceiling",
+      totalTokens: 890,
+    });
+    expect(result.hardStop?.reason).toContain("grace ceiling");
+  });
+
+  it("clears deferred live budget grace when rotating after mid-turn closure", async () => {
+    const root = await createRoot();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const continueTurn = vi.fn();
+    let clientCount = 0;
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 20,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
+          estimatedCostPer1kTokensUsd: 0.01,
+          cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
+        },
+      },
+      tracker: createTracker(),
+      createCodexClient: (input) => {
+        clientCount += 1;
+        const clientIndex = clientCount;
+        return {
+          async startSession() {
+            if (clientIndex === 1) {
+              input.onEvent({
+                event: "notification",
+                timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+                codexAppServerPid: "1001",
+                sessionId: "thread-1-turn-1",
+                threadId: "thread-1",
+                turnId: "turn-1",
+                message: "live usage update",
+                usage: {
+                  inputTokens: 21,
+                  outputTokens: 0,
+                  totalTokens: 21,
+                },
+              });
+
+              const error = new Error(
+                "Codex session closed while a turn was running.",
+              ) as Error & { code: string };
+              error.code = ERROR_CODES.codexSessionClosedMidTurn;
+              throw error;
+            }
+
+            return {
+              status: "completed" as const,
+              threadId: "thread-2",
+              turnId: "turn-2",
+              sessionId: "thread-2-turn-2",
+              usage: {
+                inputTokens: 1,
+                outputTokens: 0,
+                totalTokens: 1,
+              },
+              rateLimits: null,
+              message: "retry completed\n[STAGE_COMPLETE]",
+            };
+          },
+          continueTurn,
+          close,
+        };
+      },
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(clientCount).toBe(2);
+    expect(close).toHaveBeenCalledWith({
+      closureInitiator: "session_rotation",
+    });
+    expect(close).toHaveBeenCalledWith({ closureInitiator: "shutdown" });
+    expect(close).not.toHaveBeenCalledWith({
+      closureInitiator: "budget_hard_stop",
+    });
+    expect(result.hardStop).toBeNull();
+    expect(result.lastTurn?.message).toContain("[STAGE_COMPLETE]");
   });
 
   it("pauses with rate_limit_budget from live window telemetry", async () => {

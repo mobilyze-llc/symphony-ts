@@ -627,6 +627,7 @@ export class AgentRunner {
             midTurnClosureRotations < MAX_MID_TURN_CLOSURE_ROTATIONS_PER_RUN
           ) {
             midTurnClosureRotations += 1;
+            pendingLiveBudgetGraceStop = null;
             await rotateClient(
               "mid_turn_closure",
               `fresh session forced after mid-turn closure (rotation ${midTurnClosureRotations}/${MAX_MID_TURN_CLOSURE_ROTATIONS_PER_RUN}): ${toErrorMessage(error)}`,
@@ -670,11 +671,6 @@ export class AgentRunner {
           ...(lastTurn.message === null ? {} : { message: lastTurn.message }),
         });
 
-        if (pendingLiveBudgetGraceStop !== null) {
-          hardStop = pendingLiveBudgetGraceStop;
-          break;
-        }
-
         // Early exit: agent signaled stage completion or failure
         if (hardStop !== null) {
           break;
@@ -705,12 +701,24 @@ export class AgentRunner {
           });
         }
 
-        hardStop = evaluateBudgetHardStop({
+        const postTurnBudgetStop = evaluateBudgetHardStop({
           config: hardStops,
           turnCount: realTurnCount,
           totalTokens: liveSession.totalStageTotalTokens,
           cacheReadTokens: liveSession.totalStageCacheReadTokens,
         });
+        if (pendingLiveBudgetGraceStop !== null) {
+          const finalDecision =
+            postTurnBudgetStop ?? pendingLiveBudgetGraceStop;
+          hardStop = addLiveBudgetStopReason(
+            finalDecision,
+            canDeferLiveBudgetStopWithinGrace(finalDecision, hardStops)
+              ? `Live token telemetry crossed the budget during an in-flight turn; paused after the turn finished within ${formatLiveBudgetGracePct(hardStops.liveBudgetGraceRatio)} grace.`
+              : `Live token telemetry crossed the budget during an in-flight turn; final completed-turn usage exceeded the ${formatLiveBudgetGracePct(hardStops.liveBudgetGraceRatio)} grace ceiling before another live update interrupted it.`,
+          );
+          break;
+        }
+        hardStop = postTurnBudgetStop;
         if (hardStop !== null) {
           break;
         }
@@ -1634,9 +1642,13 @@ function canDeferLiveBudgetStopWithinGrace(
   }
 
   const graceMultiplier = 1 + config.liveBudgetGraceRatio;
+  const dollarGraceThreshold =
+    decision.trigger === "premium_spend_near_ceiling"
+      ? config.maxDollarBudgetUsd * config.premiumBudgetPauseRatio
+      : config.maxDollarBudgetUsd;
   return (
     decision.billableTokens <= config.maxTokensPerUnit * graceMultiplier &&
-    decision.estimatedCostUsd <= config.maxDollarBudgetUsd * graceMultiplier
+    decision.estimatedCostUsd <= dollarGraceThreshold * graceMultiplier
   );
 }
 
