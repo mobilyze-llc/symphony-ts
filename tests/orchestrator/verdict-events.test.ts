@@ -576,6 +576,92 @@ describe("dispatch verdict events (SYMPH-405)", () => {
     expect(dispatched.dispatchedIssueIds).toEqual(["9"]);
   });
 
+  it("journals same-millisecond breaker opened→closed→opened and cluster re-entry under distinct idempotency keys", async () => {
+    // Frozen clock: every transition shares one timestamp, so a
+    // timestamp-suffixed key would silently drop the re-opened breaker
+    // entry and the re-entered cluster membership snapshot.
+    const config = createConfig({ agent: { maxConcurrentAgents: 2 } });
+    config.tracker.activeStates = [
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ];
+    config.stages = createImplementStages();
+    let candidates = [
+      createIssue({ id: "1", identifier: "ISSUE-1" }),
+      createIssue({ id: "2", identifier: "ISSUE-2" }),
+    ];
+    const tracker = createTracker({ candidatesFn: () => candidates });
+    const orchestrator = createOrchestrator({ config, tracker });
+    await orchestrator.pollTick();
+
+    const reason =
+      "EPERM: operation not permitted, open '.git/index.lock' (permanent)";
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason,
+    });
+    await orchestrator.onWorkerExit({
+      issueId: "2",
+      outcome: "abnormal",
+      reason,
+    });
+
+    const entriesOfKind = (kind: string) =>
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.filter((entry) => entry.kind === kind);
+    expect(entriesOfKind("breaker_transition")).toHaveLength(1);
+
+    // Operator resume of issue 1 closes the breaker and clears its cluster
+    // membership — all at the same frozen timestamp as the open.
+    orchestrator.getState().failed.add("1");
+    orchestrator.isDispatchEligible(
+      createIssue({ id: "1", identifier: "ISSUE-1", state: "Resume" }),
+    );
+    expect(entriesOfKind("breaker_transition")).toHaveLength(2);
+
+    // Re-dispatch issue 1 and fail it again with the same signature: the
+    // cluster re-crosses threshold and the breaker re-opens in the same
+    // millisecond as the first open. Perturb the stored per-issue failure
+    // signature so the repeat is NOT parked as retry-futile (that park path
+    // skips cluster recording) and reaches the cluster registry.
+    candidates = [createIssue({ id: "1", identifier: "ISSUE-1" })];
+    orchestrator.getState().issueFailureSignatures["1:implement"] = {
+      signature: "different-prior-signature",
+      class: "transient",
+    };
+    const redispatch = await orchestrator.onRetryTimer("1");
+    expect(redispatch.dispatched).toBe(true);
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason,
+    });
+
+    const breakerEntries = entriesOfKind("breaker_transition");
+    expect(
+      breakerEntries.map(
+        (entry) => entry.metadata.transition as "opened" | "closed",
+      ),
+    ).toEqual(["opened", "closed", "opened"]);
+    expect(
+      new Set(breakerEntries.map((entry) => entry.idempotencyKey)).size,
+    ).toBe(3);
+
+    // Issue 1 produced two cluster_transition entries (initial growth +
+    // post-resume re-entry) at the same timestamp; both must survive.
+    const issueOneClusterEntries = entriesOfKind("cluster_transition").filter(
+      (entry) => entry.issueId === "1",
+    );
+    expect(issueOneClusterEntries).toHaveLength(2);
+    expect(
+      new Set(issueOneClusterEntries.map((entry) => entry.idempotencyKey)).size,
+    ).toBe(2);
+  });
+
   it("exposes the dispositions map in the runtime snapshot", async () => {
     const orchestrator = createOrchestrator();
     orchestrator.isDispatchEligible(

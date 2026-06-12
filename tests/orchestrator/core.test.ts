@@ -883,6 +883,44 @@ describe("orchestrator core", () => {
     expect(timers.scheduled).toEqual([]);
   });
 
+  it("burns the sequence of a rolled-back journal entry instead of reissuing it", async () => {
+    let failNextCompletedWrite = true;
+    const orchestrator = createOrchestrator({
+      timerScheduler: createFakeTimerScheduler(),
+      writeRunJournalEntry: async (entry) => {
+        if (entry.lease?.status === "completed" && failNextCompletedWrite) {
+          failNextCompletedWrite = false;
+          throw new Error("journal disk unavailable");
+        }
+      },
+    });
+
+    await orchestrator.pollTick();
+    const sequenceBeforeFailure =
+      orchestrator.getState().dispatcherRunJournal.at(-1)?.sequence ?? 0;
+    const rolledBackSequence = sequenceBeforeFailure + 1;
+
+    await expect(
+      orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" }),
+    ).rejects.toThrow("journal disk unavailable");
+
+    // Retry succeeds: the new entry must NOT reuse the rolled-back
+    // sequence — the failed write might have reached disk before
+    // rejecting, and a reissued sequence would create two disk rows
+    // with the same seq.
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+
+    const journal = orchestrator.getState().dispatcherRunJournal;
+    const completed = journal.filter(
+      (entry) => entry.lease?.status === "completed",
+    );
+    expect(completed).toHaveLength(1);
+    expect(completed[0]?.sequence).toBe(rolledBackSequence + 1);
+    expect(journal.some((entry) => entry.sequence === rolledBackSequence)).toBe(
+      false,
+    );
+  });
+
   it("schedules exponential backoff retries for abnormal exits and caps the delay", async () => {
     const timers = createFakeTimerScheduler();
     const orchestrator = createOrchestrator({

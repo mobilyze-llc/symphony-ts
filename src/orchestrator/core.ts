@@ -526,6 +526,17 @@ export class OrchestratorCore {
    */
   private runJournalDiskFlushQueue: Promise<void> = Promise.resolve();
 
+  /**
+   * Highest sequence ever rolled back by the awaited writer
+   * (recordRunJournalEntry). A rolled-back tail entry is removed from the
+   * in-memory journal, so naive tail+1 allocation would reissue its
+   * sequence. The built-in appendFile writer cannot write-then-reject, but
+   * the persistence-callback contract does not forbid it — a reissued
+   * sequence could then produce two disk rows with the same seq. Burning
+   * the number (never reissuing a rolled-back sequence) removes the class.
+   */
+  private burnedRunJournalSequence = 0;
+
   private readonly reportedSupervisionFindings = new Set<string>();
 
   private readonly reportedIgnoredSetupInstructionCollisions =
@@ -2072,6 +2083,11 @@ export class OrchestratorCore {
         attempt: retryEntry.attempt,
         details: gateVerdict.details,
       });
+      // Starvation tracking is intentionally NOT fed here: a gate-deferred
+      // retry re-fires on its own timer, and pollTick's gate path already
+      // calls trackDispatchStarvation every tick while the floor blocks, so
+      // the page condition fires from polling regardless. Counting this
+      // deferral too would double-count the same starved interval.
       this.clearRetryEntry(issueId);
       return {
         dispatched: false,
@@ -3598,8 +3614,11 @@ export class OrchestratorCore {
   }): void {
     const timestamp = this.now().toISOString();
     const actor = this.buildVerdictActor();
+    // Sequence-suffixed key (not timestamp): an opened→closed→opened flip
+    // within one millisecond must journal all three transitions, or replay
+    // rebuilds a closed breaker that is live-open.
     this.commitVerdictJournalEntrySync({
-      idempotencyKey: `breaker:${input.stageName}:${input.signature}:${input.transition}:${timestamp}`,
+      idempotencyKey: `breaker:${input.stageName}:${input.signature}:${input.transition}:${this.nextRunJournalSequence()}`,
       timestamp,
       kind: "breaker_transition",
       issueId: input.issueId,
@@ -4237,6 +4256,7 @@ export class OrchestratorCore {
     const result = appendDispatcherRunJournalEntry(
       this.state.dispatcherRunJournal,
       entry,
+      this.burnedRunJournalSequence + 1,
     );
     if (!result.appended) {
       return;
@@ -4264,6 +4284,10 @@ export class OrchestratorCore {
     const write = this.runJournalDiskFlushQueue.then(async () => {
       await this.writeRunJournalEntry?.(entry);
     });
+    // Continuation catch: a failed awaited write leaves a sequence gap on
+    // disk BY DESIGN — the entry was also rolled back in memory
+    // (journal-first invariant), so disk and memory agree. Later entries
+    // persisting after the gap is correct ordering, not an inversion.
     this.runJournalDiskFlushQueue = write.catch(() => undefined);
     return write;
   }
@@ -4276,7 +4300,10 @@ export class OrchestratorCore {
    * timestamp suffix which collides under same-tick re-emissions.
    */
   private nextRunJournalSequence(): number {
-    return (this.state.dispatcherRunJournal.at(-1)?.sequence ?? 0) + 1;
+    return Math.max(
+      (this.state.dispatcherRunJournal.at(-1)?.sequence ?? 0) + 1,
+      this.burnedRunJournalSequence + 1,
+    );
   }
 
   /**
@@ -4516,6 +4543,7 @@ export class OrchestratorCore {
     const result = appendDispatcherRunJournalEntry(
       this.state.dispatcherRunJournal,
       entry,
+      this.burnedRunJournalSequence + 1,
     );
     if (!result.appended) {
       return result.entry;
@@ -4535,7 +4563,12 @@ export class OrchestratorCore {
       // Journal-first: an entry that cannot be persisted must not take
       // effect. Roll back the in-memory append (entries committed after it
       // keep their sequences; replay tolerates the gap) and surface the
-      // failure before any lease/claim side effects.
+      // failure before any lease/claim side effects. Burn the rolled-back
+      // sequence so it is never reissued — see burnedRunJournalSequence.
+      this.burnedRunJournalSequence = Math.max(
+        this.burnedRunJournalSequence,
+        result.entry.sequence,
+      );
       this.state.dispatcherRunJournal = this.state.dispatcherRunJournal.filter(
         (candidate) => candidate !== result.entry,
       );
@@ -6154,8 +6187,11 @@ export class OrchestratorCore {
             .filter((stage): stage is string => stage !== null),
         ),
       ];
+      // Sequence-suffixed key (not timestamp): a same-ms re-entry of the
+      // same issue/signature after a membership reset must not drop the
+      // latest membership snapshot from the replay record.
       this.commitVerdictJournalEntrySync({
-        idempotencyKey: `cluster:${clusterResult.signature}:${issueId}:${timestamp}`,
+        idempotencyKey: `cluster:${clusterResult.signature}:${issueId}:${this.nextRunJournalSequence()}`,
         timestamp,
         kind: "cluster_transition",
         issueId,
