@@ -21,6 +21,7 @@ import type {
 } from "../agent/runner.js";
 import { AgentRunner } from "../agent/runner.js";
 import { runSpecFidelityJudge } from "../agent/spec-fidelity.js";
+import { runStuckTriage } from "../agent/stuck-triage.js";
 import { publishVerdictStatus } from "../agent/verdict-status.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
@@ -493,6 +494,22 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           config: this.config.pauseTriage,
           evidence,
         }),
+      // Watchdog L2 stuck-ticket triage (SYMPH-399). The module itself
+      // resolves null when the lane is unconfigured or disabled; the core
+      // additionally gates on watchdog.stuck_triage.enabled so a disabled
+      // lane produces zero side effects.
+      ...(this.config.watchdog.stuckTriage === undefined
+        ? {}
+        : {
+            runStuckTriage: (
+              evidence: Parameters<typeof runStuckTriage>[0]["evidence"],
+            ) =>
+              runStuckTriage({
+                // biome-ignore lint/style/noNonNullAssertion: guarded by the spread condition
+                config: this.config.watchdog.stuckTriage!,
+                evidence,
+              }),
+          }),
       scheduleDeferred: (task) => void this.enqueue(task),
       runAcGate: (evidence) =>
         runAcGate({
@@ -758,6 +775,29 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               if (input.canFileWatchdogTicket) {
                 void this.fileWatchdogTicketBestEffort(input);
               }
+            },
+            // Watchdog L2 escalate_human verdicts page through the same
+            // SYMPH-397 alert channel (SYMPH-399).
+            onTriageEscalation: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              issueTitle: string;
+              stageName: string | null;
+              classification: string;
+              confidence: string;
+              caseText: string;
+            }) => {
+              _notifier.notify({
+                type: "triage_escalation",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueTitle,
+                issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
+                stageName: input.stageName,
+                classification: input.classification,
+                confidence: input.confidence,
+                caseText: input.caseText,
+                attribution: `by watchdog-l2@${hostname().split(".")[0] ?? hostname()}`,
+              });
             },
           }))(this.notifier)
         : {}),

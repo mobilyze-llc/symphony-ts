@@ -1,6 +1,8 @@
 import { homedir, hostname } from "node:os";
 import { isAbsolute, normalize, resolve, sep } from "node:path";
 
+import { z } from "zod";
+
 import type { WorkflowDefinition } from "../domain/model.js";
 import { normalizeIssueState } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
@@ -43,6 +45,8 @@ import {
   DEFAULT_READ_TIMEOUT_MS,
   DEFAULT_RUNNER_KIND,
   DEFAULT_STALL_TIMEOUT_MS,
+  DEFAULT_STUCK_TRIAGE_ENABLED,
+  DEFAULT_STUCK_TRIAGE_TIMEOUT_MS,
   DEFAULT_TERMINAL_STATES,
   DEFAULT_TRACKER_KIND,
   DEFAULT_TURN_TIMEOUT_MS,
@@ -63,6 +67,7 @@ import type {
   StagesConfig,
   WorkflowContinuousFeedbackEvent,
   WorkflowHardStopsConfigOverride,
+  WorkflowStuckTriageConfig,
 } from "./types.js";
 import { GATE_TYPES, STAGE_TYPES } from "./types.js";
 
@@ -238,6 +243,7 @@ export function resolveWorkflowConfig(
       maxFilingsPerHour:
         readPositiveInteger(watchdog.max_filings_per_hour) ??
         DEFAULT_WATCHDOG_MAX_FILINGS_PER_HOUR,
+      stuckTriage: resolveStuckTriageConfig(watchdog.stuck_triage, environment),
     },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,
@@ -644,6 +650,57 @@ function readStateConcurrencyMap(
   });
 
   return Object.freeze(Object.fromEntries(normalizedEntries));
+}
+
+/**
+ * Watchdog L2 stuck-triage block (SYMPH-399), validated with Zod at the
+ * I/O boundary. Default-disabled: an absent block resolves to
+ * `{enabled: false, ...}` and the lane contributes zero side effects.
+ * A malformed block fails loudly at load (config-contract philosophy —
+ * a silently-dropped `enabled: true` would present as a watchdog that
+ * never triages).
+ */
+const STUCK_TRIAGE_SCHEMA = z
+  .object({
+    enabled: z.boolean().optional(),
+    base_url: z.string().min(1).optional().nullable(),
+    model: z.string().min(1).optional().nullable(),
+    api_key: z.string().min(1).optional().nullable(),
+    timeout_ms: z.number().int().positive().optional().nullable(),
+  })
+  .strict();
+
+function resolveStuckTriageConfig(
+  value: unknown,
+  environment: NodeJS.ProcessEnv,
+): WorkflowStuckTriageConfig {
+  const disabled: WorkflowStuckTriageConfig = {
+    enabled: DEFAULT_STUCK_TRIAGE_ENABLED,
+    baseUrl: null,
+    model: null,
+    apiKey: null,
+    timeoutMs: DEFAULT_STUCK_TRIAGE_TIMEOUT_MS,
+  };
+  if (value === undefined || value === null) {
+    return disabled;
+  }
+
+  const parsed = STUCK_TRIAGE_SCHEMA.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(
+      `Invalid watchdog.stuck_triage config: ${parsed.error.issues
+        .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+        .join("; ")}`,
+    );
+  }
+
+  return {
+    enabled: parsed.data.enabled ?? DEFAULT_STUCK_TRIAGE_ENABLED,
+    baseUrl: parsed.data.base_url ?? null,
+    model: parsed.data.model ?? null,
+    apiKey: resolveEnvReference(parsed.data.api_key ?? null, environment),
+    timeoutMs: parsed.data.timeout_ms ?? DEFAULT_STUCK_TRIAGE_TIMEOUT_MS,
+  };
 }
 
 function resolveEnvReference(
