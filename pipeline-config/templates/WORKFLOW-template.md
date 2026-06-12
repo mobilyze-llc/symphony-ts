@@ -5,6 +5,14 @@ tracker:
   # CUSTOMIZE: Set to the Linear project's slugId for this product.
   # Find it via: linear_graphql query { projects { nodes { id name slugId } } }
   project_slug: <YOUR_PROJECT_SLUG_HERE>
+  # CONTRACT (SYMPH-409, enforced at load by src/config/config-contracts.ts):
+  # active_states must contain every state the pipeline writes — each
+  # non-terminal stage's linear_state below, plus "Resume" (the readmission
+  # state after hard-stop pauses). escalation_state must NOT be listed here
+  # (escalated issues would silently respawn). Violations fail startup and
+  # config reload. Escape hatch: `contracts: { override: true }` suppresses
+  # the failure but re-warns loudly at every startup/reload until removed —
+  # remove the override as soon as the config is fixed.
   active_states:
     - Todo
     - In Progress

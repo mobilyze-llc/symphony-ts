@@ -36,6 +36,7 @@ import {
   DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
 } from "../config/defaults.js";
 import type {
+  DispatchValidationResult,
   ResolvedWorkflowConfig,
   StageDefinition,
 } from "../config/types.js";
@@ -2822,6 +2823,11 @@ export async function startRuntimeService(
       logsRoot: options.logsRoot ?? null,
       ...(options.stdout === undefined ? {} : { stdout: options.stdout }),
     }));
+  await warnSuppressedContractViolations({
+    logger,
+    validation,
+    phase: "startup",
+  });
   let currentConfig = options.config;
   let tracker = options.tracker ?? createLinearTrackerFromConfig(currentConfig);
   let workspaceManager =
@@ -3107,6 +3113,35 @@ async function logPollCycleResult(
   });
 }
 
+/**
+ * Loud, repeated re-alert for `contracts.override: true` (SYMPH-409): every
+ * startup and config reload re-warns about each suppressed config-contract
+ * violation until the override is removed. The override never expires; this
+ * repetition is the bypass resistance.
+ */
+async function warnSuppressedContractViolations(input: {
+  logger: StructuredLogger;
+  validation: DispatchValidationResult;
+  phase: "startup" | "reload";
+}): Promise<void> {
+  if (!input.validation.ok) {
+    return;
+  }
+
+  for (const violation of input.validation.suppressedContractViolations ?? []) {
+    await input.logger.warn(
+      "config_contract_override_active",
+      `contracts.override is suppressing a config contract violation: ${violation.message} Remove contracts.override once the config is fixed — this warning repeats at every startup and reload.`,
+      {
+        phase: input.phase,
+        rule: violation.rule,
+        config_key: violation.key,
+        offending_value: violation.value,
+      },
+    );
+  }
+}
+
 async function createRuntimeWorkflowWatcher(input: {
   config: ResolvedWorkflowConfig;
   logger: StructuredLogger;
@@ -3132,6 +3167,12 @@ async function createRuntimeWorkflowWatcher(input: {
         );
         return;
       }
+
+      await warnSuppressedContractViolations({
+        logger: input.logger,
+        validation: snapshot.dispatchValidation,
+        phase: "reload",
+      });
 
       await input.onReload(snapshot.config);
       await input.logger.info(
