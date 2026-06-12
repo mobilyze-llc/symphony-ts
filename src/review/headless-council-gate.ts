@@ -475,11 +475,6 @@ export async function runHeadlessCouncilGate(
       ),
     ),
   );
-  await appendReviewBundleReferenceToLaneArtifacts(
-    lanes,
-    reviewBundle.reference,
-  );
-
   if (codexLeadEnabled) {
     const codexLeadResult = await withLaneStallDeadline(
       runCodexLeadLane({
@@ -514,12 +509,13 @@ export async function runHeadlessCouncilGate(
           reviewBundle.reference,
         ),
     );
-    await appendReviewBundleReferenceToLaneArtifacts(
-      [codexLeadResult],
-      reviewBundle.reference,
-    );
     lanes = [...lanes, codexLeadResult];
   }
+
+  await appendReviewBundleReferenceToLaneArtifacts(
+    lanes,
+    reviewBundle.reference,
+  );
 
   const degradedConditions = collectDegradedConditions(lanes);
   if (!codexLeadEnabled) {
@@ -1800,14 +1796,9 @@ async function appendReviewBundleReferenceToLaneArtifacts(
 ): Promise<void> {
   const footer = [
     "",
+    `<!-- symphony-review-bundle path=${JSON.stringify(reviewBundle.path)} hash=${JSON.stringify(reviewBundle.hash)} algorithm=${JSON.stringify(reviewBundle.hashAlgorithm)} -->`,
     "",
-    "<!-- symphony-review-bundle",
-    `path=${JSON.stringify(reviewBundle.path)}`,
-    `hash=${JSON.stringify(reviewBundle.hash)}`,
-    `algorithm=${JSON.stringify(reviewBundle.hashAlgorithm)}`,
-    "-->",
-    "",
-  ].join(" ");
+  ].join("\n");
 
   await Promise.all(
     lanes.map(async (lane) => {
@@ -1818,7 +1809,7 @@ async function appendReviewBundleReferenceToLaneArtifacts(
         return;
       }
       const artifact = await readFile(lane.artifactPath, "utf-8");
-      if (artifact.includes("symphony-review-bundle")) {
+      if (/<!--\s*symphony-review-bundle\b/.test(artifact)) {
         return;
       }
       await writeFile(lane.artifactPath, `${artifact}${footer}`);
@@ -2035,12 +2026,12 @@ function normalizeReviewBundleProvenance(
 ): ReviewBundleProvenanceEntry[] {
   return entries.map((entry) => ({
     role: entry.role,
-    agent: entry.agent,
-    modelFamily: entry.modelFamily,
-    model: entry.model,
-    reasoningEffort: entry.reasoningEffort,
-    sourceStage: entry.sourceStage,
-    commitRange: entry.commitRange,
+    agent: entry.agent ?? null,
+    modelFamily: entry.modelFamily ?? null,
+    model: entry.model ?? null,
+    reasoningEffort: entry.reasoningEffort ?? null,
+    sourceStage: entry.sourceStage ?? null,
+    commitRange: entry.commitRange ?? null,
   }));
 }
 
@@ -2094,6 +2085,9 @@ function normalizeDiffPath(rawPath: string | undefined): string | null {
 }
 
 function stableJsonStringify(value: unknown): string {
+  if (value === undefined) {
+    return "null";
+  }
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value);
   }

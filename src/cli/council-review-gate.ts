@@ -112,7 +112,10 @@ export function parseCouncilReviewGateArgs(
       continue;
     }
     if (token === "--previous-reviewed-head") {
-      parsed.previousReviewedHeadSha = readValue(argv, ++index, token);
+      parsed.previousReviewedHeadSha = readGitSha(
+        readValue(argv, ++index, token),
+        token,
+      );
       continue;
     }
     if (token === "--no-codex-lead") {
@@ -231,6 +234,13 @@ function readMode(value: string, flag: string): CouncilReviewMode {
     return value;
   }
   throw new UsageError(`${flag} must be "full" or "convergence".`);
+}
+
+function readGitSha(value: string, flag: string): string {
+  if (/^[a-f0-9]{7,40}$/i.test(value)) {
+    return value;
+  }
+  throw new UsageError(`${flag} must be a 7-40 character git SHA.`);
 }
 
 function isValidRepoSlug(value: string): boolean {

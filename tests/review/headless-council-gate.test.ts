@@ -8,6 +8,7 @@ import {
   type CommandResult,
   type CommandRunner,
   type HeadlessReviewerLaneConfig,
+  type ReviewBundleProvenanceEntry,
   assertFreshCouncilReview,
   defaultReviewerLanes,
   execFileCommand,
@@ -40,7 +41,14 @@ describe("runHeadlessCouncilGate", () => {
   });
 
   it("runs Claude, Pi, and Codex lead through cmux-spawn and writes artifacts", async () => {
-    const harness = await createHarness();
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\nReviewer mentioned symphony-review-bundle in prose.\n",
+        },
+      },
+    });
     const result = await runHeadlessCouncilGate(
       {
         issueId: "MOB-88",
@@ -48,6 +56,17 @@ describe("runHeadlessCouncilGate", () => {
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
         cmuxSpawnBin: "/tmp/cmux-spawn",
+        provenance: [
+          {
+            role: "reviewer",
+            agent: undefined as unknown as string | null,
+            modelFamily: null,
+            model: null,
+            reasoningEffort: null,
+            sourceStage: null,
+            commitRange: null,
+          } satisfies ReviewBundleProvenanceEntry,
+        ],
       },
       { runCommand: harness.runCommand },
     );
@@ -207,7 +226,17 @@ describe("runHeadlessCouncilGate", () => {
         command: "git status --short --branch",
         exitCode: 0,
       },
-      provenance: [],
+      provenance: [
+        {
+          role: "reviewer",
+          agent: null,
+          modelFamily: null,
+          model: null,
+          reasoningEffort: null,
+          sourceStage: null,
+          commitRange: null,
+        },
+      ],
       optionalInputs: {
         promptPaths: [],
         evidenceDatasetPaths: [],
@@ -228,6 +257,13 @@ describe("runHeadlessCouncilGate", () => {
       result.lanes.find((lane) => lane.laneId === "claude-opus")!.artifactPath!,
       "utf-8",
     );
+    expect(claudeArtifact).toContain(
+      "Reviewer mentioned symphony-review-bundle in prose.",
+    );
+    expect(claudeArtifact).toContain("\n<!-- symphony-review-bundle");
+    expect(
+      claudeArtifact.match(/<!--\s*symphony-review-bundle\b/g),
+    ).toHaveLength(1);
     expect(claudeArtifact).toContain("symphony-review-bundle");
     expect(claudeArtifact).toContain(reviewBundle.hash);
     const codexPrompt = await readFile(
