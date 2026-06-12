@@ -44,13 +44,25 @@ const SECRET_ASSIGNMENT_REGEX =
   /\b([A-Za-z0-9_-]*(?:token|secret|password|api[_-]?key)[A-Za-z0-9_-]*)(\s*[=:]\s*)(["']?)[^\s"'`]+\3/gi;
 
 /**
+ * JWT/JOSE tokens: three dot-separated base64url segments anchored on the
+ * standard JOSE header prefix (`eyJ` — base64url of `{"`). High precision:
+ * the anchor plus the dotted three-segment shape never matches git SHAs,
+ * version strings, or hostnames, so a bare token quoted from an
+ * Authorization header redacts even when its segments are pure
+ * alphanumeric (which BASE64_RUN_REGEX deliberately ignores).
+ */
+const JWT_REGEX =
+  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g;
+
+/**
  * Long base64/base64url-shaped runs (40+ chars). Requires BOTH a digit
  * AND at least one non-alphanumeric token character (`+ / = _ -`):
  * pure-alphanumeric runs — full git SHAs, sha256 digests, long camelCase
  * identifiers, hashed path segments — are routine diagnostic content in a
  * coding orchestrator and are never auto-redacted. This rule is
- * best-effort defense-in-depth only (it misses dotted shapes like JWTs);
- * SECRET_ASSIGNMENT_REGEX is the primary secret control.
+ * best-effort defense-in-depth only (dotted shapes are handled by the
+ * dedicated JWT_REGEX above); SECRET_ASSIGNMENT_REGEX is the primary
+ * secret control.
  */
 const BASE64_RUN_REGEX =
   /\b(?=[A-Za-z0-9+/_-]*\d)(?=[A-Za-z0-9+/_-]*[+/=_-])[A-Za-z0-9+/_-]{40,}={0,2}/g;
@@ -64,6 +76,7 @@ const FENCE_REGEX = /`{3,}/g;
 function redactSecrets(text: string): string {
   return text
     .replace(SECRET_ASSIGNMENT_REGEX, "$1$2$3[REDACTED]$3")
+    .replace(JWT_REGEX, "[REDACTED:token]")
     .replace(BASE64_RUN_REGEX, "[REDACTED:token]");
 }
 

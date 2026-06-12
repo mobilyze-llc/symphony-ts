@@ -115,6 +115,26 @@ describe("sanitizeForLinear", () => {
       "handleReviewFailureForStage2WithRetryAndBackoffLogic";
     expect(sanitizeForLinear(digitIdentifier)).toBe(digitIdentifier);
   });
+
+  it("redacts bare JWTs even when their base64url segments are pure alphanumeric", () => {
+    // Codex R2 finding: worker error text quoting an Authorization header.
+    const jwt =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c";
+    expect(sanitizeForLinear(`Authorization: Bearer ${jwt} rejected`)).toBe(
+      "Authorization: Bearer [REDACTED:token] rejected",
+    );
+    // No false positive on dotted non-token shapes: versions, hostnames,
+    // and 40-char SHAs all survive.
+    expect(sanitizeForLinear("upgraded from 1.2.3 to 1.2.4")).toBe(
+      "upgraded from 1.2.3 to 1.2.4",
+    );
+    const host = "orchestrator.internal.example.com";
+    expect(sanitizeForLinear(`resolving ${host} failed`)).toBe(
+      `resolving ${host} failed`,
+    );
+    const sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+    expect(sanitizeForLinear(`commit ${sha} ok`)).toBe(`commit ${sha} ok`);
+  });
 });
 
 describe("sanitizeForReworkChannel", () => {
@@ -133,6 +153,13 @@ describe("sanitizeForReworkChannel", () => {
     expect(result).toContain("API_KEY=[REDACTED]");
     // The 40-char SHA SURVIVES — this channel exists for diagnostics.
     expect(result).toContain(sha);
+  });
+
+  it("redacts bare JWTs on the rework channel", () => {
+    const jwt =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c";
+    const result = sanitizeForReworkChannel(`header was Bearer ${jwt}`);
+    expect(result).toBe("header was Bearer [REDACTED:token]");
   });
 
   it("uses the large rework-channel cap, not the Linear default", () => {
@@ -173,5 +200,13 @@ describe("sanitizeForSlack", () => {
     // Diagnostic SHAs survive on the Slack path too.
     const sha = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
     expect(sanitizeForSlack(`failed at ${sha}`)).toBe(`failed at ${sha}`);
+  });
+
+  it("redacts bare JWTs on the Slack path", () => {
+    const jwt =
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJVadQssw5c";
+    expect(sanitizeForSlack(`401 with Bearer ${jwt}`)).toBe(
+      "401 with Bearer [REDACTED:token]",
+    );
   });
 });
