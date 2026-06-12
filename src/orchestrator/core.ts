@@ -1536,27 +1536,7 @@ export class OrchestratorCore {
     // hard-stop policy asked for human review.
     if (this.state.resumeRequired.has(issue.id)) {
       if (this.canConsumeResumeRequirement(issue.id, normalizedState)) {
-        this.state.completed.delete(issue.id);
-        this.state.failed.delete(issue.id);
-        // Clear exhaustion-dedup marker so a re-dispatched issue can fire the
-        // failure_exhausted alert again if it exhausts retries in this new
-        // lifecycle (SYMPH-397).
-        this.state.failureExhaustedIds.delete(issue.id);
-        // Clear from signature cluster so a resumed issue re-counts fresh
-        // if it fails again, and close any stage breaker opened for it so the
-        // resumed issue is not immediately re-parked at the dispatch boundary
-        // (SYMPH-398 — these two must happen together or the resume deadlocks).
-        this.signatureClusterRegistry.clearIssueFromCluster(issue.id);
-        this.resetBreakersForResumedIssue(issue.id);
-        // SYMPH-399 lifecycle: a resumed issue starts a fresh park lifecycle —
-        // stale fence generations, triage-once markers, escalation markers,
-        // and retry grants must not survive into it (resume-then-recur must
-        // triage again).
-        this.issueParkGenerations.delete(issue.id);
-        this.triagedParkGenerations.delete(issue.id);
-        this.retryOnceGrants.delete(issue.id);
-        this.escalatedParkGenerations.delete(issue.id);
-        this.clearResumeRequirement(issue.id);
+        this.clearResumedIssueLifecycleState(issue.id);
       } else {
         // The 2026-06-11 invisible skip (SYMPH-405): a stop-like pause waits
         // for an explicit Resume, and Todo alone is silently skipped.
@@ -1578,23 +1558,7 @@ export class OrchestratorCore {
     if (this.state.completed.has(issue.id) || this.state.failed.has(issue.id)) {
       const resumeStates: ReadonlySet<string> = new Set(["resume", "todo"]);
       if (resumeStates.has(normalizedState)) {
-        this.state.completed.delete(issue.id);
-        this.state.failed.delete(issue.id);
-        // Clear exhaustion-dedup marker so the resumed issue starts a fresh
-        // exhaustion lifecycle (SYMPH-397).
-        this.state.failureExhaustedIds.delete(issue.id);
-        // Clear from signature cluster so a resumed issue re-counts fresh
-        // if it fails again, and close any stage breaker opened for it so the
-        // resumed issue is not immediately re-parked at the dispatch boundary
-        // (SYMPH-398 — these two must happen together or the resume deadlocks).
-        this.signatureClusterRegistry.clearIssueFromCluster(issue.id);
-        this.resetBreakersForResumedIssue(issue.id);
-        // SYMPH-399 lifecycle: same fresh-lifecycle reset as the stop-like
-        // resume path above.
-        this.issueParkGenerations.delete(issue.id);
-        this.triagedParkGenerations.delete(issue.id);
-        this.retryOnceGrants.delete(issue.id);
-        this.escalatedParkGenerations.delete(issue.id);
+        this.clearResumedIssueLifecycleState(issue.id);
       } else {
         return false;
       }
@@ -2968,6 +2932,33 @@ export class OrchestratorCore {
       };
     }
 
+    const validation = validateDispatchConfig(this.config);
+    if (!validation.ok) {
+      console.warn(
+        `[orchestrator] ${validation.error.message} Deferring retry for ${retryEntry.identifier ?? issueId}.`,
+      );
+      this.recordDispatchVerdict({
+        issueId,
+        issueIdentifier: retryEntry.identifier ?? issueId,
+        disposition: "gate",
+        reasonCode: validation.error.code,
+        remedy: validation.error.message,
+        attempt: retryEntry.attempt,
+        details: { message: validation.error.message },
+      });
+      this.clearRetryEntry(issueId);
+      return {
+        dispatched: false,
+        released: false,
+        retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
+          identifier: retryEntry.identifier,
+          error: `dispatch validation failed: ${validation.error.message}`,
+          delayType: retryEntry.delayType,
+          deferral: true,
+        }),
+      };
+    }
+
     // Check for pipeline-halt before dispatching — fail-open on errors
     const haltIssue = await this.checkPipelineHalt();
     if (haltIssue !== null) {
@@ -3069,6 +3060,15 @@ export class OrchestratorCore {
       return {
         dispatched: false,
         released: true,
+        retryEntry: null,
+      };
+    }
+
+    if (!this.admitRetryResumeRequirement(issue, retryEntry)) {
+      this.releaseClaim(issueId);
+      return {
+        dispatched: false,
+        released: false,
         retryEntry: null,
       };
     }
@@ -5362,6 +5362,22 @@ export class OrchestratorCore {
     this.resumeRequiredGuards.delete(issueId);
   }
 
+  private clearResumedIssueLifecycleState(issueId: string): void {
+    this.state.completed.delete(issueId);
+    this.state.failed.delete(issueId);
+    // A resumed issue starts a fresh park/failure lifecycle. Keep the reset set
+    // shared across poll admission and retry admission so fences, breakers, and
+    // alert dedupe do not drift between the two dispatch paths.
+    this.state.failureExhaustedIds.delete(issueId);
+    this.signatureClusterRegistry.clearIssueFromCluster(issueId);
+    this.resetBreakersForResumedIssue(issueId);
+    this.issueParkGenerations.delete(issueId);
+    this.triagedParkGenerations.delete(issueId);
+    this.retryOnceGrants.delete(issueId);
+    this.escalatedParkGenerations.delete(issueId);
+    this.clearResumeRequirement(issueId);
+  }
+
   // -------------------------------------------------------------------------
   // Shared intent-verb layer (SYMPH-399 / SYMPH-408 carve-out "408a")
   // -------------------------------------------------------------------------
@@ -7272,6 +7288,34 @@ export class OrchestratorCore {
         blocker.state === null ? null : normalizeIssueState(blocker.state);
       return blockerState !== null && terminalStates.has(blockerState);
     });
+  }
+
+  private admitRetryResumeRequirement(
+    issue: Issue,
+    retryEntry: RetryEntry,
+  ): boolean {
+    const normalizedState = normalizeIssueState(issue.state);
+    this.observeResumeRequiredState(issue.id, normalizedState);
+
+    if (!this.state.resumeRequired.has(issue.id)) {
+      return true;
+    }
+
+    if (this.canConsumeResumeRequirement(issue.id, normalizedState)) {
+      this.clearResumedIssueLifecycleState(issue.id);
+      return true;
+    }
+
+    this.recordDispatchVerdict({
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      disposition: "skip",
+      reasonCode: "requires_explicit_resume",
+      remedy: "transition the issue into Resume (Todo alone is skipped)",
+      attempt: retryEntry.attempt,
+      details: { issueState: issue.state, retryAttempt: retryEntry.attempt },
+    });
+    return false;
   }
 
   private async dispatchIssue(
