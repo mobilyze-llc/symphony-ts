@@ -51,6 +51,8 @@ describe("parseCouncilReviewGateArgs", () => {
           "convergence",
           "--round",
           "2",
+          "--previous-reviewed-head",
+          "old-head-sha",
         ],
         "/cwd",
       ),
@@ -60,6 +62,7 @@ describe("parseCouncilReviewGateArgs", () => {
       workspace: "/cwd",
       mode: "convergence",
       round: 2,
+      previousReviewedHeadSha: "old-head-sha",
       allowedChangePatterns: [],
     });
   });
@@ -121,7 +124,7 @@ describe("parseCouncilReviewGateArgs", () => {
         ],
         "/cwd",
       ),
-    ).toThrow("--mode and --round are only valid");
+    ).toThrow("--mode, --round, and --previous-reviewed-head are only valid");
   });
 
   it("returns exit code 2 for invalid freshness artifacts", async () => {
