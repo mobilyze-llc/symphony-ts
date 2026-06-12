@@ -814,12 +814,37 @@ export type RightSizingImpactSurface =
 export const RIGHT_SIZING_BUDGETS = ["low", "medium", "high"] as const;
 export type RightSizingBudget = (typeof RIGHT_SIZING_BUDGETS)[number];
 
+export const COUNCIL_RISK_PREDICATE_TRIGGERS = [
+  "high_risk_path",
+  "journal_producer",
+  "journal_replay_reducer",
+  "dispatcher_event_vocabulary",
+  "state_journal_projection",
+] as const;
+
+export type CouncilRiskPredicateTrigger =
+  (typeof COUNCIL_RISK_PREDICATE_TRIGGERS)[number];
+
+export interface CouncilRiskPredicateMatch {
+  trigger: CouncilRiskPredicateTrigger;
+  path: string;
+  matchedPattern: string;
+  rationale: string;
+}
+
+export interface CouncilRiskPredicateResult {
+  triggerHits: CouncilRiskPredicateTrigger[];
+  matchedPaths: string[];
+  matches: CouncilRiskPredicateMatch[];
+}
+
 export interface RightSizingSignals {
   explicitModeHint: RightSizingMode | null;
   declaredScopeFiles: string[];
   changedFiles: string[];
   impactSurface: RightSizingImpactSurface;
   highRiskFiles: string[];
+  riskPredicate: CouncilRiskPredicateResult;
   stageCount: number;
   gateCount: number;
   reviewerCount: number;
@@ -844,6 +869,7 @@ export interface RightSizingDecision {
   reason: string;
   rationale: string[];
   triggerHits: string[];
+  riskPredicate: CouncilRiskPredicateResult;
   signals: RightSizingSignals;
   modelRouting: RightSizingModelRouting;
 }
