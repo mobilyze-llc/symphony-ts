@@ -1448,6 +1448,70 @@ describe("CodexAppServerClient", () => {
     await client.close();
   });
 
+  it("classifies close() during a running turn as codex_session_closed_mid_turn (SYMPH-412)", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("turn-timeout", workspace, events, {
+      turnTimeoutMs: 5_000,
+      stallTimeoutMs: 5_000,
+    });
+
+    const turnPromise = client.startSession({
+      prompt: "Hang forever",
+      title: "SYMPH-412: Example",
+    });
+    const turnRejection = expect(turnPromise).rejects.toMatchObject({
+      name: "CodexAppServerClientError",
+      code: ERROR_CODES.codexSessionClosedMidTurn,
+    } satisfies Partial<CodexAppServerClientError>);
+
+    // Wait for turn/start to be acknowledged so a turn is actually running.
+    await vi.waitFor(() => {
+      expect(events).toContainEqual(
+        expect.objectContaining({ event: "session_started" }),
+      );
+    });
+
+    await client.close();
+    await turnRejection;
+
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "turn_ended_with_error",
+        errorCode: ERROR_CODES.codexSessionClosedMidTurn,
+      }),
+    );
+  });
+
+  it("classifies a spontaneous app-server exit during a running turn as codex_session_closed_mid_turn (SYMPH-412)", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("exit-mid-turn", workspace, events, {
+      turnTimeoutMs: 5_000,
+      stallTimeoutMs: 5_000,
+    });
+
+    await expect(
+      client.startSession({
+        prompt: "Die mid-turn",
+        title: "SYMPH-412: Example",
+      }),
+    ).rejects.toMatchObject({
+      name: "CodexAppServerClientError",
+      code: ERROR_CODES.codexSessionClosedMidTurn,
+    } satisfies Partial<CodexAppServerClientError>);
+
+    const midTurnEvents = events.filter(
+      (event) =>
+        event.event === "turn_ended_with_error" &&
+        event.errorCode === ERROR_CODES.codexSessionClosedMidTurn,
+    );
+    expect(midTurnEvents).toHaveLength(1);
+    expect(midTurnEvents[0]?.message).toContain("while a turn was running");
+
+    await client.close();
+  });
+
   it("handles dynamic tool response after child exit without unhandled rejection", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];

@@ -156,6 +156,14 @@ export interface WorkflowCodexConfig {
   turnTimeoutMs: number;
   readTimeoutMs: number;
   stallTimeoutMs: number;
+  /**
+   * Proactive session rotation guard (SYMPH-412): when the cumulative input
+   * tokens observed on a single Codex session exceed this threshold, the
+   * runner rotates to a fresh session before the next turn instead of letting
+   * accumulated thread context grow until the app-server dies mid-turn.
+   * 0 disables the guard. Default: 1_500_000.
+   */
+  sessionRotationInputTokens?: number;
 }
 
 export interface WorkflowServerConfig {

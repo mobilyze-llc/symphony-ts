@@ -2243,6 +2243,335 @@ describe("Agent runner startup diagnostics", () => {
   });
 });
 
+describe("AgentRunner session rotation (SYMPH-412)", () => {
+  function midTurnClosureError(): Error {
+    return Object.assign(
+      new Error("Codex session closed while a turn was running."),
+      { code: ERROR_CODES.codexSessionClosedMidTurn },
+    );
+  }
+
+  it("rotates to a fresh client and retries the turn after a mid-turn session closure", async () => {
+    const root = await createRoot();
+    const tracker = createTracker({
+      refreshStates: [{ id: "issue-1", identifier: "ABC-123", state: "Done" }],
+    });
+    const events: Array<{ event: string; message?: string }> = [];
+    const closeCalls: number[] = [];
+    let clientsCreated = 0;
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker,
+      onEvent: (event) => {
+        events.push({
+          event: event.event,
+          ...(event.message === undefined ? {} : { message: event.message }),
+        });
+      },
+      createCodexClient: () => {
+        clientsCreated += 1;
+        const clientIndex = clientsCreated;
+        return {
+          async startSession() {
+            if (clientIndex === 1) {
+              // First session dies mid-turn (SYMPH-412 incident shape).
+              throw midTurnClosureError();
+            }
+            return {
+              status: "completed" as const,
+              threadId: `thread-${clientIndex}`,
+              turnId: "turn-1",
+              sessionId: `thread-${clientIndex}-turn-1`,
+              usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+              rateLimits: null,
+              message: "done",
+            };
+          },
+          continueTurn: vi.fn(),
+          async close() {
+            closeCalls.push(clientIndex);
+          },
+        };
+      },
+    });
+
+    const result = await runner.run({ issue: ISSUE_FIXTURE, attempt: null });
+
+    expect(result.runAttempt.status).toBe("succeeded");
+    expect(clientsCreated).toBe(2);
+    // The dead client was closed as part of the rotation.
+    expect(closeCalls).toContain(1);
+    const rotationEvents = events.filter(
+      (event) => event.event === "session_rotated",
+    );
+    expect(rotationEvents).toHaveLength(1);
+    expect(rotationEvents[0]?.message).toContain(
+      "fresh session forced after mid-turn closure",
+    );
+  });
+
+  it("propagates codex_session_closed_mid_turn once the per-run rotation cap is exhausted", async () => {
+    const root = await createRoot();
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const events: string[] = [];
+    let clientsCreated = 0;
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker,
+      onEvent: (event) => {
+        events.push(event.event);
+      },
+      createCodexClient: () => {
+        clientsCreated += 1;
+        return {
+          async startSession(): Promise<never> {
+            throw midTurnClosureError();
+          },
+          continueTurn: vi.fn(),
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+      },
+    });
+
+    await expect(
+      runner.run({ issue: ISSUE_FIXTURE, attempt: null }),
+    ).rejects.toMatchObject({
+      name: "AgentRunnerError",
+      code: ERROR_CODES.codexSessionClosedMidTurn,
+    });
+
+    // Initial client + the capped number of rotations (2).
+    expect(clientsCreated).toBe(3);
+    expect(events.filter((event) => event === "session_rotated")).toHaveLength(
+      2,
+    );
+  });
+
+  it("proactively rotates to a fresh session when cumulative session input tokens cross the threshold", async () => {
+    const root = await createRoot();
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+        { id: "issue-1", identifier: "ABC-123", state: "Done" },
+      ],
+    });
+    const events: Array<{ event: string; message?: string }> = [];
+    let clientsCreated = 0;
+    const startSessionCalls: number[] = [];
+    const continueTurnCalls: number[] = [];
+    const config = createConfig(root, "unused");
+    config.codex.sessionRotationInputTokens = 50;
+    const runner = new AgentRunner({
+      config,
+      tracker,
+      onEvent: (event) => {
+        events.push({
+          event: event.event,
+          ...(event.message === undefined ? {} : { message: event.message }),
+        });
+      },
+      createCodexClient: (input) => {
+        clientsCreated += 1;
+        const clientIndex = clientsCreated;
+        const makeTurn = (turnId: string) => {
+          input.onEvent({
+            event: "session_started",
+            timestamp: new Date("2026-06-11T00:00:00.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: `thread-${clientIndex}-${turnId}`,
+            threadId: `thread-${clientIndex}`,
+            turnId,
+          });
+          return {
+            status: "completed" as const,
+            threadId: `thread-${clientIndex}`,
+            turnId,
+            sessionId: `thread-${clientIndex}-${turnId}`,
+            // Each turn alone crosses the 50-token rotation threshold.
+            usage: { inputTokens: 100, outputTokens: 5, totalTokens: 105 },
+            rateLimits: null,
+            message: `client ${clientIndex} ${turnId}`,
+          };
+        };
+        return {
+          async startSession() {
+            startSessionCalls.push(clientIndex);
+            return makeTurn("turn-1");
+          },
+          async continueTurn() {
+            continueTurnCalls.push(clientIndex);
+            return makeTurn("turn-2");
+          },
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+      },
+    });
+
+    const result = await runner.run({ issue: ISSUE_FIXTURE, attempt: null });
+
+    expect(result.runAttempt.status).toBe("succeeded");
+    expect(result.turnsCompleted).toBe(2);
+    // Turn 1 on client 1, proactive rotation, turn 2 opens a NEW session on
+    // client 2 instead of continuing the bloated thread.
+    expect(clientsCreated).toBe(2);
+    expect(startSessionCalls).toEqual([1, 2]);
+    expect(continueTurnCalls).toEqual([]);
+    const rotationEvents = events.filter(
+      (event) => event.event === "session_rotated",
+    );
+    expect(rotationEvents).toHaveLength(1);
+    expect(rotationEvents[0]?.message).toContain("rotation threshold 50");
+  });
+
+  it("does not rotate on mid-turn closure when the run was aborted", async () => {
+    const root = await createRoot();
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const abortController = new AbortController();
+    let clientsCreated = 0;
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker,
+      createCodexClient: () => {
+        clientsCreated += 1;
+        return {
+          async startSession(): Promise<never> {
+            // Abort fires mid-turn; the client close surfaces as a mid-turn
+            // closure. The runner must report cancellation, not rotate.
+            abortController.abort("Stopped due to manual_stop.");
+            throw midTurnClosureError();
+          },
+          continueTurn: vi.fn(),
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+      },
+    });
+
+    await expect(
+      runner.run({
+        issue: ISSUE_FIXTURE,
+        attempt: null,
+        signal: abortController.signal,
+      }),
+    ).rejects.toMatchObject({
+      name: "AgentRunnerError",
+      status: "canceled_by_reconciliation",
+    });
+
+    expect(clientsCreated).toBe(1);
+  });
+
+  it("does not inflate turnsCompleted or trip the iteration cap early when a mid-turn closure rotates (SYMPH-412 regression)", async () => {
+    // Production faithfulness: the real CodexAppServerClient emits
+    // `session_started` on every turn/start (including the one that then dies
+    // mid-stream), and `applyCodexEventToSession` increments
+    // `liveSession.turnCount` on each. A rotation therefore emits a SECOND
+    // session_started for the same logical turn. Without compensation, a single
+    // real turn counts as 2 — inflating turnsCompleted and tripping the
+    // iteration cap one real turn early. The stage caps maxIterations at 2.
+    const root = await createRoot();
+    const stage: StageDefinition = {
+      type: "agent",
+      runner: null,
+      model: null,
+      prompt: null,
+      maxTurns: 5,
+      timeoutMs: null,
+      hardStops: { maxIterations: 2 },
+      concurrency: null,
+      gateType: null,
+      maxRework: null,
+      reviewers: [],
+      transitions: { onComplete: "implement", onApprove: null, onRework: null },
+      linearState: null,
+    };
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    let clientsCreated = 0;
+    const startSessionCalls: number[] = [];
+    const continueTurnCalls: number[] = [];
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker,
+      createCodexClient: (input) => {
+        clientsCreated += 1;
+        const clientIndex = clientsCreated;
+        const emitStarted = (turnId: string) => {
+          input.onEvent({
+            event: "session_started",
+            timestamp: new Date("2026-06-11T00:00:00.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: `thread-${clientIndex}-${turnId}`,
+            threadId: `thread-${clientIndex}`,
+            turnId,
+          });
+        };
+        const completed = (turnId: string) => ({
+          status: "completed" as const,
+          threadId: `thread-${clientIndex}`,
+          turnId,
+          sessionId: `thread-${clientIndex}-${turnId}`,
+          usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+          rateLimits: null,
+          message: `client ${clientIndex} ${turnId}`,
+        });
+        return {
+          async startSession() {
+            startSessionCalls.push(clientIndex);
+            // Both sessions emit session_started (production shape); the first
+            // then dies mid-turn, the second completes the same logical turn.
+            emitStarted("turn-1");
+            if (clientIndex === 1) {
+              throw midTurnClosureError();
+            }
+            return completed("turn-1");
+          },
+          async continueTurn() {
+            continueTurnCalls.push(clientIndex);
+            emitStarted("turn-2");
+            return completed("turn-2");
+          },
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+      },
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "investigate",
+      stage,
+    });
+
+    // Two session_starts fired (failed turn 1 + rotated retry), then a real
+    // second turn ran on the same client. liveSession.turnCount is 3 (3
+    // session_started events), but one was a rotation artifact: real turns = 2,
+    // which exactly hits maxIterations without overshooting or stopping early.
+    expect(result.runAttempt.status).toBe("succeeded");
+    expect(startSessionCalls).toEqual([1, 2]);
+    expect(continueTurnCalls).toEqual([2]);
+    // turnsCompleted reflects real turns (2), not the inflated session tally (3).
+    expect(result.turnsCompleted).toBe(2);
+    // The iteration cap fired on the real count, not one turn early.
+    expect(result.hardStop).toMatchObject({
+      outcome: "STALLED",
+      trigger: "iteration_cap",
+      turnCount: 2,
+    });
+  });
+});
+
 describe("augmentWorkspaceWriteSandbox (SYMPH-353)", () => {
   const ROOT = "/srv/workspaces/.bare-clones";
 

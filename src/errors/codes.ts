@@ -44,6 +44,7 @@ export const ERROR_CODES = {
   codexUserInputRequired: "codex_user_input_required",
   codexDynamicToolRejected: "codex_dynamic_tool_rejected",
   codexProtocolError: "codex_protocol_error",
+  codexSessionClosedMidTurn: "codex_session_closed_mid_turn",
   snapshotUnavailable: "snapshot_unavailable",
   snapshotTimedOut: "snapshot_timed_out",
   issueNotFound: "issue_not_found",

@@ -165,6 +165,39 @@ describe("retry-without-novelty: transient repeats keep normal ladder", () => {
     expect(orchestrator.getState().failed.has("1")).toBe(false);
   });
 
+  it("does not park when a mid-turn Codex session closure repeats (SYMPH-412)", async () => {
+    // A mid-turn closure retries in a FRESH session, so a repeated identical
+    // signature carries genuine novelty (new session, new context) and must
+    // NOT be short-circuited as "retry futile". The stage circuit breaker
+    // (SYMPH-398) and the max-retry ladder still bound repeated closures.
+    const orchestrator = createOrchestrator();
+
+    await orchestrator.pollTick();
+
+    // Worker exit reason shape produced by formatWorkerErrorReason:
+    // "<error_code>: <message>".
+    const midTurnClosure =
+      "codex_session_closed_mid_turn: Codex session closed while a turn was running.";
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: midTurnClosure,
+    });
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    await orchestrator.onRetryTimer("1");
+
+    const retry2 = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: midTurnClosure,
+    });
+
+    expect(retry2).not.toBeNull();
+    expect(retry2!.delayType).toBe("failure");
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+  });
+
   it("does not park when repeated failure is transient (ECONNRESET)", async () => {
     const orchestrator = createOrchestrator();
 

@@ -62,6 +62,20 @@ const CLASSIFICATION_RULES: ClassificationRule[] = [
   { pattern: /\beperm\b/, class: "permanent" },
   { pattern: /\beacces\b/, class: "permanent" },
   { pattern: /\bpermission denied\b/, class: "permanent" },
+  // Transient — Codex app-server session closed mid-turn (SYMPH-412). The
+  // session/process dies under accumulated thread context; the retry runs in a
+  // FRESH session, so the repeat of this signature must never be treated as a
+  // futile permanent failure by the novelty short-circuit. The stage circuit
+  // breaker (SYMPH-398) still bounds systemic recurrence across issues.
+  { pattern: /\bcodex_session_closed_mid_turn\b/, class: "transient" },
+  {
+    pattern: /\bsession closed while a turn was running\b/,
+    class: "transient",
+  },
+  {
+    pattern: /\bapp-server exited\b.*\bwhile a turn was running\b/,
+    class: "transient",
+  },
   // Transient — rate limits (must precede catch-all auth permanents so that
   // messages like "Forbidden: too many requests" classify as transient)
   { pattern: /\brate.?limit\b/, class: "transient" },
