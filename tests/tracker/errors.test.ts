@@ -70,6 +70,11 @@ describe("serializeTrackerErrorDetails", () => {
     expect(serialized).toContain("GRAPHQL_VALIDATION_FAILED");
   });
 
+  it("never exceeds maxLength even when it is smaller than the marker", () => {
+    expect(serializeTrackerErrorDetails("abcdef", 1)?.length).toBe(1);
+    expect(serializeTrackerErrorDetails("abcdef", 5)?.length).toBe(5);
+  });
+
   it("never emits a split UTF-16 surrogate at the truncation boundary", () => {
     // "😀" (U+1F600) is two UTF-16 code units; place it straddling the bound.
     const serialized = serializeTrackerErrorDetails(`${"a".repeat(18)}😀b`, 20);

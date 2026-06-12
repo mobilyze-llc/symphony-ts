@@ -69,11 +69,17 @@ export function serializeTrackerErrorDetails(
     return serialized;
   }
 
+  // When the budget can't even fit the marker, return a bare marker capped to
+  // the budget rather than overshooting the documented bound.
+  if (maxLength <= TRACKER_ERROR_TRUNCATION_MARKER.length) {
+    return TRACKER_ERROR_TRUNCATION_MARKER.slice(0, maxLength);
+  }
+
   // Reserve room for the marker so the total output stays within maxLength,
   // and step back off a lone high surrogate so truncation never emits a
   // split UTF-16 surrogate pair.
-  let cut = Math.max(maxLength - TRACKER_ERROR_TRUNCATION_MARKER.length, 0);
-  const lastCode = cut > 0 ? serialized.charCodeAt(cut - 1) : 0;
+  let cut = maxLength - TRACKER_ERROR_TRUNCATION_MARKER.length;
+  const lastCode = serialized.charCodeAt(cut - 1);
   if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
     cut -= 1;
   }
