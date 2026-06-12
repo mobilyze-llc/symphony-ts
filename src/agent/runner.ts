@@ -625,6 +625,16 @@ export class AgentRunner {
         rateLimits = lastTurn.rateLimits;
         observeRateLimits(lastTurn.rateLimits);
 
+        // SYMPH-412: a mid-turn closure already emitted one `session_started`
+        // (which incremented `liveSession.turnCount`) for a turn that produced
+        // no output; the rotated retry emits a SECOND `session_started` for the
+        // same logical turn. Subtract the per-run rotation count so policy gates
+        // (iteration cap) and the reported `turnsCompleted` reflect real turns,
+        // not the inflated session-start tally. Proactive rotations do NOT
+        // double-count (they replace one continueTurn with one startSession),
+        // so only mid-turn-closure rotations are compensated.
+        const realTurnCount = liveSession.turnCount - midTurnClosureRotations;
+
         applyCodexEventToSession(liveSession, {
           event:
             lastTurn.status === "completed"
@@ -676,7 +686,7 @@ export class AgentRunner {
 
         hardStop = evaluateBudgetHardStop({
           config: hardStops,
-          turnCount: liveSession.turnCount,
+          turnCount: realTurnCount,
           totalTokens: liveSession.totalStageTotalTokens,
           cacheReadTokens: liveSession.totalStageCacheReadTokens,
         });
@@ -687,7 +697,7 @@ export class AgentRunner {
         if (rateLimitBudgetConfigured) {
           hardStop = evaluateRateLimitBudgetHardStop({
             config: hardStops,
-            turnCount: liveSession.turnCount,
+            turnCount: realTurnCount,
             totalTokens: liveSession.totalStageTotalTokens,
             cacheReadTokens: liveSession.totalStageCacheReadTokens,
             rateLimitUsage,
@@ -714,7 +724,7 @@ export class AgentRunner {
         hardStop = evaluateNoProgressHardStop({
           config: hardStops,
           repeatedNoProgressTurns,
-          turnCount: liveSession.turnCount,
+          turnCount: realTurnCount,
           totalTokens: liveSession.totalStageTotalTokens,
           cacheReadTokens: liveSession.totalStageCacheReadTokens,
         });
@@ -724,7 +734,7 @@ export class AgentRunner {
 
         hardStop = evaluateIterationHardStop({
           config: hardStops,
-          turnCount: liveSession.turnCount,
+          turnCount: realTurnCount,
           totalTokens: liveSession.totalStageTotalTokens,
           cacheReadTokens: liveSession.totalStageCacheReadTokens,
         });
@@ -755,7 +765,9 @@ export class AgentRunner {
         workspace,
         runAttempt,
         liveSession,
-        turnsCompleted: liveSession.turnCount,
+        // SYMPH-412: discount the extra session_started emitted by each
+        // mid-turn-closure rotation so this reports real completed turns.
+        turnsCompleted: liveSession.turnCount - midTurnClosureRotations,
         lastTurn,
         rateLimits,
         hardStop,

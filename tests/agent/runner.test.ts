@@ -2467,6 +2467,109 @@ describe("AgentRunner session rotation (SYMPH-412)", () => {
 
     expect(clientsCreated).toBe(1);
   });
+
+  it("does not inflate turnsCompleted or trip the iteration cap early when a mid-turn closure rotates (SYMPH-412 regression)", async () => {
+    // Production faithfulness: the real CodexAppServerClient emits
+    // `session_started` on every turn/start (including the one that then dies
+    // mid-stream), and `applyCodexEventToSession` increments
+    // `liveSession.turnCount` on each. A rotation therefore emits a SECOND
+    // session_started for the same logical turn. Without compensation, a single
+    // real turn counts as 2 — inflating turnsCompleted and tripping the
+    // iteration cap one real turn early. The stage caps maxIterations at 2.
+    const root = await createRoot();
+    const stage: StageDefinition = {
+      type: "agent",
+      runner: null,
+      model: null,
+      prompt: null,
+      maxTurns: 5,
+      timeoutMs: null,
+      hardStops: { maxIterations: 2 },
+      concurrency: null,
+      gateType: null,
+      maxRework: null,
+      reviewers: [],
+      transitions: { onComplete: "implement", onApprove: null, onRework: null },
+      linearState: null,
+    };
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    let clientsCreated = 0;
+    const startSessionCalls: number[] = [];
+    const continueTurnCalls: number[] = [];
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker,
+      createCodexClient: (input) => {
+        clientsCreated += 1;
+        const clientIndex = clientsCreated;
+        const emitStarted = (turnId: string) => {
+          input.onEvent({
+            event: "session_started",
+            timestamp: new Date("2026-06-11T00:00:00.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: `thread-${clientIndex}-${turnId}`,
+            threadId: `thread-${clientIndex}`,
+            turnId,
+          });
+        };
+        const completed = (turnId: string) => ({
+          status: "completed" as const,
+          threadId: `thread-${clientIndex}`,
+          turnId,
+          sessionId: `thread-${clientIndex}-${turnId}`,
+          usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+          rateLimits: null,
+          message: `client ${clientIndex} ${turnId}`,
+        });
+        return {
+          async startSession() {
+            startSessionCalls.push(clientIndex);
+            // Both sessions emit session_started (production shape); the first
+            // then dies mid-turn, the second completes the same logical turn.
+            emitStarted("turn-1");
+            if (clientIndex === 1) {
+              throw midTurnClosureError();
+            }
+            return completed("turn-1");
+          },
+          async continueTurn() {
+            continueTurnCalls.push(clientIndex);
+            emitStarted("turn-2");
+            return completed("turn-2");
+          },
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+      },
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "investigate",
+      stage,
+    });
+
+    // Two session_starts fired (failed turn 1 + rotated retry), then a real
+    // second turn ran on the same client. liveSession.turnCount is 3 (3
+    // session_started events), but one was a rotation artifact: real turns = 2,
+    // which exactly hits maxIterations without overshooting or stopping early.
+    expect(result.runAttempt.status).toBe("succeeded");
+    expect(startSessionCalls).toEqual([1, 2]);
+    expect(continueTurnCalls).toEqual([2]);
+    // turnsCompleted reflects real turns (2), not the inflated session tally (3).
+    expect(result.turnsCompleted).toBe(2);
+    // The iteration cap fired on the real count, not one turn early.
+    expect(result.hardStop).toMatchObject({
+      outcome: "STALLED",
+      trigger: "iteration_cap",
+      turnCount: 2,
+    });
+  });
 });
 
 describe("augmentWorkspaceWriteSandbox (SYMPH-353)", () => {
