@@ -228,6 +228,77 @@ describe("failure signal routing in onWorkerExit", () => {
     );
   });
 
+  it("parks repeated unparseable substrate stalls even when prose changes", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const firstRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: substrate stall with no lane field.\n[STAGE_FAILED: infra]",
+    });
+    expect(firstRetry).not.toBeNull();
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toMatchObject({ count: 1, stalledLanes: [] });
+
+    await orchestrator.onRetryTimer("1");
+    const secondRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Second run had different prose but the same substrate stall class.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(secondRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+  });
+
+  it("parks the second substrate stall while preserving the full punctuated lane set", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const laneA =
+      "Headless council gate error: substrate_stall:team:deadbeef123456#1.\n[STAGE_FAILED: infra]";
+    const laneB =
+      "Headless council gate error: substrate_stall:team:feedface123456#1.\n[STAGE_FAILED: infra]";
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: laneA,
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const changedLaneRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: laneB,
+    });
+
+    expect(changedLaneRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(orchestrator.getState().failureExhaustedIds.has("1")).toBe(true);
+  });
+
   it("escalates review failure when max rework exceeded", async () => {
     const base = createGateWorkflowConfig();
     const stages: StagesConfig = {

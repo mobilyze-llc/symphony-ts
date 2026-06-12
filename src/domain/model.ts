@@ -1054,7 +1054,7 @@ export interface OrchestratorState {
   /**
    * Consecutive review-gate infrastructure stalls per issue (SYMPH-441).
    * Review-stage substrate stalls are retried once as infrastructure; the
-   * second identical stalled-lane set parks loudly instead of reworking code.
+   * second consecutive substrate stall parks loudly instead of reworking code.
    */
   issueReviewInfrastructureStalls: Record<
     string,

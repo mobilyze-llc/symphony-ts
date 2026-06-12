@@ -776,7 +776,7 @@ If `$ARTIFACT_DIR/review-result.json` reports `verdict: "error"` and a lane has 
 1. Post a short `## Review Infrastructure Retry` workpad/comment note naming the artifact directory, reviewed head SHA, and stalled lane(s).
 2. Output `[STAGE_FAILED: infra]` with `substrate_stall:<lane>` details. Do NOT output `[STAGE_FAILED: review]`.
 
-The orchestrator retries the review gate once for the same stalled-lane set. If the same substrate stall repeats, it parks the issue loudly as infra-blocked instead of dispatching implement rework (SYMPH-441).
+The orchestrator retries the review gate once for substrate-stall infrastructure. If another substrate stall follows, it parks the issue loudly as infra-blocked instead of dispatching implement rework (SYMPH-441).
 
 If artifacts are missing/malformed for any other reason, or the gate times out without a readable `review-result.json`: post a `## Review Findings` comment naming the missing/malformed artifact and output `[STAGE_FAILED: review]`.
 {% endif %}

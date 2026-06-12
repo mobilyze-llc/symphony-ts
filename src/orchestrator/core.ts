@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 
 import { extractAcceptanceCriteria } from "../agent/ac-gate.js";
@@ -141,8 +142,7 @@ const CONTINUATION_RETRY_DELAY_MS = 1_000;
 const MAX_SAME_CRITERION_REVIEW_FAILURES = 3;
 const MAX_REVIEW_SUBSTRATE_STALL_FAILURES = 2;
 const SUBSTRATE_STALL_REGEX = /\bsubstrate[_ -]?stall\b/i;
-const SUBSTRATE_STALL_CONDITION_REGEX =
-  /\bsubstrate[_ -]?stall:([A-Za-z0-9_.-]+)/gi;
+const SUBSTRATE_STALL_CONDITION_REGEX = /\bsubstrate[_ -]?stall:([^\s,;]+)/gi;
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
@@ -3448,8 +3448,8 @@ export class OrchestratorCore {
   /**
    * SYMPH-441: a substrate-stalled council gate is infrastructure, not code
    * rework. The review worker reports the first occurrence as
-   * `[STAGE_FAILED: infra]`, which retries the same review stage. If the same
-   * stalled-lane set repeats, park loudly so operators can relaunch/requeue
+   * `[STAGE_FAILED: infra]`, which retries the same review stage. If another
+   * substrate stall follows, park loudly so operators can relaunch/requeue
    * without burning another implement round.
    */
   private handleReviewInfrastructureStall(
@@ -3471,13 +3471,10 @@ export class OrchestratorCore {
     const signatureSource =
       stalledLanes.length > 0
         ? `substrate_stall:${stalledLanes.join(",")}`
-        : (agentMessage ?? "substrate_stall");
-    const signature = normalizeErrorSignature(signatureSource).signature;
+        : "substrate_stall:unknown-lane";
+    const signature = hashReviewInfrastructureSignature(signatureSource);
     const previous = this.state.issueReviewInfrastructureStalls[issueId];
-    const count =
-      previous !== undefined && previous.signature === signature
-        ? previous.count + 1
-        : 1;
+    const count = previous !== undefined ? previous.count + 1 : 1;
     this.state.issueReviewInfrastructureStalls[issueId] = {
       signature,
       count,
@@ -8821,10 +8818,17 @@ function extractSubstrateStallLanes(text: string | null | undefined): string[] {
   const lanes = new Set<string>();
   for (const match of text.matchAll(SUBSTRATE_STALL_CONDITION_REGEX)) {
     if (match[1] !== undefined) {
-      lanes.add(match[1]);
+      const lane = match[1].replace(/[.)\]]+$/g, "");
+      if (lane !== "") {
+        lanes.add(lane);
+      }
     }
   }
   return [...lanes].sort();
+}
+
+function hashReviewInfrastructureSignature(source: string): string {
+  return createHash("sha1").update(source).digest("hex").slice(0, 7);
 }
 
 function defaultTimerScheduler(): TimerScheduler {
