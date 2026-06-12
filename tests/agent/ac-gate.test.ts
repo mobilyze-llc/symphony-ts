@@ -166,6 +166,37 @@ describe("rewriteFullSuiteCheckCriteria", () => {
     expect(rewriteFullSuiteCheckCriteria(prose)).toBe(prose);
   });
 
+  it("leaves a focused command with flags before the path untouched (SYMPH-402 R1)", () => {
+    // The full-suite token is `test`, but the first non-flag argument names a
+    // test file — this is focused, not the bare suite, and must survive.
+    const flagged = "- [ ] `check: pnpm test --run tests/foo.test.ts exits 0`";
+    expect(rewriteFullSuiteCheckCriteria(flagged)).toBe(flagged);
+  });
+
+  it("rewrites a bare full-suite command with package-manager flags (SYMPH-402 R1)", () => {
+    // `pnpm -w test` is still the bare full suite — flags between the package
+    // manager and `test` must not let it escape the rewrite.
+    for (const command of ["pnpm -w test", "npm --silent run test"]) {
+      const rewritten = rewriteFullSuiteCheckCriteria(
+        `- [ ] \`check: ${command} exits 0\``,
+      );
+      expect(rewritten).not.toContain(command);
+      expect(rewritten).toContain("CI check-run success on the PR head SHA");
+    }
+  });
+
+  it("leaves a distinct `test:<variant>` npm script untouched (SYMPH-402 R1)", () => {
+    // `test:e2e` / `test:unit` are separate, locally-satisfiable scripts — not
+    // the bare full suite — and must keep their specific requirement.
+    for (const line of [
+      "- [ ] `check: pnpm run test:e2e exits 0`",
+      "- [ ] `check: pnpm test:unit exits 0`",
+      "- [ ] `check: yarn test:integration exits 0`",
+    ]) {
+      expect(rewriteFullSuiteCheckCriteria(line)).toBe(line);
+    }
+  });
+
   it("preserves the list prefix and surrounding lines", () => {
     const section = [
       "### Acceptance Criteria",

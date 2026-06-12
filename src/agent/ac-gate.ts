@@ -45,11 +45,16 @@ const MAX_AC_SNAPSHOT_CHARS = 8000;
  * and produced the SYMPH-332 / PR #350 unclearable rework loop.
  *
  * Matches package-manager full-suite commands (`pnpm test`, `npm test`,
- * `npm run test`, `yarn test`, `bun test`). A command narrowed to specific
- * files (first argument is path-like or a test-file name) is focused, not
- * full-suite, and is left untouched.
+ * `npm run test`, `yarn test`, `bun test`), tolerating package-manager flags
+ * before the script (`pnpm -w test`, `npm --silent run test`). A command
+ * narrowed to specific files (first non-flag argument is path-like or a
+ * test-file name) is focused, not full-suite, and is left untouched. The
+ * `test` token must end the script name (followed by whitespace or
+ * end-of-line) so a distinct npm script like `test:unit` / `test:e2e` — which
+ * IS satisfiable locally — is never mistaken for the bare full suite.
  */
-const FULL_SUITE_COMMAND_REGEX = /\b(?:pnpm|npm|yarn|bun)(?:\s+run)?\s+test\b/i;
+const FULL_SUITE_COMMAND_REGEX =
+  /\b(?:pnpm|npm|yarn|bun)(?:\s+-{1,2}[\w-]+)*(?:\s+run)?\s+test(?=\s|$)/i;
 const CHECK_TAG_REGEX = /`?check:/i;
 const CRITERION_LINE_PREFIX_REGEX = /^(\s*(?:[-*+]\s*)?(?:\[[ xX]\]\s*)?)(.*)$/;
 const FOCUSED_FIRST_TOKEN_REGEX = /[/\\]|\.test\.|\.spec\./;
@@ -83,11 +88,14 @@ export function rewriteFullSuiteCheckCriteria(section: string): string {
         return line;
       }
       // A first argument that names a path or test file makes the command
-      // focused (e.g. `pnpm test tests/foo.test.ts`) — leave it alone.
+      // focused (e.g. `pnpm test tests/foo.test.ts`) — leave it alone. Skip
+      // any leading flags first so `pnpm test --run tests/foo.test.ts` is
+      // still recognized as focused rather than clobbered into the CI shape.
       const after = rest
         .slice(commandMatch.index + commandMatch[0].length)
         .trimStart();
-      const firstToken = after.split(/\s+/, 1)[0] ?? "";
+      const firstToken =
+        after.split(/\s+/).find((token) => !token.startsWith("-")) ?? "";
       if (FOCUSED_FIRST_TOKEN_REGEX.test(firstToken)) {
         return line;
       }

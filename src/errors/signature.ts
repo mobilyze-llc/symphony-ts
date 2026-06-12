@@ -181,11 +181,12 @@ function classifyRaw(rawText: string): ErrorSignatureClass {
 /**
  * Signature of a review-stage failure, criterion-aware when possible.
  *
- * When the review worker's failure message quotes one or more frozen
- * acceptance criteria (the pre-gate refusal contract names the missing
- * evidence), the signature hashes the SET of matched criteria — stable
- * across reworded refusals of the same criterion. When no criterion can be
- * isolated, falls back to the normalized whole-message signature.
+ * When the review worker's failure message quotes EXACTLY ONE frozen
+ * acceptance criterion (the pre-gate refusal contract names the missing
+ * evidence), the signature hashes that criterion — stable across reworded
+ * refusals of the same criterion. When zero or two-or-more criteria match,
+ * the refused criterion is not isolatable, so it falls back to the
+ * normalized whole-message signature.
  */
 export interface ReviewFailureSignature {
   /** 7-char SHA-1 prefix, criterion-set hash or whole-message fallback. */
@@ -237,7 +238,14 @@ export function normalizeReviewFailureSignature(
     const matched = [
       ...new Set(criteria.filter((c) => cleanedMessage.includes(c))),
     ].sort();
-    if (matched.length > 0) {
+    // Only a SINGLE isolatable criterion is authoritative (SYMPH-402). When a
+    // refusal message echoes the whole frozen AC block — or otherwise names
+    // two or more criteria — every round matches the same SET regardless of
+    // which criterion actually failed, so a set-hash would falsely group
+    // rounds that failed on DIFFERENT criteria into one streak and park an
+    // issue that is still making progress. Fall back to the whole-message
+    // signature in that case; it varies with the actual failure content.
+    if (matched.length === 1) {
       const signature = createHash("sha1")
         .update(matched.join("\n"))
         .digest("hex")
