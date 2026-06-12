@@ -93,7 +93,10 @@ export interface ReviewBundleReference {
   path: string;
   /** SHA-256 of the written review-bundle.json bytes. */
   hash: string;
-  /** Canonical SHA-256 stored inside the bundle, excluding run-local paths. */
+  /**
+   * Canonical SHA-256 stored inside the bundle; excludes generated diff paths
+   * and includes caller-supplied optional input identifiers.
+   */
   bundleHash: string;
   hashAlgorithm: "sha256";
 }
@@ -517,12 +520,16 @@ export async function runHeadlessCouncilGate(
     lanes = [...lanes, codexLeadResult];
   }
 
-  await appendReviewBundleReferenceToLaneArtifacts(
-    lanes,
-    reviewBundle.reference,
-  );
-
   const degradedConditions = collectDegradedConditions(lanes);
+  try {
+    await appendReviewBundleReferenceToLaneArtifacts(
+      lanes,
+      reviewBundle.reference,
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    degradedConditions.push(`review-bundle-footer-append-failed:${message}`);
+  }
   if (!codexLeadEnabled) {
     degradedConditions.push("codex-lead-disabled");
   }
@@ -1816,8 +1823,10 @@ async function appendReviewBundleReferenceToLaneArtifacts(
   lanes: readonly HeadlessLaneResult[],
   reviewBundle: ReviewBundleReference,
 ): Promise<void> {
-  const existingFooterPattern =
-    /(?:\r?\n)?<!--\s*symphony-review-bundle\b[\s\S]*?-->(?:\r?\n)?/g;
+  const trailingClosedFooterPattern =
+    /(?:\r?\n)*<!--\s*symphony-review-bundle\b[\s\S]*?-->\s*$/;
+  const trailingUnclosedFooterPattern =
+    /(?:\r?\n)*<!--\s*symphony-review-bundle\b(?![\s\S]*-->)[\s\S]*$/;
   const footer = [
     "",
     `<!-- symphony-review-bundle path=${JSON.stringify(reviewBundle.path)} hash=${JSON.stringify(reviewBundle.hash)} bundleHash=${JSON.stringify(reviewBundle.bundleHash)} algorithm=${JSON.stringify(reviewBundle.hashAlgorithm)} -->`,
@@ -1834,7 +1843,8 @@ async function appendReviewBundleReferenceToLaneArtifacts(
       }
       const artifact = await readFile(lane.artifactPath, "utf-8");
       const cleanedArtifact = artifact
-        .replace(existingFooterPattern, "")
+        .replace(trailingClosedFooterPattern, "")
+        .replace(trailingUnclosedFooterPattern, "")
         .replace(/\n*$/, "");
       await writeFile(lane.artifactPath, `${cleanedArtifact}${footer}`);
     }),
@@ -2068,6 +2078,10 @@ function extractChangedPathsFromDiff(diff: string): string[] {
   const paths = new Set<string>();
   let inFileHeader = false;
   for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith("diff ")) {
+      inFileHeader = false;
+    }
+
     const diffGitMatch = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
     if (diffGitMatch !== null) {
       addDiffPath(paths, diffGitMatch[1]);
