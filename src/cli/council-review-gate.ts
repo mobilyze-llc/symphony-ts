@@ -5,9 +5,13 @@ import { pathToFileURL } from "node:url";
 
 import {
   type CouncilReviewMode,
-  assertFreshCouncilReview,
-  runHeadlessCouncilGate,
+  assertFreshCouncilReview as assertFreshCouncilReviewImpl,
+  runHeadlessCouncilGate as runHeadlessCouncilGateImpl,
 } from "../review/headless-council-gate.js";
+import {
+  type ReviewJournalSource,
+  appendReviewJournalEventsToDispatcherJournal as appendReviewJournalEventsToDispatcherJournalImpl,
+} from "../review/review-journal-events.js";
 
 interface ParsedArgs {
   issueId: string;
@@ -26,6 +30,18 @@ interface ParsedArgs {
   previousReviewedHeadSha?: string;
   assertFreshReview?: string;
   allowedChangePatterns: string[];
+  journalWorkspaceRoot?: string;
+  journalSource?: ReviewJournalSource;
+  journalStage?: string;
+  journalAttempt?: number;
+  journalOwnerId?: string;
+  journalIssueIdentifier?: string;
+}
+
+interface CouncilReviewGateCliDependencies {
+  runHeadlessCouncilGate?: typeof runHeadlessCouncilGateImpl;
+  assertFreshCouncilReview?: typeof assertFreshCouncilReviewImpl;
+  appendReviewJournalEventsToDispatcherJournal?: typeof appendReviewJournalEventsToDispatcherJournalImpl;
 }
 
 class UsageError extends Error {
@@ -133,6 +149,36 @@ export function parseCouncilReviewGateArgs(
       ];
       continue;
     }
+    if (token === "--journal-workspace-root") {
+      parsed.journalWorkspaceRoot = readValue(argv, ++index, token);
+      continue;
+    }
+    if (token === "--journal-source") {
+      parsed.journalSource = readReviewJournalSource(
+        readValue(argv, ++index, token),
+        token,
+      );
+      continue;
+    }
+    if (token === "--journal-stage") {
+      parsed.journalStage = readValue(argv, ++index, token);
+      continue;
+    }
+    if (token === "--journal-attempt") {
+      parsed.journalAttempt = readPositiveInteger(
+        readValue(argv, ++index, token),
+        token,
+      );
+      continue;
+    }
+    if (token === "--journal-owner-id") {
+      parsed.journalOwnerId = readValue(argv, ++index, token);
+      continue;
+    }
+    if (token === "--journal-issue-identifier") {
+      parsed.journalIssueIdentifier = readValue(argv, ++index, token);
+      continue;
+    }
 
     throw new UsageError(`Unknown argument: ${token}`);
   }
@@ -159,6 +205,26 @@ export function parseCouncilReviewGateArgs(
       "--mode, --round, and --previous-reviewed-head are only valid when running a council review, not with --assert-fresh-review.",
     );
   }
+  if (
+    parsed.assertFreshReview !== undefined &&
+    parsed.journalWorkspaceRoot !== undefined
+  ) {
+    throw new UsageError(
+      "--journal-workspace-root is only valid when running a council review, not with --assert-fresh-review.",
+    );
+  }
+  if (
+    parsed.journalWorkspaceRoot === undefined &&
+    (parsed.journalSource !== undefined ||
+      parsed.journalStage !== undefined ||
+      parsed.journalAttempt !== undefined ||
+      parsed.journalOwnerId !== undefined ||
+      parsed.journalIssueIdentifier !== undefined)
+  ) {
+    throw new UsageError(
+      "--journal-source, --journal-stage, --journal-attempt, --journal-owner-id, and --journal-issue-identifier require --journal-workspace-root.",
+    );
+  }
 
   return parsed as ParsedArgs;
 }
@@ -169,6 +235,7 @@ export async function runCouncilReviewGateCli(
     stdout: (message: string) => process.stdout.write(message),
     stderr: (message: string) => process.stderr.write(message),
   },
+  dependencies: CouncilReviewGateCliDependencies = {},
 ): Promise<number> {
   let parsed: ParsedArgs;
   try {
@@ -183,30 +250,49 @@ export async function runCouncilReviewGateCli(
     return 2;
   }
 
-  const result =
-    parsed.assertFreshReview === undefined
-      ? await runHeadlessCouncilGate(parsed)
-      : await assertFreshCouncilReview({
-          issueId: parsed.issueId,
-          workspace: parsed.workspace,
-          artifactDir: parsed.artifactDir,
-          reviewResultPath: parsed.assertFreshReview,
-          allowedChangePatterns: parsed.allowedChangePatterns,
-          ...(parsed.repo === undefined ? {} : { repo: parsed.repo }),
-          ...(parsed.prNumber === undefined
-            ? {}
-            : { prNumber: parsed.prNumber }),
-          ...(parsed.baseRef === undefined ? {} : { baseRef: parsed.baseRef }),
-          ...(parsed.headRef === undefined ? {} : { headRef: parsed.headRef }),
-        });
+  const runHeadlessCouncilGate =
+    dependencies.runHeadlessCouncilGate ?? runHeadlessCouncilGateImpl;
+  const assertFreshCouncilReview =
+    dependencies.assertFreshCouncilReview ?? assertFreshCouncilReviewImpl;
+  const appendReviewJournalEventsToDispatcherJournal =
+    dependencies.appendReviewJournalEventsToDispatcherJournal ??
+    appendReviewJournalEventsToDispatcherJournalImpl;
+
+  if (parsed.assertFreshReview === undefined) {
+    const result = await runHeadlessCouncilGate(parsed);
+    if (parsed.journalWorkspaceRoot !== undefined) {
+      await appendReviewJournalEventsToDispatcherJournal({
+        workspaceRoot: parsed.journalWorkspaceRoot,
+        result,
+        options: {
+          issueIdentifier: parsed.journalIssueIdentifier ?? parsed.issueId,
+          ownerId: parsed.journalOwnerId ?? null,
+          stage: parsed.journalStage ?? "review",
+          attempt: parsed.journalAttempt ?? null,
+          source: parsed.journalSource ?? "pipeline",
+        },
+      });
+    }
+    io.stdout(`${JSON.stringify(result, null, 2)}\n`);
+    return result.verdict === "pass" ? 0 : 1;
+  }
+
+  const result = await assertFreshCouncilReview({
+    issueId: parsed.issueId,
+    workspace: parsed.workspace,
+    artifactDir: parsed.artifactDir,
+    reviewResultPath: parsed.assertFreshReview,
+    allowedChangePatterns: parsed.allowedChangePatterns,
+    ...(parsed.repo === undefined ? {} : { repo: parsed.repo }),
+    ...(parsed.prNumber === undefined ? {} : { prNumber: parsed.prNumber }),
+    ...(parsed.baseRef === undefined ? {} : { baseRef: parsed.baseRef }),
+    ...(parsed.headRef === undefined ? {} : { headRef: parsed.headRef }),
+  });
   io.stdout(`${JSON.stringify(result, null, 2)}\n`);
   if (result.verdict === "pass") {
     return 0;
   }
-  if (parsed.assertFreshReview !== undefined && "code" in result) {
-    return result.code === "stale_review" ? 1 : 2;
-  }
-  return 1;
+  return result.code === "stale_review" ? 1 : 2;
 }
 
 function readValue(
@@ -234,6 +320,18 @@ function readMode(value: string, flag: string): CouncilReviewMode {
     return value;
   }
   throw new UsageError(`${flag} must be "full" or "convergence".`);
+}
+
+function readReviewJournalSource(
+  value: string,
+  flag: string,
+): ReviewJournalSource {
+  if (value === "pipeline" || value === "interactive" || value === "replay") {
+    return value;
+  }
+  throw new UsageError(
+    `${flag} must be "pipeline", "interactive", or "replay".`,
+  );
 }
 
 function readGitSha(value: string, flag: string): string {
@@ -268,6 +366,12 @@ function renderUsage(): string {
     "  --previous-reviewed-head SHA  Previous reviewed head SHA for convergence metadata",
     "  --assert-fresh-review PATH    Assert an existing clean review-result.json covers current HEAD",
     "  --allow-stale-path GLOB       Explicit freshness allowlist; repeatable; ** crosses /, * and ? do not",
+    "  --journal-workspace-root DIR  Append sanitized review events to DIR/.symphony/run-journals/dispatcher.jsonl",
+    "  --journal-source SOURCE       Journal source: pipeline, interactive, or replay (default: pipeline)",
+    "  --journal-stage STAGE         Journal stage label (default: review)",
+    "  --journal-attempt N           Journal pipeline attempt",
+    "  --journal-owner-id ID         Journal owner/actor id",
+    "  --journal-issue-identifier ID Journal issue identifier (default: --issue-id)",
     "",
   ].join("\n");
 }

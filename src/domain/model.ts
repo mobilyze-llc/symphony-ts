@@ -240,6 +240,16 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   // Durable consumption marker for a terminal stage signal that arrived
   // together with a budget hard stop (SYMPH-440).
   "pending_stage_signal",
+  // Council v2 review lifecycle events (SYMPH-450): emitted through the
+  // dispatcher run journal so review state remains replayable from one source.
+  "review_round",
+  "review_lane",
+  "review_finding",
+  "review_escalation",
+  "review_rework",
+  "fix_round",
+  "review_gate_result",
+  "review_synthesis",
 ] as const;
 
 // ---------------------------------------------------------------------------

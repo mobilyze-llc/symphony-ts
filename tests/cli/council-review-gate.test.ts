@@ -10,6 +10,8 @@ import {
   parseCouncilReviewGateArgs,
   runCouncilReviewGateCli,
 } from "../../src/cli/council-review-gate.js";
+import { readDispatcherRunJournal } from "../../src/logging/run-journal.js";
+import type { HeadlessCouncilGateResult } from "../../src/review/headless-council-gate.js";
 
 describe("parseCouncilReviewGateArgs", () => {
   it("parses required inputs and PR context", () => {
@@ -64,6 +66,43 @@ describe("parseCouncilReviewGateArgs", () => {
       round: 2,
       previousReviewedHeadSha: "0123456789abcdef0123456789abcdef01234567",
       allowedChangePatterns: [],
+    });
+  });
+
+  it("parses journal append metadata", () => {
+    expect(
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "issue-symph-450",
+          "--artifact-dir",
+          "/tmp/review",
+          "--journal-workspace-root",
+          "/workspace",
+          "--journal-source",
+          "interactive",
+          "--journal-stage",
+          "review",
+          "--journal-attempt",
+          "2",
+          "--journal-owner-id",
+          "worker-1",
+          "--journal-issue-identifier",
+          "SYMPH-450",
+        ],
+        "/cwd",
+      ),
+    ).toEqual({
+      issueId: "issue-symph-450",
+      artifactDir: "/tmp/review",
+      workspace: "/cwd",
+      allowedChangePatterns: [],
+      journalWorkspaceRoot: "/workspace",
+      journalSource: "interactive",
+      journalStage: "review",
+      journalAttempt: 2,
+      journalOwnerId: "worker-1",
+      journalIssueIdentifier: "SYMPH-450",
     });
   });
 
@@ -143,6 +182,22 @@ describe("parseCouncilReviewGateArgs", () => {
     ).toThrow("--mode, --round, and --previous-reviewed-head are only valid");
   });
 
+  it("rejects journal metadata without journal append root", () => {
+    expect(() =>
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "MOB-88",
+          "--artifact-dir",
+          "/tmp/review",
+          "--journal-source",
+          "interactive",
+        ],
+        "/cwd",
+      ),
+    ).toThrow("--journal-source");
+  });
+
   it("returns exit code 2 for invalid freshness artifacts", async () => {
     const root = await mkdtemp(join(tmpdir(), "symphony-council-cli-"));
     const stdout: string[] = [];
@@ -176,6 +231,76 @@ describe("parseCouncilReviewGateArgs", () => {
     expect(JSON.parse(stdout.join(""))).toMatchObject({
       verdict: "error",
       code: "invalid_review_artifact",
+    });
+  });
+
+  it("appends sanitized journal events when the journal root flag is present", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-council-cli-"));
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+
+    const code = await runCouncilReviewGateCli(
+      [
+        "--issue-id",
+        "issue-symph-450",
+        "--artifact-dir",
+        join(root, "artifacts"),
+        "--workspace",
+        root,
+        "--journal-workspace-root",
+        root,
+        "--journal-source",
+        "pipeline",
+        "--journal-stage",
+        "review",
+        "--journal-attempt",
+        "1",
+        "--journal-owner-id",
+        "worker-1",
+        "--journal-issue-identifier",
+        "SYMPH-450",
+      ],
+      {
+        stdout: (message) => {
+          stdout.push(message);
+          return true;
+        },
+        stderr: (message) => {
+          stderr.push(message);
+          return true;
+        },
+      },
+      {
+        runHeadlessCouncilGate: async () => cliReviewResult(),
+      },
+    );
+    const journal = await readDispatcherRunJournal(root);
+
+    expect(code).toBe(0);
+    expect(stderr).toEqual([]);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      issueId: "issue-symph-450",
+      verdict: "pass",
+    });
+    expect(journal.map((entry) => entry.kind)).toEqual([
+      "review_round",
+      "review_gate_result",
+    ]);
+    expect(journal[0]).toMatchObject({
+      sequence: 1,
+      issueId: "issue-symph-450",
+      issueIdentifier: "SYMPH-450",
+      operation: "gate",
+      stage: "review",
+      attempt: 1,
+      ownerId: "worker-1",
+      metadata: {
+        schema_version: 1,
+        source: "pipeline",
+        actor_kind: "pipeline-worker",
+        actor_id: "worker-1",
+        contract_version: "markdown_v0",
+      },
     });
   });
 
@@ -243,3 +368,39 @@ describe("parseCouncilReviewGateArgs", () => {
     ).toBe(true);
   });
 });
+
+function cliReviewResult(): HeadlessCouncilGateResult {
+  return {
+    schemaVersion: 1,
+    issueId: "issue-symph-450",
+    verdict: "pass",
+    startedAt: "2026-06-12T10:00:00.000Z",
+    completedAt: "2026-06-12T10:01:00.000Z",
+    pr: {
+      repo: "mobilyze-llc/symphony-ts",
+      number: 450,
+      baseRef: "main",
+      headRef: "codex/SYMPH-450-review-journal-events",
+    },
+    review_metadata: {
+      reviewed_head_sha: "head-sha",
+      previous_reviewed_head_sha: null,
+      base_sha: "base-sha",
+      round: 1,
+      mode: "full",
+      verdict: "pass",
+    },
+    review_bundle: null,
+    lanes: [],
+    degradedConditions: [],
+    artifactPaths: {
+      artifactDir: "/tmp/review",
+      diff: null,
+      reviewBundle: null,
+      structuredArtifacts: [],
+      resultJson: "/tmp/review/review-result.json",
+      councilReport: "/tmp/review/council-report.md",
+    },
+    summary: "Headless council review passed with 0 lanes.",
+  };
+}

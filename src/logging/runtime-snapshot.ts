@@ -800,6 +800,56 @@ export interface StateDeltaEntryMetadata {
   scope?: string;
   step?: string;
   resumesUsed?: number;
+  actor_kind?: string;
+  actor_id?: string;
+  source?: string;
+  contract_version?: string;
+  repo?: string;
+  base_ref?: string;
+  head_ref?: string;
+  base_sha?: string;
+  head_sha?: string;
+  previous_head_sha?: string;
+  bundle_hash?: string;
+  routing_mode?: string;
+  round?: number;
+  pr_number?: number;
+  started_at?: string;
+  completed_at?: string;
+  gate_verdict?: string;
+  escalation_reason?: string;
+  lane_id?: string;
+  lane_agent?: string;
+  lane_role?: string;
+  lane_model?: string;
+  lane_state?: string;
+  lane_verdict?: string;
+  independent_reviewer?: boolean;
+  degraded_reason?: string;
+  parse_status?: string;
+  finding_fingerprint?: string;
+  finding_severity?: string;
+  emitted_severity?: string;
+  finding_disposition?: string;
+  repeat_of?: string;
+  introduced_in?: string;
+  family?: string;
+  category?: string;
+  narrowing_status?: string;
+  narrowing_rationale?: string;
+  lane_count?: number;
+  finding_count?: number;
+  blocking_finding_count?: number;
+  degraded_condition_count?: number;
+  wall_time_ms?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+  total_tokens?: number;
+  confidence?: number;
+  fixed_symptom_count?: number;
+  remaining_symptom_count?: number;
+  rework_finding_count?: number;
+  fix_round?: number;
 }
 
 /**
@@ -839,7 +889,62 @@ const STATE_DELTA_METADATA_STRING_FIELDS = [
   "transition",
   "scope",
   "step",
+  "actor_kind",
+  "actor_id",
+  "source",
+  "contract_version",
+  "repo",
+  "base_ref",
+  "head_ref",
+  "base_sha",
+  "head_sha",
+  "previous_head_sha",
+  "bundle_hash",
+  "routing_mode",
+  "started_at",
+  "completed_at",
+  "gate_verdict",
+  "escalation_reason",
+  "lane_id",
+  "lane_agent",
+  "lane_role",
+  "lane_model",
+  "lane_state",
+  "lane_verdict",
+  "degraded_reason",
+  "parse_status",
+  "finding_fingerprint",
+  "finding_severity",
+  "emitted_severity",
+  "finding_disposition",
+  "repeat_of",
+  "introduced_in",
+  "family",
+  "category",
+  "narrowing_status",
+  "narrowing_rationale",
 ] as const;
+
+const STATE_DELTA_METADATA_NUMBER_FIELDS = [
+  "resumesUsed",
+  "round",
+  "pr_number",
+  "lane_count",
+  "finding_count",
+  "blocking_finding_count",
+  "degraded_condition_count",
+  "wall_time_ms",
+  "input_tokens",
+  "output_tokens",
+  "total_tokens",
+  "confidence",
+  "fixed_symptom_count",
+  "remaining_symptom_count",
+  "rework_finding_count",
+  "fix_round",
+] as const;
+
+const STATE_DELTA_METADATA_BOOLEAN_FIELDS = ["independent_reviewer"] as const;
 
 function projectStateDeltaMetadata(
   metadata: Record<string, unknown>,
@@ -851,9 +956,17 @@ function projectStateDeltaMetadata(
       projected[field] = value;
     }
   }
-  const resumesUsed = metadata.resumesUsed;
-  if (typeof resumesUsed === "number") {
-    projected.resumesUsed = resumesUsed;
+  for (const field of STATE_DELTA_METADATA_NUMBER_FIELDS) {
+    const value = metadata[field];
+    if (typeof value === "number") {
+      projected[field] = value;
+    }
+  }
+  for (const field of STATE_DELTA_METADATA_BOOLEAN_FIELDS) {
+    const value = metadata[field];
+    if (typeof value === "boolean") {
+      projected[field] = value;
+    }
   }
   return projected;
 }
