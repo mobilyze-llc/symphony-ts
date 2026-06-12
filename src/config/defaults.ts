@@ -83,6 +83,9 @@ export const DEFAULT_WATCHDOG_SYSTEMIC_THRESHOLD = 2;
 export const DEFAULT_WATCHDOG_CIRCUIT_BREAKER = true;
 export const DEFAULT_WATCHDOG_MAX_FILINGS_PER_HOUR = 3;
 
+// Verdict-event defaults (SYMPH-405)
+export const DEFAULT_VERDICTS_PAGE_AFTER_TICKS = 10;
+
 // Watchdog L2 stuck-ticket triage defaults (SYMPH-399). Disabled until the
 // operator opts a product in (calibration gate).
 export const DEFAULT_STUCK_TRIAGE_ENABLED = false;

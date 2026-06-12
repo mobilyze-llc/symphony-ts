@@ -23,6 +23,7 @@ import {
   DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
   DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
   DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
+  DEFAULT_VERDICTS_PAGE_AFTER_TICKS,
 } from "../config/defaults.js";
 import type {
   DispatchValidationResult,
@@ -52,6 +53,9 @@ import {
   type RightSizingMode,
   type RunningEntry,
   type StageRecord,
+  VERDICT_DISPOSITIONS,
+  type VerdictActor,
+  type VerdictDisposition,
   createEmptyLiveSession,
   createInitialOrchestratorState,
   normalizeIssueState,
@@ -118,6 +122,14 @@ import {
   formatSupervisionFindingsComment,
 } from "./supervision.js";
 import type { TrackerIssueWriteRequest } from "./tracker-write.js";
+
+/**
+ * Synthetic verdict scope for pipeline-wide dispatch gates that are not
+ * attributable to a single issue (e.g. the global rate-limit admission floor).
+ * Keyed into the dispositions map alongside real issue ids (SYMPH-405).
+ */
+export const PIPELINE_VERDICT_SCOPE_ID = "__dispatch__";
+export const PIPELINE_VERDICT_SCOPE_IDENTIFIER = "PIPELINE";
 
 const CONTINUATION_RETRY_DELAY_MS = 1_000;
 
@@ -450,6 +462,30 @@ export interface OrchestratorCoreOptions {
     members: ClusterMember[];
   }) => void;
   /**
+   * Called when an issue's dispatch verdict CHANGES to gate or halt
+   * (SYMPH-405). Transitions-only: an unchanged verdict never re-fires.
+   * Fire-and-forget; notifier absence/failure never blocks dispatch.
+   */
+  onVerdictTransition?: (input: {
+    issueId: string;
+    issueIdentifier: string;
+    disposition: VerdictDisposition;
+    reasonCode: string;
+    remedy: string | null;
+    actor: VerdictActor;
+  }) => void;
+  /**
+   * Called when the dispatch-starvation page condition fires or recovers
+   * (SYMPH-405): eligible candidates > 0 with zero dispatches for
+   * verdicts.page_after_ticks consecutive ticks. One alert per episode;
+   * re-fired only on recovery. Fire-and-forget.
+   */
+  onDispatchPage?: (input: {
+    kind: "page" | "recovery";
+    eligibleCount: number;
+    consecutiveTicks: number;
+  }) => void;
+  /**
    * Watchdog L2 stuck-ticket triage (SYMPH-399): render a bounded-action
    * verdict over a watchdog park (novelty short-circuit or breaker park).
    * Resolve null to fail closed — the park stands. Only consulted when
@@ -531,11 +567,50 @@ export class OrchestratorCore {
 
   private readonly onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
 
+  private readonly onVerdictTransition?: OrchestratorCoreOptions["onVerdictTransition"];
+
+  private readonly onDispatchPage?: OrchestratorCoreOptions["onDispatchPage"];
+
   private readonly runStuckTriage?: OrchestratorCoreOptions["runStuckTriage"];
 
   private readonly onTriageEscalation?: OrchestratorCoreOptions["onTriageEscalation"];
 
   private readonly signatureClusterRegistry: SignatureClusterRegistry;
+
+  /**
+   * Last verdict idempotency base key per issue (SYMPH-405). Gates the
+   * dedup-on-change behavior: an UNCHANGED disposition+reason for an issue
+   * never appends a new journal entry on subsequent ticks.
+   */
+  private readonly lastVerdictKeys = new Map<string, string>();
+
+  /** Consecutive poll ticks with eligible candidates but zero dispatches. */
+  private starvedTickCount = 0;
+
+  /** Whether the dispatch-starvation page alert is currently latched. */
+  private pageAlertActive = false;
+
+  /**
+   * Ordered disk-flush chain for run-journal entries. Every disk append —
+   * the awaited writer (recordRunJournalEntry) and the fire-and-forget
+   * verdict writer (commitVerdictJournalEntrySync) — chains through this
+   * queue, so disk order always equals in-memory sequence order: an entry's
+   * write may lag, but a later sequence can never land before an earlier
+   * one. Without it, a crash could leave sequence N+1 on disk without N and
+   * replay would rebuild different breaker/cluster state than was alerted.
+   */
+  private runJournalDiskFlushQueue: Promise<void> = Promise.resolve();
+
+  /**
+   * Highest sequence ever rolled back by the awaited writer
+   * (recordRunJournalEntry). A rolled-back tail entry is removed from the
+   * in-memory journal, so naive tail+1 allocation would reissue its
+   * sequence. The built-in appendFile writer cannot write-then-reject, but
+   * the persistence-callback contract does not forbid it — a reissued
+   * sequence could then produce two disk rows with the same seq. Burning
+   * the number (never reissuing a rolled-back sequence) removes the class.
+   */
+  private burnedRunJournalSequence = 0;
 
   private readonly reportedSupervisionFindings = new Set<string>();
 
@@ -631,6 +706,8 @@ export class OrchestratorCore {
     this.onEscalationStep = options.onEscalationStep;
     this.onGateFailed = options.onGateFailed;
     this.onSystemicCluster = options.onSystemicCluster;
+    this.onVerdictTransition = options.onVerdictTransition;
+    this.onDispatchPage = options.onDispatchPage;
     this.runStuckTriage = options.runStuckTriage;
     this.onTriageEscalation = options.onTriageEscalation;
     this.signatureClusterRegistry = new SignatureClusterRegistry({
@@ -659,6 +736,10 @@ export class OrchestratorCore {
     this.reportedSupervisionFindings.clear();
     this.reportedIgnoredSetupInstructionCollisions.clear();
     this.state.decorrelatedGateOutcomes = {};
+    this.lastVerdictKeys.clear();
+    this.state.issueDispositions = {};
+    this.starvedTickCount = 0;
+    this.pageAlertActive = false;
 
     const nowMs = this.now().getTime();
     for (const entry of this.state.dispatcherRunJournal) {
@@ -844,6 +925,26 @@ export class OrchestratorCore {
           entry.metadata.acceptanceCriteria;
       }
 
+      if (entry.kind === "dispatch_verdict") {
+        const pageEvent = readMetadataString(entry.metadata, "page_event");
+        if (pageEvent === "page") {
+          this.recoverDispatchPageLatch();
+        } else if (pageEvent === "recovery") {
+          this.pageAlertActive = false;
+          this.starvedTickCount = 0;
+        } else {
+          this.recoverDispatchVerdict(entry);
+        }
+      }
+
+      if (entry.kind === "cluster_transition") {
+        this.recoverClusterTransition(entry);
+      }
+
+      if (entry.kind === "breaker_transition") {
+        this.recoverBreakerTransition(entry);
+      }
+
       if (
         entry.kind === "gate_result" &&
         entry.operation === "gate" &&
@@ -870,6 +971,127 @@ export class OrchestratorCore {
         this.state.claimed.add(lease.issueId);
       }
     }
+  }
+
+  /**
+   * Rehydrate the dispatch-starvation page latch from a journaled "page"
+   * event with no later "recovery" (SYMPH-405 council R1). The latch is
+   * restored as active with the tick counter resumed AT the page threshold:
+   * the active latch guarantees no double-page (trackDispatchStarvation only
+   * pages on a false→true latch transition), and the latch staying set until
+   * a genuinely non-starved tick guarantees the recovery alert still fires —
+   * a restart can neither re-page an already-paged episode nor silently
+   * un-page it.
+   */
+  private recoverDispatchPageLatch(): void {
+    this.pageAlertActive = true;
+    this.starvedTickCount =
+      this.config.verdicts?.pageAfterTicks ?? DEFAULT_VERDICTS_PAGE_AFTER_TICKS;
+  }
+
+  /**
+   * Rehydrate the last-verdict dedup map and the dispositions surface from a
+   * journaled dispatch_verdict entry (SYMPH-405). Entries replay in sequence
+   * order, so the latest verdict per issue wins.
+   */
+  private recoverDispatchVerdict(entry: DispatcherRunJournalEntry): void {
+    const disposition = toVerdictDisposition(entry.metadata.disposition);
+    const reasonCode = readMetadataString(entry.metadata, "reason_code");
+    if (disposition === null || reasonCode === null) {
+      return;
+    }
+    this.lastVerdictKeys.set(
+      entry.issueId,
+      `verdict:${entry.issueId}:${disposition}:${reasonCode}`,
+    );
+    this.state.issueDispositions[entry.issueId] = {
+      disposition,
+      reasonCode,
+      remedy: readMetadataString(entry.metadata, "remedy"),
+      since: entry.timestamp,
+    };
+  }
+
+  /**
+   * Rehydrate the signature cluster registry from a journaled
+   * cluster_transition entry (SYMPH-405 amendment 2): the registry consumes
+   * its own journaled transitions on recovery so a deploy mid-systemic-
+   * signature does not reset the count below the threshold. Each entry
+   * carries the full membership snapshot; latest wins per signature.
+   */
+  private recoverClusterTransition(entry: DispatcherRunJournalEntry): void {
+    const signature = readMetadataString(entry.metadata, "signature");
+    const details =
+      typeof entry.metadata.details === "object" &&
+      entry.metadata.details !== null
+        ? (entry.metadata.details as Record<string, unknown>)
+        : null;
+    if (signature === null || details === null) {
+      return;
+    }
+
+    const members = toClusterMembers(details.members);
+    if (members === null) {
+      return;
+    }
+
+    const rawErrorClass = details.errorClass;
+    const errorClass: ErrorSignatureClass =
+      rawErrorClass === "permanent" || rawErrorClass === "transient"
+        ? rawErrorClass
+        : "unknown";
+    const lastAlertSize =
+      typeof details.lastAlertSize === "number" ? details.lastAlertSize : 0;
+
+    this.signatureClusterRegistry.hydrateCluster({
+      signature,
+      errorClass,
+      normalizedText:
+        typeof details.normalizedText === "string"
+          ? details.normalizedText
+          : "",
+      members,
+      lastAlertSize,
+    });
+  }
+
+  /**
+   * Rehydrate stage circuit-breaker state from journaled breaker_transition
+   * entries (SYMPH-405). Replayed in sequence order: an "opened" entry sets
+   * the breaker, a later "closed" entry clears it.
+   */
+  private recoverBreakerTransition(entry: DispatcherRunJournalEntry): void {
+    const transition = readMetadataString(entry.metadata, "transition");
+    const stageName = readMetadataString(entry.metadata, "stage");
+    const signature = readMetadataString(entry.metadata, "signature");
+    if (transition === null || stageName === null || signature === null) {
+      return;
+    }
+
+    if (transition === "closed") {
+      this.signatureClusterRegistry.resetCircuitBreaker(stageName);
+      return;
+    }
+    if (transition !== "opened") {
+      return;
+    }
+
+    const details =
+      typeof entry.metadata.details === "object" &&
+      entry.metadata.details !== null
+        ? (entry.metadata.details as Record<string, unknown>)
+        : null;
+    const openedForIssueIds = Array.isArray(details?.openedForIssueIds)
+      ? details.openedForIssueIds.filter(
+          (value): value is string => typeof value === "string",
+        )
+      : [];
+    this.signatureClusterRegistry.hydrateBreakerOpen({
+      stageName,
+      signature,
+      openedAt: entry.timestamp,
+      openedForIssueIds,
+    });
   }
 
   private recoverHardStopTrigger(entry: DispatcherRunJournalEntry): void {
@@ -1071,6 +1293,16 @@ export class OrchestratorCore {
         this.escalatedParkGenerations.delete(issue.id);
         this.clearResumeRequirement(issue.id);
       } else {
+        // The 2026-06-11 invisible skip (SYMPH-405): a stop-like pause waits
+        // for an explicit Resume, and Todo alone is silently skipped.
+        this.recordDispatchVerdict({
+          issueId: issue.id,
+          issueIdentifier: issue.identifier,
+          disposition: "skip",
+          reasonCode: "requires_explicit_resume",
+          remedy: "transition the issue into Resume (Todo alone is skipped)",
+          details: { issueState: issue.state },
+        });
         return false;
       }
     }
@@ -1108,21 +1340,67 @@ export class OrchestratorCore {
       this.state.claimed.has(issue.id) &&
       (allowClaimedIssueId === undefined || allowClaimedIssueId !== issue.id)
     ) {
+      this.recordDispatchVerdict({
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        disposition: "skip",
+        reasonCode: "claimed",
+        remedy:
+          "Wait for the active claim/lease on this issue to complete or expire.",
+      });
       return false;
     }
 
-    if (
-      this.availableSlots() <= 0 ||
-      this.availableSlotsForState(issue.state) <= 0
-    ) {
+    if (this.availableSlots() <= 0) {
+      this.recordDispatchVerdict({
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        disposition: "skip",
+        reasonCode: "no_slots",
+        remedy:
+          "Wait for a running worker to finish or raise agent.max_concurrent_agents.",
+        details: { maxConcurrentAgents: this.state.maxConcurrentAgents },
+      });
       return false;
     }
 
-    return issue.blockedBy.every((blocker) => {
+    if (this.availableSlotsForState(issue.state) <= 0) {
+      this.recordDispatchVerdict({
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        disposition: "skip",
+        reasonCode: "no_state_slots",
+        remedy: `Wait for a worker in state "${issue.state}" to finish or raise agent.max_concurrent_agents_by_state.`,
+        details: { issueState: issue.state },
+      });
+      return false;
+    }
+
+    const openBlockers = issue.blockedBy.filter((blocker) => {
       const blockerState =
         blocker.state === null ? null : normalizeIssueState(blocker.state);
-      return blockerState !== null && terminalStates.has(blockerState);
+      return blockerState === null || !terminalStates.has(blockerState);
     });
+    if (openBlockers.length > 0) {
+      this.recordDispatchVerdict({
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        disposition: "skip",
+        reasonCode: "blocked_by_open",
+        remedy:
+          "Close (or move to a terminal state) the blocking issues listed in details.",
+        details: {
+          blockers: openBlockers.map((blocker) => ({
+            id: blocker.id,
+            identifier: blocker.identifier,
+            state: blocker.state,
+          })),
+        },
+      });
+      return false;
+    }
+
+    return true;
   }
 
   async pollTick(): Promise<PollTickResult> {
@@ -1168,6 +1446,17 @@ export class OrchestratorCore {
       console.warn(
         `[orchestrator] Pipeline halted: ${haltIssue.identifier} — ${haltIssue.title}. Skipping all dispatch.`,
       );
+      // One journal-level halt verdict keyed on the halt issue; the
+      // per-candidate skip is implied (SYMPH-405).
+      this.recordDispatchVerdict({
+        issueId: haltIssue.id,
+        issueIdentifier: haltIssue.identifier,
+        disposition: "halt",
+        reasonCode: "pipeline_halt",
+        remedy: `Move the pipeline-halt issue ${haltIssue.identifier} to a terminal state to resume dispatch.`,
+        details: { haltIssueTitle: haltIssue.title },
+      });
+      this.trackDispatchStarvation(issues.length, 0);
       return {
         validation,
         dispatchedIssueIds: [],
@@ -1186,6 +1475,18 @@ export class OrchestratorCore {
       console.warn(
         `[orchestrator] ${rateLimitGate.reason} Skipping all dispatch.`,
       );
+      // The admission floor is pipeline-wide, not per-issue: one verdict on
+      // the synthetic dispatch scope (SYMPH-405).
+      const gateVerdict = this.buildRateLimitGateVerdict(rateLimitGate);
+      this.recordDispatchVerdict({
+        issueId: PIPELINE_VERDICT_SCOPE_ID,
+        issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
+        disposition: "gate",
+        reasonCode: gateVerdict.reasonCode,
+        remedy: gateVerdict.remedy,
+        details: gateVerdict.details,
+      });
+      this.trackDispatchStarvation(issues.length, 0);
       return {
         validation,
         dispatchedIssueIds: [],
@@ -1197,8 +1498,20 @@ export class OrchestratorCore {
       };
     }
 
+    // Gate recovery: journal the flip back so the verdict stream shows when
+    // the floor stopped blocking (SYMPH-405). Dedup map suppresses repeats.
+    if (this.lastVerdictKeys.has(PIPELINE_VERDICT_SCOPE_ID)) {
+      this.recordDispatchVerdict({
+        issueId: PIPELINE_VERDICT_SCOPE_ID,
+        issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
+        disposition: "admit",
+        reasonCode: "rate_window_clear",
+      });
+    }
+
     const dispatchedIssueIds: string[] = [];
     const modeDecisions: RightSizingDecision[] = [];
+    let eligibleCount = 0;
     const admittedSnapshots = this.buildRunningAdmissionSnapshots();
     for (const issue of sortIssuesForDispatch(issues)) {
       if (this.availableSlots() <= 0) {
@@ -1256,6 +1569,13 @@ export class OrchestratorCore {
         continue;
       }
 
+      // Counted at the FINAL admission boundary: candidates paused by
+      // deterministic admission findings are journaled as dispatcher
+      // decisions, not verdicts, so counting them as "eligible" would let
+      // the starvation page fire while the dispositions map it points at
+      // cannot explain the block.
+      eligibleCount += 1;
+
       const dispatchResult = await this.dispatchIssue(issue, null);
       if (dispatchResult.dispatched) {
         dispatchedIssueIds.push(issue.id);
@@ -1263,6 +1583,8 @@ export class OrchestratorCore {
         admittedSnapshots.push(candidateSnapshot);
       }
     }
+
+    this.trackDispatchStarvation(eligibleCount, dispatchedIssueIds.length);
 
     return {
       validation,
@@ -1284,6 +1606,12 @@ export class OrchestratorCore {
   private evaluateRateLimitAdmissionGate(): {
     blocked: boolean;
     reason: string | null;
+    /** Structured floor violations for verdict reason codes (SYMPH-405). */
+    floorViolations: Array<{
+      window: "primary" | "secondary";
+      floorPct: number;
+      headroomPct: number;
+    }>;
   } {
     const floors = this.config.rateLimitAdmission;
     if (
@@ -1291,7 +1619,7 @@ export class OrchestratorCore {
       floors.minSecondaryHeadroomPct === null
     ) {
       this.state.rateLimitAdmission = null;
-      return { blocked: false, reason: null };
+      return { blocked: false, reason: null, floorViolations: [] };
     }
 
     const now = this.now();
@@ -1306,6 +1634,11 @@ export class OrchestratorCore {
     );
 
     const violations: string[] = [];
+    const floorViolations: Array<{
+      window: "primary" | "secondary";
+      floorPct: number;
+      headroomPct: number;
+    }> = [];
     if (
       floors.minPrimaryHeadroomPct !== null &&
       primary !== null &&
@@ -1315,6 +1648,11 @@ export class OrchestratorCore {
       violations.push(
         `primary window headroom ${primary.remainingPercent.toFixed(1)}% < ${floors.minPrimaryHeadroomPct}% floor`,
       );
+      floorViolations.push({
+        window: "primary",
+        floorPct: floors.minPrimaryHeadroomPct,
+        headroomPct: primary.remainingPercent,
+      });
     }
     if (
       floors.minSecondaryHeadroomPct !== null &&
@@ -1325,6 +1663,11 @@ export class OrchestratorCore {
       violations.push(
         `secondary window headroom ${secondary.remainingPercent.toFixed(1)}% < ${floors.minSecondaryHeadroomPct}% floor`,
       );
+      floorViolations.push({
+        window: "secondary",
+        floorPct: floors.minSecondaryHeadroomPct,
+        headroomPct: secondary.remainingPercent,
+      });
     }
 
     const blocked = violations.length > 0;
@@ -1344,7 +1687,31 @@ export class OrchestratorCore {
         secondary !== null && !secondary.expired ? secondary.usedPercent : null,
     };
 
-    return { blocked, reason };
+    return { blocked, reason, floorViolations };
+  }
+
+  /**
+   * Build the verdict fields for a blocked rate-limit admission gate
+   * (SYMPH-405): stable reason code per violated window plus a remedy that
+   * includes the configured floor and observed headroom.
+   */
+  private buildRateLimitGateVerdict(
+    gate: ReturnType<OrchestratorCore["evaluateRateLimitAdmissionGate"]>,
+  ): { reasonCode: string; remedy: string; details: Record<string, unknown> } {
+    const violation = gate.floorViolations[0];
+    const reasonCode =
+      violation?.window === "secondary"
+        ? "rate_window_secondary_floor"
+        : "rate_window_primary_floor";
+    const remedy =
+      violation !== undefined
+        ? `Wait for the ${violation.window} rate-limit window to reset: floor ${violation.floorPct}% headroom, observed ${violation.headroomPct.toFixed(1)}%.`
+        : "Wait for the rate-limit window to reset.";
+    return {
+      reasonCode,
+      remedy,
+      details: { floorViolations: gate.floorViolations },
+    };
   }
 
   budgetMultiplierForIssue(issueId: string): number {
@@ -1966,6 +2333,16 @@ export class OrchestratorCore {
       console.warn(
         `[orchestrator] Pipeline halted: ${haltIssue.identifier} — ${haltIssue.title}. Deferring retry for ${retryEntry.identifier ?? issueId}.`,
       );
+      // Journal-level halt verdict keyed on the halt issue (SYMPH-405); the
+      // per-candidate deferral is implied.
+      this.recordDispatchVerdict({
+        issueId: haltIssue.id,
+        issueIdentifier: haltIssue.identifier,
+        disposition: "halt",
+        reasonCode: "pipeline_halt",
+        remedy: `Move the pipeline-halt issue ${haltIssue.identifier} to a terminal state to resume dispatch.`,
+        details: { haltIssueTitle: haltIssue.title },
+      });
       // Don't consume the retry attempt — reschedule at the same attempt number
       this.clearRetryEntry(issueId);
       return {
@@ -1987,6 +2364,21 @@ export class OrchestratorCore {
       console.warn(
         `[orchestrator] ${rateLimitGate.reason} Deferring retry for ${retryEntry.identifier ?? issueId}.`,
       );
+      const gateVerdict = this.buildRateLimitGateVerdict(rateLimitGate);
+      this.recordDispatchVerdict({
+        issueId,
+        issueIdentifier: retryEntry.identifier ?? issueId,
+        disposition: "gate",
+        reasonCode: gateVerdict.reasonCode,
+        remedy: gateVerdict.remedy,
+        attempt: retryEntry.attempt,
+        details: gateVerdict.details,
+      });
+      // Starvation tracking is intentionally NOT fed here: a gate-deferred
+      // retry re-fires on its own timer, and pollTick's gate path already
+      // calls trackDispatchStarvation every tick while the floor blocks, so
+      // the page condition fires from polling regardless. Counting this
+      // deferral too would double-count the same starved interval.
       this.clearRetryEntry(issueId);
       return {
         dispatched: false,
@@ -4014,11 +4406,59 @@ export class OrchestratorCore {
    */
   private resetBreakersForResumedIssue(issueId: string): void {
     const reset = this.signatureClusterRegistry.resetBreakersForIssue(issueId);
-    for (const stageName of reset) {
+    for (const breaker of reset) {
       console.log(
-        `[orchestrator] circuit breaker reset for stage "${stageName}" on resume of ${issueId}`,
+        `[orchestrator] circuit breaker reset for stage "${breaker.stageName}" on resume of ${issueId}`,
       );
+      this.recordBreakerTransition({
+        transition: "closed",
+        stageName: breaker.stageName,
+        signature: breaker.signature,
+        issueId,
+        issueIdentifier: issueId,
+        openedForIssueIds: breaker.openedForIssueIds,
+      });
     }
+  }
+
+  /**
+   * Journal a stage circuit-breaker open/close transition (SYMPH-405).
+   * Fire-and-forget; replayed on recovery to rehydrate breaker state.
+   */
+  private recordBreakerTransition(input: {
+    transition: "opened" | "closed";
+    stageName: string;
+    signature: string;
+    issueId: string;
+    issueIdentifier: string;
+    openedForIssueIds: string[];
+  }): void {
+    const timestamp = this.now().toISOString();
+    const actor = this.buildVerdictActor();
+    // Sequence-suffixed key (not timestamp): an opened→closed→opened flip
+    // within one millisecond must journal all three transitions, or replay
+    // rebuilds a closed breaker that is live-open.
+    this.commitVerdictJournalEntrySync({
+      idempotencyKey: `breaker:${input.stageName}:${input.signature}:${input.transition}:${this.nextRunJournalSequence()}`,
+      timestamp,
+      kind: "breaker_transition",
+      issueId: input.issueId,
+      issueIdentifier: input.issueIdentifier,
+      operation: "dispatcher",
+      stage: input.stageName,
+      attempt: null,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Circuit breaker ${input.transition} for stage "${input.stageName}" (signature ${input.signature}) by ${actor.kind}@${actor.host}.`,
+      metadata: {
+        schema_version: 1,
+        transition: input.transition,
+        stage: input.stageName,
+        signature: input.signature,
+        actor,
+        details: { openedForIssueIds: input.openedForIssueIds },
+      },
+    });
   }
 
   /**
@@ -5013,6 +5453,254 @@ export class OrchestratorCore {
     return null;
   }
 
+  /**
+   * Record a dispatch verdict (SYMPH-405): every dispatch decision becomes a
+   * deduped structured journal event. Dedup-on-change is gated by the
+   * in-memory last-verdict map — an UNCHANGED disposition+reason for an issue
+   * is a no-op (no journal append, no state churn, no alert). The journal's
+   * own idempotency machinery dedupes by exact key; a flip BACK to a
+   * previously journaled verdict (A→B→A) appends a key suffixed with the
+   * next journal sequence number so the recovery is still journaled. The
+   * sequence suffix is collision-safe where a millisecond timestamp is not:
+   * two flip-backs to the same verdict within one tick get distinct keys.
+   *
+   * Fire-and-forget: verdict observability never blocks dispatch.
+   */
+  private recordDispatchVerdict(input: {
+    issueId: string;
+    issueIdentifier: string;
+    disposition: VerdictDisposition;
+    reasonCode: string;
+    remedy?: string | null;
+    stage?: string | null;
+    attempt?: number | null;
+    details?: Record<string, unknown>;
+  }): void {
+    const baseKey = `verdict:${input.issueId}:${input.disposition}:${input.reasonCode}`;
+    if (this.lastVerdictKeys.get(input.issueId) === baseKey) {
+      return;
+    }
+    this.lastVerdictKeys.set(input.issueId, baseKey);
+
+    const timestamp = this.now().toISOString();
+    const remedy = input.remedy ?? null;
+    const actor = this.buildVerdictActor();
+    this.state.issueDispositions[input.issueId] = {
+      disposition: input.disposition,
+      reasonCode: input.reasonCode,
+      remedy,
+      since: timestamp,
+    };
+
+    // A verdict's first emission uses the bare base key; every re-emission
+    // (flip-back) is suffixed. Match both shapes so a flip-back after a
+    // prior flip-back is still detected as already journaled.
+    const alreadyJournaled = this.state.dispatcherRunJournal.some(
+      (entry) =>
+        entry.idempotencyKey === baseKey ||
+        entry.idempotencyKey.startsWith(`${baseKey}:`),
+    );
+    this.commitVerdictJournalEntrySync({
+      idempotencyKey: alreadyJournaled
+        ? `${baseKey}:${this.nextRunJournalSequence()}`
+        : baseKey,
+      timestamp,
+      kind: "dispatch_verdict",
+      issueId: input.issueId,
+      issueIdentifier: input.issueIdentifier,
+      operation: "dispatcher",
+      stage: input.stage ?? null,
+      attempt: input.attempt ?? null,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Dispatch verdict for ${input.issueIdentifier}: ${input.disposition} (${input.reasonCode}) by ${actor.kind}@${actor.host}.`,
+      metadata: {
+        schema_version: 1,
+        disposition: input.disposition,
+        reason_code: input.reasonCode,
+        remedy,
+        actor,
+        details: input.details ?? {},
+      },
+    });
+
+    // Transitions-only Slack notification: only when the disposition CHANGES
+    // to gate/halt (the map check above guarantees the change). Fail-open.
+    if (input.disposition === "gate" || input.disposition === "halt") {
+      try {
+        this.onVerdictTransition?.({
+          issueId: input.issueId,
+          issueIdentifier: input.issueIdentifier,
+          disposition: input.disposition,
+          reasonCode: input.reasonCode,
+          remedy,
+          actor,
+        });
+      } catch {
+        // Notification failures are always swallowed.
+      }
+    }
+  }
+
+  private buildVerdictActor(): VerdictActor {
+    return { kind: "dispatcher", host: hostname() };
+  }
+
+  /**
+   * Synchronously commit a verdict-class journal entry (SYMPH-405) to the
+   * in-memory journal, then hand the disk write to the ordered flush queue
+   * fire-and-forget. Callable from sync paths (isDispatchEligible) — the
+   * in-memory commit happens before any await, so overlapping appends can
+   * never compute the same sequence from a stale journal. Verdict entries
+   * never carry a lease, so no lease bookkeeping is needed.
+   */
+  private commitVerdictJournalEntrySync(
+    entry: Omit<DispatcherRunJournalEntry, "sequence">,
+  ): void {
+    const result = appendDispatcherRunJournalEntry(
+      this.state.dispatcherRunJournal,
+      entry,
+      this.burnedRunJournalSequence + 1,
+    );
+    if (!result.appended) {
+      return;
+    }
+    this.state.dispatcherRunJournal = result.journal;
+    this.flushRunJournalEntryToDisk(result.entry).catch((error) => {
+      console.warn(
+        "[orchestrator] Failed to persist journal entry:",
+        {
+          kind: entry.kind,
+          issueIdentifier: entry.issueIdentifier,
+        },
+        error,
+      );
+    });
+  }
+
+  /**
+   * Append a journal entry's disk write to the ordered flush chain. Entries
+   * are flushed strictly in the order this method is called, which (because
+   * every caller commits to the in-memory journal first, and all callers run
+   * inside the host's serialized event queue) is sequence order. A failed
+   * write does not stall the chain; the caller decides whether the failure
+   * propagates (awaited writer) or is logged (fire-and-forget writer).
+   */
+  private flushRunJournalEntryToDisk(
+    entry: DispatcherRunJournalEntry,
+  ): Promise<void> {
+    const write = this.runJournalDiskFlushQueue.then(async () => {
+      await this.writeRunJournalEntry?.(entry);
+    });
+    // Continuation catch: a failed awaited write leaves a sequence gap on
+    // disk BY DESIGN — the entry was also rolled back in memory
+    // (journal-first invariant), so disk and memory agree. Later entries
+    // persisting after the gap is correct ordering, not an inversion.
+    this.runJournalDiskFlushQueue = write.catch(() => undefined);
+    return write;
+  }
+
+  /**
+   * The sequence number the next committed journal entry will receive.
+   * Used to build collision-safe idempotency keys for re-emissions: the
+   * sequence is monotonic and survives restarts (the journal is replayed
+   * into memory before any new entry is committed), unlike a millisecond
+   * timestamp suffix which collides under same-tick re-emissions.
+   */
+  private nextRunJournalSequence(): number {
+    return Math.max(
+      (this.state.dispatcherRunJournal.at(-1)?.sequence ?? 0) + 1,
+      this.burnedRunJournalSequence + 1,
+    );
+  }
+
+  /**
+   * Track the dispatch-starvation page condition (SYMPH-405): eligible
+   * candidates > 0 AND dispatched_count == 0 for verdicts.page_after_ticks
+   * consecutive ticks fires ONE page alert; the next non-starved tick fires
+   * one recovery alert and unlatches. Each page/recovery transition is
+   * journaled so a restart rehydrates the latch instead of resetting it
+   * (the SYMPH-401 deploy-resets-counters class). Fail-open on callback
+   * errors.
+   */
+  private trackDispatchStarvation(
+    eligibleCount: number,
+    dispatchedCount: number,
+  ): void {
+    const starved = eligibleCount > 0 && dispatchedCount === 0;
+    if (starved) {
+      this.starvedTickCount += 1;
+      const pageAfterTicks =
+        this.config.verdicts?.pageAfterTicks ??
+        DEFAULT_VERDICTS_PAGE_AFTER_TICKS;
+      if (!this.pageAlertActive && this.starvedTickCount >= pageAfterTicks) {
+        this.pageAlertActive = true;
+        this.recordDispatchPageEvent("page", eligibleCount);
+        try {
+          this.onDispatchPage?.({
+            kind: "page",
+            eligibleCount,
+            consecutiveTicks: this.starvedTickCount,
+          });
+        } catch {
+          // Notification failures are always swallowed.
+        }
+      }
+      return;
+    }
+
+    if (this.pageAlertActive) {
+      this.pageAlertActive = false;
+      this.recordDispatchPageEvent("recovery", eligibleCount);
+      try {
+        this.onDispatchPage?.({
+          kind: "recovery",
+          eligibleCount,
+          consecutiveTicks: this.starvedTickCount,
+        });
+      } catch {
+        // Notification failures are always swallowed.
+      }
+    }
+    this.starvedTickCount = 0;
+  }
+
+  /**
+   * Journal a dispatch-starvation page transition (SYMPH-405 council R1).
+   * Replay rehydrates the page latch from the latest of these entries, so a
+   * deploy mid-starvation neither double-pages nor silently drops the latch.
+   * Keyed on the next journal sequence: page episodes recur, so the key must
+   * be unique per transition and survive restarts.
+   */
+  private recordDispatchPageEvent(
+    event: "page" | "recovery",
+    eligibleCount: number,
+  ): void {
+    this.commitVerdictJournalEntrySync({
+      idempotencyKey: `page:${PIPELINE_VERDICT_SCOPE_ID}:${event}:${this.nextRunJournalSequence()}`,
+      timestamp: this.now().toISOString(),
+      kind: "dispatch_verdict",
+      issueId: PIPELINE_VERDICT_SCOPE_ID,
+      issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
+      operation: "dispatcher",
+      stage: null,
+      attempt: null,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary:
+        event === "page"
+          ? `Dispatch starvation page fired after ${this.starvedTickCount} consecutive starved ticks.`
+          : "Dispatch starvation recovered.",
+      metadata: {
+        schema_version: 1,
+        page_event: event,
+        eligible_count: eligibleCount,
+        consecutive_ticks: this.starvedTickCount,
+        actor: this.buildVerdictActor(),
+      },
+    });
+  }
+
   private async recordDispatcherDecisionEvent(input: {
     decisionId: string;
     category: DispatcherDecisionCategory;
@@ -5163,16 +5851,37 @@ export class OrchestratorCore {
     const result = appendDispatcherRunJournalEntry(
       this.state.dispatcherRunJournal,
       entry,
+      this.burnedRunJournalSequence + 1,
     );
     if (!result.appended) {
       return result.entry;
     }
 
+    // Commit in-memory BEFORE the disk await: sequence assignment and
+    // commit must be atomic so an overlapping append can never compute the
+    // same sequence from a stale journal and drop this entry. Disk
+    // durability is ordered separately by the flush queue.
     if (result.entry.lease !== null) {
       result.entry.lease.lastJournalSequence = result.entry.sequence;
     }
-    await this.writeRunJournalEntry?.(result.entry);
     this.state.dispatcherRunJournal = result.journal;
+    try {
+      await this.flushRunJournalEntryToDisk(result.entry);
+    } catch (error) {
+      // Journal-first: an entry that cannot be persisted must not take
+      // effect. Roll back the in-memory append (entries committed after it
+      // keep their sequences; replay tolerates the gap) and surface the
+      // failure before any lease/claim side effects. Burn the rolled-back
+      // sequence so it is never reissued — see burnedRunJournalSequence.
+      this.burnedRunJournalSequence = Math.max(
+        this.burnedRunJournalSequence,
+        result.entry.sequence,
+      );
+      this.state.dispatcherRunJournal = this.state.dispatcherRunJournal.filter(
+        (candidate) => candidate !== result.entry,
+      );
+      throw error;
+    }
     if (result.entry.lease !== null) {
       this.state.dispatcherLeases[result.entry.lease.leaseId] =
         result.entry.lease;
@@ -6153,6 +6862,21 @@ export class OrchestratorCore {
       this.state.running[issue.id] = runEntry;
       this.state.claimed.add(issue.id);
       this.clearRetryEntry(issue.id);
+      // Verdict event (SYMPH-405): the dispatch went out. The right-sizing
+      // decision summary is already in hand, so it rides along in details.
+      this.recordDispatchVerdict({
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        disposition: "admit",
+        reasonCode: "dispatched",
+        stage: stageName,
+        attempt,
+        details: {
+          mode: rightSizingDecision.mode,
+          classifier: rightSizingDecision.classifier,
+          modelRoutingReason: rightSizingDecision.modelRouting.reason,
+        },
+      });
       return {
         dispatched: true,
         rightSizingDecision,
@@ -6786,6 +7510,65 @@ export class OrchestratorCore {
       stageName,
       now: this.now(),
     });
+
+    // Verdict events (SYMPH-405): journal cluster growth / systemic
+    // transitions and breaker opens so the registry can rebuild on replay
+    // (closes the SYMPH-398 restart-amnesia hole). Fire-and-forget.
+    if (clusterResult.memberAdded || clusterResult.shouldAlert) {
+      const timestamp = this.now().toISOString();
+      const transition = clusterResult.isSystemic ? "systemic" : "growth";
+      const stages = [
+        ...new Set(
+          clusterResult.members
+            .map((member) => member.stageName)
+            .filter((stage): stage is string => stage !== null),
+        ),
+      ];
+      // Sequence-suffixed key (not timestamp): a same-ms re-entry of the
+      // same issue/signature after a membership reset must not drop the
+      // latest membership snapshot from the replay record.
+      this.commitVerdictJournalEntrySync({
+        idempotencyKey: `cluster:${clusterResult.signature}:${issueId}:${this.nextRunJournalSequence()}`,
+        timestamp,
+        kind: "cluster_transition",
+        issueId,
+        issueIdentifier,
+        operation: "dispatcher",
+        stage: stageName,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary: `Signature cluster ${clusterResult.signature} ${transition}: ${clusterResult.clusterSize} distinct issue(s).`,
+        metadata: {
+          schema_version: 1,
+          transition,
+          signature: clusterResult.signature,
+          issueCount: clusterResult.clusterSize,
+          stages,
+          details: {
+            errorClass: clusterResult.errorClass,
+            normalizedText: clusterResult.normalizedText,
+            members: clusterResult.members,
+            lastAlertSize: clusterResult.shouldAlert
+              ? clusterResult.clusterSize
+              : clusterResult.lastAlertSize,
+          },
+        },
+      });
+    }
+    if (clusterResult.shouldOpenBreaker && stageName !== null) {
+      this.recordBreakerTransition({
+        transition: "opened",
+        stageName,
+        signature: clusterResult.signature,
+        issueId,
+        issueIdentifier,
+        openedForIssueIds: clusterResult.members.map(
+          (member) => member.issueId,
+        ),
+      });
+    }
+
     if (clusterResult.shouldAlert) {
       try {
         this.onSystemicCluster?.({
@@ -7453,6 +8236,47 @@ function readMetadataNumber(
 ): number | null {
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function toVerdictDisposition(value: unknown): VerdictDisposition | null {
+  return typeof value === "string" &&
+    (VERDICT_DISPOSITIONS as readonly string[]).includes(value)
+    ? (value as VerdictDisposition)
+    : null;
+}
+
+function toClusterMembers(value: unknown): ClusterMember[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const members: ClusterMember[] = [];
+  for (const candidate of value) {
+    if (
+      typeof candidate !== "object" ||
+      candidate === null ||
+      typeof (candidate as { issueId?: unknown }).issueId !== "string" ||
+      typeof (candidate as { issueIdentifier?: unknown }).issueIdentifier !==
+        "string"
+    ) {
+      return null;
+    }
+    const raw = candidate as {
+      issueId: string;
+      issueIdentifier: string;
+      stageName?: unknown;
+      recordedAt?: unknown;
+      normalizedText?: unknown;
+    };
+    members.push({
+      issueId: raw.issueId,
+      issueIdentifier: raw.issueIdentifier,
+      stageName: typeof raw.stageName === "string" ? raw.stageName : null,
+      recordedAt: typeof raw.recordedAt === "string" ? raw.recordedAt : "",
+      normalizedText:
+        typeof raw.normalizedText === "string" ? raw.normalizedText : "",
+    });
+  }
+  return members;
 }
 
 function defaultTimerScheduler(): TimerScheduler {

@@ -777,6 +777,44 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 void this.fileWatchdogTicketBestEffort(input);
               }
             },
+            // Verdict-event alerts (SYMPH-405): transitions-only gate/halt
+            // notifications and the dispatch-starvation page condition.
+            // Fail-open — notifier absence/failure never blocks dispatch.
+            onVerdictTransition: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              disposition: "admit" | "skip" | "gate" | "halt";
+              reasonCode: string;
+              remedy: string | null;
+              actor: { kind: string; host: string; session?: string };
+            }) => {
+              if (
+                input.disposition !== "gate" &&
+                input.disposition !== "halt"
+              ) {
+                return;
+              }
+              _notifier.notify({
+                type: "dispatch_verdict_alert",
+                issueIdentifier: input.issueIdentifier,
+                disposition: input.disposition,
+                reasonCode: input.reasonCode,
+                remedy: input.remedy,
+                actor: input.actor,
+              });
+            },
+            onDispatchPage: (input: {
+              kind: "page" | "recovery";
+              eligibleCount: number;
+              consecutiveTicks: number;
+            }) => {
+              _notifier.notify({
+                type: "dispatch_page_alert",
+                kind: input.kind,
+                eligibleCount: input.eligibleCount,
+                consecutiveTicks: input.consecutiveTicks,
+              });
+            },
             // Watchdog L2 escalate_human verdicts page through the same
             // SYMPH-397 alert channel (SYMPH-399).
             onTriageEscalation: (input: {

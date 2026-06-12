@@ -221,6 +221,17 @@ export interface WorkflowWatchdogConfig {
   stuckTriage?: WorkflowStuckTriageConfig;
 }
 
+/**
+ * Verdict-event configuration (SYMPH-405).
+ */
+export interface WorkflowVerdictsConfig {
+  /**
+   * Number of consecutive poll ticks with eligible candidates but zero
+   * dispatches before the dispatch-starvation page alert fires. Default: 10.
+   */
+  pageAfterTicks: number;
+}
+
 export const STAGE_TYPES = ["agent", "gate", "terminal"] as const;
 export type StageType = (typeof STAGE_TYPES)[number];
 
@@ -284,6 +295,8 @@ export interface ResolvedWorkflowConfig {
   specFidelity: WorkflowSpecFidelityConfig;
   admissionCard: WorkflowAdmissionCardConfig;
   watchdog: WorkflowWatchdogConfig;
+  /** Optional so existing fixtures keep compiling; consumers default to 10. */
+  verdicts?: WorkflowVerdictsConfig;
   runner: WorkflowRunnerConfig;
   continuousFeedback?: WorkflowContinuousFeedbackConfig;
   codex: WorkflowCodexConfig;
