@@ -224,6 +224,9 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "operator_input_required",
   "continuous_feedback",
   "dispatch_verdict",
+  // Restart visibility (SYMPH-455): a replayed active Pipeline issue that
+  // spawns work again gets a distinct pickup event, not a duplicate dispatch.
+  "resumed_existing_active",
   "breaker_transition",
   "cluster_transition",
   // Shared intent-verb layer (SYMPH-399 / SYMPH-408 carve-out): idempotent,

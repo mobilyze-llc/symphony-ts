@@ -349,6 +349,33 @@ describe("formatNotification", () => {
     expect(result.text).toContain("Triggers: merge_path, scope_overlap");
   });
 
+  it("formats resumed_existing_active with journal cursor", () => {
+    const result = formatNotification({
+      type: "resumed_existing_active",
+      issueIdentifier: "SYMPH-455",
+      issueTitle:
+        "Notify operators when restart rehydrates active Pipeline work",
+      issueUrl:
+        "https://linear.app/mobilyze-llc/issue/SYMPH-455/notify-operators",
+      stageName: "implement",
+      attempt: null,
+      reworkCount: 0,
+      journalSequence: 42,
+    });
+
+    expect(result.text).toContain("Issue resumed after restart");
+    expect(result.text).toContain("SYMPH-455");
+    expect(result.text).toContain("Stage: implement");
+    expect(result.text).toContain("Journal cursor: seq 42");
+    expect(result.text).not.toContain("Issue dispatched");
+    expect(result.blocks?.[0]).toMatchObject({
+      type: "header",
+      text: expect.objectContaining({
+        text: expect.stringContaining("Issue resumed after restart"),
+      }),
+    });
+  });
+
   it("formats issue_dropped", () => {
     const result = formatNotification({
       type: "issue_dropped",

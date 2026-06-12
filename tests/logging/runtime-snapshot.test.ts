@@ -2755,6 +2755,43 @@ describe("buildStateDelta (SYMPH-407)", () => {
     expect(delta.as_of_sequence).toBe(3);
   });
 
+  it("projects resumed_existing_active pickup evidence for /state deltas", () => {
+    const resumeEntry: DispatcherRunJournalEntry = {
+      ...entryAt(1),
+      kind: "resumed_existing_active",
+      stage: "implement",
+      summary:
+        "Resumed existing active Pipeline work for SYMPH-455 after journal replay.",
+      metadata: {
+        schema_version: 1,
+        status: "completed",
+        source: "restart_replay",
+        resume_reason: "prior_dispatch_replayed",
+        rework_count: 0,
+        details: {
+          should_not_egress: "private",
+        },
+      },
+    };
+    const delta = buildStateDelta([resumeEntry], { sinceSeq: 0 });
+
+    expect(delta.entries).toEqual([
+      expect.objectContaining({
+        kind: "resumed_existing_active",
+        stage: "implement",
+        summary:
+          "Resumed existing active Pipeline work for SYMPH-455 after journal replay.",
+        metadata: {
+          status: "completed",
+          source: "restart_replay",
+          resume_reason: "prior_dispatch_replayed",
+          rework_count: 0,
+        },
+      }),
+    ]);
+    expect(JSON.stringify(delta)).not.toContain("should_not_egress");
+  });
+
   it("projects entries through the egress whitelist — no raw metadata passthrough", () => {
     const clusterEntry: DispatcherRunJournalEntry = {
       ...entryAt(1),
