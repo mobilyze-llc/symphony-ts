@@ -113,6 +113,35 @@ describe("normalizeErrorSignature", () => {
   });
 
   describe("classification", () => {
+    it("classifies a mid-turn Codex session closure as transient (SYMPH-412)", () => {
+      // Worker exit reasons are "<code>: <message>" (formatWorkerErrorReason).
+      const result = normalizeErrorSignature(
+        "codex_session_closed_mid_turn: Codex session closed while a turn was running.",
+      );
+      expect(result.class).toBe("transient");
+    });
+
+    it("classifies the bare mid-turn closure message as transient (SYMPH-412)", () => {
+      const result = normalizeErrorSignature(
+        "Codex session closed while a turn was running.",
+      );
+      expect(result.class).toBe("transient");
+    });
+
+    it("classifies a mid-turn app-server exit as transient (SYMPH-412)", () => {
+      const result = normalizeErrorSignature(
+        "Codex app-server exited with code 1 signal null while a turn was running.",
+      );
+      expect(result.class).toBe("transient");
+    });
+
+    it("keeps a generic app-server exit (no running turn) unknown", () => {
+      const result = normalizeErrorSignature(
+        "Codex app-server exited with code 1 signal null.",
+      );
+      expect(result.class).toBe("unknown");
+    });
+
     it("classifies EPERM as permanent", () => {
       const result = normalizeErrorSignature("EPERM: operation not permitted");
       expect(result.class).toBe("permanent");

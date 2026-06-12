@@ -422,6 +422,57 @@ describe("orchestrator core", () => {
     expect(calls[0]?.canFileWatchdogTicket).toBe(true);
   });
 
+  it("mid-turn session closures still tip the systemic cluster / circuit breaker despite transient class (SYMPH-412)", async () => {
+    // The transient classification exempts mid-turn closures from the
+    // novelty short-circuit (each retry runs a fresh session), but the
+    // SYMPH-398 cluster registry must still bound systemic recurrence.
+    const calls: Array<{ clusterSize: number; breakerOpened: boolean }> = [];
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2" }),
+      ],
+      statesById: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      timerScheduler: createFakeTimerScheduler(),
+      onSystemicCluster: (input) => {
+        calls.push({
+          clusterSize: input.clusterSize,
+          breakerOpened: input.breakerOpened,
+        });
+      },
+    });
+
+    await orchestrator.pollTick();
+    const reason =
+      "codex_session_closed_mid_turn: Codex session closed while a turn was running.";
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason,
+      endedAt: new Date("2026-03-06T00:00:05.000Z"),
+    });
+    expect(calls).toHaveLength(0);
+
+    await orchestrator.onWorkerExit({
+      issueId: "2",
+      outcome: "abnormal",
+      reason,
+      endedAt: new Date("2026-03-06T00:00:06.000Z"),
+    });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.clusterSize).toBe(2);
+    // breakerOpened is false here only because this fixture runs without
+    // stages (stageName === null); per-stage breaker opening for transient
+    // signatures is covered by the signature-cluster registry tests.
+  });
+
   it("recordWatchdogFiling feeds the rate limiter so subsequent alerts report canFile=false (SYMPH-398)", async () => {
     const calls: Array<{ canFileWatchdogTicket: boolean }> = [];
     const tracker = createTracker({

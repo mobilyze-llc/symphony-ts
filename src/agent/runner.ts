@@ -17,6 +17,7 @@ import {
 } from "../codex/rate-limits.js";
 import { createWorkpadSyncDynamicTool } from "../codex/workpad-sync-tool.js";
 import {
+  DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
   DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
   DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
@@ -43,6 +44,7 @@ import {
   normalizeIssueState,
   parseFailureSignal,
 } from "../domain/model.js";
+import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import { applyCodexEventToSession } from "../logging/session-metrics.js";
 import {
@@ -70,6 +72,13 @@ import {
 const execFileAsync = promisify(execFile);
 const GIT_COMMAND_TIMEOUT_MS = 10_000;
 const PROMPT_FILE_EXTENSIONS = new Set([".liquid", ".md", ".txt"]);
+/**
+ * SYMPH-412: in-run cap on fresh-session rotations after mid-turn closures.
+ * Past this, the closure propagates as codex_session_closed_mid_turn so the
+ * orchestrator retry ladder (and the SYMPH-398 stage circuit breaker) bound
+ * the recurrence instead of the runner looping forever.
+ */
+const MAX_MID_TURN_CLOSURE_ROTATIONS_PER_RUN = 2;
 
 export interface AgentRunnerEvent extends CodexClientEvent {
   issueId: string;
@@ -375,6 +384,7 @@ export class AgentRunner {
       });
       await cleanupWorkspaceArtifacts(workspace.path);
       const workspacePath = workspace.path;
+      const workspaceKey = workspace.workspaceKey;
 
       console.warn(
         `[agent-runner] ${issue.identifier}: Using workspace path ${workspacePath}`,
@@ -412,91 +422,134 @@ export class AgentRunner {
         workspace.path,
         this.config.workspace.root,
       );
-      client = effectiveClientFactory({
-        command: this.config.codex.command,
-        ephemeralHome: this.config.codex.ephemeralHome === true,
-        disableSkills: this.config.codex.disableSkills === true,
-        cwd: workspace.path,
-        approvalPolicy:
-          input.modePolicy?.approvalPolicy ?? this.config.codex.approvalPolicy,
-        // thread/start only accepts a sandbox MODE; writable roots are a
-        // turn-level concept — and turns are where git executes.
-        threadSandbox:
-          input.modePolicy?.threadSandbox ?? this.config.codex.threadSandbox,
-        // The bare-clone root keeps git commits working (SYMPH-353); the
-        // cmux-spawn state dir keeps in-pipeline council lanes from EPERMing
-        // on their concurrency lock and failing the gate closed (SYMPH-394).
-        turnSandboxPolicy: augmentWorkspaceWriteSandbox(
-          input.modePolicy?.turnSandboxPolicy ??
-            this.config.codex.turnSandboxPolicy,
-          gitMetadataRoot,
-          resolveCmuxSpawnStateRoot(),
-        ),
-        readTimeoutMs: this.config.codex.readTimeoutMs,
-        turnTimeoutMs: this.config.codex.turnTimeoutMs,
-        stallTimeoutMs: this.config.codex.stallTimeoutMs,
-        artifactDirectory: getDurableCodexSessionArtifactDirectory(
-          this.config.workspace.root,
-          workspace.workspaceKey,
-        ),
-        dynamicTools: this.createDynamicTools(),
-        ...(input.modePolicy === undefined
-          ? {}
-          : { modePolicy: input.modePolicy }),
-        onEvent: (event) => {
-          const telemetry = applyCodexEventToSession(liveSession, event);
-          if (event.rateLimits !== undefined) {
-            rateLimits = event.rateLimits;
-            observeRateLimits(event.rateLimits);
-            if (rateLimitBudgetConfigured && hardStop === null) {
-              const rateLimitHardStop = evaluateRateLimitBudgetHardStop({
+      const buildClient = (): AgentRunnerCodexClient =>
+        effectiveClientFactory({
+          command: this.config.codex.command,
+          ephemeralHome: this.config.codex.ephemeralHome === true,
+          disableSkills: this.config.codex.disableSkills === true,
+          cwd: workspacePath,
+          approvalPolicy:
+            input.modePolicy?.approvalPolicy ??
+            this.config.codex.approvalPolicy,
+          // thread/start only accepts a sandbox MODE; writable roots are a
+          // turn-level concept — and turns are where git executes.
+          threadSandbox:
+            input.modePolicy?.threadSandbox ?? this.config.codex.threadSandbox,
+          // The bare-clone root keeps git commits working (SYMPH-353); the
+          // cmux-spawn state dir keeps in-pipeline council lanes from EPERMing
+          // on their concurrency lock and failing the gate closed (SYMPH-394).
+          turnSandboxPolicy: augmentWorkspaceWriteSandbox(
+            input.modePolicy?.turnSandboxPolicy ??
+              this.config.codex.turnSandboxPolicy,
+            gitMetadataRoot,
+            resolveCmuxSpawnStateRoot(),
+          ),
+          readTimeoutMs: this.config.codex.readTimeoutMs,
+          turnTimeoutMs: this.config.codex.turnTimeoutMs,
+          stallTimeoutMs: this.config.codex.stallTimeoutMs,
+          artifactDirectory: getDurableCodexSessionArtifactDirectory(
+            this.config.workspace.root,
+            workspaceKey,
+          ),
+          dynamicTools: this.createDynamicTools(),
+          ...(input.modePolicy === undefined
+            ? {}
+            : { modePolicy: input.modePolicy }),
+          onEvent: (event) => {
+            const telemetry = applyCodexEventToSession(liveSession, event);
+            if (event.rateLimits !== undefined) {
+              rateLimits = event.rateLimits;
+              observeRateLimits(event.rateLimits);
+              if (rateLimitBudgetConfigured && hardStop === null) {
+                const rateLimitHardStop = evaluateRateLimitBudgetHardStop({
+                  config: hardStops,
+                  turnCount: liveSession.turnCount,
+                  totalTokens: liveSession.totalStageTotalTokens,
+                  cacheReadTokens: liveSession.totalStageCacheReadTokens,
+                  rateLimitUsage,
+                });
+                if (rateLimitHardStop !== null) {
+                  requestLiveBudgetStop(rateLimitHardStop);
+                }
+              }
+            }
+            if (
+              isLiveUsageEvent(event) &&
+              telemetry.totalTokensDelta > 0 &&
+              hardStop === null
+            ) {
+              const liveHardStop = evaluateBudgetHardStop({
                 config: hardStops,
                 turnCount: liveSession.turnCount,
                 totalTokens: liveSession.totalStageTotalTokens,
                 cacheReadTokens: liveSession.totalStageCacheReadTokens,
-                rateLimitUsage,
               });
-              if (rateLimitHardStop !== null) {
-                requestLiveBudgetStop(rateLimitHardStop);
+              if (liveHardStop !== null) {
+                requestLiveBudgetStop(liveHardStop);
               }
             }
-          }
-          if (
-            isLiveUsageEvent(event) &&
-            telemetry.totalTokensDelta > 0 &&
-            hardStop === null
-          ) {
-            const liveHardStop = evaluateBudgetHardStop({
-              config: hardStops,
-              turnCount: liveSession.turnCount,
-              totalTokens: liveSession.totalStageTotalTokens,
-              cacheReadTokens: liveSession.totalStageCacheReadTokens,
-            });
-            if (liveHardStop !== null) {
-              requestLiveBudgetStop(liveHardStop);
+            if (
+              event.event === "session_started" &&
+              "codexAppServerPid" in event
+            ) {
+              console.warn(
+                `[agent-runner] ${issue.identifier}: CC process spawned with PID ${event.codexAppServerPid}`,
+              );
             }
-          }
-          if (
-            event.event === "session_started" &&
-            "codexAppServerPid" in event
-          ) {
-            console.warn(
-              `[agent-runner] ${issue.identifier}: CC process spawned with PID ${event.codexAppServerPid}`,
-            );
-          }
-          this.onEvent?.({
-            ...event,
-            issueId: issue.id,
-            issueIdentifier: issue.identifier,
-            attempt: input.attempt,
-            workspacePath,
-            turnCount: liveSession.turnCount,
-            promptChars: currentPromptChars,
-            estimatedPromptTokens: currentEstimatedPromptTokens,
-          });
-        },
-      });
+            this.onEvent?.({
+              ...event,
+              issueId: issue.id,
+              issueIdentifier: issue.identifier,
+              attempt: input.attempt,
+              workspacePath,
+              turnCount: liveSession.turnCount,
+              promptChars: currentPromptChars,
+              estimatedPromptTokens: currentEstimatedPromptTokens,
+            });
+          },
+        });
+      client = buildClient();
       abortController.bindClient(client);
+
+      // Session rotation state (SYMPH-412). `clientFreshSession` tracks
+      // whether the next turn must open a NEW session (startSession) rather
+      // than continue the existing thread; `clientInputTokens` accumulates
+      // input tokens observed on the current session only, so the proactive
+      // rotation guard bounds per-session context, not per-stage totals.
+      let clientFreshSession = true;
+      let clientInputTokens = 0;
+      let midTurnClosureRotations = 0;
+      const sessionRotationInputTokens =
+        this.config.codex.sessionRotationInputTokens ??
+        DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS;
+      const rotateClient = async (
+        reason: "mid_turn_closure" | "input_token_threshold",
+        detail: string,
+      ): Promise<void> => {
+        const previous = client;
+        if (previous !== null) {
+          await closeBestEffort(previous);
+        }
+        client = buildClient();
+        abortController.bindClient(client);
+        clientFreshSession = true;
+        clientInputTokens = 0;
+        console.warn(`[agent-runner] ${issue.identifier}: ${detail}`);
+        this.onEvent?.({
+          event: "session_rotated",
+          timestamp: formatEasternTimestamp(new Date()),
+          codexAppServerPid: liveSession.codexAppServerPid,
+          sessionId: liveSession.sessionId,
+          threadId: liveSession.threadId,
+          message: detail,
+          raw: { rotation_reason: reason },
+          issueId: issue.id,
+          issueIdentifier: issue.identifier,
+          attempt: input.attempt,
+          workspacePath,
+          turnCount: liveSession.turnCount,
+        });
+      };
 
       for (
         let turnNumber = 1;
@@ -534,20 +587,41 @@ export class AgentRunner {
         currentEstimatedPromptTokens = Math.ceil(prompt.length / 4);
         const title = `${issue.identifier}: ${issue.title}`;
 
-        runAttempt.status =
-          turnNumber === 1 ? "initializing_session" : "streaming_turn";
+        runAttempt.status = clientFreshSession
+          ? "initializing_session"
+          : "streaming_turn";
         lastTurn = null;
         try {
-          lastTurn =
-            turnNumber === 1
-              ? await client.startSession({ prompt, title })
-              : await client.continueTurn(prompt, title);
+          lastTurn = clientFreshSession
+            ? await client.startSession({ prompt, title })
+            : await client.continueTurn(prompt, title);
+          clientFreshSession = false;
         } catch (error) {
           if (hardStop !== null) {
             break;
           }
+          // Mid-turn session closure (SYMPH-412): the app-server died (or was
+          // closed) while this turn was streaming. Resuming the dead session
+          // is impossible and re-running the whole attempt re-accumulates the
+          // same context — rotate to a FRESH session and retry this turn
+          // in-place, bounded per run. Aborts and hard stops never rotate.
+          if (
+            isMidTurnSessionClosureError(error) &&
+            input.signal?.aborted !== true &&
+            midTurnClosureRotations < MAX_MID_TURN_CLOSURE_ROTATIONS_PER_RUN
+          ) {
+            midTurnClosureRotations += 1;
+            await rotateClient(
+              "mid_turn_closure",
+              `fresh session forced after mid-turn closure (rotation ${midTurnClosureRotations}/${MAX_MID_TURN_CLOSURE_ROTATIONS_PER_RUN}): ${toErrorMessage(error)}`,
+            );
+            // Retry the same turn number on the fresh session.
+            turnNumber -= 1;
+            continue;
+          }
           throw error;
         }
+        clientInputTokens += lastTurn.usage?.inputTokens ?? 0;
         rateLimits = lastTurn.rateLimits;
         observeRateLimits(lastTurn.rateLimits);
 
@@ -656,6 +730,21 @@ export class AgentRunner {
         });
         if (hardStop !== null) {
           break;
+        }
+
+        // Proactive session rotation (SYMPH-412): mid-turn closures cluster
+        // at very high cumulative session context (0.9M–2.5M input tokens).
+        // Rotate to a fresh session BEFORE the next turn once this session's
+        // cumulative input tokens cross the configured threshold.
+        if (
+          sessionRotationInputTokens > 0 &&
+          clientInputTokens >= sessionRotationInputTokens &&
+          turnNumber < effectiveMaxTurns
+        ) {
+          await rotateClient(
+            "input_token_threshold",
+            `fresh session forced before next turn: cumulative session input tokens ${clientInputTokens} >= rotation threshold ${sessionRotationInputTokens}`,
+          );
         }
       }
 
@@ -1300,6 +1389,19 @@ function classifyFailureStatus(code: string | undefined): RunAttemptPhase {
   return "failed";
 }
 
+/**
+ * SYMPH-412: a Codex session/process died while a turn was streaming. The
+ * thread cannot be resumed and the recovery policy is a fresh session.
+ */
+function isMidTurnSessionClosureError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === ERROR_CODES.codexSessionClosedMidTurn
+  );
+}
+
 async function closeBestEffort(client: AgentRunnerCodexClient): Promise<void> {
   try {
     await client.close();
@@ -1503,6 +1605,7 @@ function isLiveUsageEvent(event: CodexClientEvent): boolean {
     case "turn_ended_with_error":
     case "turn_input_required":
     case "session_artifact_saved":
+    case "session_rotated":
       return false;
   }
 }

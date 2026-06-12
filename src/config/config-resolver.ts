@@ -9,6 +9,7 @@ import {
   DEFAULT_BUDGET_ESCALATION_MAX_STEPS,
   DEFAULT_BUDGET_ESCALATION_MULTIPLIER,
   DEFAULT_CODEX_COMMAND,
+  DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
   DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
   DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
   DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
@@ -273,6 +274,9 @@ export function resolveWorkflowConfig(
         readPositiveInteger(codex.read_timeout_ms) ?? DEFAULT_READ_TIMEOUT_MS,
       stallTimeoutMs:
         readInteger(codex.stall_timeout_ms) ?? DEFAULT_STALL_TIMEOUT_MS,
+      sessionRotationInputTokens:
+        readNonNegativeInteger(codex.session_rotation_input_tokens) ??
+        DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
     },
     server: {
       port: readNonNegativeInteger(server.port),

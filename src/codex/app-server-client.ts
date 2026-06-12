@@ -94,6 +94,7 @@ export interface CodexClientEvent {
     | "approval_auto_approved"
     | "unsupported_tool_call"
     | "session_artifact_saved"
+    | "session_rotated"
     | "notification"
     | "other_message"
     | "malformed"
@@ -264,10 +265,13 @@ export class CodexAppServerClient {
     );
 
     if (this.currentTurn !== null) {
+      // Distinct code (SYMPH-412): a mid-turn closure must be classifiable
+      // downstream so the retry path can force a fresh session instead of
+      // re-accumulating the dead session's context.
       this.finishTurnWithError(
         new CodexAppServerClientError(
           "Codex session closed while a turn was running.",
-          ERROR_CODES.codexProtocolError,
+          ERROR_CODES.codexSessionClosedMidTurn,
         ),
         "turn_ended_with_error",
       );
@@ -364,7 +368,16 @@ export class CodexAppServerClient {
       );
       this.rejectPending(error);
       if (this.currentTurn !== null) {
-        this.finishTurnWithError(error, "turn_ended_with_error");
+        // Distinct code (SYMPH-412): the app-server died while a turn was
+        // streaming — classify as a mid-turn session closure so retry policy
+        // can rotate to a fresh session.
+        this.finishTurnWithError(
+          new CodexAppServerClientError(
+            `Codex app-server exited with code ${code ?? "null"} signal ${signal ?? "null"} while a turn was running.`,
+            ERROR_CODES.codexSessionClosedMidTurn,
+          ),
+          "turn_ended_with_error",
+        );
       }
       if (!this.closed && this.threadId === null) {
         this.emit({

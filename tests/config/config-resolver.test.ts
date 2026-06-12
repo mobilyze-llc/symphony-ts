@@ -11,6 +11,7 @@ import {
 } from "../../src/config/config-resolver.js";
 import {
   DEFAULT_CODEX_COMMAND,
+  DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
   DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
   DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
   DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
@@ -90,6 +91,9 @@ describe("config-resolver", () => {
     expect(resolved.codex.turnTimeoutMs).toBe(DEFAULT_TURN_TIMEOUT_MS);
     expect(resolved.codex.readTimeoutMs).toBe(DEFAULT_READ_TIMEOUT_MS);
     expect(resolved.codex.stallTimeoutMs).toBe(DEFAULT_STALL_TIMEOUT_MS);
+    expect(resolved.codex.sessionRotationInputTokens).toBe(
+      DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
+    );
     expect(resolved.continuousFeedback).toEqual({
       enabled: DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
       events: [...DEFAULT_CONTINUOUS_FEEDBACK_EVENTS],
@@ -155,6 +159,7 @@ describe("config-resolver", () => {
             turn_timeout_ms: "90000",
             read_timeout_ms: "2500",
             stall_timeout_ms: "-1",
+            session_rotation_input_tokens: "0",
           },
           server: {
             port: "8080",
@@ -205,6 +210,7 @@ describe("config-resolver", () => {
     expect(resolved.codex.turnTimeoutMs).toBe(90_000);
     expect(resolved.codex.readTimeoutMs).toBe(2_500);
     expect(resolved.codex.stallTimeoutMs).toBe(-1);
+    expect(resolved.codex.sessionRotationInputTokens).toBe(0);
     expect(resolved.server.port).toBe(8080);
     expect(resolved.observability.dashboardEnabled).toBe(false);
     expect(resolved.observability.refreshMs).toBe(2_500);

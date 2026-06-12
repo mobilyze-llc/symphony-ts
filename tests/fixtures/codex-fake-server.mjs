@@ -210,6 +210,14 @@ async function handleMessage(message) {
       return;
     }
 
+    if (scenario === "exit-mid-turn") {
+      // SYMPH-412: the app-server dies while the turn is still streaming.
+      setTimeout(() => {
+        process.exit(1);
+      }, 10);
+      return;
+    }
+
     if (scenario === "agent-message-item") {
       setTimeout(() => {
         writeJson({

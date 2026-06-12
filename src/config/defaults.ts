@@ -69,6 +69,11 @@ export const DEFAULT_CODEX_DISABLE_SKILLS = false;
 export const DEFAULT_TURN_TIMEOUT_MS = 3_600_000;
 export const DEFAULT_READ_TIMEOUT_MS = 5_000;
 export const DEFAULT_STALL_TIMEOUT_MS = 300_000;
+// SYMPH-412: rotate to a fresh Codex session once cumulative session input
+// tokens cross this threshold. Observed mid-turn closures clustered at
+// 0.9M-2.5M cumulative input tokens; 1.5M keeps headroom while bounding
+// accumulated thread context. 0 disables proactive rotation.
+export const DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS = 1_500_000;
 export const DEFAULT_OBSERVABILITY_ENABLED = true;
 export const DEFAULT_OBSERVABILITY_REFRESH_MS = 1_000;
 export const DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS = 16;
@@ -160,6 +165,7 @@ export const SPEC_DEFAULTS = Object.freeze({
     turnTimeoutMs: DEFAULT_TURN_TIMEOUT_MS,
     readTimeoutMs: DEFAULT_READ_TIMEOUT_MS,
     stallTimeoutMs: DEFAULT_STALL_TIMEOUT_MS,
+    sessionRotationInputTokens: DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
   },
   observability: {
     dashboardEnabled: DEFAULT_OBSERVABILITY_ENABLED,
