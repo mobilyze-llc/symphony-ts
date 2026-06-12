@@ -621,14 +621,34 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             );
             // Surface on the Slack alert channel (SYMPH-397) — a warn-level
             // journal line alone let three branch_divergence findings vanish.
-            this.notifier?.notify({
-              type: "tracker_write_failed",
-              followUpTitle: title,
-              sourceIssueIds,
-              reason,
-              httpStatus,
-              details: serializeTrackerErrorDetails(trackerError?.details, 500),
-            });
+            // Fail-open: this runs inside the tracker-write catch block, which
+            // re-throws the original error; a throwing notifier must not mask
+            // it (the SYMPH-397 fail-open contract).
+            try {
+              this.notifier?.notify({
+                type: "tracker_write_failed",
+                followUpTitle: title,
+                sourceIssueIds,
+                reason,
+                httpStatus,
+                details: serializeTrackerErrorDetails(
+                  trackerError?.details,
+                  500,
+                ),
+              });
+            } catch (notifyError) {
+              void this.logger?.warn(
+                "tracker_write_failed_notify_error",
+                "Failed to emit tracker_write_failed Slack alert.",
+                {
+                  outcome: "degraded",
+                  reason:
+                    notifyError instanceof Error
+                      ? notifyError.message
+                      : String(notifyError),
+                },
+              );
+            }
           },
         });
       },

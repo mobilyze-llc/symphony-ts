@@ -1084,17 +1084,33 @@ function isSensitiveGraphqlVariable(key: string): boolean {
   );
 }
 
+/**
+ * Cap on the raw error-response body we retain. A misconfigured endpoint or
+ * proxy can return a large HTML error page on a non-OK status; without a bound
+ * the full body would be parsed, stored in `TrackerError.details`, and
+ * re-serialized for logs/Slack (SYMPH-413 council finding).
+ */
+const GRAPHQL_RESPONSE_BODY_MAX_CHARS = 16_000;
+
 async function parseGraphqlResponseBody(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (text.trim().length === 0) {
+  const rawText = await response.text();
+  if (rawText.trim().length === 0) {
     return null;
   }
 
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return {
-      raw: text,
-    };
+  const truncated = rawText.length > GRAPHQL_RESPONSE_BODY_MAX_CHARS;
+  const text = truncated
+    ? rawText.slice(0, GRAPHQL_RESPONSE_BODY_MAX_CHARS)
+    : rawText;
+
+  if (!truncated) {
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return { raw: text };
+    }
   }
+
+  // A truncated body is no longer valid JSON; preserve the readable prefix.
+  return { raw: text, responseBodyTruncated: true };
 }
