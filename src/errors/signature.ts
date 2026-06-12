@@ -173,3 +173,82 @@ function classifyRaw(rawText: string): ErrorSignatureClass {
   }
   return "unknown";
 }
+
+// ---------------------------------------------------------------------------
+// Review-failure signatures (SYMPH-402)
+// ---------------------------------------------------------------------------
+
+/**
+ * Signature of a review-stage failure, criterion-aware when possible.
+ *
+ * When the review worker's failure message quotes one or more frozen
+ * acceptance criteria (the pre-gate refusal contract names the missing
+ * evidence), the signature hashes the SET of matched criteria — stable
+ * across reworded refusals of the same criterion. When no criterion can be
+ * isolated, falls back to the normalized whole-message signature.
+ */
+export interface ReviewFailureSignature {
+  /** 7-char SHA-1 prefix, criterion-set hash or whole-message fallback. */
+  signature: string;
+  /** Cleaned criterion lines matched in the message (empty on fallback). */
+  matchedCriteria: string[];
+  /** "permanent" when criterion-matched; fallback uses message classification. */
+  class: ErrorSignatureClass;
+}
+
+/** Strip list markers, checkboxes, backticks; lowercase; collapse whitespace. */
+function cleanCriterionLine(line: string): string {
+  return line
+    .replace(/^\s*[-*+]\s*/, "")
+    .replace(/^\[[ xX]\]\s*/, "")
+    .replaceAll("`", "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const CRITERION_TAG_REGEX = /\b(?:test|check|judge):/i;
+
+/**
+ * Normalize a review-stage failure into a criterion-aware signature
+ * (SYMPH-402). Used by the orchestrator to detect an issue looping on the
+ * SAME failed pre-gate criterion across rework rounds: a rework cycle
+ * (review → implement → review) does not pass through the retry path, so
+ * the SYMPH-396 retry-without-novelty short-circuit never sees it.
+ */
+export function normalizeReviewFailureSignature(
+  message: string | null | undefined,
+  acSnapshot: string | null,
+): ReviewFailureSignature {
+  const text =
+    message === null || message === undefined || message.trim() === ""
+      ? "agent reported failure: review"
+      : message;
+  if (acSnapshot !== null) {
+    const criteria = acSnapshot
+      .split("\n")
+      .filter((line) => CRITERION_TAG_REGEX.test(line))
+      .map(cleanCriterionLine)
+      .filter((line) => line.length > 0);
+    const cleanedMessage = text
+      .replaceAll("`", "")
+      .toLowerCase()
+      .replace(/\s+/g, " ");
+    const matched = [
+      ...new Set(criteria.filter((c) => cleanedMessage.includes(c))),
+    ].sort();
+    if (matched.length > 0) {
+      const signature = createHash("sha1")
+        .update(matched.join("\n"))
+        .digest("hex")
+        .slice(0, 7);
+      return { signature, matchedCriteria: matched, class: "permanent" };
+    }
+  }
+  const fallback = normalizeErrorSignature(text);
+  return {
+    signature: fallback.signature,
+    matchedCriteria: [],
+    class: fallback.class,
+  };
+}

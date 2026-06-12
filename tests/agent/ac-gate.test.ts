@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { extractAcceptanceCriteria } from "../../src/agent/ac-gate.js";
+import {
+  extractAcceptanceCriteria,
+  rewriteFullSuiteCheckCriteria,
+} from "../../src/agent/ac-gate.js";
 
 describe("extractAcceptanceCriteria", () => {
   it("extracts the heading plus body up to the next same-level heading", () => {
@@ -104,5 +107,76 @@ describe("extractAcceptanceCriteria", () => {
     expect(snapshot).not.toBeNull();
     expect(snapshot?.length).toBe(8000);
     expect(snapshot?.startsWith("### Acceptance Criteria")).toBe(true);
+  });
+
+  it("rewrites a bare full-suite check criterion into the SYMPH-358 shape at freeze (SYMPH-402)", () => {
+    // The exact SYMPH-332 workpad shape that produced the unclearable loop.
+    const message = [
+      "Investigation workpad posted.",
+      "### Acceptance Criteria",
+      "- [ ] `check: pnpm test exits 0`",
+      "- [ ] `check: npx tsc --noEmit exits 0`",
+      "### Validation",
+      "- npx vitest run tests/foo.test.ts",
+    ].join("\n");
+
+    const snapshot = extractAcceptanceCriteria(message);
+
+    expect(snapshot).not.toBeNull();
+    expect(snapshot).not.toContain("pnpm test");
+    expect(snapshot).toContain("CI check-run success on the PR head SHA");
+    expect(snapshot).toContain("focused tests for the touched area");
+    expect(snapshot).toContain("- [ ] `check:`");
+    // Non-full-suite criteria pass through untouched.
+    expect(snapshot).toContain("- [ ] `check: npx tsc --noEmit exits 0`");
+  });
+});
+
+describe("rewriteFullSuiteCheckCriteria", () => {
+  it("rewrites package-manager full-suite variants", () => {
+    for (const command of [
+      "pnpm test",
+      "npm test",
+      "npm run test",
+      "yarn test",
+      "bun test",
+    ]) {
+      const rewritten = rewriteFullSuiteCheckCriteria(
+        `- [ ] \`check: ${command} exits 0\``,
+      );
+      expect(rewritten).not.toContain(command);
+      expect(rewritten).toContain("CI check-run success on the PR head SHA");
+    }
+  });
+
+  it("leaves focused test commands and non-check lines untouched", () => {
+    const focused = "- [ ] `check: pnpm test tests/foo.test.ts exits 0`";
+    expect(rewriteFullSuiteCheckCriteria(focused)).toBe(focused);
+
+    const pathScoped = "- [ ] `check: npm test src/agent/ exits 0`";
+    expect(rewriteFullSuiteCheckCriteria(pathScoped)).toBe(pathScoped);
+
+    const testTag = "- [ ] `test: tests/foo.test.ts covers pnpm test parsing`";
+    expect(rewriteFullSuiteCheckCriteria(testTag)).toBe(testTag);
+
+    const otherCheck = "- [ ] `check: pnpm lint exits 0`";
+    expect(rewriteFullSuiteCheckCriteria(otherCheck)).toBe(otherCheck);
+
+    const prose = "The full suite (`pnpm test`) gates in CI.";
+    expect(rewriteFullSuiteCheckCriteria(prose)).toBe(prose);
+  });
+
+  it("preserves the list prefix and surrounding lines", () => {
+    const section = [
+      "### Acceptance Criteria",
+      "- [x] `check: pnpm lint exits 0`",
+      "- [ ] `check: npm test exits 0`",
+    ].join("\n");
+    const rewritten = rewriteFullSuiteCheckCriteria(section);
+    const lines = rewritten.split("\n");
+    expect(lines[0]).toBe("### Acceptance Criteria");
+    expect(lines[1]).toBe("- [x] `check: pnpm lint exits 0`");
+    expect(lines[2]?.startsWith("- [ ] `check:`")).toBe(true);
+    expect(lines[2]).toContain("SYMPH-358 / SYMPH-402");
   });
 });

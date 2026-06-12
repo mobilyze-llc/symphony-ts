@@ -1691,3 +1691,160 @@ function createIssue(overrides?: Partial<Issue>): Issue {
     updatedAt: overrides?.updatedAt ?? "2026-03-01T00:00:00.000Z",
   };
 }
+
+describe("same-criterion review-failure park (SYMPH-402)", () => {
+  const REFUSAL =
+    "[STAGE_FAILED: review] Pre-gate evidence check failed: missing evidence for the frozen criterion.";
+
+  it("parks loudly instead of entering a third rework round on the same review failure", async () => {
+    const postedComments: string[] = [];
+    const orchestrator = createStagedOrchestrator({
+      stages: createGateWorkflowConfig(),
+      postComment: async (_issueId, body) => {
+        postedComments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+
+    // Round 1 — rework
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: REFUSAL,
+    });
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(1);
+    await orchestrator.onRetryTimer("1");
+
+    // Round 2 — rework (same signature)
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: REFUSAL,
+    });
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(2);
+    await orchestrator.onRetryTimer("1");
+
+    // Round 3 — same signature again: park, do NOT rework
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: REFUSAL,
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
+    expect(
+      orchestrator.getState().issueReviewFailureStreaks["1"],
+    ).toBeUndefined();
+
+    // The loud operator comment fires as a void side effect — flush it.
+    await Promise.resolve();
+    await Promise.resolve();
+    const parked = postedComments.find((body) =>
+      body.startsWith(
+        "## Parked: repeated review failure on the same criterion (SYMPH-402)",
+      ),
+    );
+    expect(parked).toBeDefined();
+    expect(parked).toContain("SYMPH-358 verify contract");
+  });
+
+  it("journals failure_exhausted with the review-failure signature on park", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createGateWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    for (let round = 0; round < 2; round += 1) {
+      await orchestrator.onWorkerExit({
+        issueId: "1",
+        outcome: "normal",
+        agentMessage: REFUSAL,
+      });
+      await orchestrator.onRetryTimer("1");
+    }
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: REFUSAL,
+    });
+
+    expect(orchestrator.getState().failureExhaustedIds.has("1")).toBe(true);
+    const exhausted = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((entry) => entry.kind === "failure_exhausted");
+    expect(exhausted).toBeDefined();
+    expect(exhausted?.summary).toContain("review rework futile");
+    expect(exhausted?.summary).toContain("SYMPH-402");
+  });
+
+  it("matches the SAME frozen criterion across differently-worded refusals via the AC snapshot", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createGateWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueAcSnapshots["1"] =
+      "### Acceptance Criteria\n- [ ] `check: pnpm test exits 0`";
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "[STAGE_FAILED: review] no evidence line for `check: pnpm test exits 0`",
+    });
+    await orchestrator.onRetryTimer("1");
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "[STAGE_FAILED: review] the frozen criterion check: pnpm test exits 0 lacks an exit-0 log",
+    });
+    await orchestrator.onRetryTimer("1");
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "[STAGE_FAILED: review] still blocking: check: pnpm test exits 0 was not satisfied",
+    });
+
+    expect(retryEntry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+  });
+
+  it("a different failure signature resets the streak — rework continues", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createGateWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: REFUSAL,
+    });
+    await orchestrator.onRetryTimer("1");
+
+    // A different failure resets the streak to 1.
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: review] council gate FAIL: real findings",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    // Same as round 1 again — the reset means this counts as 1, not 3.
+    const retryEntry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: REFUSAL,
+    });
+
+    expect(retryEntry).not.toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBe(3);
+  });
+});
