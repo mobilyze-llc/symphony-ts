@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 
 import { extractAcceptanceCriteria } from "../agent/ac-gate.js";
@@ -139,6 +140,9 @@ const CONTINUATION_RETRY_DELAY_MS = 1_000;
  * round N, and a third round against an unchanged criterion is futile.
  */
 const MAX_SAME_CRITERION_REVIEW_FAILURES = 3;
+const MAX_REVIEW_SUBSTRATE_STALL_FAILURES = 2;
+const SUBSTRATE_STALL_REGEX = /\bsubstrate_stall:/i;
+const SUBSTRATE_STALL_PREFIXES = ["substrate_stall:"];
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
@@ -3153,6 +3157,9 @@ export class OrchestratorCore {
       }
       targetStageName = targetStage.transitions.onComplete;
     }
+    if (currentStageName === "review" || targetStageName === "review") {
+      delete this.state.issueReviewInfrastructureStalls[issueId];
+    }
 
     // Move to the target stage (may be ahead of nextStageName if stages were skipped)
     this.state.issueStages[issueId] = targetStageName;
@@ -3228,6 +3235,19 @@ export class OrchestratorCore {
     }
 
     if (failureClass === "verify" || failureClass === "infra") {
+      if (
+        failureClass === "infra" &&
+        this.handleReviewInfrastructureStall(
+          issueId,
+          runningEntry,
+          agentMessage,
+        )
+      ) {
+        return null;
+      }
+      if (failureClass === "verify") {
+        delete this.state.issueReviewInfrastructureStalls[issueId];
+      }
       // Retryable failures — use existing exponential backoff
       return this.scheduleRetry(
         issueId,
@@ -3242,11 +3262,13 @@ export class OrchestratorCore {
     }
 
     if (failureClass === "rebase") {
+      delete this.state.issueReviewInfrastructureStalls[issueId];
       // Rebase failures — trigger rework if onRework configured, else retry
       return this.handleRebaseFailure(issueId, runningEntry, agentMessage);
     }
 
     // failureClass === "review" — trigger rework via gate lookup
+    delete this.state.issueReviewInfrastructureStalls[issueId];
     return this.handleReviewFailure(issueId, runningEntry, agentMessage);
   }
 
@@ -3428,6 +3450,130 @@ export class OrchestratorCore {
       count,
       matchedCriteria: normalized.matchedCriteria,
     };
+  }
+
+  /**
+   * SYMPH-441: a substrate-stalled council gate is infrastructure, not code
+   * rework. The review worker reports the first occurrence as
+   * `[STAGE_FAILED: infra]`, which retries the same review stage. If another
+   * substrate stall follows, park loudly so operators can relaunch/requeue
+   * without burning another implement round.
+   */
+  private handleReviewInfrastructureStall(
+    issueId: string,
+    runningEntry: RunningEntry,
+    agentMessage: string | undefined,
+  ): boolean {
+    const stageName = this.state.issueStages[issueId] ?? null;
+    if (!isReviewSubstrateStallMessage(agentMessage)) {
+      const hadSubstrateStall =
+        this.state.issueReviewInfrastructureStalls[issueId] !== undefined;
+      delete this.state.issueReviewInfrastructureStalls[issueId];
+      if (hadSubstrateStall && stageName === "review") {
+        delete this.state.issueFailureSignatures[`${issueId}:review`];
+      }
+      return false;
+    }
+
+    if (stageName !== "review") {
+      delete this.state.issueReviewInfrastructureStalls[issueId];
+      return false;
+    }
+
+    const stalledLanes = extractSubstrateStallLanes(agentMessage);
+    const signatureSource =
+      stalledLanes.length > 0
+        ? `substrate_stall:${stalledLanes.join(",")}`
+        : "substrate_stall:unknown-lane";
+    const signature = hashReviewInfrastructureSignature(signatureSource);
+    const previous = this.state.issueReviewInfrastructureStalls[issueId];
+    const count = previous !== undefined ? previous.count + 1 : 1;
+    this.state.issueReviewInfrastructureStalls[issueId] = {
+      signature,
+      count,
+      stalledLanes,
+    };
+    delete this.state.issueFailureSignatures[`${issueId}:review`];
+
+    if (count < MAX_REVIEW_SUBSTRATE_STALL_FAILURES) {
+      return false;
+    }
+
+    this.parkReviewInfrastructureBlocked(issueId, runningEntry, {
+      signature,
+      count,
+      stalledLanes,
+      agentMessage,
+    });
+    return true;
+  }
+
+  private parkReviewInfrastructureBlocked(
+    issueId: string,
+    runningEntry: RunningEntry,
+    input: {
+      signature: string;
+      count: number;
+      stalledLanes: string[];
+      agentMessage: string | undefined;
+    },
+  ): void {
+    const stageName = this.state.issueStages[issueId] ?? null;
+    const laneText =
+      input.stalledLanes.length > 0
+        ? input.stalledLanes.join(", ")
+        : "lane set not parseable from worker message";
+    const parkReason = `review gate infrastructure blocked: ${input.count} consecutive substrate_stall failures for ${laneText} (signature ${input.signature}); parked instead of reworking code (SYMPH-441)`;
+    const reworkCount = this.state.issueReworkCounts[issueId] ?? 0;
+    const stageHistory = this.state.issueExecutionHistory[issueId] ?? [];
+
+    this.state.failed.add(issueId);
+    this.releaseClaim(issueId);
+    this.clearTerminalIssueRuntimeState(issueId);
+    this.recordFailureInCluster(
+      issueId,
+      runningEntry.identifier,
+      {
+        signature: input.signature,
+        normalizedText: parkReason,
+        class: "permanent",
+      },
+      stageName,
+    );
+
+    void this.fireEscalationSideEffects(
+      issueId,
+      runningEntry.identifier,
+      [
+        "## Parked: review gate infrastructure blocked (SYMPH-441)",
+        "",
+        `The review gate reported ${input.count} consecutive substrate-stall infrastructure failures. Latest stalled lane set: ${laneText}.`,
+        "",
+        "This is not a council FAIL with code findings, and the orchestrator did not dispatch implement rework. Requeue after the council substrate is healthy or relaunch the review gate in a quiet window.",
+        "",
+        "Last review-stage message:",
+        sanitizeForLinear(input.agentMessage ?? "(missing)", { maxLen: 2000 }),
+      ].join("\n"),
+    );
+    void this.recordFailureExhausted(
+      issueId,
+      runningEntry.identifier,
+      runningEntry.issue.title,
+      parkReason,
+      {
+        failure_signature: input.signature,
+        failure_class: "permanent",
+      },
+      {
+        issueDescription: runningEntry.issue.description ?? "",
+        stageName,
+        parkKind: "retry_exhausted",
+        attemptCount: runningEntry.retryAttempt ?? 1,
+        reworkCount,
+        failureRecords: [],
+        stageHistory,
+      },
+    );
   }
 
   /**
@@ -4653,6 +4799,7 @@ export class OrchestratorCore {
     delete this.state.issuePauseTriageResumes[issueId];
     delete this.state.issueAcSnapshots[issueId];
     delete this.state.issueReviewFailureStreaks[issueId];
+    delete this.state.issueReviewInfrastructureStalls[issueId];
     delete this.state.loopTraceJournal[issueId];
     delete this.state.continuousFeedback[issueId];
     // Clear the exhaustion-dedup marker so a resumed issue can fire the alert
@@ -8680,6 +8827,96 @@ function toClusterMembers(value: unknown): ClusterMember[] | null {
     });
   }
   return members;
+}
+
+function isReviewSubstrateStallMessage(
+  text: string | null | undefined,
+): boolean {
+  return (
+    text !== null && text !== undefined && SUBSTRATE_STALL_REGEX.test(text)
+  );
+}
+
+function extractSubstrateStallLanes(text: string | null | undefined): string[] {
+  if (text === null || text === undefined) {
+    return [];
+  }
+  const lanes = new Set<string>();
+  const lowerText = text.toLowerCase();
+  let searchFrom = 0;
+  while (searchFrom < text.length) {
+    const match = findNextSubstrateStallPrefix(lowerText, searchFrom);
+    if (match === null) {
+      break;
+    }
+    let laneStart = match.index + match.prefix.length;
+    while (
+      laneStart < text.length &&
+      isSubstrateStallLanePadding(text.charCodeAt(laneStart))
+    ) {
+      laneStart += 1;
+    }
+    let laneEnd = laneStart;
+    while (
+      laneEnd < text.length &&
+      !isSubstrateStallLaneDelimiter(text.charCodeAt(laneEnd))
+    ) {
+      laneEnd += 1;
+    }
+    const lane = trimSubstrateStallLane(text.slice(laneStart, laneEnd));
+    if (lane !== "") {
+      lanes.add(lane);
+    }
+    searchFrom = Math.max(laneEnd, match.index + 1);
+  }
+  return [...lanes].sort();
+}
+
+function findNextSubstrateStallPrefix(
+  lowerText: string,
+  searchFrom: number,
+): { index: number; prefix: string } | null {
+  let best: { index: number; prefix: string } | null = null;
+  for (const prefix of SUBSTRATE_STALL_PREFIXES) {
+    const index = lowerText.indexOf(prefix, searchFrom);
+    if (index !== -1 && (best === null || index < best.index)) {
+      best = { index, prefix };
+    }
+  }
+  return best;
+}
+
+function isSubstrateStallLaneDelimiter(charCode: number): boolean {
+  return (
+    charCode === 9 ||
+    charCode === 10 ||
+    charCode === 11 ||
+    charCode === 12 ||
+    charCode === 13 ||
+    charCode === 32 ||
+    charCode === 44 ||
+    charCode === 59
+  );
+}
+
+function isSubstrateStallLanePadding(charCode: number): boolean {
+  return charCode === 9 || charCode === 32;
+}
+
+function trimSubstrateStallLane(value: string): string {
+  let end = value.length;
+  while (end > 0) {
+    const charCode = value.charCodeAt(end - 1);
+    if (charCode !== 46) {
+      break;
+    }
+    end -= 1;
+  }
+  return value.slice(0, end);
+}
+
+function hashReviewInfrastructureSignature(source: string): string {
+  return createHash("sha1").update(source).digest("hex").slice(0, 7);
 }
 
 function defaultTimerScheduler(): TimerScheduler {

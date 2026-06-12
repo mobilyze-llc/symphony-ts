@@ -173,6 +173,522 @@ describe("failure signal routing in onWorkerExit", () => {
     expect(retryEntry!.error).toBe("agent review failure: rework to implement");
   });
 
+  it("retries review gate substrate stalls once, then parks infra-blocked", async () => {
+    const comments: string[] = [];
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+
+    const substrateMessage =
+      "Headless council gate error: substrate_stall:claude-opus with no surviving P1/P2 code findings.\n[STAGE_FAILED: infra]";
+    const firstRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: substrateMessage,
+    });
+
+    expect(firstRetry).not.toBeNull();
+    expect(firstRetry!.error).toBe("agent reported failure: infra");
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toMatchObject({
+      count: 1,
+      stalledLanes: ["claude-opus"],
+    });
+
+    await orchestrator.onRetryTimer("1");
+    const secondRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: substrateMessage,
+    });
+
+    expect(secondRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(orchestrator.getState().failureExhaustedIds.has("1")).toBe(true);
+    expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
+    await Promise.resolve();
+    expect(comments.join("\n")).toContain(
+      "Parked: review gate infrastructure blocked",
+    );
+    expect(comments.join("\n")).toContain("Latest stalled lane set");
+    expect(comments.join("\n")).toContain("claude-opus");
+    const exhausted = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((entry) => entry.kind === "failure_exhausted");
+    expect(exhausted?.metadata.failure_class).toBe("permanent");
+    const cluster = orchestrator
+      .getState()
+      .dispatcherRunJournal.find(
+        (entry) =>
+          entry.kind === "cluster_transition" &&
+          entry.metadata.signature === exhausted?.metadata.failure_signature,
+      );
+    expect(cluster).toBeDefined();
+    expect(cluster?.metadata.details).toMatchObject({
+      errorClass: "permanent",
+    });
+  });
+
+  it("does not let a prior review infra retry make the first substrate stall park as no-novelty", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const ordinaryInfraRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Tracker API temporarily unavailable.\n[STAGE_FAILED: infra]",
+    });
+    expect(ordinaryInfraRetry).not.toBeNull();
+    await orchestrator.onRetryTimer("1");
+
+    const firstSubstrateRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: substrate_stall:claude-opus with no surviving P1/P2 code findings.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(firstSubstrateRetry).not.toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toMatchObject({
+      count: 1,
+      stalledLanes: ["claude-opus"],
+    });
+  });
+
+  it("does not let a prior substrate stall make a different infra failure park as no-novelty", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const firstSubstrateRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: substrate_stall:claude-opus with no surviving P1/P2 code findings.\n[STAGE_FAILED: infra]",
+    });
+    expect(firstSubstrateRetry).not.toBeNull();
+    await orchestrator.onRetryTimer("1");
+
+    const trackerRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Tracker API temporarily unavailable.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(trackerRetry).not.toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "failure_exhausted" &&
+            entry.summary.includes("retry futile"),
+        ),
+    ).toBe(false);
+  });
+
+  it("still parks repeated non-substrate review infra failures as no-novelty", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const firstRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Tracker API temporarily unavailable.\n[STAGE_FAILED: infra]",
+    });
+    expect(firstRetry).not.toBeNull();
+    await orchestrator.onRetryTimer("1");
+
+    const secondRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Tracker API temporarily unavailable.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(secondRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "failure_exhausted" &&
+            entry.summary.includes("retry futile"),
+        ),
+    ).toBe(true);
+  });
+
+  it("treats non-review substrate-stall text as ordinary infra for novelty", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    const ordinaryInfraRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Tracker API temporarily unavailable.\n[STAGE_FAILED: infra]",
+    });
+    expect(ordinaryInfraRetry).not.toBeNull();
+    await orchestrator.onRetryTimer("1");
+
+    const substrateTextRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Worker log mentioned substrate_stall:claude-opus outside the review gate.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(substrateTextRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "failure_exhausted" &&
+            entry.summary.includes("retry futile"),
+        ),
+    ).toBe(true);
+  });
+
+  it("does not let stale substrate-stall state disable non-review infra novelty", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    const ordinaryInfraRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Tracker API temporarily unavailable.\n[STAGE_FAILED: infra]",
+    });
+    expect(ordinaryInfraRetry).not.toBeNull();
+    orchestrator.getState().issueReviewInfrastructureStalls["1"] = {
+      count: 1,
+      signature: "stale-review-substrate-stall",
+      stalledLanes: ["claude-opus"],
+    };
+    await orchestrator.onRetryTimer("1");
+
+    const secondRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Tracker API temporarily unavailable.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(secondRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "failure_exhausted" &&
+            entry.summary.includes("retry futile"),
+        ),
+    ).toBe(true);
+  });
+
+  it("clears substrate-stall review state when a real review finding reworks code", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: substrate_stall:claude-opus with no surviving P1/P2 code findings.\n[STAGE_FAILED: infra]",
+    });
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toBeDefined();
+
+    await orchestrator.onRetryTimer("1");
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "Real code finding survived.\n[STAGE_FAILED: review]",
+    });
+
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toBeUndefined();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+  });
+
+  it("clears stale substrate-stall review state when entering a fresh review stage", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueReviewInfrastructureStalls["1"] = {
+      count: 1,
+      signature: "stale",
+      stalledLanes: ["claude-opus"],
+    };
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toBeUndefined();
+  });
+
+  it("parks repeated unparseable substrate stalls even when prose changes", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const firstRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: substrate_stall:\n[STAGE_FAILED: infra]",
+    });
+    expect(firstRetry).not.toBeNull();
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"]?.count,
+    ).toBe(1);
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"]
+        ?.stalledLanes,
+    ).toEqual([]);
+
+    await orchestrator.onRetryTimer("1");
+    const secondRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Second run had different prose but the same substrate_stall:\n[STAGE_FAILED: infra]",
+    });
+
+    expect(secondRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+  });
+
+  it("does not treat prose-only substrate stall mentions as review gate stalls", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Worker hit an unrelated infra error while reading docs about a substrate stall.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(retry).not.toBeNull();
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toBeUndefined();
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+  });
+
+  it("does not parse natural-language substrate stall colons as lane markers", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Worker hit an unrelated infra error while reading docs about a substrate stall: details follow.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(retry).not.toBeNull();
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toBeUndefined();
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+  });
+
+  it("extracts substrate-stall lanes after marker padding", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: substrate_stall: claude-opus\n[STAGE_FAILED: infra]",
+    });
+
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"]
+        ?.stalledLanes,
+    ).toEqual(["claude-opus"]);
+  });
+
+  it("preserves bracketed substrate-stall lane suffixes while trimming sentence periods", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: substrate_stall: team(west).\n[STAGE_FAILED: infra]",
+    });
+
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"]
+        ?.stalledLanes,
+    ).toEqual(["team(west)"]);
+  });
+
+  it("parks the second substrate stall while preserving the full punctuated lane set", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const laneA =
+      "Headless council gate error: substrate_stall:team:deadbeef123456#1.\n[STAGE_FAILED: infra]";
+    const laneB =
+      "Headless council gate error: substrate_stall:team:feedface123456#1.\n[STAGE_FAILED: infra]";
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: laneA,
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const changedLaneRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: laneB,
+    });
+
+    expect(changedLaneRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(orchestrator.getState().failureExhaustedIds.has("1")).toBe(true);
+  });
+
   it("escalates review failure when max rework exceeded", async () => {
     const base = createGateWorkflowConfig();
     const stages: StagesConfig = {

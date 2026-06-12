@@ -499,6 +499,14 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain(
       "echoes the live-proof disposition line you verified",
     );
+    expect(output).toContain("Review Infrastructure Retry");
+    expect(output).toContain("substrate_stall:<lane>");
+    expect(output).toContain("Do NOT output `[STAGE_FAILED: review]`");
+    expect(output).toContain("parks the issue loudly as infra-blocked");
+    expect(output).toContain(
+      'reports any other `verdict: "error"` or degraded condition',
+    );
+    expect(output).toContain("non-PASS review-result");
 
     // The without-ACs else branch is new code too — render and assert it
     // (council R1: untested Liquid branches are how strictVariables bites).
@@ -513,6 +521,24 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       "If the workpad records gate-passed acceptance criteria",
     );
     expect(withoutAcs).toContain("Pre-gate evidence check");
+  });
+
+  it("shipped Symphony workflow overlays substrate-stall review routing", async () => {
+    const output = await renderPrompt({
+      workflow: { promptTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "review",
+      reworkCount: 0,
+    });
+
+    expect(output).toContain("Symphony Review Infrastructure Routing");
+    expect(output).toContain('degradedReason: "substrate_stall"');
+    expect(output).toContain("## Review Infrastructure Retry");
+    expect(output).toContain("[STAGE_FAILED: infra]");
+    expect(output).toContain("actual surviving P1/P2 code findings");
+    expect(output).toContain('Any other readable `verdict: "error"`');
+    expect(output).toContain("Never output `[STAGE_COMPLETE]`");
   });
 
   it("review stage does NOT contain description", async () => {

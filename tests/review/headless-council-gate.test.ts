@@ -977,6 +977,33 @@ describe("runHeadlessCouncilGate", () => {
     expect(report).toContain("pi-deepseek");
   });
 
+  it("instructs the Codex lead not to turn substrate stalls into code findings", async () => {
+    const harness = await createHarness();
+    await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: true,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const prompt = await readFile(
+      join(harness.artifactDir, "codex-high-lead.prompt.md"),
+      "utf-8",
+    );
+    expect(prompt).toContain(
+      "Do not convert degraded reviewer infrastructure into blocking code FINDINGS",
+    );
+    expect(prompt).toContain("degradedReason: substrate_stall");
+    expect(prompt).toContain(
+      "the gate aggregate will still fail closed from the lane state",
+    );
+  });
+
   it("parses a verdict after a short plain-text preamble", async () => {
     const harness = await createHarness({
       laneBehavior: {

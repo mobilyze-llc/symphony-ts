@@ -1052,6 +1052,15 @@ export interface OrchestratorState {
     { signature: string; count: number }
   >;
   /**
+   * Consecutive review-gate infrastructure stalls per issue (SYMPH-441).
+   * Review-stage substrate stalls are retried once as infrastructure; the
+   * second consecutive substrate stall parks loudly instead of reworking code.
+   */
+  issueReviewInfrastructureStalls: Record<
+    string,
+    { signature: string; count: number; stalledLanes: string[] }
+  >;
+  /**
    * Issues for which a `failure_exhausted` alert has been fired in this
    * session (SYMPH-397). Used by runtime-host to suppress the redundant
    * `issue_failed` notification when the terminal path was already announced
@@ -1214,6 +1223,7 @@ export function createInitialOrchestratorState(input: {
     issueFailureSignatures: {},
     issueDispositions: {},
     issueReviewFailureStreaks: {},
+    issueReviewInfrastructureStalls: {},
     failureExhaustedIds: new Set<string>(),
   };
 }
