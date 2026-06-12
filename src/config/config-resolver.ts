@@ -15,7 +15,10 @@ import {
   DEFAULT_BUDGET_ESCALATION_MAX_STEPS,
   DEFAULT_BUDGET_ESCALATION_MULTIPLIER,
   DEFAULT_CODEX_COMMAND,
+  DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
+  DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
   DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
+  DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
   DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
   DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
   DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
@@ -294,6 +297,15 @@ export function resolveWorkflowConfig(
       command: readString(codex.command) ?? DEFAULT_CODEX_COMMAND,
       ephemeralHome: readBoolean(codex.ephemeral_home) ?? false,
       disableSkills: readBoolean(codex.disable_skills) ?? false,
+      toolOutputTokenLimit:
+        readPositiveInteger(codex.tool_output_token_limit) ??
+        DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
+      modelAutoCompactTokenLimit:
+        readPositiveInteger(codex.model_auto_compact_token_limit) ??
+        DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+      maxHealthyCompactionsPerStage:
+        readNonNegativeInteger(codex.max_healthy_compactions_per_stage) ??
+        DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
       approvalPolicy: codex.approval_policy,
       threadSandbox: codex.thread_sandbox,
       turnSandboxPolicy: codex.turn_sandbox_policy,

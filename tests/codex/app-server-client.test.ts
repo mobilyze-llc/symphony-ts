@@ -692,6 +692,46 @@ describe("CodexAppServerClient", () => {
     }
   });
 
+  it("renders configured headless output caps into the ephemeral CODEX_HOME", async () => {
+    const workspace = await createWorkspace();
+    const sourceHome = await createWorkspace();
+    await writeFile(join(sourceHome, "auth.json"), "{}\n");
+
+    const configPath = join(workspace, "codex-config.toml");
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = sourceHome;
+    try {
+      const events: CodexClientEvent[] = [];
+      const command = [
+        `cp "$CODEX_HOME/config.toml" ${shellQuote(configPath)}`,
+        `exec ${shellQuote(process.execPath)} ${shellQuote(fixturePath)} happy`,
+      ].join(" && ");
+      const client = createClient("happy", workspace, events, {
+        command,
+        ephemeralHome: true,
+        disableSkills: true,
+        toolOutputTokenLimit: 1_234,
+        modelAutoCompactTokenLimit: 12_345,
+      });
+
+      const result = await client.startSession({
+        prompt: "Verify configured caps",
+        title: "ABC-123: Example",
+      });
+
+      expect(result.status).toBe("completed");
+      const config = await readFile(configPath, "utf8");
+      expect(config).toContain("tool_output_token_limit = 1234");
+      expect(config).toContain("model_auto_compact_token_limit = 12345");
+    } finally {
+      if (previousCodexHome === undefined) {
+        Reflect.deleteProperty(process.env, "CODEX_HOME");
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+    }
+  });
+
   it("fails clearly when ephemeral CODEX_HOME cannot read operator auth", async () => {
     const workspace = await createWorkspace();
     const sourceHome = await createWorkspace();
@@ -933,6 +973,57 @@ describe("CodexAppServerClient", () => {
           cacheReadTokens: 41000,
           reasoningTokens: 7,
         }),
+      }),
+    );
+
+    await client.close();
+  });
+
+  it("emits compaction telemetry when Codex auto-compacts the thread", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient("compaction-notification", workspace, events);
+
+    const result = await client.startSession({
+      prompt: "Trigger compaction telemetry",
+      title: "ABC-123: Example",
+    });
+
+    expect(result.status).toBe("completed");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "compaction",
+        message: "thread/autoCompact/completed",
+      }),
+    );
+
+    await client.close();
+  });
+
+  it("does not treat ordinary compact payload text as compaction telemetry", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const client = createClient(
+      "compact-payload-notification",
+      workspace,
+      events,
+    );
+
+    const result = await client.startSession({
+      prompt: "Return compact payload text",
+      title: "ABC-123: Example",
+    });
+
+    expect(result.status).toBe("completed");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "notification",
+        message: "item/completed",
+      }),
+    );
+    expect(events).not.toContainEqual(
+      expect.objectContaining({
+        event: "compaction",
       }),
     );
 
@@ -1625,6 +1716,8 @@ function createClient(
     command: string;
     ephemeralHome: boolean;
     disableSkills: boolean;
+    toolOutputTokenLimit: number;
+    modelAutoCompactTokenLimit: number;
     artifactDirectory: string;
     threadSandbox: ConstructorParameters<
       typeof CodexAppServerClient
@@ -1643,6 +1736,12 @@ function createClient(
     ...(overrides?.disableSkills === undefined
       ? {}
       : { disableSkills: overrides.disableSkills }),
+    ...(overrides?.toolOutputTokenLimit === undefined
+      ? {}
+      : { toolOutputTokenLimit: overrides.toolOutputTokenLimit }),
+    ...(overrides?.modelAutoCompactTokenLimit === undefined
+      ? {}
+      : { modelAutoCompactTokenLimit: overrides.modelAutoCompactTokenLimit }),
     cwd: workspace,
     approvalPolicy: "full-auto",
     threadSandbox: overrides?.threadSandbox ?? "workspace-write",

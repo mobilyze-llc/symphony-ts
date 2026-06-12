@@ -155,6 +155,9 @@ export interface WorkflowCodexConfig {
   command: string;
   ephemeralHome?: boolean;
   disableSkills?: boolean;
+  toolOutputTokenLimit?: number;
+  modelAutoCompactTokenLimit?: number;
+  maxHealthyCompactionsPerStage?: number;
   approvalPolicy: unknown;
   threadSandbox: unknown;
   turnSandboxPolicy: unknown;

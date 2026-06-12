@@ -16,6 +16,10 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, parse, relative } from "node:path";
 
+import {
+  DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+  DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
+} from "../config/defaults.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
@@ -101,6 +105,7 @@ export interface CodexClientEvent {
     | "turn_input_required"
     | "approval_auto_approved"
     | "unsupported_tool_call"
+    | "compaction"
     | "session_artifact_saved"
     | "session_rotated"
     | "notification"
@@ -136,6 +141,8 @@ export interface CodexAppServerClientOptions {
   command: string;
   ephemeralHome?: boolean;
   disableSkills?: boolean;
+  toolOutputTokenLimit?: number;
+  modelAutoCompactTokenLimit?: number;
   cwd: string;
   approvalPolicy: unknown;
   threadSandbox: unknown;
@@ -503,6 +510,15 @@ export class CodexAppServerClient {
           codexHome,
           cwd: this.options.cwd,
           sourceHome,
+          ...(this.options.toolOutputTokenLimit === undefined
+            ? {}
+            : { toolOutputTokenLimit: this.options.toolOutputTokenLimit }),
+          ...(this.options.modelAutoCompactTokenLimit === undefined
+            ? {}
+            : {
+                modelAutoCompactTokenLimit:
+                  this.options.modelAutoCompactTokenLimit,
+              }),
         }),
       );
     }
@@ -963,7 +979,7 @@ export class CodexAppServerClient {
 
     if (method !== null) {
       this.emit({
-        event: "notification",
+        event: isCompactionNotification(method) ? "compaction" : "notification",
         sessionId: this.currentTurn?.sessionId ?? null,
         threadId: this.currentTurn?.threadId ?? this.threadId,
         turnId: this.currentTurn?.turnId ?? null,
@@ -1337,8 +1353,16 @@ export async function prepareDisabledSkillsConfig(input: {
   codexHome: string;
   cwd: string;
   sourceHome: string;
+  toolOutputTokenLimit?: number;
+  modelAutoCompactTokenLimit?: number;
 }): Promise<string> {
-  return renderHeadlessCodexConfig(await discoverCodexSkillPaths(input));
+  return renderHeadlessCodexConfig(await discoverCodexSkillPaths(input), {
+    toolOutputTokenLimit:
+      input.toolOutputTokenLimit ?? DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
+    modelAutoCompactTokenLimit:
+      input.modelAutoCompactTokenLimit ??
+      DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+  });
 }
 
 async function discoverCodexSkillPaths(input: {
@@ -1533,17 +1557,20 @@ function pathExists(path: string): boolean {
   }
 }
 
-// Enforceable in-turn context caps (SYMPH-319). Prompt-level output
-// discipline proved advisory-only; these codex-native limits bound what a
-// single tool output can pin in history and when accumulated history is
-// auto-compacted, independent of worker compliance.
-export const HEADLESS_TOOL_OUTPUT_TOKEN_LIMIT = 2_500;
-export const HEADLESS_AUTO_COMPACT_TOKEN_LIMIT = 40_000;
-
-function renderHeadlessCodexConfig(skillPaths: string[]): string {
+function renderHeadlessCodexConfig(
+  skillPaths: string[],
+  caps: {
+    toolOutputTokenLimit: number;
+    modelAutoCompactTokenLimit: number;
+  },
+): string {
+  // Enforceable in-turn context caps (SYMPH-319/454). Prompt-level output
+  // discipline proved advisory-only; these codex-native limits bound what a
+  // single tool output can pin in history and when accumulated history is
+  // auto-compacted, independent of worker compliance.
   const featureConfig = `project_doc_max_bytes = 0
-tool_output_token_limit = ${HEADLESS_TOOL_OUTPUT_TOKEN_LIMIT}
-model_auto_compact_token_limit = ${HEADLESS_AUTO_COMPACT_TOKEN_LIMIT}
+tool_output_token_limit = ${caps.toolOutputTokenLimit}
+model_auto_compact_token_limit = ${caps.modelAutoCompactTokenLimit}
 
 [features]
 apps = false
@@ -2250,6 +2277,10 @@ function extractRateLimits(
     }
   }
   return null;
+}
+
+function isCompactionNotification(method: string): boolean {
+  return method.toLowerCase() === "thread/autocompact/completed";
 }
 
 /**

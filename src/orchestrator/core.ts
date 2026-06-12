@@ -3230,6 +3230,7 @@ export class OrchestratorCore {
         outputTokens: runningEntry.totalStageOutputTokens,
         cacheReadTokens: runningEntry.totalStageCacheReadTokens,
         cacheWriteTokens: runningEntry.totalStageCacheWriteTokens,
+        compactions: runningEntry.totalStageCompactions ?? 0,
         turns: runningEntry.turnCount,
         outcome: classifiedOutcome,
       };
@@ -9589,6 +9590,7 @@ function toStageRecordFromMetadata(
     outputTokens: readMetadataNumber(metadata, "outputTokens") ?? 0,
     cacheReadTokens: readMetadataNumber(metadata, "cacheReadTokens") ?? 0,
     cacheWriteTokens: readMetadataNumber(metadata, "cacheWriteTokens") ?? 0,
+    compactions: readMetadataNumber(metadata, "compactions") ?? 0,
     turns,
     outcome,
   };

@@ -29,6 +29,7 @@ const SESSION_EVENT_MESSAGES: Partial<
   turn_input_required: "operator input required",
   approval_auto_approved: "approval auto approved",
   unsupported_tool_call: "unsupported tool call",
+  compaction: "compaction",
   notification: "notification",
   other_message: "other message",
   malformed: "malformed event",
@@ -63,6 +64,9 @@ export function applyCodexEventToSession(
   session.lastCodexEvent = event.event;
   session.lastCodexTimestamp = event.timestamp;
   session.lastCodexMessage = summarizeCodexEvent(event);
+  if (event.event === "compaction") {
+    session.totalStageCompactions = (session.totalStageCompactions ?? 0) + 1;
+  }
   if (event.artifacts !== undefined && event.artifacts.length > 0) {
     const existingPaths = new Set(
       session.codexSessionLogs.map((entry) => entry.path),
@@ -536,6 +540,14 @@ function buildRecentActivityEntry(
       }
     }
     return { timestamp: event.timestamp, toolName: "Notification", context };
+  }
+
+  if (event.event === "compaction") {
+    return {
+      timestamp: event.timestamp,
+      toolName: "Compaction",
+      context: event.message ?? null,
+    };
   }
 
   return null;

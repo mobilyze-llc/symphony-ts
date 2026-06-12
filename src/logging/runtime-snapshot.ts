@@ -1,4 +1,9 @@
 import { parseRateLimitSnapshot } from "../codex/rate-limits.js";
+import {
+  DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
+  DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+  DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
+} from "../config/defaults.js";
 import type {
   CodexRateLimits,
   CodexTotals,
@@ -58,6 +63,8 @@ export interface RuntimeSnapshotRunningRow {
     cache_write_tokens: number;
     reasoning_tokens: number;
   };
+  output_caps?: RuntimeSnapshotOutputCaps;
+  churn?: RuntimeSnapshotChurn;
   rework_count?: number;
   rate_limit_window: RuntimeSnapshotRateLimitWindowUsage | null;
   total_pipeline_tokens: number;
@@ -77,6 +84,17 @@ export interface RuntimeSnapshotRunningRow {
   health: HealthStatus;
   health_reason: string | null;
   loop_trace_preview: LoopTraceJournalPreviewResponse;
+}
+
+export interface RuntimeSnapshotOutputCaps {
+  tool_output_token_limit: number;
+  model_auto_compact_token_limit: number;
+}
+
+export interface RuntimeSnapshotChurn {
+  compactions_per_stage: Record<string, number>;
+  current_stage_compactions: number;
+  max_healthy_compactions_per_stage: number;
 }
 
 export interface RuntimeSnapshotRateLimitWindowRow {
@@ -380,6 +398,11 @@ export interface RuntimeSnapshotEnrichment {
     rateLimits: Record<string, unknown>;
   } | null;
   watchdog?: WatchdogRegistrySnapshot | null;
+  codexCaps?: {
+    toolOutputTokenLimit: number;
+    modelAutoCompactTokenLimit: number;
+    maxHealthyCompactionsPerStage: number;
+  };
 }
 
 export interface RuntimeSnapshotExplicitResumeMark {
@@ -404,6 +427,17 @@ export function buildRuntimeSnapshot(
 ): RuntimeSnapshot {
   const now = options?.now ?? new Date();
   const enrichment = options?.enrichment;
+  const codexCaps = {
+    toolOutputTokenLimit:
+      enrichment?.codexCaps?.toolOutputTokenLimit ??
+      DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
+    modelAutoCompactTokenLimit:
+      enrichment?.codexCaps?.modelAutoCompactTokenLimit ??
+      DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
+    maxHealthyCompactionsPerStage:
+      enrichment?.codexCaps?.maxHealthyCompactionsPerStage ??
+      DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
+  };
 
   const running = Object.values(state.running)
     .slice()
@@ -448,9 +482,16 @@ export function buildRuntimeSnapshot(
           0,
         ) + entry.totalStageCacheWriteTokens;
       const pipelineStage = state.issueStages[entry.issue.id] ?? null;
+      const compactionsPerStage = buildCompactionsPerStage(
+        executionHistory,
+        pipelineStage,
+        entry.totalStageCompactions ?? 0,
+      );
       const { health, health_reason } = classifyHealth(
         entry.lastCodexTimestamp,
         tokensPerTurn,
+        entry.totalStageCompactions ?? 0,
+        codexCaps.maxHealthyCompactionsPerStage,
         now,
         pipelineStage,
       );
@@ -489,6 +530,16 @@ export function buildRuntimeSnapshot(
           total_tokens: totalPipelineTokens,
           cache_read_tokens: pipelineCacheReadTokens,
           cache_write_tokens: pipelineCacheWriteTokens,
+        },
+        output_caps: {
+          tool_output_token_limit: codexCaps.toolOutputTokenLimit,
+          model_auto_compact_token_limit: codexCaps.modelAutoCompactTokenLimit,
+        },
+        churn: {
+          compactions_per_stage: compactionsPerStage,
+          current_stage_compactions: entry.totalStageCompactions ?? 0,
+          max_healthy_compactions_per_stage:
+            codexCaps.maxHealthyCompactionsPerStage,
         },
         rate_limit_window: toSnapshotRateLimitWindowUsage(
           entry.rateLimitWindows,
@@ -1116,6 +1167,8 @@ export function getStallThreshold(stageName: string | null): number {
 function classifyHealth(
   lastEventAt: string | null,
   tokensPerTurn: number,
+  currentStageCompactions: number,
+  maxHealthyCompactionsPerStage: number,
   now: Date,
   stageName: string | null,
 ): { health: HealthStatus; health_reason: string | null } {
@@ -1141,12 +1194,59 @@ function classifyHealth(
     }
   }
 
+  const yellowReasons: string[] = [];
   if (tokensPerTurn > HIGH_TOKEN_BURN_THRESHOLD) {
+    yellowReasons.push(
+      `high token burn: ${Math.round(tokensPerTurn).toLocaleString("en-US")} tokens/turn`,
+    );
+  }
+
+  if (currentStageCompactions > maxHealthyCompactionsPerStage) {
+    const stageLabel = stageName ?? "unknown";
+    yellowReasons.push(
+      `high compaction churn: ${currentStageCompactions.toLocaleString("en-US")} compactions in ${stageLabel} stage (threshold ${maxHealthyCompactionsPerStage.toLocaleString("en-US")})`,
+    );
+  }
+
+  if (yellowReasons.length > 0) {
     return {
       health: "yellow",
-      health_reason: `high token burn: ${Math.round(tokensPerTurn).toLocaleString("en-US")} tokens/turn`,
+      health_reason: yellowReasons.join("; "),
     };
   }
 
   return { health: "green", health_reason: null };
+}
+
+function buildCompactionsPerStage(
+  executionHistory: StageRecord[],
+  currentStage: string | null,
+  currentStageCompactions: number,
+): Record<string, number> {
+  const compactionsPerStage: Record<string, number> = {};
+  for (const record of executionHistory) {
+    addCompactions(
+      compactionsPerStage,
+      record.stageName,
+      record.compactions ?? 0,
+    );
+  }
+  addCompactions(
+    compactionsPerStage,
+    currentStage ?? "unknown",
+    currentStageCompactions,
+  );
+  return compactionsPerStage;
+}
+
+function addCompactions(
+  compactionsPerStage: Record<string, number>,
+  stageName: string,
+  compactions: number,
+): void {
+  if (!Number.isFinite(compactions) || compactions <= 0) {
+    return;
+  }
+  compactionsPerStage[stageName] =
+    (compactionsPerStage[stageName] ?? 0) + Math.floor(compactions);
 }

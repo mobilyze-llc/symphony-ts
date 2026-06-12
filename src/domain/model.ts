@@ -765,6 +765,7 @@ export interface LiveSession {
   totalStageTotalTokens: number;
   totalStageCacheReadTokens: number;
   totalStageCacheWriteTokens: number;
+  totalStageCompactions?: number;
   turnHistory: TurnHistoryEntry[];
   recentActivity: RecentActivityEntry[];
   tokenTelemetry: TokenTelemetryEntry[];
@@ -963,6 +964,7 @@ export interface StageRecord {
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
+  compactions?: number;
   turns: number;
   outcome: string;
 }
@@ -1191,6 +1193,7 @@ export function createEmptyLiveSession(): LiveSession {
     totalStageTotalTokens: 0,
     totalStageCacheReadTokens: 0,
     totalStageCacheWriteTokens: 0,
+    totalStageCompactions: 0,
     turnHistory: [],
     recentActivity: [],
     tokenTelemetry: [],
