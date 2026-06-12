@@ -1,14 +1,21 @@
 import { homedir, hostname } from "node:os";
 import { isAbsolute, normalize, resolve, sep } from "node:path";
 
+import { z } from "zod";
+
 import type { WorkflowDefinition } from "../domain/model.js";
 import { normalizeIssueState } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
+import {
+  checkConfigContracts,
+  formatContractViolations,
+} from "./config-contracts.js";
 import {
   DEFAULT_ACTIVE_STATES,
   DEFAULT_BUDGET_ESCALATION_MAX_STEPS,
   DEFAULT_BUDGET_ESCALATION_MULTIPLIER,
   DEFAULT_CODEX_COMMAND,
+  DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
   DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
   DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
   DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
@@ -43,9 +50,15 @@ import {
   DEFAULT_READ_TIMEOUT_MS,
   DEFAULT_RUNNER_KIND,
   DEFAULT_STALL_TIMEOUT_MS,
+  DEFAULT_STUCK_TRIAGE_ENABLED,
+  DEFAULT_STUCK_TRIAGE_TIMEOUT_MS,
   DEFAULT_TERMINAL_STATES,
   DEFAULT_TRACKER_KIND,
   DEFAULT_TURN_TIMEOUT_MS,
+  DEFAULT_VERDICTS_PAGE_AFTER_TICKS,
+  DEFAULT_WATCHDOG_CIRCUIT_BREAKER,
+  DEFAULT_WATCHDOG_MAX_FILINGS_PER_HOUR,
+  DEFAULT_WATCHDOG_SYSTEMIC_THRESHOLD,
   DEFAULT_WORKSPACE_ROOT,
 } from "./defaults.js";
 import type {
@@ -60,8 +73,16 @@ import type {
   StagesConfig,
   WorkflowContinuousFeedbackEvent,
   WorkflowHardStopsConfigOverride,
+  WorkflowStuckTriageConfig,
 } from "./types.js";
 import { GATE_TYPES, STAGE_TYPES } from "./types.js";
+
+// validateStagesConfig moved to config-contracts.ts (SYMPH-409); re-exported
+// here so existing importers keep working.
+export {
+  type StagesValidationResult,
+  validateStagesConfig,
+} from "./config-contracts.js";
 
 const LINEAR_CANONICAL_API_KEY_ENV = "LINEAR_API_KEY";
 
@@ -83,11 +104,15 @@ export function resolveWorkflowConfig(
   const acGate = asRecord(config.ac_gate);
   const specFidelity = asRecord(config.spec_fidelity);
   const admissionCard = asRecord(config.admission_card);
+  const watchdog = asRecord(config.watchdog);
+  const verdicts = asRecord(config.verdicts);
   const runner = asRecord(config.runner);
   const continuousFeedback = asRecord(config.continuous_feedback);
   const codex = asRecord(config.codex);
   const server = asRecord(config.server);
+  const notifications = asRecord(config.notifications);
   const observability = asRecord(config.observability);
+  const contracts = asRecord(config.contracts);
 
   return {
     workflowPath: workflow.workflowPath,
@@ -223,6 +248,23 @@ export function resolveWorkflowConfig(
     admissionCard: {
       enabled: admissionCard.enabled === true,
     },
+    watchdog: {
+      systemicThreshold:
+        readPositiveInteger(watchdog.systemic_threshold) ??
+        DEFAULT_WATCHDOG_SYSTEMIC_THRESHOLD,
+      circuitBreaker:
+        readBoolean(watchdog.circuit_breaker) ??
+        DEFAULT_WATCHDOG_CIRCUIT_BREAKER,
+      maxFilingsPerHour:
+        readPositiveInteger(watchdog.max_filings_per_hour) ??
+        DEFAULT_WATCHDOG_MAX_FILINGS_PER_HOUR,
+      stuckTriage: resolveStuckTriageConfig(watchdog.stuck_triage, environment),
+    },
+    verdicts: {
+      pageAfterTicks:
+        readPositiveInteger(verdicts.page_after_ticks) ??
+        DEFAULT_VERDICTS_PAGE_AFTER_TICKS,
+    },
     runner: {
       kind: readString(runner.kind) ?? DEFAULT_RUNNER_KIND,
       model: readString(runner.model),
@@ -257,6 +299,9 @@ export function resolveWorkflowConfig(
         readPositiveInteger(codex.read_timeout_ms) ?? DEFAULT_READ_TIMEOUT_MS,
       stallTimeoutMs:
         readInteger(codex.stall_timeout_ms) ?? DEFAULT_STALL_TIMEOUT_MS,
+      sessionRotationInputTokens:
+        readNonNegativeInteger(codex.session_rotation_input_tokens) ??
+        DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
     },
     server: {
       port: readNonNegativeInteger(server.port),
@@ -264,6 +309,9 @@ export function resolveWorkflowConfig(
         readString(server.slack_notify_channel) ??
         environment.SLACK_NOTIFY_CHANNEL ??
         null,
+    },
+    notifications: {
+      slackEnabled: readBoolean(notifications.slack) ?? true,
     },
     observability: {
       dashboardEnabled:
@@ -279,6 +327,9 @@ export function resolveWorkflowConfig(
     stages: resolveStagesConfig(config.stages),
     escalationState: readString(config.escalation_state),
     ownerHost: readString(config.owner_host),
+    contracts: {
+      override: readBoolean(contracts.override) ?? false,
+    },
   };
 }
 
@@ -353,6 +404,21 @@ export function validateDispatchConfig(
     return invalid(
       ERROR_CODES.configInvalid,
       "codex.disable_skills requires codex.ephemeral_home before dispatch.",
+    );
+  }
+
+  // Declared-vs-consumed config contracts (SYMPH-409). contracts.override
+  // suppresses the failure but the violations ride along on the ok result so
+  // the runtime host can re-warn loudly at every startup and reload.
+  const contractViolations = checkConfigContracts(config);
+  if (contractViolations.length > 0) {
+    if (config.contracts?.override === true) {
+      return { ok: true, suppressedContractViolations: contractViolations };
+    }
+
+    return invalid(
+      ERROR_CODES.configContractViolation,
+      `Config contract violation(s):\n${formatContractViolations(contractViolations)}`,
     );
   }
 
@@ -627,6 +693,57 @@ function readStateConcurrencyMap(
   return Object.freeze(Object.fromEntries(normalizedEntries));
 }
 
+/**
+ * Watchdog L2 stuck-triage block (SYMPH-399), validated with Zod at the
+ * I/O boundary. Default-disabled: an absent block resolves to
+ * `{enabled: false, ...}` and the lane contributes zero side effects.
+ * A malformed block fails loudly at load (config-contract philosophy —
+ * a silently-dropped `enabled: true` would present as a watchdog that
+ * never triages).
+ */
+const STUCK_TRIAGE_SCHEMA = z
+  .object({
+    enabled: z.boolean().optional(),
+    base_url: z.string().min(1).optional().nullable(),
+    model: z.string().min(1).optional().nullable(),
+    api_key: z.string().min(1).optional().nullable(),
+    timeout_ms: z.number().int().positive().optional().nullable(),
+  })
+  .strict();
+
+function resolveStuckTriageConfig(
+  value: unknown,
+  environment: NodeJS.ProcessEnv,
+): WorkflowStuckTriageConfig {
+  const disabled: WorkflowStuckTriageConfig = {
+    enabled: DEFAULT_STUCK_TRIAGE_ENABLED,
+    baseUrl: null,
+    model: null,
+    apiKey: null,
+    timeoutMs: DEFAULT_STUCK_TRIAGE_TIMEOUT_MS,
+  };
+  if (value === undefined || value === null) {
+    return disabled;
+  }
+
+  const parsed = STUCK_TRIAGE_SCHEMA.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(
+      `Invalid watchdog.stuck_triage config: ${parsed.error.issues
+        .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+        .join("; ")}`,
+    );
+  }
+
+  return {
+    enabled: parsed.data.enabled ?? DEFAULT_STUCK_TRIAGE_ENABLED,
+    baseUrl: parsed.data.base_url ?? null,
+    model: parsed.data.model ?? null,
+    apiKey: resolveEnvReference(parsed.data.api_key ?? null, environment),
+    timeoutMs: parsed.data.timeout_ms ?? DEFAULT_STUCK_TRIAGE_TIMEOUT_MS,
+  };
+}
+
 function resolveEnvReference(
   value: string | null,
   environment: NodeJS.ProcessEnv,
@@ -831,126 +948,6 @@ function readFastTrackLabels(
     labels.add(label);
   }
   return [...labels];
-}
-
-export interface StagesValidationResult {
-  ok: boolean;
-  errors: string[];
-}
-
-export function validateStagesConfig(
-  stagesConfig: StagesConfig | null,
-): StagesValidationResult {
-  if (stagesConfig === null) {
-    return { ok: true, errors: [] };
-  }
-
-  const errors: string[] = [];
-  const stageNames = new Set(Object.keys(stagesConfig.stages));
-
-  if (!stageNames.has(stagesConfig.initialStage)) {
-    errors.push(
-      `initial_stage '${stagesConfig.initialStage}' does not reference a defined stage.`,
-    );
-  }
-
-  if (
-    stagesConfig.fastTrack != null &&
-    !stageNames.has(stagesConfig.fastTrack.initialStage)
-  ) {
-    errors.push(
-      `fast_track.initial_stage '${stagesConfig.fastTrack.initialStage}' does not reference a defined stage.`,
-    );
-  }
-
-  let hasTerminal = false;
-  for (const [name, stage] of Object.entries(stagesConfig.stages)) {
-    if (stage.type === "terminal") {
-      hasTerminal = true;
-      continue;
-    }
-
-    if (stage.type === "agent") {
-      if (stage.transitions.onComplete === null) {
-        errors.push(`Stage '${name}' (agent) has no on_complete transition.`);
-      } else if (!stageNames.has(stage.transitions.onComplete)) {
-        errors.push(
-          `Stage '${name}' on_complete references unknown stage '${stage.transitions.onComplete}'.`,
-        );
-      }
-
-      if (
-        stage.transitions.onRework !== null &&
-        !stageNames.has(stage.transitions.onRework)
-      ) {
-        errors.push(
-          `Stage '${name}' on_rework references unknown stage '${stage.transitions.onRework}'.`,
-        );
-      }
-    }
-
-    if (stage.type === "gate") {
-      if (stage.transitions.onApprove === null) {
-        errors.push(`Stage '${name}' (gate) has no on_approve transition.`);
-      } else if (!stageNames.has(stage.transitions.onApprove)) {
-        errors.push(
-          `Stage '${name}' on_approve references unknown stage '${stage.transitions.onApprove}'.`,
-        );
-      }
-
-      if (
-        stage.transitions.onRework !== null &&
-        !stageNames.has(stage.transitions.onRework)
-      ) {
-        errors.push(
-          `Stage '${name}' on_rework references unknown stage '${stage.transitions.onRework}'.`,
-        );
-      }
-    }
-  }
-
-  if (!hasTerminal) {
-    errors.push(
-      "No terminal stage defined. At least one stage must have type 'terminal'.",
-    );
-  }
-
-  // Check reachability from initial stage
-  const reachable = new Set<string>();
-  const queue = [stagesConfig.initialStage];
-  while (queue.length > 0) {
-    // biome-ignore lint/style/noNonNullAssertion: queue.length > 0 guarantees pop() returns a value
-    const current = queue.pop()!;
-    if (reachable.has(current)) {
-      continue;
-    }
-    reachable.add(current);
-
-    const stage = stagesConfig.stages[current];
-    if (stage === undefined) {
-      continue;
-    }
-
-    for (const target of [
-      stage.transitions.onComplete,
-      stage.transitions.onApprove,
-      stage.transitions.onRework,
-    ]) {
-      if (target !== null && !reachable.has(target)) {
-        queue.push(target);
-      }
-    }
-  }
-
-  for (const name of stageNames) {
-    if (!reachable.has(name)) {
-      errors.push(
-        `Stage '${name}' is unreachable from initial stage '${stagesConfig.initialStage}'.`,
-      );
-    }
-  }
-
-  return { ok: errors.length === 0, errors };
 }
 
 function parseReviewers(value: unknown): ReviewerDefinition[] {

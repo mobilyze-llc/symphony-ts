@@ -24,6 +24,68 @@ export class TrackerError extends Error {
   }
 }
 
+/** Default bound for serialized tracker error details in journal events. */
+export const TRACKER_ERROR_DETAILS_MAX_LENGTH = 2_000;
+
+const TRACKER_ERROR_TRUNCATION_MARKER = "…[truncated]";
+
+/**
+ * Serialize an unknown error-details payload into a bounded, readable string
+ * for journal events. Plain `String(object)` yields "[object Object]"
+ * (SYMPH-413) — this JSON-stringifies objects, substitutes an explicit
+ * placeholder for circular structures (never `String()`, which is the
+ * "[object Object]" failure mode this fixes), and truncates with an ellipsis
+ * marker when over the bound. The returned string never exceeds `maxLength`
+ * (marker included), is trimmed so leading whitespace can't consume the budget
+ * and hide the useful error text, and never ends on a split UTF-16 surrogate.
+ * Returns null when there is nothing useful to record.
+ */
+export function serializeTrackerErrorDetails(
+  details: unknown,
+  maxLength: number = TRACKER_ERROR_DETAILS_MAX_LENGTH,
+): string | null {
+  if (details === undefined || details === null) {
+    return null;
+  }
+
+  let serialized: string;
+  if (typeof details === "string") {
+    serialized = details;
+  } else {
+    try {
+      serialized =
+        JSON.stringify(details) ?? "[unserializable tracker error details]";
+    } catch {
+      serialized = "[unserializable tracker error details]";
+    }
+  }
+
+  serialized = serialized.trim();
+  if (serialized.length === 0) {
+    return null;
+  }
+
+  if (serialized.length <= maxLength) {
+    return serialized;
+  }
+
+  // When the budget can't even fit the marker, return a bare marker capped to
+  // the budget rather than overshooting the documented bound.
+  if (maxLength <= TRACKER_ERROR_TRUNCATION_MARKER.length) {
+    return TRACKER_ERROR_TRUNCATION_MARKER.slice(0, maxLength);
+  }
+
+  // Reserve room for the marker so the total output stays within maxLength,
+  // and step back off a lone high surrogate so truncation never emits a
+  // split UTF-16 surrogate pair.
+  let cut = maxLength - TRACKER_ERROR_TRUNCATION_MARKER.length;
+  const lastCode = serialized.charCodeAt(cut - 1);
+  if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+    cut -= 1;
+  }
+  return `${serialized.slice(0, cut)}${TRACKER_ERROR_TRUNCATION_MARKER}`;
+}
+
 export function toTrackerRequestError(error: unknown): TrackerError {
   if (error instanceof TrackerError) {
     return error;

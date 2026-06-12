@@ -223,7 +223,59 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "spec_fidelity",
   "operator_input_required",
   "continuous_feedback",
+  "dispatch_verdict",
+  "breaker_transition",
+  "cluster_transition",
+  // Shared intent-verb layer (SYMPH-399 / SYMPH-408 carve-out): idempotent,
+  // fenced, attributed journal writes that operator/agents/watchdog-L2 all
+  // mutate through. metadata carries schema_version, verb, status, actor.
+  "intent",
+  // Watchdog L2 stuck-ticket triage verdicts (SYMPH-399; the kind reserved
+  // by SYMPH-405's verdict-event vocabulary).
+  "triage_verdict",
 ] as const;
+
+// ---------------------------------------------------------------------------
+// Dispatch verdict events (SYMPH-405)
+// ---------------------------------------------------------------------------
+
+export const VERDICT_DISPOSITIONS = ["admit", "skip", "gate", "halt"] as const;
+
+export type VerdictDisposition = (typeof VERDICT_DISPOSITIONS)[number];
+
+export const VERDICT_ACTOR_KINDS = [
+  "operator",
+  "watchdog-l1",
+  "watchdog-l2",
+  "pipeline-worker",
+  "interactive-agent",
+  "dispatcher",
+] as const;
+
+export type VerdictActorKind = (typeof VERDICT_ACTOR_KINDS)[number];
+
+/**
+ * Attribution object carried on every verdict-class journal event
+ * (SYMPH-405 amendment 4): every human-visible rendering of a state change
+ * includes "by {kind}@{host}".
+ */
+export interface VerdictActor {
+  kind: VerdictActorKind;
+  host: string;
+  session?: string;
+}
+
+/**
+ * Last dispatch verdict per issue (SYMPH-405). Sourced from the in-memory
+ * last-verdict map and surfaced in the /api/v1/state payload so an operator
+ * can see WHY an issue is not dispatching without grepping the journal.
+ */
+export interface IssueDispositionRecord {
+  disposition: VerdictDisposition;
+  reasonCode: string;
+  remedy: string | null;
+  since: string;
+}
 
 export type DispatcherRunJournalEventKind =
   (typeof DISPATCHER_RUN_JOURNAL_EVENT_KINDS)[number];
@@ -926,7 +978,6 @@ export interface OrchestratorState {
   issueBudgetEscalations: Record<string, number>;
   issuePauseTriageResumes: Record<string, number>;
   issueReworkCounts: Record<string, number>;
-  issueGateErrorCounts: Record<string, number>;
   issuePassedStages: Record<string, string[]>;
   issueFirstDispatchedAt: Record<string, string>;
   issueExecutionHistory: Record<string, ExecutionHistory>;
@@ -955,6 +1006,33 @@ export interface OrchestratorState {
     string,
     { signature: string; class: ErrorSignatureClass }
   >;
+  /**
+   * Last dispatch verdict per issue id (SYMPH-405), keyed by issue id (plus
+   * the synthetic "__dispatch__" scope for pipeline-wide gates). Mirrors the
+   * orchestrator's last-verdict dedup map and feeds the /api/v1/state
+   * `dispositions` surface (real issue ids) plus the `dispatch_gate` field
+   * (the synthetic scope).
+   */
+  issueDispositions: Record<string, IssueDispositionRecord>;
+  /**
+   * Consecutive review-failure streak per issue (SYMPH-402): the
+   * criterion-aware review-failure signature and how many consecutive review
+   * rounds have failed with it. Rework cycles (review → implement → review)
+   * bypass the retry path, so the SYMPH-396 short-circuit never sees them —
+   * this streak parks an issue loudly instead of letting it enter a third
+   * rework round on the SAME failed pre-gate criterion.
+   */
+  issueReviewFailureStreaks: Record<
+    string,
+    { signature: string; count: number }
+  >;
+  /**
+   * Issues for which a `failure_exhausted` alert has been fired in this
+   * session (SYMPH-397). Used by runtime-host to suppress the redundant
+   * `issue_failed` notification when the terminal path was already announced
+   * via `failure_exhausted` (e.g. novelty short-circuit parks at attempt < maxRetries).
+   */
+  failureExhaustedIds: Set<string>;
 }
 
 export const FAILURE_CLASSES = [
@@ -1095,7 +1173,6 @@ export function createInitialOrchestratorState(input: {
     issueBudgetEscalations: {},
     issuePauseTriageResumes: {},
     issueReworkCounts: {},
-    issueGateErrorCounts: {},
     issuePassedStages: {},
     issueFirstDispatchedAt: {},
     issueExecutionHistory: {},
@@ -1109,5 +1186,8 @@ export function createInitialOrchestratorState(input: {
     managerRunJournal: [],
     managerRuns: {},
     issueFailureSignatures: {},
+    issueDispositions: {},
+    issueReviewFailureStreaks: {},
+    failureExhaustedIds: new Set<string>(),
   };
 }

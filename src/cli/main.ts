@@ -12,6 +12,7 @@ import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
   PipelineNotifier,
   createSlackPoster,
+  createWebhookPoster,
 } from "../orchestrator/pipeline-notifier.js";
 import {
   type RuntimeServiceHandle,
@@ -163,30 +164,60 @@ export function applyCliOverrides(
 export async function startCliHost(
   input: StartCliHostInput,
 ): Promise<RuntimeServiceHandle> {
+  const slackEnabled = input.runtime.config.notifications.slackEnabled;
+  const webhookUrl = input.env.SYMPHONY_SLACK_WEBHOOK_URL;
   const slackChannel = input.runtime.config.server.slackNotifyChannel;
   const slackToken = input.env.SLACK_BOT_TOKEN;
-  const canNotify = slackChannel !== null && slackToken !== undefined;
 
-  const notifier = canNotify
-    ? new PipelineNotifier({
-        channel: slackChannel,
-        poster: createSlackPoster({ botToken: slackToken }),
-        onError: (error) =>
-          logToStderr({
-            timestamp: formatEasternTimestamp(new Date()),
-            level: "error",
-            event: "slack_notification_failed",
-            channel: slackChannel,
-            message: safeErrorMessage(error),
-          }),
-      })
-    : null;
+  // Webhook poster takes precedence over bot-token poster; both require
+  // per-product slackEnabled to be true (default: true).
+  // Require a non-empty trimmed value: an empty-string env var passes !==
+  // undefined but produces "Failed to parse URL from " on every notify call,
+  // silently blocking the otherwise-working bot-token fallback.
+  const canUseWebhook =
+    slackEnabled && webhookUrl !== undefined && webhookUrl.trim() !== "";
+  const canUseToken =
+    slackEnabled && slackChannel !== null && slackToken !== undefined;
+
+  let notifier: PipelineNotifier | null = null;
+
+  if (canUseWebhook) {
+    notifier = new PipelineNotifier({
+      channel: "webhook",
+      poster: createWebhookPoster({ webhookUrl }),
+      onError: (error) =>
+        logToStderr({
+          timestamp: formatEasternTimestamp(new Date()),
+          level: "error",
+          event: "slack_notification_failed",
+          transport: "webhook",
+          message: safeErrorMessage(error),
+        }),
+    });
+  } else if (canUseToken) {
+    notifier = new PipelineNotifier({
+      channel: slackChannel,
+      poster: createSlackPoster({ botToken: slackToken }),
+      onError: (error) =>
+        logToStderr({
+          timestamp: formatEasternTimestamp(new Date()),
+          level: "error",
+          event: "slack_notification_failed",
+          channel: slackChannel,
+          message: safeErrorMessage(error),
+        }),
+    });
+  }
 
   logToStderr({
     timestamp: formatEasternTimestamp(new Date()),
     level: "info",
     event: "notifier_init",
-    enabled: canNotify,
+    enabled: notifier !== null,
+    transport: canUseWebhook ? "webhook" : canUseToken ? "bot_token" : "none",
+    slackEnabled,
+    // Never log the webhook URL — it contains a secret token
+    webhookPresent: webhookUrl !== undefined,
     channel: slackChannel,
     tokenPresent: slackToken !== undefined,
   });

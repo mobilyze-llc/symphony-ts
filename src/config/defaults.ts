@@ -69,6 +69,11 @@ export const DEFAULT_CODEX_DISABLE_SKILLS = false;
 export const DEFAULT_TURN_TIMEOUT_MS = 3_600_000;
 export const DEFAULT_READ_TIMEOUT_MS = 5_000;
 export const DEFAULT_STALL_TIMEOUT_MS = 300_000;
+// SYMPH-412: rotate to a fresh Codex session once cumulative session input
+// tokens cross this threshold. Observed mid-turn closures clustered at
+// 0.9M-2.5M cumulative input tokens; 1.5M keeps headroom while bounding
+// accumulated thread context. 0 disables proactive rotation.
+export const DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS = 1_500_000;
 export const DEFAULT_OBSERVABILITY_ENABLED = true;
 export const DEFAULT_OBSERVABILITY_REFRESH_MS = 1_000;
 export const DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS = 16;
@@ -77,6 +82,19 @@ export const DEFAULT_LINEAR_PAGE_SIZE = 50;
 export const DEFAULT_LINEAR_NETWORK_TIMEOUT_MS = 30_000;
 
 export const WORKFLOW_FILENAME = "WORKFLOW.md";
+
+// Watchdog L1c defaults (SYMPH-398)
+export const DEFAULT_WATCHDOG_SYSTEMIC_THRESHOLD = 2;
+export const DEFAULT_WATCHDOG_CIRCUIT_BREAKER = true;
+export const DEFAULT_WATCHDOG_MAX_FILINGS_PER_HOUR = 3;
+
+// Verdict-event defaults (SYMPH-405)
+export const DEFAULT_VERDICTS_PAGE_AFTER_TICKS = 10;
+
+// Watchdog L2 stuck-ticket triage defaults (SYMPH-399). Disabled until the
+// operator opts a product in (calibration gate).
+export const DEFAULT_STUCK_TRIAGE_ENABLED = false;
+export const DEFAULT_STUCK_TRIAGE_TIMEOUT_MS = 600_000;
 
 export const SPEC_DEFAULTS = Object.freeze({
   tracker: {
@@ -155,6 +173,7 @@ export const SPEC_DEFAULTS = Object.freeze({
     turnTimeoutMs: DEFAULT_TURN_TIMEOUT_MS,
     readTimeoutMs: DEFAULT_READ_TIMEOUT_MS,
     stallTimeoutMs: DEFAULT_STALL_TIMEOUT_MS,
+    sessionRotationInputTokens: DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
   },
   observability: {
     dashboardEnabled: DEFAULT_OBSERVABILITY_ENABLED,

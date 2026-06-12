@@ -136,7 +136,7 @@ function createConfig(
       endpoint: "https://linear.example",
       apiKey: "token",
       projectSlug: "ENG",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       terminalStates: ["Done"],
     },
     polling: {
@@ -187,6 +187,11 @@ function createConfig(
     admissionCard: {
       enabled: false,
     },
+    watchdog: {
+      systemicThreshold: 2,
+      circuitBreaker: true,
+      maxFilingsPerHour: 3,
+    },
     budgetEscalation: {
       maxSteps: null,
       multiplier: 2,
@@ -198,6 +203,9 @@ function createConfig(
     server: {
       port: null,
       slackNotifyChannel: null,
+    },
+    notifications: {
+      slackEnabled: true,
     },
     observability: {
       dashboardEnabled: true,

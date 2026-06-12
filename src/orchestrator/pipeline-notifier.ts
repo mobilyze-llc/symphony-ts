@@ -6,6 +6,7 @@
  */
 
 import type { ExecutionHistory, RightSizingDecision } from "../domain/model.js";
+import { sanitizeForSlack } from "../shared/egress.js";
 import { getDisplayVersion } from "../version.js";
 
 // ---------------------------------------------------------------------------
@@ -125,6 +126,174 @@ export interface IssueDroppedEvent {
   reason: string;
 }
 
+// ---------------------------------------------------------------------------
+// Watchdog / lifecycle alert events (SYMPH-397)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fired when an issue's retry budget is exhausted or it is parked for
+ * operator review (includes loud-parking via the novelty short-circuit).
+ * severity: critical
+ */
+export interface FailureExhaustedEvent {
+  type: "failure_exhausted";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  reason: string;
+  /** Normalized failure signature when available (from SYMPH-396). */
+  failureSignature: string | null;
+  /** Failure class when available. */
+  failureClass: string | null;
+}
+
+/**
+ * Fired when a hard stop pauses an issue due to hitting the budget ceiling
+ * (token, dollar, or window-% limit) and the escalation ladder could not
+ * absorb it.
+ * severity: warning
+ */
+export interface HardStopBudgetEvent {
+  type: "hard_stop_budget";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  trigger: string;
+  reason: string;
+  totalTokens: number;
+  estimatedCostUsd: number;
+}
+
+/**
+ * Fired for each step of the deterministic budget-escalation ladder.
+ * severity: info
+ */
+export interface EscalationStepEvent {
+  type: "escalation_step";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  step: number;
+  maxSteps: number;
+  multiplier: number;
+  trigger: string;
+}
+
+/**
+ * Fired when an ensemble gate returns ERROR or [STAGE_FAILED].
+ * severity: warning
+ */
+export interface GateFailedEvent {
+  type: "gate_failed";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  reason: string;
+}
+
+/**
+ * Info-tier alert event.
+ * severity: info
+ */
+export interface InfoAlertEvent {
+  type: "info_alert";
+  issueIdentifier: string;
+  message: string;
+}
+
+/**
+ * Fired when a normalized failure signature has been seen in K>=threshold
+ * distinct issues — declared SYSTEMIC (SYMPH-398).
+ * severity: critical
+ * Re-fires when the cluster grows beyond the last-alerted size.
+ */
+export interface SystemicClusterAlertEvent {
+  type: "systemic_cluster_alert";
+  /** 7-char signature hash. */
+  signature: string;
+  /** Failure class: permanent | transient | unknown. */
+  errorClass: string;
+  /** Affected stage name, or null if unknown. */
+  stageName: string | null;
+  /** Number of distinct issues in the cluster. */
+  clusterSize: number;
+  /** Identifiers of all affected issues. */
+  issueIdentifiers: string[];
+  /** Whether the stage circuit breaker is being opened. */
+  breakerOpened: boolean;
+  /** Whether a watchdog ticket is being filed. */
+  watchdogTicketFiling: boolean;
+}
+
+/**
+ * Fired when a dispatcher follow-up issue write to the tracker fails
+ * (SYMPH-413). Without this alert, supervision findings (e.g.
+ * branch_divergence) silently never reach the board.
+ * severity: warning
+ */
+export interface TrackerWriteFailedEvent {
+  type: "tracker_write_failed";
+  /** Title of the follow-up issue that failed to write. */
+  followUpTitle: string;
+  /** Identifiers/IDs of the source issues the follow-up was filed for. */
+  sourceIssueIds: string[];
+  reason: string;
+  httpStatus: number | null;
+  /** Bounded, pre-serialized tracker error details (never raw objects). */
+  details: string | null;
+}
+
+/**
+ * Fired when an issue's dispatch verdict CHANGES to gate or halt (SYMPH-405).
+ * Transitions-only: unchanged verdicts never re-fire.
+ * severity: warning
+ */
+export interface DispatchVerdictAlertEvent {
+  type: "dispatch_verdict_alert";
+  issueIdentifier: string;
+  disposition: "gate" | "halt";
+  reasonCode: string;
+  remedy: string | null;
+  /** Attribution: rendered as "by {kind}@{host}" (SYMPH-405 amendment 4). */
+  actor: { kind: string; host: string; session?: string };
+}
+
+/**
+ * Fired when the dispatch-starvation page condition latches (eligible
+ * candidates > 0 with zero dispatches for verdicts.page_after_ticks
+ * consecutive ticks) and again on recovery (SYMPH-405).
+ * severity: critical (page) / info (recovery)
+ */
+export interface DispatchPageAlertEvent {
+  type: "dispatch_page_alert";
+  kind: "page" | "recovery";
+  eligibleCount: number;
+  consecutiveTicks: number;
+}
+
+/**
+ * Fired when the watchdog L2 stuck-triage lane escalates a parked ticket to
+ * a human with the model's one-paragraph case (SYMPH-399).
+ * severity: critical
+ */
+export interface TriageEscalationEvent {
+  type: "triage_escalation";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  classification: string;
+  confidence: string;
+  /** The model's one-paragraph case for paging a human. */
+  caseText: string;
+  /** Rendered actor attribution, e.g. "by watchdog-l2@pro14". */
+  attribution: string;
+}
+
 export type PipelineNotificationEvent =
   | PipelineStartedEvent
   | PipelineStoppedEvent
@@ -133,7 +302,17 @@ export type PipelineNotificationEvent =
   | StallKilledEvent
   | InfraErrorEvent
   | IssueDispatchedEvent
-  | IssueDroppedEvent;
+  | IssueDroppedEvent
+  | FailureExhaustedEvent
+  | HardStopBudgetEvent
+  | EscalationStepEvent
+  | GateFailedEvent
+  | InfoAlertEvent
+  | SystemicClusterAlertEvent
+  | TrackerWriteFailedEvent
+  | DispatchVerdictAlertEvent
+  | DispatchPageAlertEvent
+  | TriageEscalationEvent;
 
 // ---------------------------------------------------------------------------
 // Formatting helpers
@@ -391,6 +570,12 @@ export function formatNotification(
     }
 
     case "issue_failed": {
+      // Free-text failure reasons can carry worker/model-authored content;
+      // sanitize once and reuse (SYMPH-421).
+      const failureReason =
+        event.failureReason === null
+          ? null
+          : sanitizeForSlack(event.failureReason);
       const parts = [
         `:x: *Issue failed* — ${event.issueIdentifier}`,
         `*${event.issueTitle}*`,
@@ -398,8 +583,8 @@ export function formatNotification(
       if (event.issueUrl !== null) {
         parts.push(event.issueUrl);
       }
-      if (event.failureReason !== null) {
-        parts.push(`Reason: ${event.failureReason}`);
+      if (failureReason !== null) {
+        parts.push(`Reason: ${failureReason}`);
       }
       if (event.retriesExhausted) {
         parts.push(`Retries exhausted (attempt ${event.retryAttempt ?? "?"})`);
@@ -428,12 +613,12 @@ export function formatNotification(
         { type: "divider" },
       ];
 
-      if (event.failureReason !== null) {
+      if (failureReason !== null) {
         blocks.push({
           type: "section",
           text: {
             type: "mrkdwn",
-            text: `Reason: ${event.failureReason}`,
+            text: `Reason: ${failureReason}`,
           },
         });
       }
@@ -507,10 +692,11 @@ export function formatNotification(
     }
 
     case "infra_error": {
+      const errorReason = sanitizeForSlack(event.errorReason);
       const text = [
         `:rotating_light: *Infra error* — ${event.issueIdentifier}`,
         `*${event.issueTitle}*`,
-        `Error: ${event.errorReason}`,
+        `Error: ${errorReason}`,
         version,
       ].join("\n");
 
@@ -529,7 +715,7 @@ export function formatNotification(
         },
         {
           type: "section",
-          text: { type: "mrkdwn", text: `Error: ${event.errorReason}` },
+          text: { type: "mrkdwn", text: `Error: ${errorReason}` },
         },
         {
           type: "context",
@@ -611,6 +797,7 @@ export function formatNotification(
     }
 
     case "issue_dropped": {
+      const dropReason = sanitizeForSlack(event.reason);
       const parts = [
         `:stop_button: *Issue left pipeline* — ${event.issueIdentifier}`,
         `*${event.issueTitle}*`,
@@ -618,7 +805,7 @@ export function formatNotification(
       if (event.issueUrl !== null) {
         parts.push(event.issueUrl);
       }
-      parts.push(`Reason: ${event.reason}`);
+      parts.push(`Reason: ${dropReason}`);
       parts.push(version);
       const text = parts.join("\n");
 
@@ -642,7 +829,7 @@ export function formatNotification(
         },
         {
           type: "section",
-          text: { type: "mrkdwn", text: `Reason: ${event.reason}` },
+          text: { type: "mrkdwn", text: `Reason: ${dropReason}` },
         },
         {
           type: "context",
@@ -651,6 +838,193 @@ export function formatNotification(
       ];
 
       return { text, blocks };
+    }
+
+    // -----------------------------------------------------------------------
+    // Watchdog / lifecycle alert events (SYMPH-397)
+    // -----------------------------------------------------------------------
+
+    case "failure_exhausted": {
+      const exhaustedReason = sanitizeForSlack(event.reason);
+      const issueLine =
+        event.issueUrl !== null
+          ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
+          : `${event.issueIdentifier}: ${event.issueTitle}`;
+      const parts: string[] = [
+        `:rotating_light: *Retries exhausted* — ${issueLine}`,
+      ];
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(`Reason: ${exhaustedReason}`);
+      if (event.failureSignature !== null) {
+        const classSuffix =
+          event.failureClass !== null ? ` (${event.failureClass})` : "";
+        parts.push(`Signature: ${event.failureSignature}${classSuffix}`);
+      }
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "hard_stop_budget": {
+      const hardStopReason = sanitizeForSlack(event.reason);
+      const issueLine =
+        event.issueUrl !== null
+          ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
+          : `${event.issueIdentifier}: ${event.issueTitle}`;
+      const parts: string[] = [`:warning: *Budget ceiling hit* — ${issueLine}`];
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(
+        `Trigger: ${event.trigger} · ~$${event.estimatedCostUsd.toFixed(2)} · ${formatTokensCompact(event.totalTokens)} tokens`,
+      );
+      parts.push(`Reason: ${hardStopReason}`);
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "escalation_step": {
+      const issueLine =
+        event.issueUrl !== null
+          ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
+          : `${event.issueIdentifier}: ${event.issueTitle}`;
+      const parts: string[] = [
+        `:ladder: *Budget escalation step ${event.step}/${event.maxSteps}* — ${issueLine}`,
+      ];
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(
+        `Auto-resuming at ${event.multiplier}x budget after ${event.trigger}`,
+      );
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "gate_failed": {
+      const gateReason = sanitizeForSlack(event.reason);
+      const issueLine =
+        event.issueUrl !== null
+          ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
+          : `${event.issueIdentifier}: ${event.issueTitle}`;
+      const parts: string[] = [`:x: *Gate failed* — ${issueLine}`];
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(`Reason: ${gateReason}`);
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "info_alert": {
+      return {
+        text: `:information_source: *${event.issueIdentifier}* — ${sanitizeForSlack(event.message)}\n${version}`,
+      };
+    }
+
+    case "triage_escalation": {
+      const issueLine =
+        event.issueUrl !== null
+          ? `<${event.issueUrl}|${event.issueIdentifier}>: ${event.issueTitle}`
+          : `${event.issueIdentifier}: ${event.issueTitle}`;
+      const parts: string[] = [
+        `:rotating_light: *Stuck-triage escalation* — ${issueLine}`,
+      ];
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      parts.push(
+        `Classification: ${event.classification} (confidence: ${event.confidence}) · ${event.attribution}`,
+      );
+      // caseText is the model's verbatim rationale (SYMPH-421).
+      parts.push(`Case: ${sanitizeForSlack(event.caseText)}`);
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "systemic_cluster_alert": {
+      const stageLabel =
+        event.stageName !== null
+          ? `stage \`${event.stageName}\``
+          : "unknown stage";
+      const issueList =
+        event.issueIdentifiers.length > 0
+          ? event.issueIdentifiers.join(", ")
+          : "none";
+      const parts: string[] = [
+        `:rotating_light: *SYSTEMIC failure cluster* — signature \`${event.signature}\``,
+        `Class: \`${event.errorClass}\` · ${stageLabel} · ${event.clusterSize} affected issues`,
+        `Issues: ${issueList}`,
+      ];
+      if (event.breakerOpened) {
+        parts.push(`:electric_plug: Circuit breaker OPENED for ${stageLabel}`);
+      }
+      if (event.watchdogTicketFiling) {
+        parts.push(":ticket: Watchdog ticket being filed");
+      }
+      // The raw normalized error text is deliberately omitted here: it can
+      // carry secrets or adversarial content from worker output. The signature
+      // hash + class + affected issues are the operator triage signal; the raw
+      // text lives on the linked member issues (SYMPH-398).
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "tracker_write_failed": {
+      const sourceList =
+        event.sourceIssueIds.length > 0
+          ? event.sourceIssueIds.join(", ")
+          : "none";
+      const statusLabel =
+        event.httpStatus !== null ? ` (HTTP ${event.httpStatus})` : "";
+      const parts: string[] = [
+        `:warning: *Tracker follow-up write failed*${statusLabel} — ${sanitizeForSlack(event.followUpTitle)}`,
+        `Source issues: ${sourceList}`,
+        `Reason: ${sanitizeForSlack(event.reason)}`,
+      ];
+      if (event.details !== null) {
+        // details carries Linear API error bodies — sanitize like every other
+        // free-text egress surface (SYMPH-421).
+        parts.push(`Details: \`${sanitizeForSlack(event.details)}\``);
+      }
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "dispatch_verdict_alert": {
+      const emoji =
+        event.disposition === "halt"
+          ? ":octagonal_sign:"
+          : ":vertical_traffic_light:";
+      const label =
+        event.disposition === "halt" ? "Dispatch HALTED" : "Dispatch GATED";
+      const parts: string[] = [
+        `${emoji} *${label}* — ${event.issueIdentifier} (\`${event.reasonCode}\`) by ${event.actor.kind}@${event.actor.host}`,
+      ];
+      if (event.remedy !== null) {
+        parts.push(`Remedy: ${event.remedy}`);
+      }
+      parts.push(version);
+      return { text: parts.join("\n") };
+    }
+
+    case "dispatch_page_alert": {
+      if (event.kind === "page") {
+        return {
+          text: [
+            `:rotating_light: *Dispatch starvation* — ${event.eligibleCount} eligible candidate(s), 0 dispatched for ${event.consecutiveTicks} consecutive ticks`,
+            "The pipeline has work but nothing is going out. Check the dispositions map in /api/v1/state for the blocking verdicts.",
+            version,
+          ].join("\n"),
+        };
+      }
+      return {
+        text: [
+          `:white_check_mark: *Dispatch recovered* — starvation cleared after ${event.consecutiveTicks} tick(s)`,
+          version,
+        ].join("\n"),
+      };
     }
   }
 }
@@ -691,6 +1065,53 @@ export function createSlackPoster(input: {
         text,
         ...(blocks !== undefined ? { blocks } : {}),
       });
+    },
+  };
+}
+
+/**
+ * Create a webhook-based poster for Incoming Webhook URLs
+ * (SYMPHONY_SLACK_WEBHOOK_URL). The channel parameter is ignored — webhook
+ * URLs are pre-routed to a single channel by Slack. This poster never logs
+ * the URL, per the fail-open / no-URL-in-logs contract.
+ */
+export function createWebhookPoster(input: {
+  webhookUrl: string;
+  /** Injected only in tests — never pass in production code. */
+  _fetchOverride?: typeof fetch;
+}): NotificationPoster {
+  return {
+    async post(
+      _channel: string,
+      text: string,
+      blocks?: SlackBlock[],
+    ): Promise<void> {
+      const fetchFn = input._fetchOverride ?? fetch;
+      const body = JSON.stringify({
+        text,
+        ...(blocks !== undefined ? { blocks } : {}),
+      });
+      // Wrap the fetch so that ALL transport errors (URL parse failures, DNS,
+      // connection refused, timeout) are re-thrown as a fixed URL-free message.
+      // This prevents a malformed SYMPHONY_SLACK_WEBHOOK_URL from leaking the
+      // full secret path into logs via "Failed to parse URL from <url>".
+      // Redaction is co-located with the secret — never rely on callers to sanitize.
+      let response: Response;
+      try {
+        response = await fetchFn(input.webhookUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body,
+          signal: AbortSignal.timeout(5_000),
+        });
+      } catch (err) {
+        throw new Error(
+          `Slack webhook delivery failed: ${err instanceof Error ? err.name : "unknown"}`,
+        );
+      }
+      if (!response.ok) {
+        throw new Error(`Slack webhook returned HTTP ${response.status}`);
+      }
     },
   };
 }

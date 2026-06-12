@@ -1289,7 +1289,7 @@ function createConfig(overrides?: {
       endpoint: "https://api.linear.app/graphql",
       apiKey: "token",
       projectSlug: "project",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       terminalStates: ["Done", "Canceled"],
     },
     polling: {
@@ -1340,6 +1340,11 @@ function createConfig(overrides?: {
     admissionCard: {
       enabled: false,
     },
+    watchdog: {
+      systemicThreshold: 2,
+      circuitBreaker: true,
+      maxFilingsPerHour: 3,
+    },
     budgetEscalation: {
       maxSteps: null,
       multiplier: 2,
@@ -1351,6 +1356,9 @@ function createConfig(overrides?: {
     server: {
       port: null,
       slackNotifyChannel: null,
+    },
+    notifications: {
+      slackEnabled: true,
     },
     observability: {
       dashboardEnabled: true,

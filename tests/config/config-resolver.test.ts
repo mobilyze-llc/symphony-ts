@@ -11,6 +11,7 @@ import {
 } from "../../src/config/config-resolver.js";
 import {
   DEFAULT_CODEX_COMMAND,
+  DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
   DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
   DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
   DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
@@ -90,6 +91,9 @@ describe("config-resolver", () => {
     expect(resolved.codex.turnTimeoutMs).toBe(DEFAULT_TURN_TIMEOUT_MS);
     expect(resolved.codex.readTimeoutMs).toBe(DEFAULT_READ_TIMEOUT_MS);
     expect(resolved.codex.stallTimeoutMs).toBe(DEFAULT_STALL_TIMEOUT_MS);
+    expect(resolved.codex.sessionRotationInputTokens).toBe(
+      DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
+    );
     expect(resolved.continuousFeedback).toEqual({
       enabled: DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
       events: [...DEFAULT_CONTINUOUS_FEEDBACK_EVENTS],
@@ -155,6 +159,7 @@ describe("config-resolver", () => {
             turn_timeout_ms: "90000",
             read_timeout_ms: "2500",
             stall_timeout_ms: "-1",
+            session_rotation_input_tokens: "0",
           },
           server: {
             port: "8080",
@@ -205,6 +210,7 @@ describe("config-resolver", () => {
     expect(resolved.codex.turnTimeoutMs).toBe(90_000);
     expect(resolved.codex.readTimeoutMs).toBe(2_500);
     expect(resolved.codex.stallTimeoutMs).toBe(-1);
+    expect(resolved.codex.sessionRotationInputTokens).toBe(0);
     expect(resolved.server.port).toBe(8080);
     expect(resolved.observability.dashboardEnabled).toBe(false);
     expect(resolved.observability.refreshMs).toBe(2_500);
@@ -1129,5 +1135,85 @@ describe("config-resolver fast_track", () => {
         expect.stringContaining("fast_track.initial_stage 'nonexistent'"),
       ]),
     );
+  });
+});
+
+describe("config-resolver watchdog.stuck_triage (SYMPH-399)", () => {
+  it("defaults to disabled when the block is absent", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      config: {},
+      promptTemplate: "Prompt",
+    });
+
+    expect(resolved.watchdog.stuckTriage).toEqual({
+      enabled: false,
+      baseUrl: null,
+      model: null,
+      apiKey: null,
+      timeoutMs: 600_000,
+    });
+  });
+
+  it("parses a full block and resolves $ENV api_key references", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        config: {
+          watchdog: {
+            stuck_triage: {
+              enabled: true,
+              base_url: "http://studio2.local:8000/v1",
+              model: "deepseek-v4-flash",
+              api_key: "$STUCK_TRIAGE_KEY",
+              timeout_ms: 120_000,
+            },
+          },
+        },
+        promptTemplate: "Prompt",
+      },
+      { STUCK_TRIAGE_KEY: "secret-token" } as NodeJS.ProcessEnv,
+    );
+
+    expect(resolved.watchdog.stuckTriage).toEqual({
+      enabled: true,
+      baseUrl: "http://studio2.local:8000/v1",
+      model: "deepseek-v4-flash",
+      apiKey: "secret-token",
+      timeoutMs: 120_000,
+    });
+  });
+
+  it("fails loudly on a malformed block instead of silently disabling", () => {
+    expect(() =>
+      resolveWorkflowConfig({
+        workflowPath: "/repo/WORKFLOW.md",
+        config: {
+          watchdog: {
+            stuck_triage: {
+              enabled: "yes",
+            },
+          },
+        },
+        promptTemplate: "Prompt",
+      }),
+    ).toThrowError(/stuck_triage/);
+  });
+
+  it("rejects unknown keys (declared-vs-consumed contract)", () => {
+    expect(() =>
+      resolveWorkflowConfig({
+        workflowPath: "/repo/WORKFLOW.md",
+        config: {
+          watchdog: {
+            stuck_triage: {
+              enabled: true,
+              base_uri: "http://typo.local",
+            },
+          },
+        },
+        promptTemplate: "Prompt",
+      }),
+    ).toThrowError(/stuck_triage/);
   });
 });

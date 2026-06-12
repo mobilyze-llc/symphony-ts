@@ -21,6 +21,7 @@ import type {
 } from "../agent/runner.js";
 import { AgentRunner } from "../agent/runner.js";
 import { runSpecFidelityJudge } from "../agent/spec-fidelity.js";
+import { runStuckTriage } from "../agent/stuck-triage.js";
 import { publishVerdictStatus } from "../agent/verdict-status.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
 import {
@@ -35,6 +36,7 @@ import {
   DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
 } from "../config/defaults.js";
 import type {
+  DispatchValidationResult,
   ResolvedWorkflowConfig,
   StageDefinition,
 } from "../config/types.js";
@@ -54,6 +56,7 @@ import type {
   RunningEntry,
 } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
+import type { ErrorSignatureClass } from "../errors/signature.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
   type LoopTraceArtifactLocator,
@@ -100,6 +103,7 @@ import {
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
+import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
 import type { IssueTracker } from "../tracker/tracker.js";
 import { getDisplayVersion } from "../version.js";
@@ -125,6 +129,10 @@ import {
   loadPersistedRateLimitSnapshot,
   persistRateLimitSnapshot,
 } from "./rate-limit-persistence.js";
+import {
+  type ClusterMember,
+  formatWatchdogTicketBody,
+} from "./signature-cluster.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
 import { writeTrackerIssueFromBoundary } from "./tracker-write.js";
 
@@ -488,6 +496,22 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           config: this.config.pauseTriage,
           evidence,
         }),
+      // Watchdog L2 stuck-ticket triage (SYMPH-399). The module itself
+      // resolves null when the lane is unconfigured or disabled; the core
+      // additionally gates on watchdog.stuck_triage.enabled so a disabled
+      // lane produces zero side effects.
+      ...(this.config.watchdog.stuckTriage === undefined
+        ? {}
+        : {
+            runStuckTriage: (
+              evidence: Parameters<typeof runStuckTriage>[0]["evidence"],
+            ) =>
+              runStuckTriage({
+                // biome-ignore lint/style/noNonNullAssertion: guarded by the spread condition
+                config: this.config.watchdog.stuckTriage!,
+                evidence,
+              }),
+          }),
       scheduleDeferred: (task) => void this.enqueue(task),
       runAcGate: (evidence) =>
         runAcGate({
@@ -585,6 +609,17 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                     details?: unknown;
                   })
                 : null;
+            const reason =
+              error instanceof Error ? error.message : String(error);
+            const httpStatus =
+              typeof trackerError?.status === "number"
+                ? trackerError.status
+                : null;
+            // Serialize the tracker error payload — logging the raw object
+            // renders as "[object Object]" in the journal line (SYMPH-413).
+            const serializedDetails = serializeTrackerErrorDetails(
+              trackerError?.details,
+            );
             void this.logger?.warn(
               "tracker_follow_up_write_failed",
               "Failed to create or update dispatcher follow-up issue.",
@@ -592,19 +627,46 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 outcome: "degraded",
                 title,
                 source_issue_ids: sourceIssueIds,
-                reason: error instanceof Error ? error.message : String(error),
+                reason,
                 ...(typeof trackerError?.code === "string"
                   ? { error_code: trackerError.code }
                   : {}),
-                ...(typeof trackerError?.status === "number"
-                  ? { http_status: trackerError.status }
-                  : {}),
-                ...(trackerError?.details !== undefined &&
-                trackerError.details !== null
-                  ? { details: trackerError.details }
+                ...(httpStatus !== null ? { http_status: httpStatus } : {}),
+                ...(serializedDetails !== null
+                  ? { details: serializedDetails }
                   : {}),
               },
             );
+            // Surface on the Slack alert channel (SYMPH-397) — a warn-level
+            // journal line alone let three branch_divergence findings vanish.
+            // Fail-open: this runs inside the tracker-write catch block, which
+            // re-throws the original error; a throwing notifier must not mask
+            // it (the SYMPH-397 fail-open contract).
+            try {
+              this.notifier?.notify({
+                type: "tracker_write_failed",
+                followUpTitle: title,
+                sourceIssueIds,
+                reason,
+                httpStatus,
+                details: serializeTrackerErrorDetails(
+                  trackerError?.details,
+                  500,
+                ),
+              });
+            } catch (notifyError) {
+              void this.logger?.warn(
+                "tracker_write_failed_notify_error",
+                "Failed to emit tracker_write_failed Slack alert.",
+                {
+                  outcome: "degraded",
+                  reason:
+                    notifyError instanceof Error
+                      ? notifyError.message
+                      : String(notifyError),
+                },
+              );
+            }
           },
         });
       },
@@ -642,6 +704,205 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         }
         return runEnsembleGate(gateOptions);
       },
+      // Watchdog / lifecycle alert callbacks (SYMPH-397).
+      // Capture notifier in a local so biome can narrow the non-null assertion
+      // without needing the !-operator on a class property.
+      ...(this.notifier !== null
+        ? ((_notifier) => ({
+            onFailureExhausted: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              issueTitle: string;
+              reason: string;
+              stageName: string | null;
+              failureSignature: string | null;
+              failureClass: string | null;
+            }) => {
+              _notifier.notify({
+                type: "failure_exhausted",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueTitle,
+                issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
+                stageName: input.stageName,
+                reason: input.reason,
+                failureSignature: input.failureSignature,
+                failureClass: input.failureClass,
+              });
+            },
+            onHardStopBudget: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              issueTitle: string;
+              stageName: string | null;
+              trigger: string;
+              reason: string;
+              totalTokens: number;
+              estimatedCostUsd: number;
+            }) => {
+              _notifier.notify({
+                type: "hard_stop_budget",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueTitle,
+                issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
+                stageName: input.stageName,
+                trigger: input.trigger,
+                reason: input.reason,
+                totalTokens: input.totalTokens,
+                estimatedCostUsd: input.estimatedCostUsd,
+              });
+            },
+            onEscalationStep: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              issueTitle: string;
+              stageName: string | null;
+              step: number;
+              maxSteps: number;
+              multiplier: number;
+              trigger: string;
+            }) => {
+              _notifier.notify({
+                type: "escalation_step",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueTitle,
+                issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
+                stageName: input.stageName,
+                step: input.step,
+                maxSteps: input.maxSteps,
+                multiplier: input.multiplier,
+                trigger: input.trigger,
+              });
+            },
+            onGateFailed: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              issueTitle: string;
+              stageName: string | null;
+              reason: string;
+            }) => {
+              _notifier.notify({
+                type: "gate_failed",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueTitle,
+                issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
+                stageName: input.stageName,
+                reason: input.reason,
+              });
+            },
+            onSystemicCluster: (input: {
+              signature: string;
+              errorClass: string;
+              stageName: string | null;
+              clusterSize: number;
+              issueIdentifiers: string[];
+              breakerOpened: boolean;
+              canFileWatchdogTicket: boolean;
+              members: ClusterMember[];
+            }) => {
+              // Fire the SYSTEMIC Slack alert (once-per-signature, re-alert on growth)
+              _notifier.notify({
+                type: "systemic_cluster_alert",
+                signature: input.signature,
+                errorClass: input.errorClass,
+                stageName: input.stageName,
+                clusterSize: input.clusterSize,
+                issueIdentifiers: input.issueIdentifiers,
+                breakerOpened: input.breakerOpened,
+                watchdogTicketFiling: input.canFileWatchdogTicket,
+              });
+
+              // Watchdog ticket filer — best-effort, never blocks the loop
+              if (input.canFileWatchdogTicket) {
+                void this.fileWatchdogTicketBestEffort(input);
+              }
+            },
+            // Verdict-event alerts (SYMPH-405): transitions-only gate/halt
+            // notifications and the dispatch-starvation page condition.
+            // Fail-open — notifier absence/failure never blocks dispatch.
+            onVerdictTransition: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              disposition: "admit" | "skip" | "gate" | "halt";
+              reasonCode: string;
+              remedy: string | null;
+              actor: { kind: string; host: string; session?: string };
+            }) => {
+              if (
+                input.disposition !== "gate" &&
+                input.disposition !== "halt"
+              ) {
+                return;
+              }
+              _notifier.notify({
+                type: "dispatch_verdict_alert",
+                issueIdentifier: input.issueIdentifier,
+                disposition: input.disposition,
+                reasonCode: input.reasonCode,
+                remedy: input.remedy,
+                actor: input.actor,
+              });
+            },
+            onDispatchPage: (input: {
+              kind: "page" | "recovery";
+              eligibleCount: number;
+              consecutiveTicks: number;
+            }) => {
+              _notifier.notify({
+                type: "dispatch_page_alert",
+                kind: input.kind,
+                eligibleCount: input.eligibleCount,
+                consecutiveTicks: input.consecutiveTicks,
+              });
+            },
+            // Watchdog L2 escalate_human verdicts page through the same
+            // SYMPH-397 alert channel (SYMPH-399).
+            onTriageEscalation: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              issueTitle: string;
+              stageName: string | null;
+              classification: string;
+              confidence: string;
+              caseText: string;
+            }) => {
+              _notifier.notify({
+                type: "triage_escalation",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueTitle,
+                issueUrl: this.resolveIssueUrlBestEffort(input.issueId),
+                stageName: input.stageName,
+                classification: input.classification,
+                confidence: input.confidence,
+                caseText: input.caseText,
+                attribution: `by watchdog-l2@${hostname().split(".")[0] ?? hostname()}`,
+              });
+            },
+          }))(this.notifier)
+        : {}),
+      // Watchdog ticket filer without a notifier: the circuit breaker operates
+      // purely inside the SignatureClusterRegistry; the host always wires the
+      // ticket-filing side of onSystemicCluster regardless of whether a Slack
+      // notifier is present. When both notifier and tracker are present the
+      // notifier spread above covers the full path; this branch handles the
+      // tracker-only case where notifier is null.
+      ...(this.notifier === null
+        ? {
+            onSystemicCluster: (input: {
+              signature: string;
+              errorClass: string;
+              stageName: string | null;
+              clusterSize: number;
+              issueIdentifiers: string[];
+              breakerOpened: boolean;
+              canFileWatchdogTicket: boolean;
+              members: ClusterMember[];
+            }) => {
+              if (input.canFileWatchdogTicket) {
+                void this.fileWatchdogTicketBestEffort(input);
+              }
+            },
+          }
+        : {}),
     };
 
     this.orchestrator = new OrchestratorCore(orchestratorOptions);
@@ -833,6 +1094,117 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
 
     return null;
+  }
+
+  /**
+   * Best-effort resolution of the Linear URL for an issue ID from runtime
+   * state. Returns null when the issue is no longer in the running or retry
+   * maps — that is acceptable; callers use it only for notification enrichment.
+   */
+  private resolveIssueUrlBestEffort(issueId: string): string | null {
+    const state = this.orchestrator.getState();
+    return state.running[issueId]?.issue.url ?? null;
+  }
+
+  /**
+   * File a watchdog ticket for a SYSTEMIC failure cluster. Best-effort — any
+   * failure is logged and swallowed. Uses the first cluster member's issue ID
+   * to resolve team context from the tracker (SYMPH-398).
+   */
+  private async fileWatchdogTicketBestEffort(input: {
+    signature: string;
+    errorClass: string;
+    stageName: string | null;
+    members: ClusterMember[];
+  }): Promise<void> {
+    if (!(this.tracker instanceof LinearTrackerClient)) {
+      return;
+    }
+    const firstMember = input.members[0];
+    if (firstMember === undefined) {
+      return;
+    }
+    try {
+      const tracker = this.tracker;
+
+      // Derive team context: prefer config.tracker fields, fall back to member
+      // issue lookup so the filer works even when teamId is not pre-populated.
+      let teamId = this.config.tracker.teamId;
+      let teamKey = this.config.tracker.teamKey;
+      if (!teamId || !teamKey) {
+        const refs = await tracker.fetchIssueReferencesByIds([
+          firstMember.issueId,
+        ]);
+        const ref = refs[0];
+        if (ref?.teamId && ref.teamKey) {
+          teamId = ref.teamId;
+          teamKey = ref.teamKey;
+        }
+      }
+      // Derive team key from the identifier (e.g. "SYMPH-123" → "SYMPH") as a
+      // last resort so simple setups without explicit teamId still work.
+      teamKey ||= firstMember.issueIdentifier.split("-")[0] ?? "";
+      // teamId is mandatory for issueCreate; an empty teamId reaches Linear and
+      // is rejected, and the catch would swallow it silently. Fail LOUDLY and
+      // skip rather than attempt a create that can never succeed (SYMPH-398).
+      if (!teamId || !teamKey) {
+        await this.logger?.warn(
+          "watchdog_ticket_filing_skipped",
+          "Cannot file watchdog ticket: team context not resolvable.",
+          {
+            outcome: "degraded",
+            signature: input.signature,
+            issue_id: firstMember.issueId,
+            reason: !teamId
+              ? "teamId could not be resolved (config.tracker.teamId unset and not derivable from member issues)"
+              : "teamKey could not be resolved",
+          },
+        );
+        return;
+      }
+
+      const title = `[watchdog] SYSTEMIC failure cluster: ${input.signature}`;
+      const body = formatWatchdogTicketBody({
+        signature: input.signature,
+        errorClass: input.errorClass as ErrorSignatureClass,
+        members: input.members,
+        stageName: input.stageName,
+        observedAt: new Date().toISOString(),
+      });
+      const result = await tracker.createWatchdogIssue({
+        teamId,
+        teamKey,
+        title,
+        description: body,
+      });
+      // Record the filing so the per-signature rate limiter can suppress
+      // duplicates without a tracker round-trip (SYMPH-398). Record on both
+      // created and deduped outcomes — a deduped result still consumed a filing
+      // opportunity and the throttle window should reflect that.
+      this.orchestrator.recordWatchdogFiling({
+        signature: input.signature,
+        issueIdentifier: result.identifier,
+      });
+      await this.logger?.info(
+        "watchdog_ticket_filed",
+        `Watchdog ticket ${result.created ? "created" : "deduped"}: ${result.identifier}`,
+        {
+          outcome: result.created ? "created" : "deduped",
+          signature: input.signature,
+          identifier: result.identifier,
+        },
+      );
+    } catch (err) {
+      await this.logger?.warn(
+        "watchdog_ticket_filing_failed",
+        "Failed to file watchdog ticket.",
+        {
+          outcome: "degraded",
+          signature: input.signature,
+          reason: err instanceof Error ? err.message : String(err),
+        },
+      );
+    }
   }
 
   private findInMemoryLoopTraceByIssueKey(
@@ -2150,6 +2522,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const capturedUrl = runningEntry?.issue.url ?? null;
     const capturedRetryAttempt = runningEntry?.retryAttempt ?? null;
     const preFailedHas = state.failed.has(execution.issueId);
+    const preExhaustedHas = state.failureExhaustedIds.has(execution.issueId);
     const capturedFirstDispatchedAt =
       state.issueFirstDispatchedAt[execution.issueId] ?? null;
 
@@ -2232,6 +2605,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         capturedRetryAttempt,
         capturedTurnCount: runningEntry?.turnCount ?? 0,
         preFailedHas,
+        preExhaustedHas,
         capturedFirstDispatchedAt,
         durationMs,
       });
@@ -2336,6 +2710,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       capturedRetryAttempt: number | null;
       capturedTurnCount: number;
       preFailedHas: boolean;
+      /** Whether a failure_exhausted alert had already fired before onWorkerExit ran. */
+      preExhaustedHas: boolean;
       capturedFirstDispatchedAt: string | null;
       durationMs: number;
     },
@@ -2344,22 +2720,32 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const notifier = this.notifier!;
     const state = this.orchestrator.getState();
 
-    // Terminal failure — retries exhausted (check first; supersedes infra_error)
+    // Terminal failure — issue newly entered failed set (check first; supersedes infra_error)
     const nowFailed =
       state.failed.has(execution.issueId) && !captured.preFailedHas;
     if (nowFailed) {
-      const maxRetries = this.config.agent.maxRetryAttempts;
-      const retriesExhausted =
-        (captured.capturedRetryAttempt ?? 0) >= maxRetries;
-      notifier.notify({
-        type: "issue_failed",
-        issueIdentifier: execution.issueIdentifier,
-        issueTitle: captured.capturedTitle,
-        issueUrl: captured.capturedUrl,
-        failureReason: input.reason ?? null,
-        retriesExhausted,
-        retryAttempt: captured.capturedRetryAttempt,
-      });
+      // Dedup: if a failure_exhausted alert fired during this onWorkerExit call
+      // (i.e. exhaustedIds grew since we captured preExhaustedHas), suppress
+      // the generic issue_failed post to avoid double terminal alerts for the
+      // same event. This covers both count-based exhaustion AND novelty short-circuit
+      // parks that fire failure_exhausted at attempt < maxRetries.
+      const exhaustedAlertFired =
+        state.failureExhaustedIds.has(execution.issueId) &&
+        !captured.preExhaustedHas;
+      if (!exhaustedAlertFired) {
+        const maxRetries = this.config.agent.maxRetryAttempts;
+        const retriesExhausted =
+          (captured.capturedRetryAttempt ?? 0) >= maxRetries;
+        notifier.notify({
+          type: "issue_failed",
+          issueIdentifier: execution.issueIdentifier,
+          issueTitle: captured.capturedTitle,
+          issueUrl: captured.capturedUrl,
+          failureReason: input.reason ?? null,
+          retriesExhausted,
+          retryAttempt: captured.capturedRetryAttempt,
+        });
+      }
       return;
     }
 
@@ -2514,6 +2900,11 @@ export async function startRuntimeService(
       logsRoot: options.logsRoot ?? null,
       ...(options.stdout === undefined ? {} : { stdout: options.stdout }),
     }));
+  await warnSuppressedContractViolations({
+    logger,
+    validation,
+    phase: "startup",
+  });
   let currentConfig = options.config;
   let tracker = options.tracker ?? createLinearTrackerFromConfig(currentConfig);
   let workspaceManager =
@@ -2799,6 +3190,35 @@ async function logPollCycleResult(
   });
 }
 
+/**
+ * Loud, repeated re-alert for `contracts.override: true` (SYMPH-409): every
+ * startup and config reload re-warns about each suppressed config-contract
+ * violation until the override is removed. The override never expires; this
+ * repetition is the bypass resistance.
+ */
+async function warnSuppressedContractViolations(input: {
+  logger: StructuredLogger;
+  validation: DispatchValidationResult;
+  phase: "startup" | "reload";
+}): Promise<void> {
+  if (!input.validation.ok) {
+    return;
+  }
+
+  for (const violation of input.validation.suppressedContractViolations ?? []) {
+    await input.logger.warn(
+      "config_contract_override_active",
+      `contracts.override is suppressing a config contract violation: ${violation.message} Remove contracts.override once the config is fixed — this warning repeats at every startup and reload.`,
+      {
+        phase: input.phase,
+        rule: violation.rule,
+        config_key: violation.key,
+        offending_value: violation.value,
+      },
+    );
+  }
+}
+
 async function createRuntimeWorkflowWatcher(input: {
   config: ResolvedWorkflowConfig;
   logger: StructuredLogger;
@@ -2824,6 +3244,12 @@ async function createRuntimeWorkflowWatcher(input: {
         );
         return;
       }
+
+      await warnSuppressedContractViolations({
+        logger: input.logger,
+        validation: snapshot.dispatchValidation,
+        phase: "reload",
+      });
 
       await input.onReload(snapshot.config);
       await input.logger.info(

@@ -4,6 +4,7 @@ import type { AgentRunnerCodexClient } from "../agent/runner.js";
 import type { CodexTurnResult } from "../codex/app-server-client.js";
 import type { ReviewerDefinition, StageDefinition } from "../config/types.js";
 import type { ExecutionHistory, Issue } from "../domain/model.js";
+import { sanitizeForReworkChannel } from "../shared/egress.js";
 import { getDisplayVersion } from "../version.js";
 
 /**
@@ -123,7 +124,7 @@ export async function runEnsembleGate(
 /**
  * Aggregate individual verdicts.
  * - Any explicit "fail" verdict (from a reviewer that actually ran) = FAIL.
- * - If ALL reviewers errored (no pass or fail verdicts), = ERROR (infra, not code).
+ * - If ALL reviewers errored (no pass or fail verdicts), = ERROR (no review occurred).
  * - Otherwise (all pass/error with at least one pass) = PASS.
  */
 export function aggregateVerdicts(results: ReviewerResult[]): AggregateVerdict {
@@ -389,7 +390,10 @@ export function formatReviewFindingsComment(
     `**Issue:** ${issueIdentifier}`,
   ];
   if (agentMessage.trim() !== "") {
-    sections.push("", agentMessage);
+    // agentMessage is worker-authored and this comment is re-consumed by
+    // rework prompts — neutralize fences/links and redact credentials
+    // while preserving diagnostic fidelity (SYMPH-421).
+    sections.push("", sanitizeForReworkChannel(agentMessage));
   }
   return sections.join("\n");
 }
@@ -411,7 +415,8 @@ export function formatRebaseComment(
     `**Issue:** ${issueIdentifier}`,
   ];
   if (agentMessage.trim() !== "") {
-    sections.push("", agentMessage);
+    // Same rework-channel treatment as formatReviewFindingsComment.
+    sections.push("", sanitizeForReworkChannel(agentMessage));
   }
   return sections.join("\n");
 }
@@ -426,9 +431,7 @@ export function formatGateComment(
   const header =
     aggregate === "pass"
       ? "## Ensemble Review: PASS"
-      : aggregate === "error"
-        ? "## Ensemble Review: ERROR"
-        : "## Ensemble Review: FAIL";
+      : "## Ensemble Review: FAIL";
 
   const sections = results.map((r) => {
     const iconMap = { pass: "PASS", fail: "FAIL", error: "ERROR" } as const;
@@ -436,7 +439,10 @@ export function formatGateComment(
     return [
       `### ${r.verdict.role} (${r.verdict.model}): ${icon}`,
       "",
-      r.feedback,
+      // Reviewer feedback is model-authored and posts to Linear via the
+      // runtime-host callback, bypassing the orchestrator's escalation
+      // choke point — sanitize here (SYMPH-421).
+      sanitizeForReworkChannel(r.feedback),
     ].join("\n");
   });
 

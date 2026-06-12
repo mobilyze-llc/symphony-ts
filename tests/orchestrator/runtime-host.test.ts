@@ -1074,6 +1074,7 @@ describe("OrchestratorRuntimeHost", () => {
       "Todo",
       "In Progress",
       "In Review",
+      "Resume",
     ]);
     expect(status).toMatchObject({
       paused: false,
@@ -2459,7 +2460,7 @@ describe("OrchestratorRuntimeHost", () => {
       endpoint: "https://api.linear.app/graphql",
       apiKey: "token",
       projectSlug: "project",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       fetchFn: vi.fn(),
     });
     vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
@@ -2522,7 +2523,7 @@ describe("OrchestratorRuntimeHost", () => {
       endpoint: "https://api.linear.app/graphql",
       apiKey: "token",
       projectSlug: "project",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       fetchFn: vi.fn(),
     });
     vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
@@ -2601,9 +2602,164 @@ describe("OrchestratorRuntimeHost", () => {
         reason: "Linear API request failed with HTTP 400.",
         error_code: ERROR_CODES.linearApiStatus,
         http_status: 400,
-        details: labelDiagnostics,
+        // Serialized JSON, never "[object Object]" (SYMPH-413).
+        details: JSON.stringify(labelDiagnostics),
       }),
     );
+  });
+
+  it("emits a tracker_write_failed Slack alert with serialized details on follow-up write failures", async () => {
+    const tracker = new LinearTrackerClient({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "token",
+      projectSlug: "project",
+      activeStates: ["Todo", "In Progress", "In Review"],
+      fetchFn: vi.fn(),
+    });
+    vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+      createIssue({ id: "1", identifier: "ISSUE-1" }),
+      createIssue({ id: "2", identifier: "ISSUE-2", priority: 2 }),
+    ]);
+    vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+      { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+      { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+    ]);
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockResolvedValue([]);
+    const writeDiagnostics = {
+      operationName: "SymphonyOpenIssuesByTitle",
+      variables: { projectId: "project-1" },
+      responseBody: {
+        errors: [
+          {
+            message:
+              'Variable "$projectId" of type "String!" used in position expecting type "ID".',
+            extensions: { code: "GRAPHQL_VALIDATION_FAILED" },
+          },
+        ],
+      },
+    };
+    vi.spyOn(tracker, "fetchIssueReferencesByIds").mockRejectedValue(
+      new TrackerError(
+        ERROR_CODES.linearApiStatus,
+        "Linear API request failed with HTTP 400.",
+        { status: 400, details: writeDiagnostics },
+      ),
+    );
+
+    const fakeRunner = new FakeAgentRunner();
+    const notifierEvents: PipelineNotificationEvent[] = [];
+    const readWorkspaceChangedFiles = vi.fn(async (workspacePath: string) =>
+      workspacePath.endsWith("/1")
+        ? ["src/shared/config.ts"]
+        : ["src/shared/config.ts", "src/features/two.ts"],
+    );
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier: {
+        notify(event: PipelineNotificationEvent) {
+          notifierEvents.push(event);
+        },
+      },
+      readWorkspaceChangedFiles,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.pollOnce();
+
+    expect(notifierEvents).toContainEqual(
+      expect.objectContaining({
+        type: "tracker_write_failed",
+        followUpTitle:
+          "Dispatcher follow-up: actual_write_collision for ISSUE-1 + ISSUE-2",
+        sourceIssueIds: ["1", "2"],
+        reason: "Linear API request failed with HTTP 400.",
+        httpStatus: 400,
+        details: JSON.stringify(writeDiagnostics),
+      }),
+    );
+    const alert = notifierEvents.find(
+      (event) => event.type === "tracker_write_failed",
+    );
+    expect(alert).toBeDefined();
+    if (alert !== undefined && alert.type === "tracker_write_failed") {
+      expect(alert.details).not.toContain("[object Object]");
+      expect(alert.details).toContain("GRAPHQL_VALIDATION_FAILED");
+    }
+  });
+
+  it("truncates oversized tracker_write_failed details at the 500-char Slack bound", async () => {
+    const tracker = new LinearTrackerClient({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "token",
+      projectSlug: "project",
+      activeStates: ["Todo", "In Progress", "In Review"],
+      fetchFn: vi.fn(),
+    });
+    vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+      createIssue({ id: "1", identifier: "ISSUE-1" }),
+      createIssue({ id: "2", identifier: "ISSUE-2", priority: 2 }),
+    ]);
+    vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+      { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+      { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+    ]);
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockResolvedValue([]);
+    // A diagnostic payload whose serialized form far exceeds the 500-char
+    // Slack bound, so the notifier-path truncation is actually exercised
+    // (SYMPH-413 council finding: the existing fixture was ~271 chars).
+    const writeDiagnostics = {
+      operationName: "SymphonyOpenIssuesByTitle",
+      responseBody: { errors: [{ message: "x".repeat(2_000) }] },
+    };
+    vi.spyOn(tracker, "fetchIssueReferencesByIds").mockRejectedValue(
+      new TrackerError(
+        ERROR_CODES.linearApiStatus,
+        "Linear API request failed with HTTP 400.",
+        { status: 400, details: writeDiagnostics },
+      ),
+    );
+
+    const fakeRunner = new FakeAgentRunner();
+    const notifierEvents: PipelineNotificationEvent[] = [];
+    const readWorkspaceChangedFiles = vi.fn(async (workspacePath: string) =>
+      workspacePath.endsWith("/1")
+        ? ["src/shared/config.ts"]
+        : ["src/shared/config.ts", "src/features/two.ts"],
+    );
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier: {
+        notify(event: PipelineNotificationEvent) {
+          notifierEvents.push(event);
+        },
+      },
+      readWorkspaceChangedFiles,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.pollOnce();
+
+    const alert = notifierEvents.find(
+      (event) => event.type === "tracker_write_failed",
+    );
+    expect(alert).toBeDefined();
+    if (alert !== undefined && alert.type === "tracker_write_failed") {
+      expect(alert.details).not.toBeNull();
+      expect(alert.details?.length).toBeLessThanOrEqual(500);
+      expect(alert.details?.endsWith("…[truncated]")).toBe(true);
+    }
   });
 
   it("logs a triggered re-steer when a worker branch base changes after admission", async () => {
@@ -4328,16 +4484,26 @@ describe("pipeline notifications", () => {
     fakeRunner.reject("1", new Error("agent crashed"));
     await host.waitForIdle();
 
+    // Events: dispatched + failure_exhausted (SYMPH-397).
+    // issue_failed is suppressed when retriesExhausted is true — failure_exhausted
+    // is the canonical terminal alert and avoids double "retries exhausted" posts.
     expect(notifier.events).toHaveLength(2);
     expect(notifier.events[0]).toMatchObject({
       type: "issue_dispatched",
       issueIdentifier: "ISSUE-1",
     });
-    expect(notifier.events[1]).toMatchObject({
-      type: "issue_failed",
-      issueIdentifier: "ISSUE-1",
-      retriesExhausted: true,
-    });
+    expect(notifier.events).toContainEqual(
+      expect.objectContaining({
+        type: "failure_exhausted",
+        issueIdentifier: "ISSUE-1",
+      }),
+    );
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({
+        type: "issue_failed",
+        retriesExhausted: true,
+      }),
+    );
   });
 
   it("does not emit issue_failed for an intentional manual stop", async () => {
@@ -4412,8 +4578,13 @@ describe("pipeline notifications", () => {
     });
     await host.waitForIdle();
 
+    // Events: dispatched + hard_stop_budget (SYMPH-397)
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
+      expect.objectContaining({
+        type: "hard_stop_budget",
+        issueIdentifier: "ISSUE-1",
+      }),
     ]);
 
     const snapshot = await host.getRuntimeSnapshot();
@@ -4792,6 +4963,198 @@ describe("pipeline notifications", () => {
     fakeRunner.resolve("1", createNormalResult());
     await host.waitForIdle();
   });
+
+  it("onEscalationStep fires escalation_step with real issue title (not identifier)", async () => {
+    // Escalation step: hardStop with PAUSED-budget outcome + maxSteps >= 1 triggers
+    // onEscalationStep in the orchestrator, which the runtime host routes to the notifier.
+    const tracker = createTracker({
+      candidates: [createIssue({ title: "Pagination feature" })],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: {
+        ...createConfig(),
+        budgetEscalation: { maxSteps: 2, multiplier: 2 },
+      },
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    // Resolve with a budget hard stop — step 1 of 2 triggers escalation, not exhaustion
+    fakeRunner.resolve("1", {
+      ...createNormalResult(),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250_000,
+        estimatedCostUsd: 3.21,
+      },
+    });
+    await host.waitForIdle();
+
+    const escalationEvents = notifier.events.filter(
+      (e) => e.type === "escalation_step",
+    );
+    expect(escalationEvents).toHaveLength(1);
+    expect(escalationEvents[0]).toMatchObject({
+      type: "escalation_step",
+      issueIdentifier: "ISSUE-1",
+      // issueTitle must be the real title, not the fallback identifier
+      issueTitle: "Pagination feature",
+    });
+  });
+
+  it("onHardStopBudget fires hard_stop_budget with real issue title (not identifier)", async () => {
+    // Verifies that the hard_stop_budget callback threads the real issue title
+    // rather than falling back to the identifier.
+    const tracker = createTracker({
+      candidates: [createIssue({ title: "Auth refactor" })],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: {
+        ...createConfig(),
+        // maxSteps: null => budget escalation ladder not available → hard_stop_budget
+        budgetEscalation: { maxSteps: null, multiplier: 2 },
+      },
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.resolve("1", {
+      ...createNormalResult(),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250_000,
+        estimatedCostUsd: 3.21,
+      },
+    });
+    await host.waitForIdle();
+
+    const budgetEvents = notifier.events.filter(
+      (e) => e.type === "hard_stop_budget",
+    );
+    expect(budgetEvents).toHaveLength(1);
+    expect(budgetEvents[0]).toMatchObject({
+      type: "hard_stop_budget",
+      issueIdentifier: "ISSUE-1",
+      // issueTitle must be the real title, not the fallback identifier
+      issueTitle: "Auth refactor",
+    });
+  });
+
+  it("onFailureExhausted fires failure_exhausted with real issue title (not identifier)", async () => {
+    // Verifies that failure_exhausted threads the real issue title.
+    const tracker = createTracker({
+      candidates: [createIssue({ title: "Payment gateway fix" })],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: {
+        ...createConfig(),
+        agent: { ...createConfig().agent, maxRetryAttempts: 0 },
+      },
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.reject("1", new Error("agent crashed"));
+    await host.waitForIdle();
+
+    const exhaustedEvents = notifier.events.filter(
+      (e) => e.type === "failure_exhausted",
+    );
+    expect(exhaustedEvents).toHaveLength(1);
+    expect(exhaustedEvents[0]).toMatchObject({
+      type: "failure_exhausted",
+      issueIdentifier: "ISSUE-1",
+      // issueTitle must be the real title, not the fallback identifier
+      issueTitle: "Payment gateway fix",
+    });
+  });
+
+  it("terminal event with failure_exhausted fires only ONE alert (no redundant issue_failed)", async () => {
+    // Verifies council R2 P2: the dedup guard suppresses issue_failed whenever
+    // a failure_exhausted alert actually fired — not just when the count-based
+    // retriesExhausted proxy is true. A spec failure parks at attempt 0 with
+    // maxRetries=5, so retriesExhausted (old proxy: 0 >= 5 = false) would have
+    // emitted a redundant issue_failed. The new seam checks failureExhaustedIds.
+    const tracker = createTracker({
+      candidates: [createIssue({ title: "Spec-fail dedup test" })],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: {
+        ...createConfig(),
+        // maxRetryAttempts=5 so attempt 0 is far below the limit:
+        // old dedup proxy (0 >= 5 = false) would emit issue_failed even though
+        // failure_exhausted was already fired by the spec-failure path.
+        agent: { ...createConfig().agent, maxRetryAttempts: 5 },
+      },
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    // Spec failure is terminal — no retry, failure_exhausted fires immediately.
+    // Pass the STAGE_FAILED signal via lastCodexMessage (the fallback agentMessage source).
+    fakeRunner.resolve("1", {
+      ...createNormalResult(),
+      liveSession: {
+        ...createNormalResult().liveSession,
+        lastCodexMessage:
+          "[STAGE_FAILED: spec]\nCannot satisfy the acceptance criteria.",
+      },
+    });
+    await host.waitForIdle();
+
+    // Should be in failed state
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.counts.failed).toBe(1);
+
+    // Exactly ONE Slack post for the terminal event: failure_exhausted
+    const exhaustedEvents = notifier.events.filter(
+      (e) => e.type === "failure_exhausted",
+    );
+    const failedEvents = notifier.events.filter(
+      (e) => e.type === "issue_failed",
+    );
+    expect(exhaustedEvents).toHaveLength(1);
+    // issue_failed must be suppressed — failure_exhausted already covers the terminal alert
+    expect(failedEvents).toHaveLength(0);
+  });
 });
 
 describe("pipeline notifications in startRuntimeService", () => {
@@ -5114,7 +5477,7 @@ function createLinearTrackerForPipelineStatus(): LinearTrackerClient {
     endpoint: "https://api.linear.app/graphql",
     apiKey: "token",
     projectSlug: "pipeline",
-    activeStates: ["Todo", "In Progress", "In Review"],
+    activeStates: ["Todo", "In Progress", "In Review", "Resume"],
     fetchFn: vi.fn(),
   });
 }
@@ -5174,7 +5537,7 @@ function createConfig(): ResolvedWorkflowConfig {
       endpoint: "https://api.linear.app/graphql",
       apiKey: "token",
       projectSlug: "project",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       terminalStates: ["Done", "Canceled"],
     },
     polling: {
@@ -5221,6 +5584,11 @@ function createConfig(): ResolvedWorkflowConfig {
     admissionCard: {
       enabled: false,
     },
+    watchdog: {
+      systemicThreshold: 2,
+      circuitBreaker: true,
+      maxFilingsPerHour: 3,
+    },
     budgetEscalation: {
       maxSteps: null,
       multiplier: 2,
@@ -5232,6 +5600,9 @@ function createConfig(): ResolvedWorkflowConfig {
     server: {
       port: null,
       slackNotifyChannel: null,
+    },
+    notifications: {
+      slackEnabled: true,
     },
     observability: {
       dashboardEnabled: true,
