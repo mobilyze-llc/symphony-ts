@@ -926,22 +926,74 @@ function isAllowlistedChangedFile(
   allowedPatterns: readonly string[],
 ): boolean {
   return allowedPatterns.some((pattern) =>
-    globLikePatternToRegExp(pattern).test(filePath),
+    matchesGlobLikePattern(pattern, filePath),
   );
 }
 
-function globLikePatternToRegExp(pattern: string): RegExp {
-  const doubleStarToken = "__SYMPHONY_DOUBLE_STAR__";
-  const questionToken = "__SYMPHONY_QUESTION__";
-  const escaped = pattern
-    .replace(/\?/g, questionToken)
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&");
-  const regexSource = escaped
-    .replace(/\*\*/g, doubleStarToken)
-    .replace(/\*/g, "[^/]*")
-    .replaceAll(doubleStarToken, ".*")
-    .replaceAll(questionToken, "[^/]");
-  return new RegExp(`^${regexSource}$`);
+function matchesGlobLikePattern(pattern: string, filePath: string): boolean {
+  const failedStates = new Set<string>();
+
+  function matches(patternIndex: number, fileIndex: number): boolean {
+    const state = `${patternIndex}:${fileIndex}`;
+    if (failedStates.has(state)) {
+      return false;
+    }
+
+    if (patternIndex === pattern.length) {
+      return fileIndex === filePath.length;
+    }
+
+    if (pattern.startsWith("**", patternIndex)) {
+      for (
+        let nextFileIndex = fileIndex;
+        nextFileIndex <= filePath.length;
+        nextFileIndex += 1
+      ) {
+        if (matches(patternIndex + 2, nextFileIndex)) {
+          return true;
+        }
+      }
+      failedStates.add(state);
+      return false;
+    }
+
+    const token = pattern[patternIndex];
+
+    if (token === "*") {
+      let nextFileIndex = fileIndex;
+      while (true) {
+        if (matches(patternIndex + 1, nextFileIndex)) {
+          return true;
+        }
+        if (
+          nextFileIndex >= filePath.length ||
+          filePath[nextFileIndex] === "/"
+        ) {
+          break;
+        }
+        nextFileIndex += 1;
+      }
+      failedStates.add(state);
+      return false;
+    }
+
+    if (token === "?") {
+      if (fileIndex < filePath.length && filePath[fileIndex] !== "/") {
+        return matches(patternIndex + 1, fileIndex + 1);
+      }
+      failedStates.add(state);
+      return false;
+    }
+
+    if (filePath[fileIndex] === token) {
+      return matches(patternIndex + 1, fileIndex + 1);
+    }
+
+    failedStates.add(state);
+    return false;
+  }
+
+  return matches(0, 0);
 }
 
 async function runReviewerLane(input: {
