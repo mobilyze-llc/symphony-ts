@@ -3469,8 +3469,8 @@ export class OrchestratorCore {
       const hadSubstrateStall =
         this.state.issueReviewInfrastructureStalls[issueId] !== undefined;
       delete this.state.issueReviewInfrastructureStalls[issueId];
-      if (hadSubstrateStall && stageName !== null) {
-        delete this.state.issueFailureSignatures[`${issueId}:${stageName}`];
+      if (hadSubstrateStall && stageName === "review") {
+        delete this.state.issueFailureSignatures[`${issueId}:review`];
       }
       return false;
     }

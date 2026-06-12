@@ -406,6 +406,48 @@ describe("failure signal routing in onWorkerExit", () => {
     ).toBe(true);
   });
 
+  it("does not let stale substrate-stall state disable non-review infra novelty", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+
+    const ordinaryInfraRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Tracker API temporarily unavailable.\n[STAGE_FAILED: infra]",
+    });
+    expect(ordinaryInfraRetry).not.toBeNull();
+    orchestrator.getState().issueReviewInfrastructureStalls["1"] = {
+      count: 1,
+      signature: "stale-review-substrate-stall",
+      stalledLanes: ["claude-opus"],
+    };
+    await orchestrator.onRetryTimer("1");
+
+    const secondRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Tracker API temporarily unavailable.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(secondRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "failure_exhausted" &&
+            entry.summary.includes("retry futile"),
+        ),
+    ).toBe(true);
+  });
+
   it("clears substrate-stall review state when a real review finding reworks code", async () => {
     const orchestrator = createStagedOrchestrator({
       stages: createAgentReviewWorkflowConfig(),
