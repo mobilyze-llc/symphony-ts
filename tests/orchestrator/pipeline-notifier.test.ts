@@ -1653,3 +1653,29 @@ describe("egress sanitization retrofit (SYMPH-421)", () => {
     expect(infra.text).toContain("&lt;runaway&gt;");
   });
 });
+
+describe("formatNotification triage_escalation (SYMPH-399)", () => {
+  it("formats the L2 escalation with classification, case, and attribution", () => {
+    const result = formatNotification({
+      type: "triage_escalation",
+      issueIdentifier: "SYMPH-332",
+      issueTitle: "Council gate loops review stage",
+      issueUrl: "https://linear.app/x/issue/SYMPH-332",
+      stageName: "review",
+      classification: "infra",
+      confidence: "high",
+      caseText:
+        "EPERM recurs across attempts with rotating temp paths; a human needs to inspect the host.",
+      attribution: "by watchdog-l2@pro14",
+    });
+
+    expect(result.text).toContain("Stuck-triage escalation");
+    expect(result.text).toContain(
+      "<https://linear.app/x/issue/SYMPH-332|SYMPH-332>",
+    );
+    expect(result.text).toContain("Stage: review");
+    expect(result.text).toContain("Classification: infra (confidence: high)");
+    expect(result.text).toContain("by watchdog-l2@pro14");
+    expect(result.text).toContain("a human needs to inspect the host");
+  });
+});
