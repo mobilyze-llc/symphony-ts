@@ -2742,6 +2742,12 @@ export class OrchestratorCore {
 
       let retryEntry: RetryEntry | null;
       if (pendingStageSignal.signal === "failure") {
+        await this.recordPendingStageSignalConsumed(
+          issueId,
+          runningEntry,
+          pendingStageSignal,
+        );
+        this.clearResumeRequirement(issueId);
         retryEntry = this.handleFailureSignal(
           issueId,
           runningEntry,
@@ -2755,14 +2761,13 @@ export class OrchestratorCore {
           pendingStageSignal.stageName,
           pendingStageSignal.agentMessage,
         );
+        await this.recordPendingStageSignalConsumed(
+          issueId,
+          runningEntry,
+          pendingStageSignal,
+        );
+        this.clearResumeRequirement(issueId);
       }
-
-      await this.recordPendingStageSignalConsumed(
-        issueId,
-        runningEntry,
-        pendingStageSignal,
-      );
-      this.clearResumeRequirement(issueId);
       return retryEntry;
     } catch (error) {
       runningEntry.lastCodexMessage = originalLastCodexMessage;
@@ -7191,11 +7196,17 @@ export class OrchestratorCore {
         attempt: pendingStageSignal.attempt,
         agentMessage: pendingStageSignal.agentMessage,
       });
-      await this.consumePendingStageSignal(
-        issue.id,
-        pendingRunningEntry,
-        pendingStageSignal,
-      );
+      try {
+        await this.consumePendingStageSignal(
+          issue.id,
+          pendingRunningEntry,
+          pendingStageSignal,
+        );
+      } catch (error) {
+        console.warn(
+          `[orchestrator] Failed to consume pending stage signal for ${issue.identifier}; will retry on a later dispatch tick: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       return {
         dispatched: false,
         rightSizingDecision: null,

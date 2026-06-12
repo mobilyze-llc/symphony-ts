@@ -1600,6 +1600,69 @@ describe("orchestrator core", () => {
     ).toBe(false);
   });
 
+  it("journals pending failure consumption before firing terminal failure side effects", async () => {
+    const failureExhausted: string[] = [];
+    const config = createInvestigateImplementConfig();
+    config.budgetEscalation = { maxSteps: 1, multiplier: 2 };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            title: "Terminal pending failure",
+          }),
+        ],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      onFailureExhausted: (event) => {
+        failureExhausted.push(event.issueIdentifier);
+      },
+      writeRunJournalEntry: async (entry) => {
+        if (entry.kind === "pending_stage_signal") {
+          throw new Error("journal disk unavailable");
+        }
+      },
+    });
+
+    await orchestrator.pollTick();
+    await expect(
+      orchestrator.onWorkerExit({
+        issueId: "1",
+        outcome: "normal",
+        agentMessage: "Cannot satisfy the ticket.\n[STAGE_FAILED: spec]",
+        endedAt: new Date("2026-03-06T00:01:05.000Z"),
+        hardStop: {
+          outcome: "PAUSED-budget",
+          trigger: "token_budget",
+          reason: "Token budget exceeded.",
+          turnCount: 2,
+          totalTokens: 250_001,
+          estimatedCostUsd: 5,
+        },
+      }),
+    ).rejects.toThrow("journal disk unavailable");
+
+    const state = orchestrator.getState();
+    expect(failureExhausted).toEqual([]);
+    expect(state.failed.has("1")).toBe(false);
+    expect(state.issuePendingStageSignals["1"]).toMatchObject({
+      signal: "failure",
+      failureClass: "spec",
+    });
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) => entry.kind === "failure_exhausted",
+      ),
+    ).toBe(false);
+  });
+
   it("keeps worker running state when dispatcher lease completion cannot be persisted", async () => {
     const timers = createFakeTimerScheduler();
     const orchestrator = createOrchestrator({
@@ -4714,6 +4777,64 @@ describe("dispatcher run journal restart recovery", () => {
     );
     expect(replayedAfterConsumption.getState().resumeRequired.has("1")).toBe(
       false,
+    );
+  });
+
+  it("continues the poll tick when pending signal consumption fails during dispatch", async () => {
+    const config = createInvestigateImplementConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    const spawnedStageNames: Array<string | null> = [];
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: "Resume" }),
+          createIssue({ id: "2", identifier: "ISSUE-2", state: "Todo" }),
+        ],
+      }),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStageNames.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      writeRunJournalEntry: async (entry) => {
+        if (entry.kind === "pending_stage_signal") {
+          throw new Error("journal disk unavailable");
+        }
+      },
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "hard_stop:1:investigate:initial:token_budget:1",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:investigate:initial:token_budget:1",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            outcome: "PAUSED-budget",
+            trigger: "token_budget",
+            issueState: "Todo",
+            pendingStageSignal: "complete",
+            pendingStageName: "investigate",
+            pendingAttempt: null,
+            pendingAgentMessage: "Investigation complete.\n[STAGE_COMPLETE]",
+            pendingFailureClass: null,
+          },
+        }),
+      ],
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(spawnedStageNames).toEqual(["investigate"]);
+    expect(orchestrator.getState().issuePendingStageSignals["1"]).toMatchObject(
+      {
+        signal: "complete",
+      },
     );
   });
 
