@@ -5451,6 +5451,62 @@ describe("max retry safety net", () => {
     expect(exhausted[0]?.issueTitle).toBe("Infra Fix Title");
   });
 
+  it("parks repeated infra failure signals with infra signature class", async () => {
+    const exhausted: Array<{
+      failureClass: string | null;
+      reason: string;
+    }> = [];
+
+    const orchestrator = new OrchestratorCore({
+      config: createConfig({ agent: { maxRetryAttempts: 5 } }),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            title: "Infra Signal Title",
+          }),
+        ],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      onFailureExhausted: (input) => {
+        exhausted.push({
+          failureClass: input.failureClass,
+          reason: input.reason,
+        });
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: infra]",
+    });
+    expect(retry).not.toBeNull();
+
+    const retryResult = await orchestrator.onRetryTimer("1");
+    expect(retryResult.dispatched).toBe(true);
+
+    const parked = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_FAILED: infra]",
+    });
+
+    expect(parked).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(exhausted).toHaveLength(1);
+    expect(exhausted[0]?.failureClass).toBe("infra");
+    expect(exhausted[0]?.reason).toContain("(infra)");
+  });
+
   it("threads real issueTitle into failure_exhausted on review failure signal path (no stages)", async () => {
     // Verifies fix for council R2 P2: handleReviewFailure no-stages branch must thread issueTitle.
     const exhausted: Array<{ issueTitle: string }> = [];

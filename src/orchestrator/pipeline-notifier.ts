@@ -230,7 +230,7 @@ export interface SystemicClusterAlertEvent {
   type: "systemic_cluster_alert";
   /** 7-char signature hash. */
   signature: string;
-  /** Failure class: permanent | transient | unknown. */
+  /** Failure class: permanent | infra | transient | unknown. */
   errorClass: string;
   /** Affected stage name, or null if unknown. */
   stageName: string | null;

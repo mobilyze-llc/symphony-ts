@@ -10,8 +10,9 @@
  * - retry_once grants exactly one attempt exempt from the novelty
  *   short-circuit; an identical-signature failure goes straight back to
  *   park with NO second triage.
- * - Low confidence ⇒ park; retry_once for a permanent failure class ⇒ park
- *   (the 332 fixture); rework without a hint ⇒ park.
+ * - Low confidence ⇒ park; retry_once for a non-transient failure class ⇒
+ *   park (the 332 fixture and explicit infra signals); rework without a hint ⇒
+ *   park.
  * - Disabled config ⇒ byte-identical behavior (zero new side effects).
  */
 import { describe, expect, it, vi } from "vitest";
@@ -44,7 +45,7 @@ const ENABLED_TRIAGE: WorkflowStuckTriageConfig = {
 };
 
 // Unknown-class failure (no classification rule matches): eligible for the
-// novelty park (class !== "transient") but NOT subject to the permanent-class
+// novelty park (class !== "transient") but NOT subject to the non-transient
 // retry_once coercion — the shape the retry_once grant exists for.
 const UNKNOWN_CLASS_FAILURE =
   "AssertionError: rendered snapshot diverged from stable baseline in widget tree";
@@ -511,7 +512,7 @@ describe("stuck triage: envelope bounds", () => {
     );
   });
 
-  it("332 fixture: a permanent-class park never yields retry_once — infra retry_once is coerced to park", async () => {
+  it("332 fixture: a permanent-class park never yields retry_once", async () => {
     const runStuckTriage = vi.fn().mockResolvedValue({
       classification: "infra",
       action: "retry_once",
@@ -533,6 +534,31 @@ describe("stuck triage: envelope bounds", () => {
     expect(verdictEntry?.metadata.modelAction).toBe("retry_once");
     expect(verdictEntry?.metadata.action).toBe("park");
     expect(verdictEntry?.metadata.failure_class).toBe("permanent");
+  });
+
+  it("an infra-class park never yields retry_once", async () => {
+    const runStuckTriage = vi.fn().mockResolvedValue({
+      classification: "infra",
+      action: "retry_once",
+      confidence: "high",
+      rationale: "Model over-optimistically wants a retry.",
+    } satisfies StuckTriageVerdict);
+    const orchestrator = createOrchestrator({
+      runStuckTriage,
+      stuckTriage: ENABLED_TRIAGE,
+    });
+    await driveNoveltyPark(orchestrator, [
+      "agent reported failure: infra",
+      "agent reported failure: infra",
+    ]);
+    const state = orchestrator.getState();
+
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.retryAttempts["1"]).toBeUndefined();
+    const verdictEntry = triageVerdictEntries(orchestrator)[0];
+    expect(verdictEntry?.metadata.modelAction).toBe("retry_once");
+    expect(verdictEntry?.metadata.action).toBe("park");
+    expect(verdictEntry?.metadata.failure_class).toBe("infra");
   });
 });
 

@@ -150,6 +150,11 @@ describe("normalizeErrorSignature", () => {
       expect(result.class).toBe("permanent");
     });
 
+    it("classifies agent-reported infra stage failures as infra", () => {
+      const result = normalizeErrorSignature("agent reported failure: infra");
+      expect(result.class).toBe("infra");
+    });
+
     it("classifies EACCES as permanent", () => {
       const result = normalizeErrorSignature(
         "EACCES: permission denied, access '/root/secret'",
