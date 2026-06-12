@@ -548,6 +548,55 @@ describe("runHeadlessCouncilGate", () => {
     ).toEqual(["pi-deepseek:timed_out:timed out"]);
   });
 
+  it("fails closed with durable aggregate artifacts when a reviewer command hangs", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": { hang: true },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        timeoutSeconds: -59.99,
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      state: "error",
+      verdict: "error",
+      message:
+        "Review lane execution failed: cmux-spawn lane claude-opus timed out.",
+    });
+    await expect(
+      readFile(join(harness.artifactDir, "claude-opus.cli.stderr"), "utf-8"),
+    ).resolves.toContain("cmux-spawn lane claude-opus timed out");
+    const cliJson = JSON.parse(
+      await readFile(
+        join(harness.artifactDir, "claude-opus.cli.json"),
+        "utf-8",
+      ),
+    ) as { state: string; message: string; artifact_path: string | null };
+    expect(cliJson).toMatchObject({
+      state: "error",
+      artifact_path: null,
+    });
+    expect(cliJson.message).toContain("cmux-spawn lane claude-opus timed out");
+    await expect(
+      readFile(join(harness.artifactDir, "review-result.json"), "utf-8"),
+    ).resolves.toContain('"verdict": "error"');
+    await expect(
+      readFile(join(harness.artifactDir, "council-report.md"), "utf-8"),
+    ).resolves.toContain("claude-opus");
+  });
+
   it("fails closed before review when an explicit diff file is too large", async () => {
     const harness = await createHarness();
     await writeFile(harness.diffPath, "x".repeat(5 * 1024 * 1024 + 1));
@@ -1079,6 +1128,7 @@ interface LaneBehavior {
   json?: Record<string, unknown>;
   artifact?: string;
   reject?: Error;
+  hang?: boolean;
 }
 
 async function createHarness(options?: {
@@ -1158,6 +1208,9 @@ async function createHarness(options?: {
     if (args[0] === "run") {
       const artifactName = args[args.indexOf("--artifact-name") + 1]!;
       const behavior = options?.laneBehavior?.[artifactName] ?? {};
+      if (behavior.hang === true) {
+        return await new Promise<CommandResult>(() => {});
+      }
       if (behavior.reject !== undefined) {
         throw behavior.reject;
       }

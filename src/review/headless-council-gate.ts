@@ -212,11 +212,31 @@ export async function runHeadlessCouncilGate(
     );
   }
 
-  const preflight = await runCommand(
-    cmuxSpawnBin,
-    ["preflight", "--caffeinate", "--json"],
-    { cwd: workspace, env, timeoutMs: DEFAULT_PREFLIGHT_TIMEOUT_MS },
-  );
+  let preflight: CommandResult;
+  try {
+    preflight = await runCommandWithDeadline(
+      runCommand(cmuxSpawnBin, ["preflight", "--caffeinate", "--json"], {
+        cwd: workspace,
+        env,
+        timeoutMs: DEFAULT_PREFLIGHT_TIMEOUT_MS,
+      }),
+      DEFAULT_PREFLIGHT_TIMEOUT_MS,
+      "cmux-spawn preflight timed out.",
+    );
+  } catch (error) {
+    await writeFile(`${artifactDir}/cmux-preflight.stdout`, "");
+    await writeFile(
+      `${artifactDir}/cmux-preflight.stderr`,
+      `${formatError(error)}\n`,
+    );
+    return await fail(
+      "error",
+      {},
+      [],
+      ["cmux-preflight-timeout"],
+      "cmux-spawn preflight timed out; review gate failed closed.",
+    );
+  }
   await writeFile(`${artifactDir}/cmux-preflight.stdout`, preflight.stdout);
   await writeFile(`${artifactDir}/cmux-preflight.stderr`, preflight.stderr);
   if (preflight.exitCode !== 0) {
@@ -493,11 +513,16 @@ async function runReviewerLane(input: {
     ...laneAgentArgs(input.lane),
   ];
 
-  const result = await input.runCommand(input.cmuxSpawnBin, args, {
-    cwd: input.workspace,
-    env: input.env,
-    timeoutMs: commandTimeoutMs(input.timeoutSeconds),
-  });
+  const timeoutMs = commandTimeoutMs(input.timeoutSeconds);
+  const result = await runCommandWithDeadline(
+    input.runCommand(input.cmuxSpawnBin, args, {
+      cwd: input.workspace,
+      env: input.env,
+      timeoutMs,
+    }),
+    timeoutMs,
+    `cmux-spawn lane ${input.lane.laneId} timed out.`,
+  );
   await writeFile(cliJsonPath, result.stdout);
   await writeFile(stderrPath, result.stderr);
 
@@ -534,35 +559,40 @@ async function runCodexLeadLane(input: {
     buildCodexLeadPrompt(input.context, input.reviewerResults),
   );
 
-  const result = await input.runCommand(
-    input.cmuxSpawnBin,
-    [
-      "run",
-      "--agent",
-      "codex",
-      "--workspace",
-      input.workspace,
-      "--prompt-file",
-      promptPath,
-      "--artifact-dir",
-      input.artifactDir,
-      "--artifact-name",
-      laneId,
-      "--lane-id",
-      laneId,
-      "--phase",
-      phase,
-      "--timeout-seconds",
-      String(input.timeoutSeconds),
-      "--read-only",
-      "--config",
-      'model_reasoning_effort="high"',
-    ],
-    {
-      cwd: input.workspace,
-      env: input.env,
-      timeoutMs: commandTimeoutMs(input.timeoutSeconds),
-    },
+  const timeoutMs = commandTimeoutMs(input.timeoutSeconds);
+  const result = await runCommandWithDeadline(
+    input.runCommand(
+      input.cmuxSpawnBin,
+      [
+        "run",
+        "--agent",
+        "codex",
+        "--workspace",
+        input.workspace,
+        "--prompt-file",
+        promptPath,
+        "--artifact-dir",
+        input.artifactDir,
+        "--artifact-name",
+        laneId,
+        "--lane-id",
+        laneId,
+        "--phase",
+        phase,
+        "--timeout-seconds",
+        String(input.timeoutSeconds),
+        "--read-only",
+        "--config",
+        'model_reasoning_effort="high"',
+      ],
+      {
+        cwd: input.workspace,
+        env: input.env,
+        timeoutMs,
+      },
+    ),
+    timeoutMs,
+    `cmux-spawn lane ${laneId} timed out.`,
   );
   await writeFile(cliJsonPath, result.stdout);
   await writeFile(stderrPath, result.stderr);
@@ -1159,6 +1189,30 @@ function assertDiffWithinLimit(diff: string, source: string): string {
 
 function commandTimeoutMs(timeoutSeconds: number): number {
   return (timeoutSeconds + DEFAULT_COMMAND_TIMEOUT_GRACE_SECONDS) * 1000;
+}
+
+async function runCommandWithDeadline(
+  command: Promise<CommandResult>,
+  timeoutMs: number,
+  timeoutMessage: string,
+): Promise<CommandResult> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      command,
+      new Promise<CommandResult>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(timeoutMessage)),
+          timeoutMs,
+        );
+        timeout.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function stringOrNull(value: unknown): string | null {
