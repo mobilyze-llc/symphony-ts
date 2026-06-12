@@ -42,7 +42,6 @@ export type StructuredReviewIntroducedIn =
   | `fix_round_${number}`
   | "pre_existing";
 export type StructuredReviewParseStatus =
-  | "valid"
   | "synthesized_from_markdown"
   | "malformed";
 
@@ -1803,6 +1802,7 @@ function buildStructuredReviewerArtifact(input: {
     }),
     ...parseSectionFindings({
       severity: "P2",
+      inferSeverity: inferTriageFindingSeverity,
       content: sections.triage,
       changedPaths,
       round: input.round,
@@ -1904,6 +1904,7 @@ function inferArtifactConfidence(
 
 function parseSectionFindings(input: {
   severity: StructuredReviewFindingSeverity;
+  inferSeverity?: (entry: string) => StructuredReviewFindingSeverity;
   content: string;
   changedPaths: ReadonlySet<string>;
   round: number;
@@ -1913,7 +1914,7 @@ function parseSectionFindings(input: {
   return entries.map((entry) =>
     normalizeStructuredFinding({
       rawText: entry,
-      severity: input.severity,
+      severity: input.inferSeverity?.(entry) ?? input.severity,
       changedPaths: input.changedPaths,
       round: input.round,
       category: input.category,
@@ -1983,9 +1984,16 @@ function normalizeStructuredFinding(input: {
     evidence,
     relatedPaths,
     rationale: input.rawText.trim(),
-    leadDisposition: leadDispositionForSeverity(input.severity),
+    leadDisposition:
+      input.category === "triage"
+        ? inferLeadDisposition(input.rawText, input.severity)
+        : leadDispositionForSeverity(input.severity),
     repeatOf: extractRepeatOf(input.rawText),
-    introducedIn: introducedInForFinding(input.severity, input.round),
+    introducedIn: introducedInForFinding(
+      input.severity,
+      input.round,
+      input.rawText,
+    ),
     dismissalReason:
       input.severity === "Dismissed" ? input.rawText.trim() : null,
   };
@@ -2107,7 +2115,9 @@ function clampConfidence(value: number): number {
   if (!Number.isFinite(value)) {
     return 0.5;
   }
-  return Math.max(0, Math.min(1, Number(value.toFixed(2))));
+  const clamped = Math.max(0, Math.min(1, value));
+  const rounded = Number(clamped.toFixed(2));
+  return rounded === 0 && clamped > 0 ? 0.01 : rounded;
 }
 
 function extractRepeatOf(text: string): string | null {
@@ -2129,14 +2139,117 @@ function leadDispositionForSeverity(
   return "open";
 }
 
+function inferLeadDisposition(
+  text: string,
+  severity: StructuredReviewFindingSeverity,
+): StructuredReviewFinding["leadDisposition"] {
+  const explicitDisposition = extractLeadDisposition(text);
+  return explicitDisposition ?? leadDispositionForSeverity(severity);
+}
+
+function extractLeadDisposition(
+  text: string,
+): StructuredReviewFinding["leadDisposition"] | null {
+  const dispositionFromField =
+    /\bdisposition\s*[:=]\s*(open|track|dismissed|refuted)\b/i.exec(
+      text,
+    )?.[1] ?? null;
+  if (dispositionFromField !== null) {
+    return normalizeLeadDisposition(dispositionFromField);
+  }
+
+  const tableCells = text
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+  const dispositionCell = tableCells
+    .slice(0, 4)
+    .find((cell) => /^(open|track|dismissed|refuted)$/i.test(cell));
+  return dispositionCell === undefined
+    ? null
+    : normalizeLeadDisposition(dispositionCell);
+}
+
+function normalizeLeadDisposition(
+  value: string,
+): StructuredReviewFinding["leadDisposition"] {
+  const normalized = value.toLowerCase();
+  if (normalized === "track") {
+    return "track";
+  }
+  if (normalized === "dismissed") {
+    return "dismissed";
+  }
+  if (normalized === "refuted") {
+    return "refuted";
+  }
+  return "open";
+}
+
 function introducedInForFinding(
   severity: StructuredReviewFindingSeverity,
   round: number,
+  text: string,
 ): StructuredReviewIntroducedIn {
+  const explicitIntroducedIn = extractIntroducedIn(text);
+  if (explicitIntroducedIn !== null) {
+    return explicitIntroducedIn;
+  }
   if (severity === "Track" || severity === "Dismissed") {
     return "pre_existing";
   }
   return round <= 1 ? "original_diff" : `fix_round_${round}`;
+}
+
+function extractIntroducedIn(
+  text: string,
+): StructuredReviewIntroducedIn | null {
+  const fixRoundMatch = /\b(?:introduced\s+in\s+)?fix\s+round\s+(\d+)\b/i.exec(
+    text,
+  );
+  if (fixRoundMatch?.[1] !== undefined) {
+    return `fix_round_${Number.parseInt(fixRoundMatch[1], 10)}`;
+  }
+  if (/\boriginal\s+diff\b/i.test(text)) {
+    return "original_diff";
+  }
+  if (/\bpre[-\s]?existing\b/i.test(text)) {
+    return "pre_existing";
+  }
+  return null;
+}
+
+function inferTriageFindingSeverity(
+  text: string,
+): StructuredReviewFindingSeverity {
+  const tableSeverity = text
+    .replace(/^\|/, "")
+    .split("|")
+    .map((cell) => cell.trim())
+    .find((cell) => /^(P1|P2|Track|Dismissed)$/i.test(cell));
+  const severityToken =
+    tableSeverity ?? /\b(P1|P2|Track|Dismissed)\b/i.exec(text)?.[1] ?? null;
+  if (severityToken === null) {
+    return "P2";
+  }
+  return normalizeFindingSeverity(severityToken);
+}
+
+function normalizeFindingSeverity(
+  value: string,
+): StructuredReviewFindingSeverity {
+  const normalized = value.toLowerCase();
+  if (normalized === "p1") {
+    return "P1";
+  }
+  if (normalized === "track") {
+    return "Track";
+  }
+  if (normalized === "dismissed") {
+    return "Dismissed";
+  }
+  return "P2";
 }
 
 function fingerprintFinding(
@@ -2209,11 +2322,9 @@ function artifactHasBlockingSections(artifact: string): boolean {
 }
 
 function artifactSectionHasContent(artifact: string, heading: string): boolean {
-  return artifactSectionContent(artifact, heading)
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line !== "")
-    .some((line) => !isEmptySectionMarker(line));
+  return (
+    sectionFindingEntries(artifactSectionContent(artifact, heading)).length > 0
+  );
 }
 
 function artifactSectionContent(artifact: string, heading: string): string {
@@ -2224,7 +2335,7 @@ function artifactSectionContent(artifact: string, heading: string): string {
 
   const sectionStart = sectionMatch.index + sectionMatch[0].length;
   const sectionTail = artifact.slice(sectionStart);
-  const nextHeadingIndex = sectionTail.search(/^#{2,3}\s+/m);
+  const nextHeadingIndex = sectionTail.search(artifactSectionBoundaryPattern());
   return nextHeadingIndex === -1
     ? sectionTail.trim()
     : sectionTail.slice(0, nextHeadingIndex).trim();
@@ -2309,11 +2420,33 @@ function isPlainTextArtifactPreamble(preamble: string): boolean {
 }
 
 function artifactSectionHeadingPattern(heading: string): RegExp {
+  return new RegExp(
+    `^#{2,3}\\s+${artifactHeadingBody(heading)}\\s*:?\\s*$`,
+    "im",
+  );
+}
+
+function artifactSectionBoundaryPattern(): RegExp {
+  const headings = [
+    "Verdict",
+    "P1 Must Fix",
+    "P2 Should Fix",
+    "Track",
+    "Dismissed Or Theoretical",
+    "Triage",
+    "Reviewer Artifacts",
+  ];
+  return new RegExp(
+    `^#{2,3}\\s+(?:${headings.map(artifactHeadingBody).join("|")})\\s*:?\\s*$`,
+    "im",
+  );
+}
+
+function artifactHeadingBody(heading: string): string {
   const escapedWords = heading
     .split(/\s+/)
     .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  const headingPattern = escapedWords.join("(?:\\s+:?\\s*|\\s*:\\s*)");
-  return new RegExp(`^#{2,3}\\s+${headingPattern}\\s*:?\\s*$`, "im");
+  return escapedWords.join("(?:\\s+:?\\s*|\\s*:\\s*)");
 }
 
 function isEmptySectionMarker(line: string): boolean {
@@ -2641,6 +2774,8 @@ function buildCodexLeadPrompt(
     "",
     "## Triage",
     "Summarize surviving P1/P2 findings or state `None`.",
+    "For each triage item, use `- <Severity> | <Disposition> | <Fingerprint or new> | <Title> | <file:line> | confidence: <0-1>`.",
+    "Use Severity `P1` or `P2`. Use Disposition `open`, `track`, `dismissed`, or `refuted`.",
     "",
     "## Track",
     "List durable follow-ups that should be filed in Linear, or `None`.",
