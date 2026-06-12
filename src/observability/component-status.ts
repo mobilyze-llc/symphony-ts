@@ -76,7 +76,7 @@ export function buildComponentStatuses(
   // product until calibration.
   const stuckTriage = config.watchdog.stuckTriage;
   components.stuck_triage =
-    stuckTriage !== undefined && stuckTriage.enabled
+    stuckTriage?.enabled === true
       ? { enabled: true }
       : {
           enabled: false,

@@ -1013,7 +1013,10 @@ export function formatNotification(
       if (event.watchdogTicketFiling) {
         parts.push(":ticket: Watchdog ticket being filed");
       }
-      if (event.journalSequence !== undefined && event.journalSequence !== null) {
+      if (
+        event.journalSequence !== undefined &&
+        event.journalSequence !== null
+      ) {
         parts.push(
           `Journal cursor: seq ${event.journalSequence} — \`GET /api/v1/state/delta?since_seq=${Math.max(0, event.journalSequence - 1)}\``,
         );

@@ -80,11 +80,6 @@ import {
   buildRuntimeSnapshot,
   buildStateDelta,
 } from "../logging/runtime-snapshot.js";
-import { buildComponentStatuses } from "../observability/component-status.js";
-import {
-  type DeployDriftStatus,
-  captureDeployDrift,
-} from "../observability/deploy-drift.js";
 import {
   buildActivityContext,
   extractToolInputFromRaw,
@@ -95,6 +90,7 @@ import {
   StructuredLogger,
   createJsonLineSink,
 } from "../logging/structured-logger.js";
+import { buildComponentStatuses } from "../observability/component-status.js";
 import {
   type DashboardServerHost,
   type DashboardServerInstance,
@@ -108,6 +104,10 @@ import {
   type StopIssueResponse,
   startDashboardServer,
 } from "../observability/dashboard-server.js";
+import {
+  type DeployDriftStatus,
+  captureDeployDrift,
+} from "../observability/deploy-drift.js";
 import {
   createModeScopedPermissionPolicy,
   resolveHardStopsConfig,
@@ -1153,14 +1153,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     sinceSeq: number;
     limit?: number;
   }): StateDeltaResponse {
-    return buildStateDelta(
-      this.orchestrator.getState().dispatcherRunJournal,
-      {
-        sinceSeq: input.sinceSeq,
-        ...(input.limit === undefined ? {} : { limit: input.limit }),
-        asOfSequence: this.orchestrator.getRunJournalCursor(),
-      },
-    );
+    return buildStateDelta(this.orchestrator.getState().dispatcherRunJournal, {
+      sinceSeq: input.sinceSeq,
+      ...(input.limit === undefined ? {} : { limit: input.limit }),
+      asOfSequence: this.orchestrator.getRunJournalCursor(),
+    });
   }
 
   /**

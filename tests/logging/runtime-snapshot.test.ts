@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type DispatcherRunJournalEntry,
   type ManagerRunJournal,
   type RunningEntry,
   createEmptyLiveSession,
@@ -9,7 +10,9 @@ import {
 import { formatEasternTimestamp } from "../../src/logging/format-timestamp.js";
 import {
   STAGE_STALL_THRESHOLDS,
+  STATE_DELTA_MAX_LIMIT,
   buildRuntimeSnapshot,
+  buildStateDelta,
   getStallThreshold,
 } from "../../src/logging/runtime-snapshot.js";
 import { reduceManagerRunJournal } from "../../src/orchestrator/manager-run.js";
@@ -1826,3 +1829,326 @@ function createRunningEntry(input: {
     failureReason: null,
   };
 }
+
+describe("state-document enrichment (SYMPH-407)", () => {
+  function makeJournalEntry(input: {
+    sequence: number;
+    kind: DispatcherRunJournalEntry["kind"];
+    issueId?: string;
+    metadata?: Record<string, unknown>;
+  }): DispatcherRunJournalEntry {
+    return {
+      sequence: input.sequence,
+      idempotencyKey: `entry:${input.sequence}`,
+      timestamp: "2026-06-12T10:00:00.000Z",
+      kind: input.kind,
+      issueId: input.issueId ?? "issue-1",
+      issueIdentifier: "ABC-1",
+      operation: "dispatcher",
+      stage: null,
+      attempt: null,
+      ownerId: null,
+      lease: null,
+      summary: `entry ${input.sequence}`,
+      metadata: input.metadata ?? {},
+    };
+  }
+
+  function makeState() {
+    return createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+  }
+
+  it("carries as_of_sequence from the journal, preferring the enrichment cursor", () => {
+    const state = makeState();
+    expect(buildRuntimeSnapshot(state).as_of_sequence).toBe(0);
+
+    state.dispatcherRunJournal = [
+      makeJournalEntry({ sequence: 1, kind: "admission" }),
+      makeJournalEntry({ sequence: 7, kind: "dispatch_verdict" }),
+    ];
+    expect(buildRuntimeSnapshot(state).as_of_sequence).toBe(7);
+    expect(
+      buildRuntimeSnapshot(state, { enrichment: { asOfSequence: 9 } })
+        .as_of_sequence,
+    ).toBe(9);
+  });
+
+  it("renders per-issue counters coherently (escalations, triage resumes, rework, spend)", () => {
+    const state = makeState();
+    state.issueBudgetEscalations["issue-1"] = 2;
+    state.issuePauseTriageResumes["issue-1"] = 1;
+    state.issueReworkCounts["issue-1"] = 3;
+    state.issueExecutionHistory["issue-1"] = [
+      {
+        stageName: "investigate",
+        durationMs: 1_800_000,
+        totalTokens: 40_000,
+        turns: 12,
+        outcome: "completed",
+      },
+    ];
+    const running = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: "2026-06-12T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: null,
+      lastCodexTimestamp: null,
+      lastCodexMessage: null,
+      turnCount: 2,
+      codexInputTokens: 0,
+      codexOutputTokens: 0,
+      codexTotalTokens: 0,
+    });
+    running.totalStageTotalTokens = 5_000;
+    state.running["issue-1"] = running;
+    // issue with no non-zero counters must not appear
+    state.issueExecutionHistory["issue-2"] = [];
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-06-12T10:01:00.000Z"),
+    });
+    expect(snapshot.counters["issue-1"]).toEqual({
+      escalation_steps: 2,
+      triage_resumes: 1,
+      rework_count: 3,
+      spend: {
+        total_tokens: 45_000,
+        completed_stage_tokens: 40_000,
+        live_stage_tokens: 5_000,
+      },
+    });
+    expect(snapshot.counters["issue-2"]).toBeUndefined();
+  });
+
+  it("renders both rate views with sources and disagrees visibly when trackers disagree", () => {
+    const state = makeState();
+    state.rateLimitAdmission = {
+      blocked: true,
+      reason: "secondary window headroom 2.0% < 5% floor",
+      evaluatedAt: "2026-06-12T10:00:00.000Z",
+      minPrimaryHeadroomPct: 10,
+      minSecondaryHeadroomPct: 5,
+      primaryUsedPercent: 39,
+      secondaryUsedPercent: 98,
+    };
+    const snapshot = buildRuntimeSnapshot(state, {
+      enrichment: {
+        rateLimitFile: {
+          path: "/workspaces/.symphony/rate-limits.json",
+          observedAt: "2026-06-12T09:55:00.000Z",
+          rateLimits: {
+            primary: { used_percent: 39, window_minutes: 300, resets_at: 1 },
+            secondary: { used_percent: 6, window_minutes: 10080, resets_at: 2 },
+          },
+        },
+      },
+    });
+
+    expect(snapshot.rate_limit_views.runner_snapshot_file).toMatchObject({
+      source: "/workspaces/.symphony/rate-limits.json",
+      observed_at: "2026-06-12T09:55:00.000Z",
+      primary_used_pct: 39,
+      secondary_used_pct: 6,
+    });
+    expect(snapshot.rate_limit_views.gate).toMatchObject({
+      source: "dispatch admission gate (rate_limit_admission evaluation)",
+      blocked: true,
+      primary_used_pct: 39,
+      secondary_used_pct: 98,
+    });
+    // The SYMPH-338 case: file says 6%, gate says 98% — visible disagreement.
+    expect(snapshot.rate_limit_views.disagreement).toBe(true);
+  });
+
+  it("reports agreement and null when a view is missing", () => {
+    const state = makeState();
+    expect(buildRuntimeSnapshot(state).rate_limit_views).toEqual({
+      runner_snapshot_file: null,
+      gate: null,
+      live_telemetry: null,
+      disagreement: null,
+    });
+
+    state.rateLimitAdmission = {
+      blocked: false,
+      reason: null,
+      evaluatedAt: "2026-06-12T10:00:00.000Z",
+      minPrimaryHeadroomPct: 10,
+      minSecondaryHeadroomPct: 5,
+      primaryUsedPercent: 39.4,
+      secondaryUsedPercent: 97.8,
+    };
+    const agreeing = buildRuntimeSnapshot(state, {
+      enrichment: {
+        rateLimitFile: {
+          path: "/workspaces/.symphony/rate-limits.json",
+          observedAt: "2026-06-12T09:55:00.000Z",
+          rateLimits: {
+            primary: { used_percent: 39, window_minutes: 300, resets_at: 1 },
+            secondary: {
+              used_percent: 98,
+              window_minutes: 10080,
+              resets_at: 2,
+            },
+          },
+        },
+      },
+    });
+    expect(agreeing.rate_limit_views.disagreement).toBe(false);
+  });
+
+  it("summarizes watchdog clusters and breakers with journal cursors", () => {
+    const state = makeState();
+    state.dispatcherRunJournal = [
+      makeJournalEntry({
+        sequence: 4,
+        kind: "cluster_transition",
+        metadata: { signature: "abc1234" },
+      }),
+      makeJournalEntry({
+        sequence: 6,
+        kind: "cluster_transition",
+        metadata: { signature: "abc1234" },
+      }),
+      makeJournalEntry({
+        sequence: 8,
+        kind: "breaker_transition",
+        metadata: { stage: "implement", signature: "abc1234" },
+      }),
+    ];
+    const snapshot = buildRuntimeSnapshot(state, {
+      enrichment: {
+        watchdog: {
+          clusters: [
+            {
+              signature: "abc1234",
+              error_class: "infra",
+              cluster_size: 2,
+              member_issue_identifiers: ["ABC-1", "ABC-2"],
+              last_alert_size: 2,
+            },
+          ],
+          openBreakers: [
+            {
+              stage_name: "implement",
+              signature: "abc1234",
+              opened_at: "2026-06-12T10:00:00.000Z",
+              opened_for_issue_ids: ["issue-1", "issue-2"],
+            },
+          ],
+        },
+      },
+    });
+
+    expect(snapshot.watchdog.clusters).toEqual([
+      {
+        signature: "abc1234",
+        error_class: "infra",
+        cluster_size: 2,
+        member_issue_identifiers: ["ABC-1", "ABC-2"],
+        last_alert_size: 2,
+        last_transition_sequence: 6,
+      },
+    ]);
+    expect(snapshot.watchdog.open_breakers).toEqual([
+      {
+        stage_name: "implement",
+        signature: "abc1234",
+        opened_at: "2026-06-12T10:00:00.000Z",
+        opened_for_issue_ids: ["issue-1", "issue-2"],
+        last_transition_sequence: 8,
+      },
+    ]);
+  });
+
+  it("passes components and deploy drift through as one document", () => {
+    const state = makeState();
+    const snapshot = buildRuntimeSnapshot(state, {
+      enrichment: {
+        components: {
+          slack_notifier: {
+            enabled: false,
+            degraded_reason: "no notification sink configured",
+          },
+        },
+        deployDrift: {
+          running_commit: "aaa111",
+          origin_main_commit: "bbb222",
+          drift: true,
+          captured_at: "2026-06-12T10:00:00.000Z",
+          note: "captured once at startup",
+        },
+      },
+    });
+    expect(snapshot.components.slack_notifier).toEqual({
+      enabled: false,
+      degraded_reason: "no notification sink configured",
+    });
+    expect(snapshot.deploy_drift?.drift).toBe(true);
+  });
+});
+
+describe("buildStateDelta (SYMPH-407)", () => {
+  function entryAt(sequence: number): DispatcherRunJournalEntry {
+    return {
+      sequence,
+      idempotencyKey: `entry:${sequence}`,
+      timestamp: "2026-06-12T10:00:00.000Z",
+      kind: "admission",
+      issueId: "issue-1",
+      issueIdentifier: "ABC-1",
+      operation: "dispatcher",
+      stage: null,
+      attempt: null,
+      ownerId: null,
+      lease: null,
+      summary: `entry ${sequence}`,
+      metadata: {},
+    };
+  }
+
+  it("returns exactly the journal-backed deltas between two cursors", () => {
+    const journal = [1, 2, 3, 4, 5].map(entryAt);
+    const delta = buildStateDelta(journal, { sinceSeq: 2 });
+    expect(delta.since_seq).toBe(2);
+    expect(delta.as_of_sequence).toBe(5);
+    expect(delta.count).toBe(3);
+    expect(delta.truncated).toBe(false);
+    expect(delta.entries.map((entry) => entry.sequence)).toEqual([3, 4, 5]);
+  });
+
+  it("bounds the page and reports truncation", () => {
+    const journal = Array.from({ length: 10 }, (_, index) =>
+      entryAt(index + 1),
+    );
+    const delta = buildStateDelta(journal, { sinceSeq: 0, limit: 4 });
+    expect(delta.count).toBe(4);
+    expect(delta.truncated).toBe(true);
+    expect(delta.entries.map((entry) => entry.sequence)).toEqual([1, 2, 3, 4]);
+  });
+
+  it("clamps the limit to the maximum page size", () => {
+    const journal = Array.from({ length: STATE_DELTA_MAX_LIMIT + 5 }, (_, i) =>
+      entryAt(i + 1),
+    );
+    const delta = buildStateDelta(journal, {
+      sinceSeq: 0,
+      limit: STATE_DELTA_MAX_LIMIT + 100,
+    });
+    expect(delta.count).toBe(STATE_DELTA_MAX_LIMIT);
+    expect(delta.truncated).toBe(true);
+  });
+
+  it("returns an empty page at the head cursor", () => {
+    const journal = [1, 2, 3].map(entryAt);
+    const delta = buildStateDelta(journal, { sinceSeq: 3 });
+    expect(delta.count).toBe(0);
+    expect(delta.truncated).toBe(false);
+    expect(delta.entries).toEqual([]);
+    expect(delta.as_of_sequence).toBe(3);
+  });
+});

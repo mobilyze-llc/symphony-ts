@@ -603,7 +603,8 @@ export function createDashboardRequestHandler(
         }
 
         const sinceSeqRaw = url.searchParams.get("since_seq");
-        const sinceSeq = sinceSeqRaw === null ? Number.NaN : Number(sinceSeqRaw);
+        const sinceSeq =
+          sinceSeqRaw === null ? Number.NaN : Number(sinceSeqRaw);
         if (!Number.isInteger(sinceSeq) || sinceSeq < 0) {
           writeJsonError(response, 400, "invalid_request", {
             message:

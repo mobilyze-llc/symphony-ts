@@ -5896,3 +5896,82 @@ describe("pruneLocalBranches", () => {
     expect(debounced.length).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe("state-document enrichment wiring (SYMPH-407)", () => {
+  it("composes components, watchdog, as_of_sequence, and deploy drift into one snapshot", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      captureDeployDrift: async () => ({
+        running_commit: "aaa1111",
+        origin_main_commit: "bbb2222",
+        drift: true,
+        captured_at: "2026-06-12T10:00:00.000Z",
+        note: "captured once at startup",
+      }),
+      now: () => new Date("2026-06-12T10:00:05.000Z"),
+    });
+
+    // First snapshot kicks off the non-blocking deploy-drift capture.
+    const first = await host.getRuntimeSnapshot();
+    expect(typeof first.as_of_sequence).toBe("number");
+    expect(first.watchdog).toEqual({ clusters: [], open_breakers: [] });
+    // No notifier wired: the fail-open component reports degraded.
+    expect(first.components.slack_notifier).toEqual({
+      enabled: false,
+      degraded_reason: expect.stringContaining("no notification sink"),
+    });
+    expect(first.components.ac_gate?.enabled).toBe(false);
+
+    // Let the single-flight capture settle, then it must appear.
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = await host.getRuntimeSnapshot();
+    expect(second.deploy_drift).toEqual({
+      running_commit: "aaa1111",
+      origin_main_commit: "bbb2222",
+      drift: true,
+      captured_at: "2026-06-12T10:00:00.000Z",
+      note: "captured once at startup",
+    });
+  });
+
+  it("serves journal-backed deltas through getStateDelta after dispatch activity", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      captureDeployDrift: async () => null,
+      now: () => new Date("2026-06-12T10:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.as_of_sequence).toBeGreaterThan(0);
+
+    const delta = host.getStateDelta({ sinceSeq: 0 });
+    expect(delta.as_of_sequence).toBe(snapshot.as_of_sequence);
+    expect(delta.count).toBeGreaterThan(0);
+    expect(delta.entries.map((entry) => entry.sequence)).toEqual(
+      [...delta.entries.map((entry) => entry.sequence)].sort(
+        (left, right) => left - right,
+      ),
+    );
+
+    // Exact between-cursors read: everything after the first entry.
+    const firstSeq = delta.entries[0]!.sequence;
+    const tail = host.getStateDelta({ sinceSeq: firstSeq });
+    expect(tail.entries.every((entry) => entry.sequence > firstSeq)).toBe(true);
+    expect(tail.count).toBe(delta.count - 1);
+  });
+});

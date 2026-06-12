@@ -18,11 +18,11 @@ import type {
 import type { ComponentStatus } from "../observability/component-status.js";
 import type { DeployDriftStatus } from "../observability/deploy-drift.js";
 import { PIPELINE_VERDICT_SCOPE_ID } from "../orchestrator/core.js";
-import type { WatchdogRegistrySnapshot } from "../orchestrator/signature-cluster.js";
 import {
   evaluateDispatcherDecisionQuality,
   extractDispatcherDecisionEvents,
 } from "../orchestrator/decision-quality.js";
+import type { WatchdogRegistrySnapshot } from "../orchestrator/signature-cluster.js";
 import { formatEasternTimestamp } from "./format-timestamp.js";
 import {
   type LoopTraceJournalPreviewResponse,
@@ -594,8 +594,7 @@ function buildIssueCounters(
     const completedStageTokens = (
       state.issueExecutionHistory[issueId] ?? []
     ).reduce((sum, stage) => sum + stage.totalTokens, 0);
-    const liveStageTokens =
-      state.running[issueId]?.totalStageTotalTokens ?? 0;
+    const liveStageTokens = state.running[issueId]?.totalStageTotalTokens ?? 0;
     const entry: RuntimeSnapshotIssueCounters = {
       escalation_steps: state.issueBudgetEscalations[issueId] ?? 0,
       triage_resumes: state.issuePauseTriageResumes[issueId] ?? 0,
