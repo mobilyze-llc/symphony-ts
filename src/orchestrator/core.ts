@@ -738,6 +738,7 @@ export class OrchestratorCore {
     this.state.decorrelatedGateOutcomes = {};
     this.lastVerdictKeys.clear();
     this.state.issueDispositions = {};
+    this.state.resumeRequiredMarks = {};
     this.starvedTickCount = 0;
     this.pageAlertActive = false;
 
@@ -776,6 +777,7 @@ export class OrchestratorCore {
           entry.issueId,
           readMetadataString(entry.metadata, "issueState"),
           entry.timestamp,
+          { reason: "operator_input_required", setBySequence: entry.sequence },
         );
       }
 
@@ -787,6 +789,7 @@ export class OrchestratorCore {
           entry.issueId,
           readMetadataString(entry.metadata, "issueState"),
           entry.timestamp,
+          { reason: "failure_exhausted", setBySequence: entry.sequence },
         );
       }
 
@@ -805,6 +808,10 @@ export class OrchestratorCore {
             entry.issueId,
             readMetadataString(entry.metadata, "issueState"),
             entry.timestamp,
+            {
+              reason: formatIntentMarkReason(verb, entry.metadata),
+              setBySequence: entry.sequence,
+            },
           );
         } else if (
           verb === "release" ||
@@ -908,6 +915,58 @@ export class OrchestratorCore {
         // same format the live path writes at dispatch.
         this.state.issueFirstDispatchedAt[entry.issueId] ??=
           formatEasternTimestamp(new Date(entry.timestamp));
+      }
+
+      if (
+        entry.kind === "budget_escalation" &&
+        entry.metadata.status === "completed"
+      ) {
+        // Restore the escalation ladder position (SYMPH-401): entries replay
+        // in sequence order so the latest step wins, a restart resumes the
+        // ladder at the journaled step instead of step 0, and the next
+        // escalation computes step N+1 (no duplicate step-1 entry — the
+        // idempotency key `budget_escalation:{issue}:{stage}:{step}` would
+        // dedupe a re-issue anyway). A later terminal entry clears the
+        // counter via clearTerminalIssueRuntimeState.
+        const step = readMetadataNumber(entry.metadata, "step");
+        if (step !== null) {
+          this.state.issueBudgetEscalations[entry.issueId] = step;
+        }
+      }
+
+      if (
+        entry.kind === "pause_triage" &&
+        entry.metadata.status === "completed" &&
+        entry.metadata.action === "resumed"
+      ) {
+        // Restore the authorized-resume count (SYMPH-401): each journaled
+        // resumed verdict carries the pre-increment `resumesUsed`, so the
+        // post-restart count converges on resumesUsed + 1 and the triage cap
+        // (maxResumes) is enforced across a deploy boundary.
+        const resumesUsed = readMetadataNumber(entry.metadata, "resumesUsed");
+        if (resumesUsed !== null) {
+          this.state.issuePauseTriageResumes[entry.issueId] = resumesUsed + 1;
+        }
+      }
+
+      if (
+        entry.kind === "stage_record" &&
+        entry.metadata.status === "completed"
+      ) {
+        // Restore per-stage spend into execution history (SYMPH-401): the
+        // /state per-issue cumulative spend reduces from these entries, so
+        // pre-restart tokens + post-restart deltas sum without a bespoke
+        // store. A later terminal entry clears the history via
+        // clearTerminalIssueRuntimeState.
+        const record = toStageRecordFromMetadata(entry.metadata);
+        if (record !== null) {
+          const history = this.state.issueExecutionHistory[entry.issueId];
+          if (history === undefined) {
+            this.state.issueExecutionHistory[entry.issueId] = [record];
+          } else {
+            history.push(record);
+          }
+        }
       }
 
       if (
@@ -1113,10 +1172,18 @@ export class OrchestratorCore {
       reason === "inactive_state" ||
       outcome !== null
     ) {
+      const trigger = readMetadataString(entry.metadata, "trigger");
       this.markIssueRequiresExplicitResume(
         entry.issueId,
         readMetadataString(entry.metadata, "issueState"),
         entry.timestamp,
+        {
+          reason:
+            reason === "manual_stop" || reason === "inactive_state"
+              ? reason
+              : `hard_stop:${trigger ?? outcome ?? "unknown"}`,
+          setBySequence: entry.sequence,
+        },
       );
     }
   }
@@ -2602,6 +2669,36 @@ export class OrchestratorCore {
       // Snapshot history after the push so runtime-host can read it even if
       // advanceStage() deletes issueExecutionHistory for terminal transitions.
       this.lastExitHistorySnapshot.set(input.issueId, [...history]);
+
+      // Journal the stage record (SYMPH-401) so replay reduces it back into
+      // issueExecutionHistory and per-issue cumulative spend survives a
+      // restart. Sequence-suffixed key: continuations reuse stage+attempt,
+      // so a stable key would dedupe (and drop) every stage after the first.
+      // Best-effort relative to the exit handling itself.
+      try {
+        await this.recordRunJournalEntry({
+          idempotencyKey: `stage_record:${input.issueId}:${stageName}:${formatAttemptKey(runningEntry.retryAttempt)}:${this.nextRunJournalSequence()}`,
+          timestamp: endedAt.toISOString(),
+          kind: "stage_record",
+          issueId: input.issueId,
+          issueIdentifier: runningEntry.identifier,
+          operation: "dispatcher",
+          stage: stageName,
+          attempt: runningEntry.retryAttempt,
+          ownerId: this.leaseOwnerId,
+          lease: null,
+          summary: `Stage record for ${runningEntry.identifier} (${stageName}): ${stageRecord.totalTokens} tokens over ${stageRecord.turns} turns (${stageRecord.outcome}).`,
+          metadata: {
+            schema_version: 1,
+            status: "completed",
+            ...stageRecord,
+          },
+        });
+      } catch (error) {
+        console.warn(
+          `[orchestrator] failed to journal stage record for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     if (input.outcome === "normal") {
@@ -4492,8 +4589,9 @@ export class OrchestratorCore {
     issueId: string,
     issueState?: string | null,
     pausedAt?: string | null,
+    mark?: { reason: string; setBySequence: number | null },
   ): void {
-    this.recordIssueRequiresExplicitResume(issueId, issueState, pausedAt);
+    this.recordIssueRequiresExplicitResume(issueId, issueState, pausedAt, mark);
     this.releaseClaim(issueId);
   }
 
@@ -4501,8 +4599,19 @@ export class OrchestratorCore {
     issueId: string,
     issueState?: string | null,
     pausedAt?: string | null,
+    mark?: { reason: string; setBySequence: number | null },
   ): void {
     this.state.resumeRequired.add(issueId);
+    // Persistable mark surface (SYMPH-406): reason + the journal cursor that
+    // set the mark. A re-mark without fresh attribution (e.g. the worker-exit
+    // path re-asserting a park requestStop already recorded) preserves the
+    // existing reason/cursor instead of erasing it.
+    const existingMark = this.state.resumeRequiredMarks[issueId];
+    this.state.resumeRequiredMarks[issueId] = {
+      reason: mark?.reason ?? existingMark?.reason ?? "stop_like_pause",
+      setBySequence: mark?.setBySequence ?? existingMark?.setBySequence ?? null,
+      since: pausedAt ?? existingMark?.since ?? this.now().toISOString(),
+    };
     const pausedState =
       issueState === undefined || issueState === null
         ? null
@@ -4525,6 +4634,7 @@ export class OrchestratorCore {
 
   private clearResumeRequirement(issueId: string): void {
     this.state.resumeRequired.delete(issueId);
+    delete this.state.resumeRequiredMarks[issueId];
     this.resumeRequiredGuards.delete(issueId);
   }
 
@@ -4691,6 +4801,25 @@ export class OrchestratorCore {
         ? {}
         : { journalMetadata: application.journalMetadata }),
     });
+
+    // Stamp the persistable mark with the intent entry's cursor (SYMPH-406):
+    // park/halt set the mark inside applyIntentVerb before the journal write
+    // existed, so the sequence is patched in here — matching what replay
+    // reduces from the same entry.
+    if (
+      application.status === "applied" &&
+      (input.verb === "park" || input.verb === "halt") &&
+      sequence !== null
+    ) {
+      const standingMark = this.state.resumeRequiredMarks[input.issueId];
+      if (standingMark !== undefined) {
+        this.state.resumeRequiredMarks[input.issueId] = {
+          ...standingMark,
+          reason: `intent:${input.verb}:${input.reason.class}`,
+          setBySequence: sequence,
+        };
+      }
+    }
 
     if (application.status === "applied" && input.renderComment !== false) {
       try {
@@ -6007,7 +6136,7 @@ export class OrchestratorCore {
       stageName: string | null;
     },
   ): Promise<void> {
-    await this.recordRunJournalEntry({
+    const hardStopEntry = await this.recordRunJournalEntry({
       idempotencyKey: `hard_stop:${issueId}:${input.stageName ?? "no-stage"}:${formatAttemptKey(runningEntry.retryAttempt)}:${input.hardStop.trigger}:${input.hardStop.turnCount}`,
       timestamp: this.now().toISOString(),
       kind: "hard_stop_trigger",
@@ -6031,7 +6160,15 @@ export class OrchestratorCore {
       },
     });
 
-    this.markIssueRequiresExplicitResume(issueId, runningEntry.issue.state);
+    this.markIssueRequiresExplicitResume(
+      issueId,
+      runningEntry.issue.state,
+      null,
+      {
+        reason: `hard_stop:${input.hardStop.trigger}`,
+        setBySequence: hardStopEntry.sequence,
+      },
+    );
 
     const comment = [
       `Hard stop outcome: ${input.hardStop.outcome}`,
@@ -6081,7 +6218,7 @@ export class OrchestratorCore {
       stageName: string | null;
     },
   ): Promise<void> {
-    await this.recordRunJournalEntry({
+    const operatorInputEntry = await this.recordRunJournalEntry({
       idempotencyKey: `operator_input_required:${issueId}:${input.stageName ?? "no-stage"}:${formatAttemptKey(runningEntry.retryAttempt)}`,
       timestamp: this.now().toISOString(),
       kind: "operator_input_required",
@@ -6101,7 +6238,15 @@ export class OrchestratorCore {
       },
     });
 
-    this.markIssueRequiresExplicitResume(issueId, runningEntry.issue.state);
+    this.markIssueRequiresExplicitResume(
+      issueId,
+      runningEntry.issue.state,
+      null,
+      {
+        reason: "operator_input_required",
+        setBySequence: operatorInputEntry.sequence,
+      },
+    );
 
     const comment = [
       "Headless Codex requested operator input during the worker turn.",
@@ -7454,6 +7599,8 @@ export class OrchestratorCore {
         this.recordIssueRequiresExplicitResume(
           runningEntry.issue.id,
           runningEntry.issue.state,
+          null,
+          { reason, setBySequence: lease.lastJournalSequence },
         );
       }
       await this.stopRunningIssue?.({
@@ -8236,6 +8383,61 @@ function readMetadataNumber(
 ): number | null {
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Mark reason for an intent-driven park/halt (SYMPH-406): the verb plus the
+ * journaled intent reason class, e.g. "intent:park:manual_stop".
+ */
+function formatIntentMarkReason(
+  verb: string,
+  metadata: Record<string, unknown>,
+): string {
+  const reason = metadata.reason;
+  const reasonClass =
+    typeof reason === "object" &&
+    reason !== null &&
+    typeof (reason as { class?: unknown }).class === "string"
+      ? (reason as { class: string }).class
+      : null;
+  return reasonClass === null
+    ? `intent:${verb}`
+    : `intent:${verb}:${reasonClass}`;
+}
+
+/**
+ * Reconstruct a StageRecord from a journaled stage_record entry's metadata
+ * (SYMPH-401). Returns null for malformed/legacy entries — replay tolerates
+ * the gap (spend under-counts rather than crashing recovery).
+ */
+function toStageRecordFromMetadata(
+  metadata: Record<string, unknown>,
+): StageRecord | null {
+  const stageName = readMetadataString(metadata, "stageName");
+  const durationMs = readMetadataNumber(metadata, "durationMs");
+  const totalTokens = readMetadataNumber(metadata, "totalTokens");
+  const turns = readMetadataNumber(metadata, "turns");
+  const outcome = readMetadataString(metadata, "outcome");
+  if (
+    stageName === null ||
+    durationMs === null ||
+    totalTokens === null ||
+    turns === null ||
+    outcome === null
+  ) {
+    return null;
+  }
+  return {
+    stageName,
+    durationMs,
+    totalTokens,
+    inputTokens: readMetadataNumber(metadata, "inputTokens") ?? 0,
+    outputTokens: readMetadataNumber(metadata, "outputTokens") ?? 0,
+    cacheReadTokens: readMetadataNumber(metadata, "cacheReadTokens") ?? 0,
+    cacheWriteTokens: readMetadataNumber(metadata, "cacheWriteTokens") ?? 0,
+    turns,
+    outcome,
+  };
 }
 
 function toVerdictDisposition(value: unknown): VerdictDisposition | null {

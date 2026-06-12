@@ -233,6 +233,10 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   // Watchdog L2 stuck-ticket triage verdicts (SYMPH-399; the kind reserved
   // by SYMPH-405's verdict-event vocabulary).
   "triage_verdict",
+  // Per-stage token/turn record appended at worker exit (SYMPH-401):
+  // replayed into issueExecutionHistory so per-issue cumulative spend
+  // survives restarts without a bespoke persistence store.
+  "stage_record",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -962,6 +966,19 @@ export interface StageRecord {
 
 export type ExecutionHistory = StageRecord[];
 
+/**
+ * Persistent description of a requires-explicit-resume mark (SYMPH-406).
+ * Reduced from journal events on replay; never stored outside the journal.
+ */
+export interface ResumeRequiredMark {
+  /** Why the issue is parked (e.g. "hard_stop:token_budget", "intent:park:manual_stop"). */
+  reason: string;
+  /** Journal sequence of the event that set the mark; null when unknown. */
+  setBySequence: number | null;
+  /** ISO timestamp the mark was recorded. */
+  since: string;
+}
+
 export interface OrchestratorState {
   pollIntervalMs: number;
   maxConcurrentAgents: number;
@@ -971,6 +988,14 @@ export interface OrchestratorState {
   completed: Set<string>;
   failed: Set<string>;
   resumeRequired: Set<string>;
+  /**
+   * Why each issue in `resumeRequired` is parked (SYMPH-406): the reason
+   * string and the journal sequence (event cursor) of the entry that set
+   * the mark. Maintained by the same choke points that mutate
+   * `resumeRequired` and surfaced in the /api/v1/state snapshot so an
+   * operator never has to grep the journal to learn why an issue skips.
+   */
+  resumeRequiredMarks: Record<string, ResumeRequiredMark>;
   codexTotals: CodexTotals;
   codexRateLimits: CodexRateLimits;
   rateLimitAdmission: RateLimitAdmissionState | null;
@@ -1157,6 +1182,7 @@ export function createInitialOrchestratorState(input: {
     completed: new Set<string>(),
     failed: new Set<string>(),
     resumeRequired: new Set<string>(),
+    resumeRequiredMarks: {},
     codexTotals: {
       inputTokens: 0,
       outputTokens: 0,

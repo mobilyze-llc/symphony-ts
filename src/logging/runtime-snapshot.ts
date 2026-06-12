@@ -241,6 +241,18 @@ export interface RuntimeSnapshot {
    * separately so disposition consumers never meet a fake issue id.
    */
   dispatch_gate?: RuntimeSnapshotDisposition | null;
+  /**
+   * Issues parked behind a requires-explicit-resume mark (SYMPH-406), with
+   * the reason and the journal sequence (event cursor) that set the mark.
+   * The 2026-06-11 frozen-queue diagnosis collapses to this one read.
+   */
+  explicit_resume_required?: Record<string, RuntimeSnapshotExplicitResumeMark>;
+}
+
+export interface RuntimeSnapshotExplicitResumeMark {
+  reason: string;
+  set_by_sequence: number | null;
+  since: string;
 }
 
 export interface RuntimeSnapshotDisposition {
@@ -414,7 +426,23 @@ export function buildRuntimeSnapshot(
     manager_runs: buildManagerRunSnapshots(state),
     dispositions: buildDispositionSnapshots(state),
     dispatch_gate: buildDispatchGateSnapshot(state),
+    explicit_resume_required: buildExplicitResumeMarks(state),
   };
+}
+
+function buildExplicitResumeMarks(
+  state: OrchestratorState,
+): Record<string, RuntimeSnapshotExplicitResumeMark> {
+  const marks: Record<string, RuntimeSnapshotExplicitResumeMark> = {};
+  for (const issueId of state.resumeRequired) {
+    const mark = state.resumeRequiredMarks[issueId];
+    marks[issueId] = {
+      reason: mark?.reason ?? "stop_like_pause",
+      set_by_sequence: mark?.setBySequence ?? null,
+      since: mark?.since ?? "",
+    };
+  }
+  return marks;
 }
 
 function buildDispositionSnapshots(
