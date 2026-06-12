@@ -422,6 +422,11 @@ describe("runHeadlessCouncilGate", () => {
         "--- body-not-a-path.ts",
         "+++ also-not-a-path.ts",
         "+changed",
+        'diff --git "a/path with spaces.ts" "b/path with spaces.ts"',
+        '--- "a/path with spaces.ts"',
+        '+++ "b/path with spaces.ts"',
+        "@@ -1 +1 @@",
+        "+changed",
         "",
       ].join("\n"),
     );
@@ -445,7 +450,35 @@ describe("runHeadlessCouncilGate", () => {
       "bad\\u12",
       "good.ts",
       "merged.ts",
+      "path with spaces.ts",
     ]);
+  });
+
+  it("fails closed before reviewer launch when the diff is empty", async () => {
+    const harness = await createHarness();
+    await writeFile(harness.diffPath, "\n");
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain("empty-diff");
+    expect(result.summary).toBe(
+      "Review diff was empty; review gate failed closed.",
+    );
+    expect(result.lanes).toEqual([]);
+    expect(harness.commands.some((command) => command.args[0] === "run")).toBe(
+      false,
+    );
   });
 
   it("does not leave a machine PASS artifact when report writing fails", async () => {

@@ -2076,6 +2076,15 @@ function extractChangedPathsFromDiff(diff: string): string[] {
       continue;
     }
 
+    const quotedDiffGitMatch =
+      /^diff --git ("(?:\\.|[^"\\])*") ("(?:\\.|[^"\\])*")$/.exec(line);
+    if (quotedDiffGitMatch !== null) {
+      addDiffPath(paths, quotedDiffGitMatch[1], "a/");
+      addDiffPath(paths, quotedDiffGitMatch[2], "b/");
+      inFileHeader = true;
+      continue;
+    }
+
     const combinedDiffMatch = /^diff --(?:cc|combined) (.+)$/.exec(line);
     if (combinedDiffMatch !== null) {
       addDiffPath(paths, combinedDiffMatch[1]);
@@ -2090,7 +2099,7 @@ function extractChangedPathsFromDiff(diff: string): string[] {
 
     const oldPathMatch = inFileHeader ? /^--- (?:a\/)?(.+)$/.exec(line) : null;
     if (oldPathMatch !== null) {
-      addDiffPath(paths, oldPathMatch[1]);
+      addDiffPath(paths, oldPathMatch[1], "a/");
       continue;
     }
 
@@ -2098,18 +2107,27 @@ function extractChangedPathsFromDiff(diff: string): string[] {
       ? /^\+\+\+ (?:b\/)?(.+)$/.exec(line)
       : null;
     if (newPathMatch !== null) {
-      addDiffPath(paths, newPathMatch[1]);
+      addDiffPath(paths, newPathMatch[1], "b/");
       inFileHeader = false;
     }
   }
   return [...paths].sort();
 }
 
-function addDiffPath(paths: Set<string>, rawPath: string | undefined): void {
+function addDiffPath(
+  paths: Set<string>,
+  rawPath: string | undefined,
+  prefixToStrip?: "a/" | "b/",
+): void {
   const path = normalizeDiffPath(rawPath);
-  if (path !== null && path !== "/dev/null") {
-    paths.add(path);
+  if (path === null || path === "/dev/null") {
+    return;
   }
+  const normalizedPath =
+    prefixToStrip !== undefined && path.startsWith(prefixToStrip)
+      ? path.slice(prefixToStrip.length)
+      : path;
+  paths.add(normalizedPath);
 }
 
 function normalizeDiffPath(rawPath: string | undefined): string | null {
