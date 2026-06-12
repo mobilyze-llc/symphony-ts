@@ -1243,6 +1243,21 @@ describe("orchestrator core", () => {
     expect(spawnedStageNames).toEqual(["investigate"]);
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
     expect(orchestrator.getState().issueBudgetEscalations["1"]).toBe(1);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.find(
+          (entry) =>
+            entry.kind === "budget_escalation" &&
+            entry.metadata.status === "completed",
+        )?.metadata,
+    ).toMatchObject({
+      pendingStageSignal: "complete",
+      pendingStageName: "investigate",
+      pendingAttempt: null,
+      pendingAgentMessage: "Investigation finished.\n[STAGE_COMPLETE]",
+      pendingFailureClass: null,
+    });
     expect(orchestrator.getState().issueStages["1"]).toBe("implement");
     expect(retry).toMatchObject({
       issueId: "1",
@@ -4596,6 +4611,86 @@ describe("dispatcher run journal restart recovery", () => {
     expect(replayedAfterConsumption.getState().resumeRequired.has("1")).toBe(
       false,
     );
+  });
+
+  it("restart recovery keeps the earliest pending stage signal source sequence", async () => {
+    const issueState = "Resume";
+    const config = createInvestigateImplementConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const pendingMetadata = {
+      pendingStageSignal: "complete",
+      pendingStageName: "investigate",
+      pendingAttempt: null,
+      pendingAgentMessage: "Investigation complete.\n[STAGE_COMPLETE]",
+      pendingFailureClass: null,
+    };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "pause_triage:1:investigate:initial:1",
+          kind: "pause_triage",
+          operation: "dispatcher",
+          leaseId: "pause_triage:1:investigate:initial:1",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            action: "resumed",
+            resumesUsed: 0,
+            ...pendingMetadata,
+          },
+        }),
+        createJournalEntry({
+          sequence: 2,
+          idempotencyKey: "hard_stop:1:investigate:initial:token_budget:1",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:investigate:initial:token_budget:1",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            outcome: "PAUSED-budget",
+            trigger: "token_budget",
+            issueState: "Todo",
+            ...pendingMetadata,
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().issuePendingStageSignals["1"]).toMatchObject(
+      {
+        setBySequence: 1,
+      },
+    );
+
+    const resumed = await orchestrator.pollTick();
+
+    expect(resumed.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.find(
+          (entry) =>
+            entry.kind === "pending_stage_signal" &&
+            entry.metadata.status === "consumed",
+        )?.metadata,
+    ).toMatchObject({
+      sourceSequence: 1,
+      resultingStageName: "implement",
+    });
   });
 
   it("journals retry exhaustion and keeps the park across restart replay", async () => {

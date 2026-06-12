@@ -1287,6 +1287,9 @@ export class OrchestratorCore {
     if (pending === null) {
       return;
     }
+    if (this.state.issuePendingStageSignals[entry.issueId] !== undefined) {
+      return;
+    }
     this.state.issuePendingStageSignals[entry.issueId] = {
       ...pending,
       setBySequence: entry.sequence,
@@ -2661,6 +2664,8 @@ export class OrchestratorCore {
         issueIdentifier: runningEntry.identifier,
         issueTitle: runningEntry.issue.title,
         acceptanceCriteria: this.state.issueAcSnapshots[issueId] ?? null,
+        // Pending-signal consumption sets lastCodexMessage to the terminal
+        // message before routing through the normal exit path.
         reviewMessage: runningEntry.lastCodexMessage,
       })
         .catch((error) => {
@@ -2730,6 +2735,7 @@ export class OrchestratorCore {
             pendingStageSignal,
           );
           this.clearResumeRequirement(issueId);
+          this.releaseClaim(issueId);
           return null;
         }
         retryEntry = this.handleFailureSignal(
@@ -9157,6 +9163,9 @@ function readPendingStageSignalMetadata(
   const parsedFailureClass =
     signal === "failure" && isFailureClass(failureClass) ? failureClass : null;
   if (signal === "failure" && parsedFailureClass === null) {
+    console.warn(
+      `[orchestrator] pending stage signal recovery dropped failure signal for ${entry.issueIdentifier}: missing or invalid failure class in journal sequence ${entry.sequence}.`,
+    );
     return null;
   }
   return {
