@@ -12,6 +12,7 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 
 import {
+  DISPATCHER_OPERATIONS,
   DISPATCHER_RUN_JOURNAL_EVENT_KINDS,
   type DispatcherRunJournalEntry,
 } from "../domain/model.js";
@@ -76,7 +77,7 @@ function isCalibrationJournalEntry(
     return false;
   }
   return (
-    typeof value.sequence === "number" &&
+    Number.isFinite(value.sequence) &&
     typeof value.idempotencyKey === "string" &&
     typeof value.timestamp === "string" &&
     typeof value.kind === "string" &&
@@ -85,6 +86,12 @@ function isCalibrationJournalEntry(
     ) &&
     typeof value.issueId === "string" &&
     typeof value.issueIdentifier === "string" &&
+    typeof value.operation === "string" &&
+    (DISPATCHER_OPERATIONS as readonly string[]).includes(value.operation) &&
+    (value.stage === null || typeof value.stage === "string") &&
+    (value.attempt === null || Number.isFinite(value.attempt)) &&
+    (value.ownerId === null || typeof value.ownerId === "string") &&
+    (value.lease === null || isRecord(value.lease)) &&
     typeof value.summary === "string" &&
     isRecord(value.metadata)
   );

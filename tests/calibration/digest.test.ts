@@ -364,6 +364,135 @@ describe("calibration digest (SYMPH-411)", () => {
     ]);
   });
 
+  it("attributes parks by failure_signature only, never by summary text, across overlapping breaker windows", () => {
+    const report = computeCalibrationReport([
+      entry({
+        sequence: 1,
+        kind: "breaker_transition",
+        issueId: "issue-a",
+        issueIdentifier: "SYMPH-100",
+        stage: "implement",
+        metadata: {
+          transition: "opened",
+          stage: "implement",
+          signature: "sig-1",
+        },
+      }),
+      entry({
+        sequence: 2,
+        kind: "breaker_transition",
+        issueId: "issue-b",
+        issueIdentifier: "SYMPH-101",
+        stage: "review",
+        metadata: { transition: "opened", stage: "review", signature: "sig-2" },
+      }),
+      // No failure_signature metadata, only summary text: with both windows
+      // open this used to be double-counted into every window.
+      rePark({
+        sequence: 3,
+        issueId: "issue-c",
+        issueIdentifier: "SYMPH-102",
+        summary:
+          "Retries exhausted for SYMPH-102: circuit breaker open. Parked for operator.",
+      }),
+      // Signature-matched park: attributed to exactly its own window.
+      rePark({
+        sequence: 4,
+        issueId: "issue-d",
+        issueIdentifier: "SYMPH-103",
+        signature: "sig-1",
+      }),
+    ]);
+
+    expect(report.breakerWindows).toHaveLength(2);
+    const sig1 = report.breakerWindows.find((w) => w.signature === "sig-1");
+    const sig2 = report.breakerWindows.find((w) => w.signature === "sig-2");
+    expect(sig1?.saves.map((s) => s.issueId)).toEqual(["issue-d"]);
+    expect(sig2?.saves).toEqual([]);
+  });
+
+  it("classifies a park that re-parked after the first resume as true_park even when a later resume eventually succeeds", () => {
+    // park → resume → re-park → resume → success: the metric is
+    // recovered-on-FIRST-resume, so the first park is a true park, with
+    // cursors at the first resume and the re-park.
+    const report = computeCalibrationReport([
+      triageVerdict({
+        sequence: 1,
+        issueId: "issue-a",
+        issueIdentifier: "SYMPH-100",
+        action: "park",
+        parkKind: "novelty",
+      }),
+      operatorIntent({
+        sequence: 2,
+        issueId: "issue-a",
+        issueIdentifier: "SYMPH-100",
+        verb: "release",
+      }),
+      rePark({
+        sequence: 3,
+        issueId: "issue-a",
+        issueIdentifier: "SYMPH-100",
+      }),
+      operatorIntent({
+        sequence: 4,
+        issueId: "issue-a",
+        issueIdentifier: "SYMPH-100",
+        verb: "release",
+      }),
+      terminalSuccess({
+        sequence: 5,
+        issueId: "issue-a",
+        issueIdentifier: "SYMPH-100",
+      }),
+    ]);
+
+    expect(report.noveltyParks).toEqual([
+      {
+        issueId: "issue-a",
+        issueIdentifier: "SYMPH-100",
+        parkSequence: 1,
+        resumeSequence: 2,
+        judgement: "true_park",
+        outcomeSequence: 3,
+      },
+    ]);
+  });
+
+  it("escapes pipes and newlines in journal-derived strings so table column counts stay intact", () => {
+    const digest = renderCalibrationDigest(
+      computeCalibrationReport([
+        triageVerdict({
+          sequence: 1,
+          issueId: "issue-a",
+          issueIdentifier: "SYMPH|100\nextra",
+          action: "park",
+          classification: "weird|class\nification",
+          parkKind: "novelty",
+        }),
+      ]),
+      { generatedAt: "2026-06-12T00:00:00.000Z", journalLabel: "synthetic" },
+    );
+
+    expect(digest).not.toContain("SYMPH|100");
+    expect(digest).toContain("weird\\|class ification");
+    // Every row within a table block must have the same number of
+    // (unescaped) column separators as its header.
+    let blockPipeCount: number | null = null;
+    for (const line of digest.split("\n")) {
+      if (!line.startsWith("|")) {
+        blockPipeCount = null;
+        continue;
+      }
+      const pipes = (line.match(/(?<!\\)\|/g) ?? []).length;
+      if (blockPipeCount === null) {
+        blockPipeCount = pipes;
+      } else {
+        expect(pipes).toBe(blockPipeCount);
+      }
+    }
+  });
+
   it("tallies alert volume per disposition tier against operator actions", () => {
     const report = computeCalibrationReport([
       dispatchVerdict({
@@ -463,6 +592,30 @@ describe("calibration journal reader (SYMPH-411)", () => {
     ].join("\n");
     const parsed = parseCalibrationJournal(raw);
     expect(parsed.map((e) => e.sequence)).toEqual([1, 2]);
+  });
+
+  it("skips rows missing required entry fields such as stage", () => {
+    const { stage: _stage, ...withoutStage } = terminalSuccess({
+      sequence: 1,
+      issueId: "issue-a",
+      issueIdentifier: "SYMPH-100",
+    });
+    expect(parseCalibrationJournal(JSON.stringify(withoutStage))).toEqual([]);
+  });
+
+  it("skips rows with a non-finite sequence", () => {
+    const valid = terminalSuccess({
+      sequence: 1,
+      issueId: "issue-a",
+      issueIdentifier: "SYMPH-100",
+    });
+    // 1e999 overflows JSON.parse to Infinity; JSON cannot carry NaN directly,
+    // so non-finite numbers are the realistic malformed shape.
+    const nonFinite = JSON.stringify(valid).replace(
+      '"sequence":1',
+      '"sequence":1e999',
+    );
+    expect(parseCalibrationJournal(nonFinite)).toEqual([]);
   });
 });
 

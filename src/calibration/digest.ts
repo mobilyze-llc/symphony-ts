@@ -3,8 +3,8 @@
  * (SYMPH-411).
  *
  * Pure read-model over journal entries — no orchestrator coupling, fully
- * deletable. Joins verdict-class events (dispatch_verdict, breaker_transition,
- * cluster_transition from SYMPH-405; triage_verdict + intent from
+ * deletable. Joins verdict-class events (dispatch_verdict and
+ * breaker_transition from SYMPH-405; triage_verdict + intent from
  * SYMPH-399/422) against each issue's eventual terminal outcome, and renders a
  * markdown digest where every number carries the journal cursors (sequences)
  * backing it.
@@ -275,30 +275,35 @@ export function computeCalibrationReport(
   const sorted = [...journal].sort((a, b) => a.sequence - b.sequence);
 
   // --- L2 triage joins (triage_verdict → terminal outcome) -----------------
-  const triageJoins: TriageJoinRow[] = sorted
-    .filter(
-      (entry) =>
-        entry.kind === "triage_verdict" &&
-        metaString(entry, "status") === "applied" &&
-        metaString(entry, "action") !== null,
-    )
-    .map((entry) => {
-      const { outcome, outcomeSequence } = joinOutcomeAfter(
-        sorted,
-        entry.issueId,
-        entry.sequence,
-      );
-      return {
+  const triageJoins: TriageJoinRow[] = sorted.flatMap((entry) => {
+    if (
+      entry.kind !== "triage_verdict" ||
+      metaString(entry, "status") !== "applied"
+    ) {
+      return [];
+    }
+    const action = metaString(entry, "action");
+    if (action === null) {
+      return [];
+    }
+    const { outcome, outcomeSequence } = joinOutcomeAfter(
+      sorted,
+      entry.issueId,
+      entry.sequence,
+    );
+    return [
+      {
         issueId: entry.issueId,
         issueIdentifier: entry.issueIdentifier,
-        action: metaString(entry, "action") ?? "unknown",
+        action,
         classification: metaString(entry, "classification"),
         parkKind: metaString(entry, "parkKind"),
         verdictSequence: entry.sequence,
         outcome,
         outcomeSequence,
-      };
-    });
+      },
+    ];
+  });
 
   // --- Novelty-park accuracy ------------------------------------------------
   // Parked-as-futile = applied triage verdict whose effective action is park
@@ -324,7 +329,8 @@ export function computeCalibrationReport(
   // --- Breaker value ----------------------------------------------------------
   // For each breaker opened-window, the issues parked by it are the
   // failure_exhausted entries inside the window carrying the breaker's
-  // failure_signature (or whose reason names the open breaker). True save =
+  // failure_signature (signature match only — summary text would double-count
+  // saves across overlapping windows). True save =
   // the parked issue re-parked after operator resume (the breaker correctly
   // predicted the failure); false save = it succeeded on resume.
   const breakerWindows: BreakerWindowRow[] = [];
@@ -350,8 +356,7 @@ export function computeCalibrationReport(
         candidate.sequence > entry.sequence &&
         candidate.sequence < windowEnd &&
         candidate.kind === "failure_exhausted" &&
-        (metaString(candidate, "failure_signature") === signature ||
-          candidate.summary.includes("circuit breaker open")),
+        metaString(candidate, "failure_signature") === signature,
     );
     breakerWindows.push({
       stage: entry.stage,
@@ -437,6 +442,15 @@ export interface RenderDigestOptions {
   journalLabel: string;
 }
 
+/**
+ * Robustness escaping for journal-derived strings interpolated into markdown
+ * tables, headings, and bullets: pipes would break table column counts and
+ * newlines would break row structure. Not a security boundary.
+ */
+function escapeMarkdownCell(value: string): string {
+  return value.replace(/\r?\n/g, " ").replaceAll("|", "\\|");
+}
+
 function formatPercent(value: number | null): string {
   return value === null ? "n/a" : `${(value * 100).toFixed(1)}%`;
 }
@@ -461,7 +475,7 @@ function formatPrecisionTable(
       .map((c) => formatCursorPair(c.verdictSequence, c.outcomeSequence))
       .join(", ");
     lines.push(
-      `| ${row.key} | ${row.recovered} | ${row.reParked} | ${row.unresolved} | ${formatPercent(row.precision)} | ${cursors} |`,
+      `| ${escapeMarkdownCell(row.key)} | ${row.recovered} | ${row.reParked} | ${row.unresolved} | ${formatPercent(row.precision)} | ${cursors} |`,
     );
   }
   return lines;
@@ -476,7 +490,7 @@ function formatParkRows(
   ];
   for (const row of rows) {
     lines.push(
-      `| ${row.issueIdentifier} | seq ${row.parkSequence} | ${row.resumeSequence === null ? "—" : `seq ${row.resumeSequence}`} | ${row.judgement} | ${row.outcomeSequence === null ? "—" : `seq ${row.outcomeSequence}`} |`,
+      `| ${escapeMarkdownCell(row.issueIdentifier)} | seq ${row.parkSequence} | ${row.resumeSequence === null ? "—" : `seq ${row.resumeSequence}`} | ${row.judgement} | ${row.outcomeSequence === null ? "—" : `seq ${row.outcomeSequence}`} |`,
     );
   }
   return lines;
@@ -583,7 +597,7 @@ export function renderCalibrationDigest(
     for (const window of report.breakerWindows) {
       const { trueParks, falseParks, accuracy } = parkAccuracy(window.saves);
       lines.push(
-        `### Breaker ${window.signature} on stage ${window.stage ?? "(none)"} — opened seq ${window.openedSequence}${window.closedSequence === null ? " (still open)" : `, closed seq ${window.closedSequence}`}`,
+        `### Breaker ${escapeMarkdownCell(window.signature)} on stage ${window.stage === null ? "(none)" : escapeMarkdownCell(window.stage)} — opened seq ${window.openedSequence}${window.closedSequence === null ? " (still open)" : `, closed seq ${window.closedSequence}`}`,
       );
       lines.push("");
       lines.push(
@@ -611,7 +625,7 @@ export function renderCalibrationDigest(
     lines.push("| --- | --- | --- | --- |");
     for (const row of report.alertVolume) {
       lines.push(
-        `| ${row.disposition} | ${row.alerting ? "alerting" : "quiet"} | ${row.count} | ${row.firstSequence === null ? "—" : `seq ${row.firstSequence}–${row.lastSequence}`} |`,
+        `| ${escapeMarkdownCell(row.disposition)} | ${row.alerting ? "alerting" : "quiet"} | ${row.count} | ${row.firstSequence === null ? "—" : `seq ${row.firstSequence}–${row.lastSequence}`} |`,
       );
     }
   }
@@ -623,7 +637,7 @@ export function renderCalibrationDigest(
     lines.push("");
     for (const row of report.operatorActions) {
       lines.push(
-        `- ${row.verb}: ${row.count} (${row.sequences.map((s) => `seq ${s}`).join(", ")})`,
+        `- ${escapeMarkdownCell(row.verb)}: ${row.count} (${row.sequences.map((s) => `seq ${s}`).join(", ")})`,
       );
     }
   }
