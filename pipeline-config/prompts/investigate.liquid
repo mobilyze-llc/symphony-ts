@@ -30,6 +30,29 @@ Investigation is a routing and planning stage, not a full implementation rehears
 - Do not run multi-file `sed` batches, broad `rg -n` over multiple top-level directories, full docs scans, or source dumps during investigate.
 - If more discovery is truly required, write the open questions into the workpad and output `[STAGE_COMPLETE]`; the implement stage can do targeted reads while making changes.
 
+## Risk-Predicate State Contract Artifacts
+
+If the issue matches the shared Council risk predicate language — `journal_producer`, `journal_replay_reducer`, `dispatcher_event_vocabulary`, `state_journal_projection`, or `high_risk_path` (journal producer/reducer/replay paths, event-kind changes, or the high-risk path set) — the investigate workpad MUST include a `### Risk Predicate State Contract` section. This is a required investigate deliverable for matching tickets; a missing scenario row or missing code/test pointer is review evidence, not reviewer judgment.
+
+Use this template exactly enough that implementation and review can find it:
+
+```markdown
+### Risk Predicate State Contract
+- Trigger(s): `<predicate-trigger>` — `<matched path or rationale>`
+- Artifact path: `.symphony/workpads/{{ issue.identifier }}-risk-contract.md` (or `workpad section only` if the table stays inline)
+
+| Scenario | State contract | Code pointers | Test pointers | Evidence gap/follow-up |
+| --- | --- | --- | --- | --- |
+| Live success | Expected durable state/event after success | `src/...:line` | `tests/...:line` | `none` or filed issue |
+| Live failure | Expected durable state/event after failure | `src/...:line` | `tests/...:line` | `none` or filed issue |
+| Rollback | What is undone, retained, or tombstoned | `src/...:line` | `tests/...:line` | `none` or filed issue |
+| Replay/restart | How replay restores or suppresses the state | `src/...:line` | `tests/...:line` | `none` or filed issue |
+| Duplicate/late consume | Idempotency/ordering rule for repeated or delayed inputs | `src/...:line` | `tests/...:line` | `none` or filed issue |
+| External side effects/idempotency | Tracker/GitHub/filesystem/API side effects and idempotency key, or `n/a` with pointer | `src/...:line` | `tests/...:line` | `none` or filed issue |
+```
+
+If the table is too large for the workpad, write it as a bounded local artifact and put its path in the workpad and implementation handoff as `risk-contract-artifact: <path>`. The review stage can pass that path into the council review bundle with `--risk-contract-artifact <path>`; the bundle records only the deterministic path list, not raw unbounded prose.
+
 If a decision is marked as "Explicitly Deferred" in the spec, do not raise it or try to resolve it. The founder has deliberately punted this.
 
 ---

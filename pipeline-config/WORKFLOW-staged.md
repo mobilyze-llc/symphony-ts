@@ -247,6 +247,29 @@ Investigation is a routing and planning stage, not a full implementation rehears
 - Do not run multi-file `sed` batches, broad `rg -n` over multiple top-level directories, full docs scans, or source dumps during investigate.
 - If more discovery is truly required, write the open questions into the workpad and output `[STAGE_COMPLETE]`; the implement stage can do targeted reads while making changes.
 
+## Risk-Predicate State Contract Artifacts
+
+If the issue matches the shared Council risk predicate language — `journal_producer`, `journal_replay_reducer`, `dispatcher_event_vocabulary`, `state_journal_projection`, or `high_risk_path` (journal producer/reducer/replay paths, event-kind changes, or the high-risk path set) — the investigate workpad MUST include a `### Risk Predicate State Contract` section. This is a required investigate deliverable for matching tickets; a missing scenario row or missing code/test pointer is review evidence, not reviewer judgment.
+
+Use this template exactly enough that implementation and review can find it:
+
+```markdown
+### Risk Predicate State Contract
+- Trigger(s): `<predicate-trigger>` — `<matched path or rationale>`
+- Artifact path: `.symphony/workpads/{{ issue.identifier }}-risk-contract.md` (or `workpad section only` if the table stays inline)
+
+| Scenario | State contract | Code pointers | Test pointers | Evidence gap/follow-up |
+| --- | --- | --- | --- | --- |
+| Live success | Expected durable state/event after success | `src/...:line` | `tests/...:line` | `none` or filed issue |
+| Live failure | Expected durable state/event after failure | `src/...:line` | `tests/...:line` | `none` or filed issue |
+| Rollback | What is undone, retained, or tombstoned | `src/...:line` | `tests/...:line` | `none` or filed issue |
+| Replay/restart | How replay restores or suppresses the state | `src/...:line` | `tests/...:line` | `none` or filed issue |
+| Duplicate/late consume | Idempotency/ordering rule for repeated or delayed inputs | `src/...:line` | `tests/...:line` | `none` or filed issue |
+| External side effects/idempotency | Tracker/GitHub/filesystem/API side effects and idempotency key, or `n/a` with pointer | `src/...:line` | `tests/...:line` | `none` or filed issue |
+```
+
+If the table is too large for the workpad, write it as a bounded local artifact and put its path in the workpad and implementation handoff as `risk-contract-artifact: <path>`. The review stage can pass that path into the council review bundle with `--risk-contract-artifact <path>`; the bundle records only the deterministic path list, not raw unbounded prose.
+
 {% if issue.state == "Resume" %}
 ## RESUME CONTEXT
 This issue was previously blocked. Check the issue comments for a `## Resume Context` comment explaining what changed. Focus your investigation on the blocking reasons and what has been updated.
@@ -372,6 +395,10 @@ PR_NUMBER=$(gh pr view --json number --jq '.number')
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-{{ issue.identifier }}-$(date +%s)"
 CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-$(command -v cmux-spawn || true)}"
+RISK_CONTRACT_ARTIFACT_ARGS=()
+if [ -n "${RISK_CONTRACT_ARTIFACT:-}" ]; then
+  RISK_CONTRACT_ARTIFACT_ARGS=(--risk-contract-artifact "$RISK_CONTRACT_ARTIFACT")
+fi
 if [ -z "$CMUX_SPAWN_BIN" ] || [ ! -x "$CMUX_SPAWN_BIN" ]; then
   echo "Set CMUX_SPAWN_BIN to an executable cmux-spawn path or put cmux-spawn on PATH." >&2
   exit 1
@@ -400,8 +427,11 @@ run_council_gate \
   --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
   --mode {% if reworkCount > 0 %}convergence{% else %}full{% endif %} \
   --round {{ reworkCount | plus: 1 }} \
-  --timeout-seconds 1800
+  --timeout-seconds 1800 \
+  "${RISK_CONTRACT_ARTIFACT_ARGS[@]}"
 ```
+
+If the investigate workpad or PR body names `risk-contract-artifact: <path>`, set `RISK_CONTRACT_ARTIFACT=<path>` before the gate so the review bundle records the bounded artifact path under `optionalInputs.riskContractArtifactPaths`.
 
 Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`. The machine result must contain `review_metadata.reviewed_head_sha`, `review_metadata.base_sha`, `review_metadata.round`, `review_metadata.mode`, and a clean verdict.
 

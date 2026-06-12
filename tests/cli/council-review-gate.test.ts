@@ -37,6 +37,7 @@ describe("parseCouncilReviewGateArgs", () => {
       workspace: "/repo",
       repo: "mobilyze-llc/symphony-ts",
       prNumber: 282,
+      riskContractArtifactPaths: [],
       allowedChangePatterns: [],
     });
   });
@@ -65,6 +66,34 @@ describe("parseCouncilReviewGateArgs", () => {
       mode: "convergence",
       round: 2,
       previousReviewedHeadSha: "0123456789abcdef0123456789abcdef01234567",
+      riskContractArtifactPaths: [],
+      allowedChangePatterns: [],
+    });
+  });
+
+  it("parses repeatable risk contract artifact paths", () => {
+    expect(
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "SYMPH-470",
+          "--artifact-dir",
+          "/tmp/review",
+          "--risk-contract-artifact",
+          ".symphony/workpads/SYMPH-470-risk-contract.md",
+          "--risk-contract-artifact",
+          ".symphony/workpads/SYMPH-470-risk-contract.json",
+        ],
+        "/cwd",
+      ),
+    ).toEqual({
+      issueId: "SYMPH-470",
+      artifactDir: "/tmp/review",
+      workspace: "/cwd",
+      riskContractArtifactPaths: [
+        ".symphony/workpads/SYMPH-470-risk-contract.md",
+        ".symphony/workpads/SYMPH-470-risk-contract.json",
+      ],
       allowedChangePatterns: [],
     });
   });
@@ -103,6 +132,7 @@ describe("parseCouncilReviewGateArgs", () => {
       journalAttempt: 2,
       journalOwnerId: "worker-1",
       journalIssueIdentifier: "SYMPH-450",
+      riskContractArtifactPaths: [],
     });
   });
 
@@ -145,6 +175,7 @@ describe("parseCouncilReviewGateArgs", () => {
       workspace: "/cwd",
       assertFreshReview: "/tmp/old/review-result.json",
       allowedChangePatterns: [".symphony/reports/**", "docs/reports/*.html"],
+      riskContractArtifactPaths: [],
     });
   });
 
@@ -180,6 +211,24 @@ describe("parseCouncilReviewGateArgs", () => {
         "/cwd",
       ),
     ).toThrow("--mode, --round, and --previous-reviewed-head are only valid");
+  });
+
+  it("rejects risk contract artifacts in freshness assertion mode", () => {
+    expect(() =>
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "MOB-88",
+          "--artifact-dir",
+          "/tmp/review",
+          "--assert-fresh-review",
+          "/tmp/review-result.json",
+          "--risk-contract-artifact",
+          ".symphony/risk-contract.md",
+        ],
+        "/cwd",
+      ),
+    ).toThrow("--risk-contract-artifact is only valid");
   });
 
   it("rejects journal metadata without journal append root", () => {
