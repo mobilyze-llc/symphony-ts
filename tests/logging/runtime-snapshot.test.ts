@@ -1956,6 +1956,7 @@ describe("state-document enrichment (SYMPH-407)", () => {
     sequence: number;
     kind: DispatcherRunJournalEntry["kind"];
     issueId?: string;
+    issueIdentifier?: string;
     metadata?: Record<string, unknown>;
   }): DispatcherRunJournalEntry {
     return {
@@ -1964,7 +1965,7 @@ describe("state-document enrichment (SYMPH-407)", () => {
       timestamp: "2026-06-12T10:00:00.000Z",
       kind: input.kind,
       issueId: input.issueId ?? "issue-1",
-      issueIdentifier: "ABC-1",
+      issueIdentifier: input.issueIdentifier ?? "ABC-1",
       operation: "dispatcher",
       stage: null,
       attempt: null,
@@ -1972,6 +1973,24 @@ describe("state-document enrichment (SYMPH-407)", () => {
       lease: null,
       summary: `entry ${input.sequence}`,
       metadata: input.metadata ?? {},
+    };
+  }
+
+  function reviewMetadata(
+    metadata: Record<string, unknown>,
+  ): Record<string, unknown> {
+    return {
+      source: "pipeline",
+      contract_version: "structured_v1",
+      repo: "mobilyze-llc/symphony-ts",
+      pr_number: 451,
+      base_ref: "main",
+      head_ref: "codex/SYMPH-451-review-state",
+      base_sha: "base-sha",
+      head_sha: "head-sha",
+      routing_mode: "full",
+      round: 1,
+      ...metadata,
     };
   }
 
@@ -1995,6 +2014,469 @@ describe("state-document enrichment (SYMPH-407)", () => {
       buildRuntimeSnapshot(state, { enrichment: { asOfSequence: 9 } })
         .as_of_sequence,
     ).toBe(9);
+  });
+
+  it("projects a clean Council review pass from review journal events", () => {
+    const state = makeState();
+    const cleanMetadata = (metadata: Record<string, unknown>) =>
+      reviewMetadata({
+        bundle_hash: "bundle-clean",
+        head_sha: "head-clean",
+        ...metadata,
+      });
+    state.dispatcherRunJournal = [
+      makeJournalEntry({
+        sequence: 10,
+        kind: "review_round",
+        metadata: cleanMetadata({
+          round: 1,
+          routing_mode: "full",
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 11,
+        kind: "review_lane",
+        metadata: cleanMetadata({
+          lane_id: "claude-opus",
+          lane_agent: "claude",
+          lane_role: "reviewer",
+          lane_model: "opus",
+          lane_state: "completed",
+          lane_verdict: "pass",
+          independent_reviewer: true,
+          parse_status: "ok",
+          finding_count: 0,
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 12,
+        kind: "review_gate_result",
+        metadata: cleanMetadata({
+          gate_verdict: "pass",
+          reviewed_head_sha: "reviewed-clean",
+          lane_count: 1,
+          finding_count: 0,
+          blocking_finding_count: 0,
+          degraded_condition_count: 0,
+        }),
+      }),
+    ];
+
+    const review = buildRuntimeSnapshot(state).council_reviews!["issue-1"]!;
+
+    expect(review).toMatchObject({
+      issue_id: "issue-1",
+      issue_identifier: "ABC-1",
+      status: "passed",
+      availability: "available",
+      current_round: 1,
+      last_round: 1,
+      routing_mode: "full",
+      bundle_hash: "bundle-clean",
+      reviewed_head_sha: "reviewed-clean",
+      author_family: null,
+      fixer_family: null,
+      verdict: "pass",
+      next_action: "continue_pipeline",
+      cursor_range: {
+        first_sequence: 10,
+        last_sequence: 12,
+      },
+    });
+    expect(review.decorrelation_basis).toEqual({
+      repo: "mobilyze-llc/symphony-ts",
+      pr_number: 451,
+      base_ref: "main",
+      head_ref: "codex/SYMPH-451-review-state",
+      base_sha: "base-sha",
+      head_sha: "head-clean",
+    });
+    expect(review.lanes).toEqual([
+      {
+        lane_id: "claude-opus",
+        lane_agent: "claude",
+        lane_role: "reviewer",
+        lane_model: "opus",
+        lane_state: "completed",
+        lane_verdict: "pass",
+        independent_reviewer: true,
+        parse_status: "ok",
+        degraded_reason: null,
+        finding_count: 0,
+      },
+    ]);
+    expect(review.finding_counts_by_disposition).toEqual({});
+  });
+
+  it("projects Council findings and fix-round rework without reviewer prose", () => {
+    const state = makeState();
+    const reworkMetadata = (metadata: Record<string, unknown>) =>
+      reviewMetadata({
+        round: 2,
+        routing_mode: "convergence",
+        bundle_hash: "bundle-rework",
+        head_sha: "head-rework",
+        ...metadata,
+      });
+    state.dispatcherRunJournal = [
+      makeJournalEntry({
+        sequence: 20,
+        kind: "review_round",
+        metadata: reworkMetadata({}),
+      }),
+      makeJournalEntry({
+        sequence: 21,
+        kind: "fix_round",
+        metadata: reworkMetadata({
+          fix_round: 2,
+          previous_head_sha: "head-before-fix",
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 22,
+        kind: "review_rework",
+        metadata: reworkMetadata({
+          rework_finding_count: 1,
+          introduced_in: ["fix_round_2"],
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 23,
+        kind: "review_finding",
+        metadata: reworkMetadata({
+          finding_fingerprint: "fp-open",
+          finding_severity: "P1",
+          finding_disposition: "open",
+          related_paths: ["src/private.ts"],
+          evidence_locations: [{ path: "src/private.ts", line_start: 1 }],
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 24,
+        kind: "review_finding",
+        metadata: reworkMetadata({
+          finding_fingerprint: "fp-fixed",
+          finding_severity: "P3",
+          finding_disposition: "fixed",
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 25,
+        kind: "review_finding",
+        metadata: reworkMetadata({
+          finding_fingerprint: "fp-open",
+          finding_severity: "P1",
+          finding_disposition: "open",
+          lane_id: "second-reviewer",
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 26,
+        kind: "review_gate_result",
+        metadata: reworkMetadata({
+          gate_verdict: "fail",
+          finding_count: 2,
+          blocking_finding_count: 1,
+        }),
+      }),
+    ];
+
+    const review = buildRuntimeSnapshot(state).council_reviews!["issue-1"]!;
+
+    expect(review.status).toBe("failed");
+    expect(review.routing_mode).toBe("convergence");
+    expect(review.fixer_family).toBeNull();
+    expect(review.finding_counts_by_disposition).toEqual({
+      fixed: 1,
+      open: 1,
+    });
+    expect(review.next_action).toBe("rework_required");
+    const serialized = JSON.stringify(review);
+    expect(serialized).not.toContain("src/private.ts");
+    expect(serialized).not.toContain("evidence_locations");
+    expect(serialized).not.toContain("related_paths");
+  });
+
+  it("projects Council escalation and malformed/degraded lane status", () => {
+    const state = makeState();
+    const degradedMetadata = (metadata: Record<string, unknown>) =>
+      reviewMetadata({
+        routing_mode: "thin",
+        bundle_hash: "bundle-degraded",
+        ...metadata,
+      });
+    state.dispatcherRunJournal = [
+      makeJournalEntry({
+        sequence: 30,
+        kind: "review_round",
+        metadata: degradedMetadata({
+          round: 1,
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 31,
+        kind: "review_lane",
+        metadata: degradedMetadata({
+          lane_id: "codex-excavation",
+          lane_agent: "codex",
+          lane_role: "excavation",
+          lane_state: "degraded",
+          lane_verdict: "error",
+          degraded_reason: "artifact_parse_failed",
+          parse_status: "malformed",
+          finding_count: 0,
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 32,
+        kind: "review_escalation",
+        metadata: degradedMetadata({
+          escalation_reason: "degraded_review_substrate",
+          degraded_condition_count: 1,
+          degraded_conditions: ["artifact_parse_failed"],
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 33,
+        kind: "review_gate_result",
+        metadata: degradedMetadata({
+          gate_verdict: "error",
+          degraded_condition_count: 1,
+        }),
+      }),
+    ];
+
+    const review = buildRuntimeSnapshot(state).council_reviews!["issue-1"]!;
+
+    expect(review.status).toBe("degraded");
+    expect(review.escalation).toEqual({
+      predicate: "degraded_review_substrate",
+      reason: "degraded_review_substrate",
+      sequence: 32,
+    });
+    expect(review.degraded).toEqual({
+      status: "malformed",
+      reasons: ["artifact_parse_failed", "degraded_review_substrate"],
+      malformed_lane_count: 1,
+    });
+    expect(review.next_action).toBe("inspect_review_substrate");
+  });
+
+  it("clears stale degradation and findings when a later review round passes cleanly", () => {
+    const state = makeState();
+    const roundMetadata = (round: number, metadata: Record<string, unknown>) =>
+      reviewMetadata({
+        round,
+        bundle_hash: `bundle-round-${round}`,
+        head_sha: `head-round-${round}`,
+        ...metadata,
+      });
+    state.dispatcherRunJournal = [
+      makeJournalEntry({
+        sequence: 40,
+        kind: "review_round",
+        metadata: roundMetadata(1, {}),
+      }),
+      makeJournalEntry({
+        sequence: 41,
+        kind: "review_lane",
+        metadata: roundMetadata(1, {
+          lane_id: "claude-opus",
+          lane_state: "degraded",
+          lane_verdict: "error",
+          degraded_reason: "artifact_parse_failed",
+          parse_status: "malformed",
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 42,
+        kind: "review_finding",
+        metadata: roundMetadata(1, {
+          finding_fingerprint: "fp-stale",
+          finding_disposition: "open",
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 43,
+        kind: "review_gate_result",
+        metadata: roundMetadata(1, {
+          gate_verdict: "error",
+          degraded_condition_count: 1,
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 44,
+        kind: "review_round",
+        metadata: roundMetadata(2, {}),
+      }),
+      makeJournalEntry({
+        sequence: 45,
+        kind: "review_lane",
+        metadata: roundMetadata(2, {
+          lane_id: "claude-opus",
+          lane_state: "completed",
+          lane_verdict: "pass",
+          parse_status: "ok",
+          finding_count: 0,
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 46,
+        kind: "review_gate_result",
+        metadata: roundMetadata(2, {
+          gate_verdict: "pass",
+          degraded_condition_count: 0,
+        }),
+      }),
+    ];
+
+    const review = buildRuntimeSnapshot(state).council_reviews!["issue-1"]!;
+
+    expect(review.status).toBe("passed");
+    expect(review.current_round).toBe(2);
+    expect(review.last_round).toBe(2);
+    expect(review.bundle_hash).toBe("bundle-round-2");
+    expect(review.reviewed_head_sha).toBe("head-round-2");
+    expect(review.finding_counts_by_disposition).toEqual({});
+    expect(review.degraded).toEqual({
+      status: "ok",
+      reasons: [],
+      malformed_lane_count: 0,
+    });
+    expect(review.lanes).toEqual([
+      expect.objectContaining({
+        lane_id: "claude-opus",
+        lane_state: "completed",
+        lane_verdict: "pass",
+        parse_status: "ok",
+      }),
+    ]);
+    expect(review.cursor_range).toEqual({
+      first_sequence: 40,
+      last_sequence: 46,
+    });
+  });
+
+  it("separates in-progress current rounds from the last completed gate round", () => {
+    const state = makeState();
+    state.dispatcherRunJournal = [
+      makeJournalEntry({
+        sequence: 50,
+        kind: "review_round",
+        metadata: reviewMetadata({ round: 1, head_sha: "head-round-1" }),
+      }),
+      makeJournalEntry({
+        sequence: 51,
+        kind: "review_gate_result",
+        metadata: reviewMetadata({
+          round: 1,
+          head_sha: "head-round-1",
+          gate_verdict: "fail",
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 52,
+        kind: "review_round",
+        metadata: reviewMetadata({
+          round: 2,
+          head_sha: "head-round-2",
+          routing_mode: "convergence",
+        }),
+      }),
+    ];
+
+    const review = buildRuntimeSnapshot(state).council_reviews!["issue-1"]!;
+
+    expect(review.status).toBe("in_progress");
+    expect(review.current_round).toBe(2);
+    expect(review.last_round).toBe(1);
+    expect(review.verdict).toBeNull();
+    expect(review.next_action).toBe("await_review_gate_result");
+    expect(review.decorrelation_basis.head_sha).toBe("head-round-2");
+  });
+
+  it("keeps malformed lane degradation even when the lane id is missing", () => {
+    const state = makeState();
+    state.dispatcherRunJournal = [
+      makeJournalEntry({
+        sequence: 60,
+        kind: "review_round",
+        metadata: reviewMetadata({ round: 1 }),
+      }),
+      makeJournalEntry({
+        sequence: 61,
+        kind: "review_lane",
+        metadata: reviewMetadata({
+          round: 1,
+          degraded_reason: "missing_lane_id",
+          parse_status: "malformed",
+        }),
+      }),
+    ];
+
+    const review = buildRuntimeSnapshot(state).council_reviews!["issue-1"]!;
+
+    expect(review.status).toBe("degraded");
+    expect(review.lanes).toEqual([]);
+    expect(review.degraded).toEqual({
+      status: "malformed",
+      reasons: ["missing_lane_id"],
+      malformed_lane_count: 1,
+    });
+  });
+
+  it("renders explicit Council not_started/unavailable when review-stage events are absent", () => {
+    const state = makeState();
+    state.running["issue-1"] = createRunningEntry({
+      issueId: "issue-1",
+      identifier: "ABC-1",
+      startedAt: "2026-06-12T10:00:00.000Z",
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: null,
+      lastCodexTimestamp: null,
+      lastCodexMessage: null,
+      turnCount: 0,
+      codexInputTokens: 0,
+      codexOutputTokens: 0,
+      codexTotalTokens: 0,
+    });
+    state.issueStages["issue-1"] = "review";
+
+    expect(buildRuntimeSnapshot(state).council_reviews!["issue-1"]).toEqual({
+      issue_id: "issue-1",
+      issue_identifier: "ABC-1",
+      status: "not_started",
+      availability: "unavailable",
+      current_round: null,
+      last_round: null,
+      routing_mode: null,
+      decorrelation_basis: {
+        repo: null,
+        pr_number: null,
+        base_ref: null,
+        head_ref: null,
+        base_sha: null,
+        head_sha: null,
+      },
+      author_family: null,
+      fixer_family: null,
+      bundle_hash: null,
+      reviewed_head_sha: null,
+      lanes: [],
+      verdict: null,
+      finding_counts_by_disposition: {},
+      escalation: null,
+      degraded: {
+        status: "ok",
+        reasons: [],
+        malformed_lane_count: 0,
+      },
+      next_action: "await_review_events",
+      cursor_range: {
+        first_sequence: null,
+        last_sequence: null,
+      },
+    });
   });
 
   it("renders per-issue counters coherently (escalations, triage resumes, rework, spend)", () => {
