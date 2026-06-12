@@ -51,6 +51,8 @@ describe("parseCouncilReviewGateArgs", () => {
           "convergence",
           "--round",
           "2",
+          "--previous-reviewed-head",
+          "0123456789abcdef0123456789abcdef01234567",
         ],
         "/cwd",
       ),
@@ -60,8 +62,25 @@ describe("parseCouncilReviewGateArgs", () => {
       workspace: "/cwd",
       mode: "convergence",
       round: 2,
+      previousReviewedHeadSha: "0123456789abcdef0123456789abcdef01234567",
       allowedChangePatterns: [],
     });
+  });
+
+  it("rejects malformed previous reviewed head metadata", () => {
+    expect(() =>
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "MOB-88",
+          "--artifact-dir",
+          "/tmp/review",
+          "--previous-reviewed-head",
+          "not-a-sha",
+        ],
+        "/cwd",
+      ),
+    ).toThrow("--previous-reviewed-head must be a 7-40 character git SHA");
   });
 
   it("parses freshness assertion inputs", () => {
@@ -121,7 +140,7 @@ describe("parseCouncilReviewGateArgs", () => {
         ],
         "/cwd",
       ),
-    ).toThrow("--mode and --round are only valid");
+    ).toThrow("--mode, --round, and --previous-reviewed-head are only valid");
   });
 
   it("returns exit code 2 for invalid freshness artifacts", async () => {

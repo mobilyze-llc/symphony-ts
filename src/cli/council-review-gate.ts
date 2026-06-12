@@ -23,6 +23,7 @@ interface ParsedArgs {
   codexLead?: boolean;
   round?: number;
   mode?: CouncilReviewMode;
+  previousReviewedHeadSha?: string;
   assertFreshReview?: string;
   allowedChangePatterns: string[];
 }
@@ -110,6 +111,13 @@ export function parseCouncilReviewGateArgs(
       parsed.mode = readMode(readValue(argv, ++index, token), token);
       continue;
     }
+    if (token === "--previous-reviewed-head") {
+      parsed.previousReviewedHeadSha = readGitSha(
+        readValue(argv, ++index, token),
+        token,
+      );
+      continue;
+    }
     if (token === "--no-codex-lead") {
       parsed.codexLead = false;
       continue;
@@ -143,10 +151,12 @@ export function parseCouncilReviewGateArgs(
   }
   if (
     parsed.assertFreshReview !== undefined &&
-    (parsed.mode !== undefined || parsed.round !== undefined)
+    (parsed.mode !== undefined ||
+      parsed.round !== undefined ||
+      parsed.previousReviewedHeadSha !== undefined)
   ) {
     throw new UsageError(
-      "--mode and --round are only valid when running a council review, not with --assert-fresh-review.",
+      "--mode, --round, and --previous-reviewed-head are only valid when running a council review, not with --assert-fresh-review.",
     );
   }
 
@@ -226,6 +236,13 @@ function readMode(value: string, flag: string): CouncilReviewMode {
   throw new UsageError(`${flag} must be "full" or "convergence".`);
 }
 
+function readGitSha(value: string, flag: string): string {
+  if (/^[a-f0-9]{7,40}$/i.test(value)) {
+    return value;
+  }
+  throw new UsageError(`${flag} must be a 7-40 character git SHA.`);
+}
+
 function isValidRepoSlug(value: string): boolean {
   return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value);
 }
@@ -248,6 +265,7 @@ function renderUsage(): string {
     "  --no-codex-lead               Skip Codex lead triage and mark degraded",
     "  --round N                     Council loop round number (default: 1)",
     "  --mode full|convergence       Council loop mode (default: full)",
+    "  --previous-reviewed-head SHA  Previous reviewed head SHA for convergence metadata",
     "  --assert-fresh-review PATH    Assert an existing clean review-result.json covers current HEAD",
     "  --allow-stale-path GLOB       Explicit freshness allowlist; repeatable; ** crosses /, * and ? do not",
     "",
