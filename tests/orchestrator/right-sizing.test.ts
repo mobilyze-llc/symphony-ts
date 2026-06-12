@@ -5,6 +5,7 @@ import type {
   StagesConfig,
 } from "../../src/config/types.js";
 import type { Issue } from "../../src/domain/model.js";
+import { classifyCouncilRiskPaths } from "../../src/orchestrator/council-risk-predicate.js";
 import { createRightSizingDecision } from "../../src/orchestrator/right-sizing.js";
 
 describe("deterministic right-sizing", () => {
@@ -109,6 +110,7 @@ describe("deterministic right-sizing", () => {
     });
 
     expect(decision.mode).toBe("full");
+    expect(decision.signals.impactSurface).toBe("shared");
     expect(decision.triggerHits).toEqual(
       expect.arrayContaining([
         "heavy_gate_requirements",
@@ -118,9 +120,134 @@ describe("deterministic right-sizing", () => {
         "repeat_retry",
       ]),
     );
+    expect(decision.riskPredicate).toMatchObject({
+      triggerHits: expect.arrayContaining([
+        "high_risk_path",
+        "journal_producer",
+        "state_journal_projection",
+      ]),
+      matchedPaths: [
+        "src/config/config-resolver.ts",
+        "src/orchestrator/runtime-host.ts",
+      ],
+    });
+    expect(decision.modelRouting.allowed).toBe(true);
+  });
+
+  it("uses the shared predicate for the existing right-sizing high-risk path set", () => {
+    const decision = createRightSizingDecision({
+      issue: createIssue({
+        description: "## Declared file scope\n- src/tracker/linear.ts\n",
+      }),
+      config: createConfig(),
+      stageName: "implement",
+      attempt: null,
+    });
+
+    expect(decision.signals.highRiskFiles).toEqual(["src/tracker/linear.ts"]);
+    expect(decision.triggerHits).toContain("high_risk_files");
+    expect(decision.riskPredicate).toMatchObject({
+      triggerHits: ["high_risk_path"],
+      matchedPaths: ["src/tracker/linear.ts"],
+    });
+    expect(decision.modelRouting.allowed).toBe(true);
+  });
+
+  it("treats journal-risk paths as right-sizing high-risk inputs", () => {
+    const decision = createRightSizingDecision({
+      issue: createIssue({
+        description: "## Declared file scope\n- src/logging/run-journal.ts\n",
+      }),
+      config: createConfig(),
+      stageName: "implement",
+      attempt: null,
+    });
+
+    expect(decision.signals.impactSurface).toBe("shared");
+    expect(decision.signals.highRiskFiles).toEqual([
+      "src/logging/run-journal.ts",
+    ]);
+    expect(decision.triggerHits).toContain("high_risk_files");
+    expect(decision.riskPredicate).toMatchObject({
+      triggerHits: ["journal_producer"],
+      matchedPaths: ["src/logging/run-journal.ts"],
+    });
+    expect(decision.modelRouting.allowed).toBe(true);
+  });
+
+  it("leaves benign ordinary source files outside the risk predicate", () => {
+    const decision = createRightSizingDecision({
+      issue: createIssue({
+        description: "## Declared file scope\n- src/features/copy.ts\n",
+      }),
+      config: createConfig(),
+      stageName: "implement",
+      attempt: null,
+    });
+
+    expect(decision.signals.highRiskFiles).toEqual([]);
+    expect(decision.riskPredicate).toEqual({
+      triggerHits: [],
+      matchedPaths: [],
+      matches: [],
+    });
     expect(decision.modelRouting).toEqual({
-      allowed: true,
-      reason: "risk_trigger",
+      allowed: false,
+      reason: "not_needed",
+    });
+  });
+});
+
+describe("Council v2 risk predicate", () => {
+  it("fires for journal producers", () => {
+    const result = classifyCouncilRiskPaths(["src/logging/run-journal.ts"]);
+
+    expect(result.triggerHits).toContain("journal_producer");
+    expect(result.matchedPaths).toEqual(["src/logging/run-journal.ts"]);
+    expect(result.matches).toContainEqual(
+      expect.objectContaining({
+        trigger: "journal_producer",
+        path: "src/logging/run-journal.ts",
+      }),
+    );
+  });
+
+  it("fires for journal replay reducer paths", () => {
+    const result = classifyCouncilRiskPaths(["src/orchestrator/core.ts"]);
+
+    expect(result.triggerHits).toContain("journal_replay_reducer");
+    expect(result.matchedPaths).toEqual(["src/orchestrator/core.ts"]);
+    expect(result.matches).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          trigger: "journal_replay_reducer",
+          path: "src/orchestrator/core.ts",
+        }),
+      ]),
+    );
+  });
+
+  it("fires for dispatcher run-journal event-kind vocabulary", () => {
+    const result = classifyCouncilRiskPaths(["src/domain/model.ts"]);
+
+    expect(result.triggerHits).toEqual(["dispatcher_event_vocabulary"]);
+    expect(result.matchedPaths).toEqual(["src/domain/model.ts"]);
+  });
+
+  it("fires for state delta and snapshot journal projection", () => {
+    const result = classifyCouncilRiskPaths([
+      "src/logging/runtime-snapshot.ts",
+    ]);
+
+    expect(result.triggerHits).toEqual(["state_journal_projection"]);
+    expect(result.matchedPaths).toEqual(["src/logging/runtime-snapshot.ts"]);
+  });
+
+  it("does not fire for benign ordinary source files", () => {
+    expect(classifyCouncilRiskPaths(["src/features/copy.ts"])).toEqual({
+      triggerHits: [],
+      matchedPaths: [],
+      matches: [],
     });
   });
 });

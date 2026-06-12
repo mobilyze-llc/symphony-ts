@@ -10,6 +10,7 @@ import type {
   RightSizingMode,
   RightSizingSignals,
 } from "../domain/model.js";
+import { classifyCouncilRiskPaths } from "./council-risk-predicate.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
 
 const EXPLICIT_MODE_LABELS: Record<string, RightSizingMode> = {
@@ -23,26 +24,6 @@ const EXPLICIT_MODE_LABELS: Record<string, RightSizingMode> = {
   "high-risk": "full",
   "risk:high": "full",
 };
-
-const HIGH_RISK_ROOT_FILES = new Set([
-  "WORKFLOW.md",
-  "package.json",
-  "pnpm-lock.yaml",
-  "pnpm-workspace.yaml",
-  "SPEC.mobilyze.md",
-  "SPEC.upstream.md",
-  "biome.json",
-  "tsconfig.build.json",
-  "tsconfig.json",
-]);
-
-const HIGH_RISK_PREFIXES = [
-  "src/cli/",
-  "src/config/",
-  "src/orchestrator/",
-  "src/tracker/",
-  "src/workspace/",
-];
 
 export interface RightSizingInput {
   issue: Issue;
@@ -67,6 +48,7 @@ export function createRightSizingDecision(
         `Issue metadata explicitly selects ${signals.explicitModeHint} mode.`,
       ],
       triggerHits,
+      riskPredicate: signals.riskPredicate,
       signals,
       modelRouting:
         triggerHits.length > 0
@@ -207,6 +189,7 @@ export function createRightSizingDecision(
     reason,
     rationale,
     triggerHits,
+    riskPredicate: signals.riskPredicate,
     signals,
     modelRouting,
   };
@@ -221,7 +204,8 @@ function collectSignals(input: RightSizingInput): RightSizingSignals {
       .sort() ?? [];
   const changedFiles = [...(input.changedFiles ?? [])].sort();
   const impactFiles = uniqueSorted([...declaredScopeFiles, ...changedFiles]);
-  const highRiskFiles = impactFiles.filter(isHighRiskPath);
+  const riskPredicate = classifyCouncilRiskPaths(impactFiles);
+  const highRiskFiles = riskPredicate.matchedPaths;
   const stagePath = resolveStagePath(input.config, input.stageName);
   const plannedTurns = stagePath.reduce((sum, stage) => {
     if (stage.type !== "agent") {
@@ -245,6 +229,7 @@ function collectSignals(input: RightSizingInput): RightSizingSignals {
     changedFiles,
     impactSurface: classifyImpactSurface(impactFiles, highRiskFiles),
     highRiskFiles,
+    riskPredicate,
     stageCount: stagePath.length,
     gateCount,
     reviewerCount,
@@ -352,16 +337,9 @@ function classifyBudget(input: {
   return "low";
 }
 
-function isHighRiskPath(file: string): boolean {
-  if (HIGH_RISK_ROOT_FILES.has(file)) {
-    return true;
-  }
-  return HIGH_RISK_PREFIXES.some((prefix) => file.startsWith(prefix));
-}
-
 function collectTriggerHits(signals: RightSizingSignals): string[] {
   const hits = new Set<string>();
-  if (signals.highRiskFiles.length > 0) {
+  if (signals.riskPredicate.triggerHits.length > 0) {
     hits.add("high_risk_files");
   }
   if (signals.retryCount >= 2) {

@@ -1331,12 +1331,22 @@ function createRightSizingDecision(input: {
     reason: `Selected ${input.mode}`,
     rationale: [`${input.mode} rationale`],
     triggerHits: input.triggerHits,
+    riskPredicate: {
+      triggerHits: [],
+      matchedPaths: [],
+      matches: [],
+    },
     signals: {
       explicitModeHint: null,
       declaredScopeFiles: ["src/features/example.ts"],
       changedFiles: ["src/features/example.ts"],
       impactSurface: "narrow" as const,
       highRiskFiles: [],
+      riskPredicate: {
+        triggerHits: [],
+        matchedPaths: [],
+        matches: [],
+      },
       stageCount: 2,
       gateCount: 0,
       reviewerCount: 0,
