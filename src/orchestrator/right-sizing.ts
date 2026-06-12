@@ -11,6 +11,7 @@ import type {
   RightSizingSignals,
 } from "../domain/model.js";
 import { classifyCouncilRiskPaths } from "./council-risk-predicate.js";
+import { sortPaths, uniqueSortedPaths } from "./path-ordering.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
 
 const EXPLICIT_MODE_LABELS: Record<string, RightSizingMode> = {
@@ -198,13 +199,17 @@ export function createRightSizingDecision(
 function collectSignals(input: RightSizingInput): RightSizingSignals {
   const labels = [...input.issue.labels].sort();
   const explicitModeHint = findExplicitModeHint(labels);
-  const declaredScopeFiles =
-    createIssueSupervisionSnapshot(input.issue)
-      .declaredFileScope?.slice()
-      .sort() ?? [];
-  const changedFiles = [...(input.changedFiles ?? [])].sort();
-  const impactFiles = uniqueSorted([...declaredScopeFiles, ...changedFiles]);
+  const declaredScopeFiles = sortPaths(
+    createIssueSupervisionSnapshot(input.issue).declaredFileScope ?? [],
+  );
+  const changedFiles = sortPaths(input.changedFiles ?? []);
+  const impactFiles = uniqueSortedPaths([
+    ...declaredScopeFiles,
+    ...changedFiles,
+  ]);
   const riskPredicate = classifyCouncilRiskPaths(impactFiles);
+  // Compatibility alias for consumers that still read highRiskFiles.
+  // Keep this equal to riskPredicate.matchedPaths until those consumers migrate.
   const highRiskFiles = riskPredicate.matchedPaths;
   const stagePath = resolveStagePath(input.config, input.stageName);
   const plannedTurns = stagePath.reduce((sum, stage) => {
@@ -375,8 +380,4 @@ function rankModes(scores: Record<RightSizingMode, number>): Array<{
       return severity[right[0]] - severity[left[0]];
     })
     .map(([mode, score]) => ({ mode, score }));
-}
-
-function uniqueSorted(values: readonly string[]): string[] {
-  return [...new Set(values)].sort();
 }
