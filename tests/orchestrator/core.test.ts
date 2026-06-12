@@ -6539,11 +6539,13 @@ describe("review findings comment on agent review failure", () => {
   function createReviewStageConfig(maxRework = 2) {
     const config = createConfig();
     config.escalationState = "Blocked";
+    // SYMPH-409 contract: escalation_state must NOT be in active_states
+    // (silent-respawn hazard) and "Resume" must be (readmission path).
     config.tracker.activeStates = [
       "Todo",
       "In Progress",
       "In Review",
-      "Blocked",
+      "Resume",
     ];
     config.stages = {
       initialStage: "implement",
@@ -7682,7 +7684,7 @@ function createConfig(overrides?: {
       endpoint: "https://api.linear.app/graphql",
       apiKey: "token",
       projectSlug: "project",
-      activeStates: ["Todo", "In Progress", "In Review"],
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
       terminalStates: ["Done", "Canceled"],
     },
     polling: {

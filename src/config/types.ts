@@ -1,3 +1,5 @@
+import type { ContractViolation } from "./config-contracts.js";
+
 export interface WorkflowHooksConfig {
   afterCreate: string | null;
   beforeRun: string | null;
@@ -276,6 +278,19 @@ export interface ResolvedWorkflowConfig {
    * for the same tracker project. Absent/null means any host may run it.
    */
   ownerHost?: string | null;
+  /**
+   * Config-contract escape hatch (SYMPH-409). `contracts.override: true`
+   * turns contract violations from dispatch-validation failures into
+   * suppressed warnings that are re-logged loudly at every startup and
+   * config reload. Optional so hand-built test fixtures keep compiling;
+   * resolveWorkflowConfig always sets it.
+   */
+  contracts?: WorkflowContractsConfig;
+}
+
+/** See {@link ResolvedWorkflowConfig.contracts}. */
+export interface WorkflowContractsConfig {
+  override: boolean;
 }
 
 export interface DispatchValidationFailure {
@@ -286,6 +301,13 @@ export interface DispatchValidationFailure {
 export type DispatchValidationResult =
   | {
       ok: true;
+      /**
+       * Contract violations suppressed by `contracts.override: true`
+       * (SYMPH-409). Present (non-empty) only when the override is active;
+       * the runtime host re-warns about each entry at every startup and
+       * config reload until the override is removed.
+       */
+      suppressedContractViolations?: ContractViolation[];
     }
   | {
       ok: false;
