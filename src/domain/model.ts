@@ -982,14 +982,26 @@ export interface ResumeRequiredMark {
   since: string;
 }
 
-export interface PendingStageSignal {
-  signal: "complete" | "failure";
+interface PendingStageSignalBase {
   stageName: string | null;
   attempt: number | null;
   agentMessage: string;
-  failureClass: FailureClass | null;
   setBySequence: number | null;
 }
+
+export interface PendingStageCompletionSignal extends PendingStageSignalBase {
+  signal: "complete";
+  failureClass: null;
+}
+
+export interface PendingStageFailureSignal extends PendingStageSignalBase {
+  signal: "failure";
+  failureClass: FailureClass;
+}
+
+export type PendingStageSignal =
+  | PendingStageCompletionSignal
+  | PendingStageFailureSignal;
 
 export interface OrchestratorState {
   pollIntervalMs: number;

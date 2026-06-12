@@ -1270,6 +1270,106 @@ describe("orchestrator core", () => {
     expect(spawnedStageNames).toEqual(["investigate", "implement"]);
   });
 
+  it("does not re-park when budget escalation consumes a terminal stage completion", async () => {
+    const spawnedStageNames: Array<string | null> = [];
+    const config = createInvestigateImplementConfig();
+    config.budgetEscalation = { maxSteps: 1, multiplier: 2 };
+    const investigateStage = config.stages?.stages.investigate;
+    if (investigateStage === undefined) {
+      throw new Error("expected investigate stage");
+    }
+    investigateStage.transitions.onComplete = "done";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStageNames.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "Investigation finished.\n[STAGE_COMPLETE]",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250_001,
+        estimatedCostUsd: 5,
+      },
+    });
+
+    const state = orchestrator.getState();
+    expect(retry).toBeNull();
+    expect(spawnedStageNames).toEqual(["investigate"]);
+    expect(state.completed.has("1")).toBe(true);
+    expect(state.resumeRequired.has("1")).toBe(false);
+    expect(state.issuePendingStageSignals["1"]).toBeUndefined();
+    expect(state.retryAttempts["1"]).toBeUndefined();
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) => entry.kind === "hard_stop_trigger",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not re-park when budget escalation consumes a terminal failure signal", async () => {
+    const config = createInvestigateImplementConfig();
+    config.budgetEscalation = { maxSteps: 1, multiplier: 2 };
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "Cannot satisfy this ticket.\n[STAGE_FAILED: spec]",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+      hardStop: {
+        outcome: "PAUSED-budget",
+        trigger: "token_budget",
+        reason: "Token budget exceeded.",
+        turnCount: 2,
+        totalTokens: 250_001,
+        estimatedCostUsd: 5,
+      },
+    });
+
+    const state = orchestrator.getState();
+    expect(retry).toBeNull();
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.resumeRequired.has("1")).toBe(false);
+    expect(state.issuePendingStageSignals["1"]).toBeUndefined();
+    expect(state.retryAttempts["1"]).toBeUndefined();
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) => entry.kind === "hard_stop_trigger",
+      ),
+    ).toBe(false);
+  });
+
   it("consumes a pending stage completion after sync pause-triage continue", async () => {
     const spawnedStageNames: Array<string | null> = [];
     const config = createInvestigateImplementConfig();

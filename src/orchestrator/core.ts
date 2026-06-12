@@ -187,6 +187,11 @@ interface PendingStageConsumptionRollbackSnapshot {
   parkSequence: number;
 }
 
+interface BudgetPauseHandlingResult {
+  handled: boolean;
+  retryEntry: RetryEntry | null;
+}
+
 export type WorkerExitOutcome =
   | "normal"
   | "abnormal"
@@ -1930,17 +1935,17 @@ export class OrchestratorCore {
     hardStop: HardStopDecision,
     stageName: string | null,
     pendingStageSignal: PendingStageSignal | null,
-  ): Promise<RetryEntry | null> {
+  ): Promise<BudgetPauseHandlingResult> {
     if (hardStop.outcome !== "PAUSED-budget") {
-      return null;
+      return { handled: false, retryEntry: null };
     }
     if (!isBudgetEscalationTrigger(hardStop.trigger)) {
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const ladder = this.config.budgetEscalation;
     if (ladder.maxSteps === null) {
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const steps = this.state.issueBudgetEscalations[issueId] ?? 0;
@@ -1948,7 +1953,7 @@ export class OrchestratorCore {
       console.warn(
         `[orchestrator] Budget escalation exhausted for ${runningEntry.identifier} (${steps}/${ladder.maxSteps} steps used) — parking for operator.`,
       );
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const gate = this.evaluateRateLimitAdmissionGate();
@@ -1956,7 +1961,7 @@ export class OrchestratorCore {
       console.warn(
         `[orchestrator] Budget escalation deferred to operator for ${runningEntry.identifier}: ${gate.reason}`,
       );
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const nextStep = steps + 1;
@@ -2025,18 +2030,24 @@ export class OrchestratorCore {
         setBySequence: escalationEntry.sequence,
       };
       this.state.issuePendingStageSignals[issueId] = storedPendingStageSignal;
-      return this.consumePendingStageSignal(
-        issueId,
-        runningEntry,
-        storedPendingStageSignal,
-      );
+      return {
+        handled: true,
+        retryEntry: await this.consumePendingStageSignal(
+          issueId,
+          runningEntry,
+          storedPendingStageSignal,
+        ),
+      };
     }
 
-    return this.scheduleRetry(issueId, 1, {
-      identifier: runningEntry.identifier,
-      error: null,
-      delayType: "continuation",
-    });
+    return {
+      handled: true,
+      retryEntry: this.scheduleRetry(issueId, 1, {
+        identifier: runningEntry.identifier,
+        error: null,
+        delayType: "continuation",
+      }),
+    };
   }
 
   /**
@@ -2053,25 +2064,25 @@ export class OrchestratorCore {
     hardStop: HardStopDecision,
     stageName: string | null,
     pendingStageSignal: PendingStageSignal | null,
-  ): Promise<RetryEntry | null> {
+  ): Promise<BudgetPauseHandlingResult> {
     if (this.runPauseTriage === undefined) {
-      return null;
+      return { handled: false, retryEntry: null };
     }
     if (hardStop.outcome !== "PAUSED-budget") {
-      return null;
+      return { handled: false, retryEntry: null };
     }
     if (!isBudgetEscalationTrigger(hardStop.trigger)) {
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const resumesUsed = this.state.issuePauseTriageResumes[issueId] ?? 0;
     if (resumesUsed >= this.config.pauseTriage.maxResumes) {
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const gate = this.evaluateRateLimitAdmissionGate();
     if (gate.blocked) {
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     const evidence: PauseTriageEvidence = {
@@ -2140,7 +2151,7 @@ export class OrchestratorCore {
             `[orchestrator] deferred pause triage chain failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
           );
         });
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     let verdict: PauseTriageVerdict | null = null;
@@ -2195,7 +2206,7 @@ export class OrchestratorCore {
         // Journal failure means the resume is NOT authorized: fall through
         // to the normal operator park without consuming a resume, so live
         // and replay agree on the count (both omit it).
-        return null;
+        return { handled: false, retryEntry: null };
       }
     }
 
@@ -2221,7 +2232,7 @@ export class OrchestratorCore {
           // Observability only.
         }
       }
-      return null;
+      return { handled: false, retryEntry: null };
     }
 
     // Routed through the shared intent-verb layer (SYMPH-422 parity with
@@ -2249,11 +2260,14 @@ export class OrchestratorCore {
     if (pendingStageSignal !== null) {
       const storedPendingStageSignal =
         this.state.issuePendingStageSignals[issueId] ?? pendingStageSignal;
-      return this.consumePendingStageSignal(
-        issueId,
-        runningEntry,
-        storedPendingStageSignal,
-      );
+      return {
+        handled: true,
+        retryEntry: await this.consumePendingStageSignal(
+          issueId,
+          runningEntry,
+          storedPendingStageSignal,
+        ),
+      };
     }
 
     const resumeResult = await this.writeIntent({
@@ -2268,7 +2282,10 @@ export class OrchestratorCore {
       stage: stageName,
       renderComment: false,
     });
-    return resumeResult.retryEntry ?? null;
+    return {
+      handled: true,
+      retryEntry: resumeResult.retryEntry ?? null,
+    };
   }
 
   /**
@@ -2411,21 +2428,17 @@ export class OrchestratorCore {
 
     const pendingStageSignal = this.state.issuePendingStageSignals[issueId];
     if (pendingStageSignal !== undefined) {
-      const retryEntry = await this.consumePendingStageSignal(
+      await this.consumePendingStageSignal(
         issueId,
         createPendingRunningEntry({
           issue: input.issue,
           identifier,
           attempt: pendingStageSignal.attempt,
-          stageName,
           agentMessage: pendingStageSignal.agentMessage,
         }),
         pendingStageSignal,
       );
       await postContinueComment();
-      if (retryEntry !== null) {
-        return;
-      }
       return;
     }
 
@@ -2719,6 +2732,7 @@ export class OrchestratorCore {
       issueId,
       runningEntry,
     );
+    const originalLastCodexMessage = runningEntry.lastCodexMessage;
     try {
       delete this.state.issuePendingStageSignals[issueId];
       if (pendingStageSignal.stageName !== null) {
@@ -2728,16 +2742,6 @@ export class OrchestratorCore {
 
       let retryEntry: RetryEntry | null;
       if (pendingStageSignal.signal === "failure") {
-        if (pendingStageSignal.failureClass === null) {
-          await this.recordPendingStageSignalConsumed(
-            issueId,
-            runningEntry,
-            pendingStageSignal,
-          );
-          this.clearResumeRequirement(issueId);
-          this.releaseClaim(issueId);
-          return null;
-        }
         retryEntry = this.handleFailureSignal(
           issueId,
           runningEntry,
@@ -2761,6 +2765,7 @@ export class OrchestratorCore {
       this.clearResumeRequirement(issueId);
       return retryEntry;
     } catch (error) {
+      runningEntry.lastCodexMessage = originalLastCodexMessage;
       this.clearRetryEntry(issueId);
       this.restorePendingStageConsumptionRollback(rollbackSnapshot);
       throw error;
@@ -3216,8 +3221,8 @@ export class OrchestratorCore {
           exitedStageName,
           pendingStageSignal,
         );
-        if (escalation !== null) {
-          return escalation;
+        if (escalation.handled) {
+          return escalation.retryEntry;
         }
 
         const triageResume = await this.tryPauseTriageResume(
@@ -3227,8 +3232,8 @@ export class OrchestratorCore {
           exitedStageName,
           pendingStageSignal,
         );
-        if (triageResume !== null) {
-          return triageResume;
+        if (triageResume.handled) {
+          return triageResume.retryEntry;
         }
 
         await this.handleHardStopTrigger(input.issueId, runningEntry, {
@@ -7184,7 +7189,6 @@ export class OrchestratorCore {
         issue,
         identifier: issue.identifier,
         attempt: pendingStageSignal.attempt,
-        stageName: pendingStageSignal.stageName,
         agentMessage: pendingStageSignal.agentMessage,
       });
       await this.consumePendingStageSignal(
@@ -9161,20 +9165,28 @@ function readPendingStageSignalMetadata(
     entry.metadata,
     "pendingFailureClass",
   );
-  const parsedFailureClass =
-    signal === "failure" && isFailureClass(failureClass) ? failureClass : null;
-  if (signal === "failure" && parsedFailureClass === null) {
-    console.warn(
-      `[orchestrator] pending stage signal recovery dropped failure signal for ${entry.issueIdentifier}: missing or invalid failure class in journal sequence ${entry.sequence}.`,
-    );
-    return null;
+  if (signal === "failure") {
+    if (!isFailureClass(failureClass)) {
+      console.warn(
+        `[orchestrator] pending stage signal recovery dropped failure signal for ${entry.issueIdentifier}: missing or invalid failure class in journal sequence ${entry.sequence}.`,
+      );
+      return null;
+    }
+    return {
+      signal,
+      stageName,
+      attempt: attempt ?? entry.attempt,
+      agentMessage,
+      failureClass,
+      setBySequence: entry.sequence,
+    };
   }
   return {
     signal,
     stageName,
     attempt: attempt ?? entry.attempt,
     agentMessage,
-    failureClass: parsedFailureClass,
+    failureClass: null,
     setBySequence: entry.sequence,
   };
 }
@@ -9333,7 +9345,6 @@ function createPendingRunningEntry(input: {
   issue: Issue;
   identifier: string;
   attempt: number | null;
-  stageName: string | null;
   agentMessage: string;
 }): RunningEntry {
   return {
