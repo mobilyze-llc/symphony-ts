@@ -569,6 +569,20 @@ export class OrchestratorCore {
   private readonly triagedParkGenerations = new Map<string, number>();
 
   /**
+   * Escalation-once-per-park guard (SYMPH-422 council P2): park generation
+   * whose escalate_human already applied. escalate_human is the one verb
+   * that returns "applied" while the park stands, so journal-key dedup is
+   * its only re-issue guard — and key dedup is exact string equality, which
+   * a key-format migration breaks (a #374-era entry never matches a
+   * re-issued new-format key, double-applying the escalation and posting a
+   * duplicate comment on upgrade restart). This marker makes the verb
+   * itself idempotent per park: a re-park (new generation) may escalate
+   * again; the same park never does. `null` records an escalation against
+   * a parked issue with no generation (defensive — parks always mint one).
+   */
+  private readonly escalatedParkGenerations = new Map<string, number | null>();
+
+  /**
    * Single retry_once grant per issue (SYMPH-399): the signature of the
    * park the grant was issued against. Consumed on the first post-grant
    * failure: an identical signature goes straight back to park with NO
@@ -713,6 +727,7 @@ export class OrchestratorCore {
           this.issueParkGenerations.delete(entry.issueId);
           this.triagedParkGenerations.delete(entry.issueId);
           this.retryOnceGrants.delete(entry.issueId);
+          this.escalatedParkGenerations.delete(entry.issueId);
 
           if (verb === "rework_with_hint") {
             // Restore the rework stage transition so a mid-rework restart
@@ -772,6 +787,21 @@ export class OrchestratorCore {
               this.clearStageFailureSignature(entry.issueId, grantedStage);
             }
           }
+        }
+        if (verb === "escalate_human") {
+          // Restore the escalation-once-per-park marker (SYMPH-422 council
+          // P2). Matched on verb+status, NEVER on idempotency-key shape:
+          // pre-discriminator (#374-era) entries carry old-format keys that
+          // can never string-match a re-issued new-format key, so without
+          // this marker every upgrade restart double-applies each journaled
+          // escalation and posts a duplicate comment. The marker is scoped
+          // to the CURRENT replay-minted generation (journaled generation
+          // numbers do not survive a restart — replay re-mints them), so a
+          // later replayed release → re-park still permits re-escalation.
+          this.escalatedParkGenerations.set(
+            entry.issueId,
+            this.issueParkGenerations.get(entry.issueId) ?? null,
+          );
         }
         // escalate_human leaves the park (replayed from its source event)
         // standing; resume replays as a no-op (its continuation is
@@ -1023,11 +1053,13 @@ export class OrchestratorCore {
         this.signatureClusterRegistry.clearIssueFromCluster(issue.id);
         this.resetBreakersForResumedIssue(issue.id);
         // SYMPH-399 lifecycle: a resumed issue starts a fresh park lifecycle —
-        // stale fence generations, triage-once markers, and retry grants must
-        // not survive into it (resume-then-recur must triage again).
+        // stale fence generations, triage-once markers, escalation markers,
+        // and retry grants must not survive into it (resume-then-recur must
+        // triage again).
         this.issueParkGenerations.delete(issue.id);
         this.triagedParkGenerations.delete(issue.id);
         this.retryOnceGrants.delete(issue.id);
+        this.escalatedParkGenerations.delete(issue.id);
         this.clearResumeRequirement(issue.id);
       } else {
         return false;
@@ -1056,6 +1088,7 @@ export class OrchestratorCore {
         this.issueParkGenerations.delete(issue.id);
         this.triagedParkGenerations.delete(issue.id);
         this.retryOnceGrants.delete(issue.id);
+        this.escalatedParkGenerations.delete(issue.id);
       } else {
         return false;
       }
@@ -3837,6 +3870,7 @@ export class OrchestratorCore {
     this.issueParkGenerations.delete(issueId);
     this.triagedParkGenerations.delete(issueId);
     this.retryOnceGrants.delete(issueId);
+    this.escalatedParkGenerations.delete(issueId);
     // Failure signatures are keyed by `${issueId}:${stage}` — purge all
     const sigPrefix = `${issueId}:`;
     for (const key of Object.keys(this.state.issueFailureSignatures)) {
@@ -3988,6 +4022,7 @@ export class OrchestratorCore {
     this.issueParkGenerations.delete(issueId);
     this.triagedParkGenerations.delete(issueId);
     this.retryOnceGrants.delete(issueId);
+    this.escalatedParkGenerations.delete(issueId);
   }
 
   /**
@@ -4268,6 +4303,21 @@ export class OrchestratorCore {
         if (!this.isIssueParked(issueId)) {
           return { status: "no_op", detail: "not parked" };
         }
+        // Idempotent per park generation (SYMPH-422 council P2): the park
+        // stands after an applied escalation, so without this guard any
+        // re-issue that slips past journal-key dedup (e.g. across a key
+        // format migration, or from a second actor) applies again and
+        // posts a duplicate escalation comment.
+        if (
+          this.escalatedParkGenerations.has(issueId) &&
+          this.escalatedParkGenerations.get(issueId) === currentGen
+        ) {
+          return {
+            status: "no_op",
+            detail: `already escalated for park generation ${currentGen ?? "none"}`,
+          };
+        }
+        this.escalatedParkGenerations.set(issueId, currentGen);
         // No state change: the park stands while a human is paged.
         return {
           status: "applied",

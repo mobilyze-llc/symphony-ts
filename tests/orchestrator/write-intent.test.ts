@@ -294,9 +294,12 @@ describe("idempotency-key actor discriminator (SYMPH-422)", () => {
     const orchestrator = createOrchestrator();
     await driveNoveltyPark(orchestrator);
 
-    // escalate_human is state-preserving: both writes are "applied" at the
-    // SAME park generation — exactly the collision the discriminator exists
-    // for (pre-SYMPH-422 the second actor's entry silently collapsed).
+    // escalate_human at the SAME park generation — exactly the collision
+    // the discriminator exists for (pre-SYMPH-422 the second actor's entry
+    // silently collapsed onto the first actor's key). The verb itself is
+    // idempotent per park (council P2), so the second actor records a
+    // no_op — but its attribution and rationale now survive as a journal
+    // entry of its own instead of vanishing.
     const first = await orchestrator.writeIntent({
       verb: "escalate_human",
       issueId: "1",
@@ -312,7 +315,8 @@ describe("idempotency-key actor discriminator (SYMPH-422)", () => {
       reason: { class: "stuck_triage_escalate", human: "model paged human" },
     });
     expect(first.status).toBe("applied");
-    expect(second.status).toBe("applied");
+    expect(second.status).toBe("no_op");
+    expect(second.detail).toContain("already escalated");
 
     const escalations = intentEntries(orchestrator).filter(
       (entry) => entry.metadata.verb === "escalate_human",
@@ -361,10 +365,17 @@ describe("idempotency-key actor discriminator (SYMPH-422)", () => {
         reason: { class: "operator_escalate", human: "paging on-call" },
       });
     }
+    // First call applies; the second records a no_op (already escalated for
+    // this park, council P2); the third is an identical no_op that dedupes
+    // onto the second's key — exactly two entries, never three.
     const escalations = intentEntries(orchestrator).filter(
       (entry) => entry.metadata.verb === "escalate_human",
     );
-    expect(escalations).toHaveLength(1);
+    expect(escalations).toHaveLength(2);
+    expect(escalations.map((entry) => entry.metadata.status)).toEqual([
+      "applied",
+      "no_op",
+    ]);
   });
 
   it("the same kind+host with different sessions journal separately", async () => {
@@ -384,6 +395,28 @@ describe("idempotency-key actor discriminator (SYMPH-422)", () => {
       (entry) => entry.metadata.verb === "escalate_human",
     );
     expect(escalations).toHaveLength(2);
+  });
+
+  it("delimiter escaping: hosts/sessions composing the same raw string still mint distinct keys", async () => {
+    const orchestrator = createOrchestrator();
+    // Without component escaping both actors would compose the raw key
+    // segment "operator@h#a#b" and the second no_op would silently dedupe
+    // onto the first actor's entry.
+    await orchestrator.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "h", session: "a#b" },
+      reason: { class: "operator_release", human: "release" },
+    });
+    await orchestrator.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "h#a", session: "b" },
+      reason: { class: "operator_release", human: "release" },
+    });
+    expect(intentEntries(orchestrator)).toHaveLength(2);
   });
 
   it("replay with multi-actor entries at one generation still converges", async () => {
@@ -425,6 +458,93 @@ describe("idempotency-key actor discriminator (SYMPH-422)", () => {
     });
     expect(replayReleased.getState().resumeRequired.has("1")).toBe(false);
     expect(replayReleased.getState().failed.has("1")).toBe(false);
+  });
+});
+
+describe("escalate_human idempotency across the key-format migration (council P2)", () => {
+  it("replay of a #374-era old-format applied escalation makes a post-restart re-issue a no_op with no duplicate comment", async () => {
+    const first = createOrchestrator();
+    await driveNoveltyPark(first);
+    const escalation = await first.writeIntent({
+      verb: "escalate_human",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_escalate", human: "paging on-call" },
+    });
+    expect(escalation.status).toBe("applied");
+
+    // Rewrite the journaled escalation's idempotency key to the pre-422
+    // (#374) shape — no actor discriminator. The replay restore must match
+    // on verb+status, never on key shape, or every upgrade restart
+    // double-applies each pre-existing journaled escalation.
+    const journal = first.getState().dispatcherRunJournal.map((entry) =>
+      entry.kind === "intent" &&
+      entry.metadata.verb === "escalate_human" &&
+      entry.metadata.status === "applied"
+        ? {
+            ...entry,
+            idempotencyKey: `intent:escalate_human:1:gen-${entry.metadata.parkGeneration}`,
+          }
+        : entry,
+    );
+
+    const postComment = vi.fn().mockResolvedValue(undefined);
+    const restarted = createOrchestrator({ runJournal: journal, postComment });
+    expect(restarted.getState().resumeRequired.has("1")).toBe(true);
+
+    const reissue = await restarted.writeIntent({
+      verb: "escalate_human",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_escalate", human: "paging on-call" },
+    });
+    expect(reissue.status).toBe("no_op");
+    expect(reissue.detail).toContain("already escalated");
+    const escalationComments = postComment.mock.calls.filter(([, body]) =>
+      String(body).startsWith("Intent applied: escalate_human"),
+    );
+    expect(escalationComments).toHaveLength(0);
+  });
+
+  it("release → re-park mints a new generation and permits re-escalation", async () => {
+    const orchestrator = createOrchestrator();
+    await driveNoveltyPark(orchestrator);
+
+    const firstEscalation = await orchestrator.writeIntent({
+      verb: "escalate_human",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_escalate", human: "paging on-call" },
+    });
+    expect(firstEscalation.status).toBe("applied");
+
+    await orchestrator.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_release", human: "released after page" },
+    });
+    const repark = await orchestrator.writeIntent({
+      verb: "park",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_pause", human: "new problem, new park" },
+    });
+    expect(repark.status).toBe("applied");
+
+    const secondEscalation = await orchestrator.writeIntent({
+      verb: "escalate_human",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_escalate", human: "paging on-call again" },
+    });
+    expect(secondEscalation.status).toBe("applied");
   });
 });
 

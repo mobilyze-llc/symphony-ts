@@ -95,11 +95,6 @@ export interface IntentWriteResult {
 }
 
 /**
- * Render the mandatory human-visible attribution line. Any state-changing
- * surface (Linear comment, Slack alert) produced by an applied intent must
- * include this string.
- */
-/**
  * Render the actor discriminator segment of an intent idempotency key
  * (SYMPH-422). Two DIFFERENT actors minting same-verb-same-generation
  * intents must journal separately — collapsing them loses the second
@@ -114,10 +109,26 @@ export function formatIntentActorKey(actor: IntentActor): string {
   const session =
     actor.session === undefined || actor.session === null
       ? ""
-      : `#${actor.session}`;
-  return `${actor.kind}@${actor.host}${session}`;
+      : `#${sanitizeActorKeyComponent(actor.session)}`;
+  return `${actor.kind}@${sanitizeActorKeyComponent(actor.host)}${session}`;
 }
 
+/**
+ * Replace the key delimiters (@ # :) inside an actor-key component so an
+ * unusual or hostile host/session string cannot compose into another
+ * actor's key (e.g. host "h#a" + session "b" colliding with host "h" +
+ * session "a#b"). Lossy by design — the key is an opaque equality token;
+ * the journal entry's actor metadata keeps the exact values.
+ */
+function sanitizeActorKeyComponent(value: string): string {
+  return value.replace(/[@#:]/g, "_");
+}
+
+/**
+ * Render the mandatory human-visible attribution line. Any state-changing
+ * surface (Linear comment, Slack alert) produced by an applied intent must
+ * include this string.
+ */
 export function formatIntentAttribution(actor: IntentActor): string {
   const session =
     actor.session === undefined || actor.session === null
