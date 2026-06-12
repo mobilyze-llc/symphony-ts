@@ -515,6 +515,7 @@ Do not use Codex app/connector MCP tools for Linear comments or documents in hea
    - [ ] `check:` a command plus its expected result (e.g. `check: npx tsc --noEmit exits 0`)
    - [ ] `judge:` a falsifiable claim plus the evidence proving it (e.g. `judge: pause reasons report billable and raw tokens — visible in the hard-stop comment`)
    Bad (will be bounced): restating the title, untestable opinions ("code is clean"), criteria without tags.
+   Never author a bare full-suite `check:` (e.g. `check: pnpm test exits 0`) — the full suite gates in CI on the PR head SHA, never locally (SYMPH-358); the orchestrator rewrites such criteria into the focused-tests-locally + CI-status shape at freeze (SYMPH-402).
 
    ### Validation
    - `<FOCUSED test command for the touched area — never a bare full-suite run like \`pnpm test\`; the full suite gates in CI (SYMPH-358)>`
@@ -610,7 +611,7 @@ Do not emit `[STAGE_COMPLETE]` until the machine-checkable criteria above pass �
 - For every `check:` criterion: run the named command and confirm the expected result. Record command + exit code per criterion.
 - For every `judge:` criterion: PRODUCE the evidence the criterion names (artifact, comment, log) and cite where it lives. Never grade your own `judge:` criteria — an independent judge does that at review exit.
 - A failing `test:`/`check:` criterion gets at most 3 fix-and-rerun attempts (the bound is per criterion). Exhausted → output `[STAGE_FAILED: verify]` naming the specific criterion and its last output.
-- A frozen `check:` criterion that names a full-suite command (e.g. `pnpm test`) inherits the full-suite contract from the Implementation Steps: the unrelated-failure carve-out applies; failures related to your diff never qualify for it.
+- A frozen `check:` criterion that names a full-suite command (e.g. `pnpm test`) inherits the full-suite contract from the Implementation Steps: CI check-run success on the PR head SHA satisfies it (SYMPH-358 / SYMPH-402 — CI is the contract's authority); the unrelated-failure carve-out applies to the one local run, and failures related to your diff never qualify for it.
 - Your FINAL completion message (the one with `[STAGE_COMPLETE]`) must list every criterion with its evidence line — `test:`/`check:` as `<tag> — <command> — exit <code> — <log path>`; `judge:` as `<tag> — judge — <evidence citation>`. Keep each line bounded; full output stays in `.symphony/validation/`.
 - These criteria are read-only to you. If satisfying one would require editing or weakening it, that is `[STAGE_FAILED: spec]` with an explanation, never a quiet reinterpretation.
 {% endif %}
@@ -716,6 +717,7 @@ Before running the council gate, verify the implement stage honored its evidence
 
 {{ acceptance_criteria }}
 {% else %}If the workpad records gate-passed acceptance criteria, each has an evidence line in the implement completion message or PR body (`test:`/`check:`: command + exit code + log path; `judge:`: the named evidence cited).{% endif %}
+   - **Full-suite criteria — CI is the authority (SYMPH-358 / SYMPH-402):** a frozen full-suite `check:` criterion (e.g. `check: pnpm test exits 0`) is SATISFIED by CI check-run success on the PR head SHA. Verify with `gh pr checks "$PR_NUMBER"` (or `gh api repos/$REPO/commits/$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)/check-runs`). When CI is green on the head SHA, do NOT fail this check over a red local full-suite log — local full-suite runs false-negative under multi-lane load. Accept `full-suite: CI green @ <head SHA>` as the criterion's evidence line.
 2. The PR body carries exactly one live-proof disposition line: `live-proof: evidence — <citation>`, `live-proof: waived — <reason>`, or `live-proof: n/a — <reason>` (the workpad artifact copy is supporting material; a missing PR-body disposition line fails this check). Runtime-touching diffs whose disposition is neither `evidence` nor an explicit `waived` fail this check.
 
 If a check fails, post a `## Review Findings` comment naming the missing evidence and output `[STAGE_FAILED: review]` — do not run the council gate on work that skipped its evidence contract.

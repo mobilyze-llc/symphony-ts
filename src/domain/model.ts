@@ -962,6 +962,18 @@ export interface OrchestratorState {
     { signature: string; class: ErrorSignatureClass }
   >;
   /**
+   * Consecutive review-failure streak per issue (SYMPH-402): the
+   * criterion-aware review-failure signature and how many consecutive review
+   * rounds have failed with it. Rework cycles (review → implement → review)
+   * bypass the retry path, so the SYMPH-396 short-circuit never sees them —
+   * this streak parks an issue loudly instead of letting it enter a third
+   * rework round on the SAME failed pre-gate criterion.
+   */
+  issueReviewFailureStreaks: Record<
+    string,
+    { signature: string; count: number }
+  >;
+  /**
    * Issues for which a `failure_exhausted` alert has been fired in this
    * session (SYMPH-397). Used by runtime-host to suppress the redundant
    * `issue_failed` notification when the terminal path was already announced
@@ -1121,6 +1133,7 @@ export function createInitialOrchestratorState(input: {
     managerRunJournal: [],
     managerRuns: {},
     issueFailureSignatures: {},
+    issueReviewFailureStreaks: {},
     failureExhaustedIds: new Set<string>(),
   };
 }

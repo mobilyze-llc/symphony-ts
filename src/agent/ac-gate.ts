@@ -37,6 +37,74 @@ const STAGE_MARKER_LINE_REGEX =
 const MAX_AC_SNAPSHOT_CHARS = 8000;
 
 /**
+ * Bare full-suite test invocations must never freeze into a `check:`
+ * criterion (SYMPH-402): the worker box runs multiple lanes concurrently and
+ * the full suite false-negatives under load, so the SYMPH-358 verify contract
+ * makes CI (on the PR head SHA) the full-suite authority. A frozen
+ * `check: pnpm test exits 0` is mechanically unsatisfiable on a loaded box
+ * and produced the SYMPH-332 / PR #350 unclearable rework loop.
+ *
+ * Matches package-manager full-suite commands (`pnpm test`, `npm test`,
+ * `npm run test`, `yarn test`, `bun test`), tolerating package-manager flags
+ * before the script (`pnpm -w test`, `npm --silent run test`). A command
+ * narrowed to specific files (first non-flag argument is path-like or a
+ * test-file name) is focused, not full-suite, and is left untouched. The
+ * `test` token must end the script name (followed by whitespace or
+ * end-of-line) so a distinct npm script like `test:unit` / `test:e2e` — which
+ * IS satisfiable locally — is never mistaken for the bare full suite.
+ */
+const FULL_SUITE_COMMAND_REGEX =
+  /\b(?:pnpm|npm|yarn|bun)(?:\s+-{1,2}[\w-]+)*(?:\s+run)?\s+test(?=\s|$)/i;
+const CHECK_TAG_REGEX = /`?check:/i;
+const CRITERION_LINE_PREFIX_REGEX = /^(\s*(?:[-*+]\s*)?(?:\[[ xX]\]\s*)?)(.*)$/;
+const FOCUSED_FIRST_TOKEN_REGEX = /[/\\]|\.test\.|\.spec\./;
+
+const SYMPH_358_CHECK_REWRITE =
+  "`check:` focused tests for the touched area exit 0 locally (e.g. `npx vitest run <touched test files>`); the FULL suite is verified via CI check-run success on the PR head SHA, never gated on a local full-suite run (SYMPH-358 / SYMPH-402)";
+
+/**
+ * Rewrite bare full-suite `check:` criteria into the SYMPH-358 shape
+ * (focused tests locally + full suite via CI status). Applied to the AC
+ * section before it freezes into the canonical snapshot, so downstream
+ * judges and the review pre-gate never enforce a criterion that contradicts
+ * the verify contract (SYMPH-402). Lines without a full-suite `check:` pass
+ * through unchanged.
+ */
+export function rewriteFullSuiteCheckCriteria(section: string): string {
+  return section
+    .split("\n")
+    .map((line) => {
+      const parsed = CRITERION_LINE_PREFIX_REGEX.exec(line);
+      if (parsed === null) {
+        return line;
+      }
+      const prefix = parsed[1] ?? "";
+      const rest = parsed[2] ?? "";
+      if (!CHECK_TAG_REGEX.test(rest)) {
+        return line;
+      }
+      const commandMatch = FULL_SUITE_COMMAND_REGEX.exec(rest);
+      if (commandMatch === null) {
+        return line;
+      }
+      // A first argument that names a path or test file makes the command
+      // focused (e.g. `pnpm test tests/foo.test.ts`) — leave it alone. Skip
+      // any leading flags first so `pnpm test --run tests/foo.test.ts` is
+      // still recognized as focused rather than clobbered into the CI shape.
+      const after = rest
+        .slice(commandMatch.index + commandMatch[0].length)
+        .trimStart();
+      const firstToken =
+        after.split(/\s+/).find((token) => !token.startsWith("-")) ?? "";
+      if (FOCUSED_FIRST_TOKEN_REGEX.test(firstToken)) {
+        return line;
+      }
+      return `${prefix}${SYMPH_358_CHECK_REWRITE}`;
+    })
+    .join("\n");
+}
+
+/**
  * Extract the Acceptance Criteria section from an investigate completion
  * message (the worker echoes the workpad AC section there per the
  * contract). The snapshot frozen at gate pass is the CANONICAL rubric
@@ -92,10 +160,9 @@ export function extractAcceptanceCriteria(
   if (cleanedBody.trim().length === 0) {
     return null;
   }
-  return `${headingLine.trim()}\n${cleanedBody.trim()}`.slice(
-    0,
-    MAX_AC_SNAPSHOT_CHARS,
-  );
+  return rewriteFullSuiteCheckCriteria(
+    `${headingLine.trim()}\n${cleanedBody.trim()}`,
+  ).slice(0, MAX_AC_SNAPSHOT_CHARS);
 }
 
 const VERDICT_SCHEMA = z.object({

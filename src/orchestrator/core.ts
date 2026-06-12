@@ -62,6 +62,7 @@ import {
   type ErrorSignatureClass,
   type NormalizedErrorSignature,
   normalizeErrorSignature,
+  normalizeReviewFailureSignature,
 } from "../errors/signature.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
@@ -119,6 +120,13 @@ import {
 import type { TrackerIssueWriteRequest } from "./tracker-write.js";
 
 const CONTINUATION_RETRY_DELAY_MS = 1_000;
+
+/**
+ * An issue may fail review on the SAME pre-gate criterion at most twice
+ * before parking (SYMPH-402): the Nth identical failure would start rework
+ * round N, and a third round against an unchanged criterion is futile.
+ */
+const MAX_SAME_CRITERION_REVIEW_FAILURES = 3;
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
@@ -2620,6 +2628,18 @@ export class OrchestratorCore {
     runningEntry: RunningEntry,
     agentMessage: string | undefined,
   ): RetryEntry | null {
+    // Same-criterion rework brake (SYMPH-402): rework cycles bypass the
+    // retry path, so the SYMPH-396 retry-without-novelty short-circuit never
+    // sees them, and the SYMPH-398 cluster needs distinct ISSUES sharing a
+    // signature. Track the criterion-aware review-failure streak here and
+    // park loudly instead of entering a third rework round on the same
+    // failed pre-gate criterion.
+    const streak = this.trackReviewFailureStreak(issueId, agentMessage);
+    if (streak.count >= MAX_SAME_CRITERION_REVIEW_FAILURES) {
+      this.parkRepeatedReviewFailure(issueId, runningEntry, streak);
+      return null;
+    }
+
     const stagesConfig = this.config.stages;
     if (stagesConfig === null) {
       // No stages — fall back to retry
@@ -2747,6 +2767,95 @@ export class OrchestratorCore {
       error: `agent review failure: rework to ${reworkTarget}`,
       delayType: "continuation",
     });
+  }
+
+  /**
+   * Record the criterion-aware signature of a review-stage failure and
+   * return the current consecutive streak (SYMPH-402). An identical
+   * signature increments the streak; a different one resets it to 1.
+   */
+  private trackReviewFailureStreak(
+    issueId: string,
+    agentMessage: string | undefined,
+  ): { signature: string; count: number; matchedCriteria: string[] } {
+    const normalized = normalizeReviewFailureSignature(
+      agentMessage ?? null,
+      this.state.issueAcSnapshots[issueId] ?? null,
+    );
+    const previous = this.state.issueReviewFailureStreaks[issueId];
+    const count =
+      previous !== undefined && previous.signature === normalized.signature
+        ? previous.count + 1
+        : 1;
+    this.state.issueReviewFailureStreaks[issueId] = {
+      signature: normalized.signature,
+      count,
+    };
+    return {
+      signature: normalized.signature,
+      count,
+      matchedCriteria: normalized.matchedCriteria,
+    };
+  }
+
+  /**
+   * Park an issue that keeps failing review on the SAME pre-gate criterion
+   * (SYMPH-402): another implement rework round against an unchanged
+   * criterion is futile — the SYMPH-332 / PR #350 loop burned a day of
+   * budget against a finished, CI-green PR. Parks via the same
+   * failure_exhausted machinery as the SYMPH-396 novelty short-circuit and
+   * posts a loud operator-facing Linear comment.
+   */
+  private parkRepeatedReviewFailure(
+    issueId: string,
+    runningEntry: RunningEntry,
+    streak: { signature: string; count: number; matchedCriteria: string[] },
+  ): void {
+    const stageName = this.state.issueStages[issueId] ?? null;
+    const criteriaBlock =
+      streak.matchedCriteria.length > 0
+        ? streak.matchedCriteria.map((c) => `- ${c}`).join("\n")
+        : "- (criterion not isolatable — the review failure message repeated identically)";
+    const parkReason = `review rework futile: ${streak.count} consecutive review-stage failures on the same pre-gate criterion (signature ${streak.signature}); parked instead of entering rework round ${streak.count} (SYMPH-402)`;
+
+    this.state.failed.add(issueId);
+    this.releaseClaim(issueId);
+    this.clearTerminalIssueRuntimeState(issueId);
+    // Record into the cluster after the terminal-state clear (same ordering
+    // as the spec-failure path) so the clear cannot erase this membership.
+    this.recordFailureInCluster(
+      issueId,
+      runningEntry.identifier,
+      {
+        signature: streak.signature,
+        normalizedText: parkReason,
+        class: "permanent",
+      },
+      stageName,
+    );
+    void this.fireEscalationSideEffects(
+      issueId,
+      runningEntry.identifier,
+      [
+        "## Parked: repeated review failure on the same criterion (SYMPH-402)",
+        "",
+        `The review stage failed ${streak.count} consecutive rounds with the same pre-gate criterion unsatisfied:`,
+        criteriaBlock,
+        "",
+        "The orchestrator parked this issue instead of starting another implement rework round. Likely cause: a frozen acceptance criterion that contradicts the SYMPH-358 verify contract (e.g. a bare full-suite `check:` while CI on the PR head SHA is green — CI is the contract's authority).",
+        "Operator action: inspect the frozen AC snapshot and the PR's CI status; correct the criterion or the evidence, then resume with a fresh Todo → Resume transition.",
+      ].join("\n"),
+    );
+    void this.recordFailureExhausted(
+      issueId,
+      runningEntry.identifier,
+      runningEntry.issue.title,
+      parkReason,
+      {
+        failure_signature: streak.signature,
+        failure_class: "permanent",
+      },
+    );
   }
 
   /**
@@ -3865,6 +3974,7 @@ export class OrchestratorCore {
     delete this.state.issueBudgetEscalations[issueId];
     delete this.state.issuePauseTriageResumes[issueId];
     delete this.state.issueAcSnapshots[issueId];
+    delete this.state.issueReviewFailureStreaks[issueId];
     delete this.state.loopTraceJournal[issueId];
     delete this.state.continuousFeedback[issueId];
     // Clear the exhaustion-dedup marker so a resumed issue can fire the alert
