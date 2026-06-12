@@ -1443,6 +1443,45 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.lanes[0]!.structuredArtifact!.findings).toHaveLength(1);
   });
 
+  it("treats unknown h2 headings as section boundaries without blocking PASS artifacts", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "PASS",
+            "",
+            "## P1 Must Fix",
+            "None",
+            "",
+            "## Notes",
+            "Reviewer context that must not become a P1 finding.",
+            "",
+            "## P2 Should Fix",
+            "None",
+          ].join("\n"),
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const structuredArtifact = result.lanes[0]!.structuredArtifact!;
+    expect(result.verdict).toBe("pass");
+    expect(structuredArtifact.sections.p1).toBe("None");
+    expect(structuredArtifact.findings).toHaveLength(0);
+  });
+
   it("keeps Track-only PASS as pass while preserving the Track finding", async () => {
     const harness = await createHarness({
       laneBehavior: {

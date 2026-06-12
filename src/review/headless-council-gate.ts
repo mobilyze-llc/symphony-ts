@@ -16,6 +16,18 @@ const CODEX_LEAD_LANE_ID = "codex-high-lead";
 const CODEX_LEAD_ROLE = "codex-lead-triage";
 const CODEX_LEAD_MODEL = "codex-high";
 const DEFAULT_LANE_STALL_GRACE_SECONDS = 60;
+const ARTIFACT_SECTION_HEADINGS = [
+  "Verdict",
+  "P1 Must Fix",
+  "P2 Should Fix",
+  "Track",
+  "Dismissed Or Theoretical",
+  "Triage",
+  "Reviewer Artifacts",
+] as const;
+const ARTIFACT_SECTION_HEADING_KEYS = new Set(
+  ARTIFACT_SECTION_HEADINGS.map(normalizeArtifactHeadingText),
+);
 // SYMPHONY_UNTRUSTED_DIFF matches as a substring (no word boundaries): the
 // real boundary token is `SYMPHONY_UNTRUSTED_DIFF_<uuid>` and `\b` fails on
 // `_`-suffixed identifiers.
@@ -2328,14 +2340,14 @@ function artifactSectionHasContent(artifact: string, heading: string): boolean {
 }
 
 function artifactSectionContent(artifact: string, heading: string): string {
-  const sectionMatch = artifactSectionHeadingPattern(heading).exec(artifact);
+  const sectionMatch = findArtifactSectionHeading(artifact, heading);
   if (sectionMatch === null) {
     return "";
   }
 
-  const sectionStart = sectionMatch.index + sectionMatch[0].length;
+  const sectionStart = sectionMatch.endIndex;
   const sectionTail = artifact.slice(sectionStart);
-  const nextHeadingIndex = sectionTail.search(artifactSectionBoundaryPattern());
+  const nextHeadingIndex = findNextArtifactSectionBoundary(sectionTail);
   return nextHeadingIndex === -1
     ? sectionTail.trim()
     : sectionTail.slice(0, nextHeadingIndex).trim();
@@ -2419,34 +2431,63 @@ function isPlainTextArtifactPreamble(preamble: string): boolean {
   );
 }
 
-function artifactSectionHeadingPattern(heading: string): RegExp {
-  return new RegExp(
-    `^#{2,3}\\s+${artifactHeadingBody(heading)}\\s*:?\\s*$`,
-    "im",
+interface ArtifactHeadingMatch {
+  startIndex: number;
+  endIndex: number;
+  level: 2 | 3;
+  normalizedText: string;
+}
+
+function findArtifactSectionHeading(
+  artifact: string,
+  heading: string,
+): ArtifactHeadingMatch | null {
+  const target = normalizeArtifactHeadingText(heading);
+  return findMarkdownHeading(
+    artifact,
+    (candidate) => candidate.normalizedText === target,
   );
 }
 
-function artifactSectionBoundaryPattern(): RegExp {
-  const headings = [
-    "Verdict",
-    "P1 Must Fix",
-    "P2 Should Fix",
-    "Track",
-    "Dismissed Or Theoretical",
-    "Triage",
-    "Reviewer Artifacts",
-  ];
-  return new RegExp(
-    `^#{2,3}\\s+(?:${headings.map(artifactHeadingBody).join("|")})\\s*:?\\s*$`,
-    "im",
+function findNextArtifactSectionBoundary(sectionTail: string): number {
+  const boundary = findMarkdownHeading(sectionTail, isArtifactSectionBoundary);
+  return boundary?.startIndex ?? -1;
+}
+
+function findMarkdownHeading(
+  artifact: string,
+  predicate: (candidate: ArtifactHeadingMatch) => boolean,
+): ArtifactHeadingMatch | null {
+  const headingPattern = /^(#{2,3})\s+(.+?)\s*$/gim;
+  let match = headingPattern.exec(artifact);
+  while (match !== null) {
+    const marker = match[1];
+    const rawText = match[2];
+    if (marker !== undefined && rawText !== undefined) {
+      const candidate: ArtifactHeadingMatch = {
+        startIndex: match.index,
+        endIndex: match.index + match[0].length,
+        level: marker.length === 2 ? 2 : 3,
+        normalizedText: normalizeArtifactHeadingText(rawText),
+      };
+      if (predicate(candidate)) {
+        return candidate;
+      }
+    }
+    match = headingPattern.exec(artifact);
+  }
+  return null;
+}
+
+function isArtifactSectionBoundary(candidate: ArtifactHeadingMatch): boolean {
+  return (
+    candidate.level === 2 ||
+    ARTIFACT_SECTION_HEADING_KEYS.has(candidate.normalizedText)
   );
 }
 
-function artifactHeadingBody(heading: string): string {
-  const escapedWords = heading
-    .split(/\s+/)
-    .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  return escapedWords.join("(?:\\s+:?\\s*|\\s*:\\s*)");
+function normalizeArtifactHeadingText(heading: string): string {
+  return heading.replace(/:/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 function isEmptySectionMarker(line: string): boolean {
