@@ -740,6 +740,138 @@ describe("council R1 fix 4: retryOnceGrant survives restart", () => {
   });
 });
 
+describe("council R2 fix 1: budget-exhausted re-park re-establishes the fence", () => {
+  it("rework budget exhausted → old fence rejected_stale, new fence applies, exhausted marker restored", async () => {
+    const runStuckTriage = vi.fn().mockResolvedValue({
+      classification: "spec_defect",
+      action: "rework_with_hint",
+      hint: "Fix the spec.",
+      confidence: "high",
+      rationale: "Spec is wrong.",
+    } satisfies StuckTriageVerdict);
+    // Stage with onRework set but maxRework: 0 (rework explicitly disabled).
+    const base = createStagesWithRework();
+    const stages: StagesConfig = {
+      ...base,
+      stages: {
+        ...base.stages,
+        investigate: {
+          ...(base.stages.investigate as StagesConfig["stages"][string]),
+          maxRework: 0,
+        },
+      },
+    };
+    const orchestrator = createOrchestrator({
+      runStuckTriage,
+      stuckTriage: ENABLED_TRIAGE,
+      stages,
+    });
+
+    await driveNoveltyPark(orchestrator);
+    const state = orchestrator.getState();
+    expect(state.failed.has("1")).toBe(true);
+    // The exhausted marker survives the release-then-re-park round trip
+    // (alert dedup in runtime-host reads this set).
+    expect(state.failureExhaustedIds.has("1")).toBe(true);
+
+    // The generation the triage envelope acted against (the OLD fence).
+    const verdictEntry = triageVerdictEntries(orchestrator)[0];
+    const oldGen = verdictEntry?.metadata.parkGeneration;
+    expect(typeof oldGen).toBe("number");
+
+    // The no_op rework intent journals the post-apply generation: the
+    // re-park must have minted a FRESH one, not left the fence dead.
+    const reworkIntent = intentEntries(orchestrator).find(
+      (entry) => entry.metadata.verb === "rework_with_hint",
+    );
+    const newGen = reworkIntent?.metadata.parkGeneration;
+    expect(typeof newGen).toBe("number");
+    expect(newGen).not.toBe(oldGen);
+
+    // Fence liveness probe 1: a release fenced on the OLD generation is
+    // rejected_stale and mutates nothing.
+    const stale = await orchestrator.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "pro14" },
+      reason: { class: "operator_release", human: "probe old fence" },
+      fence: { expectedParkSeq: oldGen as number },
+    });
+    expect(stale.status).toBe("rejected_stale");
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+
+    // Fence liveness probe 2: a release fenced on the NEW generation applies.
+    const fresh = await orchestrator.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "pro14" },
+      reason: { class: "operator_release", human: "release on new fence" },
+      fence: { expectedParkSeq: newGen as number },
+    });
+    expect(fresh.status).toBe("applied");
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+  });
+});
+
+describe("council R2 fix 2: retry_once_failed re-park keeps cluster membership", () => {
+  it("issue re-parked via retry_once_failed still counts toward SYSTEMIC when a second issue shares the signature", async () => {
+    const onSystemicCluster = vi.fn();
+    const runStuckTriage = vi.fn().mockResolvedValue({
+      classification: "flaky",
+      action: "retry_once",
+      confidence: "high",
+      rationale: "Single transient failure.",
+    } satisfies StuckTriageVerdict);
+    const orchestrator = createOrchestrator({
+      runStuckTriage,
+      stuckTriage: ENABLED_TRIAGE,
+      onSystemicCluster,
+      issues: [createIssue(), createIssue({ id: "2", identifier: "ISSUE-2" })],
+    });
+
+    // Drive issue 1 to a novelty park with an identical signature on both
+    // attempts (the shape the retry_once grant exists for). Issue 2 is
+    // dispatched alongside and keeps running.
+    await driveNoveltyPark(orchestrator, [
+      UNKNOWN_CLASS_FAILURE,
+      UNKNOWN_CLASS_FAILURE,
+    ]);
+    expect(orchestrator.getState().failed.has("1")).toBe(false); // grant released the park
+
+    // The granted attempt fails with the identical signature →
+    // retry_once_failed re-park (no second triage).
+    await orchestrator.onRetryTimer("1");
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: UNKNOWN_CLASS_FAILURE,
+    });
+    await settle();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(onSystemicCluster).not.toHaveBeenCalled();
+
+    // Issue 2 now fails with the SAME signature. If the re-park preserved
+    // issue 1's cluster membership, the cluster reaches the systemic
+    // threshold (2) and alerts; before the fix the membership was lost at
+    // retry_once release and never restored, so this stayed silent.
+    await orchestrator.onWorkerExit({
+      issueId: "2",
+      outcome: "abnormal",
+      reason: UNKNOWN_CLASS_FAILURE,
+    });
+    await settle();
+
+    expect(onSystemicCluster).toHaveBeenCalledTimes(1);
+    const clusterInput = onSystemicCluster.mock.calls[0]?.[0];
+    expect(clusterInput.clusterSize).toBe(2);
+    expect(clusterInput.issueIdentifiers).toEqual(
+      expect.arrayContaining(["ISSUE-1", "ISSUE-2"]),
+    );
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -747,11 +879,13 @@ describe("council R1 fix 4: retryOnceGrant survives restart", () => {
 function createOrchestrator(overrides?: {
   runStuckTriage?: OrchestratorCoreOptions["runStuckTriage"];
   onTriageEscalation?: OrchestratorCoreOptions["onTriageEscalation"];
+  onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
   postComment?: (issueId: string, body: string) => Promise<void>;
   stuckTriage?: WorkflowStuckTriageConfig;
   stages?: StagesConfig;
   maxRetryAttempts?: number;
   issue?: Issue;
+  issues?: Issue[];
   runJournal?: OrchestratorCoreOptions["runJournal"];
 }): OrchestratorCore {
   const issue = overrides?.issue ?? createIssue();
@@ -765,7 +899,7 @@ function createOrchestrator(overrides?: {
         ? { maxRetryAttempts: overrides.maxRetryAttempts }
         : {}),
     }),
-    tracker: createTracker(issue),
+    tracker: createTracker(overrides?.issues ?? [issue]),
     spawnWorker: async () => ({
       workerHandle: { pid: 9001 },
       monitorHandle: { ref: "monitor-1" },
@@ -775,6 +909,9 @@ function createOrchestrator(overrides?: {
       : {}),
     ...(overrides?.onTriageEscalation !== undefined
       ? { onTriageEscalation: overrides.onTriageEscalation }
+      : {}),
+    ...(overrides?.onSystemicCluster !== undefined
+      ? { onSystemicCluster: overrides.onSystemicCluster }
       : {}),
     ...(overrides?.postComment !== undefined
       ? { postComment: overrides.postComment }
@@ -787,18 +924,20 @@ function createOrchestrator(overrides?: {
   return new OrchestratorCore(options);
 }
 
-function createTracker(issue: Issue): IssueTracker {
+function createTracker(issues: Issue[]): IssueTracker {
   return {
     async fetchCandidateIssues() {
-      return [issue];
+      return issues;
     },
     async fetchIssuesByStates() {
       return [];
     },
     async fetchIssueStatesByIds() {
-      return [
-        { id: issue.id, identifier: issue.identifier, state: issue.state },
-      ];
+      return issues.map((issue) => ({
+        id: issue.id,
+        identifier: issue.identifier,
+        state: issue.state,
+      }));
     },
   };
 }

@@ -3939,6 +3939,26 @@ export class OrchestratorCore {
   }
 
   /**
+   * Re-establish park state after an intent verb released the park but the
+   * action could not proceed and the issue must stay parked (council R2).
+   * releaseParkedIssueState dropped the park generation and the
+   * failureExhaustedIds marker; without a fresh generation the re-park is
+   * fence-dead — no future fenced intent can ever match, and stale-fence
+   * protection is silently disabled for the issue. Mints a NEW generation
+   * (same bump recordWatchdogPark performs) and restores the exhausted
+   * marker for alert dedup.
+   *
+   * Deliberately does NOT re-register the issue in the signature cluster:
+   * no NEW failure occurred on these paths — the budget/precondition check
+   * merely refused the action. Re-park paths where a real failure fired
+   * (e.g. retry_once_failed) record into the cluster themselves.
+   */
+  private reestablishParkAfterRelease(issueId: string): void {
+    this.state.failureExhaustedIds.add(issueId);
+    this.recordWatchdogPark(issueId);
+  }
+
+  /**
    * The shared intent-verb write primitive (SYMPH-399, carved out of
    * SYMPH-408). One journal-write path for operator, agents, and watchdog
    * L2 — never independent mutation paths. Semantics:
@@ -4132,6 +4152,7 @@ export class OrchestratorCore {
           // reworkGate already set failed and cleared terminal state; the
           // issue stays parked (failed). Journal as no_op so callers can
           // distinguish "budget exhausted" from a clean rework application.
+          this.reestablishParkAfterRelease(issueId);
           return {
             status: "no_op",
             detail: `rework budget exhausted for stage "${stage}" — park stands`,
@@ -4140,6 +4161,7 @@ export class OrchestratorCore {
         if (reworkTarget === null) {
           // Should not happen given the pre-check above, but fail closed.
           this.state.failed.add(issueId);
+          this.reestablishParkAfterRelease(issueId);
           return {
             status: "no_op",
             detail: `no on_rework target for stage "${stage}" — park stands`,
@@ -6586,6 +6608,19 @@ export class OrchestratorCore {
           // recordFailureExhausted (which calls recordWatchdogPark). See the
           // comment on the max-retry path above for the full rationale (B-4).
           this.clearTerminalIssueRuntimeState(issueId);
+          // Re-register this failure in the signature cluster (council R2):
+          // the retry_once intent's releaseParkedIssueState cleared the
+          // issue's cluster membership, and the early return below skips the
+          // shared recordFailureInCluster call at the bottom of this method —
+          // without this the systemic count permanently loses the issue.
+          // Recorded AFTER the terminal-state clear so the clear cannot erase
+          // the membership (same ordering as the spec-failure path).
+          this.recordFailureInCluster(
+            issueId,
+            input.identifier ?? issueId,
+            incoming,
+            stage,
+          );
           void this.fireEscalationSideEffects(
             issueId,
             input.identifier ?? issueId,
