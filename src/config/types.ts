@@ -47,6 +47,11 @@ export interface WorkflowHardStopsConfig {
   maxTokensPerUnit: number;
   maxDollarBudgetUsd: number;
   premiumBudgetPauseRatio: number;
+  /**
+   * Extra live-telemetry budget headroom for an already-running turn, as a
+   * ratio of the token/dollar ceilings. 0 disables grace and kills immediately.
+   */
+  liveBudgetGraceRatio: number;
   estimatedCostPer1kTokensUsd: number;
   cachedTokenCostRatio: number;
   /**

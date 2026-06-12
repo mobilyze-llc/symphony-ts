@@ -20,6 +20,7 @@ import {
   DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
   DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+  DEFAULT_HARD_STOP_LIVE_BUDGET_GRACE_RATIO,
   DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
   DEFAULT_HARD_STOP_MAX_ITERATIONS,
   DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
@@ -77,6 +78,7 @@ describe("config-resolver", () => {
       maxTokensPerUnit: DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
       maxDollarBudgetUsd: DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
       premiumBudgetPauseRatio: DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
+      liveBudgetGraceRatio: DEFAULT_HARD_STOP_LIVE_BUDGET_GRACE_RATIO,
       estimatedCostPer1kTokensUsd:
         DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
       cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
@@ -150,6 +152,7 @@ describe("config-resolver", () => {
             max_tokens_per_unit: "50000",
             max_dollar_budget_usd: "12.5",
             premium_budget_pause_ratio: "0.75",
+            live_budget_grace_ratio: "0.2",
             estimated_cost_per_1k_tokens_usd: "0.08",
           },
           codex: {
@@ -199,6 +202,7 @@ describe("config-resolver", () => {
       maxTokensPerUnit: 50_000,
       maxDollarBudgetUsd: 12.5,
       premiumBudgetPauseRatio: 0.75,
+      liveBudgetGraceRatio: 0.2,
       estimatedCostPer1kTokensUsd: 0.08,
       cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
       maxPrimaryWindowPctPerUnit: null,
@@ -848,6 +852,7 @@ describe("config-resolver fast_track", () => {
               max_tokens_per_unit: "80000",
               max_dollar_budget_usd: "4",
               premium_budget_pause_ratio: "0.9",
+              live_budget_grace_ratio: "0.25",
             },
             on_complete: "done",
           },
@@ -861,6 +866,7 @@ describe("config-resolver fast_track", () => {
       maxTokensPerUnit: 80_000,
       maxDollarBudgetUsd: 4,
       premiumBudgetPauseRatio: 0.9,
+      liveBudgetGraceRatio: 0.25,
     });
     expect(
       resolved.stages?.stages.investigate?.hardStops

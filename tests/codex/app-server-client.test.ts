@@ -1479,6 +1479,7 @@ describe("CodexAppServerClient", () => {
       expect.objectContaining({
         event: "turn_ended_with_error",
         errorCode: ERROR_CODES.codexSessionClosedMidTurn,
+        closureInitiator: "client_close",
       }),
     );
   });
@@ -1508,6 +1509,7 @@ describe("CodexAppServerClient", () => {
     );
     expect(midTurnEvents).toHaveLength(1);
     expect(midTurnEvents[0]?.message).toContain("while a turn was running");
+    expect(midTurnEvents[0]?.closureInitiator).toBe("upstream_exit");
 
     await client.close();
   });

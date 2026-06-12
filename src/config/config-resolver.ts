@@ -24,6 +24,7 @@ import {
   DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
   DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+  DEFAULT_HARD_STOP_LIVE_BUDGET_GRACE_RATIO,
   DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
   DEFAULT_HARD_STOP_MAX_ITERATIONS,
   DEFAULT_HARD_STOP_MAX_PRIMARY_WINDOW_PCT_PER_UNIT,
@@ -202,6 +203,9 @@ export function resolveWorkflowConfig(
       premiumBudgetPauseRatio:
         hardStopOverrides.premiumBudgetPauseRatio ??
         DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
+      liveBudgetGraceRatio:
+        hardStopOverrides.liveBudgetGraceRatio ??
+        DEFAULT_HARD_STOP_LIVE_BUDGET_GRACE_RATIO,
       estimatedCostPer1kTokensUsd:
         hardStopOverrides.estimatedCostPer1kTokensUsd ??
         DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
@@ -901,6 +905,13 @@ function readHardStopsConfig(
   );
   if (premiumBudgetPauseRatio !== null) {
     parsed.premiumBudgetPauseRatio = premiumBudgetPauseRatio;
+  }
+
+  const liveBudgetGraceRatio = readZeroInclusiveRatio(
+    hardStops.live_budget_grace_ratio,
+  );
+  if (liveBudgetGraceRatio !== null) {
+    parsed.liveBudgetGraceRatio = liveBudgetGraceRatio;
   }
 
   const estimatedCostPer1kTokensUsd = readPositiveNumber(

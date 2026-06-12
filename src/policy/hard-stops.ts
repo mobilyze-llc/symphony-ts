@@ -66,6 +66,8 @@ export function resolveHardStopsConfig(
       config?.maxDollarBudgetUsd ?? fallback.maxDollarBudgetUsd,
     premiumBudgetPauseRatio:
       config?.premiumBudgetPauseRatio ?? fallback.premiumBudgetPauseRatio,
+    liveBudgetGraceRatio:
+      config?.liveBudgetGraceRatio ?? fallback.liveBudgetGraceRatio,
     estimatedCostPer1kTokensUsd:
       config?.estimatedCostPer1kTokensUsd ??
       fallback.estimatedCostPer1kTokensUsd,

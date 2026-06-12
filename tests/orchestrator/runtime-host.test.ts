@@ -4050,6 +4050,7 @@ describe("pipeline notifications", () => {
           maxTokensPerUnit: 250_000,
           maxDollarBudgetUsd: 12.5,
           premiumBudgetPauseRatio: 0.8,
+          liveBudgetGraceRatio: 0.1,
           estimatedCostPer1kTokensUsd: 0.05,
           cachedTokenCostRatio: 0.1,
           maxPrimaryWindowPctPerUnit: null,
