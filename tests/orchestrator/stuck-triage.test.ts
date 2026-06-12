@@ -780,6 +780,60 @@ describe("council R2: replay restores journaled rework target + count", () => {
   });
 });
 
+describe("council R3: retry_once replay restores the granted stage", () => {
+  it("replay of a retry_once granted at a non-initial stage restores that stage, not the workflow initial stage", async () => {
+    const stages = createStagesWithRework();
+    const orchestrator = createOrchestrator({ stages });
+
+    // Park, then grant a retry_once scoped to a NON-initial stage.
+    const parked = await orchestrator.writeIntent({
+      verb: "park",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "pro14" },
+      reason: { class: "operator_pause", human: "pause at implement" },
+    });
+    expect(parked.status).toBe("applied");
+    const granted = await orchestrator.writeIntent({
+      verb: "retry_once",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "pro14" },
+      reason: { class: "operator_retry", human: "one retry of implement" },
+      stage: "implement",
+      grantSignature: "abc1234",
+    });
+    expect(granted.status).toBe("applied");
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    // The live apply journals the granted stage + signature on the entry.
+    const grantEntry = intentEntries(orchestrator).find(
+      (entry) =>
+        entry.metadata.verb === "retry_once" &&
+        entry.metadata.status === "applied",
+    );
+    expect(grantEntry?.stage).toBe("implement");
+    expect(grantEntry?.metadata.grantSignature).toBe("abc1234");
+
+    // Replay into a fresh orchestrator: without the stage restore, dispatch
+    // would fall back to the workflow initial stage ("investigate") while
+    // still consuming the one-shot grant.
+    const replayed = createOrchestrator({
+      stages,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    expect(replayed.getState().issueStages["1"]).toBe("implement");
+    expect(replayed.getState().resumeRequired.has("1")).toBe(false);
+    expect(replayed.getState().failed.has("1")).toBe(false);
+
+    // Post-restart dispatch runs at the restored stage: after pollTick the
+    // issue is running and the cached stage is still "implement", not the
+    // workflow initial stage it would have fallen back to pre-fix.
+    await replayed.pollTick();
+    expect(replayed.getState().running["1"]).toBeDefined();
+    expect(replayed.getState().issueStages["1"]).toBe("implement");
+  });
+});
+
 describe("council R1 fix 3: hint egress neutralization", () => {
   it("hint containing triple-backticks and exceeding 4000 chars is posted stripped and capped", async () => {
     const postComment = vi.fn().mockResolvedValue(undefined);

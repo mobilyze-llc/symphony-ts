@@ -760,6 +760,16 @@ export class OrchestratorCore {
             this.retryOnceGrants.set(entry.issueId, {
               signature: sig,
             });
+            // Restore the granted stage so a post-restart dispatch reruns
+            // the SAME stage the grant was issued for, not the workflow
+            // initial stage (council R3). The live apply records the stage
+            // it granted on the entry; mirror its stage set + signature
+            // clear so the replayed grant window behaves identically.
+            const grantedStage = entry.stage;
+            if (grantedStage !== null) {
+              this.state.issueStages[entry.issueId] = grantedStage;
+              this.clearStageFailureSignature(entry.issueId, grantedStage);
+            }
           }
         }
         // escalate_human leaves the park (replayed from its source event)
