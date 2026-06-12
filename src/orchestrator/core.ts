@@ -1157,7 +1157,9 @@ export class OrchestratorCore {
 
     const rawErrorClass = details.errorClass;
     const errorClass: ErrorSignatureClass =
-      rawErrorClass === "permanent" || rawErrorClass === "transient"
+      rawErrorClass === "permanent" ||
+      rawErrorClass === "infra" ||
+      rawErrorClass === "transient"
         ? rawErrorClass
         : "unknown";
     const lastAlertSize =
@@ -3857,9 +3859,9 @@ export class OrchestratorCore {
   /**
    * Apply an out-of-band L2 triage verdict to a park that may no longer be
    * standing (SYMPH-399). The envelope owns the bounds: low-confidence
-   * verdicts park; retry_once against a permanent failure class parks
-   * (retrying an identical permanent failure is futile — SYMPH-396's own
-   * rule); rework without a hint parks; everything executes through fenced
+   * verdicts park; retry_once against a non-transient failure class parks
+   * (retrying an identical permanent/infra failure is futile — SYMPH-396's
+   * own rule); rework without a hint parks; everything executes through fenced
    * writeIntent calls so a verdict for an earlier park is a no-op even if
    * a re-park landed moments later.
    */
@@ -3897,10 +3899,10 @@ export class OrchestratorCore {
       }
       if (
         effectiveAction === "retry_once" &&
-        input.failureClass === "permanent"
+        (input.failureClass === "permanent" || input.failureClass === "infra")
       ) {
         notes.push(
-          "retry_once for a permanent failure class coerced to park (identical permanent failures are futile to retry — SYMPH-396)",
+          "retry_once for a non-transient failure class coerced to park (identical permanent/infra failures are futile to retry — SYMPH-396)",
         );
         effectiveAction = "park";
       }

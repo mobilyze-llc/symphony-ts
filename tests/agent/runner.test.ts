@@ -1395,6 +1395,85 @@ describe("AgentRunner", () => {
     expect(prompts[0]).toContain("Pull requests: denied");
   });
 
+  it("grants linked worktree gitdir writes for preserved workspace index locks", async () => {
+    const root = await createRoot();
+    const source = join(root, "source");
+    const bare = join(root, ".bare-clones", "symphony-ts");
+    const workspacePath = join(root, ISSUE_FIXTURE.id);
+    const factoryInputs: AgentRunnerCodexClientFactoryInput[] = [];
+
+    await mkdir(source);
+    await git(source, ["init", "-b", "main"]);
+    await git(source, ["config", "user.email", "test@example.com"]);
+    await git(source, ["config", "user.name", "Test User"]);
+    await writeFile(join(source, "README.md"), "seed\n");
+    await git(source, ["add", "README.md"]);
+    await git(source, ["commit", "-m", "seed"]);
+    await mkdir(dirname(bare), { recursive: true });
+    await execFileAsync("git", ["clone", "--bare", source, bare]);
+    await execFileAsync("git", [
+      "-C",
+      bare,
+      "worktree",
+      "add",
+      workspacePath,
+      "-b",
+      `worktree/${ISSUE_FIXTURE.id}`,
+      "main",
+    ]);
+
+    const gitdir = await git(workspacePath, [
+      "rev-parse",
+      "--absolute-git-dir",
+    ]);
+    const mockWorkspaceManager = {
+      root,
+      createForIssue: vi.fn().mockResolvedValue({
+        path: workspacePath,
+        workspaceKey: ISSUE_FIXTURE.id,
+        createdNow: true,
+      }),
+      removeForIssue: vi.fn(),
+      resolveForIssue: vi.fn(),
+    };
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker: createTracker({
+        refreshStates: [
+          {
+            id: ISSUE_FIXTURE.id,
+            identifier: ISSUE_FIXTURE.identifier,
+            state: "Done",
+          },
+        ],
+      }),
+      workspaceManager: mockWorkspaceManager as never,
+      createCodexClient: (input) => {
+        factoryInputs.push(input);
+        return createStubCodexClient([], input, {
+          statuses: ["completed"],
+        });
+      },
+    });
+
+    await runner.run({ issue: ISSUE_FIXTURE, attempt: null });
+
+    const commonGitRoot = dirname(dirname(gitdir));
+    const policy = factoryInputs[0]?.turnSandboxPolicy as
+      | { writableRoots?: string[] }
+      | undefined;
+    expect(policy?.writableRoots).toEqual(
+      expect.arrayContaining([
+        gitdir,
+        commonGitRoot,
+        resolveCmuxSpawnStateRoot(),
+      ]),
+    );
+    expect(policy?.writableRoots).toContain(
+      dirname(join(gitdir, "index.lock")),
+    );
+  });
+
   it("uses the sanitized workspace key for durable Codex trace artifacts", async () => {
     const root = await createRoot();
     const workspacePath = join(root, "safe-workspace-key");

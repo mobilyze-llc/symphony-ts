@@ -7,12 +7,20 @@ import { createHash } from "node:crypto";
  *   (EPERM/EACCES on fixed paths, unknown flag, auth errors). Retrying without
  *   novel input is futile.
  *
+ * infra — the worker explicitly reported an infrastructure failure via a
+ *   stage signal. It is non-transient for novelty parking, but kept distinct
+ *   so park/watchdog metadata preserves the stage-level cause.
+ *
  * transient — the failure may resolve on retry (timeout, 5xx, ECONNRESET, rate
  *   limit). Normal backoff/escalation applies.
  *
  * unknown — cannot classify. Treated conservatively: existing retry logic runs.
  */
-export type ErrorSignatureClass = "permanent" | "transient" | "unknown";
+export type ErrorSignatureClass =
+  | "permanent"
+  | "infra"
+  | "transient"
+  | "unknown";
 
 export interface NormalizedErrorSignature {
   /** 7-char SHA-1 prefix of the normalized error text. */
@@ -58,6 +66,8 @@ interface ClassificationRule {
  * that numeric patterns (e.g. HTTP 5xx) are not obscured by number-stripping.
  */
 const CLASSIFICATION_RULES: ClassificationRule[] = [
+  // Stage failure signals preserve their operator-facing class in park metadata.
+  { pattern: /\bagent reported failure:\s*infra\b/, class: "infra" },
   // Permanent — permission / access denied
   { pattern: /\beperm\b/, class: "permanent" },
   { pattern: /\beacces\b/, class: "permanent" },

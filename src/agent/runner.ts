@@ -425,13 +425,11 @@ export class AgentRunner {
                 : { modePolicy: factoryInput.modePolicy }),
             })
         : this.createCodexClient;
-      // Workspaces are git worktrees: branch/index/ref writes land in this
-      // product's shared bare clone OUTSIDE the workspace cwd. Without this
-      // the sandbox lets a worker finish the diff but never commit or open
-      // a PR (SYMPH-353). Scope the grant to THIS repo's bare clone via the
-      // worktree's gitdir pointer; per-issue scoping is impossible (branch
-      // refs and objects are repo-shared by git's design).
-      const gitMetadataRoot = await resolveGitMetadataRoot(
+      // Workspaces are git worktrees: index writes land in the per-worktree
+      // gitdir, while object/ref writes land in this product's shared bare
+      // clone outside the workspace cwd. Grant both roots so preserved
+      // worktrees can commit without reopening discovery to the runtime repo.
+      const gitMetadataRoots = await resolveGitMetadataWritableRoots(
         workspace.path,
         this.config.workspace.root,
       );
@@ -454,7 +452,7 @@ export class AgentRunner {
           turnSandboxPolicy: augmentWorkspaceWriteSandbox(
             input.modePolicy?.turnSandboxPolicy ??
               this.config.codex.turnSandboxPolicy,
-            gitMetadataRoot,
+            ...gitMetadataRoots,
             resolveCmuxSpawnStateRoot(),
           ),
           readTimeoutMs: this.config.codex.readTimeoutMs,
@@ -1484,33 +1482,38 @@ function createProgressSignature(issue: Issue, turn: CodexTurnResult): string {
 // Escalated units (SYMPH-337) widen the per-unit token and dollar budgets;
 // iteration/no-progress caps and pricing inputs stay fixed.
 /**
- * Resolve the git metadata directory the turn sandbox must be allowed to
- * write (SYMPH-353). Worktree workspaces carry a `.git` FILE pointing at
- * `<bare-clone>/worktrees/<id>` — the grant is scoped to that repo's bare
- * clone. Full clones (`.git` directory) need no extra root: the metadata
- * lives inside the workspace. Unparseable layouts fall back to the
- * product's `.bare-clones` parent so commits keep working.
+ * Resolve the git metadata directories the turn sandbox must be allowed to
+ * write (SYMPH-353, SYMPH-447). Worktree workspaces carry a `.git` FILE
+ * pointing at `<bare-clone>/worktrees/<id>`; Git creates `index.lock` in that
+ * per-worktree gitdir, while new objects and branch refs still live in the
+ * common bare clone. Grant both, resolving relative gitdir pointers the same
+ * way Git does. Unparseable layouts fall back to the product's `.bare-clones`
+ * parent so commits keep working.
  */
-async function resolveGitMetadataRoot(
+async function resolveGitMetadataWritableRoots(
   workspacePath: string,
   workspaceRoot: string,
-): Promise<string> {
+): Promise<string[]> {
   const fallback = join(workspaceRoot, ".bare-clones");
   try {
     const pointer = await readFile(join(workspacePath, ".git"), "utf8");
     const match = pointer.match(/^gitdir:\s*(.+)\s*$/m);
     if (match?.[1] !== undefined) {
-      const gitdir = normalize(match[1].trim());
+      const rawGitdir = match[1].trim();
+      const gitdir = normalize(
+        isAbsolute(rawGitdir) ? rawGitdir : resolve(workspacePath, rawGitdir),
+      );
       const marker = `${sep}worktrees${sep}`;
       const markerIndex = gitdir.lastIndexOf(marker);
       if (markerIndex > 0) {
-        return gitdir.slice(0, markerIndex);
+        return dedupeRoots([], [gitdir, gitdir.slice(0, markerIndex)]);
       }
+      return [gitdir];
     }
   } catch {
     // `.git` is a directory (full clone) or unreadable — fall through.
   }
-  return fallback;
+  return [fallback];
 }
 
 /**
