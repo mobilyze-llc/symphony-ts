@@ -747,6 +747,13 @@ export class OrchestratorCore {
     this.lastVerdictKeys.clear();
     this.state.issueDispositions = {};
     this.state.resumeRequiredMarks = {};
+    // Re-invocation safety (council R2): the stage_record reducer is
+    // additive, so a replay against a different journal (runtime-host root
+    // swap) must rebuild spend history from scratch — clear the
+    // seen-sequence guard together with the history it feeds, or stale
+    // sequence numbers from the previous journal would suppress reduction.
+    this.reducedStageRecordSequences.clear();
+    this.state.issueExecutionHistory = {};
     this.starvedTickCount = 0;
     this.pageAlertActive = false;
 
@@ -2992,14 +2999,18 @@ export class OrchestratorCore {
 
     const nextStageName = currentStage.transitions.onComplete;
     if (nextStageName === null) {
-      // No on_complete transition — treat as terminal
+      // No on_complete transition — treat as terminal. No tracker write
+      // fires here, so journal synthetic terminal evidence (council R2) or
+      // replay would restore the counters this clear erases.
+      this.journalTerminalEvidence(issueId, issueIdentifier, currentStageName);
       this.clearTerminalIssueRuntimeState(issueId);
       return "completed";
     }
 
     const nextStage = stagesConfig.stages[nextStageName];
     if (nextStage === undefined) {
-      // Invalid target — treat as terminal
+      // Invalid target — treat as terminal (same evidence rule as above)
+      this.journalTerminalEvidence(issueId, issueIdentifier, currentStageName);
       this.clearTerminalIssueRuntimeState(issueId);
       return "completed";
     }
@@ -3052,6 +3063,11 @@ export class OrchestratorCore {
             err,
           );
         });
+      } else {
+        // No tracker write fires (linearState null or no updateIssueState
+        // callback): journal synthetic terminal evidence (council R2) so
+        // replay still clears the counters this completion erased live.
+        this.journalTerminalEvidence(issueId, issueIdentifier, nextStageName);
       }
       // Best-effort: check if all sibling sub-issues are terminal and auto-close parent
       if (this.autoCloseParentIssue !== undefined) {
@@ -4527,6 +4543,48 @@ export class OrchestratorCore {
         summary: input.summary,
       },
     ];
+  }
+
+  /**
+   * Journal replay-visible terminal-completion evidence for completion
+   * paths that fire NO tracker write (council R2): a terminal stage whose
+   * linearState is null, a missing updateIssueState callback, or an
+   * onComplete transition that is null/invalid. Reuses the tracker_write
+   * journal kind with the same `:terminal:` / `:completed` key shape the
+   * runTrackerWriteOnce paths produce, so recoverFromRunJournal keeps a
+   * single terminal-evidence predicate; metadata marks that no tracker
+   * call happened. Best-effort: a journal outage must never block live
+   * terminal completion — counters surviving replay after a failed write
+   * is the documented degraded mode.
+   */
+  private journalTerminalEvidence(
+    issueId: string,
+    issueIdentifier: string,
+    stage: string | null,
+  ): void {
+    void this.recordRunJournalEntry({
+      idempotencyKey: `tracker_write:${issueId}:terminal:${stage ?? "none"}:none:completed`,
+      timestamp: this.now().toISOString(),
+      kind: "tracker_write",
+      issueId,
+      issueIdentifier,
+      operation: "tracker_write",
+      stage,
+      attempt: null,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Terminal completion for ${issueIdentifier} (no tracker write).`,
+      metadata: {
+        status: "completed",
+        action: "update_issue_state",
+        skipped: true,
+      },
+    }).catch((err) => {
+      console.warn(
+        `[orchestrator] Failed to journal terminal evidence for ${issueIdentifier}:`,
+        err,
+      );
+    });
   }
 
   private clearTerminalIssueRuntimeState(issueId: string): void {
@@ -6636,6 +6694,11 @@ export class OrchestratorCore {
               err,
             );
           });
+        } else {
+          // No tracker write fires (linearState null or no updateIssueState
+          // callback): journal synthetic terminal evidence (council R2) so
+          // replay still clears the counters this completion erased live.
+          this.journalTerminalEvidence(issue.id, issue.identifier, stageName);
         }
         return {
           dispatched: false,

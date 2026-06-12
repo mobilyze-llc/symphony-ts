@@ -508,6 +508,66 @@ describe("SYMPH-401 council R1: terminal completion clears replayed counters", (
   });
 });
 
+describe("SYMPH-401 council R2: terminal completion without a tracker write still leaves replay evidence", () => {
+  it("clears replayed counters/marks after completing into a terminal stage whose linear_state is null", async () => {
+    const stages = createImplementToTerminalStages();
+    const doneStage = stages.stages.done;
+    if (doneStage === undefined) {
+      throw new Error("fixture missing done stage");
+    }
+    doneStage.linearState = null;
+    const config = createConfig({
+      stages,
+      budgetEscalation: { maxSteps: 3, multiplier: 2 },
+    });
+    // No updateIssueState either — together with linearState null this is
+    // the config shape where no terminal tracker write can fire, so the
+    // synthetic evidence entry is the only replay signal.
+    const orchestrator = createOrchestrator({ config });
+
+    await orchestrator.pollTick();
+    feedTokens(orchestrator, { inputTokens: 60, outputTokens: 40 });
+    const escalated = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: BUDGET_PAUSE,
+    });
+    expect(escalated?.delayType).toBe("continuation");
+    expect(orchestrator.getState().issueBudgetEscalations["1"]).toBe(1);
+
+    await orchestrator.onRetryTimer("1");
+    feedTokens(orchestrator, { inputTokens: 30, outputTokens: 20 });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+
+    // Let the fire-and-forget synthetic evidence write land.
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    const terminalEvidence = orchestrator
+      .getState()
+      .dispatcherRunJournal.find(
+        (entry) =>
+          entry.kind === "tracker_write" &&
+          entry.idempotencyKey.includes(":terminal:") &&
+          entry.idempotencyKey.endsWith(":completed"),
+      );
+    expect(terminalEvidence).toBeDefined();
+    expect(terminalEvidence?.metadata.skipped).toBe(true);
+
+    // Restart: replay must not resurrect the counters the live completion
+    // cleared, even though no real tracker write was ever journaled.
+    const restarted = createOrchestrator({
+      config,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    expect(restarted.getState().completed.has("1")).toBe(true);
+    expect(restarted.getState().issueBudgetEscalations["1"]).toBeUndefined();
+    expect(restarted.getState().issuePauseTriageResumes["1"]).toBeUndefined();
+    expect(restarted.getState().issueExecutionHistory["1"]).toBeUndefined();
+    expect(restarted.getState().resumeRequired.has("1")).toBe(false);
+  });
+});
+
 describe("SYMPH-401: continuation re-pauses journal distinct stage records", () => {
   it("replays BOTH stage records for two exits on the same stage+attempt and sums the spend", async () => {
     const config = createConfig({
