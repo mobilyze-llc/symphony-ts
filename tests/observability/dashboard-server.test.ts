@@ -2,7 +2,11 @@ import { type IncomingMessage, request as httpRequest } from "node:http";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { RuntimeSnapshot } from "../../src/logging/runtime-snapshot.js";
+import type { DispatcherRunJournalEntry } from "../../src/domain/model.js";
+import {
+  type RuntimeSnapshot,
+  buildStateDelta,
+} from "../../src/logging/runtime-snapshot.js";
 import {
   type DashboardServerHost,
   type IssueDetailResponse,
@@ -831,6 +835,17 @@ function createSnapshot(): RuntimeSnapshot {
     },
     rate_limit_admission: null,
     explicit_resume_required: {},
+    as_of_sequence: 0,
+    counters: {},
+    rate_limit_views: {
+      runner_snapshot_file: null,
+      gate: null,
+      live_telemetry: null,
+      disagreement: null,
+    },
+    deploy_drift: null,
+    watchdog: { clusters: [], open_breakers: [] },
+    components: {},
   };
 }
 
@@ -1024,3 +1039,121 @@ function parseServerSentEvent(
     data: dataLine.slice("data: ".length),
   };
 }
+
+describe("state delta endpoint (SYMPH-407)", () => {
+  const servers: Array<{ close: () => Promise<void> }> = [];
+
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((server) => server.close()));
+  });
+
+  function deltaEntry(sequence: number): DispatcherRunJournalEntry {
+    return {
+      sequence,
+      idempotencyKey: `entry:${sequence}`,
+      timestamp: "2026-06-12T10:00:00.000Z",
+      kind: "admission",
+      issueId: "issue-1",
+      issueIdentifier: "ABC-123",
+      operation: "dispatcher",
+      stage: null,
+      attempt: null,
+      ownerId: null,
+      lease: null,
+      summary: `entry ${sequence}`,
+      metadata: {},
+    };
+  }
+
+  function createDeltaHost(): DashboardServerHost {
+    const journal = [1, 2, 3, 4, 5].map(deltaEntry);
+    return createHost({
+      getStateDelta: ({ sinceSeq, limit }) =>
+        buildStateDelta(journal, {
+          sinceSeq,
+          ...(limit === undefined ? {} : { limit }),
+        }),
+    });
+  }
+
+  it("returns exactly the bounded journal deltas between two cursors", async () => {
+    const server = await startDashboardServer({
+      port: 0,
+      host: createDeltaHost(),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "GET",
+      path: "/api/v1/state/delta?since_seq=2&limit=2",
+    });
+    expect(response.statusCode).toBe(200);
+    const payload = JSON.parse(response.body);
+    expect(payload.since_seq).toBe(2);
+    expect(payload.as_of_sequence).toBe(5);
+    expect(payload.count).toBe(2);
+    expect(payload.truncated).toBe(true);
+    expect(
+      payload.entries.map((entry: { sequence: number }) => entry.sequence),
+    ).toEqual([3, 4]);
+
+    const rest = await sendRequest(server.port, {
+      method: "GET",
+      path: "/api/v1/state/delta?since_seq=4",
+    });
+    const restPayload = JSON.parse(rest.body);
+    expect(restPayload.truncated).toBe(false);
+    expect(
+      restPayload.entries.map((entry: { sequence: number }) => entry.sequence),
+    ).toEqual([5]);
+  });
+
+  it("rejects missing or invalid since_seq and limit", async () => {
+    const server = await startDashboardServer({
+      port: 0,
+      host: createDeltaHost(),
+    });
+    servers.push(server);
+
+    for (const path of [
+      "/api/v1/state/delta",
+      "/api/v1/state/delta?since_seq=-1",
+      "/api/v1/state/delta?since_seq=abc",
+      "/api/v1/state/delta?since_seq=1.5",
+    ]) {
+      const response = await sendRequest(server.port, { method: "GET", path });
+      expect(response.statusCode, path).toBe(400);
+    }
+
+    const badLimit = await sendRequest(server.port, {
+      method: "GET",
+      path: "/api/v1/state/delta?since_seq=0&limit=0",
+    });
+    expect(badLimit.statusCode).toBe(400);
+  });
+
+  it("returns 501 when the host does not support deltas and 405 on POST", async () => {
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+    });
+    servers.push(server);
+
+    const unsupported = await sendRequest(server.port, {
+      method: "GET",
+      path: "/api/v1/state/delta?since_seq=0",
+    });
+    expect(unsupported.statusCode).toBe(501);
+
+    const withDelta = await startDashboardServer({
+      port: 0,
+      host: createDeltaHost(),
+    });
+    servers.push(withDelta);
+    const post = await sendRequest(withDelta.port, {
+      method: "POST",
+      path: "/api/v1/state/delta?since_seq=0",
+    });
+    expect(post.statusCode).toBe(405);
+  });
+});

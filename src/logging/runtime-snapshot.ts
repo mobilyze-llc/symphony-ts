@@ -1,9 +1,14 @@
+import { parseRateLimitSnapshot } from "../codex/rate-limits.js";
 import type {
   CodexRateLimits,
   CodexTotals,
   ContinuousFeedbackIssueState,
   DecorrelatedGateOutcome,
   DispatcherDecisionQualitySummary,
+  DispatcherOperation,
+  DispatcherRunJournal,
+  DispatcherRunJournalEntry,
+  DispatcherRunJournalEventKind,
   IssueDispositionRecord,
   OrchestratorState,
   RecentActivityEntry,
@@ -12,11 +17,14 @@ import type {
   StageRecord,
   TurnHistoryEntry,
 } from "../domain/model.js";
+import type { ComponentStatus } from "../observability/component-status.js";
+import type { DeployDriftStatus } from "../observability/deploy-drift.js";
 import { PIPELINE_VERDICT_SCOPE_ID } from "../orchestrator/core.js";
 import {
   evaluateDispatcherDecisionQuality,
   extractDispatcherDecisionEvents,
 } from "../orchestrator/decision-quality.js";
+import type { WatchdogRegistrySnapshot } from "../orchestrator/signature-cluster.js";
 import { formatEasternTimestamp } from "./format-timestamp.js";
 import {
   type LoopTraceJournalPreviewResponse,
@@ -247,6 +255,131 @@ export interface RuntimeSnapshot {
    * The 2026-06-11 frozen-queue diagnosis collapses to this one read.
    */
   explicit_resume_required: Record<string, RuntimeSnapshotExplicitResumeMark>;
+  /**
+   * Journal cursor as of this snapshot (SYMPH-407): the sequence of the last
+   * committed dispatcher-run journal entry. Pair with
+   * GET /api/v1/state/delta?since_seq=N for cursor-forward reads.
+   */
+  as_of_sequence: number;
+  /**
+   * Per-issue durable counters (SYMPH-401), rendered next to dispositions
+   * and marks: escalation-ladder step, triage-authorized resumes, rework
+   * rounds, and cumulative token spend. Only issues with any non-zero
+   * counter appear.
+   */
+  counters: Record<string, RuntimeSnapshotIssueCounters>;
+  /**
+   * Dual rate-limit views (SYMPH-407 / the SYMPH-338 6%-vs-98% lesson):
+   * BOTH trackers side by side with their sources, plus an explicit
+   * disagreement marker when they diverge.
+   */
+  rate_limit_views: RuntimeSnapshotRateLimitViews;
+  /** Running commit vs origin/main (SYMPH-407); null until captured. */
+  deploy_drift: DeployDriftStatus | null;
+  /**
+   * Watchdog cluster/breaker summary (SYMPH-398 machinery) with journal
+   * cursors pointing at the latest transition entries.
+   */
+  watchdog: RuntimeSnapshotWatchdog;
+  /**
+   * Fail-open component visibility (SYMPH-407 scope 5): every fail-open
+   * element reports {enabled, degraded_reason?}.
+   */
+  components: Record<string, ComponentStatus>;
+}
+
+export interface RuntimeSnapshotIssueCounters {
+  escalation_steps: number;
+  triage_resumes: number;
+  rework_count: number;
+  spend: {
+    total_tokens: number;
+    completed_stage_tokens: number;
+    live_stage_tokens: number;
+  };
+}
+
+export interface RuntimeSnapshotRateLimitViewWindowPcts {
+  primary_used_pct: number | null;
+  secondary_used_pct: number | null;
+}
+
+export interface RuntimeSnapshotRateLimitRunnerFileView
+  extends RuntimeSnapshotRateLimitViewWindowPcts {
+  /** Provenance: the persisted runner snapshot file. */
+  source: string;
+  observed_at: string;
+  rate_limits: Record<string, unknown>;
+}
+
+export interface RuntimeSnapshotRateLimitGateView
+  extends RuntimeSnapshotRateLimitViewWindowPcts {
+  /** Provenance: the dispatch admission gate's last evaluation. */
+  source: string;
+  evaluated_at: string;
+  blocked: boolean;
+  reason: string | null;
+}
+
+export interface RuntimeSnapshotRateLimitLiveView
+  extends RuntimeSnapshotRateLimitViewWindowPcts {
+  /** Provenance: in-memory telemetry from the runner event stream. */
+  source: string;
+}
+
+export interface RuntimeSnapshotRateLimitViews {
+  runner_snapshot_file: RuntimeSnapshotRateLimitRunnerFileView | null;
+  gate: RuntimeSnapshotRateLimitGateView | null;
+  live_telemetry: RuntimeSnapshotRateLimitLiveView | null;
+  /**
+   * True when the runner-file and gate views both report a primary or
+   * secondary percentage and any pair differs by more than 1 percentage
+   * point; null when either view is missing the comparison.
+   */
+  disagreement: boolean | null;
+}
+
+export interface RuntimeSnapshotWatchdogCluster {
+  signature: string;
+  error_class: string;
+  cluster_size: number;
+  member_issue_identifiers: string[];
+  last_alert_size: number;
+  /** Journal sequence of the latest cluster_transition for this signature. */
+  last_transition_sequence: number | null;
+}
+
+export interface RuntimeSnapshotWatchdogBreaker {
+  stage_name: string;
+  signature: string;
+  opened_at: string;
+  opened_for_issue_ids: string[];
+  /** Journal sequence of the latest breaker_transition for this stage. */
+  last_transition_sequence: number | null;
+}
+
+export interface RuntimeSnapshotWatchdog {
+  clusters: RuntimeSnapshotWatchdogCluster[];
+  open_breakers: RuntimeSnapshotWatchdogBreaker[];
+}
+
+/**
+ * Host-supplied enrichment for snapshot sections whose source of truth
+ * lives outside OrchestratorState (registry internals, files, git, config).
+ * Everything remains composed into the ONE snapshot document — enrichment
+ * is plumbing, not a second source of truth.
+ */
+export interface RuntimeSnapshotEnrichment {
+  /** Authoritative journal cursor (accounts for burned sequences). */
+  asOfSequence?: number;
+  components?: Record<string, ComponentStatus>;
+  deployDrift?: DeployDriftStatus | null;
+  rateLimitFile?: {
+    path: string;
+    observedAt: string;
+    rateLimits: Record<string, unknown>;
+  } | null;
+  watchdog?: WatchdogRegistrySnapshot | null;
 }
 
 export interface RuntimeSnapshotExplicitResumeMark {
@@ -266,9 +399,11 @@ export function buildRuntimeSnapshot(
   state: OrchestratorState,
   options?: {
     now?: Date;
+    enrichment?: RuntimeSnapshotEnrichment;
   },
 ): RuntimeSnapshot {
   const now = options?.now ?? new Date();
+  const enrichment = options?.enrichment;
 
   const running = Object.values(state.running)
     .slice()
@@ -427,6 +562,291 @@ export function buildRuntimeSnapshot(
     dispositions: buildDispositionSnapshots(state),
     dispatch_gate: buildDispatchGateSnapshot(state),
     explicit_resume_required: buildExplicitResumeMarks(state, now),
+    as_of_sequence:
+      enrichment?.asOfSequence ??
+      state.dispatcherRunJournal.at(-1)?.sequence ??
+      0,
+    counters: buildIssueCounters(state),
+    rate_limit_views: buildRateLimitViews(state, enrichment),
+    deploy_drift: enrichment?.deployDrift ?? null,
+    watchdog: buildWatchdogSection(state, enrichment?.watchdog ?? null),
+    components: enrichment?.components ?? {},
+  };
+}
+
+/**
+ * Per-issue durable counters (SYMPH-401) rendered coherently with
+ * dispositions and explicit-resume marks: one map keyed by issue id, only
+ * issues with any non-zero counter included. Spend is the sum of journaled
+ * stage_record history plus the live in-flight stage.
+ */
+function buildIssueCounters(
+  state: OrchestratorState,
+): Record<string, RuntimeSnapshotIssueCounters> {
+  const issueIds = new Set<string>([
+    ...Object.keys(state.issueBudgetEscalations),
+    ...Object.keys(state.issuePauseTriageResumes),
+    ...Object.keys(state.issueReworkCounts),
+    ...Object.keys(state.issueExecutionHistory),
+    ...Object.values(state.running).map((entry) => entry.issue.id),
+  ]);
+
+  const counters: Record<string, RuntimeSnapshotIssueCounters> = {};
+  for (const issueId of issueIds) {
+    const completedStageTokens = (
+      state.issueExecutionHistory[issueId] ?? []
+    ).reduce((sum, stage) => sum + stage.totalTokens, 0);
+    const liveStageTokens = state.running[issueId]?.totalStageTotalTokens ?? 0;
+    const entry: RuntimeSnapshotIssueCounters = {
+      escalation_steps: state.issueBudgetEscalations[issueId] ?? 0,
+      triage_resumes: state.issuePauseTriageResumes[issueId] ?? 0,
+      rework_count: state.issueReworkCounts[issueId] ?? 0,
+      spend: {
+        total_tokens: completedStageTokens + liveStageTokens,
+        completed_stage_tokens: completedStageTokens,
+        live_stage_tokens: liveStageTokens,
+      },
+    };
+    if (
+      entry.escalation_steps > 0 ||
+      entry.triage_resumes > 0 ||
+      entry.rework_count > 0 ||
+      entry.spend.total_tokens > 0
+    ) {
+      counters[issueId] = entry;
+    }
+  }
+  return counters;
+}
+
+const RATE_VIEW_DISAGREEMENT_THRESHOLD_PCT = 1;
+
+function buildRateLimitViews(
+  state: OrchestratorState,
+  enrichment: RuntimeSnapshotEnrichment | undefined,
+): RuntimeSnapshotRateLimitViews {
+  const file = enrichment?.rateLimitFile ?? null;
+  let runnerSnapshotFile: RuntimeSnapshotRateLimitRunnerFileView | null = null;
+  if (file !== null) {
+    const parsed = parseRateLimitSnapshot(file.rateLimits);
+    runnerSnapshotFile = {
+      source: file.path,
+      observed_at: file.observedAt,
+      rate_limits: file.rateLimits,
+      primary_used_pct: parsed?.primary?.usedPercent ?? null,
+      secondary_used_pct: parsed?.secondary?.usedPercent ?? null,
+    };
+  }
+
+  const admission = state.rateLimitAdmission;
+  const gate: RuntimeSnapshotRateLimitGateView | null =
+    admission === null
+      ? null
+      : {
+          source: "dispatch admission gate (rate_limit_admission evaluation)",
+          evaluated_at: admission.evaluatedAt,
+          blocked: admission.blocked,
+          reason: admission.reason,
+          primary_used_pct: admission.primaryUsedPercent,
+          secondary_used_pct: admission.secondaryUsedPercent,
+        };
+
+  let liveTelemetry: RuntimeSnapshotRateLimitLiveView | null = null;
+  const liveParsed = parseRateLimitSnapshot(state.codexRateLimits);
+  if (liveParsed !== null) {
+    liveTelemetry = {
+      source: "in-memory runner telemetry (orchestrator state)",
+      primary_used_pct: liveParsed.primary?.usedPercent ?? null,
+      secondary_used_pct: liveParsed.secondary?.usedPercent ?? null,
+    };
+  }
+
+  return {
+    runner_snapshot_file: runnerSnapshotFile,
+    gate,
+    live_telemetry: liveTelemetry,
+    disagreement: computeRateViewDisagreement(runnerSnapshotFile, gate),
+  };
+}
+
+function computeRateViewDisagreement(
+  file: RuntimeSnapshotRateLimitViewWindowPcts | null,
+  gate: RuntimeSnapshotRateLimitViewWindowPcts | null,
+): boolean | null {
+  if (file === null || gate === null) {
+    return null;
+  }
+  const pairs: Array<[number | null, number | null]> = [
+    [file.primary_used_pct, gate.primary_used_pct],
+    [file.secondary_used_pct, gate.secondary_used_pct],
+  ];
+  const comparable = pairs.filter(
+    (pair): pair is [number, number] => pair[0] !== null && pair[1] !== null,
+  );
+  if (comparable.length === 0) {
+    return null;
+  }
+  return comparable.some(
+    ([left, right]) =>
+      Math.abs(left - right) > RATE_VIEW_DISAGREEMENT_THRESHOLD_PCT,
+  );
+}
+
+function buildWatchdogSection(
+  state: OrchestratorState,
+  registry: WatchdogRegistrySnapshot | null,
+): RuntimeSnapshotWatchdog {
+  // Latest transition cursor per signature / per stage from the journal —
+  // the cursor an agent feeds into since_seq to fetch the exact slice.
+  const clusterCursors = new Map<string, number>();
+  const breakerCursors = new Map<string, number>();
+  for (const entry of state.dispatcherRunJournal) {
+    if (entry.kind === "cluster_transition") {
+      const signature = entry.metadata.signature;
+      if (typeof signature === "string") {
+        clusterCursors.set(signature, entry.sequence);
+      }
+    } else if (entry.kind === "breaker_transition") {
+      const stage = entry.metadata.stage;
+      if (typeof stage === "string") {
+        breakerCursors.set(stage, entry.sequence);
+      }
+    }
+  }
+
+  return {
+    clusters: (registry?.clusters ?? []).map((cluster) => ({
+      ...cluster,
+      last_transition_sequence: clusterCursors.get(cluster.signature) ?? null,
+    })),
+    open_breakers: (registry?.openBreakers ?? []).map((breaker) => ({
+      ...breaker,
+      last_transition_sequence: breakerCursors.get(breaker.stage_name) ?? null,
+    })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Cursor-forward delta reads (SYMPH-407 scope 6)
+// ---------------------------------------------------------------------------
+
+export const STATE_DELTA_DEFAULT_LIMIT = 100;
+export const STATE_DELTA_MAX_LIMIT = 500;
+
+/**
+ * Whitelisted scalar metadata projected onto delta entries. Raw journal
+ * metadata is an untyped bag that can carry suppressed egress content
+ * (cluster_transition `details.normalizedText`/`members` hold raw agent
+ * output the notifier and watchdog filer deliberately redact) — only these
+ * known-safe scalar fields ever cross the delta endpoint.
+ */
+export interface StateDeltaEntryMetadata {
+  status?: string;
+  verb?: string;
+  disposition?: string;
+  signature?: string;
+  transition?: string;
+  scope?: string;
+  step?: string;
+  resumesUsed?: number;
+}
+
+/**
+ * Redacted egress projection of a dispatcher journal entry — same
+ * field-projection discipline as the loop_trace_preview shape. Never a
+ * raw `DispatcherRunJournalEntry` passthrough.
+ */
+export interface StateDeltaEntry {
+  sequence: number;
+  timestamp: string;
+  kind: DispatcherRunJournalEventKind;
+  issueId: string;
+  issueIdentifier: string;
+  operation: DispatcherOperation;
+  stage: string | null;
+  attempt: number | null;
+  summary: string;
+  metadata: StateDeltaEntryMetadata;
+}
+
+export interface StateDeltaResponse {
+  /** The cursor the caller supplied. */
+  since_seq: number;
+  /** Current journal cursor — feed back as the next since_seq. */
+  as_of_sequence: number;
+  count: number;
+  /** True when more entries exist beyond `entries` (page was capped). */
+  truncated: boolean;
+  entries: StateDeltaEntry[];
+}
+
+const STATE_DELTA_METADATA_STRING_FIELDS = [
+  "status",
+  "verb",
+  "disposition",
+  "signature",
+  "transition",
+  "scope",
+  "step",
+] as const;
+
+function projectStateDeltaMetadata(
+  metadata: Record<string, unknown>,
+): StateDeltaEntryMetadata {
+  const projected: StateDeltaEntryMetadata = {};
+  for (const field of STATE_DELTA_METADATA_STRING_FIELDS) {
+    const value = metadata[field];
+    if (typeof value === "string") {
+      projected[field] = value;
+    }
+  }
+  const resumesUsed = metadata.resumesUsed;
+  if (typeof resumesUsed === "number") {
+    projected.resumesUsed = resumesUsed;
+  }
+  return projected;
+}
+
+function toStateDeltaEntry(entry: DispatcherRunJournalEntry): StateDeltaEntry {
+  return {
+    sequence: entry.sequence,
+    timestamp: entry.timestamp,
+    kind: entry.kind,
+    issueId: entry.issueId,
+    issueIdentifier: entry.issueIdentifier,
+    operation: entry.operation,
+    stage: entry.stage,
+    attempt: entry.attempt,
+    summary: entry.summary,
+    metadata: projectStateDeltaMetadata(entry.metadata),
+  };
+}
+
+/**
+ * Journal-backed deltas between two cursors: every committed entry with
+ * sequence > since_seq, ascending, capped at `limit`. The journal is the
+ * single source of truth — this is a windowed read of the same entries the
+ * snapshot reducers consume.
+ */
+export function buildStateDelta(
+  journal: DispatcherRunJournal,
+  input: { sinceSeq: number; limit?: number; asOfSequence?: number },
+): StateDeltaResponse {
+  const limit = Math.max(
+    1,
+    Math.min(input.limit ?? STATE_DELTA_DEFAULT_LIMIT, STATE_DELTA_MAX_LIMIT),
+  );
+  const matching = journal
+    .filter((entry) => entry.sequence > input.sinceSeq)
+    .sort((left, right) => left.sequence - right.sequence);
+  const entries = matching.slice(0, limit);
+  return {
+    since_seq: input.sinceSeq,
+    as_of_sequence:
+      input.asOfSequence ?? journal.at(-1)?.sequence ?? input.sinceSeq,
+    count: entries.length,
+    truncated: matching.length > entries.length,
+    entries: entries.map(toStateDeltaEntry),
   };
 }
 

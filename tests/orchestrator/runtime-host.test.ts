@@ -5896,3 +5896,186 @@ describe("pruneLocalBranches", () => {
     expect(debounced.length).toBeGreaterThanOrEqual(1);
   });
 });
+
+describe("state-document enrichment wiring (SYMPH-407)", () => {
+  it("composes components, watchdog, as_of_sequence, and deploy drift into one snapshot", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      captureDeployDrift: async () => ({
+        running_commit: "aaa1111",
+        origin_main_commit: "bbb2222",
+        drift: true,
+        captured_at: "2026-06-12T10:00:00.000Z",
+        note: "captured once at startup",
+      }),
+      now: () => new Date("2026-06-12T10:00:05.000Z"),
+    });
+
+    // First snapshot kicks off the non-blocking deploy-drift capture.
+    const first = await host.getRuntimeSnapshot();
+    expect(typeof first.as_of_sequence).toBe("number");
+    expect(first.watchdog).toEqual({ clusters: [], open_breakers: [] });
+    // No notifier wired: the fail-open component reports degraded.
+    expect(first.components.slack_notifier).toEqual({
+      enabled: false,
+      degraded_reason: expect.stringContaining("no notification sink"),
+    });
+    expect(first.components.ac_gate?.enabled).toBe(false);
+
+    // Let the single-flight capture settle, then it must appear.
+    await new Promise((resolve) => setImmediate(resolve));
+    const second = await host.getRuntimeSnapshot();
+    expect(second.deploy_drift).toEqual({
+      running_commit: "aaa1111",
+      origin_main_commit: "bbb2222",
+      drift: true,
+      captured_at: "2026-06-12T10:00:00.000Z",
+      note: "captured once at startup",
+    });
+  });
+
+  it("serves journal-backed deltas through getStateDelta after dispatch activity", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      captureDeployDrift: async () => null,
+      now: () => new Date("2026-06-12T10:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.as_of_sequence).toBeGreaterThan(0);
+
+    const delta = await host.getStateDelta({ sinceSeq: 0 });
+    expect(delta.as_of_sequence).toBe(snapshot.as_of_sequence);
+    expect(delta.count).toBeGreaterThan(0);
+    expect(delta.entries.map((entry) => entry.sequence)).toEqual(
+      [...delta.entries.map((entry) => entry.sequence)].sort(
+        (left, right) => left - right,
+      ),
+    );
+
+    // Exact between-cursors read: everything after the first entry.
+    const firstSeq = delta.entries[0]!.sequence;
+    const tail = await host.getStateDelta({ sinceSeq: firstSeq });
+    expect(tail.entries.every((entry) => entry.sequence > firstSeq)).toBe(true);
+    expect(tail.count).toBe(delta.count - 1);
+  });
+
+  it("hydrates the durable journal for reads issued before the first poll", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-early-read-"));
+    try {
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const warmRunner = new FakeAgentRunner();
+      const warmHost = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker(),
+        createAgentRunner: ({ onEvent }) => {
+          warmRunner.onEvent = onEvent;
+          return warmRunner;
+        },
+        captureDeployDrift: async () => null,
+        now: () => new Date("2026-06-12T10:00:05.000Z"),
+      });
+      await warmHost.pollOnce();
+
+      // A cold host in the same workspace serves the persisted journal on
+      // its very first read — the dashboard starts listening before the
+      // first poll cycle, so reads must not see an empty journal.
+      const coldRunner = new FakeAgentRunner();
+      const coldHost = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({ candidates: [] }),
+        createAgentRunner: ({ onEvent }) => {
+          coldRunner.onEvent = onEvent;
+          return coldRunner;
+        },
+        captureDeployDrift: async () => null,
+        now: () => new Date("2026-06-12T10:00:06.000Z"),
+      });
+
+      const delta = await coldHost.getStateDelta({ sinceSeq: 0 });
+      expect(delta.count).toBeGreaterThan(0);
+      expect(delta.as_of_sequence).toBeGreaterThan(0);
+
+      const snapshot = await coldHost.getRuntimeSnapshot();
+      expect(snapshot.as_of_sequence).toBe(delta.as_of_sequence);
+    } finally {
+      removeWorkspaceWithRetry(workspaceRoot);
+    }
+  });
+
+  it("mirrors the persisted runner file view even when live telemetry exists", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-rl-fileview-"));
+    try {
+      const fileRateLimits = {
+        limit_id: "codex",
+        primary: {
+          used_percent: 12,
+          window_minutes: 300,
+          resets_at: 1781200000,
+        },
+      };
+      await persistRateLimitSnapshot(workspaceRoot, {
+        observedAt: "2026-06-12T09:00:00.000Z",
+        rateLimits: fileRateLimits,
+      });
+
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({ candidates: [] }),
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        captureDeployDrift: async () => null,
+        now: () => new Date("2026-06-12T10:00:05.000Z"),
+      });
+
+      // Live telemetry observed before hydration runs: hydration must not
+      // assign live state, but it must still mirror the file into the
+      // runner_snapshot_file view.
+      const liveRateLimits = {
+        limit_id: "codex",
+        primary: {
+          used_percent: 55,
+          window_minutes: 300,
+          resets_at: 1781300000,
+        },
+      };
+      host.getState().codexRateLimits = liveRateLimits;
+
+      await host.pollOnce();
+      const snapshot = await host.getRuntimeSnapshot();
+
+      expect(host.getState().codexRateLimits).toEqual(liveRateLimits);
+      expect(snapshot.rate_limit_views.runner_snapshot_file).not.toBeNull();
+      expect(snapshot.rate_limit_views.runner_snapshot_file).toMatchObject({
+        observed_at: "2026-06-12T09:00:00.000Z",
+        primary_used_pct: 12,
+      });
+      expect(snapshot.rate_limit_views.live_telemetry).toMatchObject({
+        primary_used_pct: 55,
+      });
+    } finally {
+      removeWorkspaceWithRetry(workspaceRoot);
+    }
+  });
+});

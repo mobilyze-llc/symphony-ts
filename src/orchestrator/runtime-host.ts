@@ -10,6 +10,7 @@ import { access, lstat, mkdir, readdir } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { runAcGate } from "../agent/ac-gate.js";
@@ -75,7 +76,9 @@ import {
 } from "../logging/run-journal.js";
 import {
   type RuntimeSnapshot,
+  type StateDeltaResponse,
   buildRuntimeSnapshot,
+  buildStateDelta,
 } from "../logging/runtime-snapshot.js";
 import {
   buildActivityContext,
@@ -87,6 +90,7 @@ import {
   StructuredLogger,
   createJsonLineSink,
 } from "../logging/structured-logger.js";
+import { buildComponentStatuses } from "../observability/component-status.js";
 import {
   type DashboardServerHost,
   type DashboardServerInstance,
@@ -100,6 +104,10 @@ import {
   type StopIssueResponse,
   startDashboardServer,
 } from "../observability/dashboard-server.js";
+import {
+  type DeployDriftStatus,
+  captureDeployDrift,
+} from "../observability/deploy-drift.js";
 import {
   createModeScopedPermissionPolicy,
   resolveHardStopsConfig,
@@ -130,12 +138,12 @@ import { getDiff, runEnsembleGate } from "./gate-handler.js";
 import {
   type IntentActor,
   type IntentReason,
-  PIPELINE_INTENT_ISSUE_ID,
-  PIPELINE_INTENT_ISSUE_IDENTIFIER,
+  isPipelineSentinelValue,
 } from "./intent.js";
 import { reduceManagerRunJournal } from "./manager-run.js";
 import type { PipelineNotificationSink } from "./pipeline-notifier.js";
 import {
+  getRateLimitSnapshotPath,
   loadPersistedRateLimitSnapshot,
   persistRateLimitSnapshot,
 } from "./rate-limit-persistence.js";
@@ -208,6 +216,12 @@ export interface RuntimeHostOptions {
   ) => Promise<void>;
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
+  /**
+   * Injectable deploy-drift capture (SYMPH-407). Default runs git rev-parse
+   * against the repo root once at the first snapshot; never refreshed (the
+   * staleness contract lives in deploy-drift.ts).
+   */
+  captureDeployDrift?: () => Promise<DeployDriftStatus | null>;
   now?: () => Date;
 }
 
@@ -247,22 +261,6 @@ interface WorkerExecution {
 const SHUTDOWN_IDLE_TIMEOUT_MS = 30_000;
 const PIPELINE_HALT_LABEL = "pipeline-halt";
 
-/**
- * Case- and whitespace-insensitive match against the reserved pipeline
- * sentinel ("pipeline"/"PIPELINE"/" pipeline ") so issue-scoped intent verbs
- * can never journal under the pipeline-wide journal scope (SYMPH-408 council
- * R1/R2).
- */
-function isPipelineSentinelTarget(value: string | undefined): boolean {
-  if (value === undefined) {
-    return false;
-  }
-  const lowered = value.trim().toLowerCase();
-  return (
-    lowered === PIPELINE_INTENT_ISSUE_ID.toLowerCase() ||
-    lowered === PIPELINE_INTENT_ISSUE_IDENTIFIER.toLowerCase()
-  );
-}
 const PIPELINE_RESTART_GUIDANCE = [
   "Stage candidate tickets outside Pipeline first.",
   "Add dependency relations and acceptance criteria before adding the Pipeline project.",
@@ -270,6 +268,16 @@ const PIPELINE_RESTART_GUIDANCE = [
 ];
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Repo root of the running checkout for deploy-drift capture:
+ * dist/src/orchestrator/runtime-host.js -> 3 levels up (same resolution
+ * pattern as resolveDeployScriptPath in dashboard-server.ts).
+ */
+function resolveRuntimeRepoRoot(): string {
+  const thisFile = fileURLToPath(import.meta.url);
+  return resolve(dirname(thisFile), "..", "..", "..");
+}
 
 export class RuntimeHostStartupError extends Error {
   readonly code: string;
@@ -358,6 +366,19 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private managerRunJournalHydrationTask: Promise<void> | null = null;
   private rateLimitSnapshotHydrated = false;
   private lastPersistedRateLimitsJson: string | null = null;
+  /**
+   * Mirror of the persisted runner rate-limit snapshot file (SYMPH-407 dual
+   * rate views). Updated at hydration and on every write-behind persist —
+   * this process is the file's only writer, so the mirror is exact.
+   */
+  private rateLimitFileView: {
+    observedAt: string;
+    rateLimits: Record<string, unknown>;
+  } | null = null;
+  private readonly captureDeployDriftFn: () => Promise<DeployDriftStatus | null>;
+  /** Single-flight, captured once; see deploy-drift.ts staleness contract. */
+  private deployDriftCapture: Promise<DeployDriftStatus | null> | null = null;
+  private deployDrift: DeployDriftStatus | null = null;
 
   constructor(options: RuntimeHostOptions) {
     this.config = options.config;
@@ -380,6 +401,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.writeDispatcherRunJournalEntry =
       options.writeDispatcherRunJournalEntry ??
       appendDispatcherRunJournalEntryToDisk;
+    this.captureDeployDriftFn =
+      options.captureDeployDrift ??
+      (() => captureDeployDrift({ repoRoot: resolveRuntimeRepoRoot() }));
     this.workspaceManager =
       options.workspaceManager ??
       createWorkspaceManagerFromConfig(options.config, this.logger);
@@ -844,6 +868,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               breakerOpened: boolean;
               canFileWatchdogTicket: boolean;
               members: ClusterMember[];
+              journalSequence: number | null;
             }) => {
               // Fire the SYSTEMIC Slack alert (once-per-signature, re-alert on growth)
               _notifier.notify({
@@ -855,6 +880,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 issueIdentifiers: input.issueIdentifiers,
                 breakerOpened: input.breakerOpened,
                 watchdogTicketFiling: input.canFileWatchdogTicket,
+                journalSequence: input.journalSequence,
               });
 
               // Watchdog ticket filer — best-effort, never blocks the loop
@@ -872,6 +898,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               reasonCode: string;
               remedy: string | null;
               actor: { kind: string; host: string; session?: string };
+              sequence: number | null;
             }) => {
               if (
                 input.disposition !== "gate" &&
@@ -886,6 +913,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 reasonCode: input.reasonCode,
                 remedy: input.remedy,
                 actor: input.actor,
+                sequence: input.sequence,
               });
             },
             onDispatchPage: (input: {
@@ -942,6 +970,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               breakerOpened: boolean;
               canFileWatchdogTicket: boolean;
               members: ClusterMember[];
+              journalSequence: number | null;
             }) => {
               if (input.canFileWatchdogTicket) {
                 void this.fileWatchdogTicketBestEffort(input);
@@ -1070,6 +1099,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   }
 
   async getRuntimeSnapshot(): Promise<RuntimeSnapshot> {
+    // The dashboard starts listening before the first poll cycle — hydrate
+    // the durable dispatcher journal eagerly so early reads see persisted
+    // entries instead of an empty in-memory journal. Idempotent and
+    // single-flight (shared hydration task with the poll path). Best-effort:
+    // a disk-read failure degrades to in-memory state, never fails the read.
+    await this.ensureDispatcherRunJournalLoaded().catch(() => undefined);
     await this.refreshManagerRunJournalForSnapshot();
     const state = this.orchestrator.getState();
     state.managerRuns = reduceManagerRunJournal(state.managerRunJournal, {
@@ -1077,7 +1112,66 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     });
     return buildRuntimeSnapshot(this.orchestrator.getState(), {
       now: this.now(),
+      enrichment: {
+        asOfSequence: this.orchestrator.getRunJournalCursor(),
+        components: buildComponentStatuses({
+          config: this.config,
+          notifierPresent: this.notifier !== null,
+          rateLimitTelemetryPresent: state.codexRateLimits !== null,
+        }),
+        deployDrift: this.readDeployDriftNonBlocking(),
+        rateLimitFile:
+          this.rateLimitFileView === null
+            ? null
+            : {
+                path: getRateLimitSnapshotPath(this.workspaceManager.root),
+                observedAt: this.rateLimitFileView.observedAt,
+                rateLimits: this.rateLimitFileView.rateLimits,
+              },
+        watchdog: this.orchestrator.getWatchdogRegistrySnapshot(),
+      },
     });
+  }
+
+  /**
+   * Cursor-forward delta read (SYMPH-407): journal-backed entries with
+   * sequence > since_seq, bounded. Reads the same in-memory journal the
+   * snapshot reducers consume — no second source of truth.
+   */
+  async getStateDelta(input: {
+    sinceSeq: number;
+    limit?: number;
+  }): Promise<StateDeltaResponse> {
+    // Same eager hydration as getRuntimeSnapshot: deltas must be served
+    // from the durable journal even before the first poll cycle runs.
+    await this.ensureDispatcherRunJournalLoaded().catch(() => undefined);
+    return buildStateDelta(this.orchestrator.getState().dispatcherRunJournal, {
+      sinceSeq: input.sinceSeq,
+      ...(input.limit === undefined ? {} : { limit: input.limit }),
+      asOfSequence: this.orchestrator.getRunJournalCursor(),
+    });
+  }
+
+  /**
+   * Non-blocking deploy-drift read: the first snapshot kicks off the
+   * single-flight capture and reports null; later snapshots report the
+   * captured value. Never blocks the snapshot path on a git subprocess
+   * (the dashboard snapshot read has a 1s timeout). A failed capture
+   * degrades to null and is retried on a later snapshot.
+   */
+  private readDeployDriftNonBlocking(): DeployDriftStatus | null {
+    if (this.deployDriftCapture === null) {
+      this.deployDriftCapture = this.captureDeployDriftFn()
+        .then((captured) => {
+          this.deployDrift = captured;
+          return captured;
+        })
+        .catch(() => {
+          this.deployDriftCapture = null;
+          return null;
+        });
+    }
+    return this.deployDrift;
   }
 
   async getIssueDetails(issueKey: string): Promise<IssueDetailResponse | null> {
@@ -1162,6 +1256,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     errorClass: string;
     stageName: string | null;
     members: ClusterMember[];
+    journalSequence?: number | null;
   }): Promise<void> {
     if (!(this.tracker instanceof LinearTrackerClient)) {
       return;
@@ -1216,6 +1311,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         members: input.members,
         stageName: input.stageName,
         observedAt: new Date().toISOString(),
+        journalSequence: input.journalSequence ?? null,
       });
       const result = await tracker.createWatchdogIssue({
         teamId,
@@ -1346,9 +1442,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
    * Hydrate the last persisted Codex rate-limit snapshot into orchestrator
    * state once per process (SYMPH-336), so the dispatch admission floor can
    * engage from the first poll tick after a restart. Live telemetry always
-   * wins: hydration only applies while no snapshot has been observed yet.
-   * Stale data is safe — the admission gate ignores windows whose resets_at
-   * has passed.
+   * wins for orchestrator STATE: hydration only assigns it while no snapshot
+   * has been observed yet. The runner-file view, by contrast, is always
+   * loaded from the persisted file (it mirrors what the FILE says even when
+   * live telemetry superseded it). Stale data is safe — the admission gate
+   * ignores windows whose resets_at has passed.
    */
   private async ensureRateLimitSnapshotHydrated(): Promise<void> {
     if (this.rateLimitSnapshotHydrated) {
@@ -1357,9 +1455,6 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.rateLimitSnapshotHydrated = true;
 
     const state = this.orchestrator.getState();
-    if (state.codexRateLimits !== null) {
-      return;
-    }
 
     try {
       const persisted = await loadPersistedRateLimitSnapshot(
@@ -1368,6 +1463,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       if (persisted === null) {
         return;
       }
+      // Mirror the on-disk runner snapshot for the dual rate views
+      // (SYMPH-407) even when live telemetry already superseded it — the
+      // point of the file view is showing what the FILE says.
+      this.rateLimitFileView = {
+        observedAt: persisted.observedAt,
+        rateLimits: persisted.rateLimits,
+      };
       if (state.codexRateLimits === null) {
         state.codexRateLimits = persisted.rateLimits;
         this.lastPersistedRateLimitsJson = JSON.stringify(persisted.rateLimits);
@@ -1411,11 +1513,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
 
     try {
+      const observedAt = this.now().toISOString();
       await persistRateLimitSnapshot(this.workspaceManager.root, {
-        observedAt: this.now().toISOString(),
+        observedAt,
         rateLimits,
       });
       this.lastPersistedRateLimitsJson = serialized;
+      this.rateLimitFileView = { observedAt, rateLimits };
     } catch (error) {
       await this.logger?.warn(
         "rate_limit_snapshot_persist_failed",
@@ -2141,8 +2245,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     // addressable issue. The HTTP schema rejects it too; this check covers
     // direct callers of requestIntent (defense in depth).
     if (
-      isPipelineSentinelTarget(input.issueId) ||
-      isPipelineSentinelTarget(input.issueIdentifier)
+      isPipelineSentinelValue(input.issueId) ||
+      isPipelineSentinelValue(input.issueIdentifier)
     ) {
       return {
         status: "invalid_request",

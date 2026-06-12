@@ -242,6 +242,11 @@ export interface SystemicClusterAlertEvent {
   breakerOpened: boolean;
   /** Whether a watchdog ticket is being filed. */
   watchdogTicketFiling: boolean;
+  /**
+   * Journal sequence of the cluster_transition entry behind this alert
+   * (SYMPH-407): the cursor an agent feeds into /api/v1/state/delta.
+   */
+  journalSequence?: number | null;
 }
 
 /**
@@ -275,6 +280,12 @@ export interface DispatchVerdictAlertEvent {
   remedy: string | null;
   /** Attribution: rendered as "by {kind}@{host}" (SYMPH-405 amendment 4). */
   actor: { kind: string; host: string; session?: string };
+  /**
+   * Journal sequence of the dispatch_verdict entry behind this transition
+   * (SYMPH-407): rendered as "(issue, seq N)" so an agent can fetch the
+   * exact event slice via /api/v1/state/delta.
+   */
+  sequence?: number | null;
 }
 
 /**
@@ -1002,6 +1013,14 @@ export function formatNotification(
       if (event.watchdogTicketFiling) {
         parts.push(":ticket: Watchdog ticket being filed");
       }
+      if (
+        event.journalSequence !== undefined &&
+        event.journalSequence !== null
+      ) {
+        parts.push(
+          `Journal cursor: seq ${event.journalSequence} — \`GET /api/v1/state/delta?since_seq=${Math.max(0, event.journalSequence - 1)}\``,
+        );
+      }
       // The raw normalized error text is deliberately omitted here: it can
       // carry secrets or adversarial content from worker output. The signature
       // hash + class + affected issues are the operator triage signal; the raw
@@ -1038,8 +1057,12 @@ export function formatNotification(
           : ":vertical_traffic_light:";
       const label =
         event.disposition === "halt" ? "Dispatch HALTED" : "Dispatch GATED";
+      const cursor =
+        event.sequence !== undefined && event.sequence !== null
+          ? ` (${event.issueIdentifier}, seq ${event.sequence})`
+          : "";
       const parts: string[] = [
-        `${emoji} *${label}* — ${event.issueIdentifier} (\`${event.reasonCode}\`) by ${event.actor.kind}@${event.actor.host}`,
+        `${emoji} *${label}* — ${event.issueIdentifier} (\`${event.reasonCode}\`) by ${event.actor.kind}@${event.actor.host}${cursor}`,
       ];
       if (event.remedy !== null) {
         parts.push(`Remedy: ${event.remedy}`);

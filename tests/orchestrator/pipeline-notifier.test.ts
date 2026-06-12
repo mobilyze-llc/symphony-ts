@@ -975,6 +975,59 @@ describe("formatNotification", () => {
     expect(result.text).toContain("Watchdog ticket being filed");
   });
 
+  it("systemic_cluster_alert carries the journal cursor when available (SYMPH-407)", () => {
+    const result = formatNotification({
+      type: "systemic_cluster_alert",
+      signature: "abc1234",
+      errorClass: "permanent",
+      stageName: "implement",
+      clusterSize: 2,
+      issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+      breakerOpened: false,
+      watchdogTicketFiling: false,
+      journalSequence: 42,
+    });
+    expect(result.text).toContain("seq 42");
+    expect(result.text).toContain("/api/v1/state/delta?since_seq=41");
+
+    const withoutSeq = formatNotification({
+      type: "systemic_cluster_alert",
+      signature: "abc1234",
+      errorClass: "permanent",
+      stageName: "implement",
+      clusterSize: 2,
+      issueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+      breakerOpened: false,
+      watchdogTicketFiling: false,
+      journalSequence: null,
+    });
+    expect(withoutSeq.text).not.toContain("Journal cursor");
+  });
+
+  it("dispatch_verdict_alert renders the (issue, seq) cursor (SYMPH-407)", () => {
+    const result = formatNotification({
+      type: "dispatch_verdict_alert",
+      issueIdentifier: "SYMPH-99",
+      disposition: "halt",
+      reasonCode: "circuit_breaker_open",
+      remedy: "resume any breaker-parked issue",
+      actor: { kind: "dispatcher", host: "pro14" },
+      sequence: 17,
+    });
+    expect(result.text).toContain("(SYMPH-99, seq 17)");
+
+    const withoutSeq = formatNotification({
+      type: "dispatch_verdict_alert",
+      issueIdentifier: "SYMPH-99",
+      disposition: "gate",
+      reasonCode: "rate_limit_floor",
+      remedy: null,
+      actor: { kind: "dispatcher", host: "pro14" },
+      sequence: null,
+    });
+    expect(withoutSeq.text).not.toContain("seq ");
+  });
+
   it("systemic_cluster_alert omits breaker/watchdog lines when both false", () => {
     const result = formatNotification({
       type: "systemic_cluster_alert",
