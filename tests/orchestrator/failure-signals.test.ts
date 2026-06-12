@@ -287,8 +287,12 @@ describe("failure signal routing in onWorkerExit", () => {
     });
     expect(firstRetry).not.toBeNull();
     expect(
-      orchestrator.getState().issueReviewInfrastructureStalls["1"],
-    ).toMatchObject({ count: 1, stalledLanes: [] });
+      orchestrator.getState().issueReviewInfrastructureStalls["1"]?.count,
+    ).toBe(1);
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"]
+        ?.stalledLanes,
+    ).toEqual([]);
 
     await orchestrator.onRetryTimer("1");
     const secondRetry = await orchestrator.onWorkerExit({
