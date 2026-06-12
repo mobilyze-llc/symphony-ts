@@ -712,6 +712,33 @@ export class OrchestratorCore {
           this.issueParkGenerations.delete(entry.issueId);
           this.triagedParkGenerations.delete(entry.issueId);
           this.retryOnceGrants.delete(entry.issueId);
+
+          if (verb === "rework_with_hint") {
+            // Restore the rework stage transition so a mid-rework restart
+            // converges on the rework stage, not the pre-rework stage
+            // (SYMPH-399 P2 / SYMPH-368 pattern). The journal stage field
+            // holds the parked stage; the rework target is derived from config
+            // to avoid a second journal-schema field.
+            const parkedStage = entry.stage;
+            if (parkedStage !== null && this.config.stages !== null) {
+              const stageDef = this.config.stages.stages[parkedStage];
+              const reworkTarget = stageDef?.transitions.onRework ?? null;
+              if (reworkTarget !== null) {
+                this.state.issueStages[entry.issueId] = reworkTarget;
+              }
+            }
+          }
+
+          if (verb === "retry_once") {
+            // Restore the single-retry grant so the post-restart granted
+            // attempt is still exempt from the novelty short-circuit
+            // (SYMPH-399 P3 — grant envelope survives restart in the grant
+            // window). The grant signature is journaled in grantSignature metadata.
+            const sig = readMetadataString(entry.metadata, "grantSignature");
+            this.retryOnceGrants.set(entry.issueId, {
+              signature: sig,
+            });
+          }
         }
         // escalate_human leaves the park (replayed from its source event)
         // standing; no_op / rejected_stale entries mutate nothing.
@@ -3195,6 +3222,10 @@ export class OrchestratorCore {
           // steering and cannot reach a parked issue.
           const reworkStage =
             this.state.issueStages[issueId] ?? input.stageName ?? "(unknown)";
+          // Neutralize the hint before posting: strip triple-backtick fences
+          // and cap length so model output cannot inject Markdown code-fence
+          // syntax into the rework prompt on re-ingestion (SYMPH-399 Q3).
+          const safeHint = neutralizeHintEgress(hint);
           this.postReviewFindingsComment(
             issueId,
             issueIdentifier,
@@ -3202,7 +3233,7 @@ export class OrchestratorCore {
             [
               `Watchdog triage hint (${formatIntentAttribution(actor)}):`,
               "",
-              hint,
+              safeHint,
             ].join("\n"),
           );
         } else {
@@ -3864,10 +3895,11 @@ export class OrchestratorCore {
 
   /** Actor identity for watchdog L2 (stuck-triage) intent writes. */
   private watchdogL2Actor(): IntentActor {
+    // Omit session (leaseOwnerId) — the UUID is operationally meaningless
+    // in attribution comments and adds noise without information (B-7).
     return {
       kind: "watchdog-l2",
       host: this.intentHost(),
-      session: this.leaseOwnerId,
     };
   }
 
@@ -4070,21 +4102,50 @@ export class OrchestratorCore {
           return { status: "no_op", detail: "not parked" };
         }
         const stage = input.stage ?? null;
-        const stageDefinition =
-          stage === null ? undefined : this.config.stages?.stages[stage];
-        const reworkTarget = stageDefinition?.transitions.onRework ?? null;
-        if (reworkTarget === null) {
-          // Fail closed: no rework path means the park stands.
+        if (stage === null) {
+          // Fail closed: no stage context means the park stands.
           return {
             status: "no_op",
-            detail: `no on_rework target for stage "${stage ?? "(unknown)"}" — park stands`,
+            detail: "no stage context for rework_with_hint — park stands",
           };
         }
+        // Pre-check: reworkGate() requires a valid onRework target. Verify the
+        // path exists before releasing the park so a no-path result leaves the
+        // issue cleanly parked with no state mutation.
+        const stageDefinition = this.config.stages?.stages[stage];
+        const reworkPath = stageDefinition?.transitions.onRework ?? null;
+        if (reworkPath === null) {
+          return {
+            status: "no_op",
+            detail: `no on_rework target for stage "${stage}" — park stands`,
+          };
+        }
+        // Delegate to reworkGate() so the maxRework ceiling check, passedStages
+        // splice, and count increment are performed by the same audited path
+        // that all other rework calls use. This prevents an intent-path
+        // rework_with_hint from bypassing a maxRework: 0 guard (SYMPH-399 P2).
         this.releaseParkedIssueState(issueId);
-        this.state.issueStages[issueId] = reworkTarget;
-        this.clearStageFailureSignature(issueId, reworkTarget);
-        this.state.issueReworkCounts[issueId] =
-          (this.state.issueReworkCounts[issueId] ?? 0) + 1;
+        // Set the parked stage so reworkGate() reads the correct current stage.
+        this.state.issueStages[issueId] = stage;
+        const reworkTarget = this.reworkGate(issueId);
+        if (reworkTarget === "escalated") {
+          // reworkGate already set failed and cleared terminal state; the
+          // issue stays parked (failed). Journal as no_op so callers can
+          // distinguish "budget exhausted" from a clean rework application.
+          return {
+            status: "no_op",
+            detail: `rework budget exhausted for stage "${stage}" — park stands`,
+          };
+        }
+        if (reworkTarget === null) {
+          // Should not happen given the pre-check above, but fail closed.
+          this.state.failed.add(issueId);
+          return {
+            status: "no_op",
+            detail: `no on_rework target for stage "${stage}" — park stands`,
+          };
+        }
+        // reworkGate set issueStages[issueId] = reworkTarget and incremented count.
         this.scheduleRetry(issueId, 1, {
           identifier: input.issueIdentifier,
           error: null,
@@ -4133,6 +4194,7 @@ export class OrchestratorCore {
       stage?: string | null;
       hint?: string | null;
       issueState?: string | null;
+      grantSignature?: string | null;
       extraMetadata?: Record<string, unknown>;
     };
     status: "applied" | "no_op" | "rejected_stale";
@@ -4175,6 +4237,10 @@ export class OrchestratorCore {
           ...(input.issueState === undefined || input.issueState === null
             ? {}
             : { issueState: input.issueState }),
+          ...(input.grantSignature === undefined ||
+          input.grantSignature === null
+            ? {}
+            : { grantSignature: input.grantSignature }),
           ...(input.extraMetadata ?? {}),
         },
       });
@@ -6445,6 +6511,13 @@ export class OrchestratorCore {
         issueId;
       this.state.failed.add(issueId);
       this.releaseClaim(issueId);
+      // Ordering invariant: clearTerminalIssueRuntimeState MUST run before
+      // recordFailureExhausted (which calls recordWatchdogPark). The clear
+      // deletes issuePassedStages[issueId] and issueStages[issueId] so that
+      // clearIssueFromCluster runs first; recordWatchdogPark then writes the
+      // fresh park generation into the now-cleared slot. Reversing this order
+      // would cause the park-generation write to be immediately overwritten
+      // by the clear (B-4 invariant, council R1).
       this.clearTerminalIssueRuntimeState(issueId);
       void this.fireEscalationSideEffects(
         issueId,
@@ -6509,6 +6582,9 @@ export class OrchestratorCore {
             input.error,
             attempt,
           );
+          // Ordering invariant: clearTerminalIssueRuntimeState MUST run before
+          // recordFailureExhausted (which calls recordWatchdogPark). See the
+          // comment on the max-retry path above for the full rationale (B-4).
           this.clearTerminalIssueRuntimeState(issueId);
           void this.fireEscalationSideEffects(
             issueId,
@@ -6552,6 +6628,9 @@ export class OrchestratorCore {
           input.error,
           attempt,
         );
+        // Ordering invariant: clearTerminalIssueRuntimeState MUST run before
+        // recordFailureExhausted (which calls recordWatchdogPark). See the
+        // comment on the max-retry path above for the full rationale (B-4).
         this.clearTerminalIssueRuntimeState(issueId);
         void this.fireEscalationSideEffects(
           issueId,
@@ -7030,6 +7109,23 @@ function readMetadataString(
 ): string | null {
   const value = metadata[key];
   return typeof value === "string" ? value : null;
+}
+
+/**
+ * Neutralize model-generated text before it is posted as a rework-feedback
+ * comment that is later re-ingested by a downstream prompt. Strips
+ * triple-backtick fences (which could re-open a code block context in the
+ * next-hop prompt) and caps the total length so a runaway hint cannot produce
+ * an oversized Linear comment (SYMPH-399 Q3 / council R1 fix 3).
+ */
+const HINT_EGRESS_MAX_CHARS = 4000;
+function neutralizeHintEgress(text: string): string {
+  // Replace triple-backtick sequences with a single backtick to defuse
+  // Markdown code-fence syntax without destroying the surrounding content.
+  const stripped = text.replace(/```/g, "`");
+  return stripped.length > HINT_EGRESS_MAX_CHARS
+    ? `${stripped.slice(0, HINT_EGRESS_MAX_CHARS)}\n[hint truncated]`
+    : stripped;
 }
 
 function defaultTimerScheduler(): TimerScheduler {

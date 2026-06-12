@@ -553,6 +553,194 @@ describe("stuck triage: one-triage-per-park + lifecycle", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Council R1 fixes
+// ---------------------------------------------------------------------------
+
+describe("council R1 fix 1: rework_with_hint respects maxRework budget", () => {
+  it("maxRework:0 stage → rework_with_hint verdict → no rework, issue stays parked, intent records no_op", async () => {
+    const postComment = vi.fn().mockResolvedValue(undefined);
+    const runStuckTriage = vi.fn().mockResolvedValue({
+      classification: "spec_defect",
+      action: "rework_with_hint",
+      hint: "Fix the spec.",
+      confidence: "high",
+      rationale: "Spec is wrong.",
+    } satisfies StuckTriageVerdict);
+    // Stage with onRework set but maxRework: 0 (rework explicitly disabled).
+    const base = createStagesWithRework();
+    const stages: StagesConfig = {
+      ...base,
+      stages: {
+        ...base.stages,
+        investigate: {
+          ...(base.stages.investigate as StagesConfig["stages"][string]),
+          maxRework: 0,
+        },
+      },
+    };
+    const orchestrator = createOrchestrator({
+      runStuckTriage,
+      stuckTriage: ENABLED_TRIAGE,
+      postComment,
+      stages,
+    });
+
+    await driveNoveltyPark(orchestrator);
+    const state = orchestrator.getState();
+
+    // Rework budget exhausted — issue must remain parked.
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.retryAttempts["1"]).toBeUndefined();
+    // The intent was applied as no_op (budget exhausted).
+    const reworkIntent = intentEntries(orchestrator).find(
+      (entry) => entry.metadata.verb === "rework_with_hint",
+    );
+    expect(reworkIntent?.metadata.status).toBe("no_op");
+    expect(String(reworkIntent?.metadata.detail)).toContain(
+      "rework budget exhausted",
+    );
+    // The "park stands" comment was posted, not a Review Findings comment.
+    const reviewFindingsCall = postComment.mock.calls.find(([, body]) =>
+      String(body).includes("## Review Findings"),
+    );
+    expect(reviewFindingsCall).toBeUndefined();
+  });
+});
+
+describe("council R1 fix 2: replay restores rework stage transition", () => {
+  it("park → rework_with_hint → restart/replay → issue is on the rework target stage", async () => {
+    const runStuckTriage = vi.fn().mockResolvedValue({
+      classification: "spec_defect",
+      action: "rework_with_hint",
+      hint: "Fix the spec.",
+      confidence: "high",
+      rationale: "Spec is wrong.",
+    } satisfies StuckTriageVerdict);
+    const orchestrator = createOrchestrator({
+      runStuckTriage,
+      stuckTriage: ENABLED_TRIAGE,
+      stages: createStagesWithRework(),
+    });
+
+    await driveNoveltyPark(orchestrator);
+    const state = orchestrator.getState();
+
+    // Verify the rework was applied live.
+    expect(state.failed.has("1")).toBe(false);
+    expect(state.issueStages["1"]).toBe("investigate"); // onRework = "investigate"
+
+    // Replay: construct a fresh orchestrator from the same run journal.
+    const replayed = createOrchestrator({
+      stages: createStagesWithRework(),
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+
+    // After replay, the issue should be on the rework stage, not parked.
+    expect(replayed.getState().failed.has("1")).toBe(false);
+    expect(replayed.getState().resumeRequired.has("1")).toBe(false);
+    expect(replayed.getState().issueStages["1"]).toBe("investigate");
+  });
+});
+
+describe("council R1 fix 3: hint egress neutralization", () => {
+  it("hint containing triple-backticks and exceeding 4000 chars is posted stripped and capped", async () => {
+    const postComment = vi.fn().mockResolvedValue(undefined);
+    // Hint with triple-backtick fences and length > 4000.
+    const longHint = `Here is a code block:\n\`\`\`ts\nconsole.log("hi");\n\`\`\`\n${"x".repeat(5000)}`;
+    const runStuckTriage = vi.fn().mockResolvedValue({
+      classification: "spec_defect",
+      action: "rework_with_hint",
+      hint: longHint,
+      confidence: "high",
+      rationale: "Spec defect.",
+    } satisfies StuckTriageVerdict);
+    const orchestrator = createOrchestrator({
+      runStuckTriage,
+      stuckTriage: ENABLED_TRIAGE,
+      postComment,
+      stages: createStagesWithRework(),
+    });
+
+    await driveNoveltyPark(orchestrator);
+
+    const reviewCall = postComment.mock.calls.find(([, body]) =>
+      String(body).includes("## Review Findings"),
+    );
+    expect(reviewCall).toBeDefined();
+    const postedBody = String(reviewCall?.[1] ?? "");
+    // Triple-backticks must be stripped to single backticks.
+    expect(postedBody).not.toContain("```");
+    // The posted body must not exceed the cap + header overhead.
+    expect(postedBody.length).toBeLessThan(5000);
+    // The truncation marker is present when capped.
+    expect(postedBody).toContain("[hint truncated]");
+  });
+});
+
+describe("council R1 fix 4: retryOnceGrant survives restart", () => {
+  it("replay of retry_once restores the grant so the granted attempt is still novelty-exempt", async () => {
+    const runStuckTriage = vi.fn().mockResolvedValue({
+      classification: "flaky",
+      action: "retry_once",
+      confidence: "high",
+      rationale: "Single transient failure.",
+    } satisfies StuckTriageVerdict);
+    const orchestrator = createOrchestrator({
+      runStuckTriage,
+      stuckTriage: ENABLED_TRIAGE,
+    });
+
+    await driveNoveltyPark(orchestrator, [
+      UNKNOWN_CLASS_FAILURE,
+      UNKNOWN_CLASS_FAILURE,
+    ]);
+    const state = orchestrator.getState();
+
+    // Grant was set live.
+    expect(state.failed.has("1")).toBe(false);
+    expect(state.retryAttempts["1"]).toBeDefined();
+
+    // Replay into a fresh orchestrator.
+    const replayed = createOrchestrator({
+      runStuckTriage: vi.fn(),
+      stuckTriage: ENABLED_TRIAGE,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+
+    // The grant must be present on the replayed orchestrator.
+    const replayedState = replayed.getState();
+    expect(replayedState.failed.has("1")).toBe(false);
+    // Confirm the grant is set by checking that pollTick → onWorkerExit
+    // with the SAME signature parks (grant consumed, identical-sig re-park)
+    // rather than re-triaging. After replay, retryAttempts is not restored
+    // (timer is transient); pollTick re-dispatches the unparked issue.
+    const postComment = vi.fn().mockResolvedValue(undefined);
+    const replayedWithComment = createOrchestrator({
+      runStuckTriage: vi.fn(),
+      stuckTriage: ENABLED_TRIAGE,
+      postComment,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    // pollTick dispatches the unparked issue (it is not in failed/resumeRequired).
+    await replayedWithComment.pollTick();
+    expect(replayedWithComment.getState().running["1"]).toBeDefined();
+    await replayedWithComment.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: UNKNOWN_CLASS_FAILURE,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    // Should park with "no second triage" (grant consumed, identical sig).
+    expect(replayedWithComment.getState().failed.has("1")).toBe(true);
+    expect(postComment).toHaveBeenCalledWith(
+      "1",
+      expect.stringContaining("no second triage"),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
 
@@ -564,6 +752,7 @@ function createOrchestrator(overrides?: {
   stages?: StagesConfig;
   maxRetryAttempts?: number;
   issue?: Issue;
+  runJournal?: OrchestratorCoreOptions["runJournal"];
 }): OrchestratorCore {
   const issue = overrides?.issue ?? createIssue();
   const options: OrchestratorCoreOptions = {
@@ -589,6 +778,9 @@ function createOrchestrator(overrides?: {
       : {}),
     ...(overrides?.postComment !== undefined
       ? { postComment: overrides.postComment }
+      : {}),
+    ...(overrides?.runJournal !== undefined
+      ? { runJournal: overrides.runJournal }
       : {}),
     now: () => new Date("2026-06-11T12:00:00.000Z"),
   };

@@ -231,7 +231,7 @@ function buildStuckTriagePrompt(evidence: StuckTriageEvidence): string {
     "",
     "Actions (bounded — the envelope enforces them):",
     '- "park": leave parked for the operator (default; choose when uncertain).',
-    '- "retry_once": exactly one additional attempt, no escalation ladder. Only when the failure is plausibly nondeterministic (flaky/capacity). Never for failures that will deterministically recur.',
+    '- "retry_once": exempts the next attempt from the identical-signature novelty short-circuit, then releases the issue back into the standing retry ladder. A subsequent novel failure may retry normally; a recurrence of the identical signature parks immediately with no second triage. Only when the failure is plausibly nondeterministic (flaky/capacity). Never for failures that will deterministically recur.',
     '- "rework_with_hint": send the ticket back through its rework path with a concrete, actionable hint (set "hint"). Only when the failure records point at a specific fixable defect in the work.',
     '- "escalate_human": page the operator now with your one-paragraph case (use "rationale"). For systemic or infra failures needing a human on the host.',
     "",
