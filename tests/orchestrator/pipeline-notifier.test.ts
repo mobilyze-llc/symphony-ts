@@ -1678,4 +1678,26 @@ describe("formatNotification triage_escalation (SYMPH-399)", () => {
     expect(result.text).toContain("by watchdog-l2@pro14");
     expect(result.text).toContain("a human needs to inspect the host");
   });
+
+  it("sanitizes a hostile caseText (mrkdwn injection, credentials, 50k length)", () => {
+    const result = formatNotification({
+      type: "triage_escalation",
+      issueIdentifier: "SYMPH-332",
+      issueTitle: "Council gate loops review stage",
+      issueUrl: null,
+      stageName: null,
+      classification: "infra",
+      confidence: "high",
+      caseText: `ping <!channel> & set slack_token=xoxb-fake-1234 ${"w".repeat(50_000)}`,
+      attribution: "by watchdog-l2@pro14",
+    });
+
+    expect(result.text).toContain("&lt;!channel&gt;");
+    expect(result.text).not.toContain("<!channel>");
+    expect(result.text).toContain("slack_token=[REDACTED]");
+    expect(result.text).not.toContain("xoxb-fake-1234");
+    // Field-level Slack cap bounds the case line; the version trailer survives.
+    expect(result.text).toContain("[truncated by egress cap]");
+    expect(result.text.length).toBeLessThan(2000);
+  });
 });

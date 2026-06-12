@@ -888,7 +888,8 @@ export function formatNotification(
       parts.push(
         `Classification: ${event.classification} (confidence: ${event.confidence}) · ${event.attribution}`,
       );
-      parts.push(`Case: ${event.caseText}`);
+      // caseText is the model's verbatim rationale (SYMPH-421).
+      parts.push(`Case: ${sanitizeForSlack(event.caseText)}`);
       parts.push(version);
       return { text: parts.join("\n") };
     }
