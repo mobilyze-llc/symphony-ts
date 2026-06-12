@@ -227,6 +227,19 @@ export interface RuntimeSnapshot {
   decorrelated_gates?: RuntimeSnapshotDecorrelatedGateOutcome[];
   decision_quality?: DispatcherDecisionQualitySummary;
   manager_runs?: RuntimeSnapshotManagerRun[];
+  /**
+   * Last dispatch verdict per issue id (SYMPH-405), sourced from the
+   * orchestrator's in-memory last-verdict map. Includes the synthetic
+   * "__dispatch__" scope for pipeline-wide gates.
+   */
+  dispositions?: Record<string, RuntimeSnapshotDisposition>;
+}
+
+export interface RuntimeSnapshotDisposition {
+  disposition: "admit" | "skip" | "gate" | "halt";
+  reason_code: string;
+  remedy: string | null;
+  since: string;
 }
 
 export function buildRuntimeSnapshot(
@@ -391,7 +404,23 @@ export function buildRuntimeSnapshot(
       extractDispatcherDecisionEvents(state.dispatcherRunJournal),
     ),
     manager_runs: buildManagerRunSnapshots(state),
+    dispositions: buildDispositionSnapshots(state),
   };
+}
+
+function buildDispositionSnapshots(
+  state: OrchestratorState,
+): Record<string, RuntimeSnapshotDisposition> {
+  const dispositions: Record<string, RuntimeSnapshotDisposition> = {};
+  for (const [issueId, record] of Object.entries(state.issueDispositions)) {
+    dispositions[issueId] = {
+      disposition: record.disposition,
+      reason_code: record.reasonCode,
+      remedy: record.remedy,
+      since: record.since,
+    };
+  }
+  return dispositions;
 }
 
 function toSnapshotRateLimitWindowUsage(

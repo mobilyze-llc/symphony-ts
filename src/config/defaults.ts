@@ -83,6 +83,9 @@ export const DEFAULT_WATCHDOG_SYSTEMIC_THRESHOLD = 2;
 export const DEFAULT_WATCHDOG_CIRCUIT_BREAKER = true;
 export const DEFAULT_WATCHDOG_MAX_FILINGS_PER_HOUR = 3;
 
+// Verdict-event defaults (SYMPH-405)
+export const DEFAULT_VERDICTS_PAGE_AFTER_TICKS = 10;
+
 export const SPEC_DEFAULTS = Object.freeze({
   tracker: {
     kind: DEFAULT_TRACKER_KIND,
