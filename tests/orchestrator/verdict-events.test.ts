@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
 import type {
@@ -63,7 +63,6 @@ describe("dispatch verdict events (SYMPH-405)", () => {
 
   it("emits a gate verdict with floor + headroom remedy when the rate-limit floor blocks, and journals the recovery flip", async () => {
     const transitions: Array<{ disposition: string; reasonCode: string }> = [];
-    let blocked = true;
     const orchestrator = createOrchestrator({
       config: createConfig({
         rateLimitAdmission: {
@@ -109,7 +108,6 @@ describe("dispatch verdict events (SYMPH-405)", () => {
     expect(transitions).toHaveLength(1);
 
     // Floor clears → the flip back is journaled on the synthetic scope.
-    blocked = false;
     orchestrator.getState().codexRateLimits = {
       secondary: {
         used_percent: 10,
@@ -126,7 +124,6 @@ describe("dispatch verdict events (SYMPH-405)", () => {
       disposition: "admit",
       reason_code: "rate_window_clear",
     });
-    expect(blocked).toBe(false);
   });
 
   it("emits the requires_explicit_resume skip verdict with the Resume remedy, dedupes, then flips to admit on Resume", async () => {
@@ -600,6 +597,40 @@ describe("dispatch verdict events (SYMPH-405)", () => {
     expect(snapshot.dispositions?.b1?.remedy).toContain("terminal state");
   });
 
+  it("surfaces the synthetic __dispatch__ scope as dispatch_gate, never as a dispositions entry", async () => {
+    const orchestrator = createOrchestrator({
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10_080,
+        resets_at: 4_102_444_800,
+      },
+    };
+    await orchestrator.pollTick();
+
+    const snapshot = buildRuntimeSnapshot(orchestrator.getState(), {
+      now: NOW,
+    });
+    expect(snapshot.dispositions?.[PIPELINE_VERDICT_SCOPE_ID]).toBeUndefined();
+    expect(snapshot.dispatch_gate).toMatchObject({
+      disposition: "gate",
+      reason_code: "rate_window_secondary_floor",
+    });
+
+    // No pipeline-wide verdict yet → the gate field is null, not a fake row.
+    const idle = createOrchestrator();
+    expect(
+      buildRuntimeSnapshot(idle.getState(), { now: NOW }).dispatch_gate,
+    ).toBeNull();
+  });
+
   it("fires one page alert after N consecutive starved ticks and one recovery alert when dispatch resumes", async () => {
     const pages: Array<{ kind: string; consecutiveTicks: number }> = [];
     const config = createConfig({
@@ -653,6 +684,150 @@ describe("dispatch verdict events (SYMPH-405)", () => {
     expect(pages).toHaveLength(2);
   });
 
+  it("rehydrates the page latch from journaled page events: a restart mid-starvation neither double-pages nor drops the recovery alert", async () => {
+    const blockedRates = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10_080,
+        resets_at: 4_102_444_800,
+      },
+    };
+    const clearRates = {
+      secondary: {
+        used_percent: 10,
+        window_minutes: 10_080,
+        resets_at: 4_102_444_800,
+      },
+    };
+    const gatedConfig = () => {
+      const config = createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+        },
+      });
+      config.verdicts = { pageAfterTicks: 2 };
+      return config;
+    };
+
+    // First process: starve past the threshold so the page fires and the
+    // page event lands in the journal.
+    const firstPages: string[] = [];
+    const first = createOrchestrator({
+      config: gatedConfig(),
+      onDispatchPage: (input) => firstPages.push(input.kind),
+    });
+    first.getState().codexRateLimits = blockedRates;
+    await first.pollTick();
+    await first.pollTick();
+    expect(firstPages).toEqual(["page"]);
+
+    // Simulated restart mid-starvation: the latch must rehydrate, so more
+    // starved ticks do NOT re-page, and the recovery alert still fires.
+    const restartedPages: string[] = [];
+    const restarted = createOrchestrator({
+      config: gatedConfig(),
+      runJournal: first.getState().dispatcherRunJournal,
+      onDispatchPage: (input) => restartedPages.push(input.kind),
+    });
+    restarted.getState().codexRateLimits = blockedRates;
+    await restarted.pollTick();
+    await restarted.pollTick();
+    await restarted.pollTick();
+    expect(restartedPages).toEqual([]);
+
+    restarted.getState().codexRateLimits = clearRates;
+    const resumed = await restarted.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(restartedPages).toEqual(["recovery"]);
+
+    // The recovery event is journaled too: a restart after recovery starts
+    // unlatched and needs the full threshold before paging again.
+    const thirdPages: string[] = [];
+    const third = createOrchestrator({
+      config: gatedConfig(),
+      runJournal: restarted.getState().dispatcherRunJournal,
+      onDispatchPage: (input) => thirdPages.push(input.kind),
+    });
+    third.getState().codexRateLimits = blockedRates;
+    await third.pollTick();
+    expect(thirdPages).toEqual([]);
+    await third.pollTick();
+    expect(thirdPages).toEqual(["page"]);
+  });
+
+  it("flushes journal entries to disk in sequence order even when a fire-and-forget verdict write is slow", async () => {
+    const written: number[] = [];
+    const writeRunJournalEntry = async (entry: DispatcherRunJournalEntry) => {
+      // Stall the fire-and-forget verdict write so any unordered awaited
+      // write would overtake it on disk.
+      if (entry.kind === "dispatch_verdict" && entry.issueId === "b1") {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      written.push(entry.sequence);
+    };
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "b1",
+            identifier: "ISSUE-B1",
+            blockedBy: [
+              { id: "x", identifier: "BLOCK-1", state: "In Progress" },
+            ],
+          }),
+          createIssue({ id: "1", identifier: "ISSUE-1" }),
+        ],
+      }),
+      writeRunJournalEntry,
+    });
+
+    const result = await orchestrator.pollTick();
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+
+    const journal = orchestrator.getState().dispatcherRunJournal;
+    expect(journal.length).toBeGreaterThan(2);
+    await vi.waitFor(() => {
+      expect(written).toHaveLength(journal.length);
+    });
+    expect(written).toEqual(journal.map((entry) => entry.sequence));
+  });
+
+  it("journals repeated flip-backs to the same verdict within one tick under distinct idempotency keys", () => {
+    const orchestrator = createOrchestrator();
+    const blocked = createIssue({
+      id: "f1",
+      identifier: "ISSUE-F1",
+      blockedBy: [{ id: "x", identifier: "BLOCK-1", state: "In Progress" }],
+    });
+    const plain = createIssue({ id: "f1", identifier: "ISSUE-F1" });
+
+    // A→B→A→B→A with a frozen clock: every re-emission shares the same
+    // millisecond timestamp, so a timestamp-suffixed key would collide and
+    // the journal's exact-key idempotency would silently drop entries.
+    orchestrator.isDispatchEligible(blocked);
+    orchestrator.getState().claimed.add("f1");
+    orchestrator.isDispatchEligible(plain);
+    orchestrator.getState().claimed.delete("f1");
+    orchestrator.isDispatchEligible(blocked);
+    orchestrator.getState().claimed.add("f1");
+    orchestrator.isDispatchEligible(plain);
+    orchestrator.getState().claimed.delete("f1");
+    orchestrator.isDispatchEligible(blocked);
+
+    const entries = verdictEntries(orchestrator).filter(
+      (entry) => entry.issueId === "f1",
+    );
+    expect(entries.map((entry) => entry.metadata.reason_code)).toEqual([
+      "blocked_by_open",
+      "claimed",
+      "blocked_by_open",
+      "claimed",
+      "blocked_by_open",
+    ]);
+    expect(new Set(entries.map((entry) => entry.idempotencyKey)).size).toBe(5);
+  });
+
   it("formats the new notifier events with attribution", () => {
     const verdict = formatNotification({
       type: "dispatch_verdict_alert",
@@ -702,6 +877,7 @@ function createOrchestrator(overrides?: {
   onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
   onVerdictTransition?: OrchestratorCoreOptions["onVerdictTransition"];
   onDispatchPage?: OrchestratorCoreOptions["onDispatchPage"];
+  writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
 }): OrchestratorCore {
   const tracker =
     overrides?.tracker ??
@@ -728,6 +904,9 @@ function createOrchestrator(overrides?: {
   }
   if (overrides?.onDispatchPage !== undefined) {
     options.onDispatchPage = overrides.onDispatchPage;
+  }
+  if (overrides?.writeRunJournalEntry !== undefined) {
+    options.writeRunJournalEntry = overrides.writeRunJournalEntry;
   }
   return new OrchestratorCore(options);
 }

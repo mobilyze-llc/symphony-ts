@@ -515,6 +515,17 @@ export class OrchestratorCore {
   /** Whether the dispatch-starvation page alert is currently latched. */
   private pageAlertActive = false;
 
+  /**
+   * Ordered disk-flush chain for run-journal entries. Every disk append —
+   * the awaited writer (recordRunJournalEntry) and the fire-and-forget
+   * verdict writer (commitVerdictJournalEntrySync) — chains through this
+   * queue, so disk order always equals in-memory sequence order: an entry's
+   * write may lag, but a later sequence can never land before an earlier
+   * one. Without it, a crash could leave sequence N+1 on disk without N and
+   * replay would rebuild different breaker/cluster state than was alerted.
+   */
+  private runJournalDiskFlushQueue: Promise<void> = Promise.resolve();
+
   private readonly reportedSupervisionFindings = new Set<string>();
 
   private readonly reportedIgnoredSetupInstructionCollisions =
@@ -597,6 +608,8 @@ export class OrchestratorCore {
     this.state.decorrelatedGateOutcomes = {};
     this.lastVerdictKeys.clear();
     this.state.issueDispositions = {};
+    this.starvedTickCount = 0;
+    this.pageAlertActive = false;
 
     const nowMs = this.now().getTime();
     for (const entry of this.state.dispatcherRunJournal) {
@@ -678,7 +691,15 @@ export class OrchestratorCore {
       }
 
       if (entry.kind === "dispatch_verdict") {
-        this.recoverDispatchVerdict(entry);
+        const pageEvent = readMetadataString(entry.metadata, "page_event");
+        if (pageEvent === "page") {
+          this.recoverDispatchPageLatch();
+        } else if (pageEvent === "recovery") {
+          this.pageAlertActive = false;
+          this.starvedTickCount = 0;
+        } else {
+          this.recoverDispatchVerdict(entry);
+        }
       }
 
       if (entry.kind === "cluster_transition") {
@@ -715,6 +736,22 @@ export class OrchestratorCore {
         this.state.claimed.add(lease.issueId);
       }
     }
+  }
+
+  /**
+   * Rehydrate the dispatch-starvation page latch from a journaled "page"
+   * event with no later "recovery" (SYMPH-405 council R1). The latch is
+   * restored as active with the tick counter resumed AT the page threshold:
+   * the active latch guarantees no double-page (trackDispatchStarvation only
+   * pages on a false→true latch transition), and the latch staying set until
+   * a genuinely non-starved tick guarantees the recovery alert still fires —
+   * a restart can neither re-page an already-paged episode nor silently
+   * un-page it.
+   */
+  private recoverDispatchPageLatch(): void {
+    this.pageAlertActive = true;
+    this.starvedTickCount =
+      this.config.verdicts?.pageAfterTicks ?? DEFAULT_VERDICTS_PAGE_AFTER_TICKS;
   }
 
   /**
@@ -1221,7 +1258,6 @@ export class OrchestratorCore {
       if (!this.isDispatchEligible(issue)) {
         continue;
       }
-      eligibleCount += 1;
 
       const candidateSnapshot = createIssueSupervisionSnapshot(issue);
       const findings = this.detectDispatchAdmissionFindings(
@@ -1269,6 +1305,13 @@ export class OrchestratorCore {
         await this.reportSupervisionFindings("dispatch", findings);
         continue;
       }
+
+      // Counted at the FINAL admission boundary: candidates paused by
+      // deterministic admission findings are journaled as dispatcher
+      // decisions, not verdicts, so counting them as "eligible" would let
+      // the starvation page fire while the dispositions map it points at
+      // cannot explain the block.
+      eligibleCount += 1;
 
       const dispatchResult = await this.dispatchIssue(issue, null);
       if (dispatchResult.dispatched) {
@@ -4093,8 +4136,10 @@ export class OrchestratorCore {
    * in-memory last-verdict map — an UNCHANGED disposition+reason for an issue
    * is a no-op (no journal append, no state churn, no alert). The journal's
    * own idempotency machinery dedupes by exact key; a flip BACK to a
-   * previously journaled verdict (A→B→A) appends a timestamp-suffixed key so
-   * the recovery is still journaled.
+   * previously journaled verdict (A→B→A) appends a key suffixed with the
+   * next journal sequence number so the recovery is still journaled. The
+   * sequence suffix is collision-safe where a millisecond timestamp is not:
+   * two flip-backs to the same verdict within one tick get distinct keys.
    *
    * Fire-and-forget: verdict observability never blocks dispatch.
    */
@@ -4124,11 +4169,18 @@ export class OrchestratorCore {
       since: timestamp,
     };
 
+    // A verdict's first emission uses the bare base key; every re-emission
+    // (flip-back) is suffixed. Match both shapes so a flip-back after a
+    // prior flip-back is still detected as already journaled.
     const alreadyJournaled = this.state.dispatcherRunJournal.some(
-      (entry) => entry.idempotencyKey === baseKey,
+      (entry) =>
+        entry.idempotencyKey === baseKey ||
+        entry.idempotencyKey.startsWith(`${baseKey}:`),
     );
     this.commitVerdictJournalEntrySync({
-      idempotencyKey: alreadyJournaled ? `${baseKey}:${timestamp}` : baseKey,
+      idempotencyKey: alreadyJournaled
+        ? `${baseKey}:${this.nextRunJournalSequence()}`
+        : baseKey,
       timestamp,
       kind: "dispatch_verdict",
       issueId: input.issueId,
@@ -4173,11 +4225,11 @@ export class OrchestratorCore {
 
   /**
    * Synchronously commit a verdict-class journal entry (SYMPH-405) to the
-   * in-memory journal, then fire-and-forget the disk write. recordRunJournalEntry
-   * commits the in-memory journal AFTER awaiting the disk write, so calling it
-   * un-awaited from sync paths (isDispatchEligible) would let two overlapping
-   * appends read the same stale journal array and silently drop an entry.
-   * Verdict entries never carry a lease, so no lease bookkeeping is needed.
+   * in-memory journal, then hand the disk write to the ordered flush queue
+   * fire-and-forget. Callable from sync paths (isDispatchEligible) — the
+   * in-memory commit happens before any await, so overlapping appends can
+   * never compute the same sequence from a stale journal. Verdict entries
+   * never carry a lease, so no lease bookkeeping is needed.
    */
   private commitVerdictJournalEntrySync(
     entry: Omit<DispatcherRunJournalEntry, "sequence">,
@@ -4190,29 +4242,51 @@ export class OrchestratorCore {
       return;
     }
     this.state.dispatcherRunJournal = result.journal;
-    try {
-      const write = this.writeRunJournalEntry?.(result.entry);
-      if (write !== undefined) {
-        write.catch((error) => {
-          console.warn(
-            `[orchestrator] Failed to persist ${entry.kind} journal entry for ${entry.issueIdentifier}:`,
-            error,
-          );
-        });
-      }
-    } catch (error) {
+    this.flushRunJournalEntryToDisk(result.entry).catch((error) => {
       console.warn(
         `[orchestrator] Failed to persist ${entry.kind} journal entry for ${entry.issueIdentifier}:`,
         error,
       );
-    }
+    });
+  }
+
+  /**
+   * Append a journal entry's disk write to the ordered flush chain. Entries
+   * are flushed strictly in the order this method is called, which (because
+   * every caller commits to the in-memory journal first, and all callers run
+   * inside the host's serialized event queue) is sequence order. A failed
+   * write does not stall the chain; the caller decides whether the failure
+   * propagates (awaited writer) or is logged (fire-and-forget writer).
+   */
+  private flushRunJournalEntryToDisk(
+    entry: DispatcherRunJournalEntry,
+  ): Promise<void> {
+    const write = this.runJournalDiskFlushQueue.then(async () => {
+      await this.writeRunJournalEntry?.(entry);
+    });
+    this.runJournalDiskFlushQueue = write.catch(() => undefined);
+    return write;
+  }
+
+  /**
+   * The sequence number the next committed journal entry will receive.
+   * Used to build collision-safe idempotency keys for re-emissions: the
+   * sequence is monotonic and survives restarts (the journal is replayed
+   * into memory before any new entry is committed), unlike a millisecond
+   * timestamp suffix which collides under same-tick re-emissions.
+   */
+  private nextRunJournalSequence(): number {
+    return (this.state.dispatcherRunJournal.at(-1)?.sequence ?? 0) + 1;
   }
 
   /**
    * Track the dispatch-starvation page condition (SYMPH-405): eligible
    * candidates > 0 AND dispatched_count == 0 for verdicts.page_after_ticks
    * consecutive ticks fires ONE page alert; the next non-starved tick fires
-   * one recovery alert and unlatches. Fail-open on callback errors.
+   * one recovery alert and unlatches. Each page/recovery transition is
+   * journaled so a restart rehydrates the latch instead of resetting it
+   * (the SYMPH-401 deploy-resets-counters class). Fail-open on callback
+   * errors.
    */
   private trackDispatchStarvation(
     eligibleCount: number,
@@ -4226,6 +4300,7 @@ export class OrchestratorCore {
         DEFAULT_VERDICTS_PAGE_AFTER_TICKS;
       if (!this.pageAlertActive && this.starvedTickCount >= pageAfterTicks) {
         this.pageAlertActive = true;
+        this.recordDispatchPageEvent("page", eligibleCount);
         try {
           this.onDispatchPage?.({
             kind: "page",
@@ -4241,6 +4316,7 @@ export class OrchestratorCore {
 
     if (this.pageAlertActive) {
       this.pageAlertActive = false;
+      this.recordDispatchPageEvent("recovery", eligibleCount);
       try {
         this.onDispatchPage?.({
           kind: "recovery",
@@ -4252,6 +4328,42 @@ export class OrchestratorCore {
       }
     }
     this.starvedTickCount = 0;
+  }
+
+  /**
+   * Journal a dispatch-starvation page transition (SYMPH-405 council R1).
+   * Replay rehydrates the page latch from the latest of these entries, so a
+   * deploy mid-starvation neither double-pages nor silently drops the latch.
+   * Keyed on the next journal sequence: page episodes recur, so the key must
+   * be unique per transition and survive restarts.
+   */
+  private recordDispatchPageEvent(
+    event: "page" | "recovery",
+    eligibleCount: number,
+  ): void {
+    this.commitVerdictJournalEntrySync({
+      idempotencyKey: `page:${PIPELINE_VERDICT_SCOPE_ID}:${event}:${this.nextRunJournalSequence()}`,
+      timestamp: this.now().toISOString(),
+      kind: "dispatch_verdict",
+      issueId: PIPELINE_VERDICT_SCOPE_ID,
+      issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
+      operation: "dispatcher",
+      stage: null,
+      attempt: null,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary:
+        event === "page"
+          ? `Dispatch starvation page fired after ${this.starvedTickCount} consecutive starved ticks.`
+          : "Dispatch starvation recovered.",
+      metadata: {
+        schema_version: 1,
+        page_event: event,
+        eligible_count: eligibleCount,
+        consecutive_ticks: this.starvedTickCount,
+        actor: this.buildVerdictActor(),
+      },
+    });
   }
 
   private async recordDispatcherDecisionEvent(input: {
@@ -4409,11 +4521,26 @@ export class OrchestratorCore {
       return result.entry;
     }
 
+    // Commit in-memory BEFORE the disk await: sequence assignment and
+    // commit must be atomic so an overlapping append can never compute the
+    // same sequence from a stale journal and drop this entry. Disk
+    // durability is ordered separately by the flush queue.
     if (result.entry.lease !== null) {
       result.entry.lease.lastJournalSequence = result.entry.sequence;
     }
-    await this.writeRunJournalEntry?.(result.entry);
     this.state.dispatcherRunJournal = result.journal;
+    try {
+      await this.flushRunJournalEntryToDisk(result.entry);
+    } catch (error) {
+      // Journal-first: an entry that cannot be persisted must not take
+      // effect. Roll back the in-memory append (entries committed after it
+      // keep their sequences; replay tolerates the gap) and surface the
+      // failure before any lease/claim side effects.
+      this.state.dispatcherRunJournal = this.state.dispatcherRunJournal.filter(
+        (candidate) => candidate !== result.entry,
+      );
+      throw error;
+    }
     if (result.entry.lease !== null) {
       this.state.dispatcherLeases[result.entry.lease.leaseId] =
         result.entry.lease;

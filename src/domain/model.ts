@@ -1003,7 +1003,8 @@ export interface OrchestratorState {
    * Last dispatch verdict per issue id (SYMPH-405), keyed by issue id (plus
    * the synthetic "__dispatch__" scope for pipeline-wide gates). Mirrors the
    * orchestrator's last-verdict dedup map and feeds the /api/v1/state
-   * `dispositions` surface.
+   * `dispositions` surface (real issue ids) plus the `dispatch_gate` field
+   * (the synthetic scope).
    */
   issueDispositions: Record<string, IssueDispositionRecord>;
   /**

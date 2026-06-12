@@ -4,6 +4,7 @@ import type {
   ContinuousFeedbackIssueState,
   DecorrelatedGateOutcome,
   DispatcherDecisionQualitySummary,
+  IssueDispositionRecord,
   OrchestratorState,
   RecentActivityEntry,
   SessionRateLimitTelemetry,
@@ -11,6 +12,7 @@ import type {
   StageRecord,
   TurnHistoryEntry,
 } from "../domain/model.js";
+import { PIPELINE_VERDICT_SCOPE_ID } from "../orchestrator/core.js";
 import {
   evaluateDispatcherDecisionQuality,
   extractDispatcherDecisionEvents,
@@ -229,10 +231,16 @@ export interface RuntimeSnapshot {
   manager_runs?: RuntimeSnapshotManagerRun[];
   /**
    * Last dispatch verdict per issue id (SYMPH-405), sourced from the
-   * orchestrator's in-memory last-verdict map. Includes the synthetic
-   * "__dispatch__" scope for pipeline-wide gates.
+   * orchestrator's in-memory last-verdict map. Every key is a real issue
+   * id; pipeline-wide gate state lives in `dispatch_gate`.
    */
   dispositions?: Record<string, RuntimeSnapshotDisposition>;
+  /**
+   * Pipeline-wide dispatch gate/halt state (the synthetic "__dispatch__"
+   * verdict scope, e.g. the global rate-limit admission floor), surfaced
+   * separately so disposition consumers never meet a fake issue id.
+   */
+  dispatch_gate?: RuntimeSnapshotDisposition | null;
 }
 
 export interface RuntimeSnapshotDisposition {
@@ -405,6 +413,7 @@ export function buildRuntimeSnapshot(
     ),
     manager_runs: buildManagerRunSnapshots(state),
     dispositions: buildDispositionSnapshots(state),
+    dispatch_gate: buildDispatchGateSnapshot(state),
   };
 }
 
@@ -413,14 +422,30 @@ function buildDispositionSnapshots(
 ): Record<string, RuntimeSnapshotDisposition> {
   const dispositions: Record<string, RuntimeSnapshotDisposition> = {};
   for (const [issueId, record] of Object.entries(state.issueDispositions)) {
-    dispositions[issueId] = {
-      disposition: record.disposition,
-      reason_code: record.reasonCode,
-      remedy: record.remedy,
-      since: record.since,
-    };
+    if (issueId === PIPELINE_VERDICT_SCOPE_ID) {
+      continue;
+    }
+    dispositions[issueId] = toSnapshotDisposition(record);
   }
   return dispositions;
+}
+
+function buildDispatchGateSnapshot(
+  state: OrchestratorState,
+): RuntimeSnapshotDisposition | null {
+  const record = state.issueDispositions[PIPELINE_VERDICT_SCOPE_ID];
+  return record === undefined ? null : toSnapshotDisposition(record);
+}
+
+function toSnapshotDisposition(
+  record: IssueDispositionRecord,
+): RuntimeSnapshotDisposition {
+  return {
+    disposition: record.disposition,
+    reason_code: record.reasonCode,
+    remedy: record.remedy,
+    since: record.since,
+  };
 }
 
 function toSnapshotRateLimitWindowUsage(
