@@ -1288,6 +1288,13 @@ export class OrchestratorCore {
   }
 
   private recoverPendingStageSignal(entry: DispatcherRunJournalEntry): void {
+    if (
+      entry.kind !== "hard_stop_trigger" &&
+      entry.kind !== "budget_escalation" &&
+      entry.kind !== "pause_triage"
+    ) {
+      return;
+    }
     const pending = readPendingStageSignalMetadata(entry);
     if (pending === null) {
       return;
@@ -1316,7 +1323,28 @@ export class OrchestratorCore {
     if (entry.metadata.completed === true) {
       this.state.completed.add(entry.issueId);
       this.clearTerminalIssueRuntimeState(entry.issueId);
+      return;
     }
+    const signal = readMetadataString(entry.metadata, "signal");
+    if (signal !== "failure") {
+      return;
+    }
+    const failureClass = readMetadataString(entry.metadata, "failureClass");
+    if (!isFailureClass(failureClass)) {
+      return;
+    }
+    if (failureClass === "spec") {
+      this.state.failed.add(entry.issueId);
+      this.releaseClaim(entry.issueId);
+      this.clearTerminalIssueRuntimeState(entry.issueId);
+      return;
+    }
+    this.scheduleRetry(entry.issueId, nextRetryAttempt(entry.attempt), {
+      identifier: entry.issueIdentifier,
+      issueTitle: entry.issueIdentifier,
+      error: `agent reported failure: ${failureClass}`,
+      delayType: "failure",
+    });
   }
 
   private recoverDecorrelatedGateOutcome(
@@ -2625,6 +2653,8 @@ export class OrchestratorCore {
       // routed through the normal AC gate.
       const scheduleDeferred = this.scheduleDeferred;
       const completionMessage = agentMessage ?? runningEntry.lastCodexMessage;
+      // Normal exits already hold the claim from dispatch; pending-signal
+      // consumption reclaims it here so nothing redispatches while AC runs.
       this.state.claimed.add(issueId);
       void this.runAcGate({
         issueIdentifier: runningEntry.identifier,
