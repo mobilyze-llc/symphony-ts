@@ -1333,18 +1333,19 @@ export class OrchestratorCore {
     if (!isFailureClass(failureClass)) {
       return;
     }
-    if (failureClass === "spec") {
-      this.state.failed.add(entry.issueId);
-      this.releaseClaim(entry.issueId);
-      this.clearTerminalIssueRuntimeState(entry.issueId);
-      return;
-    }
-    this.scheduleRetry(entry.issueId, nextRetryAttempt(entry.attempt), {
-      identifier: entry.issueIdentifier,
-      issueTitle: entry.issueIdentifier,
-      error: `agent reported failure: ${failureClass}`,
-      delayType: "failure",
-    });
+    const agentMessage =
+      readMetadataString(entry.metadata, "agentMessage") ?? undefined;
+    this.handleFailureSignal(
+      entry.issueId,
+      createPendingRunningEntry({
+        issue: createReplayIssue(entry.issueId, entry.issueIdentifier),
+        identifier: entry.issueIdentifier,
+        attempt: entry.attempt,
+        agentMessage: agentMessage ?? "",
+      }),
+      failureClass,
+      agentMessage,
+    );
   }
 
   private recoverDecorrelatedGateOutcome(
@@ -2872,6 +2873,7 @@ export class OrchestratorCore {
         signal: pendingStageSignal.signal,
         failureClass: pendingStageSignal.failureClass,
         sourceStageName: pendingStageSignal.stageName,
+        agentMessage: pendingStageSignal.agentMessage,
         resultingStageName,
         completed: this.state.completed.has(issueId),
       },
@@ -9400,6 +9402,23 @@ function createPendingRunningEntry(input: {
     lastCodexMessage: input.agentMessage,
     lastCodexTimestamp: null,
     turnCount: 0,
+  };
+}
+
+function createReplayIssue(issueId: string, issueIdentifier: string): Issue {
+  return {
+    id: issueId,
+    identifier: issueIdentifier,
+    title: issueIdentifier,
+    description: null,
+    priority: null,
+    state: "",
+    branchName: null,
+    url: null,
+    labels: [],
+    blockedBy: [],
+    createdAt: null,
+    updatedAt: null,
   };
 }
 

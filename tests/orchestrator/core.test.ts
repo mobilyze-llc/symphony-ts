@@ -4884,6 +4884,7 @@ describe("dispatcher run journal restart recovery", () => {
             signal: "failure",
             failureClass: "spec",
             sourceStageName: "investigate",
+            agentMessage: "Cannot satisfy it.\n[STAGE_FAILED: spec]",
             resultingStageName: "investigate",
             completed: false,
           },
@@ -4946,6 +4947,7 @@ describe("dispatcher run journal restart recovery", () => {
             signal: "failure",
             failureClass: "verify",
             sourceStageName: "investigate",
+            agentMessage: "Verification failed.\n[STAGE_FAILED: verify]",
             resultingStageName: "investigate",
             completed: false,
           },
@@ -4961,6 +4963,85 @@ describe("dispatcher run journal restart recovery", () => {
       identifier: "ISSUE-1",
       attempt: 1,
       delayType: "failure",
+    });
+  });
+
+  it("restart recovery routes consumed pending review failures through rework", async () => {
+    const config = createInvestigateImplementConfig();
+    const implementStage = config.stages?.stages.implement;
+    if (implementStage === undefined) {
+      throw new Error("expected implement stage");
+    }
+    implementStage.maxRework = 2;
+    implementStage.transitions.onRework = "investigate";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            state: "In Progress",
+          }),
+        ],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "budget_escalation:1:implement:1",
+          kind: "budget_escalation",
+          operation: "dispatcher",
+          leaseId: "budget_escalation:1:implement:1",
+          leaseStatus: "completed",
+          stage: "implement",
+          metadata: {
+            status: "completed",
+            step: 1,
+            pendingStageSignal: "failure",
+            pendingStageName: "implement",
+            pendingAttempt: null,
+            pendingAgentMessage:
+              "Review found a missing assertion.\n[STAGE_FAILED: review]",
+            pendingFailureClass: "review",
+          },
+        }),
+        createJournalEntry({
+          sequence: 2,
+          idempotencyKey: "pending_stage_signal:1:1:consumed",
+          kind: "pending_stage_signal",
+          operation: "dispatcher",
+          leaseId: "pending_stage_signal:1:1:consumed",
+          leaseStatus: "completed",
+          stage: "implement",
+          metadata: {
+            status: "consumed",
+            sourceSequence: 1,
+            signal: "failure",
+            failureClass: "review",
+            sourceStageName: "implement",
+            agentMessage:
+              "Review found a missing assertion.\n[STAGE_FAILED: review]",
+            resultingStageName: "implement",
+            completed: false,
+          },
+        }),
+      ],
+    });
+
+    const state = orchestrator.getState();
+
+    expect(state.issuePendingStageSignals["1"]).toBeUndefined();
+    expect(state.issueStages["1"]).toBe("investigate");
+    expect(state.retryAttempts["1"]).toMatchObject({
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      delayType: "continuation",
+      error: "agent review failure: rework to investigate",
     });
   });
 
