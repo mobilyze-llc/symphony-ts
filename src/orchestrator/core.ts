@@ -2761,6 +2761,7 @@ export class OrchestratorCore {
       this.clearResumeRequirement(issueId);
       return retryEntry;
     } catch (error) {
+      this.clearRetryEntry(issueId);
       this.restorePendingStageConsumptionRollback(rollbackSnapshot);
       throw error;
     }

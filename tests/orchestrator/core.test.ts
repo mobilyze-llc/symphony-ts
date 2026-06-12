@@ -1442,10 +1442,12 @@ describe("orchestrator core", () => {
   });
 
   it("rolls back pending stage consumption when the consumed marker cannot be persisted", async () => {
+    const timers = createFakeTimerScheduler();
     const config = createInvestigateImplementConfig();
     config.budgetEscalation = { maxSteps: 1, multiplier: 2 };
     const orchestrator = new OrchestratorCore({
       config,
+      timerScheduler: timers,
       tracker: createTracker({
         candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
         statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
@@ -1489,6 +1491,8 @@ describe("orchestrator core", () => {
       stageName: "investigate",
     });
     expect(state.retryAttempts["1"]).toBeUndefined();
+    expect(timers.scheduled).toEqual([]);
+    expect(timers.cleared).toHaveLength(1);
     expect(
       state.dispatcherRunJournal.some(
         (entry) => entry.kind === "pending_stage_signal",
@@ -9140,13 +9144,26 @@ function createFakeTimerScheduler() {
     callback: () => void;
     delayMs: number;
   }> = [];
+  const cleared: typeof scheduled = [];
   return {
     scheduled,
+    cleared,
     set(callback: () => void, delayMs: number) {
-      scheduled.push({ callback, delayMs });
-      return { callback, delayMs } as unknown as ReturnType<typeof setTimeout>;
+      const handle = { callback, delayMs };
+      scheduled.push(handle);
+      return handle as unknown as ReturnType<typeof setTimeout>;
     },
-    clear() {},
+    clear(handle: ReturnType<typeof setTimeout> | null) {
+      if (handle === null) {
+        return;
+      }
+      const scheduledHandle = handle as unknown as (typeof scheduled)[number];
+      const index = scheduled.indexOf(scheduledHandle);
+      if (index !== -1) {
+        scheduled.splice(index, 1);
+      }
+      cleared.push(scheduledHandle);
+    },
   };
 }
 
