@@ -141,6 +141,14 @@ export function parseCouncilReviewGateArgs(
   if (parsed.prNumber !== undefined && parsed.repo === undefined) {
     throw new UsageError("--repo is required when --pr is provided.");
   }
+  if (
+    parsed.assertFreshReview !== undefined &&
+    (parsed.mode !== undefined || parsed.round !== undefined)
+  ) {
+    throw new UsageError(
+      "--mode and --round are only valid when running a council review, not with --assert-fresh-review.",
+    );
+  }
 
   return parsed as ParsedArgs;
 }
@@ -182,7 +190,13 @@ export async function runCouncilReviewGateCli(
           ...(parsed.headRef === undefined ? {} : { headRef: parsed.headRef }),
         });
   io.stdout(`${JSON.stringify(result, null, 2)}\n`);
-  return result.verdict === "pass" ? 0 : 1;
+  if (result.verdict === "pass") {
+    return 0;
+  }
+  if (parsed.assertFreshReview !== undefined && "code" in result) {
+    return result.code === "stale_review" ? 1 : 2;
+  }
+  return 1;
 }
 
 function readValue(

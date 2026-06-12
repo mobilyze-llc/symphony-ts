@@ -542,6 +542,20 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).not.toContain("issue description contains the frozen spec");
   });
 
+  it("review rework renders convergence mode and incremented round", async () => {
+    const output = await renderPrompt({
+      workflow: { promptTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "review",
+      reworkCount: 2,
+    });
+
+    expect(output).toContain("### Re-review After Rework (rework #2)");
+    expect(output).toContain("--mode convergence");
+    expect(output).toContain("--round 3");
+  });
+
   it("merge stage does NOT contain description and HAS prohibitions", async () => {
     const output = await renderPrompt({
       workflow: { promptTemplate },

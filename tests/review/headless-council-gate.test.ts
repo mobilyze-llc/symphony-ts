@@ -1487,6 +1487,129 @@ describe("runHeadlessCouncilGate", () => {
       reviewRound: 2,
     });
   });
+
+  it("rejects a clean review artifact from a different issue", async () => {
+    const harness = await createHarness();
+    const reviewResultPath = join(harness.artifactDir, "wrong-issue.json");
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(cleanReviewResult({ issueId: "MOB-999", reviewedHeadSha: "head-sha" }), null, 2)}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha: "head-sha",
+      currentHeadSha: null,
+    });
+    expect(result.summary).toContain('issueId "MOB-999"');
+    expect(result.summary).toContain('expected "MOB-88"');
+  });
+
+  it("allows a moved head when every changed file matches the explicit allowlist", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "new-head-sha",
+        }),
+        stderr: "",
+      },
+      gitDiffNameOnly: {
+        exitCode: 0,
+        stdout: ".symphony/reports/fresh.html\ndocs/reports/a1.md\n",
+        stderr: "",
+      },
+    });
+    const reviewResultPath = join(harness.artifactDir, "allowlisted.json");
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(cleanReviewResult({ reviewedHeadSha: "old-head-sha" }), null, 2)}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+        allowedChangePatterns: [".symphony/reports/**", "docs/reports/a?.md"],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "pass",
+      code: "fresh",
+      materialChangedFiles: [],
+      allowlistedChangedFiles: [
+        ".symphony/reports/fresh.html",
+        "docs/reports/a1.md",
+      ],
+    });
+  });
+
+  it("fails stale when a moved head has both allowlisted and material changes", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "new-head-sha",
+        }),
+        stderr: "",
+      },
+      gitDiffNameOnly: {
+        exitCode: 0,
+        stdout: ".symphony/reports/fresh.html\nsrc/index.ts\n",
+        stderr: "",
+      },
+    });
+    const reviewResultPath = join(harness.artifactDir, "mixed.json");
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(cleanReviewResult({ reviewedHeadSha: "old-head-sha" }), null, 2)}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+        allowedChangePatterns: [".symphony/reports/**"],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "stale_review",
+      materialChangedFiles: ["src/index.ts"],
+      allowlistedChangedFiles: [".symphony/reports/fresh.html"],
+      guidance: "rerun convergence review against HEAD.",
+    });
+  });
 });
 
 describe("execFileCommand", () => {
@@ -1692,13 +1815,14 @@ function readFlag(args: readonly string[], flag: string): string | undefined {
 }
 
 function cleanReviewResult(options: {
+  issueId?: string;
   reviewedHeadSha: string;
   mode?: "full" | "convergence";
   round?: number;
 }) {
   return {
     schemaVersion: 1,
-    issueId: "MOB-88",
+    issueId: options.issueId ?? "MOB-88",
     verdict: "pass",
     startedAt: "2026-06-12T00:00:00.000Z",
     completedAt: "2026-06-12T00:01:00.000Z",

@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   isDirectRun,
   parseCouncilReviewGateArgs,
+  runCouncilReviewGateCli,
 } from "../../src/cli/council-review-gate.js";
 
 describe("parseCouncilReviewGateArgs", () => {
@@ -38,7 +39,32 @@ describe("parseCouncilReviewGateArgs", () => {
     });
   });
 
-  it("parses council loop metadata and freshness assertion inputs", () => {
+  it("parses council loop metadata", () => {
+    expect(
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "MOB-88",
+          "--artifact-dir",
+          "/tmp/review",
+          "--mode",
+          "convergence",
+          "--round",
+          "2",
+        ],
+        "/cwd",
+      ),
+    ).toEqual({
+      issueId: "MOB-88",
+      artifactDir: "/tmp/review",
+      workspace: "/cwd",
+      mode: "convergence",
+      round: 2,
+      allowedChangePatterns: [],
+    });
+  });
+
+  it("parses freshness assertion inputs", () => {
     expect(
       parseCouncilReviewGateArgs(
         [
@@ -48,10 +74,6 @@ describe("parseCouncilReviewGateArgs", () => {
           "/tmp/review",
           "--assert-fresh-review",
           "/tmp/old/review-result.json",
-          "--mode",
-          "convergence",
-          "--round",
-          "2",
           "--allow-stale-path",
           ".symphony/reports/**",
           "--allow-stale-path",
@@ -64,8 +86,6 @@ describe("parseCouncilReviewGateArgs", () => {
       artifactDir: "/tmp/review",
       workspace: "/cwd",
       assertFreshReview: "/tmp/old/review-result.json",
-      mode: "convergence",
-      round: 2,
       allowedChangePatterns: [".symphony/reports/**", "docs/reports/*.html"],
     });
   });
@@ -84,6 +104,60 @@ describe("parseCouncilReviewGateArgs", () => {
         "/cwd",
       ),
     ).toThrow('--mode must be "full" or "convergence"');
+  });
+
+  it("rejects review loop flags in freshness assertion mode", () => {
+    expect(() =>
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "MOB-88",
+          "--artifact-dir",
+          "/tmp/review",
+          "--assert-fresh-review",
+          "/tmp/review-result.json",
+          "--mode",
+          "convergence",
+        ],
+        "/cwd",
+      ),
+    ).toThrow("--mode and --round are only valid");
+  });
+
+  it("returns exit code 2 for invalid freshness artifacts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-council-cli-"));
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+
+    const code = await runCouncilReviewGateCli(
+      [
+        "--issue-id",
+        "MOB-88",
+        "--artifact-dir",
+        join(root, "artifacts"),
+        "--workspace",
+        root,
+        "--assert-fresh-review",
+        join(root, "missing-review-result.json"),
+      ],
+      {
+        stdout: (message) => {
+          stdout.push(message);
+          return true;
+        },
+        stderr: (message) => {
+          stderr.push(message);
+          return true;
+        },
+      },
+    );
+
+    expect(code).toBe(2);
+    expect(stderr).toEqual([]);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      verdict: "error",
+      code: "invalid_review_artifact",
+    });
   });
 
   it("requires a repo when PR mode is used", () => {

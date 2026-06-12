@@ -508,6 +508,24 @@ export async function assertFreshCouncilReview(
   const metadata = reviewResult.review_metadata;
   const reviewedHeadSha = stringOrNull(metadata?.reviewed_head_sha);
   const baseSha = stringOrNull(metadata?.base_sha);
+  if (reviewResult.issueId !== input.issueId) {
+    return await writeFreshnessResult({
+      schemaVersion: 1,
+      issueId: input.issueId,
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha,
+      currentHeadSha: null,
+      baseSha,
+      reviewMode: metadata?.mode ?? null,
+      reviewRound: metadata?.round ?? null,
+      materialChangedFiles: [],
+      allowlistedChangedFiles: [],
+      allowedChangePatterns: [...(input.allowedChangePatterns ?? [])],
+      guidance: "rerun convergence review against HEAD.",
+      summary: `Council review artifact issueId ${JSON.stringify(reviewResult.issueId)} does not match expected ${JSON.stringify(input.issueId)}.`,
+    });
+  }
   if (
     reviewResult.schemaVersion !== 1 ||
     reviewResult.verdict !== "pass" ||
@@ -913,12 +931,16 @@ function isAllowlistedChangedFile(
 }
 
 function globLikePatternToRegExp(pattern: string): RegExp {
-  const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
   const doubleStarToken = "__SYMPHONY_DOUBLE_STAR__";
+  const questionToken = "__SYMPHONY_QUESTION__";
+  const escaped = pattern
+    .replace(/\?/g, questionToken)
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&");
   const regexSource = escaped
     .replace(/\*\*/g, doubleStarToken)
     .replace(/\*/g, "[^/]*")
-    .replaceAll(doubleStarToken, ".*");
+    .replaceAll(doubleStarToken, ".*")
+    .replaceAll(questionToken, "[^/]");
   return new RegExp(`^${regexSource}$`);
 }
 
