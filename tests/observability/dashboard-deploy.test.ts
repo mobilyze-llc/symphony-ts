@@ -393,6 +393,7 @@ function createSnapshot(): RuntimeSnapshot {
       requestsRemaining: 7,
     },
     rate_limit_admission: null,
+    explicit_resume_required: {},
   };
 }
 

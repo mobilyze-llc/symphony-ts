@@ -7,7 +7,7 @@
  * instead of living in a bespoke persistence store. These tests restart the
  * orchestrator by handing one core's journal to a fresh core.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
 import type {
@@ -361,6 +361,233 @@ describe("SYMPH-401: per-issue cumulative spend survives restarts", () => {
   });
 });
 
+describe("SYMPH-401 council R1: journal-first failure contracts", () => {
+  it("omits a stage record from BOTH live history and replay when its journal write fails", async () => {
+    const config = createConfig({ stages: createImplementStages() });
+    const orchestrator = createOrchestrator({
+      config,
+      writeRunJournalEntry: async (entry) => {
+        if (entry.kind === "stage_record") {
+          throw new Error("disk full");
+        }
+      },
+    });
+    await orchestrator.pollTick();
+    feedTokens(orchestrator, { inputTokens: 60, outputTokens: 40 });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await orchestrator.onWorkerExit({
+        issueId: "1",
+        outcome: "normal",
+        hardStop: BUDGET_PAUSE,
+      });
+    } finally {
+      warn.mockRestore();
+    }
+
+    // Journal-first: the un-journaled spend never reached live history…
+    expect(orchestrator.getState().issueExecutionHistory["1"]).toBeUndefined();
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.filter((entry) => entry.kind === "stage_record"),
+    ).toHaveLength(0);
+
+    // …so a restart reconstructs exactly what live had (both omit).
+    const restarted = createOrchestrator({
+      config,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    expect(restarted.getState().issueExecutionHistory["1"]).toBeUndefined();
+  });
+
+  it("does not grant or count a triage resume when the verdict journal write fails; replay agrees", async () => {
+    const config = createConfig({
+      pauseTriage: {
+        baseUrl: "http://studio2.local:8000/v1",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        maxResumes: 1,
+      },
+    });
+    const orchestrator = createOrchestrator({
+      config,
+      runPauseTriage: async () => ({
+        verdict: "continue",
+        rationale: "Real diff in progress; one unit should finish.",
+      }),
+      writeRunJournalEntry: async (entry) => {
+        if (entry.kind === "pause_triage") {
+          throw new Error("disk full");
+        }
+      },
+    });
+
+    await orchestrator.pollTick();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let parked: unknown;
+    try {
+      parked = await orchestrator.onWorkerExit({
+        issueId: "1",
+        outcome: "normal",
+        hardStop: BUDGET_PAUSE,
+      });
+    } finally {
+      warn.mockRestore();
+    }
+
+    // The resume was NOT authorized: the issue parked and no resume was
+    // consumed, so memory matches the (resume-less) journal.
+    expect(parked).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(
+      orchestrator.getState().issuePauseTriageResumes["1"],
+    ).toBeUndefined();
+
+    // Replay reconstructs the same count: the cap (1) is still fully
+    // available after a restart instead of having been silently consumed.
+    const restarted = createOrchestrator({
+      config,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    expect(restarted.getState().issuePauseTriageResumes["1"]).toBeUndefined();
+    expect(restarted.getState().resumeRequired.has("1")).toBe(true);
+  });
+});
+
+describe("SYMPH-401 council R1: terminal completion clears replayed counters", () => {
+  it("does not resurrect escalation/triage/spend state for an issue live completed terminally (non-gate path)", async () => {
+    const config = createConfig({
+      stages: createImplementToTerminalStages(),
+      budgetEscalation: { maxSteps: 3, multiplier: 2 },
+    });
+    const orchestrator = createOrchestrator({
+      config,
+      updateIssueState: async () => {},
+    });
+
+    await orchestrator.pollTick();
+    feedTokens(orchestrator, { inputTokens: 60, outputTokens: 40 });
+    const escalated = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: BUDGET_PAUSE,
+    });
+    expect(escalated?.delayType).toBe("continuation");
+    expect(orchestrator.getState().issueBudgetEscalations["1"]).toBe(1);
+
+    await orchestrator.onRetryTimer("1");
+    feedTokens(orchestrator, { inputTokens: 30, outputTokens: 20 });
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+
+    // Let the fire-and-forget terminal tracker write land its completed
+    // journal entry (the replay evidence).
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    const terminalEvidence = orchestrator
+      .getState()
+      .dispatcherRunJournal.find(
+        (entry) =>
+          entry.kind === "tracker_write" &&
+          entry.idempotencyKey.includes(":terminal:") &&
+          entry.idempotencyKey.endsWith(":completed"),
+      );
+    expect(terminalEvidence).toBeDefined();
+
+    // Restart: replay must not leave the completed issue's counters behind.
+    const restarted = createOrchestrator({
+      config,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    expect(restarted.getState().completed.has("1")).toBe(true);
+    expect(restarted.getState().issueBudgetEscalations["1"]).toBeUndefined();
+    expect(restarted.getState().issuePauseTriageResumes["1"]).toBeUndefined();
+    expect(restarted.getState().issueExecutionHistory["1"]).toBeUndefined();
+    expect(restarted.getState().resumeRequired.has("1")).toBe(false);
+  });
+});
+
+describe("SYMPH-401: continuation re-pauses journal distinct stage records", () => {
+  it("replays BOTH stage records for two exits on the same stage+attempt and sums the spend", async () => {
+    const config = createConfig({
+      stages: createImplementStages(),
+      budgetEscalation: { maxSteps: 3, multiplier: 2 },
+    });
+    const orchestrator = createOrchestrator({ config });
+
+    await orchestrator.pollTick();
+    feedTokens(orchestrator, { inputTokens: 60, outputTokens: 40 });
+    const first = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: BUDGET_PAUSE,
+    });
+    expect(first?.delayType).toBe("continuation");
+
+    await orchestrator.onRetryTimer("1");
+    feedTokens(orchestrator, { inputTokens: 30, outputTokens: 20 });
+    const second = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: BUDGET_PAUSE,
+    });
+    expect(second?.delayType).toBe("continuation");
+
+    const stageRecordEntries = orchestrator
+      .getState()
+      .dispatcherRunJournal.filter((entry) => entry.kind === "stage_record");
+    expect(stageRecordEntries).toHaveLength(2);
+    expect(stageRecordEntries[0]?.idempotencyKey).not.toBe(
+      stageRecordEntries[1]?.idempotencyKey,
+    );
+
+    const restarted = createOrchestrator({
+      config,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    const replayed = restarted.getState().issueExecutionHistory["1"];
+    expect(replayed).toHaveLength(2);
+    expect(
+      (replayed ?? []).reduce((sum, record) => sum + record.totalTokens, 0),
+    ).toBe(150);
+  });
+});
+
+describe("SYMPH-406: degraded mark fallback", () => {
+  it("falls back to the snapshot timestamp (never blank) and warns when a mark record is missing", async () => {
+    const orchestrator = createOrchestrator();
+    await orchestrator.writeIntent({
+      verb: "park",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "pro14" },
+      reason: { class: "manual_park", human: "park" },
+    });
+    // Simulate a writer that bypassed the mark surface.
+    Reflect.deleteProperty(orchestrator.getState().resumeRequiredMarks, "1");
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const snapshot = buildRuntimeSnapshot(orchestrator.getState(), {
+        now: NOW,
+      });
+      expect(snapshot.explicit_resume_required["1"]).toEqual({
+        reason: "stop_like_pause",
+        set_by_sequence: null,
+        since: NOW.toISOString(),
+      });
+      expect(
+        warn.mock.calls.some((call) =>
+          String(call[0]).includes("without a mark record"),
+        ),
+      ).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -402,6 +629,8 @@ function createOrchestrator(overrides?: {
   runJournal?: DispatcherRunJournal;
   postComment?: OrchestratorCoreOptions["postComment"];
   runPauseTriage?: OrchestratorCoreOptions["runPauseTriage"];
+  writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
+  updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
 }): OrchestratorCore {
   const options: OrchestratorCoreOptions = {
     config: overrides?.config ?? createConfig(),
@@ -420,6 +649,12 @@ function createOrchestrator(overrides?: {
   }
   if (overrides?.runPauseTriage !== undefined) {
     options.runPauseTriage = overrides.runPauseTriage;
+  }
+  if (overrides?.writeRunJournalEntry !== undefined) {
+    options.writeRunJournalEntry = overrides.writeRunJournalEntry;
+  }
+  if (overrides?.updateIssueState !== undefined) {
+    options.updateIssueState = overrides.updateIssueState;
   }
   return new OrchestratorCore(options);
 }
@@ -458,6 +693,45 @@ function createImplementStages(): NonNullable<
         reviewers: [],
         transitions: { onComplete: null, onApprove: null, onRework: null },
         linearState: null,
+      },
+    },
+  };
+}
+
+function createImplementToTerminalStages(): NonNullable<
+  ResolvedWorkflowConfig["stages"]
+> {
+  return {
+    initialStage: "implement",
+    fastTrack: null,
+    stages: {
+      implement: {
+        type: "agent",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: { onComplete: "done", onApprove: null, onRework: null },
+        linearState: null,
+      },
+      done: {
+        type: "terminal",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: { onComplete: null, onApprove: null, onRework: null },
+        linearState: "Done",
       },
     },
   };

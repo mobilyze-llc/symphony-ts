@@ -246,7 +246,7 @@ export interface RuntimeSnapshot {
    * the reason and the journal sequence (event cursor) that set the mark.
    * The 2026-06-11 frozen-queue diagnosis collapses to this one read.
    */
-  explicit_resume_required?: Record<string, RuntimeSnapshotExplicitResumeMark>;
+  explicit_resume_required: Record<string, RuntimeSnapshotExplicitResumeMark>;
 }
 
 export interface RuntimeSnapshotExplicitResumeMark {
@@ -426,20 +426,30 @@ export function buildRuntimeSnapshot(
     manager_runs: buildManagerRunSnapshots(state),
     dispositions: buildDispositionSnapshots(state),
     dispatch_gate: buildDispatchGateSnapshot(state),
-    explicit_resume_required: buildExplicitResumeMarks(state),
+    explicit_resume_required: buildExplicitResumeMarks(state, now),
   };
 }
 
 function buildExplicitResumeMarks(
   state: OrchestratorState,
+  now: Date,
 ): Record<string, RuntimeSnapshotExplicitResumeMark> {
   const marks: Record<string, RuntimeSnapshotExplicitResumeMark> = {};
   for (const issueId of state.resumeRequired) {
     const mark = state.resumeRequiredMarks[issueId];
+    if (mark === undefined) {
+      // Canary: every resumeRequired entry should carry a mark record
+      // (recordIssueRequiresExplicitResume writes both together). A missing
+      // mark means a writer bypassed the mark surface — degrade to the
+      // snapshot's own timestamp rather than a blank `since`.
+      console.warn(
+        `[runtime-snapshot] issue ${issueId} is in resumeRequired without a mark record — degraded explicit_resume_required entry`,
+      );
+    }
     marks[issueId] = {
       reason: mark?.reason ?? "stop_like_pause",
       set_by_sequence: mark?.setBySequence ?? null,
-      since: mark?.since ?? "",
+      since: mark?.since ?? now.toISOString(),
     };
   }
   return marks;

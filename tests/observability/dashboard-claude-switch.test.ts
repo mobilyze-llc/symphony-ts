@@ -336,6 +336,7 @@ function createSnapshotWithRunning(runningCount: number): RuntimeSnapshot {
       requestsRemaining: 10,
     },
     rate_limit_admission: null,
+    explicit_resume_required: {},
   };
 }
 

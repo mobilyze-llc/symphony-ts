@@ -7168,8 +7168,9 @@ describe("auto-close parent", () => {
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
     });
 
-    // Allow microtasks to flush
-    await Promise.resolve();
+    // Allow the fire-and-forget terminal tracker write (journaled through
+    // runTrackerWriteOnce since council R1) to complete its lease + write.
+    await new Promise((resolve) => setImmediate(resolve));
 
     // The terminal state update should still have fired despite autoCloseParentIssue failure
     expect(updateStateCalls).toHaveLength(1);
