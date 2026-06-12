@@ -467,7 +467,7 @@ describe("calibration digest (SYMPH-411)", () => {
           issueId: "issue-a",
           issueIdentifier: "SYMPH|100\nextra",
           action: "park",
-          classification: "weird|class\nification",
+          classification: "weird|class\rification",
           parkKind: "novelty",
         }),
       ]),

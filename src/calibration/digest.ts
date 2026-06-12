@@ -448,7 +448,7 @@ export interface RenderDigestOptions {
  * newlines would break row structure. Not a security boundary.
  */
 function escapeMarkdownCell(value: string): string {
-  return value.replace(/\r?\n/g, " ").replaceAll("|", "\\|");
+  return value.replace(/\r\n?|\n/g, " ").replaceAll("|", "\\|");
 }
 
 function formatPercent(value: number | null): string {
