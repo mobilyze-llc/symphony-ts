@@ -192,6 +192,10 @@ interface BudgetPauseHandlingResult {
   retryEntry: RetryEntry | null;
 }
 
+interface FailureSignalHandlingOptions {
+  emitSideEffects: boolean;
+}
+
 export type WorkerExitOutcome =
   | "normal"
   | "abnormal"
@@ -1345,6 +1349,7 @@ export class OrchestratorCore {
       }),
       failureClass,
       agentMessage,
+      { emitSideEffects: false },
     );
   }
 
@@ -3498,6 +3503,7 @@ export class OrchestratorCore {
     runningEntry: RunningEntry,
     failureClass: FailureClass,
     agentMessage: string | undefined,
+    options: FailureSignalHandlingOptions = { emitSideEffects: true },
   ): RetryEntry | null {
     if (failureClass === "spec") {
       // Spec failures are unrecoverable — escalate immediately.
@@ -3527,27 +3533,30 @@ export class OrchestratorCore {
         stageName,
       );
 
-      void this.fireEscalationSideEffects(
-        issueId,
-        runningEntry.identifier,
-        "Agent reported unrecoverable spec failure. Escalating for manual review.",
-      );
-      void this.recordFailureExhausted(
-        issueId,
-        runningEntry.identifier,
-        runningEntry.issue.title,
-        specFailureText,
-        {
-          failure_signature: incoming.signature,
-          failure_class: incoming.class,
-        },
-      );
+      if (options.emitSideEffects) {
+        void this.fireEscalationSideEffects(
+          issueId,
+          runningEntry.identifier,
+          "Agent reported unrecoverable spec failure. Escalating for manual review.",
+        );
+        void this.recordFailureExhausted(
+          issueId,
+          runningEntry.identifier,
+          runningEntry.issue.title,
+          specFailureText,
+          {
+            failure_signature: incoming.signature,
+            failure_class: incoming.class,
+          },
+        );
+      }
       return null;
     }
 
     if (failureClass === "verify" || failureClass === "infra") {
       if (
         failureClass === "infra" &&
+        options.emitSideEffects &&
         this.handleReviewInfrastructureStall(
           issueId,
           runningEntry,
@@ -3575,12 +3584,22 @@ export class OrchestratorCore {
     if (failureClass === "rebase") {
       delete this.state.issueReviewInfrastructureStalls[issueId];
       // Rebase failures — trigger rework if onRework configured, else retry
-      return this.handleRebaseFailure(issueId, runningEntry, agentMessage);
+      return this.handleRebaseFailure(
+        issueId,
+        runningEntry,
+        agentMessage,
+        options,
+      );
     }
 
     // failureClass === "review" — trigger rework via gate lookup
     delete this.state.issueReviewInfrastructureStalls[issueId];
-    return this.handleReviewFailure(issueId, runningEntry, agentMessage);
+    return this.handleReviewFailure(
+      issueId,
+      runningEntry,
+      agentMessage,
+      options,
+    );
   }
 
   /**
@@ -3592,6 +3611,7 @@ export class OrchestratorCore {
     issueId: string,
     runningEntry: RunningEntry,
     agentMessage: string | undefined,
+    options: FailureSignalHandlingOptions = { emitSideEffects: true },
   ): RetryEntry | null {
     // Same-criterion rework brake (SYMPH-402): rework cycles bypass the
     // retry path, so the SYMPH-396 retry-without-novelty short-circuit never
@@ -3601,7 +3621,7 @@ export class OrchestratorCore {
     // failed pre-gate criterion.
     const streak = this.trackReviewFailureStreak(issueId, agentMessage);
     if (streak.count >= MAX_SAME_CRITERION_REVIEW_FAILURES) {
-      this.parkRepeatedReviewFailure(issueId, runningEntry, streak);
+      this.parkRepeatedReviewFailure(issueId, runningEntry, streak, options);
       return null;
     }
 
@@ -3644,20 +3664,24 @@ export class OrchestratorCore {
       // Use reworkGate directly — it now supports agent stages with onRework
       const reworkTarget = this.reworkGate(issueId);
       if (reworkTarget === "escalated") {
-        void this.fireEscalationSideEffects(
-          issueId,
-          runningEntry.identifier,
-          "Agent review failure: max rework attempts exceeded. Escalating for manual review.",
-        );
+        if (options.emitSideEffects) {
+          void this.fireEscalationSideEffects(
+            issueId,
+            runningEntry.identifier,
+            "Agent review failure: max rework attempts exceeded. Escalating for manual review.",
+          );
+        }
         return null;
       }
       if (reworkTarget !== null) {
-        this.postReviewFindingsComment(
-          issueId,
-          runningEntry.identifier,
-          currentStageName,
-          agentMessage,
-        );
+        if (options.emitSideEffects) {
+          this.postReviewFindingsComment(
+            issueId,
+            runningEntry.identifier,
+            currentStageName,
+            agentMessage,
+          );
+        }
         return this.scheduleRetry(issueId, 1, {
           identifier: runningEntry.identifier,
           error: `agent review failure: rework to ${reworkTarget}`,
@@ -3712,21 +3736,25 @@ export class OrchestratorCore {
 
     if (reworkTarget === "escalated") {
       // reworkGate already cleaned up state — fire escalation side effects
-      void this.fireEscalationSideEffects(
-        issueId,
-        runningEntry.identifier,
-        "Agent review failure: max rework attempts exceeded. Escalating for manual review.",
-      );
+      if (options.emitSideEffects) {
+        void this.fireEscalationSideEffects(
+          issueId,
+          runningEntry.identifier,
+          "Agent review failure: max rework attempts exceeded. Escalating for manual review.",
+        );
+      }
       return null;
     }
 
     // Rework target set by reworkGate — post findings and schedule continuation
-    this.postReviewFindingsComment(
-      issueId,
-      runningEntry.identifier,
-      currentStageName,
-      agentMessage,
-    );
+    if (options.emitSideEffects) {
+      this.postReviewFindingsComment(
+        issueId,
+        runningEntry.identifier,
+        currentStageName,
+        agentMessage,
+      );
+    }
     return this.scheduleRetry(issueId, 1, {
       identifier: runningEntry.identifier,
       error: `agent review failure: rework to ${reworkTarget}`,
@@ -3899,6 +3927,7 @@ export class OrchestratorCore {
     issueId: string,
     runningEntry: RunningEntry,
     streak: { signature: string; count: number; matchedCriteria: string[] },
+    options: FailureSignalHandlingOptions = { emitSideEffects: true },
   ): void {
     const stageName = this.state.issueStages[issueId] ?? null;
     const criteriaBlock =
@@ -3922,29 +3951,31 @@ export class OrchestratorCore {
       },
       stageName,
     );
-    void this.fireEscalationSideEffects(
-      issueId,
-      runningEntry.identifier,
-      [
-        "## Parked: repeated review failure on the same criterion (SYMPH-402)",
-        "",
-        `The review stage failed ${streak.count} consecutive rounds with the same pre-gate criterion unsatisfied:`,
-        criteriaBlock,
-        "",
-        "The orchestrator parked this issue instead of starting another implement rework round. Likely cause: a frozen acceptance criterion that contradicts the SYMPH-358 verify contract (e.g. a bare full-suite `check:` while CI on the PR head SHA is green — CI is the contract's authority).",
-        "Operator action: inspect the frozen AC snapshot and the PR's CI status; correct the criterion or the evidence, then resume with a fresh Todo → Resume transition.",
-      ].join("\n"),
-    );
-    void this.recordFailureExhausted(
-      issueId,
-      runningEntry.identifier,
-      runningEntry.issue.title,
-      parkReason,
-      {
-        failure_signature: streak.signature,
-        failure_class: "permanent",
-      },
-    );
+    if (options.emitSideEffects) {
+      void this.fireEscalationSideEffects(
+        issueId,
+        runningEntry.identifier,
+        [
+          "## Parked: repeated review failure on the same criterion (SYMPH-402)",
+          "",
+          `The review stage failed ${streak.count} consecutive rounds with the same pre-gate criterion unsatisfied:`,
+          criteriaBlock,
+          "",
+          "The orchestrator parked this issue instead of starting another implement rework round. Likely cause: a frozen acceptance criterion that contradicts the SYMPH-358 verify contract (e.g. a bare full-suite `check:` while CI on the PR head SHA is green — CI is the contract's authority).",
+          "Operator action: inspect the frozen AC snapshot and the PR's CI status; correct the criterion or the evidence, then resume with a fresh Todo → Resume transition.",
+        ].join("\n"),
+      );
+      void this.recordFailureExhausted(
+        issueId,
+        runningEntry.identifier,
+        runningEntry.issue.title,
+        parkReason,
+        {
+          failure_signature: streak.signature,
+          failure_class: "permanent",
+        },
+      );
+    }
   }
 
   /**
@@ -3983,6 +4014,7 @@ export class OrchestratorCore {
     issueId: string,
     runningEntry: RunningEntry,
     agentMessage: string | undefined,
+    options: FailureSignalHandlingOptions = { emitSideEffects: true },
   ): RetryEntry | null {
     const stagesConfig = this.config.stages;
     if (stagesConfig === null) {
@@ -4020,20 +4052,24 @@ export class OrchestratorCore {
     ) {
       const reworkTarget = this.reworkGate(issueId);
       if (reworkTarget === "escalated") {
-        void this.fireEscalationSideEffects(
-          issueId,
-          runningEntry.identifier,
-          "Rebase failure: max rework attempts exceeded. Escalating for manual review.",
-        );
+        if (options.emitSideEffects) {
+          void this.fireEscalationSideEffects(
+            issueId,
+            runningEntry.identifier,
+            "Rebase failure: max rework attempts exceeded. Escalating for manual review.",
+          );
+        }
         return null;
       }
       if (reworkTarget !== null) {
-        this.postRebaseComment(
-          issueId,
-          runningEntry.identifier,
-          currentStageName,
-          agentMessage,
-        );
+        if (options.emitSideEffects) {
+          this.postRebaseComment(
+            issueId,
+            runningEntry.identifier,
+            currentStageName,
+            agentMessage,
+          );
+        }
         return this.scheduleRetry(issueId, 1, {
           identifier: runningEntry.identifier,
           error: `rebase failure: rework to ${reworkTarget}`,

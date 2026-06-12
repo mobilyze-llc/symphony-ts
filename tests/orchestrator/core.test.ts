@@ -4974,6 +4974,7 @@ describe("dispatcher run journal restart recovery", () => {
     }
     implementStage.maxRework = 2;
     implementStage.transitions.onRework = "investigate";
+    const postedComments: string[] = [];
     const orchestrator = new OrchestratorCore({
       config,
       tracker: createTracker({
@@ -4989,6 +4990,9 @@ describe("dispatcher run journal restart recovery", () => {
         workerHandle: { pid: 1001 },
         monitorHandle: { ref: "monitor-1" },
       }),
+      postComment: async (_issueId, body) => {
+        postedComments.push(body);
+      },
       runJournal: [
         createJournalEntry({
           sequence: 1,
@@ -5043,6 +5047,7 @@ describe("dispatcher run journal restart recovery", () => {
       delayType: "continuation",
       error: "agent review failure: rework to investigate",
     });
+    expect(postedComments).toEqual([]);
   });
 
   it("restart recovery keeps the earliest pending stage signal source sequence", async () => {
