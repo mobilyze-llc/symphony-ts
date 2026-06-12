@@ -1313,12 +1313,14 @@ describe("runHeadlessCouncilGate", () => {
       routing: { mode: "full", round: 1 },
     });
     expect(structured.findings).toHaveLength(4);
+    expect(structured.familySyntheses).toEqual([]);
     expect(structured.findings[0]).toMatchObject({
       severity: "P1",
       emittedSeverity: "P1",
       confidence: 0.91,
       introducedIn: "original_diff",
       leadDisposition: "open",
+      family: null,
       evidence: [
         {
           path: "file.ts",
@@ -1367,6 +1369,150 @@ describe("runHeadlessCouncilGate", () => {
     expect(report).toContain(lane.structuredArtifactPath!);
   });
 
+  it("groups cross-file invariant families without collapsing fingerprints", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "FINDINGS",
+            "",
+            "## P1 Must Fix",
+            "None",
+            "",
+            "## P2 Should Fix",
+            "- src/orchestrator/core.ts:120 lets a retry timer bypass pause admission | family: journal-first pause lifecycle; safety_claim: every pause fact gates dispatch before side effects; next_round_question: did every producer and consumer honor the pause fact?; remaining_symptoms: retry timer bypass, poll admission gap",
+            "- src/orchestrator/runtime-host.ts:88 resumes restart-rehydrated work without the same pause gate. | family: journal-first pause lifecycle; fixed_symptoms: tracker write ordering",
+            "",
+            "## Track",
+            "None",
+            "",
+            "## Dismissed Or Theoretical",
+            "None",
+          ].join("\n"),
+        },
+      },
+    });
+    await writeFile(
+      harness.diffPath,
+      [
+        "diff --git a/src/orchestrator/core.ts b/src/orchestrator/core.ts",
+        "+const retry = true;",
+        "diff --git a/src/orchestrator/runtime-host.ts b/src/orchestrator/runtime-host.ts",
+        "+const restart = true;",
+      ].join("\n"),
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const structured = result.lanes[0]!.structuredArtifact!;
+    const fingerprints = structured.findings.map(
+      (finding) => finding.fingerprint,
+    );
+    expect(new Set(fingerprints).size).toBe(2);
+    expect(structured.findings.map((finding) => finding.family?.name)).toEqual([
+      "journal-first pause lifecycle",
+      "journal-first pause lifecycle",
+    ]);
+    expect(structured.findings[0]!.title).not.toContain("family:");
+    expect(structured.findings[0]!.titleStem).not.toContain("family");
+    expect(structured.findings[1]!.title).not.toContain("family:");
+    expect(structured.findings[1]!.titleStem).not.toContain("family");
+    expect(structured.familySyntheses).toEqual([
+      {
+        name: "journal-first pause lifecycle",
+        safetyClaim: "every pause fact gates dispatch before side effects",
+        nextRoundQuestion:
+          "did every producer and consumer honor the pause fact?",
+        fixedSymptoms: ["tracker write ordering"],
+        remainingSymptoms: ["retry timer bypass", "poll admission gap"],
+        findingFingerprints: fingerprints,
+      },
+    ]);
+
+    const artifactFromDisk = JSON.parse(
+      await readFile(result.lanes[0]!.structuredArtifactPath!, "utf-8"),
+    ) as StructuredReviewerArtifact;
+    expect(artifactFromDisk.familySyntheses).toEqual(
+      structured.familySyntheses,
+    );
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain("## Family Synthesis");
+    expect(report).toContain("journal-first pause lifecycle");
+    expect(report).toContain(fingerprints[0]!);
+    expect(report).toContain(fingerprints[1]!);
+  });
+
+  it("does not parse prose family labels or synthesize dismissed findings", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "FINDINGS",
+            "",
+            "## P1 Must Fix",
+            "None",
+            "",
+            "## P2 Should Fix",
+            "- src/orchestrator/core.ts:120 describes a bug family: retry variants still need separate evidence",
+            "",
+            "## Track",
+            "None",
+            "",
+            "## Dismissed Or Theoretical",
+            "- src/orchestrator/runtime-host.ts:88 is a false alarm | family: dismissed pause lifecycle; remaining_symptoms: none",
+          ].join("\n"),
+        },
+      },
+    });
+    await writeFile(
+      harness.diffPath,
+      [
+        "diff --git a/src/orchestrator/core.ts b/src/orchestrator/core.ts",
+        "+const retry = true;",
+        "diff --git a/src/orchestrator/runtime-host.ts b/src/orchestrator/runtime-host.ts",
+        "+const restart = true;",
+      ].join("\n"),
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const structured = result.lanes[0]!.structuredArtifact!;
+    expect(structured.findings[0]).toMatchObject({
+      severity: "P2",
+      family: null,
+    });
+    expect(structured.findings[0]!.title).toContain("bug family:");
+    expect(structured.findings[1]).toMatchObject({
+      severity: "Dismissed",
+      family: expect.objectContaining({
+        name: "dismissed pause lifecycle",
+      }),
+    });
+    expect(structured.familySyntheses).toEqual([]);
+  });
+
   it("preserves P1 severity and explicit disposition from Codex lead triage", async () => {
     const harness = await createHarness({
       laneBehavior: {
@@ -1376,7 +1522,7 @@ describe("runHeadlessCouncilGate", () => {
             "FINDINGS",
             "",
             "## Triage",
-            "- P1 | open | new | file.ts:1 drops a blocking review artifact. confidence: 0.93",
+            "- P1 | open | new | file.ts:1 drops a blocking review artifact. confidence: 0.93 | family: artifact durability | safety_claim: review artifacts must be durable before pass/fail routing | next_round_question: can a malformed lane lose the artifact? | remaining_symptoms: missing write barrier",
             "- P2 | refuted | abc12345 | tests/review/headless-council-gate.test.ts:12 is already covered.",
             "",
             "## Track",
@@ -1408,6 +1554,14 @@ describe("runHeadlessCouncilGate", () => {
       confidence: 0.93,
       leadDisposition: "open",
       introducedIn: "original_diff",
+      family: {
+        name: "artifact durability",
+        safetyClaim:
+          "review artifacts must be durable before pass/fail routing",
+        nextRoundQuestion: "can a malformed lane lose the artifact?",
+        fixedSymptoms: [],
+        remainingSymptoms: ["missing write barrier"],
+      },
       evidence: [
         {
           path: "file.ts",
@@ -1422,6 +1576,17 @@ describe("runHeadlessCouncilGate", () => {
       leadDisposition: "refuted",
       repeatOf: "abc12345",
     });
+    expect(leadArtifact.familySyntheses).toEqual([
+      {
+        name: "artifact durability",
+        safetyClaim:
+          "review artifacts must be durable before pass/fail routing",
+        nextRoundQuestion: "can a malformed lane lose the artifact?",
+        fixedSymptoms: [],
+        remainingSymptoms: ["missing write barrier"],
+        findingFingerprints: [leadArtifact.findings[0]!.fingerprint],
+      },
+    ]);
   });
 
   it("keeps h3 subheadings inside artifact sections", async () => {

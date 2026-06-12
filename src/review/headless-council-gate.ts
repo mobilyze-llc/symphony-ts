@@ -64,6 +64,19 @@ export interface StructuredReviewFindingEvidence {
   changedPath: boolean;
 }
 
+export interface StructuredReviewFindingFamily {
+  name: string;
+  safetyClaim: string | null;
+  nextRoundQuestion: string | null;
+  fixedSymptoms: string[];
+  remainingSymptoms: string[];
+}
+
+export interface StructuredReviewFamilySynthesis
+  extends StructuredReviewFindingFamily {
+  findingFingerprints: string[];
+}
+
 export interface StructuredReviewFinding {
   fingerprint: string;
   severity: StructuredReviewFindingSeverity;
@@ -79,6 +92,7 @@ export interface StructuredReviewFinding {
   repeatOf: string | null;
   introducedIn: StructuredReviewIntroducedIn;
   dismissalReason: string | null;
+  family: StructuredReviewFindingFamily | null;
 }
 
 export interface StructuredReviewerArtifact {
@@ -111,6 +125,7 @@ export interface StructuredReviewerArtifact {
     triage: string;
   };
   findings: StructuredReviewFinding[];
+  familySyntheses: StructuredReviewFamilySynthesis[];
 }
 
 export interface CommandResult {
@@ -1835,6 +1850,7 @@ function buildStructuredReviewerArtifact(input: {
       category: "dismissed_or_theoretical",
     }),
   ];
+  const familySyntheses = buildFamilySyntheses(findings);
 
   return {
     schemaVersion: 1,
@@ -1866,6 +1882,7 @@ function buildStructuredReviewerArtifact(input: {
         : null,
     sections,
     findings,
+    familySyntheses,
   };
 }
 
@@ -1984,7 +2001,7 @@ function normalizeStructuredFinding(input: {
       evidence.filter((item) => !item.changedPath).map((item) => item.path),
     ),
   ].sort();
-  const title = findingTitle(input.rawText);
+  const title = findingTitle(stripFindingMetadata(input.rawText));
   const titleStem = normalizeTitleStem(title);
   const finding: Omit<StructuredReviewFinding, "fingerprint"> = {
     severity: input.severity,
@@ -2008,11 +2025,185 @@ function normalizeStructuredFinding(input: {
     ),
     dismissalReason:
       input.severity === "Dismissed" ? input.rawText.trim() : null,
+    family: extractFindingFamily(input.rawText),
   };
   return {
     ...finding,
     fingerprint: fingerprintFinding(finding),
   };
+}
+
+function extractFindingFamily(
+  text: string,
+): StructuredReviewFindingFamily | null {
+  const name = extractFindingMetadataField(text, [
+    "family",
+    "family_name",
+    "family name",
+  ]);
+  if (name === null) {
+    return null;
+  }
+  return {
+    name,
+    safetyClaim: extractFindingMetadataField(text, [
+      "safety_claim",
+      "safety claim",
+    ]),
+    nextRoundQuestion: extractFindingMetadataField(text, [
+      "next_round_question",
+      "next round question",
+    ]),
+    fixedSymptoms: extractFindingMetadataList(text, [
+      "fixed_symptoms",
+      "fixed symptoms",
+    ]),
+    remainingSymptoms: extractFindingMetadataList(text, [
+      "remaining_symptoms",
+      "remaining symptoms",
+    ]),
+  };
+}
+
+const FINDING_METADATA_FIELD_PATTERN =
+  /(^|[|;])\s*(family|family[_\s-]+name|safety[_\s-]+claim|next[_\s-]+round[_\s-]+question|fixed[_\s-]+symptoms|remaining[_\s-]+symptoms)\s*[:=]/gi;
+
+function stripFindingMetadata(text: string): string {
+  const fields = findingMetadataFields(text);
+  if (fields.length === 0) {
+    return text;
+  }
+  const chunks: string[] = [];
+  let cursor = 0;
+  for (let index = 0; index < fields.length; index += 1) {
+    const field = fields[index];
+    if (field === undefined) {
+      continue;
+    }
+    chunks.push(text.slice(cursor, field.start));
+    cursor = fields[index + 1]?.start ?? text.length;
+  }
+  chunks.push(text.slice(cursor));
+  return chunks
+    .join(" ")
+    .replace(/\s*(?:[|;])\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractFindingMetadataField(
+  text: string,
+  names: readonly string[],
+): string | null {
+  const allowedNames = new Set(names.map(normalizeFindingMetadataFieldName));
+  const fields = findingMetadataFields(text);
+  const fieldIndex = fields.findIndex((field) => allowedNames.has(field.name));
+  if (fieldIndex === -1) {
+    return null;
+  }
+  const field = fields[fieldIndex];
+  if (field === undefined) {
+    return null;
+  }
+  const nextField = fields[fieldIndex + 1] ?? null;
+  const value = normalizeFindingMetadataValue(
+    text.slice(field.valueStart, nextField?.start ?? text.length),
+  );
+  return value === "" ? null : value;
+}
+
+function extractFindingMetadataList(
+  text: string,
+  names: readonly string[],
+): string[] {
+  const value = extractFindingMetadataField(text, names);
+  if (value === null) {
+    return [];
+  }
+  return value
+    .split(/[,;]\s*/)
+    .map((item) => normalizeFindingMetadataValue(item))
+    .filter((item) => item !== "");
+}
+
+function findingMetadataFields(
+  text: string,
+): { name: string; start: number; valueStart: number }[] {
+  return [...text.matchAll(FINDING_METADATA_FIELD_PATTERN)].map((match) => ({
+    name: normalizeFindingMetadataFieldName(match[2] ?? ""),
+    start: match.index ?? 0,
+    valueStart: (match.index ?? 0) + match[0].length,
+  }));
+}
+
+function normalizeFindingMetadataFieldName(name: string): string {
+  return name.toLowerCase().replace(/[_\s-]+/g, "_");
+}
+
+function normalizeFindingMetadataValue(value: string | undefined): string {
+  return (value ?? "")
+    .trim()
+    .replace(/^[|;,\s]+/g, "")
+    .replace(/^["'`]|["'`]$/g, "")
+    .replace(/[|;,.]\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildFamilySyntheses(
+  findings: readonly StructuredReviewFinding[],
+): StructuredReviewFamilySynthesis[] {
+  const groups = new Map<string, StructuredReviewFamilySynthesis>();
+  for (const finding of findings) {
+    if (!shouldIncludeInFamilySynthesis(finding)) {
+      continue;
+    }
+    const key = normalizeFamilyKey(finding.family.name);
+    const existing =
+      groups.get(key) ??
+      ({
+        name: finding.family.name,
+        safetyClaim: null,
+        nextRoundQuestion: null,
+        fixedSymptoms: [],
+        remainingSymptoms: [],
+        findingFingerprints: [],
+      } satisfies StructuredReviewFamilySynthesis);
+    existing.safetyClaim ??= finding.family.safetyClaim;
+    existing.nextRoundQuestion ??= finding.family.nextRoundQuestion;
+    existing.findingFingerprints.push(finding.fingerprint);
+    existing.fixedSymptoms = uniqueInEncounterOrder([
+      ...existing.fixedSymptoms,
+      ...finding.family.fixedSymptoms,
+    ]);
+    existing.remainingSymptoms = uniqueInEncounterOrder([
+      ...existing.remainingSymptoms,
+      ...finding.family.remainingSymptoms,
+    ]);
+    groups.set(key, existing);
+  }
+  return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function shouldIncludeInFamilySynthesis(
+  finding: StructuredReviewFinding,
+): finding is StructuredReviewFinding & {
+  family: StructuredReviewFindingFamily;
+} {
+  return (
+    finding.family != null &&
+    finding.severity !== "Dismissed" &&
+    finding.leadDisposition !== "dismissed" &&
+    finding.leadDisposition !== "refuted"
+  );
+}
+
+function normalizeFamilyKey(name: string): string {
+  return name.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function uniqueInEncounterOrder(values: readonly string[]): string[] {
+  return [...new Set(values.filter((value) => value !== ""))];
 }
 
 function extractFindingEvidence(
@@ -2698,8 +2889,27 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
     lines.push("- None");
   } else {
     for (const { laneId, finding } of findings) {
+      const familyLabel =
+        finding.family == null ? "" : ` [family: ${finding.family.name}]`;
       lines.push(
-        `- ${finding.severity} ${finding.fingerprint} (${laneId}): ${finding.title}`,
+        `- ${finding.severity} ${finding.fingerprint} (${laneId}): ${finding.title}${familyLabel}`,
+      );
+    }
+  }
+
+  const familySyntheses = result.lanes.flatMap((lane) =>
+    (lane.structuredArtifact?.familySyntheses ?? []).map((synthesis) => ({
+      laneId: lane.laneId,
+      synthesis,
+    })),
+  );
+  lines.push("", "## Family Synthesis", "");
+  if (familySyntheses.length === 0) {
+    lines.push("- None");
+  } else {
+    for (const { laneId, synthesis } of familySyntheses) {
+      lines.push(
+        `- ${synthesis.name} (${laneId}): safety=${synthesis.safetyClaim ?? "n/a"}; next=${synthesis.nextRoundQuestion ?? "n/a"}; fixed=${synthesis.fixedSymptoms.join(", ") || "none"}; remaining=${synthesis.remainingSymptoms.join(", ") || "none"}; findings=${synthesis.findingFingerprints.join(", ")}`,
       );
     }
   }
@@ -2766,6 +2976,7 @@ function buildReviewerPrompt(
     "Use FINDINGS only when P1 or P2 contains blocking content. Use PASS when only Track contains content.",
     "Put findings outside the changed lines in Track unless the diff directly introduces or exposes the issue. Do not silently drop out-of-diff findings.",
     "For each finding, include a concise title, file:line evidence when available, confidence, and whether it repeats a prior fingerprint.",
+    "When multiple findings share a cross-file invariant, append lead-assertable metadata fields to each related finding as an explicit trailer: `| family: <name>; safety_claim: <claim>; next_round_question: <question>; fixed_symptoms: <comma-or-semicolon list>; remaining_symptoms: <comma-or-semicolon list>`. Family labels augment fingerprints and repeatOf; they do not replace per-finding evidence.",
     "",
     "Prior adjudicated findings by fingerprint:",
     priorFindings,
@@ -2852,6 +3063,7 @@ function buildCodexLeadPrompt(
     "## Triage",
     "Summarize surviving P1/P2 findings or state `None`.",
     "For each triage item, use `- <Severity> | <Disposition> | <Fingerprint or new> | <Title> | <file:line> | confidence: <0-1>`.",
+    "Append optional family synthesis fields to triage items when confirmed findings share an invariant, using an explicit trailer: `| family: <name>; safety_claim: <claim>; next_round_question: <question>; fixed_symptoms: <comma-or-semicolon list>; remaining_symptoms: <comma-or-semicolon list>`.",
     "Use Severity `P1` or `P2`. Use Disposition `open`, `track`, `dismissed`, or `refuted`.",
     "",
     "## Track",
@@ -2876,10 +3088,11 @@ function formatPriorStructuredFindings(
     return "- None";
   }
   return findings
-    .map(
-      ({ laneId, finding }) =>
-        `- ${finding.fingerprint} ${finding.severity} ${finding.leadDisposition} ${finding.introducedIn} (${laneId}): ${finding.title}`,
-    )
+    .map(({ laneId, finding }) => {
+      const family =
+        finding.family == null ? "" : ` family:${finding.family.name}`;
+      return `- ${finding.fingerprint} ${finding.severity} ${finding.leadDisposition} ${finding.introducedIn}${family} (${laneId}): ${finding.title}`;
+    })
     .join("\n");
 }
 
