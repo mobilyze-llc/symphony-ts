@@ -75,6 +75,28 @@ export interface WatchdogFilingRecord {
   issueIdentifier: string;
 }
 
+/** Serializable cluster summary for the state document (SYMPH-407). */
+export interface WatchdogClusterSnapshot {
+  signature: string;
+  error_class: ErrorSignatureClass;
+  cluster_size: number;
+  member_issue_identifiers: string[];
+  last_alert_size: number;
+}
+
+/** Serializable open-breaker summary for the state document (SYMPH-407). */
+export interface WatchdogBreakerSnapshot {
+  stage_name: string;
+  signature: string;
+  opened_at: string;
+  opened_for_issue_ids: string[];
+}
+
+export interface WatchdogRegistrySnapshot {
+  clusters: WatchdogClusterSnapshot[];
+  openBreakers: WatchdogBreakerSnapshot[];
+}
+
 export interface SignatureClusterRegistryOptions {
   /** Minimum cluster size (inclusive) to declare SYSTEMIC. Default: 2. */
   systemicThreshold?: number;
@@ -342,6 +364,34 @@ export class SignatureClusterRegistry {
     return this.stageBreakers;
   }
 
+  /**
+   * Serializable summary of cluster + breaker state for the /api/v1/state
+   * watchdog section (SYMPH-407). Same registry the dispatcher consults —
+   * no second source of truth.
+   */
+  toWatchdogSnapshot(): WatchdogRegistrySnapshot {
+    const clusters = [...this.clusters.values()]
+      .map((entry) => ({
+        signature: entry.signature,
+        error_class: entry.errorClass,
+        cluster_size: entry.members.size,
+        member_issue_identifiers: [...entry.members.values()]
+          .map((member) => member.issueIdentifier)
+          .sort((left, right) => left.localeCompare(right, "en")),
+        last_alert_size: entry.lastAlertSize,
+      }))
+      .sort((left, right) => left.signature.localeCompare(right.signature));
+    const openBreakers = [...this.stageBreakers.values()]
+      .map((breaker) => ({
+        stage_name: breaker.stageName,
+        signature: breaker.signature,
+        opened_at: breaker.openedAt,
+        opened_for_issue_ids: [...breaker.openedForIssueIds],
+      }))
+      .sort((left, right) => left.stage_name.localeCompare(right.stage_name));
+    return { clusters, openBreakers };
+  }
+
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
@@ -398,8 +448,15 @@ export function formatWatchdogTicketBody(input: {
   members: ClusterMember[];
   stageName: string | null;
   observedAt: string;
+  /**
+   * Journal sequence of the cluster_transition entry that fired this filing
+   * (SYMPH-407): lets an agent fetch the exact event slice via
+   * GET /api/v1/state/delta?since_seq=N-1.
+   */
+  journalSequence?: number | null;
 }): string {
   const { signature, errorClass, members, stageName, observedAt } = input;
+  const journalSequence = input.journalSequence ?? null;
 
   // Machine-parseable marker used for deduplication by title + body search.
   const marker = `<!-- watchdog-signature:${signature} -->`;
@@ -443,6 +500,11 @@ export function formatWatchdogTicketBody(input: {
     "- The circuit breaker for the affected stage is open until an operator resets it via resume/re-dispatch.",
     `- Signature hash: \`${signature}\` (stable across path/UUID variations).`,
   );
+  if (journalSequence !== null) {
+    lines.push(
+      `- Journal cursor: seq ${journalSequence} (fetch the exact event slice via \`GET /api/v1/state/delta?since_seq=${Math.max(0, journalSequence - 1)}\`).`,
+    );
+  }
 
   return lines.join("\n");
 }

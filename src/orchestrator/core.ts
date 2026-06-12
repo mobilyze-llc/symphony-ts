@@ -114,7 +114,10 @@ import {
 } from "./intent.js";
 import { createRightSizingDecision } from "./right-sizing.js";
 import { SignatureClusterRegistry } from "./signature-cluster.js";
-import type { ClusterMember } from "./signature-cluster.js";
+import type {
+  ClusterMember,
+  WatchdogRegistrySnapshot,
+} from "./signature-cluster.js";
 import {
   type IgnoredSetupInstructionCollision,
   type SupervisionFinding,
@@ -478,6 +481,12 @@ export interface OrchestratorCoreOptions {
     breakerOpened: boolean;
     canFileWatchdogTicket: boolean;
     members: ClusterMember[];
+    /**
+     * Journal sequence of the cluster_transition entry behind this alert
+     * (SYMPH-407): embedded in Slack alerts and watchdog ticket bodies as
+     * the event cursor. Null when no entry was journaled (idempotent replay).
+     */
+    journalSequence: number | null;
   }) => void;
   /**
    * Called when an issue's dispatch verdict CHANGES to gate or halt
@@ -491,6 +500,12 @@ export interface OrchestratorCoreOptions {
     reasonCode: string;
     remedy: string | null;
     actor: VerdictActor;
+    /**
+     * Journal sequence of the dispatch_verdict entry behind this transition
+     * (SYMPH-407): embedded in outbound alerts as the (issue, seq) cursor.
+     * Null when the verdict deduped to an existing journal entry.
+     */
+    sequence: number | null;
   }) => void;
   /**
    * Called when the dispatch-starvation page condition fires or recovers
@@ -755,6 +770,24 @@ export class OrchestratorCore {
 
   getState(): OrchestratorState {
     return this.state;
+  }
+
+  /**
+   * Current journal cursor (SYMPH-407): the sequence of the last committed
+   * journal entry, accounting for burned sequences from idempotent rollbacks.
+   * The snapshot's `as_of_sequence` and the delta endpoint's upper cursor.
+   */
+  getRunJournalCursor(): number {
+    return this.nextRunJournalSequence() - 1;
+  }
+
+  /**
+   * Serializable cluster/breaker summary for the /api/v1/state watchdog
+   * section (SYMPH-407). Delegates to the same registry the dispatcher
+   * consults — no second source of truth.
+   */
+  getWatchdogRegistrySnapshot(): WatchdogRegistrySnapshot {
+    return this.signatureClusterRegistry.toWatchdogSnapshot();
   }
 
   recoverFromRunJournal(journal: DispatcherRunJournal): void {
@@ -6036,7 +6069,7 @@ export class OrchestratorCore {
         entry.idempotencyKey === baseKey ||
         entry.idempotencyKey.startsWith(`${baseKey}:`),
     );
-    this.commitVerdictJournalEntrySync({
+    const journaledSequence = this.commitVerdictJournalEntrySync({
       idempotencyKey: alreadyJournaled
         ? `${baseKey}:${this.nextRunJournalSequence()}`
         : baseKey,
@@ -6071,6 +6104,7 @@ export class OrchestratorCore {
           reasonCode: input.reasonCode,
           remedy,
           actor,
+          sequence: journaledSequence,
         });
       } catch {
         // Notification failures are always swallowed.
@@ -6092,14 +6126,14 @@ export class OrchestratorCore {
    */
   private commitVerdictJournalEntrySync(
     entry: Omit<DispatcherRunJournalEntry, "sequence">,
-  ): void {
+  ): number | null {
     const result = appendDispatcherRunJournalEntry(
       this.state.dispatcherRunJournal,
       entry,
       this.burnedRunJournalSequence + 1,
     );
     if (!result.appended) {
-      return;
+      return null;
     }
     this.state.dispatcherRunJournal = result.journal;
     this.flushRunJournalEntryToDisk(result.entry).catch((error) => {
@@ -6112,6 +6146,7 @@ export class OrchestratorCore {
         error,
       );
     });
+    return result.entry.sequence;
   }
 
   /**
@@ -8073,6 +8108,7 @@ export class OrchestratorCore {
     // Verdict events (SYMPH-405): journal cluster growth / systemic
     // transitions and breaker opens so the registry can rebuild on replay
     // (closes the SYMPH-398 restart-amnesia hole). Fire-and-forget.
+    let clusterJournalSequence: number | null = null;
     if (clusterResult.memberAdded || clusterResult.shouldAlert) {
       const timestamp = this.now().toISOString();
       const transition = clusterResult.isSystemic ? "systemic" : "growth";
@@ -8086,7 +8122,7 @@ export class OrchestratorCore {
       // Sequence-suffixed key (not timestamp): a same-ms re-entry of the
       // same issue/signature after a membership reset must not drop the
       // latest membership snapshot from the replay record.
-      this.commitVerdictJournalEntrySync({
+      clusterJournalSequence = this.commitVerdictJournalEntrySync({
         idempotencyKey: `cluster:${clusterResult.signature}:${issueId}:${this.nextRunJournalSequence()}`,
         timestamp,
         kind: "cluster_transition",
@@ -8139,6 +8175,7 @@ export class OrchestratorCore {
           breakerOpened: clusterResult.shouldOpenBreaker,
           canFileWatchdogTicket: clusterResult.canFileWatchdogTicket,
           members: clusterResult.members,
+          journalSequence: clusterJournalSequence,
         });
       } catch {
         // Cluster callbacks are fire-and-forget; never surface into the loop

@@ -440,6 +440,44 @@ retry queue, lease table, breaker state). Now:
 curl -s http://localhost:3000/api/v1/state | jq '.explicit_resume_required, .dispositions'
 ```
 
+The same single read now also answers the rest of the 2026-06-11 question
+list (SYMPH-407):
+
+```bash
+curl -s http://localhost:3000/api/v1/state | jq '{
+  as_of_sequence,            # journal cursor — feed into /api/v1/state/delta
+  counters,                  # per-issue escalation steps, triage resumes, rework, token spend
+  rate_limit_views,          # BOTH rate trackers side by side + disagreement flag
+  deploy_drift,              # running commit vs origin/main (captured at startup)
+  watchdog,                  # signature clusters + open breakers with journal cursors
+  components                 # every fail-open element: {enabled, degraded_reason?}
+}'
+```
+
+- `counters[<issueId>]` shows the durable SYMPH-401 counters next to the
+  issue's disposition and mark: `escalation_steps`, `triage_resumes`,
+  `rework_count`, and cumulative `spend.total_tokens`.
+- `rate_limit_views` renders the runner snapshot file
+  (`.symphony/rate-limits.json`) and the dispatch admission gate's last
+  evaluation side by side with their sources; `disagreement: true` is the
+  SYMPH-338 6%-vs-98% case made visible instead of costing a diagnosis cycle.
+- `deploy_drift` makes "merged ≠ deployed" one field: `running_commit` vs
+  `origin_main_commit` with `captured_at`. Both are captured ONCE at startup
+  and never refreshed (`origin_main_commit` is the local ref, no fetch) —
+  treat `captured_at` as the comparison's truth time.
+- `components` lists every fail-open element (Slack notifier, watchdog
+  filer, circuit breaker, stuck triage, pause triage, AC gate,
+  spec-fidelity, rate-limit admission) as `{enabled, degraded_reason?}` — a
+  silently disabled guard shows up here instead of being discovered
+  mid-incident.
+- Cursor-forward reads: take `as_of_sequence` from one snapshot, then fetch
+  exactly what happened since with
+  `curl -s "http://localhost:3000/api/v1/state/delta?since_seq=<N>&limit=100"`
+  — journal-backed entries between the two cursors, bounded (max 500 per
+  page; `truncated: true` means page again from the last entry's sequence).
+  Slack gate/halt alerts and watchdog tickets carry the matching
+  `(issue, seq)` cursor.
+
 - `explicit_resume_required` lists every parked issue with the `reason`
   (e.g. `hard_stop:token_budget`, `operator_input_required`,
   `intent:park:manual_park`) and `set_by_sequence` — the journal event cursor

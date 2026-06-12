@@ -82,6 +82,17 @@ function createHost(): DashboardServerHost {
     rate_limits: { requestsRemaining: 10 },
     rate_limit_admission: null,
     explicit_resume_required: {},
+    as_of_sequence: 0,
+    counters: {},
+    rate_limit_views: {
+      runner_snapshot_file: null,
+      gate: null,
+      live_telemetry: null,
+      disagreement: null,
+    },
+    deploy_drift: null,
+    watchdog: { clusters: [], open_breakers: [] },
+    components: {},
   };
   return {
     getRuntimeSnapshot: () => snapshot,

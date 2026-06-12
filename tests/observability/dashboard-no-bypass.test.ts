@@ -84,6 +84,7 @@ describe("dashboard no-bypass boundary (SYMPH-408)", () => {
     ].map((match) => match[1]);
     const allowed = new Set([
       "getRuntimeSnapshot",
+      "getStateDelta",
       "getIssueDetails",
       "requestRefresh",
       "requestIssueStop",

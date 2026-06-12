@@ -23,7 +23,12 @@ import {
 } from "../config/defaults.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import type { LoopTraceJournalResponse } from "../logging/loop-trace.js";
-import type { RuntimeSnapshot } from "../logging/runtime-snapshot.js";
+import {
+  type RuntimeSnapshot,
+  STATE_DELTA_DEFAULT_LIMIT,
+  STATE_DELTA_MAX_LIMIT,
+  type StateDeltaResponse,
+} from "../logging/runtime-snapshot.js";
 // The ONLY orchestrator import allowed in this file is the intent leaf
 // module (verb/actor vocabulary + types). The dashboard never reaches into
 // orchestrator state directly — every mutation goes through a host method
@@ -238,6 +243,15 @@ export interface PipelineControlContext {
 
 export interface DashboardServerHost {
   getRuntimeSnapshot(): RuntimeSnapshot | Promise<RuntimeSnapshot>;
+  /**
+   * Cursor-forward journal delta read (SYMPH-407): entries with
+   * sequence > sinceSeq, bounded. Optional — hosts without a journal
+   * surface 501 on GET /api/v1/state/delta.
+   */
+  getStateDelta?(input: {
+    sinceSeq: number;
+    limit?: number;
+  }): StateDeltaResponse | Promise<StateDeltaResponse>;
   getIssueDetails(
     issueIdentifier: string,
   ): IssueDetailResponse | null | Promise<IssueDetailResponse | null>;
@@ -572,6 +586,47 @@ export function createDashboardRequestHandler(
 
         const snapshot = await readSnapshot(options.host, snapshotTimeoutMs);
         writeJson(response, 200, snapshot);
+        return;
+      }
+
+      if (url.pathname === "/api/v1/state/delta") {
+        if (method !== "GET") {
+          writeMethodNotAllowed(response, ["GET"]);
+          return;
+        }
+
+        if (options.host.getStateDelta === undefined) {
+          writeJsonError(response, 501, "not_implemented", {
+            message: "State deltas are not supported by this host.",
+          });
+          return;
+        }
+
+        const sinceSeqRaw = url.searchParams.get("since_seq");
+        const sinceSeq = sinceSeqRaw === null ? Number.NaN : Number(sinceSeqRaw);
+        if (!Number.isInteger(sinceSeq) || sinceSeq < 0) {
+          writeJsonError(response, 400, "invalid_request", {
+            message:
+              "since_seq is required and must be a non-negative integer.",
+          });
+          return;
+        }
+
+        const limitRaw = url.searchParams.get("limit");
+        let limit = STATE_DELTA_DEFAULT_LIMIT;
+        if (limitRaw !== null) {
+          const parsedLimit = Number(limitRaw);
+          if (!Number.isInteger(parsedLimit) || parsedLimit < 1) {
+            writeJsonError(response, 400, "invalid_request", {
+              message: "limit must be a positive integer.",
+            });
+            return;
+          }
+          limit = Math.min(parsedLimit, STATE_DELTA_MAX_LIMIT);
+        }
+
+        const delta = await options.host.getStateDelta({ sinceSeq, limit });
+        writeJson(response, 200, delta);
         return;
       }
 
