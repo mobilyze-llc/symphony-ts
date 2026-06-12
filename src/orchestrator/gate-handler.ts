@@ -4,6 +4,7 @@ import type { AgentRunnerCodexClient } from "../agent/runner.js";
 import type { CodexTurnResult } from "../codex/app-server-client.js";
 import type { ReviewerDefinition, StageDefinition } from "../config/types.js";
 import type { ExecutionHistory, Issue } from "../domain/model.js";
+import { sanitizeForReworkChannel } from "../shared/egress.js";
 import { getDisplayVersion } from "../version.js";
 
 /**
@@ -390,7 +391,10 @@ export function formatReviewFindingsComment(
     `**Issue:** ${issueIdentifier}`,
   ];
   if (agentMessage.trim() !== "") {
-    sections.push("", agentMessage);
+    // agentMessage is worker-authored and this comment is re-consumed by
+    // rework prompts — neutralize fences/links and redact credentials
+    // while preserving diagnostic fidelity (SYMPH-421).
+    sections.push("", sanitizeForReworkChannel(agentMessage));
   }
   return sections.join("\n");
 }
@@ -412,7 +416,8 @@ export function formatRebaseComment(
     `**Issue:** ${issueIdentifier}`,
   ];
   if (agentMessage.trim() !== "") {
-    sections.push("", agentMessage);
+    // Same rework-channel treatment as formatReviewFindingsComment.
+    sections.push("", sanitizeForReworkChannel(agentMessage));
   }
   return sections.join("\n");
 }
@@ -435,7 +440,10 @@ export function formatGateComment(
     return [
       `### ${r.verdict.role} (${r.verdict.model}): ${icon}`,
       "",
-      r.feedback,
+      // Reviewer feedback is model-authored and posts to Linear via the
+      // runtime-host callback, bypassing the orchestrator's escalation
+      // choke point — sanitize here (SYMPH-421).
+      sanitizeForReworkChannel(r.feedback),
     ].join("\n");
   });
 

@@ -77,6 +77,7 @@ import type {
   HardStopDecision,
   HardStopTrigger,
 } from "../policy/hard-stops.js";
+import { sanitizeForLinear } from "../shared/egress.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 import { formatAdmissionCard } from "./admission-card.js";
 import {
@@ -1606,7 +1607,7 @@ export class OrchestratorCore {
         try {
           await this.postComment?.(
             issueId,
-            `Pause triage verdict: ${verdict.verdict}\n${verdict.rationale}`,
+            `Pause triage verdict: ${verdict.verdict}\n${sanitizeForLinear(verdict.rationale)}`,
           );
         } catch {
           // Observability only.
@@ -1629,7 +1630,7 @@ export class OrchestratorCore {
         issueId,
         [
           `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes}) — ${formatIntentAttribution(actor)}`,
-          verdict.rationale,
+          sanitizeForLinear(verdict.rationale),
           "Auto-resuming one continuation unit at the current budget ceiling.",
         ].join("\n"),
       );
@@ -1728,7 +1729,7 @@ export class OrchestratorCore {
         try {
           await this.postComment?.(
             issueId,
-            `Pause triage verdict: ${verdict.verdict}\n${verdict.rationale}`,
+            `Pause triage verdict: ${verdict.verdict}\n${sanitizeForLinear(verdict.rationale)}`,
           );
         } catch {
           // Observability only.
@@ -1766,7 +1767,7 @@ export class OrchestratorCore {
         issueId,
         [
           `Pause triage verdict: continue (resume ${resumesUsed + 1}/${this.config.pauseTriage.maxResumes}) — ${formatIntentAttribution(actor)}`,
-          verdict.rationale,
+          sanitizeForLinear(verdict.rationale),
           "Auto-resuming one continuation unit at the current budget ceiling.",
         ].join("\n"),
       );
@@ -1866,7 +1867,7 @@ export class OrchestratorCore {
       try {
         await this.postComment?.(
           issueId,
-          `## Review Findings (AC gate)\n${verdict.feedback}\nRevise the workpad acceptance criteria per the contract (test:/check:/judge: tags, falsifiable, covering the ticket intent) and complete the stage again.`,
+          `## Review Findings (AC gate)\n${sanitizeForLinear(verdict.feedback, { maxLen: 4000 })}\nRevise the workpad acceptance criteria per the contract (test:/check:/judge: tags, falsifiable, covering the ticket intent) and complete the stage again.`,
         );
       } catch {
         // Observability only.
@@ -1932,7 +1933,7 @@ export class OrchestratorCore {
     try {
       await this.postComment?.(
         input.issueId,
-        `## Spec-fidelity verdict (independent judge): ${input.verdict.verdict}\n${input.verdict.findings}`,
+        `## Spec-fidelity verdict (independent judge): ${input.verdict.verdict}\n${sanitizeForLinear(input.verdict.findings, { maxLen: 6000 })}`,
       );
     } catch {
       // Observability only.
@@ -3239,7 +3240,8 @@ export class OrchestratorCore {
       const commentLines = [
         `Stuck-ticket triage verdict: ${effectiveAction}${effectiveAction === verdict.action ? "" : ` (model proposed ${verdict.action})`} — ${formatIntentAttribution(actor)}`,
         `Classification: ${verdict.classification} | confidence: ${verdict.confidence}`,
-        verdict.rationale,
+        // Rationale is model-authored; notes are deterministic (SYMPH-421).
+        sanitizeForLinear(verdict.rationale),
         ...notes.map((note) => `Note: ${note}`),
       ];
       try {
@@ -3307,10 +3309,12 @@ export class OrchestratorCore {
           // steering and cannot reach a parked issue.
           const reworkStage =
             this.state.issueStages[issueId] ?? input.stageName ?? "(unknown)";
-          // Neutralize the hint before posting: strip triple-backtick fences
-          // and cap length so model output cannot inject Markdown code-fence
-          // syntax into the rework prompt on re-ingestion (SYMPH-399 Q3).
-          const safeHint = neutralizeHintEgress(hint);
+          // Sanitize the hint before posting (SYMPH-399 Q3 / SYMPH-421
+          // consolidation): the shared helper neutralizes fences and links
+          // and redacts credentials; the tighter 4000 cap from the original
+          // bespoke rule is kept. formatReviewFindingsComment applies
+          // sanitizeForReworkChannel again downstream — idempotent backstop.
+          const safeHint = sanitizeForLinear(hint, { maxLen: 4000 });
           this.postReviewFindingsComment(
             issueId,
             issueIdentifier,
@@ -3442,7 +3446,12 @@ export class OrchestratorCore {
     }
     if (this.postComment !== undefined) {
       try {
-        await this.postComment(issueId, comment);
+        // Choke point for every escalation/park comment: bodies can embed
+        // worker/runtime-authored reasons (e.g. Codex operator-input
+        // requests, hard-stop reasons), so the whole body is sanitized
+        // here. Deterministic caller strings pass through unchanged
+        // (sanitizeForLinear is identity on clean text). SYMPH-421.
+        await this.postComment(issueId, sanitizeForLinear(comment));
       } catch (err) {
         console.warn(
           `[orchestrator] Failed to post escalation comment for ${issueIdentifier}:`,
@@ -4139,7 +4148,11 @@ export class OrchestratorCore {
           input.issueId,
           [
             `Intent applied: ${input.verb} — ${formatIntentAttribution(input.actor)}`,
-            `Reason: ${input.reason.human}`,
+            // reason.human can embed model rationale (stuck-triage verbs).
+            // The journal keeps the raw text for audit; only this rendered
+            // egress is sanitized, with the field-level cap pattern from
+            // SYMPH-421 so deterministic text around it can't be truncated.
+            `Reason: ${sanitizeForLinear(input.reason.human, { maxLen: 1500 })}`,
           ].join("\n"),
         );
       } catch {
@@ -5204,7 +5217,10 @@ export class OrchestratorCore {
     const comment = [
       `Hard stop outcome: ${input.hardStop.outcome}`,
       `Trigger: ${input.hardStop.trigger}`,
-      `Reason: ${input.hardStop.reason}`,
+      // Field-level cap on the untrusted reason: the composed body must
+      // stay under the choke-point cap so a long reason can never truncate
+      // the deterministic resume instruction below (SYMPH-421).
+      `Reason: ${sanitizeForLinear(input.hardStop.reason, { maxLen: 1500 })}`,
       `Turns: ${input.hardStop.turnCount}`,
       `Total tokens: ${input.hardStop.totalTokens}`,
       `Estimated cost: $${input.hardStop.estimatedCostUsd.toFixed(2)}`,
@@ -5270,7 +5286,9 @@ export class OrchestratorCore {
 
     const comment = [
       "Headless Codex requested operator input during the worker turn.",
-      `Reason: ${input.reason}`,
+      // Field-level cap so the resume instruction below survives the
+      // choke-point cap regardless of reason length (SYMPH-421).
+      `Reason: ${sanitizeForLinear(input.reason, { maxLen: 1500 })}`,
       "",
       this.formatPauseResumeInstruction(runningEntry.issue.state, "retrying"),
     ].join("\n");
@@ -5326,11 +5344,17 @@ export class OrchestratorCore {
     if (this.postComment !== undefined) {
       void this.postComment(
         issueId,
-        formatContinuousFeedbackComment({
-          issueIdentifier: runningEntry.identifier,
-          stageName,
-          findings: openFindings,
-        }),
+        // Finding titles/details are authored by the cheap feedback-lane
+        // model; the wider cap keeps multi-finding lists intact while the
+        // fence/link/secret neutralization still applies (SYMPH-421).
+        sanitizeForLinear(
+          formatContinuousFeedbackComment({
+            issueIdentifier: runningEntry.identifier,
+            stageName,
+            findings: openFindings,
+          }),
+          { maxLen: 6000 },
+        ),
       ).catch((err) => {
         console.warn(
           `[orchestrator] Failed to post continuous feedback findings for ${runningEntry.identifier}:`,
@@ -7319,23 +7343,6 @@ function readMetadataNumber(
 ): number | null {
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
-}
-
-/**
- * Neutralize model-generated text before it is posted as a rework-feedback
- * comment that is later re-ingested by a downstream prompt. Strips
- * triple-backtick fences (which could re-open a code block context in the
- * next-hop prompt) and caps the total length so a runaway hint cannot produce
- * an oversized Linear comment (SYMPH-399 Q3 / council R1 fix 3).
- */
-const HINT_EGRESS_MAX_CHARS = 4000;
-function neutralizeHintEgress(text: string): string {
-  // Replace triple-backtick sequences with a single backtick to defuse
-  // Markdown code-fence syntax without destroying the surrounding content.
-  const stripped = text.replace(/```/g, "`");
-  return stripped.length > HINT_EGRESS_MAX_CHARS
-    ? `${stripped.slice(0, HINT_EGRESS_MAX_CHARS)}\n[hint truncated]`
-    : stripped;
 }
 
 function defaultTimerScheduler(): TimerScheduler {
