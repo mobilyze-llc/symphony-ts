@@ -311,7 +311,7 @@ describe("failure signal routing in onWorkerExit", () => {
       issueId: "1",
       outcome: "normal",
       agentMessage:
-        "Headless council gate error: substrate_stall: with no lane field.\n[STAGE_FAILED: infra]",
+        "Headless council gate error: substrate_stall:\n[STAGE_FAILED: infra]",
     });
     expect(firstRetry).not.toBeNull();
     expect(
@@ -327,7 +327,7 @@ describe("failure signal routing in onWorkerExit", () => {
       issueId: "1",
       outcome: "normal",
       agentMessage:
-        "Second run had different prose but the same substrate_stall: class.\n[STAGE_FAILED: infra]",
+        "Second run had different prose but the same substrate_stall:\n[STAGE_FAILED: infra]",
     });
 
     expect(secondRetry).toBeNull();
@@ -359,6 +359,32 @@ describe("failure signal routing in onWorkerExit", () => {
       orchestrator.getState().issueReviewInfrastructureStalls["1"],
     ).toBeUndefined();
     expect(orchestrator.getState().failed.has("1")).toBe(false);
+  });
+
+  it("extracts substrate-stall lanes after marker padding", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: substrate_stall: claude-opus\n[STAGE_FAILED: infra]",
+    });
+
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"]
+        ?.stalledLanes,
+    ).toEqual(["claude-opus"]);
   });
 
   it("parks the second substrate stall while preserving the full punctuated lane set", async () => {

@@ -8837,7 +8837,13 @@ function extractSubstrateStallLanes(text: string | null | undefined): string[] {
     if (match === null) {
       break;
     }
-    const laneStart = match.index + match.prefix.length;
+    let laneStart = match.index + match.prefix.length;
+    while (
+      laneStart < text.length &&
+      isSubstrateStallLanePadding(text.charCodeAt(laneStart))
+    ) {
+      laneStart += 1;
+    }
     let laneEnd = laneStart;
     while (
       laneEnd < text.length &&
@@ -8879,6 +8885,10 @@ function isSubstrateStallLaneDelimiter(charCode: number): boolean {
     charCode === 44 ||
     charCode === 59
   );
+}
+
+function isSubstrateStallLanePadding(charCode: number): boolean {
+  return charCode === 9 || charCode === 32;
 }
 
 function trimSubstrateStallLane(value: string): string {
