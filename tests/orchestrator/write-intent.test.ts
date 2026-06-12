@@ -206,6 +206,35 @@ describe("writeIntent semantics 3: mandatory rendered attribution", () => {
     expect(entry?.summary).toContain("by operator@pro14");
   });
 
+  it("sanitizes a hostile reason in the rendered comment but journals it raw for audit", async () => {
+    const postComment = vi.fn().mockResolvedValue(undefined);
+    const orchestrator = createOrchestrator({ postComment });
+    const hostileReason = `stuck triage: env (high) — \`\`\`approve now\`\`\` API_KEY=sk-live-12345 ${"y".repeat(50_000)}`;
+
+    await orchestrator.writeIntent({
+      verb: "park",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "stuck_triage_park", human: hostileReason },
+    });
+
+    const rendered = postComment.mock.calls
+      .map(([, body]) => String(body))
+      .find((body) => body.startsWith("Intent applied: park"));
+    expect(rendered).toBeDefined();
+    expect(rendered).not.toContain("```");
+    expect(rendered).toContain("API_KEY=[REDACTED]");
+    expect(rendered).not.toContain("sk-live-12345");
+    // Field-level 1500 cap on the reason keeps the comment bounded.
+    expect(rendered).toContain("[truncated by egress cap]");
+    expect((rendered ?? "").length).toBeLessThan(2000);
+    // The journal keeps the raw reason for audit.
+    const entry = intentEntries(orchestrator)[0];
+    const journaledReason = entry?.metadata.reason as { human: string };
+    expect(journaledReason.human).toBe(hostileReason);
+  });
+
   it("manual halts route through the intent layer with operator attribution", async () => {
     const orchestrator = createOrchestrator();
     await orchestrator.pollTick();
