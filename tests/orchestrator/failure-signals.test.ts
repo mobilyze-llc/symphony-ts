@@ -361,6 +361,33 @@ describe("failure signal routing in onWorkerExit", () => {
     expect(orchestrator.getState().failed.has("1")).toBe(false);
   });
 
+  it("does not parse natural-language substrate stall colons as lane markers", async () => {
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Worker hit an unrelated infra error while reading docs about a substrate stall: details follow.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(retry).not.toBeNull();
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toBeUndefined();
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+  });
+
   it("extracts substrate-stall lanes after marker padding", async () => {
     const orchestrator = createStagedOrchestrator({
       stages: createAgentReviewWorkflowConfig(),

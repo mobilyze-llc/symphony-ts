@@ -141,12 +141,8 @@ const CONTINUATION_RETRY_DELAY_MS = 1_000;
  */
 const MAX_SAME_CRITERION_REVIEW_FAILURES = 3;
 const MAX_REVIEW_SUBSTRATE_STALL_FAILURES = 2;
-const SUBSTRATE_STALL_REGEX = /\bsubstrate[_ -]stall:/i;
-const SUBSTRATE_STALL_PREFIXES = [
-  "substrate_stall:",
-  "substrate-stall:",
-  "substrate stall:",
-];
+const SUBSTRATE_STALL_REGEX = /\bsubstrate_stall:/i;
+const SUBSTRATE_STALL_PREFIXES = ["substrate_stall:"];
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
