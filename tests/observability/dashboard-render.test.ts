@@ -68,6 +68,7 @@ function buildSnapshot(
     },
     rate_limits: {},
     rate_limit_admission: null,
+    explicit_resume_required: {},
   };
 }
 

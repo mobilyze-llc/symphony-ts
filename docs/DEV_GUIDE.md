@@ -429,6 +429,29 @@ These fields take effect on the next poll tick without restarting Symphony:
 
 ## Troubleshooting
 
+**An issue in Todo is silently never dispatched (requires-explicit-resume mark)**
+
+Repro of the 2026-06-11 frozen-queue incident, now diagnosable with ONE read
+(SYMPH-405/406). Before, confirming a park meant cross-referencing seven data
+sources (Linear state + comments, orchestrator logs, journal grep, dashboard,
+retry queue, lease table, breaker state). Now:
+
+```bash
+curl -s http://localhost:3000/api/v1/state | jq '.explicit_resume_required, .dispositions'
+```
+
+- `explicit_resume_required` lists every parked issue with the `reason`
+  (e.g. `hard_stop:token_budget`, `operator_input_required`,
+  `intent:park:manual_park`) and `set_by_sequence` — the journal event cursor
+  that set the mark (look up the full event by `sequence` in
+  `.symphony/run-journals/dispatcher.jsonl`).
+- `dispositions[<issueId>]` shows the live skip verdict
+  (`skip` / `requires_explicit_resume`) with the remedy: transition the issue
+  into **Resume** (Todo alone is skipped), or clear the park with the fenced
+  `release` intent verb. Marks survive restarts via journal replay; the only
+  clear paths are the release/resume verb (journaled with actor attribution)
+  and an explicit Resume transition.
+
 **Issues are not being dispatched after startup**
 - Verify `tracker.project_slug` matches exactly (check Linear project URL)
 - For self-host smoke, set `SYMPHONY_LINEAR_PROJECT_SLUG` to an isolated test project slug, not the production project slug

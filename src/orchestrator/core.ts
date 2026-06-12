@@ -630,6 +630,14 @@ export class OrchestratorCore {
 
   private readonly reportedSupervisionFindings = new Set<string>();
 
+  /**
+   * Sequences of stage_record entries already reduced into
+   * issueExecutionHistory. The stage_record reducer is the lone additive
+   * reducer in recoverFromRunJournal, so a repeated replay of the same
+   * journal must not double-count spend.
+   */
+  private readonly reducedStageRecordSequences = new Set<number>();
+
   private readonly reportedIgnoredSetupInstructionCollisions =
     new Set<string>();
 
@@ -755,6 +763,14 @@ export class OrchestratorCore {
     this.state.decorrelatedGateOutcomes = {};
     this.lastVerdictKeys.clear();
     this.state.issueDispositions = {};
+    this.state.resumeRequiredMarks = {};
+    // Re-invocation safety (council R2): the stage_record reducer is
+    // additive, so a replay against a different journal (runtime-host root
+    // swap) must rebuild spend history from scratch — clear the
+    // seen-sequence guard together with the history it feeds, or stale
+    // sequence numbers from the previous journal would suppress reduction.
+    this.reducedStageRecordSequences.clear();
+    this.state.issueExecutionHistory = {};
     this.starvedTickCount = 0;
     this.pageAlertActive = false;
     this.acGateFailOpenStreak = 0;
@@ -794,6 +810,7 @@ export class OrchestratorCore {
           entry.issueId,
           readMetadataString(entry.metadata, "issueState"),
           entry.timestamp,
+          { reason: "operator_input_required", setBySequence: entry.sequence },
         );
       }
 
@@ -805,6 +822,7 @@ export class OrchestratorCore {
           entry.issueId,
           readMetadataString(entry.metadata, "issueState"),
           entry.timestamp,
+          { reason: "failure_exhausted", setBySequence: entry.sequence },
         );
       }
 
@@ -823,6 +841,10 @@ export class OrchestratorCore {
             entry.issueId,
             readMetadataString(entry.metadata, "issueState"),
             entry.timestamp,
+            {
+              reason: formatIntentMarkReason(verb, entry.metadata),
+              setBySequence: entry.sequence,
+            },
           );
         } else if (
           verb === "release" ||
@@ -926,6 +948,80 @@ export class OrchestratorCore {
         // same format the live path writes at dispatch.
         this.state.issueFirstDispatchedAt[entry.issueId] ??=
           formatEasternTimestamp(new Date(entry.timestamp));
+      }
+
+      if (
+        entry.kind === "budget_escalation" &&
+        entry.metadata.status === "completed"
+      ) {
+        // Restore the escalation ladder position (SYMPH-401): entries replay
+        // in sequence order so the latest step wins, a restart resumes the
+        // ladder at the journaled step instead of step 0, and the next
+        // escalation computes step N+1 (no duplicate step-1 entry — the
+        // idempotency key `budget_escalation:{issue}:{stage}:{step}` would
+        // dedupe a re-issue anyway). A later terminal entry clears the
+        // counter via clearTerminalIssueRuntimeState.
+        const step = readMetadataNumber(entry.metadata, "step");
+        if (step !== null) {
+          this.state.issueBudgetEscalations[entry.issueId] = step;
+        }
+      }
+
+      if (
+        entry.kind === "pause_triage" &&
+        entry.metadata.status === "completed" &&
+        entry.metadata.action === "resumed"
+      ) {
+        // Restore the authorized-resume count (SYMPH-401): each journaled
+        // resumed verdict carries the pre-increment `resumesUsed`, so the
+        // post-restart count converges on resumesUsed + 1 and the triage cap
+        // (maxResumes) is enforced across a deploy boundary.
+        const resumesUsed = readMetadataNumber(entry.metadata, "resumesUsed");
+        if (resumesUsed !== null) {
+          this.state.issuePauseTriageResumes[entry.issueId] = resumesUsed + 1;
+        }
+      }
+
+      if (
+        entry.kind === "stage_record" &&
+        entry.metadata.status === "completed" &&
+        // Seen-sequence guard: this is the lone ADDITIVE reducer, so a
+        // repeated replay of the same entry would double-count spend.
+        !this.reducedStageRecordSequences.has(entry.sequence)
+      ) {
+        // Restore per-stage spend into execution history (SYMPH-401): the
+        // /state per-issue cumulative spend reduces from these entries, so
+        // pre-restart tokens + post-restart deltas sum without a bespoke
+        // store. A later terminal entry clears the history via
+        // clearTerminalIssueRuntimeState.
+        const record = toStageRecordFromMetadata(entry.metadata);
+        if (record !== null) {
+          this.reducedStageRecordSequences.add(entry.sequence);
+          const history = this.state.issueExecutionHistory[entry.issueId];
+          if (history === undefined) {
+            this.state.issueExecutionHistory[entry.issueId] = [record];
+          } else {
+            history.push(record);
+          }
+        }
+      }
+
+      if (
+        entry.kind === "tracker_write" &&
+        entry.idempotencyKey.includes(":terminal:") &&
+        entry.idempotencyKey.endsWith(":completed")
+      ) {
+        // Terminal-completion evidence (council R1): both terminal paths
+        // (admission-path terminal and the agent-stage advance) journal
+        // their Linear move through runTrackerWriteOnce with a
+        // `tracker_write:{issue}:terminal:...` key. Replaying the completed
+        // entry mirrors the live paths (completed + claim release + runtime
+        // clear), so restored budget_escalation / pause_triage / stage_record
+        // state cannot outlive a completion the live process already
+        // performed — a reopened issue starts with fresh counters.
+        this.state.completed.add(entry.issueId);
+        this.releaseClaim(entry.issueId);
+        this.clearTerminalIssueRuntimeState(entry.issueId);
       }
 
       if (
@@ -1137,10 +1233,18 @@ export class OrchestratorCore {
       reason === "inactive_state" ||
       outcome !== null
     ) {
+      const trigger = readMetadataString(entry.metadata, "trigger");
       this.markIssueRequiresExplicitResume(
         entry.issueId,
         readMetadataString(entry.metadata, "issueState"),
         entry.timestamp,
+        {
+          reason:
+            reason === "manual_stop" || reason === "inactive_state"
+              ? reason
+              : `hard_stop:${trigger ?? outcome ?? "unknown"}`,
+          setBySequence: entry.sequence,
+        },
       );
     }
   }
@@ -1965,13 +2069,15 @@ export class OrchestratorCore {
     }
 
     const willResume = verdict !== null && verdict.verdict === "continue";
-    if (willResume) {
-      this.state.issuePauseTriageResumes[issueId] = resumesUsed + 1;
-    }
 
     // Journal the verdict together with the action actually taken so the
     // audit trail can never claim a resume that did not happen (PR #330
-    // review P2). Journaling is best-effort relative to the resume itself.
+    // review P2). Journal-first for resumes (council R1, mirroring
+    // budget_escalation's PR #329 contract): a resume that cannot be
+    // journaled is not granted — otherwise a restart replays a lower
+    // consumed-resume count and the triage cap (maxResumes) can be exceeded
+    // across a deploy. Park-side journaling stays best-effort because the
+    // park is the safe default either way.
     try {
       await this.recordRunJournalEntry({
         idempotencyKey: `pause_triage:${issueId}:${stageName ?? "no-stage"}:${resumesUsed + 1}:${this.now().toISOString()}`,
@@ -1997,8 +2103,20 @@ export class OrchestratorCore {
           resumesUsed,
         },
       });
-    } catch {
-      // Audit is best-effort; the verdict outcome must still apply.
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to journal pause-triage verdict for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      if (willResume) {
+        // Journal failure means the resume is NOT authorized: fall through
+        // to the normal operator park without consuming a resume, so live
+        // and replay agree on the count (both omit it).
+        return null;
+      }
+    }
+
+    if (willResume) {
+      this.state.issuePauseTriageResumes[issueId] = resumesUsed + 1;
     }
 
     if (verdict === null || verdict.verdict !== "continue") {
@@ -2090,10 +2208,9 @@ export class OrchestratorCore {
       stillEligible && verdict !== null && verdict.verdict === "continue";
     const action = willResume ? "resumed" : stillEligible ? "parked" : "stale";
 
-    if (willResume) {
-      this.state.issuePauseTriageResumes[issueId] = resumesUsed + 1;
-    }
-
+    // Journal-first for resumes (council R1): same contract as the sync
+    // path above — a resume that cannot be journaled is not granted, so a
+    // restart can never replay a lower consumed-resume count than live.
     try {
       await this.recordRunJournalEntry({
         idempotencyKey: `pause_triage:${issueId}:${stageName ?? "no-stage"}:${input.resumesUsedAtFire + 1}:${this.now().toISOString()}`,
@@ -2119,8 +2236,19 @@ export class OrchestratorCore {
           resumesUsed: input.resumesUsedAtFire,
         },
       });
-    } catch {
-      // Audit is best-effort; the verdict outcome must still apply.
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to journal deferred pause-triage verdict for ${identifier}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      if (willResume) {
+        // Journal failure means the resume is NOT authorized; the standing
+        // park stays and no resume is consumed (live and replay agree).
+        return;
+      }
+    }
+
+    if (willResume) {
+      this.state.issuePauseTriageResumes[issueId] = resumesUsed + 1;
     }
 
     if (!willResume) {
@@ -2640,16 +2768,53 @@ export class OrchestratorCore {
         turns: runningEntry.turnCount,
         outcome: classifiedOutcome,
       };
-      let history = this.state.issueExecutionHistory[input.issueId];
-      if (history === undefined) {
-        history = [];
-        this.state.issueExecutionHistory[input.issueId] = history;
+      // Journal the stage record (SYMPH-401) so replay reduces it back into
+      // issueExecutionHistory and per-issue cumulative spend survives a
+      // restart. Sequence-suffixed key: continuations reuse stage+attempt,
+      // so a stable key would dedupe (and drop) every stage after the first.
+      // Journal-first (council R1, mirroring budget_escalation's PR #329
+      // contract): the record reaches live execution history only after the
+      // journal write succeeded, so memory and disk always agree on spend.
+      // On a failed write both surfaces omit the record — both-miss keeps
+      // live and replay convergent, while a live-only push would silently
+      // under-count spend after the next restart.
+      try {
+        await this.recordRunJournalEntry({
+          idempotencyKey: `stage_record:${input.issueId}:${stageName}:${formatAttemptKey(runningEntry.retryAttempt)}:${this.nextRunJournalSequence()}`,
+          timestamp: endedAt.toISOString(),
+          kind: "stage_record",
+          issueId: input.issueId,
+          issueIdentifier: runningEntry.identifier,
+          operation: "dispatcher",
+          stage: stageName,
+          attempt: runningEntry.retryAttempt,
+          ownerId: this.leaseOwnerId,
+          lease: null,
+          summary: `Stage record for ${runningEntry.identifier} (${stageName}): ${stageRecord.totalTokens} tokens over ${stageRecord.turns} turns (${stageRecord.outcome}).`,
+          metadata: {
+            schema_version: 1,
+            status: "completed",
+            ...stageRecord,
+          },
+        });
+        const history = this.state.issueExecutionHistory[input.issueId];
+        if (history === undefined) {
+          this.state.issueExecutionHistory[input.issueId] = [stageRecord];
+        } else {
+          history.push(stageRecord);
+        }
+      } catch (error) {
+        console.warn(
+          `[orchestrator] failed to journal stage record for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
-      history.push(stageRecord);
 
-      // Snapshot history after the push so runtime-host can read it even if
-      // advanceStage() deletes issueExecutionHistory for terminal transitions.
-      this.lastExitHistorySnapshot.set(input.issueId, [...history]);
+      // Snapshot history after the (conditional) push so runtime-host can
+      // read it even if advanceStage() deletes issueExecutionHistory for
+      // terminal transitions.
+      this.lastExitHistorySnapshot.set(input.issueId, [
+        ...(this.state.issueExecutionHistory[input.issueId] ?? []),
+      ]);
     }
 
     if (input.outcome === "normal") {
@@ -2883,14 +3048,18 @@ export class OrchestratorCore {
 
     const nextStageName = currentStage.transitions.onComplete;
     if (nextStageName === null) {
-      // No on_complete transition — treat as terminal
+      // No on_complete transition — treat as terminal. No tracker write
+      // fires here, so journal synthetic terminal evidence (council R2) or
+      // replay would restore the counters this clear erases.
+      this.journalTerminalEvidence(issueId, issueIdentifier, currentStageName);
       this.clearTerminalIssueRuntimeState(issueId);
       return "completed";
     }
 
     const nextStage = stagesConfig.stages[nextStageName];
     if (nextStage === undefined) {
-      // Invalid target — treat as terminal
+      // Invalid target — treat as terminal (same evidence rule as above)
+      this.journalTerminalEvidence(issueId, issueIdentifier, currentStageName);
       this.clearTerminalIssueRuntimeState(issueId);
       return "completed";
     }
@@ -2913,21 +3082,41 @@ export class OrchestratorCore {
         });
       }
       this.clearTerminalIssueRuntimeState(issueId);
-      // Fire linearState update for the terminal stage (e.g., move to "Done")
+      // Fire linearState update for the terminal stage (e.g., move to "Done").
+      // Routed through runTrackerWriteOnce (council R1) so this path leaves
+      // the same `tracker_write:{issue}:terminal:...` completed evidence the
+      // admission-path terminal write does — replay keys terminal-completion
+      // cleanup off that entry (see recoverFromRunJournal).
       if (
         nextStage.linearState !== null &&
         this.updateIssueState !== undefined
       ) {
-        void this.updateIssueState(
-          issueId,
-          issueIdentifier,
-          nextStage.linearState,
+        const linearState = nextStage.linearState;
+        const updateIssueState = this.updateIssueState;
+        void this.runTrackerWriteOnce(
+          {
+            idempotencyKey: `tracker_write:${issueId}:terminal:${nextStageName}:${linearState}`,
+            issueId,
+            issueIdentifier,
+            stage: nextStageName,
+            attempt: null,
+            action: "update_issue_state",
+            summary: `Move ${issueIdentifier} to terminal state ${linearState}.`,
+          },
+          async () => {
+            await updateIssueState(issueId, issueIdentifier, linearState);
+          },
         ).catch((err) => {
           console.warn(
             `[orchestrator] Failed to update terminal state for ${issueIdentifier}:`,
             err,
           );
         });
+      } else {
+        // No tracker write fires (linearState null or no updateIssueState
+        // callback): journal synthetic terminal evidence (council R2) so
+        // replay still clears the counters this completion erased live.
+        this.journalTerminalEvidence(issueId, issueIdentifier, nextStageName);
       }
       // Best-effort: check if all sibling sub-issues are terminal and auto-close parent
       if (this.autoCloseParentIssue !== undefined) {
@@ -4405,6 +4594,52 @@ export class OrchestratorCore {
     ];
   }
 
+  /**
+   * Journal replay-visible terminal-completion evidence for completion
+   * paths that fire NO tracker write (council R2): a terminal stage whose
+   * linearState is null, a missing updateIssueState callback, or an
+   * onComplete transition that is null/invalid. Reuses the tracker_write
+   * journal kind with the same `:terminal:` / `:completed` key shape the
+   * runTrackerWriteOnce paths produce, so recoverFromRunJournal keeps a
+   * single terminal-evidence predicate; metadata marks that no tracker
+   * call happened. Consumer contract (council R3): a `:terminal:` +
+   * `:completed` tracker_write entry — real or synthetic — means only
+   * "this issue reached terminal completion"; it is NOT proof a tracker
+   * API call occurred. Consumers needing the latter must check
+   * metadata.skipped !== true. Best-effort: a journal outage must never block live
+   * terminal completion — counters surviving replay after a failed write
+   * is the documented degraded mode.
+   */
+  private journalTerminalEvidence(
+    issueId: string,
+    issueIdentifier: string,
+    stage: string | null,
+  ): void {
+    void this.recordRunJournalEntry({
+      idempotencyKey: `tracker_write:${issueId}:terminal:${stage ?? "none"}:none:completed`,
+      timestamp: this.now().toISOString(),
+      kind: "tracker_write",
+      issueId,
+      issueIdentifier,
+      operation: "tracker_write",
+      stage,
+      attempt: null,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Terminal completion for ${issueIdentifier} (no tracker write).`,
+      metadata: {
+        status: "completed",
+        action: "update_issue_state",
+        skipped: true,
+      },
+    }).catch((err) => {
+      console.warn(
+        `[orchestrator] Failed to journal terminal evidence for ${issueIdentifier}:`,
+        err,
+      );
+    });
+  }
+
   private clearTerminalIssueRuntimeState(issueId: string): void {
     delete this.state.issueStages[issueId];
     delete this.state.issueReworkCounts[issueId];
@@ -4421,6 +4656,13 @@ export class OrchestratorCore {
     // Clear the exhaustion-dedup marker so a resumed issue can fire the alert
     // again if it exhausts retries in a new lifecycle (SYMPH-397).
     this.state.failureExhaustedIds.delete(issueId);
+    // Coupled surfaces (council P3): a terminally-cleared issue cannot be
+    // awaiting an explicit resume, so the resumeRequired set, its mark, and
+    // its guard die with the counters (clearResumeRequirement keeps the
+    // three atomic — never a marked-set entry without a mark record). Park
+    // paths that call this method re-mark AFTERWARDS, same ordering as the
+    // park-generation note below.
+    this.clearResumeRequirement(issueId);
     // SYMPH-399 lifecycle: intent fence generation, one-triage-per-park
     // marker, and any unconsumed retry_once grant all die with the issue's
     // runtime state. Park paths that call this method re-set the generation
@@ -4541,8 +4783,9 @@ export class OrchestratorCore {
     issueId: string,
     issueState?: string | null,
     pausedAt?: string | null,
+    mark?: { reason: string; setBySequence: number | null },
   ): void {
-    this.recordIssueRequiresExplicitResume(issueId, issueState, pausedAt);
+    this.recordIssueRequiresExplicitResume(issueId, issueState, pausedAt, mark);
     this.releaseClaim(issueId);
   }
 
@@ -4550,8 +4793,19 @@ export class OrchestratorCore {
     issueId: string,
     issueState?: string | null,
     pausedAt?: string | null,
+    mark?: { reason: string; setBySequence: number | null },
   ): void {
     this.state.resumeRequired.add(issueId);
+    // Persistable mark surface (SYMPH-406): reason + the journal cursor that
+    // set the mark. A re-mark without fresh attribution (e.g. the worker-exit
+    // path re-asserting a park requestStop already recorded) preserves the
+    // existing reason/cursor instead of erasing it.
+    const existingMark = this.state.resumeRequiredMarks[issueId];
+    this.state.resumeRequiredMarks[issueId] = {
+      reason: mark?.reason ?? existingMark?.reason ?? "stop_like_pause",
+      setBySequence: mark?.setBySequence ?? existingMark?.setBySequence ?? null,
+      since: pausedAt ?? existingMark?.since ?? this.now().toISOString(),
+    };
     const pausedState =
       issueState === undefined || issueState === null
         ? null
@@ -4574,6 +4828,7 @@ export class OrchestratorCore {
 
   private clearResumeRequirement(issueId: string): void {
     this.state.resumeRequired.delete(issueId);
+    delete this.state.resumeRequiredMarks[issueId];
     this.resumeRequiredGuards.delete(issueId);
   }
 
@@ -4740,6 +4995,25 @@ export class OrchestratorCore {
         ? {}
         : { journalMetadata: application.journalMetadata }),
     });
+
+    // Stamp the persistable mark with the intent entry's cursor (SYMPH-406):
+    // park/halt set the mark inside applyIntentVerb before the journal write
+    // existed, so the sequence is patched in here — matching what replay
+    // reduces from the same entry.
+    if (
+      application.status === "applied" &&
+      (input.verb === "park" || input.verb === "halt") &&
+      sequence !== null
+    ) {
+      const standingMark = this.state.resumeRequiredMarks[input.issueId];
+      if (standingMark !== undefined) {
+        this.state.resumeRequiredMarks[input.issueId] = {
+          ...standingMark,
+          reason: `intent:${input.verb}:${input.reason.class}`,
+          setBySequence: sequence,
+        };
+      }
+    }
 
     if (application.status === "applied" && input.renderComment !== false) {
       try {
@@ -6056,7 +6330,7 @@ export class OrchestratorCore {
       stageName: string | null;
     },
   ): Promise<void> {
-    await this.recordRunJournalEntry({
+    const hardStopEntry = await this.recordRunJournalEntry({
       idempotencyKey: `hard_stop:${issueId}:${input.stageName ?? "no-stage"}:${formatAttemptKey(runningEntry.retryAttempt)}:${input.hardStop.trigger}:${input.hardStop.turnCount}`,
       timestamp: this.now().toISOString(),
       kind: "hard_stop_trigger",
@@ -6080,7 +6354,15 @@ export class OrchestratorCore {
       },
     });
 
-    this.markIssueRequiresExplicitResume(issueId, runningEntry.issue.state);
+    this.markIssueRequiresExplicitResume(
+      issueId,
+      runningEntry.issue.state,
+      null,
+      {
+        reason: `hard_stop:${input.hardStop.trigger}`,
+        setBySequence: hardStopEntry.sequence,
+      },
+    );
 
     const comment = [
       `Hard stop outcome: ${input.hardStop.outcome}`,
@@ -6130,7 +6412,7 @@ export class OrchestratorCore {
       stageName: string | null;
     },
   ): Promise<void> {
-    await this.recordRunJournalEntry({
+    const operatorInputEntry = await this.recordRunJournalEntry({
       idempotencyKey: `operator_input_required:${issueId}:${input.stageName ?? "no-stage"}:${formatAttemptKey(runningEntry.retryAttempt)}`,
       timestamp: this.now().toISOString(),
       kind: "operator_input_required",
@@ -6150,7 +6432,15 @@ export class OrchestratorCore {
       },
     });
 
-    this.markIssueRequiresExplicitResume(issueId, runningEntry.issue.state);
+    this.markIssueRequiresExplicitResume(
+      issueId,
+      runningEntry.issue.state,
+      null,
+      {
+        reason: "operator_input_required",
+        setBySequence: operatorInputEntry.sequence,
+      },
+    );
 
     const comment = [
       "Headless Codex requested operator input during the worker turn.",
@@ -6457,6 +6747,11 @@ export class OrchestratorCore {
               err,
             );
           });
+        } else {
+          // No tracker write fires (linearState null or no updateIssueState
+          // callback): journal synthetic terminal evidence (council R2) so
+          // replay still clears the counters this completion erased live.
+          this.journalTerminalEvidence(issue.id, issue.identifier, stageName);
         }
         return {
           dispatched: false,
@@ -7503,6 +7798,8 @@ export class OrchestratorCore {
         this.recordIssueRequiresExplicitResume(
           runningEntry.issue.id,
           runningEntry.issue.state,
+          null,
+          { reason, setBySequence: lease.lastJournalSequence },
         );
       }
       await this.stopRunningIssue?.({
@@ -8285,6 +8582,61 @@ function readMetadataNumber(
 ): number | null {
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Mark reason for an intent-driven park/halt (SYMPH-406): the verb plus the
+ * journaled intent reason class, e.g. "intent:park:manual_stop".
+ */
+function formatIntentMarkReason(
+  verb: string,
+  metadata: Record<string, unknown>,
+): string {
+  const reason = metadata.reason;
+  const reasonClass =
+    typeof reason === "object" &&
+    reason !== null &&
+    typeof (reason as { class?: unknown }).class === "string"
+      ? (reason as { class: string }).class
+      : null;
+  return reasonClass === null
+    ? `intent:${verb}`
+    : `intent:${verb}:${reasonClass}`;
+}
+
+/**
+ * Reconstruct a StageRecord from a journaled stage_record entry's metadata
+ * (SYMPH-401). Returns null for malformed/legacy entries — replay tolerates
+ * the gap (spend under-counts rather than crashing recovery).
+ */
+function toStageRecordFromMetadata(
+  metadata: Record<string, unknown>,
+): StageRecord | null {
+  const stageName = readMetadataString(metadata, "stageName");
+  const durationMs = readMetadataNumber(metadata, "durationMs");
+  const totalTokens = readMetadataNumber(metadata, "totalTokens");
+  const turns = readMetadataNumber(metadata, "turns");
+  const outcome = readMetadataString(metadata, "outcome");
+  if (
+    stageName === null ||
+    durationMs === null ||
+    totalTokens === null ||
+    turns === null ||
+    outcome === null
+  ) {
+    return null;
+  }
+  return {
+    stageName,
+    durationMs,
+    totalTokens,
+    inputTokens: readMetadataNumber(metadata, "inputTokens") ?? 0,
+    outputTokens: readMetadataNumber(metadata, "outputTokens") ?? 0,
+    cacheReadTokens: readMetadataNumber(metadata, "cacheReadTokens") ?? 0,
+    cacheWriteTokens: readMetadataNumber(metadata, "cacheWriteTokens") ?? 0,
+    turns,
+    outcome,
+  };
 }
 
 function toVerdictDisposition(value: unknown): VerdictDisposition | null {
