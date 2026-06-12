@@ -207,6 +207,9 @@ describe("parseCouncilReviewGateArgs", () => {
     expect(() => parseCouncilReviewGateArgs(["--help"], "/cwd")).toThrow(
       /--issue-id ISSUE[\s\S]*--artifact-dir DIR/,
     );
+    expect(() => parseCouncilReviewGateArgs(["--help"], "/cwd")).toThrow(
+      /\*\* crosses \/[\s\S]*\* and \? do not/,
+    );
   });
 
   it("recognizes direct bin execution through symlink paths", async () => {

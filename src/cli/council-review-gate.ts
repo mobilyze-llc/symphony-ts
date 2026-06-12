@@ -249,7 +249,7 @@ function renderUsage(): string {
     "  --round N                     Council loop round number (default: 1)",
     "  --mode full|convergence       Council loop mode (default: full)",
     "  --assert-fresh-review PATH    Assert an existing clean review-result.json covers current HEAD",
-    "  --allow-stale-path GLOB       Explicit path allowlist for freshness assertion; repeatable",
+    "  --allow-stale-path GLOB       Explicit freshness allowlist; repeatable; ** crosses /, * and ? do not",
     "",
   ].join("\n");
 }

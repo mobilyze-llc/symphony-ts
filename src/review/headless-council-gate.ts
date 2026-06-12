@@ -943,6 +943,8 @@ function matchesGlobLikePattern(pattern: string, filePath: string): boolean {
       return fileIndex === filePath.length;
     }
 
+    // This is an explicit operator allowlist dialect: ** crosses path
+    // separators wherever it appears, while * and ? stay within one segment.
     if (pattern.startsWith("**", patternIndex)) {
       for (
         let nextFileIndex = fileIndex;

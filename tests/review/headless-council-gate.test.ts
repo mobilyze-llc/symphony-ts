@@ -1566,6 +1566,208 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("covers freshness allowlist glob edge cases through stale-head classification", async () => {
+    const matchingCases = [
+      {
+        name: "single star stays within one segment",
+        filePath: "docs/reports/fresh.html",
+        pattern: "docs/reports/*.html",
+      },
+      {
+        name: "single question matches one non-slash character",
+        filePath: "docs/reports/a1.md",
+        pattern: "docs/reports/a?.md",
+      },
+      {
+        name: "consecutive questions match consecutive non-slash characters",
+        filePath: "docs/reports/ab.md",
+        pattern: "docs/reports/??.md",
+      },
+      {
+        name: "double star spans middle path segments",
+        filePath: "src/nested/deep/test.ts",
+        pattern: "src/**/test.ts",
+      },
+      {
+        name: "multiple double stars are each evaluated",
+        filePath: "packages/app/src/nested/index.ts",
+        pattern: "packages/**/src/**/index.ts",
+      },
+      {
+        name: "only double star matches an arbitrary path",
+        filePath: "README.md",
+        pattern: "**",
+      },
+      {
+        name: "long paths do not defeat memoized matching",
+        filePath: "very/long/path/with/many/segments/tail.txt",
+        pattern: "very/**/tail.txt",
+      },
+      {
+        name: "embedded double star uses the documented operator dialect",
+        filePath: "reports/2026/summary.md",
+        pattern: "reports**",
+      },
+    ];
+
+    for (const testCase of matchingCases) {
+      const harness = await createHarness({
+        ghPrViewFreshness: {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            baseRefOid: "base-sha",
+            headRefOid: "new-head-sha",
+          }),
+          stderr: "",
+        },
+        gitDiffNameOnly: {
+          exitCode: 0,
+          stdout: `${testCase.filePath}\n`,
+          stderr: "",
+        },
+      });
+      const reviewResultPath = join(
+        harness.artifactDir,
+        `${testCase.name.replace(/\W+/g, "-")}.json`,
+      );
+      await mkdir(harness.artifactDir, { recursive: true });
+      await writeFile(
+        reviewResultPath,
+        `${JSON.stringify(cleanReviewResult({ reviewedHeadSha: "old-head-sha" }), null, 2)}\n`,
+      );
+
+      const result = await assertFreshCouncilReview(
+        {
+          issueId: "MOB-88",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          reviewResultPath,
+          repo: "mobilyze-llc/symphony-ts",
+          prNumber: 282,
+          allowedChangePatterns: [testCase.pattern],
+        },
+        { runCommand: harness.runCommand },
+      );
+
+      expect(result, testCase.name).toMatchObject({
+        verdict: "pass",
+        code: "fresh",
+        materialChangedFiles: [],
+        allowlistedChangedFiles: [testCase.filePath],
+      });
+    }
+
+    const nonMatchingCases = [
+      {
+        name: "single star does not cross a path segment",
+        filePath: "docs/reports/deep/fresh.html",
+        pattern: "docs/reports/*.html",
+      },
+      {
+        name: "single question does not match a slash",
+        filePath: "docs/reports/a/b.md",
+        pattern: "docs/reports/a?.md",
+      },
+    ];
+
+    for (const testCase of nonMatchingCases) {
+      const harness = await createHarness({
+        ghPrViewFreshness: {
+          exitCode: 0,
+          stdout: JSON.stringify({
+            baseRefOid: "base-sha",
+            headRefOid: "new-head-sha",
+          }),
+          stderr: "",
+        },
+        gitDiffNameOnly: {
+          exitCode: 0,
+          stdout: `${testCase.filePath}\n`,
+          stderr: "",
+        },
+      });
+      const reviewResultPath = join(
+        harness.artifactDir,
+        `${testCase.name.replace(/\W+/g, "-")}.json`,
+      );
+      await mkdir(harness.artifactDir, { recursive: true });
+      await writeFile(
+        reviewResultPath,
+        `${JSON.stringify(cleanReviewResult({ reviewedHeadSha: "old-head-sha" }), null, 2)}\n`,
+      );
+
+      const result = await assertFreshCouncilReview(
+        {
+          issueId: "MOB-88",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          reviewResultPath,
+          repo: "mobilyze-llc/symphony-ts",
+          prNumber: 282,
+          allowedChangePatterns: [testCase.pattern],
+        },
+        { runCommand: harness.runCommand },
+      );
+
+      expect(result, testCase.name).toMatchObject({
+        verdict: "error",
+        code: "stale_review",
+        materialChangedFiles: [testCase.filePath],
+        allowlistedChangedFiles: [],
+      });
+    }
+  });
+
+  it("returns stale_review when changed files cannot be classified", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "new-head-sha",
+        }),
+        stderr: "",
+      },
+      gitDiffNameOnly: {
+        exitCode: 1,
+        stdout: "",
+        stderr: "fatal: bad object old-head-sha",
+      },
+    });
+    const reviewResultPath = join(harness.artifactDir, "diff-failed.json");
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(cleanReviewResult({ reviewedHeadSha: "old-head-sha" }), null, 2)}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "stale_review",
+      reviewedHeadSha: "old-head-sha",
+      currentHeadSha: "new-head-sha",
+      materialChangedFiles: [],
+      allowlistedChangedFiles: [],
+      guidance: "rerun convergence review against HEAD.",
+    });
+    expect(result.summary).toContain("could not be classified");
+    expect(
+      await readFile(result.artifactPaths.freshnessResult, "utf-8"),
+    ).toContain('"code": "stale_review"');
+  });
+
   it("fails stale when a moved head has both allowlisted and material changes", async () => {
     const harness = await createHarness({
       ghPrViewFreshness: {
