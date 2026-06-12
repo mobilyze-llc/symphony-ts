@@ -26,10 +26,7 @@ function isFavorable(
 function DeltaBadge({
   text,
   favorable,
-}: {
-  text: string;
-  favorable: boolean | null;
-}) {
+}: { text: string; favorable: boolean | null }) {
   if (favorable == null) {
     return (
       <div

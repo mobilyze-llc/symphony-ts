@@ -79,7 +79,10 @@ export default function StageUtilizationChart({
 
   // Compute stacked values (cumulative sum at each date index)
   const stackedValues: Record<string, number[]> = {};
-  const cumulativeBase: number[] = new Array(sortedDates.length).fill(0);
+  const cumulativeBase: number[] = Array.from(
+    { length: sortedDates.length },
+    () => 0,
+  );
   for (const stage of stages) {
     const vals = stageValues[stage];
     stackedValues[stage] = vals.map((v, i) => cumulativeBase[i] + v);
