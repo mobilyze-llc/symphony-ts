@@ -979,6 +979,15 @@ export interface ResumeRequiredMark {
   since: string;
 }
 
+export interface PendingStageSignal {
+  signal: "complete" | "failure";
+  stageName: string | null;
+  attempt: number | null;
+  agentMessage: string;
+  failureClass: FailureClass | null;
+  setBySequence: number | null;
+}
+
 export interface OrchestratorState {
   pollIntervalMs: number;
   maxConcurrentAgents: number;
@@ -1000,6 +1009,7 @@ export interface OrchestratorState {
   codexRateLimits: CodexRateLimits;
   rateLimitAdmission: RateLimitAdmissionState | null;
   issueStages: Record<string, string>;
+  issuePendingStageSignals: Record<string, PendingStageSignal>;
   issueBudgetEscalations: Record<string, number>;
   issuePauseTriageResumes: Record<string, number>;
   issueReworkCounts: Record<string, number>;
@@ -1205,6 +1215,7 @@ export function createInitialOrchestratorState(input: {
     codexRateLimits: null,
     rateLimitAdmission: null,
     issueStages: {},
+    issuePendingStageSignals: {},
     issueBudgetEscalations: {},
     issuePauseTriageResumes: {},
     issueReworkCounts: {},
