@@ -82,6 +82,14 @@ export interface CodexSessionArtifact {
 
 export type CodexTurnStatus = "completed" | "failed" | "cancelled";
 
+export type CodexSessionClosureInitiator =
+  | "budget_hard_stop"
+  | "client_close"
+  | "operator_abort"
+  | "session_rotation"
+  | "shutdown"
+  | "upstream_exit";
+
 export interface CodexClientEvent {
   event:
     | "session_started"
@@ -107,6 +115,7 @@ export interface CodexClientEvent {
   usage?: CodexUsage;
   rateLimits?: Record<string, unknown> | null;
   errorCode?: string;
+  closureInitiator?: CodexSessionClosureInitiator;
   message?: string;
   raw?: unknown;
   toolName?: string | null;
@@ -255,8 +264,11 @@ export class CodexAppServerClient {
     });
   }
 
-  async close(): Promise<void> {
+  async close(input?: {
+    closureInitiator?: CodexSessionClosureInitiator;
+  }): Promise<void> {
     this.closed = true;
+    const closureInitiator = input?.closureInitiator ?? "client_close";
     this.rejectPending(
       new CodexAppServerClientError(
         "Codex session closed.",
@@ -274,6 +286,7 @@ export class CodexAppServerClient {
           ERROR_CODES.codexSessionClosedMidTurn,
         ),
         "turn_ended_with_error",
+        { closureInitiator },
       );
     }
 
@@ -357,7 +370,9 @@ export class CodexAppServerClient {
       });
       this.rejectPending(wrapped);
       if (this.currentTurn !== null) {
-        this.finishTurnWithError(wrapped, "turn_ended_with_error");
+        this.finishTurnWithError(wrapped, "turn_ended_with_error", {
+          closureInitiator: "upstream_exit",
+        });
       }
     });
     child.on("exit", (code, signal) => {
@@ -377,6 +392,7 @@ export class CodexAppServerClient {
             ERROR_CODES.codexSessionClosedMidTurn,
           ),
           "turn_ended_with_error",
+          { closureInitiator: "upstream_exit" },
         );
       }
       if (!this.closed && this.threadId === null) {
@@ -1067,6 +1083,7 @@ export class CodexAppServerClient {
   private finishTurnWithError(
     error: CodexAppServerClientError,
     event: "turn_ended_with_error",
+    options?: { closureInitiator?: CodexSessionClosureInitiator },
   ): void {
     const activeTurn = this.currentTurn;
     if (activeTurn === null) {
@@ -1083,6 +1100,9 @@ export class CodexAppServerClient {
       threadId: activeTurn.threadId,
       turnId: activeTurn.turnId,
       errorCode: error.code,
+      ...(options?.closureInitiator === undefined
+        ? {}
+        : { closureInitiator: options.closureInitiator }),
       message: error.message,
       ...optionalTelemetry(this.lastUsage, this.lastRateLimits),
     });

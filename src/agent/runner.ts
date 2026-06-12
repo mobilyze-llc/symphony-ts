@@ -8,6 +8,7 @@ import {
   CodexAppServerClient,
   type CodexClientEvent,
   type CodexDynamicTool,
+  type CodexSessionClosureInitiator,
   type CodexTurnResult,
 } from "../codex/app-server-client.js";
 import { createLinearGraphqlDynamicTool } from "../codex/linear-graphql-tool.js";
@@ -20,6 +21,7 @@ import {
   DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
   DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
   DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
+  DEFAULT_HARD_STOP_LIVE_BUDGET_GRACE_RATIO,
   DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
   DEFAULT_HARD_STOP_MAX_ITERATIONS,
   DEFAULT_HARD_STOP_MAX_PRIMARY_WINDOW_PCT_PER_UNIT,
@@ -96,7 +98,9 @@ export interface AgentRunnerCodexClient {
     title: string;
   }): Promise<CodexTurnResult>;
   continueTurn(prompt: string, title: string): Promise<CodexTurnResult>;
-  close(): Promise<void>;
+  close(input?: {
+    closureInitiator?: CodexSessionClosureInitiator;
+  }): Promise<void>;
 }
 
 export interface AgentRunnerCodexClientFactoryInput {
@@ -304,6 +308,7 @@ export class AgentRunner {
     const effectivePromptTemplateSource =
       stage?.prompt ?? this.config.promptTemplate;
     let hardStop: HardStopDecision | null = null;
+    let pendingLiveBudgetGraceStop: HardStopDecision | null = null;
     let previousProgressSignature: string | null = null;
     let repeatedNoProgressTurns = 0;
     const rateLimitUsage: RateLimitUsageObservations = {
@@ -336,12 +341,23 @@ export class AgentRunner {
         return;
       }
 
-      hardStop = {
-        ...decision,
-        reason: `${decision.reason} Live token telemetry crossed the budget during an in-flight turn.`,
-      };
+      if (canDeferLiveBudgetStopWithinGrace(decision, hardStops)) {
+        pendingLiveBudgetGraceStop = {
+          ...decision,
+          reason: `${decision.reason} Live token telemetry crossed the budget during an in-flight turn; allowing the in-flight turn to finish within ${formatLiveBudgetGracePct(hardStops.liveBudgetGraceRatio)} grace before pausing.`,
+        };
+        return;
+      }
+
+      hardStop = addLiveBudgetStopReason(
+        decision,
+        isBudgetHardStopTrigger(decision.trigger) &&
+          hardStops.liveBudgetGraceRatio > 0
+          ? `Live token telemetry exceeded the ${formatLiveBudgetGracePct(hardStops.liveBudgetGraceRatio)} grace ceiling during an in-flight turn.`
+          : "Live token telemetry crossed the budget during an in-flight turn.",
+      );
       if (client !== null) {
-        void closeBestEffort(client);
+        void closeBestEffort(client, "budget_hard_stop");
       }
     };
 
@@ -528,7 +544,7 @@ export class AgentRunner {
       ): Promise<void> => {
         const previous = client;
         if (previous !== null) {
-          await closeBestEffort(previous);
+          await closeBestEffort(previous, "session_rotation");
         }
         client = buildClient();
         abortController.bindClient(client);
@@ -653,6 +669,11 @@ export class AgentRunner {
             : { rateLimits: lastTurn.rateLimits }),
           ...(lastTurn.message === null ? {} : { message: lastTurn.message }),
         });
+
+        if (pendingLiveBudgetGraceStop !== null) {
+          hardStop = pendingLiveBudgetGraceStop;
+          break;
+        }
 
         // Early exit: agent signaled stage completion or failure
         if (hardStop !== null) {
@@ -788,7 +809,7 @@ export class AgentRunner {
       abortController.dispose();
 
       if (client !== null) {
-        await closeBestEffort(client);
+        await closeBestEffort(client, "shutdown");
       }
 
       if (workspace !== null) {
@@ -1414,9 +1435,12 @@ function isMidTurnSessionClosureError(error: unknown): boolean {
   );
 }
 
-async function closeBestEffort(client: AgentRunnerCodexClient): Promise<void> {
+async function closeBestEffort(
+  client: AgentRunnerCodexClient,
+  closureInitiator: CodexSessionClosureInitiator,
+): Promise<void> {
   try {
-    await client.close();
+    await client.close({ closureInitiator });
   } catch {
     // Closing is cleanup-only here; preserve the primary failure cause.
   }
@@ -1436,6 +1460,7 @@ const DEFAULT_HARD_STOPS_CONFIG = {
   maxTokensPerUnit: DEFAULT_HARD_STOP_MAX_TOKENS_PER_UNIT,
   maxDollarBudgetUsd: DEFAULT_HARD_STOP_MAX_DOLLAR_BUDGET_USD,
   premiumBudgetPauseRatio: DEFAULT_HARD_STOP_PREMIUM_BUDGET_PAUSE_RATIO,
+  liveBudgetGraceRatio: DEFAULT_HARD_STOP_LIVE_BUDGET_GRACE_RATIO,
   estimatedCostPer1kTokensUsd:
     DEFAULT_HARD_STOP_ESTIMATED_COST_PER_1K_TOKENS_USD,
   cachedTokenCostRatio: DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
@@ -1596,6 +1621,49 @@ function applyBudgetMultiplier(
   };
 }
 
+function canDeferLiveBudgetStopWithinGrace(
+  decision: HardStopDecision,
+  config: WorkflowHardStopsConfig,
+): boolean {
+  if (
+    config.liveBudgetGraceRatio <= 0 ||
+    !isBudgetHardStopTrigger(decision.trigger) ||
+    decision.billableTokens === undefined
+  ) {
+    return false;
+  }
+
+  const graceMultiplier = 1 + config.liveBudgetGraceRatio;
+  return (
+    decision.billableTokens <= config.maxTokensPerUnit * graceMultiplier &&
+    decision.estimatedCostUsd <= config.maxDollarBudgetUsd * graceMultiplier
+  );
+}
+
+function isBudgetHardStopTrigger(
+  trigger: HardStopDecision["trigger"],
+): boolean {
+  return (
+    trigger === "token_budget" ||
+    trigger === "dollar_budget" ||
+    trigger === "premium_spend_near_ceiling"
+  );
+}
+
+function addLiveBudgetStopReason(
+  decision: HardStopDecision,
+  suffix: string,
+): HardStopDecision {
+  return {
+    ...decision,
+    reason: `${decision.reason} ${suffix}`,
+  };
+}
+
+function formatLiveBudgetGracePct(ratio: number): string {
+  return `${(ratio * 100).toFixed(1).replace(/\.0$/, "")}%`;
+}
+
 function isLiveUsageEvent(event: CodexClientEvent): boolean {
   if (event.usage === undefined) {
     return false;
@@ -1640,7 +1708,7 @@ function createAgentAbortController(signal: AbortSignal | undefined): {
       return;
     }
 
-    void closeBestEffort(client);
+    void closeBestEffort(client, "operator_abort");
   };
 
   if (signal !== undefined) {

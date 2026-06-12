@@ -18,6 +18,7 @@ const CONFIG = {
   maxTokensPerUnit: 1000,
   maxDollarBudgetUsd: 10,
   premiumBudgetPauseRatio: 0.8,
+  liveBudgetGraceRatio: 0.1,
   estimatedCostPer1kTokensUsd: 5,
   cachedTokenCostRatio: 0.1,
   maxPrimaryWindowPctPerUnit: null,
@@ -220,6 +221,7 @@ describe("hard-stop policy", () => {
       maxTokensPerUnit: 240_000,
       maxDollarBudgetUsd: 4,
       premiumBudgetPauseRatio: 0.9,
+      liveBudgetGraceRatio: 0.1,
       estimatedCostPer1kTokensUsd: 0.05,
       cachedTokenCostRatio: 0.1,
     };

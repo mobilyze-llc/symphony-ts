@@ -335,6 +335,7 @@ describe("AgentRunner", () => {
           maxTokensPerUnit: 10_000,
           maxDollarBudgetUsd: 100,
           premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
           maxPrimaryWindowPctPerUnit: null,
@@ -376,6 +377,7 @@ describe("AgentRunner", () => {
           maxTokensPerUnit: 10_000,
           maxDollarBudgetUsd: 100,
           premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
           maxPrimaryWindowPctPerUnit: null,
@@ -423,6 +425,7 @@ describe("AgentRunner", () => {
           maxTokensPerUnit: 15,
           maxDollarBudgetUsd: 100,
           premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
           maxPrimaryWindowPctPerUnit: null,
@@ -446,7 +449,7 @@ describe("AgentRunner", () => {
     });
   });
 
-  it("pauses from in-flight token telemetry before the turn resolves", async () => {
+  it("lets an in-flight turn finish within live budget grace, then pauses", async () => {
     const root = await createRoot();
     const prompts: string[] = [];
     const close = vi.fn().mockResolvedValue(undefined);
@@ -465,6 +468,7 @@ describe("AgentRunner", () => {
           maxTokensPerUnit: 20,
           maxDollarBudgetUsd: 100,
           premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
           maxPrimaryWindowPctPerUnit: null,
@@ -498,6 +502,86 @@ describe("AgentRunner", () => {
             },
           });
 
+          return {
+            status: "completed" as const,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            sessionId: "thread-1-turn-1",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+            rateLimits: null,
+            message: "turn 1 finished inside grace",
+          };
+        },
+        continueTurn,
+        close,
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(prompts).toHaveLength(1);
+    expect(close).toHaveBeenCalledWith({ closureInitiator: "shutdown" });
+    expect(close).not.toHaveBeenCalledWith({
+      closureInitiator: "budget_hard_stop",
+    });
+    expect(continueTurn).not.toHaveBeenCalled();
+    expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
+    expect(result.turnsCompleted).toBe(1);
+    expect(result.lastTurn?.message).toBe("turn 1 finished inside grace");
+    expect(result.hardStop).toMatchObject({
+      outcome: "PAUSED-budget",
+      trigger: "token_budget",
+      totalTokens: 21,
+    });
+    expect(result.hardStop?.reason).toContain("Live token telemetry");
+    expect(result.hardStop?.reason).toContain("10% grace");
+  });
+
+  it("terminates an in-flight turn immediately when live budget telemetry exceeds grace", async () => {
+    const root = await createRoot();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const continueTurn = vi.fn();
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 20,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
+          estimatedCostPer1kTokensUsd: 0.01,
+          cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
+        },
+      },
+      tracker: createTracker(),
+      createCodexClient: (input) => ({
+        async startSession() {
+          input.onEvent({
+            event: "notification",
+            timestamp: new Date("2026-03-06T00:00:01.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+            message: "live usage update",
+            usage: {
+              inputTokens: 23,
+              outputTokens: 0,
+              totalTokens: 23,
+            },
+          });
+
           const error = new Error(
             "Codex session closed while a turn was running.",
           ) as Error & { code: string };
@@ -514,18 +598,17 @@ describe("AgentRunner", () => {
       attempt: null,
     });
 
-    expect(prompts).toHaveLength(1);
-    expect(close).toHaveBeenCalled();
+    expect(close).toHaveBeenCalledWith({
+      closureInitiator: "budget_hard_stop",
+    });
     expect(continueTurn).not.toHaveBeenCalled();
-    expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
-    expect(result.turnsCompleted).toBe(1);
     expect(result.lastTurn).toBeNull();
     expect(result.hardStop).toMatchObject({
       outcome: "PAUSED-budget",
       trigger: "token_budget",
-      totalTokens: 21,
+      totalTokens: 23,
     });
-    expect(result.hardStop?.reason).toContain("Live token telemetry");
+    expect(result.hardStop?.reason).toContain("grace ceiling");
   });
 
   it("pauses with rate_limit_budget from live window telemetry", async () => {
@@ -554,6 +637,7 @@ describe("AgentRunner", () => {
           maxTokensPerUnit: 1_000_000,
           maxDollarBudgetUsd: 100,
           premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
           maxPrimaryWindowPctPerUnit: 5,
@@ -600,7 +684,9 @@ describe("AgentRunner", () => {
       attempt: null,
     });
 
-    expect(close).toHaveBeenCalled();
+    expect(close).toHaveBeenCalledWith({
+      closureInitiator: "budget_hard_stop",
+    });
     expect(continueTurn).not.toHaveBeenCalled();
     expect(result.hardStop).toMatchObject({
       outcome: "PAUSED-budget",
@@ -625,6 +711,7 @@ describe("AgentRunner", () => {
           maxTokensPerUnit: 20,
           maxDollarBudgetUsd: 100,
           premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
           maxPrimaryWindowPctPerUnit: null,
@@ -704,6 +791,7 @@ describe("AgentRunner", () => {
           maxTokensPerUnit: 10_000,
           maxDollarBudgetUsd: 100,
           premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
           maxPrimaryWindowPctPerUnit: null,
@@ -728,11 +816,19 @@ describe("AgentRunner", () => {
             },
           });
 
-          const error = new Error(
-            "Codex session closed while a turn was running.",
-          ) as Error & { code: string };
-          error.code = ERROR_CODES.codexProtocolError;
-          throw error;
+          return {
+            status: "completed" as const,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            sessionId: "thread-1-turn-1",
+            usage: {
+              inputTokens: 21,
+              outputTokens: 0,
+              totalTokens: 21,
+            },
+            rateLimits: null,
+            message: "stage turn finished inside grace",
+          };
         },
         continueTurn,
         close,
@@ -746,7 +842,10 @@ describe("AgentRunner", () => {
       stage,
     });
 
-    expect(close).toHaveBeenCalled();
+    expect(close).toHaveBeenCalledWith({ closureInitiator: "shutdown" });
+    expect(close).not.toHaveBeenCalledWith({
+      closureInitiator: "budget_hard_stop",
+    });
     expect(continueTurn).not.toHaveBeenCalled();
     expect(result.hardStop).toMatchObject({
       outcome: "PAUSED-budget",
@@ -791,6 +890,7 @@ describe("AgentRunner", () => {
           maxTokensPerUnit: 10_000,
           maxDollarBudgetUsd: 100,
           premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
           maxPrimaryWindowPctPerUnit: null,
@@ -837,6 +937,7 @@ describe("AgentRunner", () => {
           maxTokensPerUnit: 20,
           maxDollarBudgetUsd: 100,
           premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
           maxPrimaryWindowPctPerUnit: null,
@@ -921,6 +1022,7 @@ describe("AgentRunner", () => {
           maxTokensPerUnit: 15,
           maxDollarBudgetUsd: 100,
           premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
           estimatedCostPer1kTokensUsd: 0.01,
           cachedTokenCostRatio: 0.1,
           maxPrimaryWindowPctPerUnit: null,
