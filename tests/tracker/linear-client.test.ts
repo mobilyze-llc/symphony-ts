@@ -6,6 +6,7 @@ import {
   LINEAR_CREATE_ISSUE_MUTATION,
   LINEAR_ISSUE_LABELS_BY_NAMES_QUERY,
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
+  LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
   LinearTrackerClient,
   type TrackerError,
 } from "../../src/index.js";
@@ -560,9 +561,70 @@ describe("resolveLabelIdsByNames", () => {
             teamKey: "SYMPH",
             labelNames: ["supervision"],
           },
+          responseBody: { raw: "bad request" },
         },
       }),
     );
+  });
+
+  it("captures the Linear GraphQL validation error body on HTTP 400 (SYMPH-413)", async () => {
+    const validationErrorBody = {
+      errors: [
+        {
+          message:
+            'Variable "$projectId" of type "String!" used in position expecting type "ID".',
+          extensions: { code: "GRAPHQL_VALIDATION_FAILED", userError: true },
+        },
+      ],
+    };
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse(validationErrorBody, 400));
+    const client = createClient({ fetchFn });
+
+    await expect(
+      client.findOpenIssuesByTitle({
+        projectId: "2d819863-4180-4361-bfa0-3cae38f1bea6",
+        title: "Dispatcher follow-up: branch_divergence for SYMPH-332",
+        excludeStateNames: ["Done", "Cancelled"],
+      }),
+    ).rejects.toThrow(
+      expect.objectContaining<Partial<TrackerError>>({
+        code: ERROR_CODES.linearApiStatus,
+        status: 400,
+        details: expect.objectContaining({
+          operationName: "SymphonyOpenIssuesByTitle",
+          responseBody: validationErrorBody,
+        }),
+      }),
+    );
+  });
+
+  it("declares $projectId as ID in the open-issues-by-title query (SYMPH-413 regression guard)", async () => {
+    // Linear rejects String! variables in ID comparator positions with
+    // HTTP 400 GRAPHQL_VALIDATION_FAILED. This guards the variable type.
+    expect(LINEAR_OPEN_ISSUES_BY_TITLE_QUERY).toContain("$projectId: ID!");
+    expect(LINEAR_OPEN_ISSUES_BY_TITLE_QUERY).not.toContain(
+      "$projectId: String!",
+    );
+
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(jsonResponse({ data: { issues: { nodes: [] } } }));
+    const client = createClient({ fetchFn });
+    await client.findOpenIssuesByTitle({
+      projectId: "project-uuid",
+      title: "Dispatcher follow-up: branch_divergence for SYMPH-332",
+      excludeStateNames: ["Done", "Cancelled"],
+    });
+
+    const { query, variables } = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(query).toBe(LINEAR_OPEN_ISSUES_BY_TITLE_QUERY);
+    expect(variables).toMatchObject({
+      projectId: "project-uuid",
+      title: "Dispatcher follow-up: branch_divergence for SYMPH-332",
+      excludeStateNames: ["Done", "Cancelled"],
+    });
   });
 
   it("includes sanitized operation context and returned errors on GraphQL top-level errors", async () => {

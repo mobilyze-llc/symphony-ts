@@ -1543,3 +1543,46 @@ describe("PipelineNotifier — fail-open contract (SYMPH-397)", () => {
     expect((errors[0] as Error).message).toContain("HTTP 503");
   });
 });
+
+describe("formatNotification — tracker_write_failed (SYMPH-413)", () => {
+  it("formats tracker_write_failed with status, sources, and serialized details", () => {
+    const result = formatNotification({
+      type: "tracker_write_failed",
+      followUpTitle: "Dispatcher follow-up: branch_divergence for SYMPH-332",
+      sourceIssueIds: ["7fe4ed29-b2ea-492f-9263-25c1e34c43ec"],
+      reason: "Linear API request failed with HTTP 400.",
+      httpStatus: 400,
+      details:
+        '{"errors":[{"extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}',
+    });
+    expect(result.text).toContain("Tracker follow-up write failed");
+    expect(result.text).toContain("(HTTP 400)");
+    expect(result.text).toContain(
+      "Dispatcher follow-up: branch_divergence for SYMPH-332",
+    );
+    expect(result.text).toContain(
+      "Source issues: 7fe4ed29-b2ea-492f-9263-25c1e34c43ec",
+    );
+    expect(result.text).toContain(
+      "Reason: Linear API request failed with HTTP 400.",
+    );
+    expect(result.text).toContain("GRAPHQL_VALIDATION_FAILED");
+    expect(result.text).not.toContain("[object Object]");
+  });
+
+  it("formats tracker_write_failed without status or details", () => {
+    const result = formatNotification({
+      type: "tracker_write_failed",
+      followUpTitle: "Dispatcher follow-up: stale promotion",
+      sourceIssueIds: [],
+      reason: "tracker unavailable",
+      httpStatus: null,
+      details: null,
+    });
+    expect(result.text).toContain("Tracker follow-up write failed");
+    expect(result.text).not.toContain("HTTP");
+    expect(result.text).toContain("Source issues: none");
+    expect(result.text).toContain("Reason: tracker unavailable");
+    expect(result.text).not.toContain("Details:");
+  });
+});

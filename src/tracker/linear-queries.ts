@@ -266,9 +266,12 @@ export const LINEAR_ISSUE_DETAILS_BY_IDS_QUERY = `
   }
 `.trim();
 
+// $projectId must be ID! — the project IDComparator position expects ID, and
+// Linear's GraphQL validation rejects String! variables in ID positions with
+// HTTP 400 GRAPHQL_VALIDATION_FAILED (SYMPH-413, verified live 2026-06-11).
 export const LINEAR_OPEN_ISSUES_BY_TITLE_QUERY = `
   query SymphonyOpenIssuesByTitle(
-    $projectId: String!
+    $projectId: ID!
     $title: String!
     $excludeStateNames: [String!]!
     $first: Int!

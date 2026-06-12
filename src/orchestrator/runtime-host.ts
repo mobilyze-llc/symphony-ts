@@ -101,6 +101,7 @@ import {
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
+import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
 import type { IssueTracker } from "../tracker/tracker.js";
 import { getDisplayVersion } from "../version.js";
@@ -590,6 +591,17 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                     details?: unknown;
                   })
                 : null;
+            const reason =
+              error instanceof Error ? error.message : String(error);
+            const httpStatus =
+              typeof trackerError?.status === "number"
+                ? trackerError.status
+                : null;
+            // Serialize the tracker error payload — logging the raw object
+            // renders as "[object Object]" in the journal line (SYMPH-413).
+            const serializedDetails = serializeTrackerErrorDetails(
+              trackerError?.details,
+            );
             void this.logger?.warn(
               "tracker_follow_up_write_failed",
               "Failed to create or update dispatcher follow-up issue.",
@@ -597,19 +609,26 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 outcome: "degraded",
                 title,
                 source_issue_ids: sourceIssueIds,
-                reason: error instanceof Error ? error.message : String(error),
+                reason,
                 ...(typeof trackerError?.code === "string"
                   ? { error_code: trackerError.code }
                   : {}),
-                ...(typeof trackerError?.status === "number"
-                  ? { http_status: trackerError.status }
-                  : {}),
-                ...(trackerError?.details !== undefined &&
-                trackerError.details !== null
-                  ? { details: trackerError.details }
+                ...(httpStatus !== null ? { http_status: httpStatus } : {}),
+                ...(serializedDetails !== null
+                  ? { details: serializedDetails }
                   : {}),
               },
             );
+            // Surface on the Slack alert channel (SYMPH-397) — a warn-level
+            // journal line alone let three branch_divergence findings vanish.
+            this.notifier?.notify({
+              type: "tracker_write_failed",
+              followUpTitle: title,
+              sourceIssueIds,
+              reason,
+              httpStatus,
+              details: serializeTrackerErrorDetails(trackerError?.details, 500),
+            });
           },
         });
       },

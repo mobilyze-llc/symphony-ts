@@ -892,11 +892,23 @@ export class LinearTrackerClient implements IssueTracker {
     const response = await this.fetchWithTimeout(query, variables, apiKey);
 
     if (!response.ok) {
+      // Capture the error body — Linear returns GraphQL validation errors
+      // (e.g. GRAPHQL_VALIDATION_FAILED) as HTTP 400 with a JSON body, and
+      // dropping it made the SYMPH-413 regression undiagnosable from logs.
+      let responseBody: unknown = null;
+      try {
+        responseBody = await parseGraphqlResponseBody(response);
+      } catch {
+        responseBody = null;
+      }
       throw new TrackerError(
         ERROR_CODES.linearApiStatus,
         `Linear API request failed with HTTP ${response.status}.`,
         {
-          details: buildGraphqlDiagnosticContext(query, variables),
+          details: {
+            ...buildGraphqlDiagnosticContext(query, variables),
+            responseBody,
+          },
           status: response.status,
         },
       );
