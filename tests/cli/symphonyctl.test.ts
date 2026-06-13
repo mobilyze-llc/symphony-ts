@@ -102,6 +102,33 @@ describe("parseSymphonyctlArgs", () => {
     });
   });
 
+  it("parses anchor until timestamps only when they include an explicit timezone", () => {
+    const parsed = parseSymphonyctlArgs(
+      ["anchor", "SYMPH-42", "--top", "--until", "2026-06-11T07:30:00-04:00"],
+      {},
+    );
+    expect(parsed.anchorExpiry).toEqual({
+      kind: "until_date",
+      at: "2026-06-11T11:30:00.000Z",
+    });
+  });
+
+  it("rejects date-only, local-time, free-form, and invalid-calendar anchor until values", () => {
+    for (const until of [
+      "2026-06-11",
+      "2026-06-11T11:30:00",
+      "June 11 2026 11:30 UTC",
+      "2026-02-30T11:30:00.000Z",
+    ]) {
+      expect(() =>
+        parseSymphonyctlArgs(
+          ["anchor", "SYMPH-42", "--top", "--until", until],
+          {},
+        ),
+      ).toThrow(SymphonyctlUsageError);
+    }
+  });
+
   it("parses unanchor", () => {
     expect(parseSymphonyctlArgs(["unanchor", "SYMPH-42"], {})).toEqual({
       command: "unanchor",

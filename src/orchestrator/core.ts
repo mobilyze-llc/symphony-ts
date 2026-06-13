@@ -97,6 +97,10 @@ import { readProcessIdentityMetadata } from "../shared/process-tree.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 import { formatAdmissionCard } from "./admission-card.js";
 import {
+  ANCHOR_UNTIL_TIMESTAMP_FORMAT,
+  parseAnchorUntilTimestamp,
+} from "./anchor-date.js";
+import {
   type ContinuousFeedbackReviewResult,
   ensureDecorrelatedFeedbackLane,
   formatContinuousFeedbackComment,
@@ -6283,8 +6287,7 @@ export class OrchestratorCore {
     };
     const parsed = parseAnchorFieldEditValue(input.value);
     if (parsed === null) {
-      const detail =
-        "anchor field value must be empty/unanchor, top until-merged, above <issue> until-merged, below <issue> until-merged, or use until <date>";
+      const detail = `anchor field value must be empty/unanchor, top until-merged, above <issue> until-merged, below <issue> until-merged, or use until ${ANCHOR_UNTIL_TIMESTAMP_FORMAT}`;
       const sequence = await this.recordInvalidAnchorFieldEdit({
         input,
         actor,
@@ -10443,13 +10446,13 @@ function parseAnchorFieldEditValue(
   }
   if (expiryToken === "until") {
     const rawDate = tokens.slice(expiryStart + 1).join(" ");
-    const parsed = new Date(rawDate);
-    if (rawDate === "" || Number.isNaN(parsed.valueOf())) {
+    const parsed = parseAnchorUntilTimestamp(rawDate);
+    if (parsed === null) {
       return null;
     }
     return {
       placement,
-      expiry: { kind: "until_date", at: parsed.toISOString() },
+      expiry: { kind: "until_date", at: parsed },
     };
   }
   return null;
