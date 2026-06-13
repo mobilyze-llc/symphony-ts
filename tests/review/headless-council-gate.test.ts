@@ -12,6 +12,7 @@ import {
   type ReviewBundleProvenanceEntry,
   type StructuredReviewerArtifact,
   assertFreshCouncilReview,
+  buildArtifactSectionHeadingKeys,
   defaultReviewerLanes,
   execFileCommand,
   runHeadlessCouncilGate as runHeadlessCouncilGateImpl,
@@ -4188,6 +4189,14 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("fails closed when configured artifact heading aliases normalize to the same key", () => {
+    expect(() =>
+      buildArtifactSectionHeadingKeys(["P2 Should Fix", "P2: Should Fix"]),
+    ).toThrow(
+      'Artifact section heading "P2: Should Fix" normalizes to "p2 should fix", which is already used by "P2 Should Fix".',
+    );
+  });
+
   it.each([
     ["emphasized", "- **P2: Should Fix**"],
     ["inline finding", "- P2: Should Fix: src/foo.ts:12 drops failures"],
@@ -4198,6 +4207,70 @@ describe("runHeadlessCouncilGate", () => {
     [
       "period-delimited inline finding",
       "- P2 Should Fix. src/foo.ts:12 drops failures",
+    ],
+    [
+      "hyphen-delimited inline finding",
+      "- P2 Should Fix - src/foo.ts:12 drops failures",
+    ],
+    [
+      "period-separated label words",
+      "- P2. Should Fix: src/foo.ts:12 drops failures",
+    ],
+    [
+      "exclamation-separated label words",
+      "- P2! Should Fix: src/foo.ts:12 drops failures",
+    ],
+    [
+      "question-separated label words",
+      "- P2? Should Fix: src/foo.ts:12 drops failures",
+    ],
+    [
+      "en-dash-delimited inline finding",
+      "- P2 Should Fix – src/foo.ts:12 drops failures",
+    ],
+    [
+      "em-dash-delimited inline finding",
+      "- P2 Should Fix — src/foo.ts:12 drops failures",
+    ],
+    [
+      "task-list checkbox inline finding",
+      "- [ ] P2: Should Fix: src/foo.ts:12 drops failures",
+    ],
+    [
+      "checked task-list checkbox inline finding",
+      "- [x] P2 Should Fix - src/foo.ts:12 drops failures",
+    ],
+    [
+      "checked task-list checkbox with glued label",
+      "- [x]P2 Should Fix: src/foo.ts:12 drops failures",
+    ],
+    [
+      "nested task-list checkbox inline finding",
+      "- [ ] [ ] P2 Should Fix: src/foo.ts:12 drops failures",
+    ],
+    [
+      "task-list checkbox with hyphenated label words",
+      "- [x] P2 - Should Fix: src/foo.ts:12 drops failures",
+    ],
+    [
+      "task-list checkbox with period-separated label words",
+      "- [x] P2. Should Fix: src/foo.ts:12 drops failures",
+    ],
+    [
+      "task-list checkbox with exclamation-separated label words",
+      "- [x] P2! Should Fix: src/foo.ts:12 drops failures",
+    ],
+    [
+      "task-list checkbox with question-separated label words",
+      "- [x] P2? Should Fix: src/foo.ts:12 drops failures",
+    ],
+    [
+      "task-list checkbox with en-dash label words",
+      "- [x] P2 – Should Fix: src/foo.ts:12 drops failures",
+    ],
+    [
+      "task-list checkbox with em-dash label words",
+      "- [x] P2 — Should Fix: src/foo.ts:12 drops failures",
     ],
     ["punctuated", "- P2 Should Fix."],
   ])(
