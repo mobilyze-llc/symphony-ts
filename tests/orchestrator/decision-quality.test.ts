@@ -76,6 +76,75 @@ describe("dispatcher decision-quality runner", () => {
 
     expect(extractDispatcherDecisionEvents(journal)).toEqual([event]);
   });
+
+  it("extracts checkpointed decision events as the covered prefix and only adds later raw decisions", () => {
+    const checkpointed = readFixture("true-positive.json");
+    const coveredTailDuplicate = readFixture("false-positive.json");
+    const afterCheckpoint = readFixture("false-negative.json");
+    const journal: DispatcherRunJournal = [
+      {
+        sequence: 10,
+        idempotencyKey: "journal_checkpoint:12",
+        timestamp: "2026-06-13T00:00:12.000Z",
+        kind: "journal_checkpoint",
+        issueId: "__dispatcher__",
+        issueIdentifier: "DISPATCHER",
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        ownerId: "worker-1",
+        lease: null,
+        summary: "checkpoint",
+        metadata: {
+          schema_version: 1,
+          checkpoint_type: "dispatcher_run_journal",
+          coveredThroughSequence: 12,
+          decisionQualityEvents: [checkpointed],
+        },
+      },
+      {
+        sequence: 11,
+        idempotencyKey: `dispatcher_decision:${coveredTailDuplicate.decisionId}`,
+        timestamp: coveredTailDuplicate.timestamp,
+        kind: "dispatcher_decision",
+        issueId: coveredTailDuplicate.issueId,
+        issueIdentifier: coveredTailDuplicate.issueIdentifier,
+        operation: coveredTailDuplicate.operation,
+        stage: coveredTailDuplicate.stage,
+        attempt: coveredTailDuplicate.attempt,
+        ownerId: "worker-1",
+        lease: null,
+        summary: "covered duplicate",
+        metadata: {
+          status: "completed",
+          decisionEvent: coveredTailDuplicate,
+        },
+      },
+      {
+        sequence: 13,
+        idempotencyKey: `dispatcher_decision:${afterCheckpoint.decisionId}`,
+        timestamp: afterCheckpoint.timestamp,
+        kind: "dispatcher_decision",
+        issueId: afterCheckpoint.issueId,
+        issueIdentifier: afterCheckpoint.issueIdentifier,
+        operation: afterCheckpoint.operation,
+        stage: afterCheckpoint.stage,
+        attempt: afterCheckpoint.attempt,
+        ownerId: "worker-1",
+        lease: null,
+        summary: "post-checkpoint decision",
+        metadata: {
+          status: "completed",
+          decisionEvent: afterCheckpoint,
+        },
+      },
+    ];
+
+    expect(extractDispatcherDecisionEvents(journal)).toEqual([
+      checkpointed,
+      afterCheckpoint,
+    ]);
+  });
 });
 
 function readFixture(filename: string): DispatcherDecisionEvent {

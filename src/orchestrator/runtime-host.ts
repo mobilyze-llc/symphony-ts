@@ -74,7 +74,12 @@ import {
 } from "../logging/loop-trace.js";
 import { readManagerRunJournal } from "../logging/manager-run-journal.js";
 import {
+  type CompactDispatcherRunJournalOptions,
+  type CompactDispatcherRunJournalResult,
+  DISPATCHER_RUN_JOURNAL_DEFAULT_COMPACTION_TAIL_ENTRIES,
+  type DispatcherRunJournalEntryDraft,
   appendDispatcherRunJournalEntryToDisk,
+  compactDispatcherRunJournalFileWithLock,
   readDispatcherRunJournal,
 } from "../logging/run-journal.js";
 import {
@@ -269,6 +274,12 @@ export interface RuntimeHostOptions {
     workspaceRoot: string,
     entry: DispatcherRunJournalEntry,
   ) => Promise<void>;
+  compactDispatcherRunJournal?: (
+    workspaceRoot: string,
+    checkpointDraft: DispatcherRunJournalEntryDraft,
+    options?: CompactDispatcherRunJournalOptions,
+  ) => Promise<CompactDispatcherRunJournalResult>;
+  dispatcherRunJournalCompactionTailEntries?: number;
   terminateDetachedPidTree?: typeof terminateDetachedPidTreeDefault;
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
@@ -388,6 +399,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     entry: DispatcherRunJournalEntry,
   ) => Promise<void>;
 
+  private readonly compactDispatcherRunJournal: (
+    workspaceRoot: string,
+    checkpointDraft: DispatcherRunJournalEntryDraft,
+    options?: CompactDispatcherRunJournalOptions,
+  ) => Promise<CompactDispatcherRunJournalResult>;
+
+  private readonly dispatcherRunJournalCompactionTailEntries: number;
+
   private readonly terminateDetachedPidTree: typeof terminateDetachedPidTreeDefault;
 
   static readonly PRUNE_DEBOUNCE_MS = 300_000;
@@ -465,6 +484,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.writeDispatcherRunJournalEntry =
       options.writeDispatcherRunJournalEntry ??
       appendDispatcherRunJournalEntryToDisk;
+    this.compactDispatcherRunJournal =
+      options.compactDispatcherRunJournal ??
+      compactDispatcherRunJournalFileWithLock;
+    this.dispatcherRunJournalCompactionTailEntries =
+      normalizeDispatcherRunJournalCompactionTailEntries(
+        options.dispatcherRunJournalCompactionTailEntries,
+      );
     this.terminateDetachedPidTree =
       options.terminateDetachedPidTree ?? terminateDetachedPidTreeDefault;
     this.captureDeployDriftFn =
@@ -1664,9 +1690,16 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     const task = (async () => {
       try {
-        const journal = await this.readDispatcherRunJournal(workspaceRoot);
+        let journal = await this.readDispatcherRunJournal(workspaceRoot);
         this.orchestrator.recoverFromRunJournal(journal);
         await this.cleanupUnconfirmedEmergencyStopProcesses(journal);
+        journal = this.orchestrator.getState().dispatcherRunJournal;
+        const compaction =
+          await this.compactLoadedDispatcherRunJournal(workspaceRoot);
+        if (compaction?.compacted === true) {
+          journal = compaction.journal;
+          this.orchestrator.recoverFromRunJournal(journal);
+        }
         this.rememberDispatcherRunJournalRoot(workspaceRoot, journal);
       } catch (error) {
         await this.logger?.warn(
@@ -1690,6 +1723,61 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         this.dispatcherRunJournalHydrationTask = null;
       }
     }
+  }
+
+  private async compactLoadedDispatcherRunJournal(
+    workspaceRoot: string,
+  ): Promise<CompactDispatcherRunJournalResult | null> {
+    const unconfirmedEmergencyStopPlans =
+      collectUnconfirmedEmergencyStopCleanupPlans(
+        this.orchestrator.getState().dispatcherRunJournal,
+      );
+    if (unconfirmedEmergencyStopPlans.length > 0) {
+      await this.logger?.warn(
+        "dispatcher_run_journal_compaction_skipped",
+        "Skipped dispatcher run-journal compaction while emergency-stop cleanup proof remains unconfirmed.",
+        {
+          outcome: "degraded",
+          skipped_reason: "unconfirmed_emergency_stop_cleanup",
+          unconfirmed_cleanup_plan_count: unconfirmedEmergencyStopPlans.length,
+        },
+      );
+      return null;
+    }
+    const checkpointDraft = this.orchestrator.createRunJournalCheckpointDraft();
+    if (checkpointDraft === null) {
+      return null;
+    }
+    const result = await this.compactDispatcherRunJournal(
+      workspaceRoot,
+      checkpointDraft,
+      { tailEntryCount: this.dispatcherRunJournalCompactionTailEntries },
+    );
+    if (result.compacted) {
+      await this.logger?.info(
+        "dispatcher_run_journal_compacted",
+        "Compacted dispatcher run journal after hydration.",
+        {
+          original_entry_count: result.originalEntryCount,
+          retained_entry_count: result.retainedEntryCount,
+          dropped_entry_count: result.droppedEntryCount,
+          checkpoint_sequence: result.checkpointSequence,
+          covered_through_sequence: result.coveredThroughSequence,
+          retained_tail_entries: result.retainedTailEntries,
+        },
+      );
+    } else if (result.skippedReason === "stale_checkpoint") {
+      await this.logger?.warn(
+        "dispatcher_run_journal_compaction_skipped",
+        "Skipped dispatcher run-journal compaction because the disk cursor advanced before the locked rewrite.",
+        {
+          outcome: "degraded",
+          skipped_reason: result.skippedReason,
+          current_cursor: result.coveredThroughSequence,
+        },
+      );
+    }
+    return result;
   }
 
   private async cleanupUnconfirmedEmergencyStopProcesses(
@@ -5145,6 +5233,17 @@ function resolveClosed(
   exitPromise: ReturnType<typeof createExitPromise>,
 ): void {
   exitPromise.resolveClosed();
+}
+
+function normalizeDispatcherRunJournalCompactionTailEntries(
+  value: number | undefined,
+): number {
+  if (value === undefined) {
+    return DISPATCHER_RUN_JOURNAL_DEFAULT_COMPACTION_TAIL_ENTRIES;
+  }
+  return Number.isInteger(value) && value > 0
+    ? value
+    : DISPATCHER_RUN_JOURNAL_DEFAULT_COMPACTION_TAIL_ENTRIES;
 }
 
 interface EmergencyStopRecoveryCleanupPlan {

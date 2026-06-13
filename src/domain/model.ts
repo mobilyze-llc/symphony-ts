@@ -261,6 +261,10 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   // Deterministic dispatch comparator disagreement (SYMPH-485): emitted when
   // the actual dispatch pick differs from the computed-order head.
   "ordering_disagreement",
+  // Replay retention checkpoint (SYMPH-293): compacted journals keep one
+  // covered-prefix state row plus a recent raw tail instead of replaying every
+  // historical row on restart.
+  "journal_checkpoint",
 ] as const;
 
 // ---------------------------------------------------------------------------
