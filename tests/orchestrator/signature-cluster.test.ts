@@ -583,6 +583,32 @@ describe("SignatureClusterRegistry — watchdog rate limiting (injected clock)",
   });
 });
 
+describe("SignatureClusterRegistry — checkpoint hydration", () => {
+  it("rejects malformed breaker issue ids instead of silently shrinking them", () => {
+    const reg = new SignatureClusterRegistry();
+
+    const accepted = reg.hydrateCheckpointSnapshot({
+      schemaVersion: 1,
+      clusters: [],
+      openBreakers: [
+        {
+          stageName: "implement",
+          signature: "abc1234",
+          openedAt: T0.toISOString(),
+          openedForIssueIds: ["id-1", 42],
+        },
+      ],
+      watchdogFilings: [],
+    });
+
+    expect(accepted).toBe(false);
+    expect(reg.toWatchdogSnapshot()).toEqual({
+      clusters: [],
+      openBreakers: [],
+    });
+  });
+});
+
 describe("formatWatchdogTicketBody — no raw error text egress", () => {
   it("includes signature, class, stage, and member identifiers but NOT raw normalized text", () => {
     const sig = normalized(EPERM_RAW_A);

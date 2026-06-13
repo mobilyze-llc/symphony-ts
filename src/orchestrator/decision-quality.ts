@@ -56,13 +56,37 @@ export function evaluateDispatcherDecisionQuality(
 export function extractDispatcherDecisionEvents(
   journal: DispatcherRunJournal,
 ): DispatcherDecisionEvent[] {
-  return journal
-    .filter((entry) => entry.kind === "dispatcher_decision")
-    .map(readDecisionEventFromEntry)
-    .filter((event): event is DispatcherDecisionEvent => event !== null)
-    .sort(
-      (left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp),
-    );
+  const events: DispatcherDecisionEvent[] = [];
+  let coveredThroughSequence = 0;
+  for (const entry of [...journal].sort(
+    (left, right) => left.sequence - right.sequence,
+  )) {
+    if (entry.kind === "journal_checkpoint") {
+      const checkpointEvents = readDecisionEventsFromCheckpoint(entry);
+      if (checkpointEvents !== null) {
+        events.length = 0;
+        events.push(...checkpointEvents);
+        coveredThroughSequence = Math.max(
+          coveredThroughSequence,
+          readCoveredThroughSequence(entry),
+        );
+      }
+      continue;
+    }
+    if (entry.sequence <= coveredThroughSequence) {
+      continue;
+    }
+    if (entry.kind !== "dispatcher_decision") {
+      continue;
+    }
+    const event = readDecisionEventFromEntry(entry);
+    if (event !== null) {
+      events.push(event);
+    }
+  }
+  return events.sort(
+    (left, right) => Date.parse(left.timestamp) - Date.parse(right.timestamp),
+  );
 }
 
 function applyDecisionEventMetrics(
@@ -122,6 +146,27 @@ function readDecisionEventFromEntry(
     return null;
   }
   return decision;
+}
+
+function readDecisionEventsFromCheckpoint(
+  entry: DispatcherRunJournalEntry,
+): DispatcherDecisionEvent[] | null {
+  const events = entry.metadata.decisionQualityEvents;
+  if (!Array.isArray(events)) {
+    return null;
+  }
+  const typedEvents = events.filter((event): event is DispatcherDecisionEvent =>
+    isDispatcherDecisionEvent(event),
+  );
+  return typedEvents.length === events.length ? typedEvents : null;
+}
+
+function readCoveredThroughSequence(entry: DispatcherRunJournalEntry): number {
+  const coveredThroughSequence = entry.metadata.coveredThroughSequence;
+  return typeof coveredThroughSequence === "number" &&
+    Number.isFinite(coveredThroughSequence)
+    ? coveredThroughSequence
+    : entry.sequence;
 }
 
 function isDispatcherDecisionEvent(

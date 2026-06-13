@@ -97,6 +97,19 @@ export interface WatchdogRegistrySnapshot {
   openBreakers: WatchdogBreakerSnapshot[];
 }
 
+export interface SignatureClusterCheckpointSnapshot {
+  schemaVersion: 1;
+  clusters: Array<{
+    signature: string;
+    errorClass: ErrorSignatureClass;
+    normalizedText: string;
+    members: ClusterMember[];
+    lastAlertSize: number;
+  }>;
+  openBreakers: CircuitBreakerEntry[];
+  watchdogFilings: WatchdogFilingRecord[];
+}
+
 export interface SignatureClusterRegistryOptions {
   /** Minimum cluster size (inclusive) to declare SYSTEMIC. Default: 2. */
   systemicThreshold?: number;
@@ -311,6 +324,53 @@ export class SignatureClusterRegistry {
     this.stageBreakers.set(entry.stageName, entry);
   }
 
+  clearForReplay(): void {
+    this.clusters.clear();
+    this.stageBreakers.clear();
+    this.filingRecords.clear();
+  }
+
+  toCheckpointSnapshot(): SignatureClusterCheckpointSnapshot {
+    return {
+      schemaVersion: 1,
+      clusters: [...this.clusters.values()].map((entry) => ({
+        signature: entry.signature,
+        errorClass: entry.errorClass,
+        normalizedText: entry.normalizedText,
+        members: [...entry.members.values()],
+        lastAlertSize: entry.lastAlertSize,
+      })),
+      openBreakers: [...this.stageBreakers.values()].map((entry) => ({
+        ...entry,
+        openedForIssueIds: [...entry.openedForIssueIds],
+      })),
+      watchdogFilings: [...this.filingRecords.values()].flatMap((records) =>
+        records.map((record) => ({ ...record })),
+      ),
+    };
+  }
+
+  hydrateCheckpointSnapshot(value: unknown): boolean {
+    const snapshot = parseSignatureClusterCheckpointSnapshot(value);
+    if (snapshot === null) {
+      return false;
+    }
+
+    this.clearForReplay();
+    for (const cluster of snapshot.clusters) {
+      this.hydrateCluster(cluster);
+    }
+    for (const breaker of snapshot.openBreakers) {
+      this.hydrateBreakerOpen(breaker);
+    }
+    for (const filing of snapshot.watchdogFilings) {
+      const records = this.filingRecords.get(filing.signature) ?? [];
+      records.push(filing);
+      this.filingRecords.set(filing.signature, records);
+    }
+    return true;
+  }
+
   /**
    * Remove an issue from all cluster entries. Called ONLY on resume /
    * re-dispatch (never at terminal park) so a resumed issue is re-counted
@@ -424,6 +484,135 @@ export interface RecordFailureResult {
   errorClass: ErrorSignatureClass;
   /** Cluster size at which the SYSTEMIC alert last fired (post-update). */
   lastAlertSize: number;
+}
+
+function parseSignatureClusterCheckpointSnapshot(
+  value: unknown,
+): SignatureClusterCheckpointSnapshot | null {
+  if (!isRecord(value) || value.schemaVersion !== 1) {
+    return null;
+  }
+  if (
+    !Array.isArray(value.clusters) ||
+    !Array.isArray(value.openBreakers) ||
+    !Array.isArray(value.watchdogFilings)
+  ) {
+    return null;
+  }
+
+  const clusters = value.clusters.map(parseCheckpointCluster);
+  const openBreakers = value.openBreakers.map(parseCircuitBreakerEntry);
+  const watchdogFilings = value.watchdogFilings.map(parseWatchdogFilingRecord);
+  if (
+    clusters.includes(null) ||
+    openBreakers.includes(null) ||
+    watchdogFilings.includes(null)
+  ) {
+    return null;
+  }
+
+  return {
+    schemaVersion: 1,
+    clusters: clusters as SignatureClusterCheckpointSnapshot["clusters"],
+    openBreakers: openBreakers as CircuitBreakerEntry[],
+    watchdogFilings: watchdogFilings as WatchdogFilingRecord[],
+  };
+}
+
+function parseCheckpointCluster(
+  value: unknown,
+): SignatureClusterCheckpointSnapshot["clusters"][number] | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (
+    typeof value.signature !== "string" ||
+    !isErrorSignatureClass(value.errorClass) ||
+    typeof value.normalizedText !== "string" ||
+    !Array.isArray(value.members) ||
+    typeof value.lastAlertSize !== "number" ||
+    !Number.isFinite(value.lastAlertSize)
+  ) {
+    return null;
+  }
+  const members = value.members.map(parseClusterMember);
+  if (members.includes(null)) {
+    return null;
+  }
+  return {
+    signature: value.signature,
+    errorClass: value.errorClass,
+    normalizedText: value.normalizedText,
+    members: members as ClusterMember[],
+    lastAlertSize: value.lastAlertSize,
+  };
+}
+
+function parseClusterMember(value: unknown): ClusterMember | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  return typeof value.issueId === "string" &&
+    typeof value.issueIdentifier === "string" &&
+    (typeof value.stageName === "string" || value.stageName === null) &&
+    typeof value.recordedAt === "string" &&
+    typeof value.normalizedText === "string"
+    ? {
+        issueId: value.issueId,
+        issueIdentifier: value.issueIdentifier,
+        stageName: value.stageName,
+        recordedAt: value.recordedAt,
+        normalizedText: value.normalizedText,
+      }
+    : null;
+}
+
+function parseCircuitBreakerEntry(value: unknown): CircuitBreakerEntry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  return typeof value.stageName === "string" &&
+    typeof value.signature === "string" &&
+    typeof value.openedAt === "string" &&
+    Array.isArray(value.openedForIssueIds) &&
+    value.openedForIssueIds.every((entry) => typeof entry === "string")
+    ? {
+        stageName: value.stageName,
+        signature: value.signature,
+        openedAt: value.openedAt,
+        openedForIssueIds: value.openedForIssueIds,
+      }
+    : null;
+}
+
+function parseWatchdogFilingRecord(
+  value: unknown,
+): WatchdogFilingRecord | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  return typeof value.signature === "string" &&
+    typeof value.filedAt === "string" &&
+    typeof value.issueIdentifier === "string"
+    ? {
+        signature: value.signature,
+        filedAt: value.filedAt,
+        issueIdentifier: value.issueIdentifier,
+      }
+    : null;
+}
+
+function isErrorSignatureClass(value: unknown): value is ErrorSignatureClass {
+  return (
+    value === "permanent" ||
+    value === "infra" ||
+    value === "transient" ||
+    value === "unknown"
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 // ---------------------------------------------------------------------------

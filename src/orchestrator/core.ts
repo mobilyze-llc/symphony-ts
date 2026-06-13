@@ -58,6 +58,7 @@ import {
   type OrchestratorState,
   type PendingStageSignal,
   type PipelineEmergencyStopState,
+  type RateLimitAdmissionState,
   type RetryEntry,
   type RightSizingDecision,
   type RightSizingMode,
@@ -81,8 +82,8 @@ import {
 } from "../errors/signature.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
 import {
+  type DispatcherRunJournalEntryDraft,
   appendDispatcherRunJournalEntry,
-  rebuildDispatcherLeases,
 } from "../logging/run-journal.js";
 import {
   addEndedSessionRuntime,
@@ -111,6 +112,7 @@ import {
   markContinuousFeedbackFindingsBounced,
   mergeContinuousFeedbackCheckpoint,
 } from "./continuous-feedback.js";
+import { extractDispatcherDecisionEvents } from "./decision-quality.js";
 import {
   DISPATCH_COMPARATOR_VERSION,
   computeDispatchOrder,
@@ -939,6 +941,37 @@ export class OrchestratorCore {
     return this.state.dispatcherRunJournal.at(-1)?.sequence ?? 0;
   }
 
+  createRunJournalCheckpointDraft(): DispatcherRunJournalEntryDraft | null {
+    const coveredThroughSequence = this.getRunJournalCursor();
+    if (coveredThroughSequence <= 0) {
+      return null;
+    }
+    const timestamp = this.now().toISOString();
+    return {
+      idempotencyKey: `journal_checkpoint:${coveredThroughSequence}`,
+      timestamp,
+      kind: "journal_checkpoint",
+      issueId: "__dispatcher__",
+      issueIdentifier: "DISPATCHER",
+      operation: "dispatcher",
+      stage: null,
+      attempt: null,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Dispatcher run-journal checkpoint through seq ${coveredThroughSequence}.`,
+      metadata: {
+        schema_version: 1,
+        checkpoint_type: "dispatcher_run_journal",
+        coveredThroughSequence,
+        state: this.createRunJournalCheckpointState(),
+        privateState: this.createRunJournalCheckpointPrivateState(),
+        decisionQualityEvents: extractDispatcherDecisionEvents(
+          this.state.dispatcherRunJournal,
+        ),
+      },
+    };
+  }
+
   confirmEmergencyStopProcessCleanup(issueId: string): void {
     const guard = this.resumeRequiredGuards.get(issueId);
     if (guard?.requiresConfirmedEmergencyStop !== true) {
@@ -1037,9 +1070,8 @@ export class OrchestratorCore {
     this.state.dispatcherRunJournal = [...journal].sort(
       (left, right) => left.sequence - right.sequence,
     );
-    this.state.dispatcherLeases = rebuildDispatcherLeases(
-      this.state.dispatcherRunJournal,
-    );
+    this.state.dispatcherLeases = {};
+    this.signatureClusterRegistry.clearForReplay();
     this.reportedSupervisionFindings.clear();
     this.reportedIgnoredSetupInstructionCollisions.clear();
     this.state.decorrelatedGateOutcomes = {};
@@ -1064,7 +1096,29 @@ export class OrchestratorCore {
     this.acGateFailOpenStreak = 0;
 
     const nowMs = this.now().getTime();
+    let checkpointCoveredThroughSequence = 0;
     for (const entry of this.state.dispatcherRunJournal) {
+      if (entry.kind === "journal_checkpoint") {
+        const coveredThroughSequence = this.recoverRunJournalCheckpoint(entry);
+        if (coveredThroughSequence !== null) {
+          checkpointCoveredThroughSequence = Math.max(
+            checkpointCoveredThroughSequence,
+            coveredThroughSequence,
+          );
+        }
+        continue;
+      }
+      if (entry.sequence <= checkpointCoveredThroughSequence) {
+        continue;
+      }
+
+      if (entry.lease !== null) {
+        this.state.dispatcherLeases[entry.lease.leaseId] = {
+          ...entry.lease,
+          lastJournalSequence: entry.sequence,
+        };
+      }
+
       if (
         entry.kind === "re_steer_request" &&
         entry.metadata.status === "completed" &&
@@ -1414,6 +1468,248 @@ export class OrchestratorCore {
         this.state.claimed.add(lease.issueId);
       }
     }
+  }
+
+  private createRunJournalCheckpointState(): Record<string, unknown> {
+    return {
+      claimedIssueIds: [...this.state.claimed],
+      completedIssueIds: [...this.state.completed],
+      failedIssueIds: [...this.state.failed],
+      resumeRequiredIssueIds: [...this.state.resumeRequired],
+      resumeRequiredMarks: clonePlain(this.state.resumeRequiredMarks),
+      issueAnchors: clonePlain(this.state.issueAnchors),
+      computedDispatchOrder: clonePlain(this.state.computedDispatchOrder),
+      emergencyStop: clonePlain(this.state.emergencyStop),
+      rateLimitAdmission: clonePlain(this.state.rateLimitAdmission),
+      issueStages: clonePlain(this.state.issueStages),
+      issuePendingStageSignals: clonePlain(this.state.issuePendingStageSignals),
+      issueBudgetEscalations: clonePlain(this.state.issueBudgetEscalations),
+      issuePauseTriageResumes: clonePlain(this.state.issuePauseTriageResumes),
+      issueReworkCounts: clonePlain(this.state.issueReworkCounts),
+      issuePassedStages: clonePlain(this.state.issuePassedStages),
+      issueFirstDispatchedAt: clonePlain(this.state.issueFirstDispatchedAt),
+      issueExecutionHistory: clonePlain(this.state.issueExecutionHistory),
+      issueRightSizingDecisions: clonePlain(
+        this.state.issueRightSizingDecisions,
+      ),
+      issueAcSnapshots: clonePlain(this.state.issueAcSnapshots),
+      decorrelatedGateOutcomes: clonePlain(this.state.decorrelatedGateOutcomes),
+      continuousFeedback: clonePlain(this.state.continuousFeedback),
+      dispatcherLeases: clonePlain(this.state.dispatcherLeases),
+      signatureClusterRegistry:
+        this.signatureClusterRegistry.toCheckpointSnapshot(),
+      issueFailureSignatures: clonePlain(this.state.issueFailureSignatures),
+      issueDispositions: clonePlain(this.state.issueDispositions),
+      issueReviewFailureStreaks: clonePlain(
+        this.state.issueReviewFailureStreaks,
+      ),
+      issueReviewInfrastructureStalls: clonePlain(
+        this.state.issueReviewInfrastructureStalls,
+      ),
+      failureExhaustedIssueIds: [...this.state.failureExhaustedIds],
+    };
+  }
+
+  private createRunJournalCheckpointPrivateState(): Record<string, unknown> {
+    return {
+      reportedSupervisionFindingSignatures: [
+        ...this.reportedSupervisionFindings,
+      ],
+      reportedIgnoredSetupInstructionCollisionSignatures: [
+        ...this.reportedIgnoredSetupInstructionCollisions,
+      ],
+      lastVerdictKeyEntries: [...this.lastVerdictKeys.entries()],
+      dispatchStarvation: {
+        pageAlertActive: this.pageAlertActive,
+        starvedTickCount: this.starvedTickCount,
+      },
+      acGateFailOpenStreak: this.acGateFailOpenStreak,
+      replayedDispatchedIssueIds: [...this.replayedDispatchedIssueIds],
+      resumeRequiredGuardEntries: [...this.resumeRequiredGuards.entries()],
+      parkSequence: this.parkSequence,
+      issueParkGenerationEntries: [...this.issueParkGenerations.entries()],
+      triagedParkGenerationEntries: [...this.triagedParkGenerations.entries()],
+      escalatedParkGenerationEntries: [
+        ...this.escalatedParkGenerations.entries(),
+      ],
+      issueAnchorCursorEntries: [...this.issueAnchorCursors.entries()],
+      anchorCursorSequence: this.anchorCursorSequence,
+      retryOnceGrantEntries: [...this.retryOnceGrants.entries()],
+    };
+  }
+
+  private recoverRunJournalCheckpoint(
+    entry: DispatcherRunJournalEntry,
+  ): number | null {
+    const checkpointType = readMetadataString(
+      entry.metadata,
+      "checkpoint_type",
+    );
+    if (checkpointType !== "dispatcher_run_journal") {
+      return null;
+    }
+    const state = toRecord(entry.metadata.state);
+    if (state === null) {
+      return null;
+    }
+    const coveredThroughSequence =
+      readMetadataNumber(entry.metadata, "coveredThroughSequence") ??
+      entry.sequence;
+
+    // Claims are time-sensitive: active leases may expire between the
+    // checkpoint write and a later restart. Rebuild claimed after replay from
+    // unexpired active leases instead of restoring a stale set verbatim.
+    this.state.claimed = new Set();
+    this.state.completed = new Set(readStringArray(state.completedIssueIds));
+    this.state.failed = new Set(readStringArray(state.failedIssueIds));
+    this.state.resumeRequired = new Set(
+      readStringArray(state.resumeRequiredIssueIds),
+    );
+    this.state.resumeRequiredMarks = readRecordOr(
+      state.resumeRequiredMarks,
+      {},
+    );
+    this.state.issueAnchors = readRecordOr(state.issueAnchors, {});
+    this.state.computedDispatchOrder =
+      state.computedDispatchOrder === null
+        ? null
+        : readRecordOr<ComputedDispatchOrderSnapshot | null>(
+            state.computedDispatchOrder,
+            null,
+          );
+    this.state.emergencyStop =
+      state.emergencyStop === null
+        ? null
+        : readRecordOr<PipelineEmergencyStopState | null>(
+            state.emergencyStop,
+            null,
+          );
+    this.state.rateLimitAdmission =
+      state.rateLimitAdmission === null
+        ? null
+        : readRecordOr<RateLimitAdmissionState | null>(
+            state.rateLimitAdmission,
+            null,
+          );
+    this.state.issueStages = readRecordOr(state.issueStages, {});
+    this.state.issuePendingStageSignals = readRecordOr(
+      state.issuePendingStageSignals,
+      {},
+    );
+    this.state.issueBudgetEscalations = readRecordOr(
+      state.issueBudgetEscalations,
+      {},
+    );
+    this.state.issuePauseTriageResumes = readRecordOr(
+      state.issuePauseTriageResumes,
+      {},
+    );
+    this.state.issueReworkCounts = readRecordOr(state.issueReworkCounts, {});
+    this.state.issuePassedStages = readRecordOr(state.issuePassedStages, {});
+    this.state.issueFirstDispatchedAt = readRecordOr(
+      state.issueFirstDispatchedAt,
+      {},
+    );
+    this.state.issueExecutionHistory = readRecordOr(
+      state.issueExecutionHistory,
+      {},
+    );
+    this.state.issueRightSizingDecisions = readRecordOr(
+      state.issueRightSizingDecisions,
+      {},
+    );
+    this.state.issueAcSnapshots = readRecordOr(state.issueAcSnapshots, {});
+    this.state.decorrelatedGateOutcomes = readRecordOr(
+      state.decorrelatedGateOutcomes,
+      {},
+    );
+    this.state.continuousFeedback = readRecordOr(state.continuousFeedback, {});
+    this.state.dispatcherLeases = readRecordOr(state.dispatcherLeases, {});
+    this.signatureClusterRegistry.hydrateCheckpointSnapshot(
+      state.signatureClusterRegistry,
+    );
+    this.state.issueFailureSignatures = readRecordOr(
+      state.issueFailureSignatures,
+      {},
+    );
+    this.state.issueDispositions = readRecordOr(state.issueDispositions, {});
+    this.state.issueReviewFailureStreaks = readRecordOr(
+      state.issueReviewFailureStreaks,
+      {},
+    );
+    this.state.issueReviewInfrastructureStalls = readRecordOr(
+      state.issueReviewInfrastructureStalls,
+      {},
+    );
+    this.state.failureExhaustedIds = new Set(
+      readStringArray(state.failureExhaustedIssueIds),
+    );
+
+    const privateState = toRecord(entry.metadata.privateState);
+    if (privateState !== null) {
+      restoreStringSet(
+        this.reportedSupervisionFindings,
+        privateState.reportedSupervisionFindingSignatures,
+      );
+      restoreStringSet(
+        this.reportedIgnoredSetupInstructionCollisions,
+        privateState.reportedIgnoredSetupInstructionCollisionSignatures,
+      );
+      restoreStringStringMap(
+        this.lastVerdictKeys,
+        privateState.lastVerdictKeyEntries,
+      );
+      const dispatchStarvation = toRecord(privateState.dispatchStarvation);
+      if (dispatchStarvation !== null) {
+        this.pageAlertActive = dispatchStarvation.pageAlertActive === true;
+        this.starvedTickCount =
+          typeof dispatchStarvation.starvedTickCount === "number"
+            ? dispatchStarvation.starvedTickCount
+            : 0;
+      }
+      this.acGateFailOpenStreak =
+        typeof privateState.acGateFailOpenStreak === "number"
+          ? privateState.acGateFailOpenStreak
+          : 0;
+      restoreStringSet(
+        this.replayedDispatchedIssueIds,
+        privateState.replayedDispatchedIssueIds,
+      );
+      restoreStringRecordMap(
+        this.resumeRequiredGuards,
+        privateState.resumeRequiredGuardEntries,
+      );
+      this.parkSequence =
+        typeof privateState.parkSequence === "number"
+          ? privateState.parkSequence
+          : 0;
+      restoreStringNumberMap(
+        this.issueParkGenerations,
+        privateState.issueParkGenerationEntries,
+      );
+      restoreStringNumberMap(
+        this.triagedParkGenerations,
+        privateState.triagedParkGenerationEntries,
+      );
+      restoreStringNullableNumberMap(
+        this.escalatedParkGenerations,
+        privateState.escalatedParkGenerationEntries,
+      );
+      restoreStringRecordMap(
+        this.issueAnchorCursors,
+        privateState.issueAnchorCursorEntries,
+      );
+      this.anchorCursorSequence =
+        typeof privateState.anchorCursorSequence === "number"
+          ? privateState.anchorCursorSequence
+          : 0;
+      restoreStringRecordMap(
+        this.retryOnceGrants,
+        privateState.retryOnceGrantEntries,
+      );
+    }
+
+    return coveredThroughSequence;
   }
 
   /**
@@ -11579,6 +11875,91 @@ function restoreMap<K, V>(target: Map<K, V>, snapshot: Map<K, V>): void {
   for (const [key, value] of snapshot) {
     target.set(key, value);
   }
+}
+
+function toRecord(value: unknown): Record<string, unknown> | null {
+  return isRecord(value) ? value : null;
+}
+
+function readRecordOr<T>(value: unknown, fallback: T): T {
+  return isRecord(value) ? (clonePlain(value) as T) : fallback;
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+function restoreStringSet(target: Set<string>, value: unknown): void {
+  target.clear();
+  for (const entry of readStringArray(value)) {
+    target.add(entry);
+  }
+}
+
+function restoreStringStringMap(
+  target: Map<string, string>,
+  value: unknown,
+): void {
+  target.clear();
+  for (const [key, entryValue] of readEntryPairs(value)) {
+    if (typeof entryValue === "string") {
+      target.set(key, entryValue);
+    }
+  }
+}
+
+function restoreStringNumberMap(
+  target: Map<string, number>,
+  value: unknown,
+): void {
+  target.clear();
+  for (const [key, entryValue] of readEntryPairs(value)) {
+    if (typeof entryValue === "number") {
+      target.set(key, entryValue);
+    }
+  }
+}
+
+function restoreStringNullableNumberMap(
+  target: Map<string, number | null>,
+  value: unknown,
+): void {
+  target.clear();
+  for (const [key, entryValue] of readEntryPairs(value)) {
+    if (entryValue === null || typeof entryValue === "number") {
+      target.set(key, entryValue);
+    }
+  }
+}
+
+function restoreStringRecordMap<T>(
+  target: Map<string, T>,
+  value: unknown,
+): void {
+  target.clear();
+  for (const [key, entryValue] of readEntryPairs(value)) {
+    if (isRecord(entryValue)) {
+      target.set(key, clonePlain(entryValue) as T);
+    }
+  }
+}
+
+function readEntryPairs(value: unknown): Array<[string, unknown]> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry): Array<[string, unknown]> => {
+    if (
+      Array.isArray(entry) &&
+      entry.length === 2 &&
+      typeof entry[0] === "string"
+    ) {
+      return [[entry[0], entry[1]]];
+    }
+    return [];
+  });
 }
 
 function createPendingRunningEntry(input: {

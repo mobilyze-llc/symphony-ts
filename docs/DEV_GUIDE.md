@@ -485,6 +485,25 @@ curl -s http://localhost:3000/api/v1/state | jq '{
   dashboard/control surfaces should use `rework_finding_count`,
   `blocking_finding_count`, and `degraded_condition_count` plus the projected
   scalar reason/verdict fields.
+- Restart replay is bounded by journal checkpoints (SYMPH-293). On successful
+  dispatcher-journal hydration, Symphony may rewrite
+  `.symphony/run-journals/dispatcher.jsonl` under the journal write lock as one
+  `journal_checkpoint` row plus the most recent raw tail (default 1000 rows).
+  Checkpoints preserve the replay-reduced state needed for restart correctness:
+  active claims/leases, explicit-resume marks and guards, hard-stop state,
+  tracker-write terminal state, gate outcomes, admission/disposition state,
+  supervision dedupe guards, anchors, counters, and dispatcher decision-quality
+  inputs. Sequence numbers are never renumbered; the checkpoint records the
+  covered cursor and later appends continue from the durable tail cursor.
+- `/state/delta` remains exact inside the retained raw tail. If an operator asks
+  for a `since_seq` before the checkpoint horizon, the response includes the
+  checkpoint row plus retained tail rather than every historical event. Treat
+  the checkpoint as the restart proof for older state and use current snapshot
+  sections (`explicit_resume_required`, `decorrelated_gates`, `decision_quality`,
+  `dispositions`, `watchdog`, `counters`) for the reduced view.
+- Emergency-stop recovery is fail-closed: if hydration finds an interrupted
+  process tree whose cleanup proof is still unconfirmed, journal compaction is
+  skipped so the raw stop/proof rows remain available to the next restart.
 - Council review artifacts carry the fuller `review_routing` object. Treat
   `selectedLanes[].reason` as a machine-readable contract:
   `non_author_family_reviewer_artifact` means the lane can satisfy the required

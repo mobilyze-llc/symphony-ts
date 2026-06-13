@@ -23,11 +23,35 @@ export type DispatcherRunJournalEntryDraft = Omit<
   "sequence"
 >;
 
+export const DISPATCHER_RUN_JOURNAL_DEFAULT_COMPACTION_TAIL_ENTRIES = 1_000;
+
 export interface AppendDispatcherRunJournalEntriesResult {
   journal: DispatcherRunJournal;
   entries: DispatcherRunJournalEntry[];
   appendedEntries: DispatcherRunJournalEntry[];
   skippedEntries: DispatcherRunJournalEntry[];
+}
+
+export interface CompactDispatcherRunJournalOptions {
+  tailEntryCount?: number;
+  minEntryCount?: number;
+}
+
+export interface CompactDispatcherRunJournalResult {
+  journal: DispatcherRunJournal;
+  compacted: boolean;
+  skippedReason:
+    | "empty"
+    | "below_threshold"
+    | "invalid_checkpoint"
+    | "stale_checkpoint"
+    | null;
+  originalEntryCount: number;
+  retainedEntryCount: number;
+  droppedEntryCount: number;
+  checkpointSequence: number | null;
+  coveredThroughSequence: number;
+  retainedTailEntries: number;
 }
 
 export function getDispatcherRunJournalPath(workspaceRoot: string): string {
@@ -133,6 +157,141 @@ export async function appendDispatcherRunJournalEntryToDisk(
   await fs.appendFile(artifactPath, `${JSON.stringify(entry)}\n`, "utf8");
 }
 
+export function compactDispatcherRunJournalWithCheckpoint(
+  journal: DispatcherRunJournal,
+  checkpointDraft: DispatcherRunJournalEntryDraft,
+  options: CompactDispatcherRunJournalOptions = {},
+): CompactDispatcherRunJournalResult {
+  const sorted = [...journal].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+  const originalEntryCount = sorted.length;
+  const coveredThroughSequence = sorted.at(-1)?.sequence ?? 0;
+  if (sorted.length === 0) {
+    return {
+      journal: [],
+      compacted: false,
+      skippedReason: "empty",
+      originalEntryCount,
+      retainedEntryCount: 0,
+      droppedEntryCount: 0,
+      checkpointSequence: null,
+      coveredThroughSequence,
+      retainedTailEntries: 0,
+    };
+  }
+  if (checkpointDraft.kind !== "journal_checkpoint") {
+    return {
+      journal: sorted,
+      compacted: false,
+      skippedReason: "invalid_checkpoint",
+      originalEntryCount,
+      retainedEntryCount: sorted.length,
+      droppedEntryCount: 0,
+      checkpointSequence: null,
+      coveredThroughSequence,
+      retainedTailEntries: 0,
+    };
+  }
+
+  const tailEntryCount = normalizeCompactionTailEntryCount(
+    options.tailEntryCount,
+  );
+  const minEntryCount =
+    options.minEntryCount === undefined
+      ? tailEntryCount + 1
+      : Math.max(2, options.minEntryCount);
+  if (sorted.length <= minEntryCount) {
+    return {
+      journal: sorted,
+      compacted: false,
+      skippedReason: "below_threshold",
+      originalEntryCount,
+      retainedEntryCount: sorted.length,
+      droppedEntryCount: 0,
+      checkpointSequence: null,
+      coveredThroughSequence,
+      retainedTailEntries: 0,
+    };
+  }
+
+  const effectiveTailEntryCount = Math.min(tailEntryCount, sorted.length - 2);
+  const tail = sorted.slice(-effectiveTailEntryCount);
+  const checkpointSequence = Math.max(0, (tail[0]?.sequence ?? 1) - 1);
+  const coveredPrefixEntryCount = sorted.length - tail.length;
+  const retainedEntryCount = tail.length + 1;
+  const droppedEntryCount = sorted.length - retainedEntryCount;
+  const checkpoint: DispatcherRunJournalEntry = {
+    ...checkpointDraft,
+    sequence: checkpointSequence,
+    idempotencyKey: `journal_checkpoint:${coveredThroughSequence}`,
+    metadata: {
+      ...checkpointDraft.metadata,
+      schema_version: 1,
+      checkpoint_type: "dispatcher_run_journal",
+      checkpointSequence,
+      coveredThroughSequence,
+      originalEntryCount,
+      retainedTailEntries: tail.length,
+      coveredPrefixEntryCount,
+      droppedEntryCount,
+    },
+  };
+  const compactedJournal = [checkpoint, ...tail].sort(
+    (left, right) => left.sequence - right.sequence,
+  );
+  return {
+    journal: compactedJournal,
+    compacted: true,
+    skippedReason: null,
+    originalEntryCount,
+    retainedEntryCount,
+    droppedEntryCount,
+    checkpointSequence,
+    coveredThroughSequence,
+    retainedTailEntries: tail.length,
+  };
+}
+
+export async function compactDispatcherRunJournalFileWithLock(
+  workspaceRoot: string,
+  checkpointDraft: DispatcherRunJournalEntryDraft,
+  options: CompactDispatcherRunJournalOptions = {},
+): Promise<CompactDispatcherRunJournalResult> {
+  return withDispatcherRunJournalWriteLock(workspaceRoot, async () => {
+    const journal = await readDispatcherRunJournal(workspaceRoot);
+    const coveredThroughSequence = journal.at(-1)?.sequence ?? 0;
+    const checkpointCoveredThroughSequence =
+      readCheckpointCoveredThroughSequence(checkpointDraft.metadata);
+    if (
+      checkpointCoveredThroughSequence !== null &&
+      checkpointCoveredThroughSequence !== coveredThroughSequence
+    ) {
+      return {
+        journal,
+        compacted: false,
+        skippedReason: "stale_checkpoint",
+        originalEntryCount: journal.length,
+        retainedEntryCount: journal.length,
+        droppedEntryCount: 0,
+        checkpointSequence: null,
+        coveredThroughSequence,
+        retainedTailEntries: 0,
+      };
+    }
+
+    const result = compactDispatcherRunJournalWithCheckpoint(
+      journal,
+      checkpointDraft,
+      options,
+    );
+    if (result.compacted) {
+      await rewriteDispatcherRunJournal(workspaceRoot, result.journal);
+    }
+    return result;
+  });
+}
+
 export async function appendDispatcherRunJournalEntriesWithLock(
   workspaceRoot: string,
   drafts: readonly DispatcherRunJournalEntryDraft[],
@@ -163,6 +322,27 @@ export async function appendDispatcherRunJournalEntriesWithLock(
 
     return { journal, entries, appendedEntries, skippedEntries };
   });
+}
+
+async function rewriteDispatcherRunJournal(
+  workspaceRoot: string,
+  journal: DispatcherRunJournal,
+): Promise<void> {
+  const artifactPath = getDispatcherRunJournalPath(workspaceRoot);
+  await fs.mkdir(join(workspaceRoot, DISPATCHER_RUN_JOURNAL_DIR), {
+    recursive: true,
+  });
+  const temporaryPath = `${artifactPath}.${randomUUID()}.tmp`;
+  const contents =
+    journal.map((entry) => JSON.stringify(entry)).join("\n") +
+    (journal.length > 0 ? "\n" : "");
+  try {
+    await fs.writeFile(temporaryPath, contents, "utf8");
+    await fs.rename(temporaryPath, artifactPath);
+  } catch (error) {
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function withDispatcherRunJournalWriteLock<T>(
@@ -399,6 +579,23 @@ function isProcessRunning(pid: number): boolean {
       (error as { code?: unknown }).code === "EPERM"
     );
   }
+}
+
+function normalizeCompactionTailEntryCount(value: number | undefined): number {
+  if (value === undefined) {
+    return DISPATCHER_RUN_JOURNAL_DEFAULT_COMPACTION_TAIL_ENTRIES;
+  }
+  if (!Number.isInteger(value) || value < 1) {
+    return DISPATCHER_RUN_JOURNAL_DEFAULT_COMPACTION_TAIL_ENTRIES;
+  }
+  return value;
+}
+
+function readCheckpointCoveredThroughSequence(
+  metadata: Record<string, unknown>,
+): number | null {
+  const value = metadata.coveredThroughSequence;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function isDispatcherRunJournalEntry(

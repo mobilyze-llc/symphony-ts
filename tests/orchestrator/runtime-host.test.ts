@@ -27,6 +27,7 @@ import type {
 } from "../../src/domain/model.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 import { writeLoopTraceJournal } from "../../src/logging/loop-trace.js";
+import { compactDispatcherRunJournalWithCheckpoint } from "../../src/logging/run-journal.js";
 import {
   type StructuredLogEntry,
   StructuredLogger,
@@ -2218,6 +2219,143 @@ describe("OrchestratorRuntimeHost", () => {
     expect(readCalls).toBe(2);
     expect(tick.dispatchedIssueIds).toEqual(["1"]);
     expect(fakeRunner.runs.size).toBe(1);
+  });
+
+  it("compacts and replays the dispatcher journal after successful hydration", async () => {
+    const fakeRunner = new FakeAgentRunner();
+    const sourceJournal: DispatcherRunJournal = [
+      createRuntimeJournalEntry({
+        sequence: 1,
+        kind: "hard_stop_trigger",
+        issueId: "parked",
+        issueIdentifier: "SYMPH-PARKED",
+        summary: "Hard stop parked issue.",
+        metadata: {
+          status: "completed",
+          outcome: "PAUSED-budget",
+          trigger: "token_budget",
+          issueState: "In Progress",
+        },
+      }),
+      createRuntimeJournalEntry({
+        sequence: 2,
+        kind: "supervision_finding",
+        issueId: "supervised",
+        issueIdentifier: "SYMPH-SUPERVISED",
+        summary: "Supervision finding covered by checkpoint.",
+        metadata: {
+          status: "completed",
+          findingKind: "ignored_setup_instruction_collision",
+          signature: "ignored-setup-signature",
+        },
+      }),
+      createRuntimeJournalEntry({
+        sequence: 3,
+        kind: "admission",
+        issueId: "tail",
+        issueIdentifier: "SYMPH-TAIL",
+        summary: "Raw tail retained.",
+      }),
+    ];
+    const compactCalls: Array<{
+      coveredThroughSequence: unknown;
+      tailEntryCount: number | undefined;
+    }> = [];
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker: createTracker({ candidates: [] }),
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => sourceJournal,
+      compactDispatcherRunJournal: async (
+        _workspaceRoot,
+        checkpointDraft,
+        options,
+      ) => {
+        compactCalls.push({
+          coveredThroughSequence:
+            checkpointDraft.metadata.coveredThroughSequence,
+          tailEntryCount: options?.tailEntryCount,
+        });
+        return compactDispatcherRunJournalWithCheckpoint(
+          sourceJournal,
+          checkpointDraft,
+          { tailEntryCount: 1, minEntryCount: 2 },
+        );
+      },
+      dispatcherRunJournalCompactionTailEntries: 1,
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+
+    expect(tick.dispatchedIssueIds).toEqual([]);
+    expect(compactCalls).toEqual([
+      { coveredThroughSequence: 3, tailEntryCount: 1 },
+    ]);
+    expect(
+      host.getState().dispatcherRunJournal.map((entry) => entry.kind),
+    ).toEqual(["journal_checkpoint", "admission"]);
+    expect(host.getState().resumeRequired.has("parked")).toBe(true);
+    expect(host.getState().resumeRequiredMarks.parked).toMatchObject({
+      reason: "hard_stop:token_budget",
+      setBySequence: 1,
+    });
+  });
+
+  it("skips dispatcher journal compaction while emergency-stop cleanup proof is unconfirmed", async () => {
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const compactDispatcherRunJournal = vi.fn(async () => {
+      throw new Error("compaction should not run with unconfirmed cleanup");
+    });
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker: createTracker({ candidates: [] }),
+      agentRunner: new FakeAgentRunner(),
+      logger,
+      readDispatcherRunJournal: async () => [
+        createPipelineStopJournalEntry(1, null, null),
+        createRuntimeJournalEntry({
+          sequence: 2,
+          kind: "admission",
+          issueId: "tail",
+          issueIdentifier: "SYMPH-TAIL",
+          summary: "Raw tail retained.",
+        }),
+      ],
+      compactDispatcherRunJournal,
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(compactDispatcherRunJournal).not.toHaveBeenCalled();
+    expect(
+      host.getState().dispatcherRunJournal.map((entry) => entry.kind),
+    ).toEqual(expect.arrayContaining(["intent", "admission"]));
+    expect(
+      host
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) => entry.kind === "journal_checkpoint",
+        ),
+    ).toBe(false);
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "dispatcher_run_journal_compaction_skipped",
+        skipped_reason: "unconfirmed_emergency_stop_cleanup",
+        unconfirmed_cleanup_plan_count: 1,
+      }),
+    );
   });
 
   it("serves missing stored details when stored loop trace lookup fails", async () => {
@@ -6883,6 +7021,31 @@ function readDispatcherJournal(workspaceRoot: string): DispatcherRunJournal {
     .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line) as DispatcherRunJournal[number]);
+}
+
+function createRuntimeJournalEntry(
+  input: Partial<DispatcherRunJournalEntry> & {
+    sequence: number;
+    kind: DispatcherRunJournalEntry["kind"];
+  },
+): DispatcherRunJournalEntry {
+  return {
+    sequence: input.sequence,
+    idempotencyKey: input.idempotencyKey ?? `${input.kind}:${input.sequence}`,
+    timestamp:
+      input.timestamp ??
+      `2026-03-06T00:00:${String(input.sequence).padStart(2, "0")}.000Z`,
+    kind: input.kind,
+    issueId: input.issueId ?? "1",
+    issueIdentifier: input.issueIdentifier ?? "ISSUE-1",
+    operation: input.operation ?? "dispatcher",
+    stage: input.stage ?? null,
+    attempt: input.attempt ?? null,
+    ownerId: input.ownerId ?? "previous-runtime",
+    lease: input.lease ?? null,
+    summary: input.summary ?? "Runtime journal entry.",
+    metadata: input.metadata ?? { status: "completed" },
+  };
 }
 
 function createPipelineStopJournalEntry(
