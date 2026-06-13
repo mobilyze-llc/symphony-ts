@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -288,6 +288,73 @@ describe("review journal events", () => {
         acquiredAt: new Date(Date.now() - 60_000).toISOString(),
       })}\n`,
     );
+
+    const result = await appendReviewJournalEventsToDispatcherJournal({
+      workspaceRoot,
+      result: reviewResult({ verdict: "pass" }),
+      options: {
+        issueIdentifier: "SYMPH-450",
+        ownerId: "worker-1",
+        source: "pipeline",
+      },
+    });
+
+    expect(result.appendedEntries).toHaveLength(3);
+    expect(await readDispatcherRunJournal(workspaceRoot)).toHaveLength(3);
+  });
+
+  it("serializes concurrent recovery from a dead-owner lock", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-stale-lock-concurrent-"),
+    );
+    const lockPath = getDispatcherRunJournalLockPath(workspaceRoot);
+    await mkdir(lockPath, { recursive: true });
+    await writeFile(
+      join(lockPath, "owner.json"),
+      `${JSON.stringify({
+        pid: 999_999_999,
+        acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+      })}\n`,
+    );
+
+    const appendCount = 6;
+    const results = await Promise.all(
+      Array.from({ length: appendCount }, (_, index) =>
+        appendReviewJournalEventsToDispatcherJournal({
+          workspaceRoot,
+          result: reviewResult({ verdict: "pass" }),
+          options: {
+            issueIdentifier: "SYMPH-450",
+            ownerId: `worker-${index}`,
+            source: "pipeline",
+            idempotencyKeyPrefix: `review-stale-recovery-${index}`,
+          },
+        }),
+      ),
+    );
+
+    const replayed = await readDispatcherRunJournal(workspaceRoot);
+    const sequences = replayed.map((entry) => entry.sequence);
+
+    expect(results.flatMap((result) => result.appendedEntries)).toHaveLength(
+      appendCount * 3,
+    );
+    expect(replayed).toHaveLength(appendCount * 3);
+    expect(sequences).toEqual(
+      Array.from({ length: appendCount * 3 }, (_, index) => index + 1),
+    );
+    expect(new Set(sequences).size).toBe(sequences.length);
+  });
+
+  it("recovers from stale corrupt lock owner metadata", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-corrupt-lock-"),
+    );
+    const lockPath = getDispatcherRunJournalLockPath(workspaceRoot);
+    const staleTimestamp = new Date(Date.now() - 60_000);
+    await mkdir(lockPath, { recursive: true });
+    await writeFile(join(lockPath, "owner.json"), "");
+    await utimes(lockPath, staleTimestamp, staleTimestamp);
 
     const result = await appendReviewJournalEventsToDispatcherJournal({
       workspaceRoot,

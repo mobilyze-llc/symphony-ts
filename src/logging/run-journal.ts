@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import type { Stats } from "node:fs";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 
@@ -12,6 +14,7 @@ const DISPATCHER_RUN_JOURNAL_DIR = join(".symphony", "run-journals");
 const DISPATCHER_RUN_JOURNAL_FILENAME = "dispatcher.jsonl";
 const DISPATCHER_RUN_JOURNAL_LOCK_DIR = `${DISPATCHER_RUN_JOURNAL_FILENAME}.lock`;
 const DISPATCHER_RUN_JOURNAL_LOCK_OWNER_FILENAME = "owner.json";
+const DISPATCHER_RUN_JOURNAL_LOCK_RECOVERY_DIR = "recovery.lock";
 const DISPATCHER_RUN_JOURNAL_LOCK_TIMEOUT_MS = 30_000;
 const DISPATCHER_RUN_JOURNAL_LOCK_POLL_MS = 25;
 
@@ -169,23 +172,24 @@ async function withDispatcherRunJournalWriteLock<T>(
   const artifactDir = join(workspaceRoot, DISPATCHER_RUN_JOURNAL_DIR);
   const lockPath = getDispatcherRunJournalLockPath(workspaceRoot);
   await fs.mkdir(artifactDir, { recursive: true });
-  await acquireDispatcherRunJournalWriteLock(lockPath);
+  const ownerToken = await acquireDispatcherRunJournalWriteLock(lockPath);
   try {
     return await write();
   } finally {
-    await fs.rm(lockPath, { recursive: true, force: true });
+    await releaseDispatcherRunJournalWriteLock(lockPath, ownerToken);
   }
 }
 
 async function acquireDispatcherRunJournalWriteLock(
   lockPath: string,
-): Promise<void> {
+): Promise<string> {
   const startedAt = Date.now();
+  const ownerToken = randomUUID();
   while (true) {
     try {
       await fs.mkdir(lockPath);
-      await writeDispatcherRunJournalLockOwner(lockPath);
-      return;
+      await writeDispatcherRunJournalLockOwner(lockPath, ownerToken);
+      return ownerToken;
     } catch (error) {
       if (!isAlreadyExistsPathError(error)) {
         throw error;
@@ -205,12 +209,14 @@ async function acquireDispatcherRunJournalWriteLock(
 
 async function writeDispatcherRunJournalLockOwner(
   lockPath: string,
+  ownerToken: string,
 ): Promise<void> {
   try {
     await fs.writeFile(
       join(lockPath, DISPATCHER_RUN_JOURNAL_LOCK_OWNER_FILENAME),
       `${JSON.stringify({
         pid: process.pid,
+        ownerToken,
         acquiredAt: new Date().toISOString(),
       })}\n`,
       "utf8",
@@ -221,37 +227,114 @@ async function writeDispatcherRunJournalLockOwner(
   }
 }
 
+async function releaseDispatcherRunJournalWriteLock(
+  lockPath: string,
+  ownerToken: string,
+): Promise<void> {
+  const owner = await readDispatcherRunJournalLockOwner(lockPath);
+  if (owner?.ownerToken === ownerToken) {
+    await fs.rm(lockPath, { recursive: true, force: true });
+  }
+}
+
 async function removeAbandonedDispatcherRunJournalWriteLock(
   lockPath: string,
 ): Promise<boolean> {
-  const ownerPath = join(lockPath, DISPATCHER_RUN_JOURNAL_LOCK_OWNER_FILENAME);
+  const recoveryCandidate =
+    await getDispatcherRunJournalLockRecoveryCandidate(lockPath);
+  if (recoveryCandidate === null) {
+    return false;
+  }
+
+  const preClaimStats = await fs.stat(lockPath).catch(() => null);
+  const recoveryPath = join(lockPath, DISPATCHER_RUN_JOURNAL_LOCK_RECOVERY_DIR);
   try {
-    const owner = parseDispatcherRunJournalLockOwner(
-      await fs.readFile(ownerPath, "utf8"),
-    );
-    if (owner !== null && !isProcessRunning(owner.pid)) {
+    await fs.mkdir(recoveryPath);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return true;
+    }
+    return false;
+  }
+
+  let removingLock = false;
+  try {
+    const postClaimStats = await fs.stat(lockPath).catch(() => null);
+    if (!isSameLockDirectory(preClaimStats, postClaimStats)) {
+      return false;
+    }
+
+    const owner = await readDispatcherRunJournalLockOwner(lockPath);
+    if (owner !== null) {
+      removingLock = !isProcessRunning(owner.pid);
+    } else {
+      removingLock =
+        recoveryCandidate.reason === "stale-metadata" ||
+        isStaleDispatcherRunJournalLock(preClaimStats);
+    }
+
+    if (removingLock) {
       await fs.rm(lockPath, { recursive: true, force: true });
       return true;
     }
     return false;
+  } finally {
+    if (!removingLock) {
+      await fs.rm(recoveryPath, { recursive: true, force: true });
+    }
+  }
+}
+
+async function getDispatcherRunJournalLockRecoveryCandidate(
+  lockPath: string,
+): Promise<{ reason: "dead-owner" | "stale-metadata" } | null> {
+  const owner = await readDispatcherRunJournalLockOwner(lockPath);
+  if (owner !== null) {
+    return isProcessRunning(owner.pid) ? null : { reason: "dead-owner" };
+  }
+
+  const stats = await fs.stat(lockPath).catch(() => null);
+  if (isStaleDispatcherRunJournalLock(stats)) {
+    return { reason: "stale-metadata" };
+  }
+  return null;
+}
+
+async function readDispatcherRunJournalLockOwner(
+  lockPath: string,
+): Promise<{ pid: number; ownerToken?: string } | null> {
+  const ownerPath = join(lockPath, DISPATCHER_RUN_JOURNAL_LOCK_OWNER_FILENAME);
+  try {
+    return parseDispatcherRunJournalLockOwner(
+      await fs.readFile(ownerPath, "utf8"),
+    );
   } catch (error) {
     if (isMissingPathError(error)) {
-      const stats = await fs.stat(lockPath).catch(() => null);
-      if (
-        stats === null ||
-        Date.now() - stats.mtimeMs >= DISPATCHER_RUN_JOURNAL_LOCK_TIMEOUT_MS
-      ) {
-        await fs.rm(lockPath, { recursive: true, force: true });
-        return true;
-      }
+      return null;
     }
-    return false;
+    throw error;
   }
+}
+
+function isStaleDispatcherRunJournalLock(stats: Stats | null): boolean {
+  return (
+    stats === null ||
+    Date.now() - stats.mtimeMs >= DISPATCHER_RUN_JOURNAL_LOCK_TIMEOUT_MS
+  );
+}
+
+function isSameLockDirectory(left: Stats | null, right: Stats | null): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.dev === right.dev &&
+    left.ino === right.ino
+  );
 }
 
 function parseDispatcherRunJournalLockOwner(
   raw: string,
-): { pid: number } | null {
+): { pid: number; ownerToken?: string } | null {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (
@@ -260,7 +343,11 @@ function parseDispatcherRunJournalLockOwner(
       Number.isInteger(parsed.pid) &&
       parsed.pid > 0
     ) {
-      return { pid: parsed.pid };
+      const owner = { pid: parsed.pid };
+      if (typeof parsed.ownerToken === "string") {
+        return { ...owner, ownerToken: parsed.ownerToken };
+      }
+      return owner;
     }
   } catch {
     return null;
