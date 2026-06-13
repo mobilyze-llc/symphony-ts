@@ -2352,7 +2352,7 @@ function isRecognizedEvidencePath(
   lineStart: number | null,
 ): boolean {
   if (lineStart !== null) {
-    return true;
+    return !/^\d+$/.test(path);
   }
   const extension = evidencePathExtension(path);
   if (path.includes("/") && extension !== null) {

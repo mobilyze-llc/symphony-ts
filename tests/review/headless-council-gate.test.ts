@@ -1473,7 +1473,7 @@ describe("runHeadlessCouncilGate", () => {
       "None",
       "",
       "## P2 Should Fix",
-      "- e.g., i.e., and Node.js describe runtime context, but src/review/headless-council-gate.ts:2258 loses file.ts, vitest.config.ts:12, src/proto/service.proto:42, and Dockerfile:12 evidence.",
+      "- e.g., i.e., Node.js, a 10:30 timestamp, and a 60:40 ratio describe runtime context, but src/review/headless-council-gate.ts:2258 loses file.ts, vitest.config.ts:12, src/proto/service.proto:42, and Dockerfile:12 evidence.",
       "",
       "## Track",
       "None",
@@ -1556,7 +1556,7 @@ describe("runHeadlessCouncilGate", () => {
       },
     ]);
     const evidencePaths = firstFinding.evidence.map((item) => item.path);
-    for (const proseToken of ["e.g", "i.e", "Node.js"]) {
+    for (const proseToken of ["e.g", "i.e", "Node.js", "10", "60"]) {
       expect(evidencePaths).not.toContain(proseToken);
     }
     expect(secondFinding.evidence).toEqual(firstFinding.evidence);
