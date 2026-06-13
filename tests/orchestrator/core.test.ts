@@ -120,6 +120,85 @@ describe("orchestrator core", () => {
     );
   });
 
+  it("journals ordering disagreement when the computed head reaches dispatch but another issue is admitted", async () => {
+    const config = createConfig();
+    config.stages = {
+      initialStage: "implement",
+      fastTrack: null,
+      stages: {
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "done",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: null,
+        },
+      },
+    };
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            priority: 1,
+            createdAt: "2026-03-01T00:00:00.000Z",
+          }),
+          createIssue({
+            id: "2",
+            identifier: "ISSUE-2",
+            priority: 1,
+            createdAt: "2026-03-02T00:00:00.000Z",
+          }),
+        ],
+      }),
+    });
+    orchestrator.getState().issueStages["1"] = "done";
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(orchestrator.getState().dispatcherRunJournal).toContainEqual(
+      expect.objectContaining({
+        kind: "ordering_disagreement",
+        issueId: "2",
+        issueIdentifier: "ISSUE-2",
+        metadata: expect.objectContaining({
+          comparator_version: "dispatch-comparator-v1",
+          computed_top_issue_id: "1",
+          expected_issue_id: "1",
+          actual_issue_id: "2",
+        }),
+      }),
+    );
+  });
+
   it("rejects Todo issues with non-terminal blockers and allows terminal blockers", () => {
     const orchestrator = createOrchestrator();
 

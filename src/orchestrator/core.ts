@@ -2087,13 +2087,13 @@ export class OrchestratorCore {
     const dispatchedIssueIds: string[] = [];
     const modeDecisions: RightSizingDecision[] = [];
     let eligibleCount = 0;
-    let expectedDispatchHead: Issue | null = null;
-    let suppressOrderingDisagreement = false;
     const admittedSnapshots = this.buildRunningAdmissionSnapshots();
     const sortedIssues = this.issuesFromComputedOrder(
       computedDispatchOrder,
       issues,
     );
+    const computedHeadIssue = sortedIssues[0] ?? null;
+    let computedHeadReachedDispatchBoundary = false;
     for (const issue of sortedIssues) {
       if (this.availableSlots() <= 0) {
         break;
@@ -2157,13 +2157,10 @@ export class OrchestratorCore {
       // cannot explain the block.
       eligibleCount += 1;
 
-      if (expectedDispatchHead === null) {
-        expectedDispatchHead = issue;
+      if (computedHeadIssue?.id === issue.id) {
+        computedHeadReachedDispatchBoundary = true;
       }
       const dispatchResult = await this.dispatchIssue(issue, null);
-      if (!dispatchResult.dispatched && expectedDispatchHead.id === issue.id) {
-        suppressOrderingDisagreement = true;
-      }
       if (dispatchResult.dispatched) {
         dispatchedIssueIds.push(issue.id);
         modeDecisions.push(dispatchResult.rightSizingDecision);
@@ -2174,7 +2171,9 @@ export class OrchestratorCore {
     this.trackDispatchStarvation(eligibleCount, dispatchedIssueIds.length);
     await this.recordOrderingDisagreementIfNeeded({
       computedOrder: computedDispatchOrder,
-      expectedIssue: suppressOrderingDisagreement ? null : expectedDispatchHead,
+      expectedIssue: computedHeadReachedDispatchBoundary
+        ? computedHeadIssue
+        : null,
       issues,
       dispatchPicks: dispatchedIssueIds,
     });

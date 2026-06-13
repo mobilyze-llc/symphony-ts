@@ -103,7 +103,7 @@ export function computeDispatchOrder(
     };
   }
 
-  const ordered = applyAnchors(
+  const anchored = applyAnchors(
     topologicallySortIssues(
       included,
       hardOrderingEdges,
@@ -119,7 +119,7 @@ export function computeDispatchOrder(
     comparator_version: DISPATCH_COMPARATOR_VERSION,
     generated_at: input.now.toISOString(),
     status: "linearized",
-    positions: ordered.map((issue, index) => ({
+    positions: anchored.ordered.map((issue, index) => ({
       position: index + 1,
       issue_id: issue.id,
       issue_identifier: issue.identifier,
@@ -135,7 +135,7 @@ export function computeDispatchOrder(
     ),
     would_have_been_excluded_by_advisory_edges: advisoryOpenEdges,
     hard_cycle: null,
-    warnings,
+    warnings: [...warnings, ...anchored.warnings],
   };
 }
 
@@ -427,8 +427,9 @@ function applyAnchors(
   anchors: Readonly<Record<string, IssueAnchorRecord>>,
   completedIssueIds: ReadonlySet<string>,
   now: Date,
-): Issue[] {
+): { ordered: Issue[]; warnings: string[] } {
   const ordered = [...issues];
+  const warnings: string[] = [];
   const issueIds = new Set(ordered.map((issue) => issue.id));
   const activeAnchors = Object.values(anchors)
     .filter(
@@ -473,7 +474,10 @@ function applyAnchors(
       (issue) => issue.identifier === placement.issueIdentifier,
     );
     if (targetIndex === -1) {
-      ordered.push(anchored);
+      ordered.splice(Math.min(currentIndex, ordered.length), 0, anchored);
+      warnings.push(
+        `Operator anchor for ${anchor.issueIdentifier} references unavailable target ${placement.issueIdentifier}; preserved natural priority/FIFO position.`,
+      );
       continue;
     }
     ordered.splice(
@@ -483,7 +487,7 @@ function applyAnchors(
     );
   }
 
-  return ordered;
+  return { ordered, warnings };
 }
 
 function buildRationale(

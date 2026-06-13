@@ -197,6 +197,53 @@ describe("dispatch comparator", () => {
     ).toEqual(["ISSUE-2", "ISSUE-1", "ISSUE-3"]);
     expect(order.positions[0]?.rationale).toContain("operator_anchor top");
   });
+
+  it("preserves natural order and warns when a relative anchor target is unavailable", () => {
+    const excluded = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      priority: 1,
+      createdAt: "2026-06-01T00:00:00.000Z",
+      blockedBy: [
+        {
+          id: "9",
+          identifier: "ISSUE-9",
+          state: "In Progress",
+        },
+      ],
+    });
+    const anchored = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+      priority: 1,
+      createdAt: "2026-06-02T00:00:00.000Z",
+    });
+    const later = createIssue({
+      id: "3",
+      identifier: "ISSUE-3",
+      priority: 1,
+      createdAt: "2026-06-03T00:00:00.000Z",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [excluded, anchored, later],
+      anchors: {
+        "2": createAnchor(anchored, {
+          kind: "above",
+          issueIdentifier: "ISSUE-1",
+        }),
+      },
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-2", "ISSUE-3"]);
+    expect(order.warnings).toContain(
+      "Operator anchor for ISSUE-2 references unavailable target ISSUE-1; preserved natural priority/FIFO position.",
+    );
+  });
 });
 
 function createIssue(overrides: Partial<Issue>): Issue {
@@ -216,11 +263,14 @@ function createIssue(overrides: Partial<Issue>): Issue {
   };
 }
 
-function createAnchor(issue: Issue): IssueAnchorRecord {
+function createAnchor(
+  issue: Issue,
+  placement: IssueAnchorRecord["placement"] = { kind: "top" },
+): IssueAnchorRecord {
   return {
     issueId: issue.id,
     issueIdentifier: issue.identifier,
-    placement: { kind: "top" },
+    placement,
     expiry: { kind: "until_merged" },
     actor: { kind: "operator", host: "local", session: null },
     reason: { class: "operator_order", human: "Prioritize this issue" },
