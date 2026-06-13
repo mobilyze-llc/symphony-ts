@@ -137,6 +137,22 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
         }),
       );
     }
+
+    const unsafeSafeCorpus = structuredClone(corpus);
+    const safeIndex = unsafeSafeCorpus.fixtures.findIndex(
+      (candidate) => candidate.bugClass === "security:safe_filesystem",
+    );
+    expect(safeIndex).toBeGreaterThanOrEqual(0);
+    unsafeSafeCorpus.fixtures[safeIndex]!.expectedReviewerOutcome.shouldBlock =
+      true;
+    expect(validateReviewCalibrationCorpus(unsafeSafeCorpus).errors).toEqual(
+      expect.arrayContaining([
+        {
+          path: `$.fixtures[${safeIndex}].expectedReviewerOutcome.shouldBlock`,
+          message: "safe security fixtures must not block",
+        },
+      ]),
+    );
   });
 
   it("keeps instruction, workflow, and frontmatter classes explicit", () => {
@@ -320,6 +336,32 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
     ).toContainEqual({
       path: `$.fixtures[${replayShapeIndex}].replay.expectedEventShape.sample.metadata.gateMutation`,
       message: "must not include forbidden runtime field",
+    });
+
+    const metadataDriftCorpus = structuredClone(corpus);
+    const metadataReplay =
+      metadataDriftCorpus.fixtures[replayShapeIndex]!.replay;
+    if (metadataReplay === null) {
+      throw new Error("expected replay metadata");
+    }
+    const metadata = metadataReplay.expectedEventShape.sample.metadata;
+    if (
+      metadata === null ||
+      typeof metadata !== "object" ||
+      Array.isArray(metadata)
+    ) {
+      throw new Error("expected replay sample metadata");
+    }
+    const { ownerIssue: _ownerIssue, ...metadataWithoutOwnerIssue } =
+      metadata as Record<string, unknown>;
+    metadataReplay.expectedEventShape.sample.metadata =
+      metadataWithoutOwnerIssue;
+
+    expect(
+      validateReviewCalibrationCorpus(metadataDriftCorpus).errors,
+    ).toContainEqual({
+      path: `$.fixtures[${replayShapeIndex}].replay.expectedEventShape.sample.metadata.ownerIssue`,
+      message: "must include metadata field",
     });
   });
 

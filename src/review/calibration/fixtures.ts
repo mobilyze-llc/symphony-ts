@@ -625,6 +625,21 @@ function validateReplayEventShape(
     addError(`${path}.sample`, "must be an object");
     return;
   }
+  const metadataFields = stringArrayValues(value.metadataFields);
+  if (metadataFields.length > 0) {
+    if (!isRecord(value.sample.metadata)) {
+      addError(`${path}.sample.metadata`, "must be an object");
+    } else {
+      for (const field of metadataFields) {
+        if (!Object.hasOwn(value.sample.metadata, field)) {
+          addError(
+            `${path}.sample.metadata.${field}`,
+            "must include metadata field",
+          );
+        }
+      }
+    }
+  }
   for (const field of stringArrayValues(value.requiredFields)) {
     if (!Object.hasOwn(value.sample, field)) {
       addError(`${path}.sample.${field}`, "must include required field");
@@ -684,6 +699,12 @@ function validateSecurityOutcome(
       addError(
         `${path}.falsePositiveTrap`,
         "safe security fixtures must carry a false-positive trap",
+      );
+    }
+    if (outcome.shouldBlock !== false) {
+      addError(
+        `${path}.expectedReviewerOutcome.shouldBlock`,
+        "safe security fixtures must not block",
       );
     }
     return;
