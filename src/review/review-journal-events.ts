@@ -192,10 +192,14 @@ export function buildReviewJournalEntries(
             remaining_symptom_count: synthesis.remainingSymptoms.length,
             narrowing_status:
               synthesis.remainingSymptoms.length === 0 ? "narrowed" : "open",
-            narrowing_rationale:
-              result.targeted_convergence?.narrowingRationale ??
-              narrowingRationale(synthesis),
-            ...targetedConvergenceMetadata(result.targeted_convergence),
+            narrowing_rationale: narrowingRationaleForSynthesis(
+              result.targeted_convergence,
+              synthesis,
+            ),
+            ...targetedConvergenceMetadataForSynthesis(
+              result.targeted_convergence,
+              synthesis,
+            ),
           },
         }),
       );
@@ -556,6 +560,35 @@ function targetedConvergenceMetadata(
   });
 }
 
+function targetedConvergenceMetadataForSynthesis(
+  targetedConvergence: TargetedConvergenceHypothesis | null,
+  synthesis: StructuredReviewFamilySynthesis,
+): Record<string, unknown> {
+  return targetedConvergenceAppliesToSynthesis(targetedConvergence, synthesis)
+    ? targetedConvergenceMetadata(targetedConvergence)
+    : {};
+}
+
+function narrowingRationaleForSynthesis(
+  targetedConvergence: TargetedConvergenceHypothesis | null,
+  synthesis: StructuredReviewFamilySynthesis,
+): string {
+  return targetedConvergenceAppliesToSynthesis(targetedConvergence, synthesis)
+    ? targetedConvergence.narrowingRationale
+    : narrowingRationale(synthesis);
+}
+
+function targetedConvergenceAppliesToSynthesis(
+  targetedConvergence: TargetedConvergenceHypothesis | null,
+  synthesis: StructuredReviewFamilySynthesis,
+): targetedConvergence is TargetedConvergenceHypothesis {
+  return (
+    targetedConvergence !== null &&
+    normalizeFamilyKey(targetedConvergence.family) ===
+      normalizeFamilyKey(synthesis.name)
+  );
+}
+
 function blockingFindingCount(
   findings: readonly StructuredReviewFinding[],
 ): number {
@@ -596,6 +629,10 @@ function normalizeTimestamp(primary: string, fallback: string): string {
 
 function stableUnique(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
+}
+
+function normalizeFamilyKey(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function compactMetadata(

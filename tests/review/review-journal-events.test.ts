@@ -356,15 +356,29 @@ describe("review journal events", () => {
 
   it("persists targeted convergence narrowing rationale through review journal events", () => {
     const targetedConvergence = targetedConvergenceHypothesis();
+    const artifact = structuredArtifact({
+      verdict: "fail",
+      findingIntroducedIn: "fix_round_2",
+    });
     const result = reviewResult({
       verdict: "fail",
       round: 2,
       mode: "convergence",
       previousReviewedHeadSha: "previous-head-sha",
-      artifact: structuredArtifact({
-        verdict: "fail",
-        findingIntroducedIn: "fix_round_2",
-      }),
+      artifact: {
+        ...artifact,
+        familySyntheses: [
+          ...artifact.familySyntheses,
+          {
+            name: "dispatcher lifecycle",
+            safetyClaim: "dispatch state remains monotonic",
+            nextRoundQuestion: "did dispatch state regress?",
+            fixedSymptoms: ["stale admission card"],
+            remainingSymptoms: ["rewrite can reopen dispatch"],
+            findingFingerprints: ["fp-dispatch-1"],
+          },
+        ],
+      },
       targetedConvergence,
     });
 
@@ -392,12 +406,30 @@ describe("review journal events", () => {
       skip_unchanged_remainder: true,
     });
     expect(
-      entries.find((entry) => entry.kind === "review_synthesis")?.metadata,
+      entries.find(
+        (entry) =>
+          entry.kind === "review_synthesis" &&
+          entry.metadata.family === "journal substrate",
+      )?.metadata,
     ).toMatchObject({
       narrowing_rationale:
         "2 confirmed findings asserted family journal substrate; next round narrows to falsifying every journal write is replayable while still reviewing the fix delta",
       targeting_hypothesis_version: "targeted_convergence_v1",
     });
+    const nonTargetedSynthesis = entries.find(
+      (entry) =>
+        entry.kind === "review_synthesis" &&
+        entry.metadata.family === "dispatcher lifecycle",
+    );
+    expect(nonTargetedSynthesis?.metadata).toMatchObject({
+      narrowing_rationale: "family retained: 1 remaining symptom(s), 1 fixed",
+    });
+    expect(nonTargetedSynthesis?.metadata).not.toHaveProperty(
+      "targeting_family",
+    );
+    expect(nonTargetedSynthesis?.metadata).not.toHaveProperty(
+      "targeting_hypothesis_version",
+    );
     expect(
       entries.find((entry) => entry.kind === "review_gate_result")?.metadata,
     ).toMatchObject({
