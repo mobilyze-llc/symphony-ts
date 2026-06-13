@@ -7099,6 +7099,7 @@ export class OrchestratorCore {
   private recoverEmergencyStopIntent(entry: DispatcherRunJournalEntry): void {
     const reason = readMetadataRecord(entry.metadata, "reason");
     const actor = readMetadataRecord(entry.metadata, "actor");
+    const interruptedIssues = readInterruptedIssues(entry.metadata);
     this.state.emergencyStop = {
       active: true,
       since: entry.timestamp,
@@ -7109,8 +7110,22 @@ export class OrchestratorCore {
         session: readRecordString(actor, "session"),
       },
       setBySequence: entry.sequence,
-      interruptedIssues: readInterruptedIssues(entry.metadata),
+      interruptedIssues,
     };
+    for (const issue of interruptedIssues) {
+      if (this.state.resumeRequired.has(issue.issueId)) {
+        continue;
+      }
+      this.markIssueRequiresExplicitResume(
+        issue.issueId,
+        null,
+        entry.timestamp,
+        {
+          reason: "killed_mid_run",
+          setBySequence: entry.sequence,
+        },
+      );
+    }
   }
 
   private toEmergencyStopInterruptedIssue(
