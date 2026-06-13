@@ -205,6 +205,28 @@ export interface PipelineStatusResponse {
   paused: boolean;
   issues: Array<{ identifier: string; title: string }>;
   restart_safety?: PipelineRestartSafetyResponse;
+  emergency_stop?: EmergencyStopStateResponse | null;
+}
+
+export interface EmergencyStopStateResponse {
+  active: true;
+  since: string;
+  reason: string;
+  set_by_sequence: number | null;
+  interrupted_issues: Array<{
+    issue_id: string;
+    issue_identifier: string;
+    stage: string | null;
+    attempt: number | null;
+  }>;
+}
+
+export interface EmergencyStopResponse {
+  status: "applied" | "no_op";
+  detail: string;
+  sequence: number | null;
+  interrupted_issues: EmergencyStopStateResponse["interrupted_issues"];
+  stop_requests: StopIssueResponse[];
 }
 
 /**
@@ -304,6 +326,9 @@ export interface DashboardServerHost {
   requestPipelineResume?(
     context?: PipelineControlContext,
   ): PipelineStatusResponse | Promise<PipelineStatusResponse>;
+  requestEmergencyStop?(
+    context?: PipelineControlContext,
+  ): EmergencyStopResponse | Promise<EmergencyStopResponse>;
   getPipelineStatus?():
     | PipelineStatusResponse
     | Promise<PipelineStatusResponse>;
@@ -1114,10 +1139,14 @@ export function createDashboardRequestHandler(
 
       if (
         url.pathname === "/api/v1/pipeline/pause" ||
-        url.pathname === "/api/v1/pipeline/resume"
+        url.pathname === "/api/v1/pipeline/resume" ||
+        url.pathname === "/api/v1/pipeline/stop"
       ) {
-        const action =
-          url.pathname === "/api/v1/pipeline/pause" ? "pause" : "resume";
+        const action = url.pathname.endsWith("/pause")
+          ? "pause"
+          : url.pathname.endsWith("/resume")
+            ? "resume"
+            : "stop";
         if (method !== "POST") {
           writeMethodNotAllowed(response, ["POST"]);
           return;
@@ -1126,7 +1155,9 @@ export function createDashboardRequestHandler(
         const handler =
           action === "pause"
             ? options.host.requestPipelinePause?.bind(options.host)
-            : options.host.requestPipelineResume?.bind(options.host);
+            : action === "resume"
+              ? options.host.requestPipelineResume?.bind(options.host)
+              : options.host.requestEmergencyStop?.bind(options.host);
         if (handler === undefined) {
           writeJsonError(response, 501, "not_implemented", {
             message: `Pipeline ${action} is not supported by this host.`,
@@ -1169,7 +1200,10 @@ export function createDashboardRequestHandler(
               ? defaultDashboardActor()
               : toIntentActor(parsed.data.actor),
           reason:
-            parsed.data.reason ?? `pipeline ${action} requested via dashboard`,
+            parsed.data.reason ??
+            (action === "stop"
+              ? "emergency stop requested via dashboard"
+              : `pipeline ${action} requested via dashboard`),
         });
         writeJson(response, 200, result);
         return;

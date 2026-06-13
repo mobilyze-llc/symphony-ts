@@ -30,6 +30,7 @@ export interface SymphonyctlCommand {
     | "unanchor"
     | "pause"
     | "resume"
+    | "stop"
     | "help";
   baseUrl: string;
   verb?: IntentVerb;
@@ -40,6 +41,7 @@ export interface SymphonyctlCommand {
   stage?: string;
   anchorPlacement?: AnchorPlacement;
   anchorExpiry?: AnchorExpiry;
+  hard?: boolean;
 }
 
 export class SymphonyctlUsageError extends Error {}
@@ -56,6 +58,12 @@ Commands:
                                  POST an unanchor intent with operator attribution
   pause [--reason <text>]        POST /api/v1/pipeline/pause
   resume [--reason <text>]       POST /api/v1/pipeline/resume
+  stop --hard [--reason <text>]  POST /api/v1/pipeline/stop (emergency stop)
+
+Cold-shell hard stop:
+  curl -fsS -X POST "\${SYMPHONYCTL_BASE_URL:-${DEFAULT_BASE_URL}}/api/v1/pipeline/stop" \\
+    -H 'content-type: application/json' \\
+    --data '{"reason":"emergency stop from shell"}'
 
 Options:
   --base-url <url>               Dashboard base URL (default ${DEFAULT_BASE_URL},
@@ -68,7 +76,7 @@ export function parseSymphonyctlArgs(
 ): SymphonyctlCommand {
   const positional: string[] = [];
   const flags = new Map<string, string>();
-  const booleanFlags = new Set(["top", "until-merged"]);
+  const booleanFlags = new Set(["top", "until-merged", "hard"]);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === undefined) {
@@ -141,6 +149,18 @@ export function parseSymphonyctlArgs(
       throw new SymphonyctlUsageError("unanchor requires an issue identifier.");
     }
     const result: SymphonyctlCommand = { command: "unanchor", baseUrl, issue };
+    const reason = flags.get("reason");
+    if (reason !== undefined) {
+      result.reason = reason;
+    }
+    return result;
+  }
+
+  if (command === "stop") {
+    if (flags.get("hard") !== "true") {
+      throw new SymphonyctlUsageError("stop requires --hard.");
+    }
+    const result: SymphonyctlCommand = { command, baseUrl, hard: true };
     const reason = flags.get("reason");
     if (reason !== undefined) {
       result.reason = reason;
@@ -410,13 +430,22 @@ export async function runSymphonyctl(
     return 0;
   }
 
-  if (parsed.command === "pause" || parsed.command === "resume") {
+  if (
+    parsed.command === "pause" ||
+    parsed.command === "resume" ||
+    parsed.command === "stop"
+  ) {
+    const action = parsed.command === "stop" ? "stop" : parsed.command;
     const { status, payload } = await httpJson(
       "POST",
-      `${parsed.baseUrl}/api/v1/pipeline/${parsed.command}`,
+      `${parsed.baseUrl}/api/v1/pipeline/${action}`,
       {
         actor: ctlActor(),
-        reason: parsed.reason ?? `pipeline ${parsed.command} via symphonyctl`,
+        reason:
+          parsed.reason ??
+          (parsed.command === "stop"
+            ? "emergency stop via symphonyctl"
+            : `pipeline ${parsed.command} via symphonyctl`),
       },
     );
     log(JSON.stringify(payload, null, 2));

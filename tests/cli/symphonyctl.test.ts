@@ -172,6 +172,23 @@ describe("parseSymphonyctlArgs", () => {
       reason: "deploy window",
     });
   });
+
+  it("parses hard emergency stop with a reason", () => {
+    expect(
+      parseSymphonyctlArgs(["stop", "--hard", "--reason", "runaway spend"], {}),
+    ).toEqual({
+      command: "stop",
+      baseUrl: DEFAULT_BASE_URL,
+      hard: true,
+      reason: "runaway spend",
+    });
+  });
+
+  it("rejects stop without --hard", () => {
+    expect(() => parseSymphonyctlArgs(["stop"], {})).toThrow(
+      SymphonyctlUsageError,
+    );
+  });
 });
 
 describe("formatStateSummary", () => {

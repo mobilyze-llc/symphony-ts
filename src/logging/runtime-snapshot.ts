@@ -304,6 +304,18 @@ export interface RuntimeSnapshot {
    * The 2026-06-11 frozen-queue diagnosis collapses to this one read.
    */
   explicit_resume_required: Record<string, RuntimeSnapshotExplicitResumeMark>;
+  emergency_stop?: {
+    active: true;
+    since: string;
+    reason: string;
+    set_by_sequence: number | null;
+    interrupted_issues: Array<{
+      issue_id: string;
+      issue_identifier: string;
+      stage: string | null;
+      attempt: number | null;
+    }>;
+  } | null;
   /**
    * Journal cursor as of this snapshot (SYMPH-407): the sequence of the last
    * committed dispatcher-run journal entry. Pair with
@@ -732,6 +744,23 @@ export function buildRuntimeSnapshot(
     dispositions: buildDispositionSnapshots(state),
     dispatch_gate: buildDispatchGateSnapshot(state),
     explicit_resume_required: buildExplicitResumeMarks(state, now),
+    emergency_stop:
+      state.emergencyStop === null
+        ? null
+        : {
+            active: true,
+            since: state.emergencyStop.since,
+            reason: state.emergencyStop.reason,
+            set_by_sequence: state.emergencyStop.setBySequence,
+            interrupted_issues: state.emergencyStop.interruptedIssues.map(
+              (issue) => ({
+                issue_id: issue.issueId,
+                issue_identifier: issue.issueIdentifier,
+                stage: issue.stage,
+                attempt: issue.attempt,
+              }),
+            ),
+          },
     as_of_sequence:
       enrichment?.asOfSequence ??
       state.dispatcherRunJournal.at(-1)?.sequence ??

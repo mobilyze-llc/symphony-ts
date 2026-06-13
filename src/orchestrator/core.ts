@@ -55,6 +55,7 @@ import {
   type LiveSession,
   type OrchestratorState,
   type PendingStageSignal,
+  type PipelineEmergencyStopState,
   type RetryEntry,
   type RightSizingDecision,
   type RightSizingMode,
@@ -219,7 +220,8 @@ export type StopReason =
   | "terminal_state"
   | "inactive_state"
   | "stall_timeout"
-  | "manual_stop";
+  | "manual_stop"
+  | "emergency_stop";
 
 export interface SpawnWorkerResult {
   workerHandle: unknown;
@@ -278,6 +280,19 @@ export interface RetryTimerResult {
   dispatched: boolean;
   released: boolean;
   retryEntry: RetryEntry | null;
+}
+
+export interface EmergencyStopResult {
+  status: "applied" | "no_op";
+  detail: string;
+  sequence: number | null;
+  interruptedIssues: Array<{
+    issueId: string;
+    issueIdentifier: string;
+    stage: string | null;
+    attempt: number | null;
+  }>;
+  stopRequests: StopRequest[];
 }
 
 export interface CodexEventResult {
@@ -908,6 +923,7 @@ export class OrchestratorCore {
     this.state.issueAnchors = {};
     this.issueAnchorCursors.clear();
     this.anchorCursorSequence = 0;
+    this.state.emergencyStop = null;
     this.state.issuePendingStageSignals = {};
     // Re-invocation safety (council R2): the stage_record reducer is
     // additive, so a replay against a different journal (runtime-host root
@@ -997,6 +1013,10 @@ export class OrchestratorCore {
         } else if (verb === "unanchor") {
           delete this.state.issueAnchors[entry.issueId];
           this.recordAnchorCursorFromJournalEntry(entry);
+        } else if (verb === "pipeline_stop") {
+          this.recoverEmergencyStopIntent(entry);
+        } else if (verb === "pipeline_resume") {
+          this.state.emergencyStop = null;
         } else if (verb === "park" || verb === "halt") {
           this.markIssueRequiresExplicitResume(
             entry.issueId,
@@ -1784,6 +1804,19 @@ export class OrchestratorCore {
     }
 
     await this.applyTrackerResumeEvidence(issues);
+
+    const emergencyStopResult = this.blockForEmergencyStop(issues.length);
+    if (emergencyStopResult !== null) {
+      return {
+        validation,
+        dispatchedIssueIds: [],
+        modeDecisions: [],
+        stopRequests: reconcileResult.stopRequests,
+        trackerFetchFailed: false,
+        reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
+        runningCount: Object.keys(this.state.running).length,
+      };
+    }
 
     // Check for pipeline-halt before dispatching
     const haltIssue = await this.checkPipelineHalt();
@@ -3172,6 +3205,24 @@ export class OrchestratorCore {
         retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
           identifier: retryEntry.identifier,
           error: `dispatch validation failed: ${validation.error.message}`,
+          delayType: retryEntry.delayType,
+          deferral: true,
+        }),
+      };
+    }
+
+    const emergencyStopResult = this.blockForEmergencyStop(1);
+    if (emergencyStopResult !== null) {
+      console.warn(
+        `[orchestrator] Emergency stop active. Deferring retry for ${retryEntry.identifier ?? issueId}.`,
+      );
+      this.clearRetryEntry(issueId);
+      return {
+        dispatched: false,
+        released: false,
+        retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
+          identifier: retryEntry.identifier,
+          error: "emergency stop active",
           delayType: retryEntry.delayType,
           deferral: true,
         }),
@@ -6524,11 +6575,12 @@ export class OrchestratorCore {
    * mutation is the caller's documented warn-only degraded mode.
    */
   async journalPipelineIntent(input: {
-    action: "pause" | "resume";
+    action: "pause" | "resume" | "stop";
     status: "applied" | "no_op";
     actor: IntentActor;
     reason: IntentReason;
     detail: string;
+    metadata?: Record<string, unknown>;
   }): Promise<number | null> {
     const verb = `pipeline_${input.action}`;
     const actorKey = formatIntentActorKey(input.actor);
@@ -6557,8 +6609,12 @@ export class OrchestratorCore {
           },
           reason: { class: input.reason.class, human: input.reason.human },
           detail: input.detail,
+          ...(input.metadata ?? {}),
         },
       });
+      if (input.status === "applied" && input.action === "resume") {
+        this.state.emergencyStop = null;
+      }
       return entry.sequence;
     } catch (error) {
       console.warn(
@@ -7012,6 +7068,128 @@ export class OrchestratorCore {
     }
 
     return null;
+  }
+
+  private blockForEmergencyStop(candidateCount: number): true | null {
+    const emergencyStop = this.state.emergencyStop;
+    if (emergencyStop === null) {
+      return null;
+    }
+    this.recordDispatchVerdict({
+      issueId: PIPELINE_VERDICT_SCOPE_ID,
+      issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
+      disposition: "halt",
+      reasonCode: "emergency_stop",
+      remedy:
+        "Run pipeline resume after triaging killed-mid-run tickets and clearing the halt issue.",
+      details: {
+        since: emergencyStop.since,
+        reason: emergencyStop.reason,
+        actor: emergencyStop.actor,
+        interruptedIssues: emergencyStop.interruptedIssues,
+      },
+    });
+    this.trackDispatchStarvation(candidateCount, 0);
+    return true;
+  }
+
+  private recoverEmergencyStopIntent(entry: DispatcherRunJournalEntry): void {
+    const reason = readMetadataRecord(entry.metadata, "reason");
+    const actor = readMetadataRecord(entry.metadata, "actor");
+    this.state.emergencyStop = {
+      active: true,
+      since: entry.timestamp,
+      reason: readRecordString(reason, "human") ?? "emergency stop",
+      actor: {
+        kind: readRecordString(actor, "kind") ?? "operator",
+        host: readRecordString(actor, "host") ?? "unknown",
+        session: readRecordString(actor, "session"),
+      },
+      setBySequence: entry.sequence,
+      interruptedIssues: readInterruptedIssues(entry.metadata),
+    };
+  }
+
+  private toEmergencyStopInterruptedIssue(
+    runningEntry: RunningEntry,
+  ): PipelineEmergencyStopState["interruptedIssues"][number] {
+    return {
+      issueId: runningEntry.issue.id,
+      issueIdentifier: runningEntry.identifier,
+      stage: this.state.issueStages[runningEntry.issue.id] ?? null,
+      attempt: runningEntry.retryAttempt,
+    };
+  }
+
+  private buildEmergencyStopState(input: {
+    actor: IntentActor;
+    reason: IntentReason;
+    interruptedIssues: PipelineEmergencyStopState["interruptedIssues"];
+    sequence: number | null;
+    timestamp: string;
+  }): PipelineEmergencyStopState {
+    return {
+      active: true,
+      since: input.timestamp,
+      reason: input.reason.human,
+      actor: {
+        kind: input.actor.kind,
+        host: input.actor.host,
+        session: input.actor.session ?? null,
+      },
+      setBySequence: input.sequence,
+      interruptedIssues: input.interruptedIssues,
+    };
+  }
+
+  async requestEmergencyStop(input: {
+    actor: IntentActor;
+    reason: IntentReason;
+  }): Promise<EmergencyStopResult> {
+    const alreadyActive = this.state.emergencyStop !== null;
+    const interruptedIssues = Object.values(this.state.running).map((entry) =>
+      this.toEmergencyStopInterruptedIssue(entry),
+    );
+    const status =
+      alreadyActive && interruptedIssues.length === 0 ? "no_op" : "applied";
+    const detail =
+      status === "applied"
+        ? `emergency stop applied; ${interruptedIssues.length} in-flight issue(s) marked killed-mid-run`
+        : "emergency stop already active; no in-flight issues";
+    const sequence = await this.journalPipelineIntent({
+      action: "stop",
+      status,
+      actor: input.actor,
+      reason: input.reason,
+      detail,
+      metadata: { interruptedIssues },
+    });
+
+    if (status === "applied") {
+      this.state.emergencyStop = this.buildEmergencyStopState({
+        actor: input.actor,
+        reason: input.reason,
+        interruptedIssues,
+        sequence,
+        timestamp: this.now().toISOString(),
+      });
+    }
+
+    const stopRequests: StopRequest[] = [];
+    for (const runningEntry of Object.values(this.state.running)) {
+      stopRequests.push(
+        await this.requestStop(runningEntry, false, "emergency_stop"),
+      );
+    }
+
+    this.blockForEmergencyStop(interruptedIssues.length);
+    return {
+      status,
+      detail,
+      sequence,
+      interruptedIssues,
+      stopRequests,
+    };
   }
 
   /**
@@ -9180,12 +9358,19 @@ export class OrchestratorCore {
     });
 
     if (lease !== null) {
-      if (reason === "manual_stop" || reason === "inactive_state") {
+      if (
+        reason === "manual_stop" ||
+        reason === "inactive_state" ||
+        reason === "emergency_stop"
+      ) {
         this.recordIssueRequiresExplicitResume(
           runningEntry.issue.id,
           runningEntry.issue.state,
           null,
-          { reason, setBySequence: lease.lastJournalSequence },
+          {
+            reason: reason === "emergency_stop" ? "killed_mid_run" : reason,
+            setBySequence: lease.lastJournalSequence,
+          },
         );
       }
       await this.stopRunningIssue?.({
@@ -10386,6 +10571,60 @@ function collectOperatorIntentSamples(
   });
 }
 
+function readMetadataRecord(
+  metadata: Record<string, unknown>,
+  key: string,
+): Record<string, unknown> | null {
+  const value = metadata[key];
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function readRecordString(
+  record: Record<string, unknown> | null,
+  key: string,
+): string | null {
+  if (record === null) {
+    return null;
+  }
+  const value = record[key];
+  return typeof value === "string" ? value : null;
+}
+
+function readInterruptedIssues(
+  metadata: Record<string, unknown>,
+): PipelineEmergencyStopState["interruptedIssues"] {
+  const value = metadata.interruptedIssues;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) {
+      return [];
+    }
+    const record = item as Record<string, unknown>;
+    const issueId = record.issueId;
+    const issueIdentifier = record.issueIdentifier;
+    if (typeof issueId !== "string" || typeof issueIdentifier !== "string") {
+      return [];
+    }
+    const stage = record.stage;
+    const attempt = record.attempt;
+    return [
+      {
+        issueId,
+        issueIdentifier,
+        stage: typeof stage === "string" ? stage : null,
+        attempt:
+          typeof attempt === "number" && Number.isFinite(attempt)
+            ? attempt
+            : null,
+      },
+    ];
+  });
+}
+
 function collectQuietDeathOutcomes(
   journal: DispatcherRunJournal,
   sinceSequence = 0,
@@ -10643,6 +10882,7 @@ function cloneOrchestratorState(state: OrchestratorState): OrchestratorState {
     resumeRequired: new Set(state.resumeRequired),
     resumeRequiredMarks: clonePlain(state.resumeRequiredMarks),
     issueAnchors: clonePlain(state.issueAnchors),
+    emergencyStop: clonePlain(state.emergencyStop),
     codexTotals: clonePlain(state.codexTotals),
     codexRateLimits: clonePlain(state.codexRateLimits),
     rateLimitAdmission: clonePlain(state.rateLimitAdmission),
@@ -10687,6 +10927,7 @@ function restoreOrchestratorState(
   target.resumeRequired = snapshot.resumeRequired;
   target.resumeRequiredMarks = snapshot.resumeRequiredMarks;
   target.issueAnchors = snapshot.issueAnchors;
+  target.emergencyStop = snapshot.emergencyStop;
   target.codexTotals = snapshot.codexTotals;
   target.codexRateLimits = snapshot.codexRateLimits;
   target.rateLimitAdmission = snapshot.rateLimitAdmission;

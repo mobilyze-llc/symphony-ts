@@ -2116,6 +2116,91 @@ describe("orchestrator core", () => {
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
   });
 
+  it("emergency stop halts dispatch, marks in-flight work killed-mid-run, and defers retries", async () => {
+    const timers = createFakeTimerScheduler();
+    const stopRunningIssue = vi.fn();
+    let issueState = "Todo";
+    let haltActive = false;
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    const orchestrator = createOrchestrator({
+      config,
+      timerScheduler: timers,
+      stopRunningIssue,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "Todo" }],
+        fetchOpenIssuesByLabels: async () =>
+          haltActive
+            ? [
+                createIssue({
+                  id: "halt",
+                  identifier: "SYMPH-HALT",
+                  title: "Graceful pipeline pause",
+                }),
+              ]
+            : [],
+      }),
+    });
+
+    await orchestrator.pollTick();
+    haltActive = true;
+    const gracefullyPaused = await orchestrator.pollTick();
+    expect(gracefullyPaused.dispatchedIssueIds).toEqual([]);
+    expect(stopRunningIssue).not.toHaveBeenCalled();
+
+    const stop = await orchestrator.requestEmergencyStop({
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      reason: { class: "operator_emergency_stop", human: "runaway spend" },
+    });
+
+    expect(stop.status).toBe("applied");
+    expect(stop.interruptedIssues).toEqual([
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        stage: null,
+        attempt: null,
+      },
+    ]);
+    expect(stopRunningIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        issueId: "1",
+        reason: "emergency_stop",
+        cleanupWorkspace: false,
+      }),
+    );
+    expect(orchestrator.getState().emergencyStop).toMatchObject({
+      reason: "runaway spend",
+      setBySequence: expect.any(Number),
+    });
+    expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run",
+      setBySequence: expect.any(Number),
+    });
+
+    const blocked = await orchestrator.pollTick();
+    expect(blocked.dispatchedIssueIds).toEqual([]);
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: "stopped after emergency_stop",
+    });
+    issueState = "Resume";
+    const stillBlocked = await orchestrator.pollTick();
+    expect(stillBlocked.dispatchedIssueIds).toEqual([]);
+
+    const retryEntry = orchestrator.getState().retryAttempts["1"];
+    if (retryEntry !== undefined) {
+      const retry = await orchestrator.onRetryTimer("1");
+      expect(retry.dispatched).toBe(false);
+      expect(retry.retryEntry?.error).toBe("emergency stop active");
+    }
+  });
+
   it("applies codex session events to the running entry and aggregate counters", async () => {
     const orchestrator = createOrchestrator();
 
@@ -9787,6 +9872,7 @@ function createTracker(input?: {
   candidates?: Issue[];
   candidatesFn?: () => Issue[];
   statesById?: IssueStateSnapshot[];
+  fetchOpenIssuesByLabels?: IssueTracker["fetchOpenIssuesByLabels"];
   latestStateTransitionAt?: (
     issueId: string,
     stateName: string,
@@ -9808,6 +9894,9 @@ function createTracker(input?: {
   };
   if (input?.latestStateTransitionAt !== undefined) {
     tracker.fetchLatestStateTransitionAt = input.latestStateTransitionAt;
+  }
+  if (input?.fetchOpenIssuesByLabels !== undefined) {
+    tracker.fetchOpenIssuesByLabels = input.fetchOpenIssuesByLabels;
   }
   return tracker;
 }

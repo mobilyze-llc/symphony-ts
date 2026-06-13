@@ -99,6 +99,8 @@ import {
   type AnchorFieldEditResult,
   type DashboardServerHost,
   type DashboardServerInstance,
+  type EmergencyStopResponse,
+  type EmergencyStopStateResponse,
   type IntentRequest,
   type IntentRequestResult,
   type IssueDetailResponse,
@@ -120,6 +122,7 @@ import {
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
+import { terminateDetachedPidTree } from "../shared/process-tree.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
 import type { IssueTracker } from "../tracker/tracker.js";
@@ -2246,14 +2249,25 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   async getPipelineStatus(): Promise<PipelineStatusResponse> {
     const restartSafety = await this.getPipelineRestartSafety();
+    const emergencyStop = this.getEmergencyStopStatus();
 
     if (!(this.tracker instanceof LinearTrackerClient)) {
-      return { paused: false, issues: [], restart_safety: restartSafety };
+      return {
+        paused: false,
+        issues: [],
+        restart_safety: restartSafety,
+        emergency_stop: emergencyStop,
+      };
     }
 
     const tracker = this.tracker as LinearTrackerClient;
     if (tracker.fetchOpenIssuesByLabels === undefined) {
-      return { paused: false, issues: [], restart_safety: restartSafety };
+      return {
+        paused: false,
+        issues: [],
+        restart_safety: restartSafety,
+        emergency_stop: emergencyStop,
+      };
     }
 
     const haltIssues = await tracker.fetchOpenIssuesByLabels(
@@ -2268,6 +2282,26 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         title: issue.title,
       })),
       restart_safety: restartSafety,
+      emergency_stop: emergencyStop,
+    };
+  }
+
+  private getEmergencyStopStatus(): EmergencyStopStateResponse | null {
+    const emergencyStop = this.orchestrator.getState().emergencyStop;
+    if (emergencyStop === null) {
+      return null;
+    }
+    return {
+      active: true,
+      since: emergencyStop.since,
+      reason: emergencyStop.reason,
+      set_by_sequence: emergencyStop.setBySequence,
+      interrupted_issues: emergencyStop.interruptedIssues.map((issue) => ({
+        issue_id: issue.issueId,
+        issue_identifier: issue.issueIdentifier,
+        stage: issue.stage,
+        attempt: issue.attempt,
+      })),
     };
   }
 
@@ -2662,6 +2696,16 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     const priorStatus = await this.getPipelineStatus();
     if (!priorStatus.paused) {
+      if (this.orchestrator.getState().emergencyStop !== null) {
+        await this.journalPipelineIntentDegradedOk({
+          action: "resume",
+          status: "applied",
+          actor,
+          reason,
+          detail: "pipeline resume applied; emergency stop cleared",
+        });
+        return await this.getPipelineStatus();
+      }
       await this.journalPipelineIntentDegradedOk({
         action: "resume",
         status: "no_op",
@@ -2731,7 +2775,56 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       ...(status.restart_safety !== undefined
         ? { restart_safety: status.restart_safety }
         : {}),
+      emergency_stop: status.emergency_stop ?? null,
     };
+  }
+
+  async requestEmergencyStop(
+    context?: PipelineControlContext,
+  ): Promise<EmergencyStopResponse> {
+    const actor = context?.actor ?? this.defaultPipelineControlActor();
+    const response = await this.enqueue(async () => {
+      await this.ensureDispatcherRunJournalLoaded();
+      const result = await this.orchestrator.requestEmergencyStop({
+        actor,
+        reason: {
+          class: "operator_emergency_stop",
+          human: context?.reason ?? "emergency stop requested",
+        },
+      });
+
+      return {
+        status: result.status,
+        detail: result.detail,
+        sequence: result.sequence,
+        interrupted_issues: result.interruptedIssues.map((issue) => ({
+          issue_id: issue.issueId,
+          issue_identifier: issue.issueIdentifier,
+          stage: issue.stage,
+          attempt: issue.attempt,
+        })),
+        stop_requests: result.stopRequests.map((request) => ({
+          issue_identifier: request.issueIdentifier,
+          stopped: true,
+          reason: request.reason,
+        })),
+      };
+    });
+
+    try {
+      await this.requestPipelinePause({
+        actor,
+        reason: "emergency stop asserted runtime halt condition",
+      });
+    } catch (error) {
+      await this.logger?.warn(
+        "emergency_stop_halt_view_failed",
+        "Emergency stop applied, but asserting the pipeline-halt Linear view failed.",
+        { error: toErrorMessage(error) },
+      );
+    }
+
+    return response;
   }
 
   private async getPipelineRestartSafety(): Promise<PipelineRestartSafetyResponse> {
@@ -3224,7 +3317,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       if (pidsToKill.length > 0) {
         for (const pid of pidsToKill) {
           try {
-            process.kill(Number(pid), "SIGTERM");
+            await terminateDetachedPidTree(Number(pid), { graceMs: 1_000 });
           } catch {
             // Process may have already exited
           }

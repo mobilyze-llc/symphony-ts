@@ -1122,6 +1122,7 @@ export interface OrchestratorState {
    * upstream priority/FIFO comparator until the comparator ticket consumes it.
    */
   issueAnchors: Record<string, IssueAnchorRecord>;
+  emergencyStop: PipelineEmergencyStopState | null;
   codexTotals: CodexTotals;
   codexRateLimits: CodexRateLimits;
   rateLimitAdmission: RateLimitAdmissionState | null;
@@ -1194,6 +1195,24 @@ export interface OrchestratorState {
    * via `failure_exhausted` (e.g. novelty short-circuit parks at attempt < maxRetries).
    */
   failureExhaustedIds: Set<string>;
+}
+
+export interface PipelineEmergencyStopState {
+  active: true;
+  since: string;
+  reason: string;
+  actor: {
+    kind: string;
+    host: string;
+    session: string | null;
+  };
+  setBySequence: number | null;
+  interruptedIssues: Array<{
+    issueId: string;
+    issueIdentifier: string;
+    stage: string | null;
+    attempt: number | null;
+  }>;
 }
 
 export const FAILURE_CLASSES = [
@@ -1321,6 +1340,7 @@ export function createInitialOrchestratorState(input: {
     resumeRequired: new Set<string>(),
     resumeRequiredMarks: {},
     issueAnchors: {},
+    emergencyStop: null,
     codexTotals: {
       inputTokens: 0,
       outputTokens: 0,

@@ -415,6 +415,62 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
     }
     expect(received).toHaveLength(0);
   });
+
+  it("forwards emergency stop requests through the pipeline stop control endpoint", async () => {
+    const received: Array<PipelineControlContext | undefined> = [];
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        requestEmergencyStop: (context) => {
+          received.push(context);
+          return {
+            status: "applied",
+            detail: "emergency stop applied",
+            sequence: 17,
+            interrupted_issues: [
+              {
+                issue_id: "1",
+                issue_identifier: "ISSUE-1",
+                stage: "implement",
+                attempt: null,
+              },
+            ],
+            stop_requests: [
+              {
+                issue_identifier: "ISSUE-1",
+                stopped: true,
+                reason: "emergency_stop",
+              },
+            ],
+          };
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/pipeline/stop",
+      body: JSON.stringify({
+        actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+        reason: "runaway token burn",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({
+      status: "applied",
+      sequence: 17,
+      interrupted_issues: [{ issue_identifier: "ISSUE-1" }],
+    });
+    expect(received).toEqual([
+      {
+        actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+        reason: "runaway token burn",
+      },
+    ]);
+  });
 });
 
 describe("POST /api/v1/anchor-field-edits", () => {
@@ -941,6 +997,7 @@ function createSnapshot(): RuntimeSnapshot {
     rate_limits: { requestsRemaining: 10 },
     rate_limit_admission: null,
     explicit_resume_required: {},
+    emergency_stop: null,
     as_of_sequence: 0,
     counters: {},
     rate_limit_views: {

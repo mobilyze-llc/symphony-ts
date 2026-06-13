@@ -28,6 +28,7 @@ import {
   evaluateModePermission,
 } from "../policy/hard-stops.js";
 import { getDefaultCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
+import { terminateChildProcessTree } from "../shared/process-tree.js";
 import { VERSION } from "../version.js";
 import {
   gitIsolationEnv,
@@ -304,12 +305,7 @@ export class CodexAppServerClient {
       return;
     }
 
-    const childExited = child.exitCode !== null || child.signalCode !== null;
-    if (!childExited) {
-      child.kill("SIGTERM");
-    }
-
-    await waitForChildExit(child);
+    await terminateChildProcessTree(child);
     await this.cleanupEphemeralCodexHome();
   }
 
@@ -337,6 +333,7 @@ export class CodexAppServerClient {
       this.child = spawn("bash", ["-lc", this.renderSpawnCommand(env)], {
         cwd: this.options.cwd,
         env,
+        detached: true,
         stdio: "pipe",
       });
     } catch (error) {
@@ -2399,20 +2396,6 @@ function clearTimeoutIfPresent(timer: NodeJS.Timeout | null): void {
   if (timer !== null) {
     clearTimeout(timer);
   }
-}
-
-async function waitForChildExit(
-  child: ChildProcessWithoutNullStreams,
-): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-
-  await new Promise<void>((resolve) => {
-    child.once("exit", () => {
-      resolve();
-    });
-  });
 }
 
 function toErrorMessage(error: unknown): string {
