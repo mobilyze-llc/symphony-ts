@@ -23,6 +23,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(
       defaultReviewerLanes({
         SYMPHONY_COUNCIL_CLAUDE_MODEL: "opus-test",
+        SYMPHONY_COUNCIL_CLAUDE_PROFILE: "artifact-contract",
         SYMPHONY_COUNCIL_PI_PROVIDER: "alt-provider",
         SYMPHONY_COUNCIL_PI_MODEL: "alt-model",
         SYMPHONY_COUNCIL_PI_THINKING: "medium",
@@ -32,6 +33,7 @@ describe("runHeadlessCouncilGate", () => {
       expect.objectContaining({
         laneId: "claude-opus",
         model: "opus-test",
+        profile: "artifact-contract",
       }),
       expect.objectContaining({
         laneId: "pi-deepseek",

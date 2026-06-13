@@ -156,6 +156,7 @@ export interface HeadlessReviewerLaneConfig {
   agent: "claude" | "pi";
   role: string;
   model: string;
+  profile?: string;
   provider?: string;
   thinking?: "low" | "medium" | "high";
   tools?: string;
@@ -925,6 +926,7 @@ export function defaultReviewerLanes(
       agent: "claude",
       role: "opus-direct-reviewer",
       model: env.SYMPHONY_COUNCIL_CLAUDE_MODEL ?? "opus",
+      profile: env.SYMPHONY_COUNCIL_CLAUDE_PROFILE ?? "legacy",
       allowedTools:
         env.SYMPHONY_COUNCIL_CLAUDE_ALLOWED_TOOLS ??
         "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git status *),Bash(git ls-files *),Bash(gh pr view *),Bash(gh pr diff *)",
@@ -1561,7 +1563,7 @@ function laneAgentArgs(
       "--model",
       lane.model,
       "--profile",
-      "legacy",
+      lane.profile ?? "legacy",
       "--allowed-tools",
       claudeAllowedToolsForArtifact(lane.allowedTools, artifactDir),
     ];
