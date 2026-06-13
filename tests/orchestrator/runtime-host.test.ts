@@ -4517,6 +4517,79 @@ describe("pipeline notifications", () => {
     );
   });
 
+  it("does not emit resumed_existing_active for restart-replayed active rework", async () => {
+    const priorJournal: DispatcherRunJournal = [
+      {
+        sequence: 1,
+        idempotencyKey: "prior:right_sizing",
+        timestamp: "2026-03-06T00:00:00.000Z",
+        kind: "right_sizing",
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        operation: "dispatcher",
+        stage: "implement",
+        attempt: null,
+        ownerId: "previous-runtime",
+        lease: null,
+        summary: "Right-sized ISSUE-1 as thin.",
+        metadata: {
+          mode: "thin",
+        },
+      },
+      {
+        sequence: 2,
+        idempotencyKey: "prior:intent:rework",
+        timestamp: "2026-03-06T00:00:01.000Z",
+        kind: "intent",
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        operation: "dispatcher",
+        stage: "review",
+        attempt: null,
+        ownerId: "previous-runtime",
+        lease: null,
+        summary: "Intent rework_with_hint applied for ISSUE-1.",
+        metadata: {
+          schema_version: 1,
+          status: "applied",
+          verb: "rework_with_hint",
+          detail: "rework requested",
+          reworkTarget: "implement",
+          reworkCount: 1,
+        },
+      },
+    ];
+    const writtenJournal: DispatcherRunJournalEntry[] = [];
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => priorJournal,
+      writeDispatcherRunJournalEntry: async (_workspaceRoot, entry) => {
+        writtenJournal.push(entry);
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+
+    expect(tick.dispatchedIssueIds).toEqual(["1"]);
+    expect(host.getState().issueReworkCounts["1"]).toBe(1);
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({ type: "resumed_existing_active" }),
+    );
+    expect(writtenJournal).not.toContainEqual(
+      expect.objectContaining({ kind: "resumed_existing_active" }),
+    );
+  });
+
   it("does NOT fire issue_completed on stage continuation", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
