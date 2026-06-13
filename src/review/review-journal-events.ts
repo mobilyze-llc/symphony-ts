@@ -10,6 +10,7 @@ import type {
   StructuredReviewFamilySynthesis,
   StructuredReviewFinding,
   StructuredReviewerArtifact,
+  TargetedConvergenceHypothesis,
 } from "./headless-council-gate.js";
 
 export const REVIEW_JOURNAL_SCHEMA_VERSION = 1;
@@ -78,6 +79,7 @@ export function buildReviewJournalEntries(
       metadata: {
         ...baseMetadata(context, contractVersion),
         ...terminationTelemetryMetadata(termination),
+        ...targetedConvergenceMetadata(result.targeted_convergence),
         started_at: normalizeTimestamp(result.startedAt, result.completedAt),
         completed_at: normalizeTimestamp(result.completedAt, result.startedAt),
         lane_count: result.lanes.length,
@@ -96,6 +98,7 @@ export function buildReviewJournalEntries(
         metadata: {
           ...baseMetadata(context, contractVersion),
           ...terminationTelemetryMetadata(termination),
+          ...targetedConvergenceMetadata(result.targeted_convergence),
           fix_round: context.round,
           previous_head_sha:
             result.review_metadata.previous_reviewed_head_sha ?? undefined,
@@ -189,7 +192,14 @@ export function buildReviewJournalEntries(
             remaining_symptom_count: synthesis.remainingSymptoms.length,
             narrowing_status:
               synthesis.remainingSymptoms.length === 0 ? "narrowed" : "open",
-            narrowing_rationale: narrowingRationale(synthesis),
+            narrowing_rationale: narrowingRationaleForSynthesis(
+              result.targeted_convergence,
+              synthesis,
+            ),
+            ...targetedConvergenceMetadataForSynthesis(
+              result.targeted_convergence,
+              synthesis,
+            ),
           },
         }),
       );
@@ -236,6 +246,7 @@ export function buildReviewJournalEntries(
       metadata: {
         ...baseMetadata(context, contractVersion),
         ...terminationMetadata(termination),
+        ...targetedConvergenceMetadata(result.targeted_convergence),
         gate_verdict: result.verdict,
         lane_count: result.lanes.length,
         finding_count: findings.length,
@@ -524,6 +535,60 @@ function terminationMetadata(
   });
 }
 
+function targetedConvergenceMetadata(
+  targetedConvergence: TargetedConvergenceHypothesis | null,
+): Record<string, unknown> {
+  if (targetedConvergence === null) {
+    return {};
+  }
+  return compactMetadata({
+    targeting_hypothesis_version: targetedConvergence.hypothesisVersion,
+    targeting_trigger: targetedConvergence.trigger,
+    targeting_family: safeLabel(targetedConvergence.family),
+    targeting_invariant: safeLabel(targetedConvergence.namedInvariant),
+    targeting_fix_delta_range:
+      targetedConvergence.scope.fixDeltaRange ?? undefined,
+    targeting_merge_base_sha:
+      targetedConvergence.scope.mergeBaseSha ?? undefined,
+    narrowing_rationale: targetedConvergence.narrowingRationale,
+    fix_delta_path_count: targetedConvergence.scope.fixDeltaPaths.length,
+    semantic_neighborhood_path_count:
+      targetedConvergence.scope.semanticNeighborhoodPaths.length,
+    producer_path_count: targetedConvergence.scope.producerPaths.length,
+    consumer_path_count: targetedConvergence.scope.consumerPaths.length,
+    skip_unchanged_remainder: targetedConvergence.scope.skipUnchangedRemainder,
+  });
+}
+
+function targetedConvergenceMetadataForSynthesis(
+  targetedConvergence: TargetedConvergenceHypothesis | null,
+  synthesis: StructuredReviewFamilySynthesis,
+): Record<string, unknown> {
+  return targetedConvergenceAppliesToSynthesis(targetedConvergence, synthesis)
+    ? targetedConvergenceMetadata(targetedConvergence)
+    : {};
+}
+
+function narrowingRationaleForSynthesis(
+  targetedConvergence: TargetedConvergenceHypothesis | null,
+  synthesis: StructuredReviewFamilySynthesis,
+): string {
+  return targetedConvergenceAppliesToSynthesis(targetedConvergence, synthesis)
+    ? targetedConvergence.narrowingRationale
+    : narrowingRationale(synthesis);
+}
+
+function targetedConvergenceAppliesToSynthesis(
+  targetedConvergence: TargetedConvergenceHypothesis | null,
+  synthesis: StructuredReviewFamilySynthesis,
+): targetedConvergence is TargetedConvergenceHypothesis {
+  return (
+    targetedConvergence !== null &&
+    normalizeFamilyKey(targetedConvergence.family) ===
+      normalizeFamilyKey(synthesis.name)
+  );
+}
+
 function blockingFindingCount(
   findings: readonly StructuredReviewFinding[],
 ): number {
@@ -564,6 +629,10 @@ function normalizeTimestamp(primary: string, fallback: string): string {
 
 function stableUnique(values: readonly string[]): string[] {
   return [...new Set(values)].sort();
+}
+
+function normalizeFamilyKey(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function compactMetadata(

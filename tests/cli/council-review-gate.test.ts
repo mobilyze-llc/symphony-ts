@@ -582,6 +582,7 @@ function cliReviewResult(): HeadlessCouncilGateResult {
       verdict: "pass",
     },
     review_bundle: null,
+    targeted_convergence: null,
     lanes: [],
     degradedConditions: [],
     artifactPaths: {

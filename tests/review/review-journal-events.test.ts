@@ -12,6 +12,7 @@ import { buildStateDelta } from "../../src/logging/runtime-snapshot.js";
 import type {
   HeadlessCouncilGateResult,
   StructuredReviewerArtifact,
+  TargetedConvergenceHypothesis,
 } from "../../src/review/headless-council-gate.js";
 import {
   appendReviewJournalEventsToDispatcherJournal,
@@ -353,6 +354,90 @@ describe("review journal events", () => {
     });
   });
 
+  it("persists targeted convergence narrowing rationale through review journal events", () => {
+    const targetedConvergence = targetedConvergenceHypothesis();
+    const artifact = structuredArtifact({
+      verdict: "fail",
+      findingIntroducedIn: "fix_round_2",
+    });
+    const result = reviewResult({
+      verdict: "fail",
+      round: 2,
+      mode: "convergence",
+      previousReviewedHeadSha: "previous-head-sha",
+      artifact: {
+        ...artifact,
+        familySyntheses: [
+          ...artifact.familySyntheses,
+          {
+            name: "dispatcher lifecycle",
+            safetyClaim: "dispatch state remains monotonic",
+            nextRoundQuestion: "did dispatch state regress?",
+            fixedSymptoms: ["stale admission card"],
+            remainingSymptoms: ["rewrite can reopen dispatch"],
+            findingFingerprints: ["fp-dispatch-1"],
+          },
+        ],
+      },
+      targetedConvergence,
+    });
+
+    const entries = buildReviewJournalEntries(result, {
+      issueIdentifier: "SYMPH-468",
+      ownerId: "worker-1",
+      source: "interactive",
+    });
+
+    expect(
+      entries.find((entry) => entry.kind === "review_round")?.metadata,
+    ).toMatchObject({
+      targeting_hypothesis_version: "targeted_convergence_v1",
+      targeting_trigger: "shared_asserted_family",
+      targeting_family: "journal substrate",
+      targeting_invariant: "every journal write is replayable",
+      targeting_fix_delta_range: "previous-head-sha..head-sha",
+      targeting_merge_base_sha: "merge-base-sha",
+      narrowing_rationale:
+        "2 confirmed findings asserted family journal substrate; next round narrows to falsifying every journal write is replayable while still reviewing the fix delta",
+      fix_delta_path_count: 2,
+      semantic_neighborhood_path_count: 3,
+      producer_path_count: 1,
+      consumer_path_count: 1,
+      skip_unchanged_remainder: true,
+    });
+    expect(
+      entries.find(
+        (entry) =>
+          entry.kind === "review_synthesis" &&
+          entry.metadata.family === "journal substrate",
+      )?.metadata,
+    ).toMatchObject({
+      narrowing_rationale:
+        "2 confirmed findings asserted family journal substrate; next round narrows to falsifying every journal write is replayable while still reviewing the fix delta",
+      targeting_hypothesis_version: "targeted_convergence_v1",
+    });
+    const nonTargetedSynthesis = entries.find(
+      (entry) =>
+        entry.kind === "review_synthesis" &&
+        entry.metadata.family === "dispatcher lifecycle",
+    );
+    expect(nonTargetedSynthesis?.metadata).toMatchObject({
+      narrowing_rationale: "family retained: 1 remaining symptom(s), 1 fixed",
+    });
+    expect(nonTargetedSynthesis?.metadata).not.toHaveProperty(
+      "targeting_family",
+    );
+    expect(nonTargetedSynthesis?.metadata).not.toHaveProperty(
+      "targeting_hypothesis_version",
+    );
+    expect(
+      entries.find((entry) => entry.kind === "review_gate_result")?.metadata,
+    ).toMatchObject({
+      targeting_trigger: "shared_asserted_family",
+      skip_unchanged_remainder: true,
+    });
+  });
+
   it("emits escalation when termination reason requires operator attention", () => {
     const result = reviewResult({
       verdict: "pass",
@@ -600,6 +685,7 @@ function reviewResult(input: {
   wallTimeMs?: number | null;
   tokenUsage?: HeadlessCouncilGateResult["lanes"][number]["tokenUsage"];
   termination?: HeadlessCouncilGateResult["termination"];
+  targetedConvergence?: TargetedConvergenceHypothesis | null;
 }): HeadlessCouncilGateResult {
   const round = input.round ?? 1;
   return {
@@ -628,6 +714,7 @@ function reviewResult(input: {
       bundleHash: "bundle-hash",
       hashAlgorithm: "sha256",
     },
+    targeted_convergence: input.targetedConvergence ?? null,
     lanes: [
       {
         laneId: "claude-opus",
@@ -724,6 +811,45 @@ function defaultTerminationAssessment(
     tripwireFamilyNames: [],
     synthesisFamilyNames:
       artifact?.familySyntheses.map((synthesis) => synthesis.name) ?? [],
+  };
+}
+
+function targetedConvergenceHypothesis(): TargetedConvergenceHypothesis {
+  return {
+    schemaVersion: 1,
+    kind: "symphony-targeted-convergence-hypothesis",
+    hypothesisVersion: "targeted_convergence_v1",
+    trigger: "shared_asserted_family",
+    family: "journal substrate",
+    namedInvariant: "every journal write is replayable",
+    safetyClaim: "every journal write is replayable",
+    nextRoundQuestion: "did replay preserve the write?",
+    sourceFindingFingerprints: ["fp-review-1", "fp-review-2"],
+    sourceRounds: [1],
+    narrowingRationale:
+      "2 confirmed findings asserted family journal substrate; next round narrows to falsifying every journal write is replayable while still reviewing the fix delta",
+    roleTargets: {
+      codex: "hunt_same_family_variants",
+      pi: "validate_matrix_completeness",
+    },
+    scope: {
+      previousReviewedHeadSha: "previous-head-sha",
+      currentHeadSha: "head-sha",
+      mergeBaseSha: "merge-base-sha",
+      fixDeltaRange: "previous-head-sha..head-sha",
+      fixDeltaPaths: [
+        "src/review/review-journal-events.ts",
+        "tests/review/review-journal-events.test.ts",
+      ],
+      semanticNeighborhoodPaths: [
+        "src/review/review-journal-events.ts",
+        "tests/review/review-journal-events.test.ts",
+        "docs/review-runbook.md",
+      ],
+      producerPaths: ["src/review/review-journal-events.ts"],
+      consumerPaths: ["tests/review/review-journal-events.test.ts"],
+      skipUnchangedRemainder: true,
+    },
   };
 }
 
