@@ -137,19 +137,31 @@ export async function runBacklogAudit(
 export async function fetchBacklogAuditRuntimeEvidence(input: {
   baseUrl: string;
   fetchFn?: typeof fetch;
+  timeoutMs?: number | null;
 }): Promise<BacklogAuditRuntimeEvidence> {
   const fetchFn = input.fetchFn ?? globalThis.fetch;
   const base = input.baseUrl.replace(/\/+$/, "");
-  const state = await fetchJson(fetchFn, `${base}/api/v1/state`);
+  const state = await fetchJson(
+    fetchFn,
+    `${base}/api/v1/state`,
+    input.timeoutMs,
+  );
   const stateDelta = await fetchJson(
     fetchFn,
     `${base}/api/v1/state/delta?since_seq=0&limit=500`,
+    input.timeoutMs,
   );
   return { state, stateDelta };
 }
 
-async function fetchJson(fetchFn: typeof fetch, url: string): Promise<unknown> {
-  const response = await fetchFn(url);
+async function fetchJson(
+  fetchFn: typeof fetch,
+  url: string,
+  timeoutMs: number | null | undefined,
+): Promise<unknown> {
+  const response = await fetchFn(url, {
+    signal: AbortSignal.timeout(timeoutMs ?? DEFAULT_BACKLOG_AUDIT_TIMEOUT_MS),
+  });
   if (!response.ok) {
     throw new Error(`GET ${url} failed with HTTP ${response.status}`);
   }

@@ -72,7 +72,7 @@ export function parseBacklogAuditArgs(
     }
     if (token === "--help" || token === "-h") {
       help = true;
-      continue;
+      break;
     }
     if (token === "--out") {
       outPath = resolve(cwd, readValue(argv, ++index, "--out"));
@@ -188,6 +188,7 @@ export async function runBacklogAuditCli(
       : await tracker.fetchIssuesByStates(args.states);
   const runtimeEvidence = await fetchBacklogAuditRuntimeEvidence({
     baseUrl: args.stateBaseUrl,
+    timeoutMs: args.timeoutMs,
   });
   const report = await runBacklogAudit({
     config: {

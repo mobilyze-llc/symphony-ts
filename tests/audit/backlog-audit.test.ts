@@ -207,6 +207,11 @@ describe("backlog audit", () => {
     expect(parseBacklogAuditArgs(["--help"], {}, "/tmp")).toMatchObject({
       help: true,
     });
+    expect(
+      parseBacklogAuditArgs(["--help", "--unknown"], {}, "/tmp"),
+    ).toMatchObject({
+      help: true,
+    });
     expect(() =>
       parseBacklogAuditArgs(
         [
@@ -251,6 +256,49 @@ describe("backlog audit", () => {
     ).rejects.toThrow(
       "GET http://127.0.0.1:4321/api/v1/state failed with HTTP 503",
     );
+  });
+
+  it("fails loudly when the runtime delta read-model fetch returns non-2xx", async () => {
+    const fetchFn = vi.fn(async (input: Parameters<typeof fetch>[0]) =>
+      String(input).endsWith("/api/v1/state")
+        ? Response.json({ ok: true })
+        : new Response("nope", { status: 503 }),
+    );
+
+    await expect(
+      fetchBacklogAuditRuntimeEvidence({
+        baseUrl: "http://127.0.0.1:4321",
+        fetchFn: fetchFn as unknown as typeof fetch,
+      }),
+    ).rejects.toThrow(
+      "GET http://127.0.0.1:4321/api/v1/state/delta?since_seq=0&limit=500 failed with HTTP 503",
+    );
+  });
+
+  it("bounds runtime read-model fetches with the audit timeout", async () => {
+    const fetchFn = vi.fn(
+      async (_input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal === undefined || signal === null) {
+            reject(new Error("missing abort signal"));
+            return;
+          }
+          signal.addEventListener(
+            "abort",
+            () => reject(new Error("runtime evidence fetch timed out")),
+            { once: true },
+          );
+        }),
+    );
+
+    await expect(
+      fetchBacklogAuditRuntimeEvidence({
+        baseUrl: "http://127.0.0.1:4321",
+        fetchFn: fetchFn as unknown as typeof fetch,
+        timeoutMs: 1,
+      }),
+    ).rejects.toThrow("runtime evidence fetch timed out");
   });
 
   it("documents the artifact-prose ban in the judge prompt", () => {
