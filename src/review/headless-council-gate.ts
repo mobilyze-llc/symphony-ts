@@ -1498,6 +1498,7 @@ async function buildTargetedConvergenceHypothesis(input: {
   }
 
   const currentHeadSha = input.context.headSha;
+  const changedPathsFromDiff = extractChangedPathsFromDiff(input.context.diff);
   const mergeBaseSha =
     currentHeadSha === null
       ? null
@@ -1509,24 +1510,24 @@ async function buildTargetedConvergenceHypothesis(input: {
         });
   const fixDeltaPaths =
     input.previousReviewedHeadSha !== null && currentHeadSha !== null
-      ? await listChangedFilesBestEffort({
+      ? ((await listChangedFilesBestEffort({
           leftRef: input.previousReviewedHeadSha,
           rightRef: currentHeadSha,
           runCommand: input.runCommand,
           workspace: input.workspace,
           env: input.env,
-        })
-      : extractChangedPathsFromDiff(input.context.diff);
+        })) ?? changedPathsFromDiff)
+      : changedPathsFromDiff;
   const mergeBasePaths =
     mergeBaseSha !== null && currentHeadSha !== null
-      ? await listChangedFilesBestEffort({
+      ? ((await listChangedFilesBestEffort({
           leftRef: mergeBaseSha,
           rightRef: currentHeadSha,
           runCommand: input.runCommand,
           workspace: input.workspace,
           env: input.env,
-        })
-      : extractChangedPathsFromDiff(input.context.diff);
+        })) ?? changedPathsFromDiff)
+      : changedPathsFromDiff;
   const semanticNeighborhoodPaths = semanticNeighborhoodFor(
     fixDeltaPaths,
     mergeBasePaths,
@@ -1681,7 +1682,7 @@ async function listChangedFilesBestEffort(input: {
   runCommand: CommandRunner;
   workspace: string;
   env: NodeJS.ProcessEnv;
-}): Promise<string[]> {
+}): Promise<string[] | null> {
   const result = await input.runCommand(
     "git",
     ["diff", "--name-only", input.leftRef, input.rightRef],
@@ -1693,7 +1694,7 @@ async function listChangedFilesBestEffort(input: {
   );
   return result.exitCode === 0
     ? sortedUniquePaths(result.stdout.split(/\r?\n/))
-    : [];
+    : null;
 }
 
 function semanticNeighborhoodFor(

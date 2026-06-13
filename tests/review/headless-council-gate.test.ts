@@ -3828,6 +3828,110 @@ describe("runHeadlessCouncilGate", () => {
     ).toBe(true);
   });
 
+  it("falls back to frozen diff paths when targeted convergence range listing fails", async () => {
+    const familyArtifact = [
+      "## Verdict",
+      "FINDINGS",
+      "",
+      "## P1 Must Fix",
+      "None",
+      "",
+      "## P2 Should Fix",
+      "- src/review/headless-council-gate.ts:10 loses reviewer targeting. | family: review-state contract; safety_claim: review state must falsify named invariants before continuing; next_round_question: did every producer and consumer honor the targeted contract?; remaining_symptoms: prompt narrowing gap",
+      "- tests/review/headless-council-gate.test.ts:20 misses prompt matrix coverage. | family: review-state contract; fixed_symptoms: stale-head guard",
+      "",
+      "## Track",
+      "None",
+      "",
+      "## Dismissed Or Theoretical",
+      "None",
+    ].join("\n");
+    const firstHarness = await createHarness({
+      laneBehavior: {
+        "codex-high-lead": { artifact: familyArtifact },
+      },
+    });
+    const firstResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-468",
+        workspace: firstHarness.workspace,
+        artifactDir: firstHarness.artifactDir,
+        diffPath: firstHarness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        reviewerLanes: [opusLane()],
+      },
+      { runCommand: firstHarness.runCommand },
+    );
+    const prior = firstResult.lanes.find(
+      (lane) => lane.laneId === "codex-high-lead",
+    )!.structuredArtifact!;
+
+    const secondHarness = await createHarness({
+      gitDiff: {
+        exitCode: 0,
+        stdout: [
+          "diff --git a/src/review/headless-council-gate.ts b/src/review/headless-council-gate.ts",
+          "+targeted convergence fix",
+          "diff --git a/src/unrelated-regression.ts b/src/unrelated-regression.ts",
+          "+const regression = true;",
+          "",
+        ].join("\n"),
+        stderr: "",
+      },
+      gitDiffNameOnlyByRange: {
+        "old-head-sha..head-sha": {
+          exitCode: 128,
+          stdout: "",
+          stderr: "fatal: bad revision old-head-sha",
+        },
+        "merge-base-sha..head-sha": {
+          exitCode: 128,
+          stdout: "",
+          stderr: "fatal: bad revision merge-base-sha",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-468",
+        workspace: secondHarness.workspace,
+        artifactDir: secondHarness.artifactDir,
+        baseRef: "origin/main",
+        headRef: "HEAD",
+        previousReviewedHeadSha: "old-head-sha",
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        reviewerLanes: [opusLane(), piLane(), codexExcavationLane()],
+        mode: "convergence",
+        round: 2,
+        priorStructuredArtifacts: [prior],
+      },
+      { runCommand: secondHarness.runCommand },
+    );
+
+    expect(result.targeted_convergence?.scope.fixDeltaPaths).toEqual([
+      "src/review/headless-council-gate.ts",
+      "src/unrelated-regression.ts",
+    ]);
+    expect(
+      result.targeted_convergence?.scope.semanticNeighborhoodPaths,
+    ).toEqual([
+      "src/review/headless-council-gate.ts",
+      "src/unrelated-regression.ts",
+    ]);
+
+    const codexPrompt = await readFile(
+      join(secondHarness.artifactDir, "codex-excavation.prompt.md"),
+      "utf-8",
+    );
+    expect(codexPrompt).toContain(
+      "Fix-delta paths: src/review/headless-council-gate.ts, src/unrelated-regression.ts",
+    );
+    expect(codexPrompt).not.toContain("Fix-delta paths: none");
+    expect(codexPrompt).toContain(
+      "Do not suppress fix-delta regressions outside the named family",
+    );
+  });
+
   it("builds a targeted hypothesis when a same-family finding reopens", async () => {
     const artifact = [
       "## Verdict",
