@@ -3299,11 +3299,7 @@ function assessCouncilTermination(input: {
   degradedConditions: readonly string[];
   priorStructuredArtifacts: readonly StructuredReviewerArtifact[];
 }): CouncilTerminationAssessment {
-  const currentArtifacts = input.lanes.flatMap((lane) =>
-    lane.structuredArtifact === undefined || lane.structuredArtifact === null
-      ? []
-      : [lane.structuredArtifact],
-  );
+  const currentArtifacts = currentTerminationArtifacts(input.lanes);
   const currentFindings = currentArtifacts.flatMap(
     (artifact) => artifact.findings,
   );
@@ -3375,6 +3371,25 @@ function assessCouncilTermination(input: {
   };
 }
 
+function currentTerminationArtifacts(
+  lanes: readonly HeadlessLaneResult[],
+): StructuredReviewerArtifact[] {
+  const codexLeadArtifact = lanes.find(
+    (lane) =>
+      lane.laneId === CODEX_LEAD_LANE_ID &&
+      lane.structuredArtifact !== undefined &&
+      lane.structuredArtifact !== null,
+  )?.structuredArtifact;
+  if (codexLeadArtifact !== undefined && codexLeadArtifact !== null) {
+    return [codexLeadArtifact];
+  }
+  return lanes.flatMap((lane) =>
+    lane.structuredArtifact === undefined || lane.structuredArtifact === null
+      ? []
+      : [lane.structuredArtifact],
+  );
+}
+
 function isOpenBlockingFinding(finding: StructuredReviewFinding): boolean {
   return (
     (finding.severity === "P1" || finding.severity === "P2") &&
@@ -3413,7 +3428,12 @@ function isReviewSubstrateDegradedCondition(condition: string): boolean {
   if (/^[^:]+:complete:Reviewer verdict was FINDINGS\./.test(condition)) {
     return false;
   }
-  return /(?:failed|error|stall|malformed|degraded|empty)/i.test(condition);
+  return (
+    condition.startsWith("malformed_artifact:") ||
+    condition.startsWith("artifact_persistence_failed:") ||
+    condition.startsWith("substrate_stall:") ||
+    condition.startsWith("review-bundle-footer-append-failed:")
+  );
 }
 
 function sameFamilyReopenNames(
@@ -3421,7 +3441,7 @@ function sameFamilyReopenNames(
   priorStructuredArtifacts: readonly StructuredReviewerArtifact[],
   sameFamilyReopenLimit: number,
 ): string[] {
-  const priorFamilyCounts = new Map<string, number>();
+  const priorFamilyRounds = new Map<string, Set<number>>();
   for (const artifact of priorStructuredArtifacts) {
     const artifactFamilyKeys = new Set<string>();
     for (const finding of artifact.findings) {
@@ -3431,7 +3451,9 @@ function sameFamilyReopenNames(
       artifactFamilyKeys.add(normalizeFamilyKey(finding.family.name));
     }
     for (const key of artifactFamilyKeys) {
-      priorFamilyCounts.set(key, (priorFamilyCounts.get(key) ?? 0) + 1);
+      const rounds = priorFamilyRounds.get(key) ?? new Set<number>();
+      rounds.add(artifact.routing.round);
+      priorFamilyRounds.set(key, rounds);
     }
   }
 
@@ -3441,7 +3463,7 @@ function sameFamilyReopenNames(
       continue;
     }
     const key = normalizeFamilyKey(finding.family.name);
-    if ((priorFamilyCounts.get(key) ?? 0) + 1 >= sameFamilyReopenLimit) {
+    if ((priorFamilyRounds.get(key)?.size ?? 0) >= sameFamilyReopenLimit) {
       reopenedNames.set(key, finding.family.name);
     }
   }
