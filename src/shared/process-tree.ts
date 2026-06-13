@@ -228,6 +228,7 @@ export function processIdentityMatches(
     expected.pid === observed.pid &&
     expected.processGroupId === expected.pid &&
     observed.processGroupId === expected.pid &&
+    // Null means the platform probe could not capture a stable session id.
     (expected.sessionId === null ||
       observed.sessionId === expected.sessionId) &&
     expected.startedAt === observed.startedAt &&

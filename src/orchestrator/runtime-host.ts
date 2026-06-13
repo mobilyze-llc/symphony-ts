@@ -5043,6 +5043,8 @@ function collectUnconfirmedEmergencyStopCleanupPlans(
       continue;
     }
 
+    // Legacy completion entries predate sourceSequence. Pair them with the
+    // latest unproven same-issue stop; current entries use the precise key.
     const pendingPlans = pendingPlansByIssue.get(entry.issueId) ?? [];
     for (let index = pendingPlans.length - 1; index >= 0; index -= 1) {
       const plan = pendingPlans[index];

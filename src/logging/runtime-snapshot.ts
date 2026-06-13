@@ -309,6 +309,11 @@ export interface RuntimeSnapshot {
     since: string;
     reason: string;
     set_by_sequence: number | null;
+    /**
+     * Process identity stays in dispatcher-run journal metadata, not this
+     * public runtime snapshot: it carries launch-token and command details
+     * used only for recovery-time identity checks.
+     */
     interrupted_issues: Array<{
       issue_id: string;
       issue_identifier: string;
