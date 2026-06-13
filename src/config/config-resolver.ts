@@ -3,8 +3,12 @@ import { isAbsolute, normalize, resolve, sep } from "node:path";
 
 import { z } from "zod";
 
-import type { WorkflowDefinition } from "../domain/model.js";
-import { normalizeIssueState } from "../domain/model.js";
+import {
+  REASONING_EFFORTS,
+  type ReasoningEffort,
+  type WorkflowDefinition,
+  normalizeIssueState,
+} from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import {
   checkConfigContracts,
@@ -52,6 +56,7 @@ import {
   DEFAULT_RATE_LIMIT_MIN_PRIMARY_HEADROOM_PCT,
   DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT,
   DEFAULT_READ_TIMEOUT_MS,
+  DEFAULT_RISK_PREDICATE_REASONING_EFFORT,
   DEFAULT_RUNNER_KIND,
   DEFAULT_STALL_TIMEOUT_MS,
   DEFAULT_STUCK_TRIAGE_ENABLED,
@@ -292,6 +297,11 @@ export function resolveWorkflowConfig(
       bounceOnFinding:
         readBoolean(continuousFeedback.bounce_on_finding) ??
         DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
+    },
+    riskPredicateReasoning: {
+      effort:
+        readReasoningEffort(config.risk_predicate_reasoning_effort) ??
+        DEFAULT_RISK_PREDICATE_REASONING_EFFORT,
     },
     codex: {
       command: readString(codex.command) ?? DEFAULT_CODEX_COMMAND,
@@ -693,6 +703,17 @@ function readContinuousFeedbackEvents(
       valid.has(entry as WorkflowContinuousFeedbackEvent),
     );
   return items.length > 0 ? [...new Set(items)] : ["checkpoint"];
+}
+
+function readReasoningEffort(value: unknown): ReasoningEffort | null {
+  const raw = readString(value);
+  if (raw === null) {
+    return null;
+  }
+  const normalized = raw.trim().toLowerCase();
+  return (REASONING_EFFORTS as readonly string[]).includes(normalized)
+    ? (normalized as ReasoningEffort)
+    : null;
 }
 
 function readStateConcurrencyMap(

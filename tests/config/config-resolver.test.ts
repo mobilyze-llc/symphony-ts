@@ -38,6 +38,7 @@ import {
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_READ_TIMEOUT_MS,
+  DEFAULT_RISK_PREDICATE_REASONING_EFFORT,
   DEFAULT_STALL_TIMEOUT_MS,
   DEFAULT_TURN_TIMEOUT_MS,
   DEFAULT_WORKSPACE_ROOT,
@@ -91,6 +92,9 @@ describe("config-resolver", () => {
     expect(resolved.rateLimitAdmission).toEqual({
       minPrimaryHeadroomPct: null,
       minSecondaryHeadroomPct: null,
+    });
+    expect(resolved.riskPredicateReasoning).toEqual({
+      effort: DEFAULT_RISK_PREDICATE_REASONING_EFFORT,
     });
     expect(resolved.codex.command).toBe(DEFAULT_CODEX_COMMAND);
     expect(resolved.codex.turnTimeoutMs).toBe(DEFAULT_TURN_TIMEOUT_MS);
@@ -187,6 +191,7 @@ describe("config-resolver", () => {
             refresh_ms: "2500",
             render_interval_ms: "33",
           },
+          risk_predicate_reasoning_effort: "HIGH",
         },
       },
       {
@@ -233,6 +238,7 @@ describe("config-resolver", () => {
     expect(resolved.codex.toolOutputTokenLimit).toBe(1_234);
     expect(resolved.codex.modelAutoCompactTokenLimit).toBe(12_345);
     expect(resolved.codex.maxHealthyCompactionsPerStage).toBe(2);
+    expect(resolved.riskPredicateReasoning).toEqual({ effort: "high" });
     expect(resolved.server.port).toBe(8080);
     expect(resolved.observability.dashboardEnabled).toBe(false);
     expect(resolved.observability.refreshMs).toBe(2_500);

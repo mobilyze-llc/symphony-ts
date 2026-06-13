@@ -1363,6 +1363,16 @@ function createRightSizingDecision(input: {
       matchedPaths: [],
       matches: [],
     },
+    reasoningEffort: {
+      configuredEffort: null,
+      selectedEffort: null,
+      escalated: false,
+      reason: "not_configured" as const,
+      stageEligible: true,
+      riskPredicateTriggers: [],
+      matchedPaths: [],
+      sameFamilyTripwire: false,
+    },
     signals: {
       explicitModeHint: null,
       declaredScopeFiles: ["src/features/example.ts"],

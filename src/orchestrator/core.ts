@@ -7974,6 +7974,8 @@ export class OrchestratorCore {
       config: this.config,
       stageName,
       attempt,
+      sameFamilyTripwire:
+        this.state.issueReviewFailureStreaks[issue.id] !== undefined,
     });
     this.state.issueRightSizingDecisions[issue.id] = rightSizingDecision;
     const dispatchLeaseId = createDispatcherLeaseId({
@@ -8061,6 +8063,19 @@ export class OrchestratorCore {
         mode: rightSizingDecision.mode,
         classifier: rightSizingDecision.classifier,
         modelRoutingReason: rightSizingDecision.modelRouting.reason,
+        reasoningEffort: {
+          configuredEffort:
+            rightSizingDecision.reasoningEffort.configuredEffort,
+          selectedEffort: rightSizingDecision.reasoningEffort.selectedEffort,
+          escalated: rightSizingDecision.reasoningEffort.escalated,
+          reason: rightSizingDecision.reasoningEffort.reason,
+          stageEligible: rightSizingDecision.reasoningEffort.stageEligible,
+          riskPredicateTriggers:
+            rightSizingDecision.reasoningEffort.riskPredicateTriggers,
+          matchedPaths: rightSizingDecision.reasoningEffort.matchedPaths,
+          sameFamilyTripwire:
+            rightSizingDecision.reasoningEffort.sameFamilyTripwire,
+        },
       },
     });
     if (
@@ -8122,6 +8137,7 @@ export class OrchestratorCore {
           stageCount: rightSizingDecision.signals.stageCount,
           gateCount: rightSizingDecision.signals.gateCount,
           reviewerCount: rightSizingDecision.signals.reviewerCount,
+          reasoningEffort: rightSizingDecision.reasoningEffort,
         },
       },
       expectedOutcome: {
@@ -8152,6 +8168,7 @@ export class OrchestratorCore {
         details: {
           mode: rightSizingDecision.mode,
           routingReason: rightSizingDecision.modelRouting.reason,
+          reasoningEffort: rightSizingDecision.reasoningEffort,
         },
       },
       expectedOutcome: {
@@ -8243,6 +8260,7 @@ export class OrchestratorCore {
           mode: rightSizingDecision.mode,
           classifier: rightSizingDecision.classifier,
           modelRoutingReason: rightSizingDecision.modelRouting.reason,
+          reasoningEffort: rightSizingDecision.reasoningEffort,
         },
       });
       return {

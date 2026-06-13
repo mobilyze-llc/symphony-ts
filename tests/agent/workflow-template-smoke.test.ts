@@ -75,6 +75,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(resolvedConfig.codex.command).toBe(CODEX_LOW_APP_SERVER_COMMAND);
     expect(resolvedConfig.codex.ephemeralHome).toBe(true);
     expect(resolvedConfig.codex.disableSkills).toBe(true);
+    expect(resolvedConfig.riskPredicateReasoning).toEqual({ effort: "high" });
 
     const stages = resolvedConfig.stages;
     expect(stages).not.toBeNull();
@@ -92,6 +93,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       const config = await readFile(configPath, "utf8");
 
       expect(config).toContain(`command: ${CODEX_LOW_APP_SERVER_COMMAND}`);
+      expect(config).toContain("risk_predicate_reasoning_effort: high");
       expect(config).toContain("ephemeral_home: true");
       expect(config).toContain("disable_skills: true");
     }

@@ -197,6 +197,143 @@ describe("deterministic right-sizing", () => {
     expect(decision.modelRouting.allowed).toBe(true);
   });
 
+  it("escalates investigate reasoning effort for risk-predicate matches when configured", () => {
+    const decision = createRightSizingDecision({
+      issue: createIssue({
+        description: "## Declared file scope\n- src/logging/run-journal.ts\n",
+      }),
+      config: createConfig({
+        riskPredicateReasoning: { effort: "high" },
+      }),
+      stageName: "investigate",
+      attempt: null,
+    });
+
+    expect(decision.reasoningEffort).toMatchObject({
+      configuredEffort: "high",
+      selectedEffort: "high",
+      escalated: true,
+      reason: "risk_predicate",
+      stageEligible: true,
+      riskPredicateTriggers: ["journal_producer"],
+      matchedPaths: ["src/logging/run-journal.ts"],
+      sameFamilyTripwire: false,
+    });
+  });
+
+  for (const sample of [
+    {
+      label: "journal replay reducer",
+      path: "src/orchestrator/decision-quality.ts",
+      stageName: "implement",
+      trigger: "journal_replay_reducer",
+    },
+    {
+      label: "dispatcher event vocabulary",
+      path: "src/domain/model.ts",
+      stageName: "implement",
+      trigger: "dispatcher_event_vocabulary",
+    },
+    {
+      label: "state journal projection",
+      path: "src/logging/runtime-snapshot.ts",
+      stageName: "investigate",
+      trigger: "state_journal_projection",
+    },
+    {
+      label: "high-risk path",
+      path: "src/config/config-resolver.ts",
+      stageName: "investigate",
+      trigger: "high_risk_path",
+    },
+  ] as const) {
+    it(`escalates ${sample.stageName} reasoning effort for ${sample.label} matches`, () => {
+      const decision = createRightSizingDecision({
+        issue: createIssue({
+          description: `## Declared file scope\n- ${sample.path}\n`,
+        }),
+        config: createConfig({
+          riskPredicateReasoning: { effort: "high" },
+        }),
+        stageName: sample.stageName,
+        attempt: null,
+      });
+
+      expect(decision.reasoningEffort).toMatchObject({
+        selectedEffort: "high",
+        escalated: true,
+        reason: "risk_predicate",
+        stageEligible: true,
+        matchedPaths: [sample.path],
+      });
+      expect(decision.reasoningEffort.riskPredicateTriggers).toContain(
+        sample.trigger,
+      );
+    });
+  }
+
+  it("keeps risk-predicate effort bounded to investigate and implement stages", () => {
+    const decision = createRightSizingDecision({
+      issue: createIssue({
+        description: "## Declared file scope\n- src/logging/run-journal.ts\n",
+      }),
+      config: createConfig({
+        riskPredicateReasoning: { effort: "high" },
+      }),
+      stageName: "review",
+      attempt: null,
+    });
+
+    expect(decision.reasoningEffort).toMatchObject({
+      configuredEffort: "high",
+      selectedEffort: null,
+      escalated: false,
+      reason: "stage_not_eligible",
+      stageEligible: false,
+    });
+  });
+
+  it("escalates implement rework after a same-family trip-wire fires", () => {
+    const decision = createRightSizingDecision({
+      issue: createIssue({
+        description: "## Declared file scope\n- src/features/copy.ts\n",
+      }),
+      config: createConfig({
+        riskPredicateReasoning: { effort: "high" },
+      }),
+      stageName: "implement",
+      attempt: 1,
+      sameFamilyTripwire: true,
+    });
+
+    expect(decision.riskPredicate.triggerHits).toEqual([]);
+    expect(decision.reasoningEffort).toMatchObject({
+      selectedEffort: "high",
+      escalated: true,
+      reason: "same_family_tripwire",
+      stageEligible: true,
+      sameFamilyTripwire: true,
+    });
+  });
+
+  it("does not escalate reasoning effort without the config knob", () => {
+    const decision = createRightSizingDecision({
+      issue: createIssue({
+        description: "## Declared file scope\n- src/logging/run-journal.ts\n",
+      }),
+      config: createConfig(),
+      stageName: "implement",
+      attempt: null,
+    });
+
+    expect(decision.reasoningEffort).toMatchObject({
+      configuredEffort: null,
+      selectedEffort: null,
+      escalated: false,
+      reason: "not_configured",
+    });
+  });
+
   it("leaves benign ordinary source files outside the risk predicate", () => {
     const decision = createRightSizingDecision({
       issue: createIssue({

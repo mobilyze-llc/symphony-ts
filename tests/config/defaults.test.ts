@@ -19,6 +19,7 @@ import {
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
   DEFAULT_POLL_INTERVAL_MS,
   DEFAULT_READ_TIMEOUT_MS,
+  DEFAULT_RISK_PREDICATE_REASONING_EFFORT,
   DEFAULT_STALL_TIMEOUT_MS,
   DEFAULT_TURN_TIMEOUT_MS,
   DEFAULT_WORKSPACE_ROOT,
@@ -45,6 +46,7 @@ describe("SPEC_DEFAULTS", () => {
     expect(DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT).toBe(2_500);
     expect(DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT).toBe(40_000);
     expect(DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE).toBe(3);
+    expect(DEFAULT_RISK_PREDICATE_REASONING_EFFORT).toBeNull();
     expect(DEFAULT_ACTIVE_STATES).toEqual([
       "Todo",
       "In Progress",
@@ -79,6 +81,9 @@ describe("SPEC_DEFAULTS", () => {
     );
     expect(SPEC_DEFAULTS.codex.maxHealthyCompactionsPerStage).toBe(
       DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
+    );
+    expect(SPEC_DEFAULTS.riskPredicateReasoning.effort).toBe(
+      DEFAULT_RISK_PREDICATE_REASONING_EFFORT,
     );
     expect(SPEC_DEFAULTS.tracker.activeStates).toBe(DEFAULT_ACTIVE_STATES);
     expect(SPEC_DEFAULTS.observability.dashboardEnabled).toBe(

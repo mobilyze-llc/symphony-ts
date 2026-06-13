@@ -544,6 +544,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           rightSizingDecision,
           acceptanceCriteria,
           budgetMultiplier,
+          rightSizingDecision.reasoningEffort.selectedEffort,
         );
       },
       runPauseTriage: (evidence) =>
@@ -2748,6 +2749,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     rightSizingDecision: RightSizingDecision,
     acceptanceCriteria: string | null = null,
     budgetMultiplier = 1,
+    reasoningEffort = rightSizingDecision.reasoningEffort.selectedEffort,
   ): Promise<{
     workerHandle: WorkerExecution;
     monitorHandle: Promise<void>;
@@ -2802,6 +2804,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         reworkCount,
         acceptanceCriteria,
         budgetMultiplier: Math.max(1, budgetMultiplier),
+        reasoningEffort,
         modePolicy: createModeScopedPermissionPolicy({
           mode: rightSizingDecision.mode,
           configuredApprovalPolicy: this.config.codex.approvalPolicy,
