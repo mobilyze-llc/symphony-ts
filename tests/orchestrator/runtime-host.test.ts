@@ -2305,6 +2305,59 @@ describe("OrchestratorRuntimeHost", () => {
     });
   });
 
+  it("skips dispatcher journal compaction while emergency-stop cleanup proof is unconfirmed", async () => {
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const compactDispatcherRunJournal = vi.fn(async () => {
+      throw new Error("compaction should not run with unconfirmed cleanup");
+    });
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker: createTracker({ candidates: [] }),
+      agentRunner: new FakeAgentRunner(),
+      logger,
+      readDispatcherRunJournal: async () => [
+        createPipelineStopJournalEntry(1, null, null),
+        createRuntimeJournalEntry({
+          sequence: 2,
+          kind: "admission",
+          issueId: "tail",
+          issueIdentifier: "SYMPH-TAIL",
+          summary: "Raw tail retained.",
+        }),
+      ],
+      compactDispatcherRunJournal,
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(compactDispatcherRunJournal).not.toHaveBeenCalled();
+    expect(
+      host.getState().dispatcherRunJournal.map((entry) => entry.kind),
+    ).toEqual(expect.arrayContaining(["intent", "admission"]));
+    expect(
+      host
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) => entry.kind === "journal_checkpoint",
+        ),
+    ).toBe(false);
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "dispatcher_run_journal_compaction_skipped",
+        skipped_reason: "unconfirmed_emergency_stop_cleanup",
+        unconfirmed_cleanup_plan_count: 1,
+      }),
+    );
+  });
+
   it("serves missing stored details when stored loop trace lookup fails", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-loop-trace-bad-"));
 

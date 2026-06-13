@@ -215,7 +215,8 @@ export function compactDispatcherRunJournalWithCheckpoint(
     };
   }
 
-  const tail = sorted.slice(-tailEntryCount);
+  const effectiveTailEntryCount = Math.min(tailEntryCount, sorted.length - 2);
+  const tail = sorted.slice(-effectiveTailEntryCount);
   const checkpointSequence = Math.max(0, (tail[0]?.sequence ?? 1) - 1);
   const coveredPrefixEntryCount = sorted.length - tail.length;
   const retainedEntryCount = tail.length + 1;

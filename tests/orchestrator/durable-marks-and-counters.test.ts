@@ -17,6 +17,7 @@ import type {
   DispatcherRunJournalEntry,
   Issue,
 } from "../../src/domain/model.js";
+import { normalizeErrorSignature } from "../../src/errors/signature.js";
 import { compactDispatcherRunJournalWithCheckpoint } from "../../src/logging/run-journal.js";
 import { buildRuntimeSnapshot } from "../../src/logging/runtime-snapshot.js";
 import {
@@ -26,6 +27,9 @@ import {
 import type { IssueTracker } from "../../src/tracker/tracker.js";
 
 const NOW = new Date("2026-06-12T00:00:05.000Z");
+const WATCHDOG_SIGNATURE = normalizeErrorSignature(
+  "worker exited: EPERM: operation not permitted, open '.git/index.lock'",
+);
 
 const BUDGET_PAUSE = {
   outcome: "PAUSED-budget" as const,
@@ -710,6 +714,71 @@ describe("SYMPH-293: dispatcher run-journal checkpoints bound replay", () => {
       )?.reportedIgnoredSetupInstructionCollisionSignatures,
     ).toEqual(["ignored-setup-signature"]);
   });
+
+  it("preserves watchdog registry state when cluster and breaker rows are compacted", () => {
+    const fullReplay = createOrchestrator({
+      config: createConfig({ stages: createImplementStages() }),
+      runJournal: createWatchdogRegistryJournal(),
+    });
+    const checkpointDraft = fullReplay.createRunJournalCheckpointDraft();
+    expect(checkpointDraft).not.toBeNull();
+
+    const compaction = compactDispatcherRunJournalWithCheckpoint(
+      fullReplay.getState().dispatcherRunJournal,
+      checkpointDraft!,
+      { tailEntryCount: 1, minEntryCount: 2 },
+    );
+
+    const restarted = createOrchestrator({
+      config: createConfig({ stages: createImplementStages() }),
+      runJournal: compaction.journal,
+    });
+
+    expect(restarted.getWatchdogRegistrySnapshot()).toEqual({
+      clusters: [
+        {
+          signature: WATCHDOG_SIGNATURE.signature,
+          error_class: WATCHDOG_SIGNATURE.class,
+          cluster_size: 2,
+          member_issue_identifiers: ["SYMPH-W1", "SYMPH-W2"],
+          last_alert_size: 2,
+        },
+      ],
+      openBreakers: [
+        {
+          stage_name: "implement",
+          signature: WATCHDOG_SIGNATURE.signature,
+          opened_at: "2026-06-13T00:00:03.000Z",
+          opened_for_issue_ids: ["watch-1", "watch-2"],
+        },
+      ],
+    });
+  });
+
+  it("does not restore stale claims for checkpointed leases that expired before restart", () => {
+    const fullReplay = createOrchestrator({
+      runJournal: createActiveLeaseJournal(),
+      now: () => new Date("2026-06-12T00:00:05.000Z"),
+    });
+    expect(fullReplay.getState().claimed.has("active")).toBe(true);
+    const checkpointDraft = fullReplay.createRunJournalCheckpointDraft();
+    expect(checkpointDraft).not.toBeNull();
+
+    const compaction = compactDispatcherRunJournalWithCheckpoint(
+      fullReplay.getState().dispatcherRunJournal,
+      checkpointDraft!,
+      { tailEntryCount: 1, minEntryCount: 2 },
+    );
+    const restartedAfterExpiry = createOrchestrator({
+      runJournal: compaction.journal,
+      now: () => new Date("2026-06-12T01:00:00.000Z"),
+    });
+
+    expect(
+      restartedAfterExpiry.getState().dispatcherLeases["lease-active"],
+    ).toMatchObject({ issueId: "active", status: "active" });
+    expect(restartedAfterExpiry.getState().claimed.has("active")).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -755,6 +824,7 @@ function createOrchestrator(overrides?: {
   runPauseTriage?: OrchestratorCoreOptions["runPauseTriage"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
   updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
+  now?: OrchestratorCoreOptions["now"];
 }): OrchestratorCore {
   const options: OrchestratorCoreOptions = {
     config: overrides?.config ?? createConfig(),
@@ -763,7 +833,7 @@ function createOrchestrator(overrides?: {
       workerHandle: { pid: 1001 },
       monitorHandle: { ref: "monitor-1" },
     }),
-    now: () => NOW,
+    now: overrides?.now ?? (() => NOW),
   };
   if (overrides?.runJournal !== undefined) {
     options.runJournal = overrides.runJournal;
@@ -1052,6 +1122,118 @@ function createCheckpointSourceJournal(): DispatcherRunJournal {
       summary: "Tail row retained for cursor-forward reads.",
     }),
   ];
+}
+
+function createActiveLeaseJournal(): DispatcherRunJournal {
+  return [
+    createJournalEntry({
+      sequence: 1,
+      kind: "admission",
+      issueId: "active",
+      issueIdentifier: "SYMPH-ACTIVE",
+      lease: createDispatcherLease({
+        leaseId: "lease-active",
+        issueId: "active",
+        issueIdentifier: "SYMPH-ACTIVE",
+        status: "active",
+      }),
+      summary: "Active issue admitted.",
+    }),
+    createJournalEntry({
+      sequence: 2,
+      kind: "admission",
+      issueId: "tail",
+      issueIdentifier: "SYMPH-TAIL",
+      summary: "Tail row retained for cursor-forward reads.",
+    }),
+  ];
+}
+
+function createWatchdogRegistryJournal(): DispatcherRunJournal {
+  return [
+    createJournalEntry({
+      sequence: 1,
+      kind: "cluster_transition",
+      issueId: "watch-1",
+      issueIdentifier: "SYMPH-W1",
+      stage: "implement",
+      summary: "Signature cluster growth.",
+      metadata: {
+        schema_version: 1,
+        transition: "growth",
+        signature: WATCHDOG_SIGNATURE.signature,
+        issueCount: 1,
+        stages: ["implement"],
+        details: {
+          errorClass: WATCHDOG_SIGNATURE.class,
+          normalizedText: WATCHDOG_SIGNATURE.normalizedText,
+          members: [createWatchdogMember("watch-1", "SYMPH-W1", 1)],
+          lastAlertSize: 0,
+        },
+      },
+    }),
+    createJournalEntry({
+      sequence: 2,
+      kind: "cluster_transition",
+      issueId: "watch-2",
+      issueIdentifier: "SYMPH-W2",
+      stage: "implement",
+      summary: "Signature cluster systemic.",
+      metadata: {
+        schema_version: 1,
+        transition: "systemic",
+        signature: WATCHDOG_SIGNATURE.signature,
+        issueCount: 2,
+        stages: ["implement"],
+        details: {
+          errorClass: WATCHDOG_SIGNATURE.class,
+          normalizedText: WATCHDOG_SIGNATURE.normalizedText,
+          members: [
+            createWatchdogMember("watch-1", "SYMPH-W1", 1),
+            createWatchdogMember("watch-2", "SYMPH-W2", 2),
+          ],
+          lastAlertSize: 2,
+        },
+      },
+    }),
+    createJournalEntry({
+      sequence: 3,
+      kind: "breaker_transition",
+      issueId: "watch-2",
+      issueIdentifier: "SYMPH-W2",
+      stage: "implement",
+      timestamp: "2026-06-13T00:00:03.000Z",
+      summary: "Breaker opened.",
+      metadata: {
+        schema_version: 1,
+        transition: "opened",
+        stage: "implement",
+        signature: WATCHDOG_SIGNATURE.signature,
+        details: { openedForIssueIds: ["watch-1", "watch-2"] },
+      },
+    }),
+    createJournalEntry({
+      sequence: 4,
+      kind: "admission",
+      issueId: "tail",
+      issueIdentifier: "SYMPH-TAIL",
+      summary: "Tail row retained for cursor-forward reads.",
+    }),
+  ];
+}
+
+function createWatchdogMember(
+  issueId: string,
+  issueIdentifier: string,
+  sequence: number,
+) {
+  return {
+    issueId,
+    issueIdentifier,
+    stageName: "implement",
+    recordedAt: `2026-06-13T00:00:0${sequence}.000Z`,
+    normalizedText: WATCHDOG_SIGNATURE.normalizedText,
+  };
 }
 
 function createDecisionEvent(): DispatcherDecisionEvent {

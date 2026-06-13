@@ -96,6 +96,29 @@ describe("dispatcher run-journal compaction", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("clamps an overlarge custom tail so compaction still drops history", () => {
+    const journal = [1, 2, 3, 4, 5, 6].map((sequence) => createEntry(sequence));
+
+    const result = compactDispatcherRunJournalWithCheckpoint(
+      journal,
+      createCheckpointDraft(6),
+      { tailEntryCount: 100, minEntryCount: 2 },
+    );
+
+    expect(result.compacted).toBe(true);
+    expect(result.retainedTailEntries).toBe(4);
+    expect(result.droppedEntryCount).toBe(1);
+    expect(result.journal.map((entry) => entry.sequence)).toEqual([
+      2, 3, 4, 5, 6,
+    ]);
+    expect(result.journal[0]).toMatchObject({
+      kind: "journal_checkpoint",
+      metadata: expect.objectContaining({
+        coveredPrefixEntryCount: 2,
+      }),
+    });
+  });
 });
 
 function createCheckpointDraft(

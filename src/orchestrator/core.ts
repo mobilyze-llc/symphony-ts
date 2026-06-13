@@ -1071,6 +1071,7 @@ export class OrchestratorCore {
       (left, right) => left.sequence - right.sequence,
     );
     this.state.dispatcherLeases = {};
+    this.signatureClusterRegistry.clearForReplay();
     this.reportedSupervisionFindings.clear();
     this.reportedIgnoredSetupInstructionCollisions.clear();
     this.state.decorrelatedGateOutcomes = {};
@@ -1495,6 +1496,8 @@ export class OrchestratorCore {
       decorrelatedGateOutcomes: clonePlain(this.state.decorrelatedGateOutcomes),
       continuousFeedback: clonePlain(this.state.continuousFeedback),
       dispatcherLeases: clonePlain(this.state.dispatcherLeases),
+      signatureClusterRegistry:
+        this.signatureClusterRegistry.toCheckpointSnapshot(),
       issueFailureSignatures: clonePlain(this.state.issueFailureSignatures),
       issueDispositions: clonePlain(this.state.issueDispositions),
       issueReviewFailureStreaks: clonePlain(
@@ -1553,7 +1556,10 @@ export class OrchestratorCore {
       readMetadataNumber(entry.metadata, "coveredThroughSequence") ??
       entry.sequence;
 
-    this.state.claimed = new Set(readStringArray(state.claimedIssueIds));
+    // Claims are time-sensitive: active leases may expire between the
+    // checkpoint write and a later restart. Rebuild claimed after replay from
+    // unexpired active leases instead of restoring a stale set verbatim.
+    this.state.claimed = new Set();
     this.state.completed = new Set(readStringArray(state.completedIssueIds));
     this.state.failed = new Set(readStringArray(state.failedIssueIds));
     this.state.resumeRequired = new Set(
@@ -1619,6 +1625,9 @@ export class OrchestratorCore {
     );
     this.state.continuousFeedback = readRecordOr(state.continuousFeedback, {});
     this.state.dispatcherLeases = readRecordOr(state.dispatcherLeases, {});
+    this.signatureClusterRegistry.hydrateCheckpointSnapshot(
+      state.signatureClusterRegistry,
+    );
     this.state.issueFailureSignatures = readRecordOr(
       state.issueFailureSignatures,
       {},
