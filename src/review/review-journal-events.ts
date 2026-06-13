@@ -4,6 +4,7 @@ import type {
 } from "../domain/model.js";
 import { appendDispatcherRunJournalEntriesWithLock } from "../logging/run-journal.js";
 import type {
+  CouncilTerminationAssessment,
   HeadlessCouncilGateResult,
   HeadlessLaneResult,
   StructuredReviewFamilySynthesis,
@@ -66,6 +67,7 @@ export function buildReviewJournalEntries(
   const findings = structuredArtifacts.flatMap(({ lane, artifact }) =>
     artifact.findings.map((finding) => ({ lane, artifact, finding })),
   );
+  const termination = result.termination ?? null;
 
   entries.push(
     entryFor(context, {
@@ -75,6 +77,7 @@ export function buildReviewJournalEntries(
       summary: `Council review round ${context.round} started for ${context.issueIdentifier}.`,
       metadata: {
         ...baseMetadata(context, contractVersion),
+        ...terminationTelemetryMetadata(termination),
         started_at: normalizeTimestamp(result.startedAt, result.completedAt),
         completed_at: normalizeTimestamp(result.completedAt, result.startedAt),
         lane_count: result.lanes.length,
@@ -92,6 +95,7 @@ export function buildReviewJournalEntries(
         summary: `Council fix round ${context.round} anchored for ${context.issueIdentifier}.`,
         metadata: {
           ...baseMetadata(context, contractVersion),
+          ...terminationTelemetryMetadata(termination),
           fix_round: context.round,
           previous_head_sha:
             result.review_metadata.previous_reviewed_head_sha ?? undefined,
@@ -119,6 +123,7 @@ export function buildReviewJournalEntries(
         summary: `Council review round ${context.round} captured ${reworkFindings.length} rework finding(s).`,
         metadata: {
           ...baseMetadata(context, "structured_v1"),
+          ...terminationTelemetryMetadata(termination),
           rework_finding_count: reworkFindings.length,
           introduced_in: stableUnique(
             reworkFindings.map(({ finding }) => finding.introducedIn),
@@ -209,6 +214,7 @@ export function buildReviewJournalEntries(
         summary: `Council review escalation recorded for ${context.issueIdentifier}: ${escalationReason}.`,
         metadata: {
           ...baseMetadata(context, contractVersion),
+          ...terminationMetadata(termination),
           escalation_reason: escalationReason,
           gate_verdict: result.verdict,
           blocking_finding_count: blockingFindingCount(
@@ -229,6 +235,7 @@ export function buildReviewJournalEntries(
       summary: `Council review gate ${result.verdict} for ${context.issueIdentifier}.`,
       metadata: {
         ...baseMetadata(context, contractVersion),
+        ...terminationMetadata(termination),
         gate_verdict: result.verdict,
         lane_count: result.lanes.length,
         finding_count: findings.length,
@@ -450,6 +457,12 @@ function escalationReasonFor(
   result: HeadlessCouncilGateResult,
   findings: readonly StructuredReviewFinding[],
 ): string {
+  if (
+    result.termination?.reason === "same_family_reopen" ||
+    result.termination?.reason === "round_cap_hit"
+  ) {
+    return result.termination.reason;
+  }
   if (blockingFindingCount(findings) > 0) {
     return "blocking_findings";
   }
@@ -457,6 +470,39 @@ function escalationReasonFor(
     return "degraded_review_substrate";
   }
   return result.verdict === "error" ? "gate_error" : "gate_failed";
+}
+
+function terminationTelemetryMetadata(
+  termination: CouncilTerminationAssessment | null,
+): Record<string, unknown> {
+  if (termination === null) {
+    return {};
+  }
+  return compactMetadata({
+    rounds_per_cycle: termination.roundsPerCycle,
+    round_warning_threshold: termination.thresholds.roundWarning,
+    round_cap: termination.thresholds.roundCap,
+    termination_alert_level: termination.alertLevel,
+  });
+}
+
+function terminationMetadata(
+  termination: CouncilTerminationAssessment | null,
+): Record<string, unknown> {
+  if (termination === null) {
+    return {};
+  }
+  return compactMetadata({
+    ...terminationTelemetryMetadata(termination),
+    termination_status: termination.status,
+    termination_reason: termination.reason,
+    termination_action: termination.action,
+    tripwire_family_count: termination.tripwireFamilyNames.length,
+    synthesis_count: termination.familySynthesisCount,
+    blocking_finding_count: termination.blockingFindingCount,
+    non_blocking_finding_count: termination.nonBlockingFindingCount,
+    track_finding_count: termination.trackFindingCount,
+  });
 }
 
 function blockingFindingCount(

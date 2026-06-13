@@ -400,6 +400,25 @@ export interface RuntimeSnapshotCouncilReviewLane {
   finding_count: number | null;
 }
 
+export interface RuntimeSnapshotCouncilReviewRounds {
+  current: number | null;
+  warning_threshold: number | null;
+  cap: number | null;
+  alert_level: string | null;
+}
+
+export interface RuntimeSnapshotCouncilReviewTermination {
+  status: string | null;
+  reason: string | null;
+  action: string | null;
+  alert_level: string | null;
+  tripwire_family_count: number | null;
+  synthesis_count: number | null;
+  blocking_finding_count: number | null;
+  non_blocking_finding_count: number | null;
+  track_finding_count: number | null;
+}
+
 export interface RuntimeSnapshotCouncilReview {
   issue_id: string;
   issue_identifier: string;
@@ -414,6 +433,7 @@ export interface RuntimeSnapshotCouncilReview {
   availability: "available" | "unavailable";
   current_round: number | null;
   last_round: number | null;
+  rounds_per_cycle?: RuntimeSnapshotCouncilReviewRounds;
   routing_mode: string | null;
   decorrelation_basis: {
     repo: string | null;
@@ -429,6 +449,7 @@ export interface RuntimeSnapshotCouncilReview {
   reviewed_head_sha: string | null;
   lanes: RuntimeSnapshotCouncilReviewLane[];
   verdict: string | null;
+  termination?: RuntimeSnapshotCouncilReviewTermination;
   finding_counts_by_disposition: Record<string, number>;
   escalation: {
     predicate: string;
@@ -863,6 +884,8 @@ function reduceCouncilReviewEntries(
   let reviewedHeadSha: string | null = null;
   let authorFamily: string | null = null;
   let fixerFamily: string | null = null;
+  let roundsPerCycle: RuntimeSnapshotCouncilReviewRounds | undefined;
+  let termination: RuntimeSnapshotCouncilReviewTermination | undefined;
 
   for (const entry of stateEntries) {
     const metadata = entry.metadata;
@@ -877,6 +900,9 @@ function reduceCouncilReviewEntries(
     reviewedHeadSha = latestString(reviewedHeadSha, metadata.reviewed_head_sha);
     authorFamily = latestString(authorFamily, metadata.author_family);
     fixerFamily = latestString(fixerFamily, metadata.fixer_family);
+    roundsPerCycle =
+      reviewRoundsFromMetadata(metadata, currentRound) ?? roundsPerCycle;
+    termination = reviewTerminationFromMetadata(metadata) ?? termination;
 
     if (entry.kind === "review_lane") {
       const parseStatus = stringField(metadata.parse_status);
@@ -959,6 +985,9 @@ function reduceCouncilReviewEntries(
     availability: "available",
     current_round: currentRound,
     last_round: lastCompletedRound,
+    ...(roundsPerCycle === undefined
+      ? {}
+      : { rounds_per_cycle: roundsPerCycle }),
     routing_mode: routingMode,
     decorrelation_basis: {
       repo,
@@ -976,6 +1005,7 @@ function reduceCouncilReviewEntries(
       left.lane_id.localeCompare(right.lane_id, "en"),
     ),
     verdict: gateVerdict,
+    ...(termination === undefined ? {} : { termination }),
     finding_counts_by_disposition: Object.fromEntries(
       Object.entries(findingCounts).sort(([left], [right]) =>
         left.localeCompare(right, "en"),
@@ -987,11 +1017,74 @@ function reduceCouncilReviewEntries(
       reasons: [...degradedReasons].sort(),
       malformed_lane_count: malformedLaneCount,
     },
-    next_action: councilReviewNextAction(status, gateVerdict),
+    next_action: councilReviewNextAction(status, gateVerdict, termination),
     cursor_range: {
       first_sequence: entries[0]?.sequence ?? null,
       last_sequence: entries.at(-1)?.sequence ?? null,
     },
+  };
+}
+
+function reviewRoundsFromMetadata(
+  metadata: Record<string, unknown>,
+  currentRound: number | null,
+): RuntimeSnapshotCouncilReviewRounds | null {
+  const hasTelemetry =
+    numberFieldOrNull(metadata.rounds_per_cycle) !== null ||
+    numberFieldOrNull(metadata.round_warning_threshold) !== null ||
+    numberFieldOrNull(metadata.round_cap) !== null ||
+    stringField(metadata.termination_alert_level) !== null;
+  if (!hasTelemetry) {
+    return null;
+  }
+  const roundsPerCycle =
+    numberFieldOrNull(metadata.rounds_per_cycle) ?? currentRound;
+  const warningThreshold = numberFieldOrNull(metadata.round_warning_threshold);
+  const cap = numberFieldOrNull(metadata.round_cap);
+  const alertLevel = stringField(metadata.termination_alert_level);
+  if (
+    roundsPerCycle === null &&
+    warningThreshold === null &&
+    cap === null &&
+    alertLevel === null
+  ) {
+    return null;
+  }
+  return {
+    current: roundsPerCycle,
+    warning_threshold: warningThreshold,
+    cap,
+    alert_level: alertLevel,
+  };
+}
+
+function reviewTerminationFromMetadata(
+  metadata: Record<string, unknown>,
+): RuntimeSnapshotCouncilReviewTermination | null {
+  const status = stringField(metadata.termination_status);
+  const reason = stringField(metadata.termination_reason);
+  const action = stringField(metadata.termination_action);
+  const alertLevel = stringField(metadata.termination_alert_level);
+  if (
+    status === null &&
+    reason === null &&
+    action === null &&
+    alertLevel === null
+  ) {
+    return null;
+  }
+  return {
+    status,
+    reason,
+    action,
+    alert_level: alertLevel,
+    tripwire_family_count: numberFieldOrNull(metadata.tripwire_family_count),
+    synthesis_count: numberFieldOrNull(metadata.synthesis_count),
+    blocking_finding_count: numberFieldOrNull(metadata.blocking_finding_count),
+    non_blocking_finding_count: numberFieldOrNull(
+      metadata.non_blocking_finding_count,
+    ),
+    track_finding_count: numberFieldOrNull(metadata.track_finding_count),
   };
 }
 
@@ -1023,7 +1116,17 @@ function councilReviewStatus(input: {
 function councilReviewNextAction(
   status: RuntimeSnapshotCouncilReview["status"],
   gateVerdict: string | null,
+  termination?: RuntimeSnapshotCouncilReviewTermination,
 ): string {
+  if (termination?.status === "restructure_required") {
+    return "restructure_or_park_with_synthesis";
+  }
+  if (termination?.status === "operator_decision") {
+    return "operator_decision_required";
+  }
+  if (termination?.status === "converged") {
+    return "continue_pipeline";
+  }
   if (status === "passed") {
     return "continue_pipeline";
   }
@@ -1285,6 +1388,10 @@ export interface StateDeltaEntryMetadata {
   category?: string;
   narrowing_status?: string;
   narrowing_rationale?: string;
+  termination_status?: string;
+  termination_reason?: string;
+  termination_action?: string;
+  termination_alert_level?: string;
   resume_reason?: string;
   rework_count?: number;
   lane_count?: number;
@@ -1300,6 +1407,13 @@ export interface StateDeltaEntryMetadata {
   remaining_symptom_count?: number;
   rework_finding_count?: number;
   fix_round?: number;
+  rounds_per_cycle?: number;
+  round_warning_threshold?: number;
+  round_cap?: number;
+  tripwire_family_count?: number;
+  synthesis_count?: number;
+  non_blocking_finding_count?: number;
+  track_finding_count?: number;
 }
 
 /**
@@ -1373,6 +1487,10 @@ const STATE_DELTA_METADATA_STRING_FIELDS = [
   "category",
   "narrowing_status",
   "narrowing_rationale",
+  "termination_status",
+  "termination_reason",
+  "termination_action",
+  "termination_alert_level",
   "resume_reason",
 ] as const;
 
@@ -1394,6 +1512,13 @@ const STATE_DELTA_METADATA_NUMBER_FIELDS = [
   "remaining_symptom_count",
   "rework_finding_count",
   "fix_round",
+  "rounds_per_cycle",
+  "round_warning_threshold",
+  "round_cap",
+  "tripwire_family_count",
+  "synthesis_count",
+  "non_blocking_finding_count",
+  "track_finding_count",
 ] as const;
 
 const STATE_DELTA_METADATA_BOOLEAN_FIELDS = ["independent_reviewer"] as const;
