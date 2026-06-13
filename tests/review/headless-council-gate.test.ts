@@ -14,9 +14,20 @@ import {
   assertFreshCouncilReview,
   defaultReviewerLanes,
   execFileCommand,
-  runHeadlessCouncilGate,
+  runHeadlessCouncilGate as runHeadlessCouncilGateImpl,
 } from "../../src/review/headless-council-gate.js";
 import { stableJsonStringify } from "../../src/review/stable-json.js";
+
+const runHeadlessCouncilGate: typeof runHeadlessCouncilGateImpl = (
+  input,
+  dependencies,
+) =>
+  runHeadlessCouncilGateImpl(
+    input.provenance === undefined
+      ? { ...input, provenance: [humanImplementerProvenance()] }
+      : input,
+    dependencies,
+  );
 
 describe("runHeadlessCouncilGate", () => {
   it("allows default reviewer lane models to be overridden by environment", () => {
@@ -327,6 +338,72 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("fails closed when author family provenance is missing", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "routing_author_provenance_missing",
+    );
+    expect(result.degradedConditions).toContain(
+      "routing_required_lane_not_decorrelated:pi-deepseek",
+    );
+    expect(result.review_routing).toMatchObject({
+      mode: "standard",
+      decorrelationBasis: {
+        authorFamilies: [],
+        requiredReviewerLaneIds: ["pi-deepseek"],
+        decorrelatedReviewerArtifacts: [],
+        mergeEligible: false,
+        summary:
+          "Review is not merge-eligible: author model family provenance is missing.",
+      },
+      escalationPredicates: ["absent_decorrelated_reviewer_artifact"],
+    });
+  });
+
+  it("classifies implementer provenance without requiring source stage text", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [
+          {
+            role: "implementer",
+            agent: "codex",
+            modelFamily: "openai-codex",
+            model: "codex-low",
+            reasoningEffort: "low",
+            sourceStage: null,
+            commitRange: null,
+          },
+        ],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.review_routing).toMatchObject({
+      decorrelationBasis: {
+        authorFamilies: ["openai-codex"],
+        mergeEligible: true,
+      },
+      escalationPredicates: ["codex_author_codex_lead_tripwire"],
+    });
+  });
+
   it("escalates disagreement to Opus with a recorded predicate", async () => {
     const harness = await createHarness({
       laneBehavior: {
@@ -522,6 +599,7 @@ describe("runHeadlessCouncilGate", () => {
         cmuxSpawnBin: "/tmp/cmux-spawn",
         routingMode: "legacy",
         provenance: [
+          humanImplementerProvenance(),
           {
             role: "reviewer",
             agent: undefined as unknown as string | null,
@@ -735,6 +813,7 @@ describe("runHeadlessCouncilGate", () => {
         exitCode: 0,
       },
       provenance: [
+        humanImplementerProvenance(),
         {
           role: "reviewer",
           agent: null,
@@ -3780,6 +3859,58 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.summary).toContain("review_routing evidence");
   });
 
+  it("rejects Council v2 routing evidence that lacks required lane proof", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "head-sha",
+        }),
+        stderr: "",
+      },
+    });
+    const reviewResultPath = join(
+      harness.artifactDir,
+      "metadata-only-routing.json",
+    );
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(
+        cleanReviewResult({
+          reviewedHeadSha: "head-sha",
+          includeLaneEvidence: false,
+        }),
+        null,
+        2,
+      )}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha: "head-sha",
+      currentHeadSha: null,
+      guidance: "rerun convergence review against HEAD.",
+    });
+    expect(result.summary).toContain(
+      "lacks lane evidence for required reviewer lane: pi-deepseek",
+    );
+  });
+
   it("rejects a clean review artifact from a different issue", async () => {
     const harness = await createHarness();
     const reviewResultPath = join(harness.artifactDir, "wrong-issue.json");
@@ -5117,6 +5248,18 @@ function codexImplementerProvenance(): ReviewBundleProvenanceEntry {
   };
 }
 
+function humanImplementerProvenance(): ReviewBundleProvenanceEntry {
+  return {
+    role: "implementer",
+    agent: "human",
+    modelFamily: "human",
+    model: null,
+    reasoningEffort: null,
+    sourceStage: "implement",
+    commitRange: null,
+  };
+}
+
 function readFlag(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index === -1 ? undefined : args[index + 1];
@@ -5128,9 +5271,14 @@ function cleanReviewResult(options: {
   mode?: "full" | "convergence";
   round?: number;
   includeRoutingEvidence?: boolean;
+  includeLaneEvidence?: boolean;
 }) {
   const routingMode = "standard";
   const includeRoutingEvidence = options.includeRoutingEvidence !== false;
+  const lanes =
+    includeRoutingEvidence && options.includeLaneEvidence !== false
+      ? [cleanPiLaneResult()]
+      : [];
   const reviewMetadata = {
     reviewed_head_sha: options.reviewedHeadSha,
     previous_reviewed_head_sha: null,
@@ -5192,17 +5340,79 @@ function cleanReviewResult(options: {
       hashAlgorithm: "sha256",
     },
     targeted_convergence: null,
-    lanes: [],
+    lanes,
     degradedConditions: [],
     artifactPaths: {
       artifactDir: "/tmp/council",
       diff: "/tmp/council/diff.patch",
       reviewBundle: "/tmp/council/review-bundle.json",
-      structuredArtifacts: [],
+      structuredArtifacts: lanes.flatMap((lane) =>
+        lane.structuredArtifactPath === undefined ||
+        lane.structuredArtifactPath === null
+          ? []
+          : [lane.structuredArtifactPath],
+      ),
       resultJson: "/tmp/council/review-result.json",
       councilReport: "/tmp/council/council-report.md",
     },
-    summary: "Headless council review passed with 0 lanes.",
+    summary: `Headless council review passed with ${lanes.length} lanes.`,
+  };
+}
+
+function cleanPiLaneResult() {
+  return {
+    laneId: "pi-deepseek",
+    agent: "pi",
+    role: "deepseek-direct-reviewer",
+    model: "deepseek-v4-pro",
+    state: "complete",
+    verdict: "pass",
+    artifactPath: "/tmp/council/phase1-pi.md",
+    promptPath: "/tmp/council/phase1-pi-prompt.md",
+    stderrPath: "/tmp/council/phase1-pi.cli.stderr",
+    cliJsonPath: "/tmp/council/phase1-pi.cli.json",
+    reasoningEffort: "high",
+    independentReviewer: true,
+    message: null,
+    degradedReason: null,
+    reviewBundle: null,
+    wallTimeMs: 1000,
+    tokenUsage: null,
+    rawArtifactPath: "/tmp/council/phase1-pi.md",
+    structuredArtifactPath: "/tmp/council/phase1-pi.structured.json",
+    structuredArtifact: {
+      schemaVersion: 1,
+      kind: "symphony-headless-council-reviewer-artifact",
+      lane: {
+        laneId: "pi-deepseek",
+        agent: "pi",
+        role: "deepseek-direct-reviewer",
+        model: "deepseek-v4-pro",
+        modelFamily: "pi",
+        reasoningEffort: "high",
+        independentReviewer: true,
+      },
+      routing: {
+        mode: "full",
+        routingMode: "standard",
+        round: 1,
+      },
+      reviewBundle: null,
+      verdict: "pass",
+      confidence: 0.9,
+      parseStatus: "synthesized_from_markdown",
+      rawArtifactPath: "/tmp/council/phase1-pi.md",
+      malformedReason: null,
+      sections: {
+        p1: "None",
+        p2: "None",
+        track: "None",
+        dismissedOrTheoretical: "None",
+        triage: "None",
+      },
+      findings: [],
+      familySyntheses: [],
+    },
   };
 }
 

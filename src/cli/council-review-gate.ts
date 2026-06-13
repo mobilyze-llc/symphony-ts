@@ -8,6 +8,7 @@ import {
   COUNCIL_ROUTING_MODES,
   type CouncilReviewMode,
   type CouncilRoutingMode,
+  type ReviewBundleProvenanceEntry,
   assertFreshCouncilReview as assertFreshCouncilReviewImpl,
   runHeadlessCouncilGate as runHeadlessCouncilGateImpl,
 } from "../review/headless-council-gate.js";
@@ -37,6 +38,7 @@ interface ParsedArgs {
   mode?: CouncilReviewMode;
   routingMode?: CouncilRoutingMode;
   operatorOverrideReason?: string;
+  provenance?: ReviewBundleProvenanceEntry[];
   previousReviewedHeadSha?: string;
   riskContractArtifactPaths: string[];
   assertFreshReview?: string;
@@ -148,6 +150,13 @@ export function parseCouncilReviewGateArgs(
     }
     if (token === "--operator-override-reason") {
       parsed.operatorOverrideReason = readValue(argv, ++index, token);
+      continue;
+    }
+    if (token === "--author-family") {
+      parsed.provenance = [
+        ...(parsed.provenance ?? []),
+        authorFamilyProvenance(readValue(argv, ++index, token)),
+      ];
       continue;
     }
     if (token === "--previous-reviewed-head") {
@@ -284,7 +293,8 @@ export function parseCouncilReviewGateArgs(
       parsed.codexExcavationToolOutputTokenLimit !== undefined ||
       parsed.codexExcavationModelAutoCompactTokenLimit !== undefined ||
       parsed.routingMode !== undefined ||
-      parsed.operatorOverrideReason !== undefined)
+      parsed.operatorOverrideReason !== undefined ||
+      parsed.provenance !== undefined)
   ) {
     throw new UsageError(
       "Codex lane and routing flags are only valid when running a council review, not with --assert-fresh-review.",
@@ -427,6 +437,22 @@ function readRoutingMode(value: string, flag: string): CouncilRoutingMode {
   );
 }
 
+function authorFamilyProvenance(family: string): ReviewBundleProvenanceEntry {
+  const normalized = family.trim();
+  if (normalized === "") {
+    throw new UsageError("--author-family requires a non-empty model family.");
+  }
+  return {
+    role: "implementer",
+    agent: null,
+    modelFamily: normalized,
+    model: null,
+    reasoningEffort: null,
+    sourceStage: "implement",
+    commitRange: null,
+  };
+}
+
 function readReviewJournalSource(
   value: string,
   flag: string,
@@ -485,6 +511,7 @@ function renderUsage(): string {
     "  --mode full|convergence       Council loop mode (default: full)",
     "  --routing-mode fast|standard|high-risk|disagreement|legacy  Force Council v2 routing mode for this run",
     "  --operator-override-reason TEXT  Record the operator reason for force/override routing",
+    "  --author-family FAMILY       Author implementation model family; repeatable for Council v2 decorrelation evidence",
     "  --previous-reviewed-head SHA  Previous reviewed head SHA for convergence metadata",
     "  --risk-contract-artifact PATH Bounded risk-predicate state contract artifact path; repeatable",
     "  --assert-fresh-review PATH    Assert an existing clean review-result.json covers current HEAD",

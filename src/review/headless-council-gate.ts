@@ -1323,6 +1323,12 @@ function councilRoutingEvidenceError(
   ) {
     return "Council review artifact routing metadata is missing or inconsistent with review_routing.mode.";
   }
+  if (
+    routing.decorrelationBasis.requiredNonAuthorFamilyReviewer &&
+    routing.decorrelationBasis.authorFamilies.length === 0
+  ) {
+    return "Council review artifact lacks author model family provenance for its required non-author-family reviewer guarantee.";
+  }
   const decorrelatedLaneIds = new Set(
     routing.decorrelationBasis.decorrelatedReviewerArtifacts.map(
       (artifact) => artifact.laneId,
@@ -1334,6 +1340,50 @@ function councilRoutingEvidenceError(
     );
   if (missingRequiredDecorrelated.length > 0) {
     return `Council review artifact lacks non-author-family decorrelated artifacts for required reviewer lane(s): ${missingRequiredDecorrelated.join(", ")}.`;
+  }
+  for (const laneId of routing.decorrelationBasis.requiredReviewerLaneIds) {
+    const lane = result.lanes.find((candidate) => candidate.laneId === laneId);
+    if (lane === undefined) {
+      return `Council review artifact lacks lane evidence for required reviewer lane: ${laneId}.`;
+    }
+    if (
+      lane.state !== "complete" ||
+      lane.verdict !== "pass" ||
+      lane.degradedReason !== null ||
+      !lane.independentReviewer
+    ) {
+      return `Council review artifact required reviewer lane ${laneId} is not a clean completed independent PASS.`;
+    }
+    const artifact = lane.structuredArtifact;
+    if (artifact === undefined || artifact === null) {
+      return `Council review artifact required reviewer lane ${laneId} lacks a structured reviewer artifact.`;
+    }
+    if (
+      artifact.lane.laneId !== laneId ||
+      artifact.lane.agent !== lane.agent ||
+      artifact.verdict !== "pass" ||
+      !artifact.lane.independentReviewer
+    ) {
+      return `Council review artifact required reviewer lane ${laneId} has inconsistent structured artifact evidence.`;
+    }
+    if (
+      routing.decorrelationBasis.authorFamilies.includes(
+        artifact.lane.modelFamily,
+      )
+    ) {
+      return `Council review artifact required reviewer lane ${laneId} is same-family with the recorded author provenance.`;
+    }
+    const routingArtifact =
+      routing.decorrelationBasis.decorrelatedReviewerArtifacts.find(
+        (candidate) => candidate.laneId === laneId,
+      );
+    if (
+      routingArtifact === undefined ||
+      routingArtifact.agent !== lane.agent ||
+      routingArtifact.modelFamily !== artifact.lane.modelFamily
+    ) {
+      return `Council review artifact required reviewer lane ${laneId} has inconsistent routing artifact evidence.`;
+    }
   }
   if (
     routing.decorrelationBasis.requiredNonAuthorFamilyReviewer &&
@@ -1619,6 +1669,9 @@ function finalizeCouncilRouting(
   routing: CouncilReviewRouting,
   lanes: readonly HeadlessLaneResult[],
 ): CouncilReviewRouting {
+  const authorFamilyKnown =
+    !routing.decorrelationBasis.requiredNonAuthorFamilyReviewer ||
+    routing.decorrelationBasis.authorFamilies.length > 0;
   const directSignalLaneIds = lanes
     .filter((lane) => lane.agent === "codex" && !lane.independentReviewer)
     .map((lane) => lane.laneId)
@@ -1634,6 +1687,9 @@ function finalizeCouncilRouting(
         lane.degradedReason !== null ||
         !lane.independentReviewer
       ) {
+        return [];
+      }
+      if (!authorFamilyKnown) {
         return [];
       }
       const modelFamily = artifact.lane.modelFamily;
@@ -1657,6 +1713,7 @@ function finalizeCouncilRouting(
       (laneId) => !decorrelatedLaneIds.has(laneId),
     );
   const mergeEligible =
+    authorFamilyKnown &&
     decorrelatedReviewerArtifacts.length > 0 &&
     missingRequiredDecorrelatedLaneIds.length === 0;
   return {
@@ -1668,9 +1725,11 @@ function finalizeCouncilRouting(
       mergeEligible,
       summary: mergeEligible
         ? `Merge-eligible decorrelated reviewer artifact(s): ${decorrelatedReviewerArtifacts.map((artifact) => artifact.laneId).join(", ")}.`
-        : missingRequiredDecorrelatedLaneIds.length > 0
-          ? `Review is not merge-eligible: required reviewer lane(s) lack non-author-family artifacts: ${missingRequiredDecorrelatedLaneIds.join(", ")}.`
-          : "Review is not merge-eligible: no completed non-author-family reviewer artifact was recorded.",
+        : !authorFamilyKnown
+          ? "Review is not merge-eligible: author model family provenance is missing."
+          : missingRequiredDecorrelatedLaneIds.length > 0
+            ? `Review is not merge-eligible: required reviewer lane(s) lack non-author-family artifacts: ${missingRequiredDecorrelatedLaneIds.join(", ")}.`
+            : "Review is not merge-eligible: no completed non-author-family reviewer artifact was recorded.",
     },
   };
 }
@@ -1695,6 +1754,12 @@ function collectRoutingGuaranteeDegradedConditions(
     ) {
       conditions.push(`routing_required_lane_degraded:${laneId}`);
     }
+  }
+  if (
+    routing.decorrelationBasis.requiredNonAuthorFamilyReviewer &&
+    routing.decorrelationBasis.authorFamilies.length === 0
+  ) {
+    conditions.push("routing_author_provenance_missing");
   }
   if (!routing.decorrelationBasis.mergeEligible) {
     conditions.push("routing_absent_decorrelated_reviewer_artifact");
@@ -1728,6 +1793,8 @@ function routingGuaranteeEscalationPredicates(
     } else if (
       condition.startsWith("routing_required_lane_not_decorrelated:")
     ) {
+      predicates.push("absent_decorrelated_reviewer_artifact");
+    } else if (condition === "routing_author_provenance_missing") {
       predicates.push("absent_decorrelated_reviewer_artifact");
     }
   }
@@ -1862,7 +1929,7 @@ function isAuthorProvenanceRole(
   if (/\b(review|reviewer|gate|triage)\b/.test(text)) {
     return false;
   }
-  return /\b(author|implement|implementation|fix|worker|coding|merge)\b/.test(
+  return /\b(author|implement(?:er|ed|ing|ation)?|fix|worker|coding|merge)\b/.test(
     text,
   );
 }

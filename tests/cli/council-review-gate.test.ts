@@ -159,6 +159,50 @@ describe("parseCouncilReviewGateArgs", () => {
     });
   });
 
+  it("parses author family provenance for Council v2 decorrelation", () => {
+    expect(
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "SYMPH-445",
+          "--artifact-dir",
+          "/tmp/review",
+          "--author-family",
+          "openai-codex",
+          "--author-family",
+          "pi",
+        ],
+        "/cwd",
+      ),
+    ).toEqual({
+      issueId: "SYMPH-445",
+      artifactDir: "/tmp/review",
+      workspace: "/cwd",
+      provenance: [
+        {
+          role: "implementer",
+          agent: null,
+          modelFamily: "openai-codex",
+          model: null,
+          reasoningEffort: null,
+          sourceStage: "implement",
+          commitRange: null,
+        },
+        {
+          role: "implementer",
+          agent: null,
+          modelFamily: "pi",
+          model: null,
+          reasoningEffort: null,
+          sourceStage: "implement",
+          commitRange: null,
+        },
+      ],
+      riskContractArtifactPaths: [],
+      allowedChangePatterns: [],
+    });
+  });
+
   it("parses journal append metadata", () => {
     expect(
       parseCouncilReviewGateArgs(
@@ -354,6 +398,8 @@ describe("parseCouncilReviewGateArgs", () => {
           "/tmp/review-result.json",
           "--routing-mode",
           "standard",
+          "--author-family",
+          "openai-codex",
         ],
         "/cwd",
       ),
