@@ -5223,6 +5223,9 @@ function isArtifactSectionBoundary(candidate: ArtifactHeadingMatch): boolean {
   );
 }
 
+// Markdown headings use strict normalization: `:` may stand in for a space, but
+// the broader preamble label separators below are only for fail-closed inline
+// label detection before the first real `## Verdict` section.
 function normalizeArtifactHeadingText(heading: string): string {
   return heading.replace(/:/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
 }
@@ -5268,7 +5271,37 @@ function artifactPreambleLineStartsWithHeadingLabel(
   }
 
   const suffix = lowerLine.slice(offset);
-  return suffix.trim() === "" || /^[\s]*[:.!?\-–—]/.test(suffix);
+  return (
+    suffix.trim() === "" ||
+    artifactHeadingLabelSuffixStartsWithSeparator(suffix, headingWords.length)
+  );
+}
+
+function artifactHeadingLabelSuffixStartsWithSeparator(
+  suffix: string,
+  headingWordCount: number,
+): boolean {
+  const match = /^[\s]*[:.!?\-–—]/.exec(suffix);
+  if (match === null) {
+    return false;
+  }
+
+  const separator = match[0].charAt(match[0].length - 1);
+  if (headingWordCount !== 1 || !isArtifactHeadingDashSeparator(separator)) {
+    return true;
+  }
+
+  const rest = suffix.slice(match[0].length);
+  return (
+    rest === "" || /^\s/.test(rest) || isCompactArtifactFindingPathSuffix(rest)
+  );
+}
+
+function isCompactArtifactFindingPathSuffix(suffix: string): boolean {
+  const candidate = suffix.trimStart();
+  return /^(?:\/|\.{1,2}[\\/]|[a-z]:[\\/]|[a-z0-9_.-]+[\\/]|[a-z0-9_.-]+:\d+(?:\D|$)|[a-z0-9_.-]+\.[a-z0-9][a-z0-9_.-]*:\d+(?:\D|$))/i.test(
+    candidate,
+  );
 }
 
 function skipArtifactHeadingWordSeparator(
@@ -5284,6 +5317,10 @@ function skipArtifactHeadingWordSeparator(
     index += 1;
   }
   return index;
+}
+
+function isArtifactHeadingDashSeparator(char: string): boolean {
+  return char === "-" || char === "–" || char === "—";
 }
 
 function isArtifactHeadingLabelSeparator(char: string): boolean {

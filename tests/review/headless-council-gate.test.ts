@@ -4455,6 +4455,18 @@ describe("runHeadlessCouncilGate", () => {
       "- P2 Should Fix - src/foo.ts:12 drops failures",
     ],
     [
+      "single-word hyphen-delimited inline finding",
+      "- Track - src/foo.ts:12 record reviewer note",
+    ],
+    [
+      "single-word compact hyphen path finding",
+      "- Triage -src/foo.ts:12 surviving P2",
+    ],
+    [
+      "single-word compact hyphen root file finding",
+      "- Triage -LICENSE:1 surviving P2",
+    ],
+    [
       "period-separated label words",
       "- P2. Should Fix: src/foo.ts:12 drops failures",
     ],
@@ -4471,8 +4483,24 @@ describe("runHeadlessCouncilGate", () => {
       "- P2 Should Fix – src/foo.ts:12 drops failures",
     ],
     [
+      "single-word en-dash-delimited inline finding",
+      "- Track – src/foo.ts:12 record reviewer note",
+    ],
+    [
+      "single-word compact en-dash path finding",
+      "- Track–src/foo.ts:12 record reviewer note",
+    ],
+    [
       "em-dash-delimited inline finding",
       "- P2 Should Fix — src/foo.ts:12 drops failures",
+    ],
+    [
+      "single-word em-dash-delimited inline finding",
+      "- Track — src/foo.ts:12 record reviewer note",
+    ],
+    [
+      "single-word compact em-dash path finding",
+      "- Track—src/foo.ts:12 record reviewer note",
     ],
     [
       "task-list checkbox inline finding",
@@ -4543,6 +4571,43 @@ describe("runHeadlessCouncilGate", () => {
       ).toMatchObject({
         verdict: "fail",
         degradedReason: "malformed_artifact",
+      });
+    },
+  );
+
+  it.each([
+    ["hyphen", "- Track-based workflow remains safe prose."],
+    ["en dash", "- Track–based workflow remains safe prose."],
+    ["em dash", "- Track—based workflow remains safe prose."],
+  ])(
+    "parses a verdict after a %s-joined single-word heading in the preamble",
+    async (_variant, preambleLine) => {
+      const harness = await createHarness({
+        laneBehavior: {
+          "claude-opus": {
+            artifact: `${preambleLine}\n\n## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n\n## Track\nNone`,
+          },
+        },
+      });
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "MOB-88",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+        },
+        { runCommand: harness.runCommand },
+      );
+
+      expect(result.verdict).toBe("pass");
+      expect(
+        result.lanes.find((lane) => lane.laneId === "claude-opus"),
+      ).toMatchObject({
+        verdict: "pass",
+        degradedReason: null,
+        message: null,
       });
     },
   );
