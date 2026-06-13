@@ -509,6 +509,45 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("requires an override reason before high-risk Codex-authored routing accepts narrower risk", async () => {
+    const harness = await createHarness();
+    await writeFile(
+      harness.diffPath,
+      "diff --git a/src/orchestrator/core.ts b/src/orchestrator/core.ts\n+const risk = true;\n",
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [codexImplementerProvenance()],
+        env: {
+          SYMPHONY_COUNCIL_ACCEPT_NARROWER_RISK: "1",
+        },
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "claude-opus",
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+    ]);
+    expect(result.review_routing).toMatchObject({
+      mode: "high-risk",
+      operatorOverrideReason: null,
+      skippedLanes: [],
+      escalationPredicates: [
+        "high_risk_predicate",
+        "codex_author_codex_lead_tripwire",
+      ],
+    });
+  });
+
   it("still escalates disagreement when high-risk routing accepts narrower risk", async () => {
     const harness = await createHarness({
       laneBehavior: {

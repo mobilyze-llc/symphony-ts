@@ -1499,14 +1499,20 @@ function buildInitialCouncilRouting(input: {
       input.env.SYMPHONY_COUNCIL_ACCEPT_NARROW_RISK,
   );
   const highRisk = highRiskPredicate.triggerHits.length > 0;
-  const operatorOverrideReason =
+  const rawOperatorOverrideReason =
     input.input.operatorOverrideReason ??
     input.env.SYMPHONY_COUNCIL_OPERATOR_OVERRIDE_REASON ??
     null;
+  const operatorOverrideReason =
+    typeof rawOperatorOverrideReason === "string" &&
+    rawOperatorOverrideReason.trim().length > 0
+      ? rawOperatorOverrideReason.trim()
+      : null;
   const acceptsNarrowerRiskForHighRisk =
     acceptsNarrowerRisk &&
     highRisk &&
     codexAuthored &&
+    operatorOverrideReason !== null &&
     !forceLegacy &&
     !forceOpus &&
     forcedMode !== "legacy";
