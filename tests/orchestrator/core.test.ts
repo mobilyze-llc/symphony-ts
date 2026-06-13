@@ -76,6 +76,7 @@ describe("orchestrator core", () => {
     expect(orchestrator.getState().computedDispatchOrder).toMatchObject({
       status: "hard_cycle",
       hard_cycle: {
+        edge_trust: "legacy_hard",
         issue_identifiers: ["ISSUE-1", "ISSUE-2"],
       },
     });
@@ -87,6 +88,35 @@ describe("orchestrator core", () => {
           reason_code: "computed_order_hard_cycle",
         }),
       }),
+    );
+  });
+
+  it("does not journal ordering disagreement when the computed head is skipped by eligibility", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            priority: 1,
+            createdAt: "2026-03-01T00:00:00.000Z",
+          }),
+          createIssue({
+            id: "2",
+            identifier: "ISSUE-2",
+            priority: 1,
+            createdAt: "2026-03-02T00:00:00.000Z",
+          }),
+        ],
+      }),
+    });
+    orchestrator.getState().claimed.add("1");
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(orchestrator.getState().dispatcherRunJournal).not.toContainEqual(
+      expect.objectContaining({ kind: "ordering_disagreement" }),
     );
   });
 

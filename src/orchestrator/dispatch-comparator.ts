@@ -388,14 +388,34 @@ function findHardCycle(
   for (const issue of issues) {
     const cycle = visit(issue.id);
     if (cycle !== null) {
+      const cycleSet = new Set(cycle);
+      const cycleEdges = hardOrderingEdges.filter((edge) => {
+        const blockerIssue = findIssueByRef(
+          edge.blocker,
+          issueById,
+          issueByIdentifier,
+        );
+        return (
+          cycleSet.has(edge.issue.id) &&
+          blockerIssue !== null &&
+          cycleSet.has(blockerIssue.id)
+        );
+      });
+      const edgeTrust = cycleEdges.some(
+        (edge) => edge.trust === "operator_confirmed",
+      )
+        ? "operator_confirmed"
+        : "legacy_hard";
       return {
         issue_ids: cycle,
         issue_identifiers: cycle.map(
           (issueId) => issueByIdLocal.get(issueId)?.identifier ?? issueId,
         ),
-        edge_trust: "operator_confirmed",
+        edge_trust: edgeTrust,
         reason:
-          "Operator-confirmed hard blocked-by edges form a cycle; dispatch comparator refused linearization.",
+          edgeTrust === "operator_confirmed"
+            ? "Operator-confirmed hard blocked-by edges form a cycle; dispatch comparator refused linearization."
+            : "Legacy hard blocked-by edges form a cycle; dispatch comparator refused linearization.",
       };
     }
   }

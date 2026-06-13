@@ -135,6 +135,34 @@ describe("dispatch comparator", () => {
     ]);
   });
 
+  it("keeps issues eligible when operator-confirmed blockers are terminal", () => {
+    const blocker = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      state: "Done",
+    });
+    const dependent = createIssue({ id: "2", identifier: "ISSUE-2" });
+
+    const order = computeDispatchOrder({
+      issues: [dependent, blocker],
+      anchors: {},
+      ticketFeatures: [
+        createFeature(dependent, [
+          createEdge(blocker, "operator_confirmed", null),
+        ]),
+        createFeature(blocker),
+      ],
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(order.status).toBe("linearized");
+    expect(order.exclusions).toEqual([]);
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-1", "ISSUE-2"]);
+  });
+
   it("applies top anchors inside the candidate priority band", () => {
     const issue1 = createIssue({
       id: "1",

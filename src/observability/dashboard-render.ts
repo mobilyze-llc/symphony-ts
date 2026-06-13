@@ -1981,8 +1981,9 @@ function renderComputedOrder(snapshot: RuntimeSnapshot): string {
     order.hard_cycle === null
       ? ""
       : `<p class="section-copy"><strong>Hard cycle:</strong> ${escapeHtml(
-          order.hard_cycle.issue_identifiers.join(" -> ") ||
-            order.hard_cycle.reason,
+          order.hard_cycle.issue_identifiers.join(" → ") ||
+            order.hard_cycle.reason ||
+            "cycle detected",
         )}</p>`;
   const summary = `<p class="section-copy">Hard exclusions: ${formatInteger(
     order.exclusions.length,
@@ -2008,7 +2009,9 @@ function renderComputedOrder(snapshot: RuntimeSnapshot): string {
                 .map(
                   (exclusion) => `
                   <tr>
-                    <td>${escapeHtml(exclusion.issue_identifier)}</td>
+                    <td>${escapeHtml(
+                      exclusion.issue_identifier || exclusion.issue_id,
+                    )}</td>
                     <td>${escapeHtml(
                       exclusion.blocker_issue_identifier ??
                         exclusion.blocker_issue_id ??
@@ -2037,7 +2040,9 @@ function renderComputedOrder(snapshot: RuntimeSnapshot): string {
                 .map(
                   (warning) => `
                   <tr>
-                    <td>${escapeHtml(warning.issue_identifier)}</td>
+                    <td>${escapeHtml(
+                      warning.issue_identifier || warning.issue_id,
+                    )}</td>
                     <td>${escapeHtml(
                       warning.blocker_issue_identifier ??
                         warning.blocker_issue_id ??
@@ -2059,7 +2064,9 @@ function renderComputedOrder(snapshot: RuntimeSnapshot): string {
               <td class="numeric">${formatInteger(position.position)}</td>
               <td>
                 <div class="issue-stack">
-                  <span class="issue-id">${escapeHtml(position.issue_identifier)}</span>
+                  <span class="issue-id">${escapeHtml(
+                    position.issue_identifier || position.issue_id,
+                  )}</span>
                 </div>
               </td>
               <td>${escapeHtml(position.rationale.join(" · "))}</td>

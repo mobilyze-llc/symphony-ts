@@ -1484,9 +1484,13 @@ export interface StateDeltaEntryMetadata {
   computed_order_status?: string;
   computed_top_issue_id?: string;
   computed_top_issue_identifier?: string;
+  expected_issue_id?: string;
+  expected_issue_identifier?: string;
   actual_issue_id?: string;
   actual_issue_identifier?: string;
   hard_exclusion_count?: number;
+  computed_order_issue_count?: number;
+  hard_cycle_issue_count?: number;
   advisory_warning_count?: number;
   would_have_been_advisory_exclusion_count?: number;
   verb?: string;
@@ -1612,6 +1616,8 @@ const STATE_DELTA_METADATA_STRING_FIELDS = [
   "computed_order_status",
   "computed_top_issue_id",
   "computed_top_issue_identifier",
+  "expected_issue_id",
+  "expected_issue_identifier",
   "actual_issue_id",
   "actual_issue_identifier",
   "verb",
@@ -1702,6 +1708,8 @@ const STATE_DELTA_METADATA_NUMBER_FIELDS = [
   "non_blocking_finding_count",
   "track_finding_count",
   "hard_exclusion_count",
+  "computed_order_issue_count",
+  "hard_cycle_issue_count",
   "advisory_warning_count",
   "would_have_been_advisory_exclusion_count",
 ] as const;

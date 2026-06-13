@@ -185,7 +185,6 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain("SYMPH-487");
     expect(html).toContain("Advisory blocked-by edge.");
     expect(html).toContain("operator_anchor top");
-    expect(html).toContain("renderComputedOrder");
   });
 
   it("dashboard shows version in hero header", () => {

@@ -2047,6 +2047,8 @@ export class OrchestratorCore {
     }
 
     if (computedDispatchOrder.status === "hard_cycle") {
+      const hardCycleTrust =
+        computedDispatchOrder.hard_cycle?.edge_trust ?? "operator_confirmed";
       console.warn(
         `[orchestrator] Dispatch comparator refused linearization: ${computedDispatchOrder.hard_cycle?.reason ?? "hard-edge cycle"}`,
       );
@@ -2056,7 +2058,9 @@ export class OrchestratorCore {
         disposition: "gate",
         reasonCode: "computed_order_hard_cycle",
         remedy:
-          "Resolve the operator-confirmed blocked-by cycle before dispatch can linearize the queue.",
+          hardCycleTrust === "operator_confirmed"
+            ? "Resolve the operator-confirmed blocked-by cycle before dispatch can linearize the queue."
+            : "Resolve the hard blocked-by cycle before dispatch can linearize the queue.",
         details: {
           comparatorVersion: computedDispatchOrder.comparator_version,
           cycle: computedDispatchOrder.hard_cycle,
@@ -2083,6 +2087,8 @@ export class OrchestratorCore {
     const dispatchedIssueIds: string[] = [];
     const modeDecisions: RightSizingDecision[] = [];
     let eligibleCount = 0;
+    let expectedDispatchHead: Issue | null = null;
+    let suppressOrderingDisagreement = false;
     const admittedSnapshots = this.buildRunningAdmissionSnapshots();
     const sortedIssues = this.issuesFromComputedOrder(
       computedDispatchOrder,
@@ -2151,7 +2157,13 @@ export class OrchestratorCore {
       // cannot explain the block.
       eligibleCount += 1;
 
+      if (expectedDispatchHead === null) {
+        expectedDispatchHead = issue;
+      }
       const dispatchResult = await this.dispatchIssue(issue, null);
+      if (!dispatchResult.dispatched && expectedDispatchHead.id === issue.id) {
+        suppressOrderingDisagreement = true;
+      }
       if (dispatchResult.dispatched) {
         dispatchedIssueIds.push(issue.id);
         modeDecisions.push(dispatchResult.rightSizingDecision);
@@ -2162,6 +2174,7 @@ export class OrchestratorCore {
     this.trackDispatchStarvation(eligibleCount, dispatchedIssueIds.length);
     await this.recordOrderingDisagreementIfNeeded({
       computedOrder: computedDispatchOrder,
+      expectedIssue: suppressOrderingDisagreement ? null : expectedDispatchHead,
       issues,
       dispatchPicks: dispatchedIssueIds,
     });
@@ -2246,11 +2259,13 @@ export class OrchestratorCore {
 
   private async recordOrderingDisagreementIfNeeded(input: {
     computedOrder: ComputedDispatchOrderSnapshot;
+    expectedIssue: Issue | null;
     issues: readonly Issue[];
     dispatchPicks: readonly string[];
   }): Promise<void> {
     if (
       input.computedOrder.status !== "linearized" ||
+      input.expectedIssue === null ||
       input.dispatchPicks.length === 0
     ) {
       return;
@@ -2258,7 +2273,7 @@ export class OrchestratorCore {
     const computedTop = input.computedOrder.positions[0];
     if (
       computedTop === undefined ||
-      computedTop.issue_id === input.dispatchPicks[0]
+      input.expectedIssue.id === input.dispatchPicks[0]
     ) {
       return;
     }
@@ -2281,13 +2296,15 @@ export class OrchestratorCore {
         attempt: null,
         ownerId: this.leaseOwnerId,
         lease: null,
-        summary: `Dispatch admitted ${actualIssue.identifier} while computed order led with ${computedTop.issue_identifier}.`,
+        summary: `Dispatch admitted ${actualIssue.identifier} while computed eligible order led with ${input.expectedIssue.identifier}.`,
         metadata: {
           status: "observed",
           comparator_version: input.computedOrder.comparator_version,
           computed_order_status: input.computedOrder.status,
           computed_top_issue_id: computedTop.issue_id,
           computed_top_issue_identifier: computedTop.issue_identifier,
+          expected_issue_id: input.expectedIssue.id,
+          expected_issue_identifier: input.expectedIssue.identifier,
           actual_issue_id: actualIssue.id,
           actual_issue_identifier: actualIssue.identifier,
         },
@@ -2348,6 +2365,11 @@ export class OrchestratorCore {
           input.computedOrder?.positions.map((position) => position.issue_id) ??
           input.consideredIssues.map((issue) => issue.id),
         hard_exclusion_count: input.computedOrder?.exclusions.length ?? 0,
+        computed_order_issue_count:
+          input.computedOrder?.positions.length ??
+          input.consideredIssues.length,
+        hard_cycle_issue_count:
+          input.computedOrder?.hard_cycle?.issue_ids.length ?? 0,
         advisory_warning_count:
           input.computedOrder?.advisory_warnings.length ?? 0,
         would_have_been_advisory_exclusion_count:
