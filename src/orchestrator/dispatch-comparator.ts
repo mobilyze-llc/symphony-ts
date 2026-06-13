@@ -67,6 +67,7 @@ export function computeDispatchOrder(
         isOpenBlocker(edge.blocker, terminalStates),
     )
     .map(toAdvisoryWarning);
+  const advisoryWouldExclude = dedupeAdvisoryWarnings(advisoryOpenEdges);
   const warnings = [
     ...new Set([
       ...(input.ticketFeatureUnavailableReason === null ||
@@ -125,7 +126,7 @@ export function computeDispatchOrder(
       issueByIdentifier,
       terminalStates,
     ),
-    would_have_been_excluded_by_advisory_edges: advisoryOpenEdges,
+    would_have_been_excluded_by_advisory_edges: advisoryWouldExclude,
     hard_cycle: hardCycle,
     warnings: [
       ...warnings,
@@ -500,8 +501,15 @@ function applyAnchors(
       const firstSamePriority = ordered.findIndex(
         (issue) => issue.priority === anchored.priority,
       );
+      const firstWorsePriority = ordered.findIndex(
+        (issue) =>
+          toSortablePriority(issue.priority) >
+          toSortablePriority(anchored.priority),
+      );
+      const priorityBandStart =
+        firstWorsePriority === -1 ? ordered.length : firstWorsePriority;
       ordered.splice(
-        firstSamePriority === -1 ? 0 : firstSamePriority,
+        firstSamePriority === -1 ? priorityBandStart : firstSamePriority,
         0,
         anchored,
       );

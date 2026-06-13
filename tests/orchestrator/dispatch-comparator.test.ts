@@ -134,6 +134,28 @@ describe("dispatch comparator", () => {
     expect(order.would_have_been_excluded_by_advisory_edges).toHaveLength(2);
   });
 
+  it("dedupes would-have-been advisory exclusions", () => {
+    const blocker = createIssue({ id: "1", identifier: "ISSUE-1" });
+    const dependent = createIssue({ id: "2", identifier: "ISSUE-2" });
+
+    const order = computeDispatchOrder({
+      issues: [dependent, blocker],
+      anchors: {},
+      ticketFeatures: [
+        createFeature(dependent, [
+          createEdge(blocker, "advisory", "service_account"),
+          createEdge(blocker, "advisory", "service_account"),
+        ]),
+        createFeature(blocker),
+      ],
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(order.advisory_warnings).toHaveLength(1);
+    expect(order.would_have_been_excluded_by_advisory_edges).toHaveLength(1);
+  });
+
   it("excludes issues blocked by open operator-confirmed hard edges", () => {
     const blocker = createIssue({ id: "1", identifier: "ISSUE-1" });
     const dependent = createIssue({ id: "2", identifier: "ISSUE-2" });
@@ -369,6 +391,41 @@ describe("dispatch comparator", () => {
       order.positions.map((position) => position.issue_identifier),
     ).toEqual(["ISSUE-2", "ISSUE-1", "ISSUE-3"]);
     expect(order.positions[0]?.rationale).toContain("operator_anchor top");
+  });
+
+  it("keeps top anchors in natural order when their priority band has no peers", () => {
+    const urgent = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      priority: 1,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    const anchored = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+      priority: 5,
+      createdAt: "2026-06-02T00:00:00.000Z",
+    });
+    const later = createIssue({
+      id: "3",
+      identifier: "ISSUE-3",
+      priority: null,
+      createdAt: "2026-06-03T00:00:00.000Z",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [urgent, anchored, later],
+      anchors: {
+        "2": createAnchor(anchored),
+      },
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-1", "ISSUE-2", "ISSUE-3"]);
+    expect(order.positions[1]?.rationale).toContain("operator_anchor top");
   });
 
   it("applies below anchors after their target issue", () => {
@@ -610,7 +667,7 @@ function createIssue(overrides: Partial<Issue>): Issue {
     identifier: overrides.identifier ?? "ISSUE-1",
     title: overrides.title ?? "Example issue",
     description: overrides.description ?? null,
-    priority: overrides.priority ?? 1,
+    priority: overrides.priority === undefined ? 1 : overrides.priority,
     state: overrides.state ?? "In Progress",
     branchName: overrides.branchName ?? null,
     url: overrides.url ?? null,

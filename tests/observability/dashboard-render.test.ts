@@ -190,12 +190,8 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain("Computed dispatch order");
     expect(html).toContain("Hard-excluded issues: 1");
     expect(html).toContain("Hard exclusion edges: 2");
-    expect(html).toContain(
-      "Hard-excluded issues: ' + formatInteger(hardExcludedIssueCount)",
-    );
-    expect(html).toContain(
-      "Hard exclusion edges: ' + formatInteger(exclusions)",
-    );
+    expect(html.match(/Hard-excluded issues:/g)).toHaveLength(2);
+    expect(html.match(/Hard exclusion edges:/g)).toHaveLength(2);
     expect(html).toContain("dispatch-comparator-v1");
     expect(html).toContain("SYMPH-485");
     expect(html).toContain("SYMPH-486");

@@ -1260,6 +1260,8 @@ function renderDashboardClientScript(
           return parts.join(' · ');
         }
 
+        // Keep the computed-order summary labels in sync with the server-side
+        // renderComputedOrder implementation below; this copy powers live updates.
         function renderComputedOrder(next) {
           var order = next.computed_order;
           if (!order) {
@@ -1973,6 +1975,8 @@ function renderRetryRows(snapshot: RuntimeSnapshot): string {
         .join("");
 }
 
+// Keep the computed-order summary labels in sync with the client-side
+// renderComputedOrder copy embedded in renderDashboardClientScript.
 function renderComputedOrder(snapshot: RuntimeSnapshot): string {
   const order = snapshot.computed_order;
   if (order === null || order === undefined) {
