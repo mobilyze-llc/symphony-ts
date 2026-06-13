@@ -470,6 +470,83 @@ describe("anchor intent family (SYMPH-486)", () => {
     ]);
   });
 
+  it("parses field edit until timestamps only when they include an explicit timezone", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+
+    const applied = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "above ISSUE-0 until 2026-06-11T07:30:00-04:00",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:00:00.000Z",
+    });
+
+    expect(applied.status).toBe("applied");
+    expect(orchestrator.getState().issueAnchors["1"]?.expiry).toEqual({
+      kind: "until_date",
+      at: "2026-06-11T11:30:00.000Z",
+    });
+  });
+
+  it("rejects field edit until values that are date-only, local-time, free-form, or invalid calendar dates", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+
+    for (const [index, value] of [
+      "top until 2026-06-11",
+      "top until 2026-06-11T11:30:00",
+      "top until June 11 2026 11:30 UTC",
+      "top until 2026-02-30T11:30:00.000Z",
+    ].entries()) {
+      const result = await orchestrator.ingestAnchorFieldEdit({
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value,
+        editorEmail: "operator@mobilyze.com",
+        editedAt: `2026-06-11T12:0${index}:00.000Z`,
+      });
+      expect(result.status).toBe("invalid");
+      expect(typeof result.sequence).toBe("number");
+    }
+
+    expect(orchestrator.getState().issueAnchors["1"]).toBeUndefined();
+    const entries = intentEntries(orchestrator);
+    expect(entries).toHaveLength(4);
+    expect(entries.map((entry) => entry.metadata.status)).toEqual([
+      "no_op",
+      "no_op",
+      "no_op",
+      "no_op",
+    ]);
+    expect(entries.map((entry) => entry.metadata.reason)).toEqual([
+      expect.objectContaining({ class: "linear_field_edit_anchor_invalid" }),
+      expect.objectContaining({ class: "linear_field_edit_anchor_invalid" }),
+      expect.objectContaining({ class: "linear_field_edit_anchor_invalid" }),
+      expect.objectContaining({ class: "linear_field_edit_anchor_invalid" }),
+    ]);
+    expect(entries.map((entry) => entry.metadata.anchorEditedAt)).toEqual([
+      "2026-06-11T12:00:00.000Z",
+      "2026-06-11T12:01:00.000Z",
+      "2026-06-11T12:02:00.000Z",
+      "2026-06-11T12:03:00.000Z",
+    ]);
+  });
+
   it("invalid allowlisted field edits advance the cursor against older delayed edits", async () => {
     const config = createConfig();
     config.operatorAnchors = {

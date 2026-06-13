@@ -13,6 +13,10 @@ import { hostname } from "node:os";
 import { fileURLToPath } from "node:url";
 
 import {
+  ANCHOR_UNTIL_TIMESTAMP_FORMAT,
+  parseAnchorUntilTimestamp,
+} from "../orchestrator/anchor-date.js";
+import {
   type AnchorExpiry,
   type AnchorPlacement,
   INTENT_VERBS,
@@ -52,7 +56,7 @@ Commands:
   state                          Pretty summary of GET /api/v1/state
   intent <verb> --issue <id> --reason <text> [--hint <text>] [--fence <seq>] [--stage <stage>]
                                  POST /api/v1/intents (verbs: ${INTENT_VERBS.join(", ")})
-  anchor <issue> (--top|--above <ref>|--below <ref>) (--until-merged|--until <date>) [--reason <text>]
+  anchor <issue> (--top|--above <ref>|--below <ref>) (--until-merged|--until <iso-timestamp>) [--reason <text>]
                                  POST an anchor intent with operator attribution
   unanchor <issue> [--reason <text>]
                                  POST an unanchor intent with operator attribution
@@ -68,6 +72,7 @@ Cold-shell hard stop:
 Options:
   --base-url <url>               Dashboard base URL (default ${DEFAULT_BASE_URL},
                                  or SYMPHONYCTL_BASE_URL)
+  --until <iso-timestamp>         Anchor expiry timestamp must be a ${ANCHOR_UNTIL_TIMESTAMP_FORMAT}
 `;
 
 export function parseSymphonyctlArgs(
@@ -263,11 +268,13 @@ function parseAnchorExpiryFlags(
   if (untilMerged) {
     return { kind: "until_merged" };
   }
-  const parsed = new Date(until ?? "");
-  if (Number.isNaN(parsed.valueOf())) {
-    throw new SymphonyctlUsageError("--until must be a parseable date.");
+  const parsed = parseAnchorUntilTimestamp(until ?? "");
+  if (parsed === null) {
+    throw new SymphonyctlUsageError(
+      `--until must be a ${ANCHOR_UNTIL_TIMESTAMP_FORMAT}.`,
+    );
   }
-  return { kind: "until_date", at: parsed.toISOString() };
+  return { kind: "until_date", at: parsed };
 }
 
 /** Only a full UUID is treated as an issue id; anything else (e.g. SYMPH-123) is an identifier. */
