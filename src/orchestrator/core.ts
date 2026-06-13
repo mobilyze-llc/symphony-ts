@@ -93,6 +93,7 @@ import type {
 } from "../policy/hard-stops.js";
 import { normalizeAccountEmail } from "../shared/account-email.js";
 import { sanitizeForLinear } from "../shared/egress.js";
+import { readProcessIdentityMetadata } from "../shared/process-tree.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 import { formatAdmissionCard } from "./admission-card.js";
 import {
@@ -10804,52 +10805,6 @@ function readInterruptedIssues(
       },
     ];
   });
-}
-
-function readProcessIdentityMetadata(
-  value: unknown,
-): PipelineEmergencyStopState["interruptedIssues"][number]["codexAppServerIdentity"] {
-  if (!isRecord(value)) {
-    return null;
-  }
-  const pid = value.pid;
-  const processGroupId = value.processGroupId;
-  const sessionId = value.sessionId;
-  const startedAt = value.startedAt;
-  const command = value.command;
-  const launchToken = value.launchToken;
-  if (
-    typeof pid !== "number" ||
-    !Number.isSafeInteger(pid) ||
-    pid <= 0 ||
-    typeof processGroupId !== "number" ||
-    !Number.isSafeInteger(processGroupId) ||
-    processGroupId <= 0 ||
-    !(
-      sessionId === null ||
-      (typeof sessionId === "number" &&
-        Number.isSafeInteger(sessionId) &&
-        sessionId >= 0)
-    ) ||
-    typeof startedAt !== "string" ||
-    startedAt.trim() === "" ||
-    typeof command !== "string" ||
-    command.trim() === "" ||
-    !(
-      launchToken === null ||
-      (typeof launchToken === "string" && launchToken.trim() !== "")
-    )
-  ) {
-    return null;
-  }
-  return {
-    pid,
-    processGroupId,
-    sessionId,
-    startedAt,
-    command,
-    launchToken,
-  };
 }
 
 function collectQuietDeathOutcomes(

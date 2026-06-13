@@ -122,7 +122,10 @@ import {
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
-import { terminateDetachedPidTree as terminateDetachedPidTreeDefault } from "../shared/process-tree.js";
+import {
+  readProcessIdentityMetadata,
+  terminateDetachedPidTree as terminateDetachedPidTreeDefault,
+} from "../shared/process-tree.js";
 import type { ProcessIdentitySnapshot } from "../shared/process-tree.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
@@ -5104,52 +5107,6 @@ function readEmergencyStopInterruptedIssues(
       },
     ];
   });
-}
-
-function readProcessIdentityMetadata(
-  value: unknown,
-): ProcessIdentitySnapshot | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-  const pid = value.pid;
-  const processGroupId = value.processGroupId;
-  const sessionId = value.sessionId;
-  const startedAt = value.startedAt;
-  const command = value.command;
-  const launchToken = value.launchToken;
-  if (
-    typeof pid !== "number" ||
-    !Number.isSafeInteger(pid) ||
-    pid <= 0 ||
-    typeof processGroupId !== "number" ||
-    !Number.isSafeInteger(processGroupId) ||
-    processGroupId <= 0 ||
-    !(
-      sessionId === null ||
-      (typeof sessionId === "number" &&
-        Number.isSafeInteger(sessionId) &&
-        sessionId >= 0)
-    ) ||
-    typeof startedAt !== "string" ||
-    startedAt.trim() === "" ||
-    typeof command !== "string" ||
-    command.trim() === "" ||
-    !(
-      launchToken === null ||
-      (typeof launchToken === "string" && launchToken.trim() !== "")
-    )
-  ) {
-    return null;
-  }
-  return {
-    pid,
-    processGroupId,
-    sessionId,
-    startedAt,
-    command,
-    launchToken,
-  };
 }
 
 function readEmergencyStopSourceSequence(

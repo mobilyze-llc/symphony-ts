@@ -40,6 +40,52 @@ type ProcessIdentityReadFile = (
 
 const execFileAsync = promisify(execFileCallback) as ProcessIdentityExecFile;
 
+export function readProcessIdentityMetadata(
+  value: unknown,
+): ProcessIdentitySnapshot | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const pid = value.pid;
+  const processGroupId = value.processGroupId;
+  const sessionId = value.sessionId;
+  const startedAt = value.startedAt;
+  const command = value.command;
+  const launchToken = value.launchToken;
+  if (
+    typeof pid !== "number" ||
+    !Number.isSafeInteger(pid) ||
+    pid <= 0 ||
+    typeof processGroupId !== "number" ||
+    !Number.isSafeInteger(processGroupId) ||
+    processGroupId <= 0 ||
+    !(
+      sessionId === null ||
+      (typeof sessionId === "number" &&
+        Number.isSafeInteger(sessionId) &&
+        sessionId >= 0)
+    ) ||
+    typeof startedAt !== "string" ||
+    startedAt.trim() === "" ||
+    typeof command !== "string" ||
+    command.trim() === "" ||
+    !(
+      launchToken === null ||
+      (typeof launchToken === "string" && launchToken.trim() !== "")
+    )
+  ) {
+    return null;
+  }
+  return {
+    pid,
+    processGroupId,
+    sessionId,
+    startedAt,
+    command,
+    launchToken,
+  };
+}
+
 export interface ChildProcessForTermination {
   exitCode: number | null;
   signalCode: NodeJS.Signals | null;
@@ -365,6 +411,10 @@ function childHasExited(
   child: Pick<ChildProcessForTermination, "exitCode" | "signalCode">,
 ): boolean {
   return child.exitCode !== null || child.signalCode !== null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function isNoSuchProcess(error: unknown): boolean {

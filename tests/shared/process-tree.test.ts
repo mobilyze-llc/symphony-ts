@@ -6,6 +6,7 @@ import {
   type ProcessIdentitySnapshot,
   processIdentityMatches,
   readProcessIdentity,
+  readProcessIdentityMetadata,
   signalPidOrProcessGroup,
   terminateChildProcessTree,
   terminateDetachedPidTree,
@@ -305,6 +306,33 @@ describe("process tree termination", () => {
     });
 
     expect(processIdentityMatches(expected, observed)).toBe(false);
+  });
+
+  it("reads serialized process identity metadata with a launch token", () => {
+    expect(readProcessIdentityMetadata(createProcessIdentity(1234))).toEqual(
+      createProcessIdentity(1234),
+    );
+  });
+
+  it("reads tokenless serialized process identity metadata", () => {
+    const identity = createProcessIdentity(1234, { launchToken: null });
+
+    expect(readProcessIdentityMetadata(identity)).toEqual(identity);
+  });
+
+  it("rejects malformed serialized process identity metadata", () => {
+    expect(
+      readProcessIdentityMetadata({
+        ...createProcessIdentity(1234),
+        launchToken: "",
+      }),
+    ).toBeNull();
+    expect(
+      readProcessIdentityMetadata({
+        ...createProcessIdentity(1234),
+        processGroupId: null,
+      }),
+    ).toBeNull();
   });
 
   it("reads Linux process identity from /proc stat, cmdline, and environ", async () => {
