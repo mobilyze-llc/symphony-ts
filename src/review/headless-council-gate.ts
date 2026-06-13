@@ -73,6 +73,7 @@ export type HeadlessLaneState =
   | "error";
 export type LaneDegradedReason =
   | "malformed_artifact"
+  | "malformed_substrate_json"
   | "substrate_stall"
   | "artifact_persistence_failed";
 export type StructuredReviewFindingSeverity =
@@ -3582,7 +3583,7 @@ async function parseLaneResult(input: {
       verdict: "error",
       artifactPath: null,
       message: "cmux-spawn returned malformed JSON.",
-      degradedReason: null,
+      degradedReason: "malformed_substrate_json",
       wallTimeMs: null,
       tokenUsage: null,
       rawArtifactPath: null,
@@ -5102,6 +5103,7 @@ function isReviewSubstrateDegradedCondition(condition: string): boolean {
   }
   return (
     condition.startsWith("malformed_artifact:") ||
+    condition.startsWith("malformed_substrate_json:") ||
     condition.startsWith("artifact_persistence_failed:") ||
     condition.startsWith("substrate_stall:") ||
     condition.startsWith("review-bundle-footer-append-failed:")
