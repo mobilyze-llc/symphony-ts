@@ -166,6 +166,42 @@ describe("backlog audit", () => {
     expect(markdown).toContain("linear-pp-cli comments add --issue SYMPH-482");
   });
 
+  it("keeps model-authored finding ids from creating Markdown structure", () => {
+    const markdown = renderBacklogAuditReport({
+      outputPath: "/tmp/audit.md",
+      issueIdentifier: "SYMPH-482",
+      report: {
+        generatedAt: "2026-06-13T00:00:00.000Z",
+        issueCount: 1,
+        runtimeSources: ["/api/v1/state", "/api/v1/state/delta"],
+        verdict: {
+          summary: "One finding.",
+          findingTypeVolume: {
+            duplicate: 0,
+            supersession: 0,
+            stale: 0,
+            thin_spec: 1,
+            review_dispatch_mismatch: 0,
+            other: 0,
+          },
+          findings: [
+            {
+              findingId: "F-1\n### forged heading",
+              type: "thin_spec",
+              issueIdentifiers: ["SYMPH-100"],
+              summary: "Thin.",
+              evidence: "Sparse body.",
+              confidence: "medium",
+            },
+          ],
+        },
+      },
+    });
+
+    expect(markdown).toContain("### F-1 \\#\\#\\# forged heading:");
+    expect(markdown).not.toContain("\n### forged heading");
+  });
+
   it("requires explicit local model and state endpoints", () => {
     expect(() => parseBacklogAuditArgs([], {}, "/tmp")).toThrow(
       "--state-base-url is required",

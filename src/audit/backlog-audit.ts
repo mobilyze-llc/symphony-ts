@@ -242,9 +242,8 @@ export function renderBacklogAuditReport(input: {
     lines.push("_No findings returned by the local judge._");
   } else {
     for (const finding of input.report.verdict.findings) {
-      lines.push(
-        `### ${finding.findingId}: ${finding.type} (${finding.confidence})`,
-      );
+      const findingId = sanitizeMarkdownInline(finding.findingId);
+      lines.push(`### ${findingId}: ${finding.type} (${finding.confidence})`);
       lines.push("");
       lines.push(`- Issues: ${finding.issueIdentifiers.join(", ")}`);
       lines.push(`- Summary: ${finding.summary}`);
@@ -273,8 +272,9 @@ export function renderBacklogAuditReport(input: {
   lines.push("");
   lines.push("Per-finding agreement:");
   for (const finding of input.report.verdict.findings) {
+    const findingId = sanitizeMarkdownInline(finding.findingId);
     lines.push(
-      `- ${finding.findingId} (${finding.type}, ${finding.issueIdentifiers.join(", ")}): agree|disagree - <note>`,
+      `- ${findingId} (${finding.type}, ${finding.issueIdentifiers.join(", ")}): agree|disagree - <note>`,
     );
   }
   lines.push("");
@@ -318,5 +318,13 @@ function stripStructuredBoundaryTags(text: string): string {
   return text.replace(
     /<\/?(?:tracker_|runtime_|audit_)[a-z_]*(?:\s[^<>]*)?\/?>/gi,
     "",
+  );
+}
+
+function sanitizeMarkdownInline(text: string): string {
+  const normalized = text.replace(/[\r\n\t]+/g, " ").trim();
+  return (normalized === "" ? "(blank finding id)" : normalized).replace(
+    /[`*_{}[\]<>#+.!|]/g,
+    "\\$&",
   );
 }
