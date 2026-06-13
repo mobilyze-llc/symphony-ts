@@ -60,11 +60,15 @@ export function computeDispatchOrder(
   const exclusions = hardEdges
     .filter((edge) => isOpenBlocker(edge.blocker, terminalStates))
     .map(toExclusion);
+  const excludedIssueIds = new Set(
+    exclusions.map((exclusion) => exclusion.issue_id),
+  );
   const advisoryOpenEdges = edges
     .filter(
       (edge) =>
         edge.trust === "advisory" &&
-        isOpenBlocker(edge.blocker, terminalStates),
+        isOpenBlocker(edge.blocker, terminalStates) &&
+        !excludedIssueIds.has(edge.issue.id),
     )
     .map(toAdvisoryWarning);
   const advisoryWouldExclude = dedupeAdvisoryWarnings(advisoryOpenEdges);
@@ -78,9 +82,6 @@ export function computeDispatchOrder(
     ]),
   ];
 
-  const excludedIssueIds = new Set(
-    exclusions.map((exclusion) => exclusion.issue_id),
-  );
   const included = baseOrder.filter((issue) => !excludedIssueIds.has(issue.id));
   const hardOrderingEdges = hardEdges.filter((edge) => {
     const blockerIssue = findIssueByRef(
@@ -91,7 +92,8 @@ export function computeDispatchOrder(
     return (
       blockerIssue !== null &&
       !excludedIssueIds.has(edge.issue.id) &&
-      !excludedIssueIds.has(blockerIssue.id)
+      !excludedIssueIds.has(blockerIssue.id) &&
+      isOpenBlocker(edge.blocker, terminalStates)
     );
   });
   const linearized = topologicallySortIssues(

@@ -156,6 +156,31 @@ describe("dispatch comparator", () => {
     expect(order.would_have_been_excluded_by_advisory_edges).toHaveLength(1);
   });
 
+  it("does not count advisory would-have exclusions for already hard-excluded issues", () => {
+    const hardBlocker = createIssue({ id: "1", identifier: "ISSUE-1" });
+    const advisoryBlocker = createIssue({ id: "2", identifier: "ISSUE-2" });
+    const dependent = createIssue({ id: "3", identifier: "ISSUE-3" });
+
+    const order = computeDispatchOrder({
+      issues: [dependent, hardBlocker, advisoryBlocker],
+      anchors: {},
+      ticketFeatures: [
+        createFeature(dependent, [
+          createEdge(hardBlocker, "operator_confirmed", null),
+          createEdge(advisoryBlocker, "advisory", "service_account"),
+        ]),
+        createFeature(hardBlocker),
+        createFeature(advisoryBlocker),
+      ],
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(order.exclusions).toHaveLength(1);
+    expect(order.advisory_warnings).toHaveLength(1);
+    expect(order.would_have_been_excluded_by_advisory_edges).toEqual([]);
+  });
+
   it("excludes issues blocked by open operator-confirmed hard edges", () => {
     const blocker = createIssue({ id: "1", identifier: "ISSUE-1" });
     const dependent = createIssue({ id: "2", identifier: "ISSUE-2" });
@@ -208,6 +233,38 @@ describe("dispatch comparator", () => {
     });
 
     expect(order.status).toBe("linearized");
+    expect(order.exclusions).toEqual([]);
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-1", "ISSUE-2"]);
+  });
+
+  it("ignores terminal hard blockers when computing ordering constraints", () => {
+    const dependent = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      priority: 1,
+    });
+    const terminalBlocker = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+      priority: 3,
+      state: "Done",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [dependent, terminalBlocker],
+      anchors: {},
+      ticketFeatures: [
+        createFeature(dependent, [
+          createEdge(terminalBlocker, "operator_confirmed", null),
+        ]),
+        createFeature(terminalBlocker),
+      ],
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
     expect(order.exclusions).toEqual([]);
     expect(
       order.positions.map((position) => position.issue_identifier),
