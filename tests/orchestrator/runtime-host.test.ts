@@ -5419,6 +5419,9 @@ describe("pipeline notifications", () => {
       expect.objectContaining({
         event: "worker_stop_requested",
         level: "info",
+        message: expect.stringContaining(
+          "Worker stop requested; aborting runner before tracked process signal delivery.",
+        ),
         outcome: "requested",
         issue_identifier: "ISSUE-1",
       }),
@@ -5431,6 +5434,63 @@ describe("pipeline notifications", () => {
         signal_delivery_status: "delivered",
         pids: [4242],
         failed_pids: [],
+      }),
+    );
+  });
+
+  it("logs ownership-unverified signal delivery as not attempted", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      deliverWorkerStopSignal: async (input): Promise<StopSignalDelivery> => ({
+        status: "not_attempted",
+        reason: input.reason,
+        attemptedAt: input.attemptedAt.toISOString(),
+        workspacePath: input.workspacePath,
+        attempts: [],
+        warning:
+          "Tracked process PID 4242 was not signaled: process command does not look like a Codex app-server",
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponse = await host.requestIssueStop("ISSUE-1");
+    await host.waitForIdle();
+
+    expect(stopResponse.signal_delivery).toMatchObject({
+      status: "not_attempted",
+      reason: "manual_stop",
+      attempts: [],
+      warning:
+        "Tracked process PID 4242 was not signaled: process command does not look like a Codex app-server",
+    });
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_stop_signal_delivery",
+        level: "info",
+        outcome: "not_attempted",
+        signal_delivery_status: "not_attempted",
+        issue_identifier: "ISSUE-1",
+        pids: [],
+        failed_pids: [],
+        warning:
+          "Tracked process PID 4242 was not signaled: process command does not look like a Codex app-server",
       }),
     );
   });
@@ -5493,6 +5553,72 @@ describe("pipeline notifications", () => {
     ]);
   });
 
+  it("rejects malformed custom signal delivery telemetry before logging attempts", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      deliverWorkerStopSignal: async (input): Promise<StopSignalDelivery> =>
+        ({
+          status: "delivered",
+          reason: input.reason,
+          attemptedAt: input.attemptedAt.toISOString(),
+          workspacePath: input.workspacePath,
+          attempts: [
+            {
+              pid: 4242,
+              processGroupId: 0,
+              sigterm: "delivered",
+              sigkill: "not_attempted",
+            },
+          ],
+          warning: null,
+        }) as StopSignalDelivery,
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponse = await host.requestIssueStop("ISSUE-1");
+    await host.waitForIdle();
+
+    expect(stopResponse.signal_delivery).toMatchObject({
+      status: "failed",
+      reason: "manual_stop",
+      attempted_at: "2026-03-06T00:00:05.000Z",
+      workspace_path: "/tmp/workspaces/1",
+      attempts: [],
+      warning:
+        "Tracked process signal delivery returned invalid telemetry; no attempts were recorded.",
+    });
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_stop_signal_delivery_failed",
+        level: "warn",
+        outcome: "degraded",
+        signal_delivery_status: "failed",
+        issue_identifier: "ISSUE-1",
+        pids: [],
+        failed_pids: [],
+        warning:
+          "Tracked process signal delivery returned invalid telemetry; no attempts were recorded.",
+      }),
+    );
+  });
+
   it("signals only the tracked pid", () => {
     const calls: Array<[number, NodeJS.Signals]> = [];
     const result = signalPid(4242, "SIGTERM", (pid, signal) => {
@@ -5504,6 +5630,20 @@ describe("pipeline notifications", () => {
       processGroupId: null,
     });
     expect(calls).toEqual([[4242, "SIGTERM"]]);
+  });
+
+  it("treats ESRCH from a signal attempt as benign already-exited delivery", () => {
+    const error = new Error("no such process");
+    Object.assign(error, { code: "ESRCH" });
+
+    const result = signalPid(4242, "SIGTERM", () => {
+      throw error;
+    });
+
+    expect(result).toEqual({
+      status: "delivered",
+      processGroupId: null,
+    });
   });
 
   it("does not signal unsafe tracked pids", () => {
@@ -5579,7 +5719,7 @@ describe("pipeline notifications", () => {
     );
 
     expect(delivery).toMatchObject({
-      status: "failed",
+      status: "not_attempted",
       attempts: [],
       warning:
         "Tracked process PID 4242 was not signaled: process cwd /tmp/workspaces/10 does not match workspace /tmp/workspaces/1",
@@ -5671,7 +5811,7 @@ describe("pipeline notifications", () => {
     );
 
     expect(delivery).toMatchObject({
-      status: "failed",
+      status: "not_attempted",
       attempts: [],
       warning:
         "Tracked process PID 4242 was not signaled: process command does not look like a Codex app-server",

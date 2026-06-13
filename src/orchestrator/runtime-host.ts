@@ -149,7 +149,7 @@ import type {
   SupervisionResteerRequest,
   TimerScheduler,
 } from "./core.js";
-import { OrchestratorCore } from "./core.js";
+import { OrchestratorCore, isStopSignalDelivery } from "./core.js";
 import { getDiff, runEnsembleGate } from "./gate-handler.js";
 import {
   type IntentActor,
@@ -3235,7 +3235,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     await this.logger?.info(
       "worker_stop_requested",
-      "Worker stop requested; aborting runner and attempting tracked process signal delivery.",
+      "Worker stop requested; aborting runner before tracked process signal delivery.",
       {
         outcome: "requested",
         issue_id: execution.issueId,
@@ -3263,16 +3263,19 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     input: WorkerStopSignalDeliveryInput,
   ): Promise<StopSignalDelivery> {
     try {
-      return await this.deliverWorkerStopSignal(input);
+      const delivery = await this.deliverWorkerStopSignal(input);
+      if (isStopSignalDelivery(delivery)) {
+        return delivery;
+      }
+      return createFailedStopSignalDelivery(
+        input,
+        "Tracked process signal delivery returned invalid telemetry; no attempts were recorded.",
+      );
     } catch (error) {
-      return {
-        status: "failed",
-        reason: input.reason,
-        attemptedAt: input.attemptedAt.toISOString(),
-        workspacePath: input.workspacePath,
-        attempts: [],
-        warning: `Tracked process signal delivery failed before attempts were recorded: ${toErrorMessage(error)}`,
-      };
+      return createFailedStopSignalDelivery(
+        input,
+        `Tracked process signal delivery failed before attempts were recorded: ${toErrorMessage(error)}`,
+      );
     }
   }
 
@@ -5297,6 +5300,20 @@ function toErrorMessage(error: unknown): string {
   return "worker failed";
 }
 
+function createFailedStopSignalDelivery(
+  input: WorkerStopSignalDeliveryInput,
+  warning: string,
+): StopSignalDelivery {
+  return {
+    status: "failed",
+    reason: input.reason,
+    attemptedAt: input.attemptedAt.toISOString(),
+    workspacePath: input.workspacePath,
+    attempts: [],
+    warning,
+  };
+}
+
 function toStopSignalDeliveryResponse(
   delivery: StopSignalDelivery | null,
 ): StopSignalDeliveryResponse | null {
@@ -5356,7 +5373,7 @@ export async function deliverTrackedWorkerStopSignal(
   });
   if (!ownership.verified) {
     return {
-      status: ownership.failureKind === "mismatch" ? "failed" : "not_attempted",
+      status: "not_attempted",
       reason: input.reason,
       attemptedAt: input.attemptedAt.toISOString(),
       workspacePath: input.workspacePath,
