@@ -11,7 +11,10 @@ import { tmpdir } from "node:os";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import packageJson from "../../package.json" with { type: "json" };
-import { renderPrompt } from "../../src/agent/prompt-builder.js";
+import {
+  renderPrompt,
+  resolvePromptPartialRoots,
+} from "../../src/agent/prompt-builder.js";
 import { resolveWorkflowConfig } from "../../src/config/config-resolver.js";
 import { loadWorkflowDefinition } from "../../src/config/workflow-loader.js";
 import type { Issue } from "../../src/domain/model.js";
@@ -842,6 +845,27 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     } finally {
       await rm(alternateRoot, { recursive: true, force: true });
     }
+  });
+
+  it("normalizes relative workflow paths before resolving partial roots", () => {
+    const roots = resolvePromptPartialRoots("pipeline-config/WORKFLOW.md");
+
+    expect(roots).toContain(resolve(REPO_ROOT, "pipeline-config"));
+    expect(roots).toContain(REPO_ROOT);
+    expect(roots).not.toContain(
+      resolve(REPO_ROOT, "pipeline-config", "pipeline-config"),
+    );
+  });
+
+  it("does not treat pipeline-config-prefixed directories as pipeline-config", () => {
+    const roots = resolvePromptPartialRoots("pipeline-config-v2/WORKFLOW.md");
+
+    expect(roots).toContain(resolve(REPO_ROOT, "pipeline-config-v2"));
+    expect(roots).toContain(
+      resolve(REPO_ROOT, "pipeline-config-v2", "pipeline-config"),
+    );
+    expect(roots).not.toContain(resolve(REPO_ROOT, "pipeline-config"));
+    expect(roots).not.toContain(REPO_ROOT);
   });
 
   it("documents intentionally uncovered standalone review and merge prompt surfaces", async () => {
