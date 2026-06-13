@@ -25,6 +25,26 @@ const SHIPPED_CODEX_WORKFLOW_CONFIGS = [
   "../../pipeline-config/WORKFLOW-instrumentation.md",
   "../../pipeline-config/templates/WORKFLOW-template.md",
 ].map((path) => resolve(import.meta.dirname, path));
+const SHIPPED_PRODUCT_WORKFLOW_CONFIGS = [
+  "../../pipeline-config/workflows/WORKFLOW-healthspanners-ui.md",
+  "../../pipeline-config/workflows/WORKFLOW-household.md",
+  "../../pipeline-config/workflows/WORKFLOW-hs-dash.md",
+  "../../pipeline-config/workflows/WORKFLOW-hs-data.md",
+  "../../pipeline-config/workflows/WORKFLOW-hs-mobile.md",
+  "../../pipeline-config/workflows/WORKFLOW-jony-agent.md",
+  "../../pipeline-config/workflows/WORKFLOW-stickerlabs.md",
+  "../../pipeline-config/workflows/WORKFLOW-symphony.md",
+  "../../pipeline-config/workflows/WORKFLOW-toys.md",
+].map((path) => resolve(import.meta.dirname, path));
+const INLINE_ELIGIBILITY_ON_REWRITE_WORKFLOW_CONFIGS = [
+  "../../pipeline-config/WORKFLOW-staged.md",
+  "../../pipeline-config/WORKFLOW-flat.md",
+  "../../pipeline-config/WORKFLOW-instrumentation.md",
+  "../../pipeline-config/templates/WORKFLOW-template.md",
+  ...SHIPPED_PRODUCT_WORKFLOW_CONFIGS,
+].map((path) =>
+  path.startsWith("../../") ? resolve(import.meta.dirname, path) : path,
+);
 const INLINE_WORKER_PROMPT_CONFIGS = SHIPPED_CODEX_WORKFLOW_CONFIGS.filter(
   (path) => !path.endsWith("/pipeline-config/WORKFLOW.md"),
 );
@@ -692,6 +712,67 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     });
 
     expectEligibilityOnRewriteRule(output);
+  });
+
+  it("documents eligibility-on-rewrite in primary file-backed rewrite prompt surfaces", async () => {
+    const primaryWorkflow = await loadWorkflowDefinition(
+      PIPELINE_WORKFLOW_PATH,
+    );
+    const primaryConfig = resolveWorkflowConfig(primaryWorkflow, {
+      LINEAR_API_KEY: "test-token",
+      LINEAR_PROJECT_SLUG: "test-project",
+    });
+
+    const promptFiles = [
+      "prompts/global.liquid",
+      primaryConfig.stages?.stages.investigate?.prompt,
+      primaryConfig.stages?.stages.implement?.prompt,
+    ];
+
+    expect(promptFiles).toEqual([
+      "prompts/global.liquid",
+      "prompts/investigate.liquid",
+      "prompts/implement.liquid",
+    ]);
+
+    for (const promptFile of promptFiles) {
+      expect(promptFile).toBeDefined();
+      const template = await readFile(
+        resolve(dirname(PIPELINE_WORKFLOW_PATH), promptFile!),
+        "utf8",
+      );
+      const output = await renderPrompt({
+        workflow: { promptTemplate: template },
+        issue: ISSUE_FIXTURE,
+        attempt: null,
+        stageName: promptFile!.includes("investigate")
+          ? "investigate"
+          : "implement",
+        reworkCount: 0,
+      });
+
+      expectEligibilityOnRewriteRule(output);
+    }
+  });
+
+  it("checks every standalone shipped workflow config for eligibility-on-rewrite coverage", async () => {
+    // SYMPH-527: file-backed stage prompts render as standalone strings, so
+    // keep this explicit until a shared prompt partial has an inspectable root.
+    for (const configPath of INLINE_ELIGIBILITY_ON_REWRITE_WORKFLOW_CONFIGS) {
+      const workflowConfig = await loadWorkflowDefinition(configPath);
+
+      for (const stageName of ["investigate", "implement"] as const) {
+        const output = await renderPrompt({
+          workflow: { promptTemplate: workflowConfig.promptTemplate },
+          issue: ISSUE_FIXTURE,
+          attempt: null,
+          stageName,
+          reworkCount: 0,
+        });
+
+        expectEligibilityOnRewriteRule(output);
+      }
+    }
   });
 });
 
