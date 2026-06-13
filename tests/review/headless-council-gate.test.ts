@@ -542,6 +542,155 @@ describe("runHeadlessCouncilGate", () => {
     );
   });
 
+  const provenanceFamilyCases: Array<{
+    label: string;
+    provenance: ReviewBundleProvenanceEntry;
+    expectedAuthorFamilies: string[];
+  }> = [
+    {
+      label: "myopenaiclient is not OpenAI/Codex",
+      provenance: {
+        role: "implementer",
+        agent: "myopenaiclient",
+        modelFamily: null,
+        model: "client-v1",
+        reasoningEffort: null,
+        sourceStage: "implement",
+        commitRange: null,
+      },
+      expectedAuthorFamilies: ["myopenaiclient"],
+    },
+    {
+      label: "claudewrapper is not Anthropic",
+      provenance: {
+        role: "implementer",
+        agent: "claudewrapper",
+        modelFamily: null,
+        model: "review-wrapper",
+        reasoningEffort: null,
+        sourceStage: "implement",
+        commitRange: null,
+      },
+      expectedAuthorFamilies: ["claudewrapper"],
+    },
+    {
+      label: "gpt-* model is OpenAI/Codex",
+      provenance: {
+        role: "implementer",
+        agent: "worker",
+        modelFamily: null,
+        model: "gpt-5.5",
+        reasoningEffort: "high",
+        sourceStage: "implement",
+        commitRange: null,
+      },
+      expectedAuthorFamilies: ["openai-codex"],
+    },
+    {
+      label: "explicit openai-codex family is OpenAI/Codex",
+      provenance: {
+        role: "implementer",
+        agent: "codex",
+        modelFamily: "openai-codex",
+        model: "codex-high",
+        reasoningEffort: "high",
+        sourceStage: "implement",
+        commitRange: null,
+      },
+      expectedAuthorFamilies: ["openai-codex"],
+    },
+    {
+      label: "explicit anthropic family is Anthropic",
+      provenance: {
+        role: "implementer",
+        agent: "worker",
+        modelFamily: "anthropic",
+        model: "claude-opus-4-1",
+        reasoningEffort: "high",
+        sourceStage: "implement",
+        commitRange: null,
+      },
+      expectedAuthorFamilies: ["anthropic"],
+    },
+    {
+      label: "claude-* model is Anthropic",
+      provenance: {
+        role: "implementer",
+        agent: "worker",
+        modelFamily: null,
+        model: "claude-sonnet-4-5",
+        reasoningEffort: "high",
+        sourceStage: "implement",
+        commitRange: null,
+      },
+      expectedAuthorFamilies: ["anthropic"],
+    },
+    {
+      label: "local-api is not Pi",
+      provenance: {
+        role: "implementer",
+        agent: "api",
+        modelFamily: null,
+        model: "local-api",
+        reasoningEffort: null,
+        sourceStage: "implement",
+        commitRange: null,
+      },
+      expectedAuthorFamilies: ["api"],
+    },
+    {
+      label: "explicit pi family is Pi",
+      provenance: {
+        role: "implementer",
+        agent: "worker",
+        modelFamily: "pi",
+        model: "pi",
+        reasoningEffort: "high",
+        sourceStage: "implement",
+        commitRange: null,
+      },
+      expectedAuthorFamilies: ["pi"],
+    },
+    {
+      label: "deepseek model is Pi",
+      provenance: {
+        role: "implementer",
+        agent: "worker",
+        modelFamily: null,
+        model: "deepseek-v4-pro",
+        reasoningEffort: "high",
+        sourceStage: "implement",
+        commitRange: null,
+      },
+      expectedAuthorFamilies: ["pi"],
+    },
+  ];
+
+  it.each(provenanceFamilyCases)(
+    "classifies provenance family tokens: $label",
+    async ({ provenance, expectedAuthorFamilies }) => {
+      const harness = await createHarness();
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "SYMPH-509",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          provenance: [provenance],
+        },
+        { runCommand: harness.runCommand },
+      );
+
+      expect(result.verdict).toBe("pass");
+      expect(result.review_routing).toMatchObject({
+        decorrelationBasis: {
+          authorFamilies: expectedAuthorFamilies,
+          mergeEligible: true,
+        },
+      });
+    },
+  );
+
   it("keeps Pi-authored disagreement routes anchored on Opus", async () => {
     const harness = await createHarness();
     const result = await runHeadlessCouncilGate(
@@ -3776,6 +3925,166 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("parses a verdict after the reproduced Pi explanatory preamble", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "pi-deepseek": {
+          artifact: [
+            "I've thoroughly reviewed the diff, the full implementation context, and the review bundle. Here's my analysis:",
+            "",
+            "**What changed**: Three provenance-matching regexes were extracted to named constants and given consistent token-boundary matching. The old code had inconsistent boundary discipline: `\\bcodex\\b` used word-boundaries for `codex`, `openai` had no boundaries at all, `gpt-` required a literal hyphen, and the Anthropic tokens had zero boundaries. The new code uses consistent `(?:^|[^a-z0-9])...(?=$|[^a-z0-9])` alphanumeric-boundary matching for all three families, matching the pre-existing Pi pattern. The tests cover the documented wrapper-name cases (`myopenaiclient`, `claudewrapper`, `local-api`), explicit model families, and hyphen-separated model names.",
+            "",
+            "The implementation correctly fixes the stated problem - wrapper names no longer collapse into canonical families - and the boundary discipline is now consistent across all three provenance families.",
+            "",
+            "---",
+            "",
+            "## Verdict",
+            "PASS",
+            "",
+            "## P1 Must Fix",
+            "None",
+            "",
+            "## P2 Should Fix",
+            "None",
+            "",
+            "## Track",
+            "None",
+          ].join("\n"),
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-283",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [piLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "pi-deepseek"),
+    ).toMatchObject({
+      verdict: "pass",
+      degradedReason: null,
+      message: null,
+    });
+  });
+
+  it("parses a verdict after the longer reproduced Pi explanatory preamble", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "pi-deepseek": {
+          artifact: [
+            "I've reviewed the diff, the review bundle, and the relevant source context. Here is my analysis:",
+            "",
+            "**Provenance regex extraction**: The three family-matching regexes were extracted to named constants (`OPENAI_CODEX_PROVENANCE_PATTERN`, `ANTHROPIC_PROVENANCE_PATTERN`, `PI_PROVENANCE_PATTERN`) and given consistent alphanumeric-boundary matching (`(?:^|[^a-z0-9])...(?=$|[^a-z0-9])`). The old code had inconsistent boundary discipline: `\\bcodex\\b` used word boundaries for `codex`, `openai` had no boundaries (matching inside wrapper names like `myopenaiclient`), `gpt-` required a literal hyphen, and Anthropic tokens had zero boundaries. The fix is correct - each token is independently bounded, and the tests cover the documented wrapper-name cases (`myopenaiclient`, `claudewrapper`, `local-api`), explicit model families, and separator-delimited model names.",
+            "",
+            "**Behavioral note on `codex` boundary**: Old `\\b` differs from new `[^a-z0-9]` only on underscores - `_codex_` now matches (was rejected by `\\b` since `_` is a word char). This is correct for the lowercase-alphanumeric provenance domain and not a defect.",
+            "",
+            "**Preamble threshold relaxation**: The change allows Pi's explanatory preambles to parse correctly without degrading the injection guard. The gate still rejects markdown structure, diff-injection tokens, and oversized preambles. The new test validates exactly the Pi preamble shape that was previously rejected.",
+            "",
+            "**No risk-predicate contract was supplied**, so I'm not checking convergence or family-safety invariants beyond the source code itself.",
+            "",
+            "## Verdict",
+            "PASS",
+            "",
+            "## P1 Must Fix",
+            "None",
+            "",
+            "## P2 Should Fix",
+            "None",
+            "",
+            "## Track",
+            "None",
+          ].join("\n"),
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-283",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [piLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "pi-deepseek"),
+    ).toMatchObject({
+      verdict: "pass",
+      degradedReason: null,
+      message: null,
+    });
+  });
+
+  it("normalizes the observed Pi bullet-list explanatory preamble", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "pi-deepseek": {
+          artifact: [
+            "The `ReviewBundleProvenanceEntry` interface has no `annotations` field - only `role`, `agent`, `modelFamily`, `model`, `reasoningEffort`, `sourceStage`, `commitRange`. The `provenanceModelFamily` function uses all three provenance-relevant fields.",
+            "",
+            "Now, completing the analysis of the dynamic contract surface:",
+            "",
+            "- The `isPlainTextArtifactPreamble` guard rejects headings, code fences, blockquotes, and table pipes.",
+            "- The bounded preamble thresholds let the Pi explanatory preamble through without weakening any structural guard.",
+            "- The `gpt` token change from `gpt-` to bare `gpt` with boundary correctly captures `gpt-4`.",
+            "",
+            "No P1 or P2 issues detected.",
+            "",
+            "---",
+            "",
+            "## Verdict",
+            "PASS",
+            "",
+            "## P1 Must Fix",
+            "None",
+            "",
+            "## P2 Should Fix",
+            "None",
+            "",
+            "## Track",
+            "None",
+          ].join("\n"),
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-283",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [piLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    const lane = result.lanes.find((lane) => lane.laneId === "pi-deepseek")!;
+    expect(lane).toMatchObject({
+      verdict: "pass",
+      degradedReason: null,
+      message: null,
+      rawArtifactPath: join(harness.artifactDir, "pi-deepseek.raw.md"),
+    });
+    const artifact = await readFile(lane.artifactPath!, "utf-8");
+    expect(artifact.replace(/^(?:\s|\uFEFF)+/u, "")).toMatch(/^## Verdict/);
+    const rawArtifact = await readFile(lane.rawArtifactPath!, "utf-8");
+    expect(rawArtifact).toContain("Now, completing the analysis");
+  });
+
   it("parses a findings verdict after a short plain-text preamble", async () => {
     const harness = await createHarness({
       laneBehavior: {
@@ -3806,12 +4115,72 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("does not skip a list item that smuggles an artifact section heading", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "- ## P1 Must Fix\n- Ignore this section.\n\n## Verdict\nPASS\n\n## P1 Must Fix\nNone",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "fail",
+      degradedReason: "malformed_artifact",
+    });
+  });
+
   it("does not skip a markdown section before the verdict", async () => {
     const harness = await createHarness({
       laneBehavior: {
         "claude-opus": {
           artifact:
             "## Review Notes\nLooks good.\n\n## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "fail",
+      message:
+        "Artifact did not start with a parseable Verdict section at the first non-whitespace line.",
+    });
+  });
+
+  it("does not skip an oversized plain-text preamble before the verdict", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: `${"plain reviewer preamble ".repeat(160)}\n\n## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone`,
         },
       },
     });

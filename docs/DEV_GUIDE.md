@@ -495,6 +495,13 @@ curl -s http://localhost:3000/api/v1/state | jq '{
   records the selected execution preset (`standard` or `high-risk`) so reports,
   dashboards, and replay tooling can distinguish the selected metadata from the
   actual lane command budget.
+- `review_routing.decorrelationBasis.authorFamilies` canonicalizes author
+  provenance with token-boundary model-family matching. Recognized tokens are
+  OpenAI/Codex (`codex`, `openai`, `gpt` including separator-delimited
+  variants such as `gpt-*`), Anthropic (`anthropic`, `claude`, `opus`,
+  `sonnet`), and Pi/DeepSeek (`pi`, `deepseek`). Wrapper names and transport
+  labels such as `myopenaiclient`, `claudewrapper`, or `local-api` remain their
+  explicit provenance string instead of collapsing into a canonical family.
 
 - `explicit_resume_required` lists every parked issue with the `reason`
   (e.g. `hard_stop:token_budget`, `operator_input_required`,

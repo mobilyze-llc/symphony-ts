@@ -53,6 +53,13 @@ const ARTIFACT_SECTION_HEADING_KEYS = new Set(
 // `_`-suffixed identifiers.
 const DIFF_INJECTION_TOKEN_PATTERN =
   /(DIFF_DATA|SYMPHONY_UNTRUSTED_DIFF|diff --git)/;
+const OPENAI_CODEX_PROVENANCE_PATTERN =
+  /(?:^|[^a-z0-9])(?:codex|openai|gpt)(?=$|[^a-z0-9])/;
+const ANTHROPIC_PROVENANCE_PATTERN =
+  /(?:^|[^a-z0-9])(?:anthropic|claude|opus|sonnet)(?=$|[^a-z0-9])/;
+const PI_PROVENANCE_PATTERN = /(?:^|[^a-z0-9])(?:deepseek|pi)(?=$|[^a-z0-9])/;
+const MAX_SAFE_ARTIFACT_PREAMBLE_CHARS = 3_000;
+const MAX_SAFE_ARTIFACT_PREAMBLE_LINES = 12;
 const execFileAsync = promisify(execFile);
 
 export type HeadlessGateVerdict = "pass" | "fail" | "error";
@@ -2038,13 +2045,13 @@ function provenanceModelFamily(
 ): string | null {
   const text =
     `${entry.agent ?? ""} ${entry.modelFamily ?? ""} ${entry.model ?? ""}`.toLowerCase();
-  if (/\bcodex\b|openai|gpt-/.test(text)) {
+  if (OPENAI_CODEX_PROVENANCE_PATTERN.test(text)) {
     return "openai-codex";
   }
-  if (/claude|anthropic|opus|sonnet/.test(text)) {
+  if (ANTHROPIC_PROVENANCE_PATTERN.test(text)) {
     return "anthropic";
   }
-  if (/(?:^|[^a-z0-9])(?:deepseek|pi)(?=$|[^a-z0-9])/.test(text)) {
+  if (PI_PROVENANCE_PATTERN.test(text)) {
     return "pi";
   }
   return entry.modelFamily ?? entry.agent ?? null;
@@ -4840,7 +4847,7 @@ function isPlainTextArtifactPreamble(preamble: string): boolean {
   if (trimmed === "") {
     return true;
   }
-  if (trimmed.length > 500) {
+  if (trimmed.length > MAX_SAFE_ARTIFACT_PREAMBLE_CHARS) {
     return false;
   }
 
@@ -4848,14 +4855,25 @@ function isPlainTextArtifactPreamble(preamble: string): boolean {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line !== "");
-  if (lines.length > 3) {
+  if (lines.length > MAX_SAFE_ARTIFACT_PREAMBLE_LINES) {
     return false;
   }
 
-  return lines.every(
-    (line) =>
-      !/^(#{1,6}\s|`{3,}|~{3,}|[-*+]\s|\d+[.)]\s|>\s|\|)/.test(line) &&
-      !DIFF_INJECTION_TOKEN_PATTERN.test(line),
+  return lines.every(isSafeArtifactPreambleLine);
+}
+
+function isSafeArtifactPreambleLine(line: string): boolean {
+  if (DIFF_INJECTION_TOKEN_PATTERN.test(line)) {
+    return false;
+  }
+
+  const proseLine = line.replace(/^(?:[-*+]\s+|\d+[.)]\s+)/, "");
+  if (/^(#{1,6}\s|`{3,}|~{3,}|>\s|\|)/.test(proseLine)) {
+    return false;
+  }
+
+  return !ARTIFACT_SECTION_HEADING_KEYS.has(
+    normalizeArtifactHeadingText(proseLine),
   );
 }
 
