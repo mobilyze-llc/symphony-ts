@@ -132,6 +132,77 @@ describe("parseCouncilReviewGateArgs", () => {
     });
   });
 
+  it("parses Council v2 routing controls", () => {
+    expect(
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "SYMPH-445",
+          "--artifact-dir",
+          "/tmp/review",
+          "--routing-mode",
+          "high-risk",
+          "--operator-override-reason",
+          "operator accepts narrower high-risk routing for this run",
+        ],
+        "/cwd",
+      ),
+    ).toEqual({
+      issueId: "SYMPH-445",
+      artifactDir: "/tmp/review",
+      workspace: "/cwd",
+      routingMode: "high-risk",
+      operatorOverrideReason:
+        "operator accepts narrower high-risk routing for this run",
+      riskContractArtifactPaths: [],
+      allowedChangePatterns: [],
+    });
+  });
+
+  it("parses author family provenance for Council v2 decorrelation", () => {
+    expect(
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "SYMPH-445",
+          "--artifact-dir",
+          "/tmp/review",
+          "--author-family",
+          "openai-codex",
+          "--author-family",
+          "pi",
+        ],
+        "/cwd",
+      ),
+    ).toEqual({
+      issueId: "SYMPH-445",
+      artifactDir: "/tmp/review",
+      workspace: "/cwd",
+      provenance: [
+        {
+          role: "implementer",
+          agent: null,
+          modelFamily: "openai-codex",
+          model: null,
+          reasoningEffort: null,
+          sourceStage: "implement",
+          commitRange: null,
+        },
+        {
+          role: "implementer",
+          agent: null,
+          modelFamily: "pi",
+          model: null,
+          reasoningEffort: null,
+          sourceStage: "implement",
+          commitRange: null,
+        },
+      ],
+      riskContractArtifactPaths: [],
+      allowedChangePatterns: [],
+    });
+  });
+
   it("parses journal append metadata", () => {
     expect(
       parseCouncilReviewGateArgs(
@@ -245,6 +316,22 @@ describe("parseCouncilReviewGateArgs", () => {
     ).toThrow('--codex-excavation-sweep must be "standard" or "high-risk"');
   });
 
+  it("rejects unknown Council v2 routing modes", () => {
+    expect(() =>
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "SYMPH-445",
+          "--artifact-dir",
+          "/tmp/review",
+          "--routing-mode",
+          "opus-ish",
+        ],
+        "/cwd",
+      ),
+    ).toThrow("--routing-mode must be one of:");
+  });
+
   it("rejects review loop flags in freshness assertion mode", () => {
     expect(() =>
       parseCouncilReviewGateArgs(
@@ -296,7 +383,27 @@ describe("parseCouncilReviewGateArgs", () => {
         ],
         "/cwd",
       ),
-    ).toThrow("Codex lane flags are only valid");
+    ).toThrow("Codex lane and routing flags are only valid");
+  });
+
+  it("rejects routing flags in freshness assertion mode", () => {
+    expect(() =>
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "MOB-88",
+          "--artifact-dir",
+          "/tmp/review",
+          "--assert-fresh-review",
+          "/tmp/review-result.json",
+          "--routing-mode",
+          "standard",
+          "--author-family",
+          "openai-codex",
+        ],
+        "/cwd",
+      ),
+    ).toThrow("Codex lane and routing flags are only valid");
   });
 
   it("rejects journal metadata without journal append root", () => {
@@ -545,6 +652,9 @@ describe("parseCouncilReviewGateArgs", () => {
     expect(() => parseCouncilReviewGateArgs(["--help"], "/cwd")).toThrow(
       /--journal-workspace-root DIR[\s\S]*fail closed on append errors/,
     );
+    expect(() => parseCouncilReviewGateArgs(["--help"], "/cwd")).toThrow(
+      /fast currently uses Standard lane selection/,
+    );
   });
 
   it("recognizes direct bin execution through symlink paths", async () => {
@@ -581,6 +691,7 @@ function cliReviewResult(): HeadlessCouncilGateResult {
       mode: "full",
       verdict: "pass",
     },
+    review_routing: null,
     review_bundle: null,
     targeted_convergence: null,
     lanes: [],

@@ -14,9 +14,20 @@ import {
   assertFreshCouncilReview,
   defaultReviewerLanes,
   execFileCommand,
-  runHeadlessCouncilGate,
+  runHeadlessCouncilGate as runHeadlessCouncilGateImpl,
 } from "../../src/review/headless-council-gate.js";
 import { stableJsonStringify } from "../../src/review/stable-json.js";
+
+const runHeadlessCouncilGate: typeof runHeadlessCouncilGateImpl = (
+  input,
+  dependencies,
+) =>
+  runHeadlessCouncilGateImpl(
+    input.provenance === undefined
+      ? { ...input, provenance: [humanImplementerProvenance()] }
+      : input,
+    dependencies,
+  );
 
 describe("runHeadlessCouncilGate", () => {
   it("allows default reviewer lane models to be overridden by environment", () => {
@@ -32,11 +43,6 @@ describe("runHeadlessCouncilGate", () => {
         SYMPHONY_COUNCIL_CODEX_EXCAVATION_REASONING_EFFORT: "medium",
       }),
     ).toEqual([
-      expect.objectContaining({
-        laneId: "claude-opus",
-        model: "opus-test",
-        profile: "artifact-contract",
-      }),
       expect.objectContaining({
         laneId: "pi-deepseek",
         provider: "alt-provider",
@@ -57,11 +63,28 @@ describe("runHeadlessCouncilGate", () => {
         independentReviewer: false,
       }),
     ]);
+    expect(
+      defaultReviewerLanes({
+        SYMPHONY_COUNCIL_FORCE_LEGACY: "1",
+        SYMPHONY_COUNCIL_CLAUDE_MODEL: "opus-test",
+        SYMPHONY_COUNCIL_CLAUDE_PROFILE: "artifact-contract",
+      })[0],
+    ).toMatchObject({
+      laneId: "claude-opus",
+      model: "opus-test",
+      profile: "artifact-contract",
+    });
   });
 
   it("configures Codex excavation timeout and budget presets explicitly", async () => {
     expect(
       defaultReviewerLanes({
+        SYMPHONY_COUNCIL_CODEX_EXCAVATION_ENABLED: "false",
+      }).map((lane) => lane.laneId),
+    ).toEqual(["pi-deepseek"]);
+    expect(
+      defaultReviewerLanes({
+        SYMPHONY_COUNCIL_FORCE_LEGACY: "1",
         SYMPHONY_COUNCIL_CODEX_EXCAVATION_ENABLED: "false",
       }).map((lane) => lane.laneId),
     ).toEqual(["claude-opus", "pi-deepseek"]);
@@ -110,7 +133,535 @@ describe("runHeadlessCouncilGate", () => {
     );
   });
 
-  it("runs Claude, Pi, Codex excavation, and Codex lead through cmux-spawn and writes artifacts", async () => {
+  it("routes Codex-authored Standard reviews through Pi and Codex without Opus", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [codexImplementerProvenance()],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+    ]);
+    expect(
+      harness.commands.some(
+        (command) =>
+          command.args[0] === "run" &&
+          command.args[command.args.indexOf("--agent") + 1] === "claude",
+      ),
+    ).toBe(false);
+    expect(result.review_metadata).toMatchObject({
+      mode: "full",
+      routing_mode: "standard",
+    });
+    expect(result.review_routing).toMatchObject({
+      mode: "standard",
+      selectedLanes: [
+        expect.objectContaining({ laneId: "pi-deepseek", required: true }),
+        expect.objectContaining({
+          laneId: "codex-excavation",
+          decorrelatedSignal: false,
+        }),
+        expect.objectContaining({ laneId: "codex-high-lead" }),
+      ],
+      skippedLanes: [
+        expect.objectContaining({
+          laneId: "claude-opus",
+          reason: "standard_mode_routes_off_opus",
+        }),
+      ],
+      escalationPredicates: ["codex_author_codex_lead_tripwire"],
+      decorrelationBasis: {
+        authorFamilies: ["openai-codex"],
+        requiredReviewerLaneIds: ["pi-deepseek"],
+        directSignalLaneIds: ["codex-excavation", "codex-high-lead"],
+        decorrelatedReviewerArtifacts: [
+          {
+            laneId: "pi-deepseek",
+            agent: "pi",
+            modelFamily: "pi",
+          },
+        ],
+        mergeEligible: true,
+      },
+    });
+    const persisted = JSON.parse(
+      await readFile(result.artifactPaths.resultJson, "utf-8"),
+    ) as { review_routing: { mode: string } };
+    expect(persisted.review_routing.mode).toBe("standard");
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain("## Review Routing");
+    expect(report).toContain("- Mode: standard");
+    expect(report).toContain("claude-opus:standard_mode_routes_off_opus");
+  });
+
+  it("documents fast routing as Standard lane selection with explicit fast metadata", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        routingMode: "fast",
+        provenance: [codexImplementerProvenance()],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+    ]);
+    expect(result.review_metadata).toMatchObject({
+      mode: "full",
+      routing_mode: "fast",
+    });
+    expect(result.review_routing).toMatchObject({
+      mode: "fast",
+      skippedLanes: [
+        expect.objectContaining({
+          laneId: "claude-opus",
+          reason: "fast_mode_routes_off_opus",
+        }),
+      ],
+      decorrelationBasis: {
+        requiredReviewerLaneIds: ["pi-deepseek"],
+        decorrelatedReviewerArtifacts: [
+          expect.objectContaining({ laneId: "pi-deepseek" }),
+        ],
+        mergeEligible: true,
+      },
+    });
+  });
+
+  it("escalates high-risk Codex-authored reviews to Opus", async () => {
+    const harness = await createHarness();
+    await writeFile(
+      harness.diffPath,
+      "diff --git a/src/orchestrator/core.ts b/src/orchestrator/core.ts\n+const risk = true;\n",
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [codexImplementerProvenance()],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "claude-opus",
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+    ]);
+    expect(result.review_routing).toMatchObject({
+      mode: "high-risk",
+      escalationPredicates: [
+        "high_risk_predicate",
+        "codex_author_codex_lead_tripwire",
+      ],
+      highRiskPredicate: {
+        triggerHits: [
+          "high_risk_path",
+          "journal_producer",
+          "journal_replay_reducer",
+        ],
+        matchedPaths: ["src/orchestrator/core.ts"],
+      },
+    });
+    const codexExcavationCommand = harness.commands.find(
+      (command) =>
+        command.args[0] === "run" &&
+        readFlag(command.args, "--lane-id") === "codex-excavation",
+    )!;
+    expect(readFlag(codexExcavationCommand.args, "--timeout-seconds")).toBe(
+      "3600",
+    );
+  });
+
+  it("fails closed when a required reviewer lane is same-family with the author", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [
+          {
+            role: "implementer",
+            agent: "pi",
+            modelFamily: "pi",
+            model: "deepseek-v4-pro",
+            reasoningEffort: "high",
+            sourceStage: "implement",
+            commitRange: null,
+          },
+        ],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "routing_absent_decorrelated_reviewer_artifact",
+    );
+    expect(result.degradedConditions).toContain(
+      "routing_required_lane_not_decorrelated:pi-deepseek",
+    );
+    expect(result.review_routing).toMatchObject({
+      mode: "standard",
+      decorrelationBasis: {
+        authorFamilies: ["pi"],
+        requiredReviewerLaneIds: ["pi-deepseek"],
+        decorrelatedReviewerArtifacts: [],
+        mergeEligible: false,
+      },
+      escalationPredicates: ["absent_decorrelated_reviewer_artifact"],
+    });
+  });
+
+  it("fails closed when author family provenance is missing", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "routing_author_provenance_missing",
+    );
+    expect(result.degradedConditions).toContain(
+      "routing_required_lane_not_decorrelated:pi-deepseek",
+    );
+    expect(result.review_routing).toMatchObject({
+      mode: "standard",
+      decorrelationBasis: {
+        authorFamilies: [],
+        requiredReviewerLaneIds: ["pi-deepseek"],
+        decorrelatedReviewerArtifacts: [],
+        mergeEligible: false,
+        summary:
+          "Review is not merge-eligible: author model family provenance is missing.",
+      },
+      escalationPredicates: ["absent_decorrelated_reviewer_artifact"],
+    });
+  });
+
+  it("classifies implementer provenance without requiring source stage text", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [
+          {
+            role: "implementer",
+            agent: "codex",
+            modelFamily: "openai-codex",
+            model: "codex-low",
+            reasoningEffort: "low",
+            sourceStage: null,
+            commitRange: null,
+          },
+        ],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.review_routing).toMatchObject({
+      decorrelationBasis: {
+        authorFamilies: ["openai-codex"],
+        mergeEligible: true,
+      },
+      escalationPredicates: ["codex_author_codex_lead_tripwire"],
+    });
+  });
+
+  it("escalates disagreement to Opus with a recorded predicate", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "pi-deepseek": {
+          artifact:
+            "## Verdict\nFINDINGS\n\n## P1 Must Fix\n- file.ts:1 loses a required reviewer artifact. confidence: 0.95\n",
+        },
+        "codex-high-lead": {
+          artifact: "## Verdict\nPASS\n\n## Triage\nNone\n\n## Track\nNone\n",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+      "claude-opus",
+    ]);
+    expect(result.review_routing).toMatchObject({
+      mode: "standard",
+      escalationPredicates: expect.arrayContaining([
+        "p1_verdict_disagreement",
+        "absent_decorrelated_reviewer_artifact",
+      ]),
+      selectedLanes: expect.arrayContaining([
+        expect.objectContaining({ laneId: "claude-opus", required: true }),
+      ]),
+    });
+    const bundle = JSON.parse(
+      await readFile(result.artifactPaths.reviewBundle!, "utf-8"),
+    ) as { target: { routingMode: string | null } };
+    expect(bundle.target.routingMode).toBe(result.review_routing?.mode);
+    expect(result.termination).toMatchObject({
+      status: "continue",
+      reason: "blocking_findings",
+      action: "continue_fix_loop",
+      blockingFindingCount: 1,
+    });
+  });
+
+  it("records operator override when high-risk Codex-authored routing accepts narrower risk", async () => {
+    const harness = await createHarness();
+    await writeFile(
+      harness.diffPath,
+      "diff --git a/src/orchestrator/core.ts b/src/orchestrator/core.ts\n+const risk = true;\n",
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [codexImplementerProvenance()],
+        env: {
+          SYMPHONY_COUNCIL_ACCEPT_NARROWER_RISK: "1",
+          SYMPHONY_COUNCIL_OPERATOR_OVERRIDE_REASON:
+            "operator accepts Pi-only decorrelation for this canary",
+        },
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+    ]);
+    expect(result.review_routing).toMatchObject({
+      mode: "high-risk",
+      operatorOverrideReason:
+        "operator accepts Pi-only decorrelation for this canary",
+      skippedLanes: [
+        expect.objectContaining({
+          laneId: "claude-opus",
+          reason: "operator_override_accept_narrower_high_risk",
+        }),
+      ],
+      escalationPredicates: [
+        "high_risk_predicate",
+        "codex_author_codex_lead_tripwire",
+        "operator_override_accept_narrower_risk",
+      ],
+      decorrelationBasis: {
+        decorrelatedReviewerArtifacts: [
+          expect.objectContaining({ laneId: "pi-deepseek" }),
+        ],
+        mergeEligible: true,
+      },
+    });
+  });
+
+  it("requires an override reason before high-risk Codex-authored routing accepts narrower risk", async () => {
+    const harness = await createHarness();
+    await writeFile(
+      harness.diffPath,
+      "diff --git a/src/orchestrator/core.ts b/src/orchestrator/core.ts\n+const risk = true;\n",
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [codexImplementerProvenance()],
+        env: {
+          SYMPHONY_COUNCIL_ACCEPT_NARROWER_RISK: "1",
+        },
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "claude-opus",
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+    ]);
+    expect(result.review_routing).toMatchObject({
+      mode: "high-risk",
+      operatorOverrideReason: null,
+      skippedLanes: [],
+      escalationPredicates: [
+        "high_risk_predicate",
+        "codex_author_codex_lead_tripwire",
+      ],
+    });
+  });
+
+  it("still escalates disagreement when high-risk routing accepts narrower risk", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "pi-deepseek": {
+          artifact:
+            "## Verdict\nFINDINGS\n\n## P1 Must Fix\n- file.ts:1 loses a required reviewer artifact. confidence: 0.95\n",
+        },
+        "codex-high-lead": {
+          artifact: "## Verdict\nPASS\n\n## Triage\nNone\n\n## Track\nNone\n",
+        },
+      },
+    });
+    await writeFile(
+      harness.diffPath,
+      "diff --git a/src/orchestrator/core.ts b/src/orchestrator/core.ts\n+const risk = true;\n",
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [codexImplementerProvenance()],
+        env: {
+          SYMPHONY_COUNCIL_ACCEPT_NARROWER_RISK: "1",
+          SYMPHONY_COUNCIL_OPERATOR_OVERRIDE_REASON:
+            "operator accepts Pi-only decorrelation until disagreement",
+        },
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+      "claude-opus",
+    ]);
+    expect(result.review_routing).toMatchObject({
+      mode: "high-risk",
+      escalationPredicates: expect.arrayContaining([
+        "operator_override_accept_narrower_risk",
+        "p1_verdict_disagreement",
+      ]),
+      selectedLanes: expect.arrayContaining([
+        expect.objectContaining({ laneId: "claude-opus", required: true }),
+      ]),
+      skippedLanes: expect.not.arrayContaining([
+        expect.objectContaining({ laneId: "claude-opus" }),
+      ]),
+    });
+  });
+
+  it("uses legacy routing when the operator forces legacy mode", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        env: { SYMPHONY_COUNCIL_FORCE_LEGACY: "1" },
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "claude-opus",
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+    ]);
+    expect(result.review_routing).toMatchObject({
+      mode: "legacy",
+      escalationPredicates: ["operator_force"],
+    });
+  });
+
+  it("uses Opus routing when the operator forces Opus", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        routingMode: "standard",
+        env: { SYMPHONY_COUNCIL_FORCE_OPUS: "1" },
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "claude-opus",
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+    ]);
+    expect(result.review_routing).toMatchObject({
+      mode: "high-risk",
+      skippedLanes: [],
+      escalationPredicates: ["operator_force"],
+      highRiskPredicate: {
+        triggerHits: [],
+        matchedPaths: [],
+      },
+    });
+  });
+
+  it("runs legacy Claude, Pi, Codex excavation, and Codex lead through cmux-spawn and writes artifacts", async () => {
     const harness = await createHarness({
       laneBehavior: {
         "claude-opus": {
@@ -144,7 +695,9 @@ describe("runHeadlessCouncilGate", () => {
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
         cmuxSpawnBin: "/tmp/cmux-spawn",
+        routingMode: "legacy",
         provenance: [
+          humanImplementerProvenance(),
           {
             role: "reviewer",
             agent: undefined as unknown as string | null,
@@ -299,6 +852,7 @@ describe("runHeadlessCouncilGate", () => {
         base_sha: null,
         round: 1,
         mode: "full",
+        routing_mode: "legacy",
         verdict: "pass",
       },
       review_bundle: {
@@ -357,6 +911,7 @@ describe("runHeadlessCouncilGate", () => {
         exitCode: 0,
       },
       provenance: [
+        humanImplementerProvenance(),
         {
           role: "reviewer",
           agent: null,
@@ -502,6 +1057,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        routingMode: "legacy",
       },
       { runCommand: harness.runCommand },
     );
@@ -1204,6 +1760,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        routingMode: "legacy",
       },
       { runCommand: harness.runCommand },
     );
@@ -1238,6 +1795,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        routingMode: "legacy",
       },
       { runCommand: harness.runCommand },
     );
@@ -1263,6 +1821,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        routingMode: "legacy",
       },
       { runCommand: harness.runCommand },
     );
@@ -1302,6 +1861,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        routingMode: "legacy",
       },
       { runCommand: harness.runCommand },
     );
@@ -1355,6 +1915,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        routingMode: "legacy",
       },
       { runCommand: harness.runCommand },
     );
@@ -1414,6 +1975,7 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        routingMode: "legacy",
       },
       { runCommand: harness.runCommand },
     );
@@ -2929,6 +3491,8 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
       },
       { runCommand: harness.runCommand },
     );
@@ -2958,6 +3522,8 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
       },
       { runCommand: harness.runCommand },
     );
@@ -3011,6 +3577,8 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
       },
       { runCommand: harness.runCommand },
     );
@@ -3040,6 +3608,8 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
       },
       { runCommand: harness.runCommand },
     );
@@ -3069,6 +3639,8 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
       },
       { runCommand: harness.runCommand },
     );
@@ -3097,6 +3669,8 @@ describe("runHeadlessCouncilGate", () => {
         workspace: harness.workspace,
         artifactDir: harness.artifactDir,
         diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
       },
       { runCommand: harness.runCommand },
     );
@@ -3182,7 +3756,7 @@ describe("runHeadlessCouncilGate", () => {
       harness.commands
         .filter((command) => command.args[0] === "run")
         .map((command) => command.timeoutMs),
-    ).toEqual([63_000, 63_000, 63_000, 63_000]);
+    ).toEqual([63_000, 63_000, 63_000]);
   });
 
   it("supports a single decorrelated reviewer for low-risk gates", async () => {
@@ -3235,6 +3809,7 @@ describe("runHeadlessCouncilGate", () => {
       base_sha: null,
       round: 2,
       mode: "convergence",
+      routing_mode: "standard",
       verdict: "pass",
     });
   });
@@ -3333,6 +3908,309 @@ describe("runHeadlessCouncilGate", () => {
       reviewMode: "convergence",
       reviewRound: 2,
     });
+  });
+
+  it("rejects pre-routing PASS artifacts that lack Council v2 routing evidence", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "head-sha",
+        }),
+        stderr: "",
+      },
+    });
+    const reviewResultPath = join(harness.artifactDir, "pre-routing.json");
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(
+        cleanReviewResult({
+          reviewedHeadSha: "head-sha",
+          includeRoutingEvidence: false,
+        }),
+        null,
+        2,
+      )}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha: "head-sha",
+      currentHeadSha: null,
+      guidance: "rerun convergence review against HEAD.",
+    });
+    expect(result.summary).toContain("review_routing evidence");
+  });
+
+  it("rejects Council v2 routing evidence that lacks required lane proof", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "head-sha",
+        }),
+        stderr: "",
+      },
+    });
+    const reviewResultPath = join(
+      harness.artifactDir,
+      "metadata-only-routing.json",
+    );
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(
+        cleanReviewResult({
+          reviewedHeadSha: "head-sha",
+          includeLaneEvidence: false,
+        }),
+        null,
+        2,
+      )}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha: "head-sha",
+      currentHeadSha: null,
+      guidance: "rerun convergence review against HEAD.",
+    });
+    expect(result.summary).toContain(
+      "lacks lane evidence for required reviewer lane: pi-deepseek",
+    );
+  });
+
+  it("rejects Council v2 routing evidence with an empty required lane set", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "head-sha",
+        }),
+        stderr: "",
+      },
+    });
+    const reviewResult = cleanReviewResult({
+      reviewedHeadSha: "head-sha",
+      includeLaneEvidence: false,
+    });
+    if (reviewResult.review_routing === null) {
+      throw new Error("expected routing evidence");
+    }
+    reviewResult.review_routing.decorrelationBasis.requiredReviewerLaneIds = [];
+    reviewResult.review_routing.decorrelationBasis.decorrelatedReviewerArtifacts =
+      [];
+    reviewResult.review_routing.decorrelationBasis.mergeEligible = true;
+    const reviewResultPath = join(
+      harness.artifactDir,
+      "self-certified-routing.json",
+    );
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(reviewResult, null, 2)}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha: "head-sha",
+      currentHeadSha: null,
+      guidance: "rerun convergence review against HEAD.",
+    });
+    expect(result.summary).toContain("lacks required reviewer lane evidence");
+  });
+
+  it("rejects Council v2 routing evidence that disables the non-author guarantee", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "head-sha",
+        }),
+        stderr: "",
+      },
+    });
+    const reviewResult = cleanReviewResult({
+      reviewedHeadSha: "head-sha",
+      includeLaneEvidence: false,
+    });
+    if (reviewResult.review_routing === null) {
+      throw new Error("expected routing evidence");
+    }
+    reviewResult.review_routing.decorrelationBasis.requiredNonAuthorFamilyReviewer = false;
+    reviewResult.review_routing.decorrelationBasis.requiredReviewerLaneIds = [];
+    reviewResult.review_routing.decorrelationBasis.decorrelatedReviewerArtifacts =
+      [];
+    reviewResult.review_routing.decorrelationBasis.mergeEligible = true;
+    const reviewResultPath = join(
+      harness.artifactDir,
+      "disabled-non-author-guarantee.json",
+    );
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(reviewResult, null, 2)}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha: "head-sha",
+      currentHeadSha: null,
+      guidance: "rerun convergence review against HEAD.",
+    });
+    expect(result.summary).toContain(
+      "does not require its non-author-family reviewer guarantee",
+    );
+  });
+
+  it("rejects malformed Council v2 artifacts with routing metadata but no routing object", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "head-sha",
+        }),
+        stderr: "",
+      },
+    });
+    const reviewResult = cleanReviewResult({ reviewedHeadSha: "head-sha" });
+    (reviewResult as { review_routing?: unknown }).review_routing = undefined;
+    const reviewResultPath = join(
+      harness.artifactDir,
+      "missing-routing-object.json",
+    );
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(reviewResult, null, 2)}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha: "head-sha",
+      currentHeadSha: null,
+      guidance: "rerun convergence review against HEAD.",
+    });
+    expect(result.summary).toContain("review_routing evidence");
+  });
+
+  it("rejects malformed Council v2 routing objects without throwing", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "head-sha",
+        }),
+        stderr: "",
+      },
+    });
+    const reviewResult = cleanReviewResult({ reviewedHeadSha: "head-sha" });
+    (reviewResult as { review_routing?: unknown }).review_routing = {
+      schemaVersion: 1,
+      mode: "standard",
+    };
+    const reviewResultPath = join(
+      harness.artifactDir,
+      "malformed-routing-object.json",
+    );
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(reviewResult, null, 2)}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha: "head-sha",
+      currentHeadSha: null,
+      guidance: "rerun convergence review against HEAD.",
+    });
+    expect(result.summary).toContain("malformed Council v2 review_routing");
   });
 
   it("rejects a clean review artifact from a different issue", async () => {
@@ -4660,6 +5538,30 @@ function codexExcavationLane(): HeadlessReviewerLaneConfig {
   };
 }
 
+function codexImplementerProvenance(): ReviewBundleProvenanceEntry {
+  return {
+    role: "implementer",
+    agent: "codex",
+    modelFamily: "openai-codex",
+    model: "codex-low",
+    reasoningEffort: "low",
+    sourceStage: "implement",
+    commitRange: null,
+  };
+}
+
+function humanImplementerProvenance(): ReviewBundleProvenanceEntry {
+  return {
+    role: "implementer",
+    agent: "human",
+    modelFamily: "human",
+    model: null,
+    reasoningEffort: null,
+    sourceStage: "implement",
+    commitRange: null,
+  };
+}
+
 function readFlag(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index === -1 ? undefined : args[index + 1];
@@ -4670,7 +5572,24 @@ function cleanReviewResult(options: {
   reviewedHeadSha: string;
   mode?: "full" | "convergence";
   round?: number;
+  includeRoutingEvidence?: boolean;
+  includeLaneEvidence?: boolean;
 }) {
+  const routingMode = "standard";
+  const includeRoutingEvidence = options.includeRoutingEvidence !== false;
+  const lanes =
+    includeRoutingEvidence && options.includeLaneEvidence !== false
+      ? [cleanPiLaneResult()]
+      : [];
+  const reviewMetadata = {
+    reviewed_head_sha: options.reviewedHeadSha,
+    previous_reviewed_head_sha: null,
+    base_sha: "base-sha",
+    round: options.round ?? 1,
+    mode: options.mode ?? "full",
+    ...(includeRoutingEvidence ? { routing_mode: routingMode } : {}),
+    verdict: "pass",
+  };
   return {
     schemaVersion: 1,
     issueId: options.issueId ?? "MOB-88",
@@ -4683,14 +5602,39 @@ function cleanReviewResult(options: {
       baseRef: "main",
       headRef: "codex/MOB-88-headless-cmux-council-gate",
     },
-    review_metadata: {
-      reviewed_head_sha: options.reviewedHeadSha,
-      previous_reviewed_head_sha: null,
-      base_sha: "base-sha",
-      round: options.round ?? 1,
-      mode: options.mode ?? "full",
-      verdict: "pass",
-    },
+    review_metadata: reviewMetadata,
+    review_routing: includeRoutingEvidence
+      ? {
+          schemaVersion: 1,
+          mode: routingMode,
+          selectedLanes: [],
+          skippedLanes: [],
+          decorrelationBasis: {
+            authorFamilies: ["openai-codex"],
+            requiredNonAuthorFamilyReviewer: true,
+            requiredReviewerLaneIds: ["pi-deepseek"],
+            directSignalLaneIds: ["codex-excavation", "codex-high-lead"],
+            decorrelatedReviewerArtifacts: [
+              {
+                laneId: "pi-deepseek",
+                agent: "pi",
+                modelFamily: "pi",
+              },
+            ],
+            mergeEligible: true,
+            summary:
+              "Merge-eligible decorrelated reviewer artifact(s): pi-deepseek.",
+          },
+          escalationPredicates: [],
+          operatorOverrideReason: null,
+          highRiskPredicate: {
+            triggerHits: [],
+            matchedPaths: [],
+            matches: [],
+          },
+          leadConfidenceThreshold: 0.7,
+        }
+      : null,
     review_bundle: {
       path: "/tmp/council/review-bundle.json",
       hash: "0".repeat(64),
@@ -4698,17 +5642,79 @@ function cleanReviewResult(options: {
       hashAlgorithm: "sha256",
     },
     targeted_convergence: null,
-    lanes: [],
+    lanes,
     degradedConditions: [],
     artifactPaths: {
       artifactDir: "/tmp/council",
       diff: "/tmp/council/diff.patch",
       reviewBundle: "/tmp/council/review-bundle.json",
-      structuredArtifacts: [],
+      structuredArtifacts: lanes.flatMap((lane) =>
+        lane.structuredArtifactPath === undefined ||
+        lane.structuredArtifactPath === null
+          ? []
+          : [lane.structuredArtifactPath],
+      ),
       resultJson: "/tmp/council/review-result.json",
       councilReport: "/tmp/council/council-report.md",
     },
-    summary: "Headless council review passed with 0 lanes.",
+    summary: `Headless council review passed with ${lanes.length} lanes.`,
+  };
+}
+
+function cleanPiLaneResult() {
+  return {
+    laneId: "pi-deepseek",
+    agent: "pi",
+    role: "deepseek-direct-reviewer",
+    model: "deepseek-v4-pro",
+    state: "complete",
+    verdict: "pass",
+    artifactPath: "/tmp/council/phase1-pi.md",
+    promptPath: "/tmp/council/phase1-pi-prompt.md",
+    stderrPath: "/tmp/council/phase1-pi.cli.stderr",
+    cliJsonPath: "/tmp/council/phase1-pi.cli.json",
+    reasoningEffort: "high",
+    independentReviewer: true,
+    message: null,
+    degradedReason: null,
+    reviewBundle: null,
+    wallTimeMs: 1000,
+    tokenUsage: null,
+    rawArtifactPath: "/tmp/council/phase1-pi.md",
+    structuredArtifactPath: "/tmp/council/phase1-pi.structured.json",
+    structuredArtifact: {
+      schemaVersion: 1,
+      kind: "symphony-headless-council-reviewer-artifact",
+      lane: {
+        laneId: "pi-deepseek",
+        agent: "pi",
+        role: "deepseek-direct-reviewer",
+        model: "deepseek-v4-pro",
+        modelFamily: "pi",
+        reasoningEffort: "high",
+        independentReviewer: true,
+      },
+      routing: {
+        mode: "full",
+        routingMode: "standard",
+        round: 1,
+      },
+      reviewBundle: null,
+      verdict: "pass",
+      confidence: 0.9,
+      parseStatus: "synthesized_from_markdown",
+      rawArtifactPath: "/tmp/council/phase1-pi.md",
+      malformedReason: null,
+      sections: {
+        p1: "None",
+        p2: "None",
+        track: "None",
+        dismissedOrTheoretical: "None",
+        triage: "None",
+      },
+      findings: [],
+      familySyntheses: [],
+    },
   };
 }
 

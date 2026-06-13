@@ -5,7 +5,10 @@ import { pathToFileURL } from "node:url";
 
 import { getDispatcherRunJournalPath } from "../logging/run-journal.js";
 import {
+  COUNCIL_ROUTING_MODES,
   type CouncilReviewMode,
+  type CouncilRoutingMode,
+  type ReviewBundleProvenanceEntry,
   assertFreshCouncilReview as assertFreshCouncilReviewImpl,
   runHeadlessCouncilGate as runHeadlessCouncilGateImpl,
 } from "../review/headless-council-gate.js";
@@ -33,6 +36,9 @@ interface ParsedArgs {
   codexExcavationModelAutoCompactTokenLimit?: number;
   round?: number;
   mode?: CouncilReviewMode;
+  routingMode?: CouncilRoutingMode;
+  operatorOverrideReason?: string;
+  provenance?: ReviewBundleProvenanceEntry[];
   previousReviewedHeadSha?: string;
   riskContractArtifactPaths: string[];
   assertFreshReview?: string;
@@ -133,6 +139,24 @@ export function parseCouncilReviewGateArgs(
     }
     if (token === "--mode") {
       parsed.mode = readMode(readValue(argv, ++index, token), token);
+      continue;
+    }
+    if (token === "--routing-mode") {
+      parsed.routingMode = readRoutingMode(
+        readValue(argv, ++index, token),
+        token,
+      );
+      continue;
+    }
+    if (token === "--operator-override-reason") {
+      parsed.operatorOverrideReason = readValue(argv, ++index, token);
+      continue;
+    }
+    if (token === "--author-family") {
+      parsed.provenance = [
+        ...(parsed.provenance ?? []),
+        authorFamilyProvenance(readValue(argv, ++index, token)),
+      ];
       continue;
     }
     if (token === "--previous-reviewed-head") {
@@ -267,10 +291,13 @@ export function parseCouncilReviewGateArgs(
       parsed.codexExcavationSweep !== undefined ||
       parsed.codexExcavationTimeoutSeconds !== undefined ||
       parsed.codexExcavationToolOutputTokenLimit !== undefined ||
-      parsed.codexExcavationModelAutoCompactTokenLimit !== undefined)
+      parsed.codexExcavationModelAutoCompactTokenLimit !== undefined ||
+      parsed.routingMode !== undefined ||
+      parsed.operatorOverrideReason !== undefined ||
+      parsed.provenance !== undefined)
   ) {
     throw new UsageError(
-      "Codex lane flags are only valid when running a council review, not with --assert-fresh-review.",
+      "Codex lane and routing flags are only valid when running a council review, not with --assert-fresh-review.",
     );
   }
   if (
@@ -401,6 +428,31 @@ function readMode(value: string, flag: string): CouncilReviewMode {
   throw new UsageError(`${flag} must be "full" or "convergence".`);
 }
 
+function readRoutingMode(value: string, flag: string): CouncilRoutingMode {
+  if (COUNCIL_ROUTING_MODES.includes(value as CouncilRoutingMode)) {
+    return value as CouncilRoutingMode;
+  }
+  throw new UsageError(
+    `${flag} must be one of: ${COUNCIL_ROUTING_MODES.join(", ")}.`,
+  );
+}
+
+function authorFamilyProvenance(family: string): ReviewBundleProvenanceEntry {
+  const normalized = family.trim();
+  if (normalized === "") {
+    throw new UsageError("--author-family requires a non-empty model family.");
+  }
+  return {
+    role: "implementer",
+    agent: null,
+    modelFamily: normalized,
+    model: null,
+    reasoningEffort: null,
+    sourceStage: "implement",
+    commitRange: null,
+  };
+}
+
 function readReviewJournalSource(
   value: string,
   flag: string,
@@ -457,6 +509,9 @@ function renderUsage(): string {
     "  --codex-excavation-model-auto-compact-token-limit N  Override Codex excavation auto-compact cap",
     "  --round N                     Council loop round number (default: 1)",
     "  --mode full|convergence       Council loop mode (default: full)",
+    "  --routing-mode fast|standard|high-risk|disagreement|legacy  Force Council v2 routing mode; fast currently uses Standard lane selection with fast metadata",
+    "  --operator-override-reason TEXT  Record the operator reason for force/override routing",
+    "  --author-family FAMILY       Author implementation model family; repeatable for Council v2 decorrelation evidence",
     "  --previous-reviewed-head SHA  Previous reviewed head SHA for convergence metadata",
     "  --risk-contract-artifact PATH Bounded risk-predicate state contract artifact path; repeatable",
     "  --assert-fresh-review PATH    Assert an existing clean review-result.json covers current HEAD",

@@ -297,7 +297,11 @@ function buildJournalContext(
     source,
     actor,
     round: result.review_metadata.round,
-    routingMode: result.review_metadata.mode,
+    routingMode:
+      result.review_routing?.mode ??
+      result.review_metadata.routing_mode ??
+      result.review_metadata.mode,
+    reviewRouting: result.review_routing,
     baseSha: result.review_metadata.base_sha,
     headSha: result.review_metadata.reviewed_head_sha,
     repo: result.pr.repo,
@@ -329,6 +333,30 @@ function baseMetadata(
     bundle_hash: context.bundleHash ?? undefined,
     routing_mode: context.routingMode,
     round: context.round,
+    selected_lanes: context.reviewRouting?.selectedLanes.map(
+      (lane) => lane.laneId,
+    ),
+    skipped_lanes: context.reviewRouting?.skippedLanes.map(
+      (lane) => `${lane.laneId}:${lane.reason}`,
+    ),
+    escalation_predicates: context.reviewRouting?.escalationPredicates,
+    operator_override_reason:
+      context.reviewRouting?.operatorOverrideReason ?? undefined,
+    decorrelation_merge_eligible:
+      context.reviewRouting?.decorrelationBasis.mergeEligible,
+    decorrelation_summary:
+      context.reviewRouting?.decorrelationBasis.summary ?? undefined,
+    decorrelated_reviewer_lanes:
+      context.reviewRouting?.decorrelationBasis.decorrelatedReviewerArtifacts.map(
+        (artifact) => artifact.laneId,
+      ),
+    direct_signal_lanes:
+      context.reviewRouting?.decorrelationBasis.directSignalLaneIds,
+    author_families: context.reviewRouting?.decorrelationBasis.authorFamilies,
+    high_risk_predicate_triggers:
+      context.reviewRouting?.highRiskPredicate.triggerHits,
+    high_risk_predicate_paths:
+      context.reviewRouting?.highRiskPredicate.matchedPaths,
   });
 }
 

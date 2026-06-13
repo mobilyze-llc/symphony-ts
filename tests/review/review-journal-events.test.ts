@@ -89,6 +89,42 @@ describe("review journal events", () => {
     expect(serialized).not.toContain("raw reviewer rationale");
   });
 
+  it("records Council v2 routing metadata in review journal entries", () => {
+    const result = reviewResult({
+      verdict: "pass",
+      artifact: structuredArtifact({
+        verdict: "pass",
+        findingIntroducedIn: "original_diff",
+      }),
+    });
+    result.review_metadata.routing_mode = "standard";
+    result.review_routing = standardReviewRouting();
+
+    const entries = buildReviewJournalEntries(result, {
+      issueIdentifier: "SYMPH-445",
+      ownerId: "worker-1",
+      source: "pipeline",
+    });
+
+    expect(entries[0]?.metadata).toMatchObject({
+      routing_mode: "standard",
+      selected_lanes: ["pi-deepseek", "codex-excavation", "codex-high-lead"],
+      skipped_lanes: ["claude-opus:standard_mode_routes_off_opus"],
+      escalation_predicates: ["codex_author_codex_lead_tripwire"],
+      decorrelation_merge_eligible: true,
+      decorrelated_reviewer_lanes: ["pi-deepseek"],
+      direct_signal_lanes: ["codex-excavation", "codex-high-lead"],
+      author_families: ["openai-codex"],
+      high_risk_predicate_triggers: [],
+      high_risk_predicate_paths: [],
+    });
+    expect(entries.at(-1)?.metadata).toMatchObject({
+      routing_mode: "standard",
+      decorrelation_summary:
+        "Merge-eligible decorrelated reviewer artifact(s): pi-deepseek.",
+    });
+  });
+
   it("appends, replays, and projects safe review metadata through state delta", async () => {
     const workspaceRoot = await mkdtemp(
       join(tmpdir(), "symphony-review-journal-"),
@@ -708,6 +744,7 @@ function reviewResult(input: {
       mode: input.mode ?? "full",
       verdict: input.verdict,
     },
+    review_routing: null,
     review_bundle: {
       path: "/tmp/review-bundle.json",
       hash: "bundle-file-hash",
@@ -814,6 +851,71 @@ function defaultTerminationAssessment(
   };
 }
 
+function standardReviewRouting(): NonNullable<
+  HeadlessCouncilGateResult["review_routing"]
+> {
+  return {
+    schemaVersion: 1,
+    mode: "standard",
+    selectedLanes: [
+      {
+        laneId: "pi-deepseek",
+        agent: "pi",
+        role: "deepseek-direct-reviewer",
+        required: true,
+        decorrelatedSignal: true,
+        reason: "non_author_family_reviewer_artifact",
+      },
+      {
+        laneId: "codex-excavation",
+        agent: "codex",
+        role: "codex-edge-case-excavation",
+        required: false,
+        decorrelatedSignal: false,
+        reason: "direct_codex_excavation_signal",
+      },
+      {
+        laneId: "codex-high-lead",
+        agent: "codex",
+        role: "codex-lead-triage",
+        required: false,
+        decorrelatedSignal: false,
+        reason: "codex_lead_triage",
+      },
+    ],
+    skippedLanes: [
+      {
+        laneId: "claude-opus",
+        agent: "claude",
+        reason: "standard_mode_routes_off_opus",
+      },
+    ],
+    decorrelationBasis: {
+      authorFamilies: ["openai-codex"],
+      requiredNonAuthorFamilyReviewer: true,
+      requiredReviewerLaneIds: ["pi-deepseek"],
+      directSignalLaneIds: ["codex-excavation", "codex-high-lead"],
+      decorrelatedReviewerArtifacts: [
+        {
+          laneId: "pi-deepseek",
+          agent: "pi",
+          modelFamily: "pi",
+        },
+      ],
+      mergeEligible: true,
+      summary: "Merge-eligible decorrelated reviewer artifact(s): pi-deepseek.",
+    },
+    escalationPredicates: ["codex_author_codex_lead_tripwire"],
+    operatorOverrideReason: null,
+    highRiskPredicate: {
+      triggerHits: [],
+      matchedPaths: [],
+      matches: [],
+    },
+    leadConfidenceThreshold: 0.7,
+  };
+}
+
 function targetedConvergenceHypothesis(): TargetedConvergenceHypothesis {
   return {
     schemaVersion: 1,
@@ -877,6 +979,7 @@ function structuredArtifact(input: {
     },
     routing: {
       mode: "full",
+      routingMode: null,
       round: 1,
     },
     reviewBundle: {
