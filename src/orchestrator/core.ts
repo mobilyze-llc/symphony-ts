@@ -112,6 +112,7 @@ import {
   mergeContinuousFeedbackCheckpoint,
 } from "./continuous-feedback.js";
 import {
+  DISPATCH_COMPARATOR_VERSION,
   computeDispatchOrder,
   sortIssuesForDispatch as sortIssuesForDispatchByPriorityFifo,
 } from "./dispatch-comparator.js";
@@ -1956,12 +1957,17 @@ export class OrchestratorCore {
       };
     }
 
-    const computedDispatchOrder =
-      await this.computeDispatchOrderForPoll(issues);
-
     // Check for pipeline-halt before dispatching
     const haltIssue = await this.checkPipelineHalt();
     if (haltIssue !== null) {
+      const computedDispatchOrder = await this.computeDispatchOrderForPoll(
+        issues,
+        {
+          ticketFeatureFetch: "skip",
+          ticketFeatureUnavailableReason:
+            "TicketFeature fetch skipped because pipeline halt blocks dispatch for this poll.",
+        },
+      );
       console.warn(
         `[orchestrator] Pipeline halted: ${haltIssue.identifier} — ${haltIssue.title}. Skipping all dispatch.`,
       );
@@ -2000,6 +2006,14 @@ export class OrchestratorCore {
     // below the configured floor (SYMPH-333). Running lanes are unaffected.
     const rateLimitGate = this.evaluateRateLimitAdmissionGate();
     if (rateLimitGate.blocked) {
+      const computedDispatchOrder = await this.computeDispatchOrderForPoll(
+        issues,
+        {
+          ticketFeatureFetch: "skip",
+          ticketFeatureUnavailableReason:
+            "TicketFeature fetch skipped because the rate-limit admission gate blocks dispatch for this poll.",
+        },
+      );
       console.warn(
         `[orchestrator] ${rateLimitGate.reason} Skipping all dispatch.`,
       );
@@ -2046,14 +2060,39 @@ export class OrchestratorCore {
       });
     }
 
+    const computedDispatchOrder =
+      await this.computeDispatchOrderForPoll(issues);
     const dispatchedIssueIds: string[] = [];
     const modeDecisions: RightSizingDecision[] = [];
     let eligibleCount = 0;
     const admittedSnapshots = this.buildRunningAdmissionSnapshots();
-    const sortedIssues = this.issuesFromComputedOrder(
+    const sortedIssuesFromOrder = this.issuesFromComputedOrder(
       computedDispatchOrder,
       issues,
     );
+    const sortedIssues = await this.requireComputedOrderDispatchCandidates({
+      candidates: sortedIssuesFromOrder,
+      computedOrder: computedDispatchOrder,
+      sourceIssues: issues,
+    });
+    if (sortedIssues === null) {
+      this.trackDispatchStarvation(issues.length, 0);
+      await this.recordQueueBaselineSample({
+        consideredIssues: [],
+        dispatchPicks: [],
+        computedOrder: computedDispatchOrder,
+        force: true,
+      });
+      return {
+        validation,
+        dispatchedIssueIds: [],
+        modeDecisions: [],
+        stopRequests: reconcileResult.stopRequests,
+        trackerFetchFailed: false,
+        reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
+        runningCount: Object.keys(this.state.running).length,
+      };
+    }
     const computedHeadIssue = sortedIssues[0] ?? null;
     let computedHeadReachedDispatchBoundary = false;
     for (const issue of sortedIssues) {
@@ -2158,12 +2197,20 @@ export class OrchestratorCore {
 
   private async computeDispatchOrderForPoll(
     issues: readonly Issue[],
+    options?: {
+      ticketFeatureFetch?: "fetch" | "skip";
+      ticketFeatureUnavailableReason?: string;
+    },
   ): Promise<ComputedDispatchOrderSnapshot> {
     let ticketFeatures: TicketFeature[] | undefined;
     let ticketFeatureUnavailableReason: string | null = null;
     if (this.tracker.fetchTicketFeatureIssuesByStates === undefined) {
       ticketFeatureUnavailableReason =
         "TicketFeature feed unavailable; preserving current blockedBy eligibility semantics.";
+    } else if (options?.ticketFeatureFetch === "skip") {
+      ticketFeatureUnavailableReason =
+        options.ticketFeatureUnavailableReason ??
+        "TicketFeature fetch skipped; preserving current blockedBy eligibility semantics.";
     } else {
       try {
         const sourceIssues =
@@ -2187,15 +2234,43 @@ export class OrchestratorCore {
       }
     }
 
-    const computedOrder = computeDispatchOrder({
-      issues,
-      anchors: this.state.issueAnchors,
-      ticketFeatures,
-      ticketFeatureUnavailableReason,
-      terminalStates: this.config.tracker.terminalStates,
-      completedIssueIds: this.state.completed,
-      now: this.now(),
-    });
+    let computedOrder: ComputedDispatchOrderSnapshot;
+    try {
+      computedOrder = computeDispatchOrder({
+        issues,
+        anchors: this.state.issueAnchors,
+        ticketFeatures,
+        ticketFeatureUnavailableReason,
+        terminalStates: this.config.tracker.terminalStates,
+        completedIssueIds: this.state.completed,
+        now: this.now(),
+      });
+    } catch (error) {
+      const formattedError = formatBoundedWarningError(error);
+      console.warn(
+        `[orchestrator] dispatch comparator failed; skipping dispatch for this poll: ${formattedError}`,
+      );
+      computedOrder = createDispatchComparatorFailureSnapshot({
+        generatedAt: this.now(),
+        warning: `Dispatch comparator failed; skipped dispatch for this poll: ${formattedError}`,
+      });
+      await this.recordDispatchComparatorSafetyEvent({
+        decisionId: `dispatch-comparator-exception:${this.nextRunJournalSequence()}`,
+        summary:
+          "Dispatch comparator failed closed; no new issue dispatches were admitted.",
+        reason: "The dispatch comparator threw while computing queue order.",
+        findingKinds: ["dispatch_comparator_exception"],
+        details: {
+          candidate_count: issues.length,
+          candidate_issue_ids: issues.map((issue) => issue.id),
+          candidate_issue_identifiers: issues.map((issue) => issue.identifier),
+          error: formattedError,
+        },
+        observedDecision: "skip_dispatch",
+        observedRationale:
+          "Comparator failure produced an empty computed-order snapshot, so no candidate reached admission.",
+      });
+    }
     this.state.computedDispatchOrder = computedOrder;
     return computedOrder;
   }
@@ -2208,6 +2283,49 @@ export class OrchestratorCore {
     return computedOrder.positions
       .map((position) => issueById.get(position.issue_id) ?? null)
       .filter((issue): issue is Issue => issue !== null);
+  }
+
+  private async requireComputedOrderDispatchCandidates(input: {
+    candidates: readonly Issue[];
+    computedOrder: ComputedDispatchOrderSnapshot;
+    sourceIssues: readonly Issue[];
+  }): Promise<Issue[] | null> {
+    const computedIssueIds = new Set(
+      input.computedOrder.positions.map((position) => position.issue_id),
+    );
+    const outsideSnapshot = input.candidates.filter(
+      (issue) => !computedIssueIds.has(issue.id),
+    );
+    if (outsideSnapshot.length === 0) {
+      return [...input.candidates];
+    }
+
+    const outsideSnapshotIdentifiers = outsideSnapshot
+      .map((issue) => issue.identifier)
+      .join(", ");
+    console.warn(
+      `[orchestrator] computed dispatch order invariant failed; ${outsideSnapshotIdentifiers} entered the dispatch loop outside the computed-order snapshot. Skipping all dispatch.`,
+    );
+    await this.recordDispatchComparatorSafetyEvent({
+      decisionId: `computed-order-snapshot-drift:${this.nextRunJournalSequence()}`,
+      summary:
+        "Dispatch loop candidate set drifted from computed-order snapshot; no new issue dispatches were admitted.",
+      reason:
+        "Every issue entering the dispatch loop must come from computedDispatchOrder.positions.",
+      findingKinds: ["computed_order_candidate_outside_snapshot"],
+      details: {
+        candidate_count: input.sourceIssues.length,
+        computed_order_issue_ids: [...computedIssueIds],
+        outside_snapshot_issue_ids: outsideSnapshot.map((issue) => issue.id),
+        outside_snapshot_issue_identifiers: outsideSnapshot.map(
+          (issue) => issue.identifier,
+        ),
+      },
+      observedDecision: "skip_dispatch",
+      observedRationale:
+        "Dispatch loop candidate drift would bypass comparator blocker gating, so the poll failed closed.",
+    });
+    return null;
   }
 
   private async recordOrderingDisagreementIfNeeded(input: {
@@ -7905,6 +8023,55 @@ export class OrchestratorCore {
     });
   }
 
+  private async recordDispatchComparatorSafetyEvent(input: {
+    decisionId: string;
+    summary: string;
+    reason: string;
+    findingKinds: string[];
+    details: Record<string, unknown>;
+    observedDecision: string;
+    observedRationale: string;
+  }): Promise<void> {
+    try {
+      await this.recordDispatcherDecisionEvent({
+        decisionId: input.decisionId,
+        category: "admission",
+        classifier: DISPATCH_COMPARATOR_VERSION,
+        issueId: PIPELINE_VERDICT_SCOPE_ID,
+        issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        summary: input.summary,
+        context: {
+          reason: input.reason,
+          triggerHits: [],
+          findingKinds: input.findingKinds,
+          files: [],
+          workerIds: [],
+          details: input.details,
+        },
+        expectedOutcome: {
+          decision: "dispatch_only_from_computed_order",
+          classification: "positive",
+          rationale:
+            "Dispatch admission must fail closed when computed-order safety is unverifiable.",
+          costWeight: "high",
+        },
+        observedOutcome: {
+          decision: input.observedDecision,
+          classification: "positive",
+          rationale: input.observedRationale,
+          costWeight: "high",
+        },
+      });
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to journal dispatch comparator safety event: ${formatWarningError(error)}`,
+      );
+    }
+  }
+
   private async acquireDispatcherLease(input: {
     leaseId: string;
     idempotencyKey: string;
@@ -11134,6 +11301,30 @@ function formatWarningError(error: unknown): string {
     return error.stack ?? error.message;
   }
   return String(error);
+}
+
+function formatBoundedWarningError(error: unknown): string {
+  const formatted = formatWarningError(error);
+  return formatted.length > 1_000
+    ? `${formatted.slice(0, 1_000)}...`
+    : formatted;
+}
+
+function createDispatchComparatorFailureSnapshot(input: {
+  generatedAt: Date;
+  warning: string;
+}): ComputedDispatchOrderSnapshot {
+  return {
+    comparator_version: DISPATCH_COMPARATOR_VERSION,
+    generated_at: input.generatedAt.toISOString(),
+    status: "linearized",
+    positions: [],
+    exclusions: [],
+    advisory_warnings: [],
+    would_have_been_excluded_by_advisory_edges: [],
+    hard_cycle: null,
+    warnings: [input.warning],
+  };
 }
 
 function createPendingStageSignal(
