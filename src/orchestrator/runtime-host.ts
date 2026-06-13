@@ -3627,6 +3627,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       const pidsToKill = await findWorkspaceCwdProcessIds(
         String(stdout),
         workspacePath,
+        { readCurrentProcessCwd: readProcessCwd },
       );
 
       if (pidsToKill.length > 0) {
@@ -5450,7 +5451,7 @@ export async function verifyTrackedProcessSignalTarget(input: {
     return {
       verified: false,
       failureKind: "mismatch",
-      warning: `process cwd ${processCwd} does not match workspace ${input.workspacePath}`,
+      warning: `process cwd ${processCwd} is outside workspace containment boundary ${input.workspacePath}`,
     };
   }
 
@@ -5546,6 +5547,9 @@ export function parseLsofCwdProcessEntries(
     return entries;
   }
 
+  // Production calls lsof with -Fpn. Keep this legacy fallback for captured
+  // table output and lsof variants that ignore field mode; NAME is the line
+  // remainder because cwd paths may contain whitespace.
   return stdout
     .split("\n")
     .map(parseLsofCwdTableEntry)
@@ -5555,6 +5559,9 @@ export function parseLsofCwdProcessEntries(
 export async function findWorkspaceCwdProcessIds(
   stdout: string,
   workspacePath: string,
+  options?: {
+    readCurrentProcessCwd?: (pid: number) => Promise<string | null>;
+  },
 ): Promise<number[]> {
   const pids: number[] = [];
   const seen = new Set<number>();
@@ -5563,33 +5570,54 @@ export async function findWorkspaceCwdProcessIds(
     if (seen.has(entry.pid)) {
       continue;
     }
-    if (await directoryIsWithinWorkspace(entry.cwdPath, workspacePath)) {
-      seen.add(entry.pid);
-      pids.push(entry.pid);
+    if (!(await directoryIsWithinWorkspace(entry.cwdPath, workspacePath))) {
+      continue;
     }
+    if (options?.readCurrentProcessCwd !== undefined) {
+      const currentCwd = await options.readCurrentProcessCwd(entry.pid);
+      if (
+        currentCwd === null ||
+        !(await directoryIsWithinWorkspace(currentCwd, workspacePath))
+      ) {
+        continue;
+      }
+    }
+    seen.add(entry.pid);
+    pids.push(entry.pid);
   }
 
   return pids;
 }
 
 function parseLsofCwdTableEntry(line: string): LsofCwdProcessEntry | null {
-  const trimmed = line.trim();
-  if (trimmed === "" || trimmed.startsWith("COMMAND ")) {
+  const trimmedStart = line.trimStart();
+  if (trimmedStart === "" || trimmedStart.startsWith("COMMAND ")) {
     return null;
   }
 
-  const columns = trimmed.split(/\s+/);
-  const pid = parseProcessId(columns[1]);
+  const match = trimmedStart.match(
+    /^\S+\s+(\d+)\s+\S+\s+(\S+)\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$/,
+  );
+  if (
+    match === null ||
+    match[1] === undefined ||
+    match[2] === undefined ||
+    match[3] === undefined
+  ) {
+    return null;
+  }
+
+  const pid = parseProcessId(match[1]);
   if (pid === null) {
     return null;
   }
 
-  const fd = columns[3];
+  const fd = match[2];
   if (fd !== "cwd" && !fd?.startsWith("cwd")) {
     return null;
   }
 
-  const cwdPath = columns.slice(8).join(" ");
+  const cwdPath = match[3];
   return cwdPath === "" ? null : { pid, cwdPath };
 }
 

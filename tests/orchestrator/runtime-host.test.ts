@@ -5722,7 +5722,7 @@ describe("pipeline notifications", () => {
       status: "not_attempted",
       attempts: [],
       warning:
-        "Tracked process PID 4242 was not signaled: process cwd /tmp/workspaces/10 does not match workspace /tmp/workspaces/1",
+        "Tracked process PID 4242 was not signaled: process cwd /tmp/workspaces/10 is outside workspace containment boundary /tmp/workspaces/1",
     });
     expect(calls).toEqual([]);
   });
@@ -5856,6 +5856,25 @@ describe("pipeline notifications", () => {
     ).resolves.toEqual([1001, 2002]);
   });
 
+  it("preserves whitespace in legacy lsof cwd table path names", () => {
+    const output = [
+      "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
+      "node     1001 eric  cwd    DIR   1,23      128  100 /tmp/workspaces/team alpha/app  one",
+      "node     2002 eric  cwd    DIR   1,23      128  101 /tmp/workspaces/team alpha sibling/app",
+    ].join("\n");
+
+    expect(parseLsofCwdProcessEntries(output)).toEqual([
+      {
+        pid: 1001,
+        cwdPath: "/tmp/workspaces/team alpha/app  one",
+      },
+      {
+        pid: 2002,
+        cwdPath: "/tmp/workspaces/team alpha sibling/app",
+      },
+    ]);
+  });
+
   it("deduplicates workspace cwd discovery from lsof field output", async () => {
     const output = [
       "p1001",
@@ -5872,6 +5891,28 @@ describe("pipeline notifications", () => {
     await expect(
       findWorkspaceCwdProcessIds(output, "/tmp/workspaces/1"),
     ).resolves.toEqual([1001, 4004]);
+  });
+
+  it("rechecks current process cwd before accepting workspace cwd discoveries", async () => {
+    const output = [
+      "p1001",
+      "n/tmp/workspaces/1",
+      "p2002",
+      "n/tmp/workspaces/1/packages/app",
+      "p3003",
+      "n/tmp/workspaces/1/packages/test",
+    ].join("\n");
+    const currentCwds = new Map<number, string | null>([
+      [1001, "/tmp/workspaces/10"],
+      [2002, "/tmp/workspaces/1/packages/app"],
+      [3003, null],
+    ]);
+
+    await expect(
+      findWorkspaceCwdProcessIds(output, "/tmp/workspaces/1", {
+        readCurrentProcessCwd: async (pid) => currentCwds.get(pid) ?? null,
+      }),
+    ).resolves.toEqual([2002]);
   });
 
   it("does not emit issue_failed for a budget hard stop pause", async () => {
