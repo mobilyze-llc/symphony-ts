@@ -241,6 +241,31 @@ export interface StopRequest {
   issueIdentifier: string;
   cleanupWorkspace: boolean;
   reason: StopReason;
+  signalDelivery?: StopSignalDelivery | null;
+}
+
+export type StopSignalDeliveryStatus =
+  | "not_attempted"
+  | "delivered"
+  | "partial"
+  | "failed";
+
+export type StopSignalStatus = "delivered" | "failed" | "not_attempted";
+
+export interface StopSignalDeliveryAttempt {
+  pid: number;
+  processGroupId: number | null;
+  sigterm: Exclude<StopSignalStatus, "not_attempted">;
+  sigkill: StopSignalStatus;
+}
+
+export interface StopSignalDelivery {
+  status: StopSignalDeliveryStatus;
+  reason: StopReason;
+  attemptedAt: string;
+  workspacePath: string | null;
+  attempts: StopSignalDeliveryAttempt[];
+  warning: string | null;
 }
 
 interface IntentWriteInput {
@@ -397,7 +422,7 @@ export interface OrchestratorCoreOptions {
     runningEntry: RunningEntry;
     cleanupWorkspace: boolean;
     reason: StopReason;
-  }) => Promise<void> | void;
+  }) => Promise<unknown> | unknown;
   runEnsembleGate?: (input: {
     issue: Issue;
     stage: StageDefinition;
@@ -9539,12 +9564,18 @@ export class OrchestratorCore {
           },
         );
       }
-      await this.stopRunningIssue?.({
+      const signalDeliveryResult = await this.stopRunningIssue?.({
         issueId: runningEntry.issue.id,
         runningEntry,
         cleanupWorkspace,
         reason,
       });
+      if (
+        signalDeliveryResult === null ||
+        isStopSignalDelivery(signalDeliveryResult)
+      ) {
+        stopRequest.signalDelivery = signalDeliveryResult;
+      }
       await this.completeDispatcherLease({
         leaseId,
         idempotencyKey: `${leaseId}:completed`,
@@ -11335,6 +11366,25 @@ function toClusterMembers(value: unknown): ClusterMember[] | null {
     });
   }
   return members;
+}
+
+function isStopSignalDelivery(value: unknown): value is StopSignalDelivery {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Partial<StopSignalDelivery>;
+  return (
+    (candidate.status === "not_attempted" ||
+      candidate.status === "delivered" ||
+      candidate.status === "partial" ||
+      candidate.status === "failed") &&
+    typeof candidate.reason === "string" &&
+    typeof candidate.attemptedAt === "string" &&
+    (typeof candidate.workspacePath === "string" ||
+      candidate.workspacePath === null) &&
+    Array.isArray(candidate.attempts) &&
+    (typeof candidate.warning === "string" || candidate.warning === null)
+  );
 }
 
 function isReviewSubstrateStallMessage(

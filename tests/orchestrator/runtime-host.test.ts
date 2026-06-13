@@ -31,6 +31,7 @@ import {
   type StructuredLogEntry,
   StructuredLogger,
 } from "../../src/logging/structured-logger.js";
+import type { StopSignalDelivery } from "../../src/orchestrator/core.js";
 import type { PipelineNotificationEvent } from "../../src/orchestrator/pipeline-notifier.js";
 import {
   loadPersistedRateLimitSnapshot,
@@ -939,14 +940,13 @@ describe("OrchestratorRuntimeHost", () => {
       ]);
 
       const reconcileTick = await host.pollOnce();
-      expect(reconcileTick.stopRequests).toEqual([
-        {
-          issueId: "1",
-          issueIdentifier: "ISSUE-1",
-          cleanupWorkspace: true,
-          reason: "terminal_state",
-        },
-      ]);
+      expect(reconcileTick.stopRequests).toHaveLength(1);
+      expect(reconcileTick.stopRequests[0]).toMatchObject({
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        cleanupWorkspace: true,
+        reason: "terminal_state",
+      });
       await host.waitForIdle();
 
       expect(fakeRunner.abortReasons).toEqual([
@@ -5131,6 +5131,102 @@ describe("pipeline notifications", () => {
 
     const snapshot = await host.getRuntimeSnapshot();
     expect(snapshot.counts.failed).toBe(0);
+
+    const stillActive = await host.pollOnce();
+    expect(stillActive.dispatchedIssueIds).toEqual([]);
+  });
+
+  it("surfaces process-tree signal delivery failures without undoing the stop", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      terminateWorkerProcessTree: async (
+        input,
+      ): Promise<StopSignalDelivery> => ({
+        status: "failed",
+        reason: input.reason,
+        attemptedAt: input.attemptedAt.toISOString(),
+        workspacePath: input.workspacePath,
+        attempts: [
+          {
+            pid: 4242,
+            processGroupId: 4242,
+            sigterm: "failed",
+            sigkill: "failed",
+          },
+        ],
+        warning:
+          "SIGTERM and SIGKILL both failed for 1 process-tree target: pid=4242 process_group=4242",
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponse = await host.requestIssueStop("ISSUE-1");
+    await host.waitForIdle();
+
+    expect(stopResponse).toMatchObject({
+      stopped: true,
+      reason: "manual_stop",
+      signal_delivery: {
+        status: "failed",
+        reason: "manual_stop",
+        attempted_at: "2026-03-06T00:00:05.000Z",
+        workspace_path: "/tmp/workspaces/1",
+        attempts: [
+          {
+            pid: 4242,
+            process_group_id: 4242,
+            sigterm: "failed",
+            sigkill: "failed",
+          },
+        ],
+      },
+    });
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_stop_requested",
+        level: "info",
+        outcome: "requested",
+        reason: "manual_stop",
+        attempted_reason: "manual_stop",
+        issue_identifier: "ISSUE-1",
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_stop_signal_delivery_failed",
+        level: "warn",
+        outcome: "degraded",
+        reason: "manual_stop",
+        attempted_reason: "manual_stop",
+        issue_identifier: "ISSUE-1",
+        pids: [4242],
+        process_group_ids: [4242],
+        failed_pids: [4242],
+        failed_process_group_ids: [4242],
+      }),
+    );
+    expect(notifier.events).toEqual([
+      expect.objectContaining({ type: "issue_dispatched" }),
+    ]);
 
     const stillActive = await host.pollOnce();
     expect(stillActive.dispatchedIssueIds).toEqual([]);
