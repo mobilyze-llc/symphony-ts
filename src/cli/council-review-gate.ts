@@ -396,7 +396,7 @@ function renderUsage(): string {
     "  --risk-contract-artifact PATH Bounded risk-predicate state contract artifact path; repeatable",
     "  --assert-fresh-review PATH    Assert an existing clean review-result.json covers current HEAD",
     "  --allow-stale-path GLOB       Explicit freshness allowlist; repeatable; ** crosses /, * and ? do not",
-    "  --journal-workspace-root DIR  Append sanitized review events to DIR/.symphony/run-journals/dispatcher.jsonl; fail closed on append errors",
+    "  --journal-workspace-root DIR  Append sanitized review events to DIR/.symphony/run-journals/dispatcher.jsonl under the standalone journal lock; fail closed on append errors",
     "  --journal-source SOURCE       Journal source: pipeline, interactive, or replay (default: pipeline)",
     "  --journal-stage STAGE         Journal stage label (default: review)",
     "  --journal-attempt N           Journal pipeline attempt",

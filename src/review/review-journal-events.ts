@@ -2,11 +2,7 @@ import type {
   DispatcherRunJournal,
   DispatcherRunJournalEntry,
 } from "../domain/model.js";
-import {
-  appendDispatcherRunJournalEntry,
-  appendDispatcherRunJournalEntryToDisk,
-  readDispatcherRunJournal,
-} from "../logging/run-journal.js";
+import { appendDispatcherRunJournalEntriesWithLock } from "../logging/run-journal.js";
 import type {
   HeadlessCouncilGateResult,
   HeadlessLaneResult,
@@ -250,27 +246,10 @@ export function buildReviewJournalEntries(
 export async function appendReviewJournalEventsToDispatcherJournal(
   input: AppendReviewJournalEventsInput,
 ): Promise<AppendReviewJournalEventsResult> {
-  let journal = await readDispatcherRunJournal(input.workspaceRoot);
-  const entries: DispatcherRunJournalEntry[] = [];
-  const appendedEntries: DispatcherRunJournalEntry[] = [];
-  const skippedEntries: DispatcherRunJournalEntry[] = [];
-
-  for (const draft of buildReviewJournalEntries(input.result, input.options)) {
-    const appended = appendDispatcherRunJournalEntry(journal, draft);
-    journal = appended.journal;
-    entries.push(appended.entry);
-    if (appended.appended) {
-      appendedEntries.push(appended.entry);
-      await appendDispatcherRunJournalEntryToDisk(
-        input.workspaceRoot,
-        appended.entry,
-      );
-    } else {
-      skippedEntries.push(appended.entry);
-    }
-  }
-
-  return { journal, entries, appendedEntries, skippedEntries };
+  return appendDispatcherRunJournalEntriesWithLock(
+    input.workspaceRoot,
+    buildReviewJournalEntries(input.result, input.options),
+  );
 }
 
 function collectStructuredArtifacts(

@@ -1,10 +1,13 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { readDispatcherRunJournal } from "../../src/logging/run-journal.js";
+import {
+  getDispatcherRunJournalLockPath,
+  readDispatcherRunJournal,
+} from "../../src/logging/run-journal.js";
 import { buildStateDelta } from "../../src/logging/runtime-snapshot.js";
 import type {
   HeadlessCouncilGateResult,
@@ -207,6 +210,195 @@ describe("review journal events", () => {
     expect(serializedDelta).not.toContain("SECRET");
     expect(serializedDelta).not.toContain("related_paths");
     expect(serializedDelta).not.toContain("evidence_locations");
+  });
+
+  it("serializes concurrent standalone review appends into one journal sequence stream", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-concurrent-"),
+    );
+    const appendCount = 8;
+
+    await Promise.all(
+      Array.from({ length: appendCount }, (_, index) =>
+        appendReviewJournalEventsToDispatcherJournal({
+          workspaceRoot,
+          result: reviewResult({ verdict: "pass" }),
+          options: {
+            issueIdentifier: "SYMPH-450",
+            ownerId: `worker-${index}`,
+            source: "pipeline",
+            idempotencyKeyPrefix: `review-concurrent-${index}`,
+          },
+        }),
+      ),
+    );
+
+    const replayed = await readDispatcherRunJournal(workspaceRoot);
+    const sequences = replayed.map((entry) => entry.sequence);
+
+    expect(replayed).toHaveLength(appendCount * 3);
+    expect(sequences).toEqual(
+      Array.from({ length: appendCount * 3 }, (_, index) => index + 1),
+    );
+    expect(new Set(sequences).size).toBe(sequences.length);
+    expect(
+      replayed.filter((entry) => entry.kind === "review_gate_result"),
+    ).toHaveLength(appendCount);
+  });
+
+  it("skips duplicate concurrent standalone review appends under the write lock", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-concurrent-duplicates-"),
+    );
+
+    const results = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        appendReviewJournalEventsToDispatcherJournal({
+          workspaceRoot,
+          result: reviewResult({ verdict: "pass" }),
+          options: {
+            issueIdentifier: "SYMPH-450",
+            ownerId: `worker-${index}`,
+            source: "pipeline",
+            idempotencyKeyPrefix: "review-concurrent-shared",
+          },
+        }),
+      ),
+    );
+
+    const replayed = await readDispatcherRunJournal(workspaceRoot);
+    const sequences = replayed.map((entry) => entry.sequence);
+
+    expect(replayed).toHaveLength(3);
+    expect(sequences).toEqual([1, 2, 3]);
+    expect(results.flatMap((result) => result.appendedEntries)).toHaveLength(3);
+    expect(results.flatMap((result) => result.skippedEntries)).toHaveLength(15);
+  });
+
+  it("recovers a standalone review append after a dead owner leaves a lock", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-stale-lock-"),
+    );
+    const lockPath = getDispatcherRunJournalLockPath(workspaceRoot);
+    await mkdir(lockPath, { recursive: true });
+    await writeFile(
+      join(lockPath, "owner.json"),
+      `${JSON.stringify({
+        pid: 999_999_999,
+        acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+      })}\n`,
+    );
+
+    const result = await appendReviewJournalEventsToDispatcherJournal({
+      workspaceRoot,
+      result: reviewResult({ verdict: "pass" }),
+      options: {
+        issueIdentifier: "SYMPH-450",
+        ownerId: "worker-1",
+        source: "pipeline",
+      },
+    });
+
+    expect(result.appendedEntries).toHaveLength(3);
+    expect(await readDispatcherRunJournal(workspaceRoot)).toHaveLength(3);
+  });
+
+  it("serializes concurrent recovery from a dead-owner lock", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-stale-lock-concurrent-"),
+    );
+    const lockPath = getDispatcherRunJournalLockPath(workspaceRoot);
+    await mkdir(lockPath, { recursive: true });
+    await writeFile(
+      join(lockPath, "owner.json"),
+      `${JSON.stringify({
+        pid: 999_999_999,
+        acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+      })}\n`,
+    );
+
+    const appendCount = 6;
+    const results = await Promise.all(
+      Array.from({ length: appendCount }, (_, index) =>
+        appendReviewJournalEventsToDispatcherJournal({
+          workspaceRoot,
+          result: reviewResult({ verdict: "pass" }),
+          options: {
+            issueIdentifier: "SYMPH-450",
+            ownerId: `worker-${index}`,
+            source: "pipeline",
+            idempotencyKeyPrefix: `review-stale-recovery-${index}`,
+          },
+        }),
+      ),
+    );
+
+    const replayed = await readDispatcherRunJournal(workspaceRoot);
+    const sequences = replayed.map((entry) => entry.sequence);
+
+    expect(results.flatMap((result) => result.appendedEntries)).toHaveLength(
+      appendCount * 3,
+    );
+    expect(replayed).toHaveLength(appendCount * 3);
+    expect(sequences).toEqual(
+      Array.from({ length: appendCount * 3 }, (_, index) => index + 1),
+    );
+    expect(new Set(sequences).size).toBe(sequences.length);
+  });
+
+  it("recovers from stale corrupt lock owner metadata", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-corrupt-lock-"),
+    );
+    const lockPath = getDispatcherRunJournalLockPath(workspaceRoot);
+    const staleTimestamp = new Date(Date.now() - 60_000);
+    await mkdir(lockPath, { recursive: true });
+    await writeFile(join(lockPath, "owner.json"), "");
+    await utimes(lockPath, staleTimestamp, staleTimestamp);
+
+    const result = await appendReviewJournalEventsToDispatcherJournal({
+      workspaceRoot,
+      result: reviewResult({ verdict: "pass" }),
+      options: {
+        issueIdentifier: "SYMPH-450",
+        ownerId: "worker-1",
+        source: "pipeline",
+      },
+    });
+
+    expect(result.appendedEntries).toHaveLength(3);
+    expect(await readDispatcherRunJournal(workspaceRoot)).toHaveLength(3);
+  });
+
+  it("recovers when a stale recovery claim is abandoned", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-stale-recovery-claim-"),
+    );
+    const lockPath = getDispatcherRunJournalLockPath(workspaceRoot);
+    const recoveryPath = join(lockPath, "recovery.lock");
+    const staleTimestamp = new Date(Date.now() - 60_000);
+    await mkdir(recoveryPath, { recursive: true });
+    await writeFile(
+      join(lockPath, "owner.json"),
+      `${JSON.stringify({
+        pid: 999_999_999,
+        acquiredAt: staleTimestamp.toISOString(),
+      })}\n`,
+    );
+    await utimes(recoveryPath, staleTimestamp, staleTimestamp);
+
+    const result = await appendReviewJournalEventsToDispatcherJournal({
+      workspaceRoot,
+      result: reviewResult({ verdict: "pass" }),
+      options: {
+        issueIdentifier: "SYMPH-450",
+        ownerId: "worker-1",
+        source: "pipeline",
+      },
+    });
+
+    expect(result.appendedEntries).toHaveLength(3);
+    expect(await readDispatcherRunJournal(workspaceRoot)).toHaveLength(3);
   });
 });
 
