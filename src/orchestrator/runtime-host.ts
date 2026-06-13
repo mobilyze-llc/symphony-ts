@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { access, lstat, mkdir, readdir, realpath } from "node:fs/promises";
 import { hostname } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -223,6 +223,11 @@ interface TrackedWorkerStopSignalDeliveryOptions {
   readProcessCwd?: ProcessCwdReader;
   readProcessCommand?: ProcessCommandReader;
   sendSignal?: ProcessSignalSender;
+}
+
+export interface LsofCwdProcessEntry {
+  pid: number;
+  cwdPath: string;
 }
 
 export interface TrackedProcessSignalTargetVerification {
@@ -3609,30 +3614,23 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     issueIdentifier: string,
   ): Promise<void> {
     try {
-      const { stdout } = await execFileAsync("lsof", ["-d", "cwd"], {
+      const { stdout } = await execFileAsync("lsof", ["-d", "cwd", "-Fpn"], {
         timeout: 5000,
       });
 
-      const pidsToKill = [
-        ...new Set(
-          stdout
-            .split("\n")
-            .filter((line) => line.includes(workspacePath))
-            .map((line) => line.trim().split(/\s+/)[1])
-            .filter(
-              (pid): pid is string =>
-                pid !== undefined &&
-                /^\d+$/.test(pid) &&
-                Number(pid) !== process.pid,
-            ),
-        ),
-      ];
+      // This fallback only discovers processes whose cwd is still inside the
+      // workspace. Descendants that chdir elsewhere must be contained by the
+      // tracked PID/process-tree stop path instead of this lsof sweep.
+      const pidsToKill = await findWorkspaceCwdProcessIds(
+        String(stdout),
+        workspacePath,
+      );
 
       if (pidsToKill.length > 0) {
         await Promise.all(
           pidsToKill.map(async (pid) => {
             try {
-              await this.terminateDetachedPidTree(Number(pid), {
+              await this.terminateDetachedPidTree(pid, {
                 graceMs: 1_000,
               });
             } catch {
@@ -3644,7 +3642,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           "info",
           "orphaned_processes_killed",
           `Killed ${pidsToKill.length} orphaned process(es) in ${workspacePath}`,
-          { issue_identifier: issueIdentifier, pids: pidsToKill },
+          {
+            issue_identifier: issueIdentifier,
+            pids: pidsToKill.map(String),
+            discovery: "workspace_cwd",
+          },
         );
       }
     } catch {
@@ -5427,9 +5429,7 @@ export async function verifyTrackedProcessSignalTarget(input: {
     };
   }
 
-  if (
-    !(await directoriesReferToSameLocation(processCwd, input.workspacePath))
-  ) {
+  if (!(await directoryIsWithinWorkspace(processCwd, input.workspacePath))) {
     return {
       verified: false,
       failureKind: "mismatch",
@@ -5504,15 +5504,93 @@ function parseLsofName(stdout: string): string | null {
   return null;
 }
 
-async function directoriesReferToSameLocation(
-  firstPath: string,
-  secondPath: string,
+export function parseLsofCwdProcessEntries(
+  stdout: string,
+): LsofCwdProcessEntry[] {
+  const entries: LsofCwdProcessEntry[] = [];
+  let currentPid: number | null = null;
+  let sawFieldRecord = false;
+
+  for (const line of stdout.split("\n")) {
+    if (/^p\d+$/.test(line)) {
+      sawFieldRecord = true;
+      currentPid = parseProcessId(line.slice(1));
+      continue;
+    }
+    if (currentPid !== null && line.startsWith("n")) {
+      sawFieldRecord = true;
+      if (line.length > 1) {
+        entries.push({ pid: currentPid, cwdPath: line.slice(1) });
+      }
+    }
+  }
+
+  if (sawFieldRecord) {
+    return entries;
+  }
+
+  return stdout
+    .split("\n")
+    .map(parseLsofCwdTableEntry)
+    .filter((entry): entry is LsofCwdProcessEntry => entry !== null);
+}
+
+export async function findWorkspaceCwdProcessIds(
+  stdout: string,
+  workspacePath: string,
+): Promise<number[]> {
+  const pids: number[] = [];
+  const seen = new Set<number>();
+
+  for (const entry of parseLsofCwdProcessEntries(stdout)) {
+    if (seen.has(entry.pid)) {
+      continue;
+    }
+    if (await directoryIsWithinWorkspace(entry.cwdPath, workspacePath)) {
+      seen.add(entry.pid);
+      pids.push(entry.pid);
+    }
+  }
+
+  return pids;
+}
+
+function parseLsofCwdTableEntry(line: string): LsofCwdProcessEntry | null {
+  const trimmed = line.trim();
+  if (trimmed === "" || trimmed.startsWith("COMMAND ")) {
+    return null;
+  }
+
+  const columns = trimmed.split(/\s+/);
+  const pid = parseProcessId(columns[1]);
+  if (pid === null) {
+    return null;
+  }
+
+  const fd = columns[3];
+  if (fd !== "cwd" && !fd?.startsWith("cwd")) {
+    return null;
+  }
+
+  const cwdPath = columns.slice(8).join(" ");
+  return cwdPath === "" ? null : { pid, cwdPath };
+}
+
+async function directoryIsWithinWorkspace(
+  directoryPath: string,
+  workspacePath: string,
 ): Promise<boolean> {
-  const [first, second] = await Promise.all([
-    resolveDirectoryForOwnership(firstPath),
-    resolveDirectoryForOwnership(secondPath),
+  const [directory, workspace] = await Promise.all([
+    resolveDirectoryForOwnership(directoryPath),
+    resolveDirectoryForOwnership(workspacePath),
   ]);
-  return first === second;
+  const relativePath = relative(workspace, directory);
+  return (
+    relativePath === "" ||
+    (relativePath !== ".." &&
+      !relativePath.startsWith(`..${sep}`) &&
+      !isAbsolute(relativePath))
+  );
 }
 
 async function resolveDirectoryForOwnership(path: string): Promise<string> {
