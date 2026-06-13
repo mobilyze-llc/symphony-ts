@@ -100,6 +100,9 @@ describe("dispatcher decision event emission", () => {
       metadata: expect.objectContaining({
         comparator_version: "priority-fifo-control-v0",
         outcome_since_sequence: 0,
+        outcome_window_semantics: expect.stringContaining(
+          "urgent_reopen_outcomes may reference the earlier failure",
+        ),
         considered_issue_ids: ["2", "1"],
         dispatch_picks: ["2", "1"],
         manual_jumps_reorders: [],
@@ -209,6 +212,8 @@ describe("dispatcher decision event emission", () => {
           issue_id: "delivered",
           issue_identifier: "ISSUE-DONE",
           spend: {
+            scope: "baseline_window",
+            since_sequence: 0,
             total_tokens: 1234,
             turns: 3,
             stages: 1,
@@ -401,6 +406,8 @@ describe("dispatcher decision event emission", () => {
           sequence: 5,
           issue_id: "redelivered",
           spend: {
+            scope: "baseline_window",
+            since_sequence: 3,
             total_tokens: 250,
             turns: 2,
             stages: 1,

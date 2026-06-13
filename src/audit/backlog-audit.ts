@@ -399,7 +399,7 @@ function toAuditIssue(issue: Issue): Record<string, unknown> {
 
 function stripStructuredBoundaryTags(text: string): string {
   return text.replace(
-    /<\/?(?:tracker_|runtime_|audit_)[a-z_]*(?:\s[^<>]*)?\/?>/gi,
+    /<\/?(?:tracker_|runtime_|audit_)[a-z_-]*(?:\s[^<>]*)?\/?>/gi,
     "",
   );
 }
@@ -407,7 +407,7 @@ function stripStructuredBoundaryTags(text: string): string {
 function sanitizeMarkdownInline(text: string): string {
   const normalized = text.replace(/[\r\n\t]+/g, " ").trim();
   return (normalized === "" ? "(blank finding id)" : normalized).replace(
-    /[`*_{}[\]<>#+.!|]/g,
+    /[\\`*_{}[\]<>()#+.!|]/g,
     "\\$&",
   );
 }

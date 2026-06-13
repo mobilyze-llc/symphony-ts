@@ -1884,6 +1884,8 @@ export class OrchestratorCore {
         schema_version: 1,
         comparator_version: "priority-fifo-control-v0",
         outcome_since_sequence: outcomeSinceSequence,
+        outcome_window_semantics:
+          "Outcome arrays contain events observed after outcome_since_sequence. urgent_reopen_outcomes may reference the earlier failure it reopened. delivery_outcomes.spend is resource consumption inside the baseline window, not lifetime ticket total.",
         considered_issue_ids: input.consideredIssues.map((issue) => issue.id),
         considered_issue_identifiers: input.consideredIssues.map(
           (issue) => issue.identifier,
@@ -9505,6 +9507,8 @@ function collectUrgentReopenOutcomes(
     deathSequencesByIssue.set(entry.issueId, sequences);
   }
 
+  // The observed baseline outcome is the operator reopen in this window; the
+  // failure it reopens can legitimately predate the window.
   return operatorIntentSamples.flatMap((sample) => {
     const issueId = typeof sample.issue_id === "string" ? sample.issue_id : "";
     const sequence =
@@ -9572,6 +9576,8 @@ function collectDeliveryOutcomes(
         terminal_stage: entry.stage,
         delivered_at: entry.timestamp,
         spend: {
+          scope: "baseline_window",
+          since_sequence: sinceSequence,
           total_tokens: totalTokens,
           turns,
           stages: history.length,
