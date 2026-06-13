@@ -655,6 +655,30 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain("linear-pp-cli documents create/edit");
     expect(output).toContain("Do not request sandbox, network");
   });
+
+  it("documents eligibility-on-rewrite for ticket rescopes", async () => {
+    const output = await renderPrompt({
+      workflow: { promptTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "implement",
+      reworkCount: 0,
+    });
+
+    expect(output).toContain("Eligibility on Ticket Rewrite (SYMPH-515)");
+    expect(output).toContain("rewrite or rescope a Linear ticket");
+    expect(output).toContain(
+      "project, state, labels, owner, and dispatch eligibility",
+    );
+    expect(output).toContain(
+      "Pipeline project or another active dispatch surface",
+    );
+    expect(output).toContain("Council v2 review finding");
+    expect(output).toContain(
+      '2026-06-12 retro "Review Convergence Discipline for Journal Invariants"',
+    );
+    expect(output).toContain("SYMPH-321");
+  });
 });
 
 function isGitIgnored(path: string): boolean {
