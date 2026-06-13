@@ -2149,12 +2149,25 @@ describe("runHeadlessCouncilGate", () => {
     );
 
     expect(result.verdict).toBe("error");
-    expect(
-      result.lanes.find((lane) => lane.laneId === "claude-opus"),
-    ).toMatchObject({
+    const lane = result.lanes.find(
+      (resultLane) => resultLane.laneId === "claude-opus",
+    );
+    expect(lane).toMatchObject({
       state: "error",
       verdict: "error",
+      degradedReason: "malformed_substrate_json",
+      message: "cmux-spawn returned malformed JSON.",
+      artifactPath: null,
+      cliJsonPath: join(harness.artifactDir, "claude-opus.cli.json"),
+      rawArtifactPath: null,
+      structuredArtifactPath: null,
     });
+    expect(result.degradedConditions).toContain(
+      "malformed_substrate_json:claude-opus",
+    );
+    await expect(
+      readFile(join(harness.artifactDir, "claude-opus.cli.json"), "utf-8"),
+    ).resolves.toBe("not json");
   });
 
   it("preserves sibling lane diagnostics when one lane throws", async () => {
