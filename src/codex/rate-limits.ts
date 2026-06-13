@@ -140,6 +140,7 @@ function parseWindow(raw: unknown): RateLimitWindow | null {
     windowMinutes: readAliasedNumber(record, [
       "window_minutes",
       "windowMinutes",
+      "windowDurationMins",
     ]),
     // Tolerate epoch milliseconds: anything past ~33658 CE in seconds is
     // unambiguously a milliseconds timestamp.

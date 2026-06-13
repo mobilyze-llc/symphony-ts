@@ -60,12 +60,12 @@ describe("aggregateVerdicts", () => {
     expect(aggregateVerdicts(results)).toBe("pass");
   });
 
-  it("returns fail when all reviewers error (no review occurred)", () => {
+  it("returns error when all reviewers error (no review occurred)", () => {
     const results = [
       createResult({ verdict: "error" }),
       createResult({ verdict: "error" }),
     ];
-    expect(aggregateVerdicts(results)).toBe("fail");
+    expect(aggregateVerdicts(results)).toBe("error");
   });
 
   it("returns fail when one reviewer fails and another errors", () => {
@@ -385,8 +385,7 @@ describe("runEnsembleGate", () => {
       retryBaseDelayMs: 0,
     });
 
-    // All reviewers errored → aggregate is fail (can't skip review)
-    expect(result.aggregate).toBe("fail");
+    expect(result.aggregate).toBe("error");
     expect(result.results).toHaveLength(1);
     expect(result.results[0]!.verdict.verdict).toBe("error");
     expect(result.results[0]!.feedback).toContain("Connection timeout");

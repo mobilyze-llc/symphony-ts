@@ -943,6 +943,18 @@ describe("runHeadlessCouncilGate", () => {
 
     expect(result.verdict).toBe("error");
     expect(result.degradedConditions).toContain("cmux-preflight-failed");
+    await expect(
+      readFile(join(harness.artifactDir, "cmux-preflight.stdout"), "utf-8"),
+    ).resolves.toBe("{}");
+    await expect(
+      readFile(join(harness.artifactDir, "cmux-preflight.stderr"), "utf-8"),
+    ).resolves.toBe("cmux unavailable");
+    await expect(
+      readFile(join(harness.artifactDir, "cmux-preflight.cli.json"), "utf-8"),
+    ).resolves.toBe("{}");
+    await expect(
+      readFile(join(harness.artifactDir, "cmux-preflight.cli.stderr"), "utf-8"),
+    ).resolves.toBe("cmux unavailable");
   });
 
   it("fails closed when cmux returns malformed lane JSON", async () => {

@@ -42,8 +42,11 @@ export interface ReviewerResult {
 
 /**
  * Aggregate result from all reviewers.
+ *
+ * "error" means no reviewer produced a code-review verdict; callers must
+ * retry or park infrastructure instead of treating it as implement rework.
  */
-export type AggregateVerdict = "pass" | "fail";
+export type AggregateVerdict = "pass" | "fail" | "error";
 
 export interface EnsembleGateResult {
   aggregate: AggregateVerdict;
@@ -124,7 +127,7 @@ export async function runEnsembleGate(
 /**
  * Aggregate individual verdicts.
  * - Any explicit "fail" verdict (from a reviewer that actually ran) = FAIL.
- * - If ALL reviewers errored (no pass or fail verdicts), = FAIL (can't skip review).
+ * - If ALL reviewers errored (no pass or fail verdicts), = ERROR.
  * - Otherwise (all pass/error with at least one pass) = PASS.
  */
 export function aggregateVerdicts(results: ReviewerResult[]): AggregateVerdict {
@@ -139,8 +142,7 @@ export function aggregateVerdicts(results: ReviewerResult[]): AggregateVerdict {
 
   const hasAnyNonError = results.some((r) => r.verdict.verdict !== "error");
   if (!hasAnyNonError) {
-    // All reviewers errored — can't skip review entirely
-    return "fail";
+    return "error";
   }
 
   return "pass";
@@ -432,7 +434,9 @@ export function formatGateComment(
   const header =
     aggregate === "pass"
       ? "## Ensemble Review: PASS"
-      : "## Ensemble Review: FAIL";
+      : aggregate === "fail"
+        ? "## Ensemble Review: FAIL"
+        : "## Ensemble Review: ERROR";
 
   const sections = results.map((r) => {
     const iconMap = { pass: "PASS", fail: "FAIL", error: "ERROR" } as const;

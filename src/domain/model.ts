@@ -905,8 +905,10 @@ export interface DecorrelatedGateOutcome {
   issueIdentifier: string;
   gateStage: string | null;
   mode: RightSizingMode;
+  // Coarse legacy status for dashboards. Use aggregate to distinguish reviewer
+  // findings ("fail") from reviewer infrastructure errors ("error").
   status: DecorrelatedGateStatus;
-  aggregate: "pass" | "fail" | null;
+  aggregate: "pass" | "fail" | "error" | null;
   checkedAt: string;
   workerLane: DecorrelatedGateLane;
   reviewerLanes: DecorrelatedGateLane[];
