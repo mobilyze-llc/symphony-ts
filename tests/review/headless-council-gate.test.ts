@@ -1464,6 +1464,105 @@ describe("runHeadlessCouncilGate", () => {
     expect(report).toContain(lane.structuredArtifactPath!);
   });
 
+  it("filters prose dotted tokens without changing deterministic evidence fingerprints", async () => {
+    const artifact = [
+      "## Verdict",
+      "FINDINGS",
+      "",
+      "## P1 Must Fix",
+      "None",
+      "",
+      "## P2 Should Fix",
+      "- e.g., i.e., Node.js, a 10:30 timestamp, and a 60:40 ratio describe runtime context, but src/review/headless-council-gate.ts:2258 loses file.ts, vitest.config.ts:12, src/proto/service.proto:42, and Dockerfile:12 evidence.",
+      "",
+      "## Track",
+      "None",
+      "",
+      "## Dismissed Or Theoretical",
+      "None",
+    ].join("\n");
+    const diff = [
+      "diff --git a/src/review/headless-council-gate.ts b/src/review/headless-council-gate.ts",
+      "+const parser = true;",
+      "diff --git a/file.ts b/file.ts",
+      "+const basenameEvidence = true;",
+    ].join("\n");
+    const firstHarness = await createHarness({
+      laneBehavior: { "claude-opus": { artifact } },
+    });
+    const secondHarness = await createHarness({
+      laneBehavior: { "claude-opus": { artifact } },
+    });
+    await writeFile(firstHarness.diffPath, diff);
+    await writeFile(secondHarness.diffPath, diff);
+
+    const firstResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-459",
+        workspace: firstHarness.workspace,
+        artifactDir: firstHarness.artifactDir,
+        diffPath: firstHarness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: firstHarness.runCommand },
+    );
+    const secondResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-459",
+        workspace: secondHarness.workspace,
+        artifactDir: secondHarness.artifactDir,
+        diffPath: secondHarness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: secondHarness.runCommand },
+    );
+
+    const firstFinding = firstResult.lanes[0]!.structuredArtifact!.findings[0]!;
+    const secondFinding =
+      secondResult.lanes[0]!.structuredArtifact!.findings[0]!;
+
+    expect(firstFinding.evidence).toEqual([
+      {
+        path: "src/review/headless-council-gate.ts",
+        lineStart: 2258,
+        lineEnd: 2258,
+        changedPath: true,
+      },
+      {
+        path: "file.ts",
+        lineStart: null,
+        lineEnd: null,
+        changedPath: true,
+      },
+      {
+        path: "vitest.config.ts",
+        lineStart: 12,
+        lineEnd: 12,
+        changedPath: false,
+      },
+      {
+        path: "src/proto/service.proto",
+        lineStart: 42,
+        lineEnd: 42,
+        changedPath: false,
+      },
+      {
+        path: "Dockerfile",
+        lineStart: 12,
+        lineEnd: 12,
+        changedPath: false,
+      },
+    ]);
+    const evidencePaths = firstFinding.evidence.map((item) => item.path);
+    for (const proseToken of ["e.g", "i.e", "Node.js", "10", "60"]) {
+      expect(evidencePaths).not.toContain(proseToken);
+    }
+    expect(secondFinding.evidence).toEqual(firstFinding.evidence);
+    expect(secondFinding.fingerprint).toBe(firstFinding.fingerprint);
+  });
+
   it("groups cross-file invariant families without collapsing fingerprints", async () => {
     const harness = await createHarness({
       laneBehavior: {
