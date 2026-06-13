@@ -227,6 +227,7 @@ interface TrackedWorkerStopSignalDeliveryOptions {
 
 export interface TrackedProcessSignalTargetVerification {
   verified: boolean;
+  failureKind: "unavailable" | "mismatch" | null;
   warning: string | null;
 }
 
@@ -5345,7 +5346,7 @@ export async function deliverTrackedWorkerStopSignal(
   });
   if (!ownership.verified) {
     return {
-      status: "failed",
+      status: ownership.failureKind === "mismatch" ? "failed" : "not_attempted",
       reason: input.reason,
       attemptedAt: input.attemptedAt.toISOString(),
       workspacePath: input.workspacePath,
@@ -5405,6 +5406,7 @@ export async function verifyTrackedProcessSignalTarget(input: {
   if (processCwd === null) {
     return {
       verified: false,
+      failureKind: "unavailable",
       warning: "process cwd could not be read for ownership verification",
     };
   }
@@ -5412,6 +5414,7 @@ export async function verifyTrackedProcessSignalTarget(input: {
   if (processCommand === null) {
     return {
       verified: false,
+      failureKind: "unavailable",
       warning: "process command could not be read for ownership verification",
     };
   }
@@ -5421,6 +5424,7 @@ export async function verifyTrackedProcessSignalTarget(input: {
   ) {
     return {
       verified: false,
+      failureKind: "mismatch",
       warning: `process cwd ${processCwd} does not match workspace ${input.workspacePath}`,
     };
   }
@@ -5428,11 +5432,12 @@ export async function verifyTrackedProcessSignalTarget(input: {
   if (!isCodexAppServerCommand(processCommand)) {
     return {
       verified: false,
+      failureKind: "mismatch",
       warning: "process command does not look like a Codex app-server",
     };
   }
 
-  return { verified: true, warning: null };
+  return { verified: true, failureKind: null, warning: null };
 }
 
 export function signalPid(

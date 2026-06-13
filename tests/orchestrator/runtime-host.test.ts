@@ -5591,6 +5591,35 @@ describe("pipeline notifications", () => {
     expect(calls).toEqual([]);
   });
 
+  it("does not report failed signal delivery when the tracked pid is already gone", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "manual_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        readProcessCwd: async () => null,
+        readProcessCommand: async () => null,
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "not_attempted",
+      attempts: [],
+      warning:
+        "Tracked process PID 4242 was not signaled: process cwd could not be read for ownership verification",
+    });
+    expect(calls).toEqual([]);
+  });
+
   it("does not signal a tracked pid whose command is not a Codex app-server", async () => {
     const calls: Array<[number, NodeJS.Signals]> = [];
     const delivery = await deliverTrackedWorkerStopSignal(
