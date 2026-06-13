@@ -931,6 +931,27 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 consecutiveTicks: input.consecutiveTicks,
               });
             },
+            onExistingActiveResumed: (input: {
+              issueId: string;
+              issueIdentifier: string;
+              issueTitle: string;
+              issueUrl: string | null;
+              stageName: string | null;
+              attempt: number | null;
+              reworkCount: number;
+              sequence: number | null;
+            }) => {
+              _notifier.notify({
+                type: "resumed_existing_active",
+                issueIdentifier: input.issueIdentifier,
+                issueTitle: input.issueTitle,
+                issueUrl: input.issueUrl,
+                stageName: input.stageName,
+                attempt: input.attempt,
+                reworkCount: input.reworkCount,
+                journalSequence: input.sequence,
+              });
+            },
             // Watchdog L2 escalate_human verdicts page through the same
             // SYMPH-397 alert channel (SYMPH-399).
             onTriageEscalation: (input: {

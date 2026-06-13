@@ -1277,6 +1277,8 @@ export interface StateDeltaEntryMetadata {
   category?: string;
   narrowing_status?: string;
   narrowing_rationale?: string;
+  resume_reason?: string;
+  rework_count?: number;
   lane_count?: number;
   finding_count?: number;
   blocking_finding_count?: number;
@@ -1363,11 +1365,13 @@ const STATE_DELTA_METADATA_STRING_FIELDS = [
   "category",
   "narrowing_status",
   "narrowing_rationale",
+  "resume_reason",
 ] as const;
 
 const STATE_DELTA_METADATA_NUMBER_FIELDS = [
   "resumesUsed",
   "round",
+  "rework_count",
   "pr_number",
   "lane_count",
   "finding_count",

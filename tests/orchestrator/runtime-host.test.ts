@@ -4404,6 +4404,9 @@ describe("pipeline notifications", () => {
 
     // Dispatch + terminal completion (no second dispatch — continuation, not rework)
     expect(notifier.events).toHaveLength(2);
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({ type: "resumed_existing_active" }),
+    );
     const event = notifier.events[1]!;
     expect(event.type).toBe("issue_completed");
     // History must include records from BOTH stages
@@ -4419,6 +4422,172 @@ describe("pipeline notifications", () => {
       stageName: "implement",
       outcome: "normal",
     });
+  });
+
+  it("emits resumed_existing_active for restart-replayed active work without duplicating issue_dispatched", async () => {
+    const priorJournal: DispatcherRunJournal = [
+      {
+        sequence: 1,
+        idempotencyKey: "prior:right_sizing",
+        timestamp: "2026-03-06T00:00:00.000Z",
+        kind: "right_sizing",
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        operation: "dispatcher",
+        stage: "implement",
+        attempt: null,
+        ownerId: "previous-runtime",
+        lease: null,
+        summary: "Right-sized ISSUE-1 as thin.",
+        metadata: {
+          mode: "thin",
+        },
+      },
+    ];
+    const writtenJournal: DispatcherRunJournalEntry[] = [];
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => priorJournal,
+      writeDispatcherRunJournalEntry: async (_workspaceRoot, entry) => {
+        writtenJournal.push(entry);
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+
+    expect(tick.dispatchedIssueIds).toEqual(["1"]);
+    expect(fakeRunner.runs.size).toBe(1);
+    expect(notifier.events).toEqual([
+      expect.objectContaining({
+        type: "resumed_existing_active",
+        issueIdentifier: "ISSUE-1",
+        stageName: null,
+        reworkCount: 0,
+        journalSequence: expect.any(Number),
+      }),
+    ]);
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({ type: "issue_dispatched" }),
+    );
+
+    const resumeEntry = host
+      .getState()
+      .dispatcherRunJournal.find(
+        (entry) => entry.kind === "resumed_existing_active",
+      );
+    expect(resumeEntry).toMatchObject({
+      issueIdentifier: "ISSUE-1",
+      metadata: {
+        status: "completed",
+        source: "restart_replay",
+        resume_reason: "prior_dispatch_replayed",
+        rework_count: 0,
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(writtenJournal).toContainEqual(
+      expect.objectContaining({
+        kind: "resumed_existing_active",
+        issueIdentifier: "ISSUE-1",
+      }),
+    );
+
+    const delta = await host.getStateDelta({ sinceSeq: 0 });
+    expect(delta.entries).toContainEqual(
+      expect.objectContaining({
+        kind: "resumed_existing_active",
+        issueIdentifier: "ISSUE-1",
+        metadata: {
+          status: "completed",
+          source: "restart_replay",
+          resume_reason: "prior_dispatch_replayed",
+          rework_count: 0,
+        },
+      }),
+    );
+  });
+
+  it("does not emit resumed_existing_active for restart-replayed active rework", async () => {
+    const priorJournal: DispatcherRunJournal = [
+      {
+        sequence: 1,
+        idempotencyKey: "prior:right_sizing",
+        timestamp: "2026-03-06T00:00:00.000Z",
+        kind: "right_sizing",
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        operation: "dispatcher",
+        stage: "implement",
+        attempt: null,
+        ownerId: "previous-runtime",
+        lease: null,
+        summary: "Right-sized ISSUE-1 as thin.",
+        metadata: {
+          mode: "thin",
+        },
+      },
+      {
+        sequence: 2,
+        idempotencyKey: "prior:intent:rework",
+        timestamp: "2026-03-06T00:00:01.000Z",
+        kind: "intent",
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        operation: "dispatcher",
+        stage: "review",
+        attempt: null,
+        ownerId: "previous-runtime",
+        lease: null,
+        summary: "Intent rework_with_hint applied for ISSUE-1.",
+        metadata: {
+          schema_version: 1,
+          status: "applied",
+          verb: "rework_with_hint",
+          detail: "rework requested",
+          reworkTarget: "implement",
+          reworkCount: 1,
+        },
+      },
+    ];
+    const writtenJournal: DispatcherRunJournalEntry[] = [];
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => priorJournal,
+      writeDispatcherRunJournalEntry: async (_workspaceRoot, entry) => {
+        writtenJournal.push(entry);
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+
+    expect(tick.dispatchedIssueIds).toEqual(["1"]);
+    expect(host.getState().issueReworkCounts["1"]).toBe(1);
+    expect(notifier.events).not.toContainEqual(
+      expect.objectContaining({ type: "resumed_existing_active" }),
+    );
+    expect(writtenJournal).not.toContainEqual(
+      expect.objectContaining({ kind: "resumed_existing_active" }),
+    );
   });
 
   it("does NOT fire issue_completed on stage continuation", async () => {

@@ -118,6 +118,17 @@ export interface IssueDispatchedEvent {
   rightSizingDecision?: RightSizingDecision;
 }
 
+export interface ResumedExistingActiveEvent {
+  type: "resumed_existing_active";
+  issueIdentifier: string;
+  issueTitle: string;
+  issueUrl: string | null;
+  stageName: string | null;
+  attempt: number | null;
+  reworkCount: number;
+  journalSequence?: number | null;
+}
+
 export interface IssueDroppedEvent {
   type: "issue_dropped";
   issueIdentifier: string;
@@ -328,6 +339,7 @@ export type PipelineNotificationEvent =
   | StallKilledEvent
   | InfraErrorEvent
   | IssueDispatchedEvent
+  | ResumedExistingActiveEvent
   | IssueDroppedEvent
   | FailureExhaustedEvent
   | HardStopBudgetEvent
@@ -815,6 +827,93 @@ export function formatNotification(
         blocks.push({ type: "section", fields });
       }
 
+      blocks.push({
+        type: "context",
+        elements: [{ type: "mrkdwn", text: version }],
+      });
+
+      return { text, blocks };
+    }
+
+    case "resumed_existing_active": {
+      const parts = [
+        `:repeat: *Issue resumed after restart* — ${event.issueIdentifier}`,
+        `*${event.issueTitle}*`,
+      ];
+      if (event.issueUrl !== null) {
+        parts.push(event.issueUrl);
+      }
+      if (event.stageName !== null) {
+        parts.push(`Stage: ${event.stageName}`);
+      }
+      if (event.attempt !== null) {
+        parts.push(`Attempt: ${event.attempt}`);
+      }
+      if (event.reworkCount > 0) {
+        parts.push(`Rework #${event.reworkCount}`);
+      }
+      if (
+        event.journalSequence !== undefined &&
+        event.journalSequence !== null
+      ) {
+        parts.push(
+          `Journal cursor: seq ${event.journalSequence} — \`GET /api/v1/state/delta?since_seq=${Math.max(0, event.journalSequence - 1)}\``,
+        );
+      }
+      parts.push(version);
+      const text = parts.join("\n");
+
+      const titleText =
+        event.issueUrl !== null
+          ? `*${event.issueTitle}*\n<${event.issueUrl}|View in Linear>`
+          : `*${event.issueTitle}*`;
+
+      const fields: SlackTextObject[] = [];
+      if (event.stageName !== null) {
+        fields.push({
+          type: "mrkdwn",
+          text: `:gear: *Stage: ${event.stageName}*`,
+        });
+      }
+      if (event.attempt !== null) {
+        fields.push({
+          type: "mrkdwn",
+          text: `:repeat: *Attempt: ${event.attempt}*`,
+        });
+      }
+      if (event.reworkCount > 0) {
+        fields.push({
+          type: "mrkdwn",
+          text: `:arrows_counterclockwise: *Rework #${event.reworkCount}*`,
+        });
+      }
+      if (
+        event.journalSequence !== undefined &&
+        event.journalSequence !== null
+      ) {
+        fields.push({
+          type: "mrkdwn",
+          text: `:page_facing_up: *Journal seq ${event.journalSequence}*`,
+        });
+      }
+
+      const blocks: SlackBlock[] = [
+        {
+          type: "header",
+          text: {
+            type: "plain_text",
+            text: `Issue resumed after restart — ${event.issueIdentifier}`,
+            emoji: true,
+          },
+        },
+        {
+          type: "section",
+          text: { type: "mrkdwn", text: titleText },
+        },
+      ];
+      if (fields.length > 0) {
+        blocks.push({ type: "section", fields });
+      }
       blocks.push({
         type: "context",
         elements: [{ type: "mrkdwn", text: version }],

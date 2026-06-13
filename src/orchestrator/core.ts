@@ -542,6 +542,21 @@ export interface OrchestratorCoreOptions {
     consecutiveTicks: number;
   }) => void;
   /**
+   * Called after a replayed active Pipeline issue successfully spawns work
+   * again in this process (SYMPH-455). The journal entry is committed before
+   * this fires; `sequence` is the cursor operators can inspect via /state.
+   */
+  onExistingActiveResumed?: (input: {
+    issueId: string;
+    issueIdentifier: string;
+    issueTitle: string;
+    issueUrl: string | null;
+    stageName: string | null;
+    attempt: number | null;
+    reworkCount: number;
+    sequence: number | null;
+  }) => void;
+  /**
    * Watchdog L2 stuck-ticket triage (SYMPH-399): render a bounded-action
    * verdict over a watchdog park (novelty short-circuit or breaker park).
    * Resolve null to fail closed — the park stands. Only consulted when
@@ -629,6 +644,8 @@ export class OrchestratorCore {
 
   private readonly onDispatchPage?: OrchestratorCoreOptions["onDispatchPage"];
 
+  private readonly onExistingActiveResumed?: OrchestratorCoreOptions["onExistingActiveResumed"];
+
   private readonly runStuckTriage?: OrchestratorCoreOptions["runStuckTriage"];
 
   private readonly onTriageEscalation?: OrchestratorCoreOptions["onTriageEscalation"];
@@ -651,7 +668,7 @@ export class OrchestratorCore {
   /**
    * Ordered disk-flush chain for run-journal entries. Every disk append —
    * the awaited writer (recordRunJournalEntry) and the fire-and-forget
-   * verdict writer (commitVerdictJournalEntrySync) — chains through this
+   * visibility writer (commitRunJournalEntrySync) — chains through this
    * queue, so disk order always equals in-memory sequence order: an entry's
    * write may lag, but a later sequence can never land before an earlier
    * one. Without it, a crash could leave sequence N+1 on disk without N and
@@ -684,6 +701,13 @@ export class OrchestratorCore {
 
   private readonly reportedIgnoredSetupInstructionCollisions =
     new Set<string>();
+
+  /**
+   * Issues whose prior dispatch state was rehydrated from the dispatcher
+   * journal in this process. A subsequent successful worker spawn is a
+   * restart pickup/resume, distinct from same-process stage continuation.
+   */
+  private readonly replayedDispatchedIssueIds = new Set<string>();
 
   /**
    * Snapshot of execution history captured after the final stage record is
@@ -777,6 +801,7 @@ export class OrchestratorCore {
     this.onSystemicCluster = options.onSystemicCluster;
     this.onVerdictTransition = options.onVerdictTransition;
     this.onDispatchPage = options.onDispatchPage;
+    this.onExistingActiveResumed = options.onExistingActiveResumed;
     this.runStuckTriage = options.runStuckTriage;
     this.onTriageEscalation = options.onTriageEscalation;
     this.signatureClusterRegistry = new SignatureClusterRegistry({
@@ -834,6 +859,7 @@ export class OrchestratorCore {
     // sequence numbers from the previous journal would suppress reduction.
     this.reducedStageRecordSequences.clear();
     this.state.issueExecutionHistory = {};
+    this.replayedDispatchedIssueIds.clear();
     this.starvedTickCount = 0;
     this.pageAlertActive = false;
     this.acGateFailOpenStreak = 0;
@@ -1011,6 +1037,7 @@ export class OrchestratorCore {
         // same format the live path writes at dispatch.
         this.state.issueFirstDispatchedAt[entry.issueId] ??=
           formatEasternTimestamp(new Date(entry.timestamp));
+        this.replayedDispatchedIssueIds.add(entry.issueId);
       }
 
       if (
@@ -5183,6 +5210,7 @@ export class OrchestratorCore {
     delete this.state.issueReviewFailureStreaks[issueId];
     delete this.state.issueReviewInfrastructureStalls[issueId];
     delete this.state.loopTraceJournal[issueId];
+    this.replayedDispatchedIssueIds.delete(issueId);
     delete this.state.continuousFeedback[issueId];
     // Clear the exhaustion-dedup marker so a resumed issue can fire the alert
     // again if it exhausts retries in a new lifecycle (SYMPH-397).
@@ -5260,7 +5288,7 @@ export class OrchestratorCore {
     // Sequence-suffixed key (not timestamp): an opened→closed→opened flip
     // within one millisecond must journal all three transitions, or replay
     // rebuilds a closed breaker that is live-open.
-    this.commitVerdictJournalEntrySync({
+    this.commitRunJournalEntrySync({
       idempotencyKey: `breaker:${input.stageName}:${input.signature}:${input.transition}:${this.nextRunJournalSequence()}`,
       timestamp,
       kind: "breaker_transition",
@@ -6432,7 +6460,7 @@ export class OrchestratorCore {
         entry.idempotencyKey === baseKey ||
         entry.idempotencyKey.startsWith(`${baseKey}:`),
     );
-    const journaledSequence = this.commitVerdictJournalEntrySync({
+    const journaledSequence = this.commitRunJournalEntrySync({
       idempotencyKey: alreadyJournaled
         ? `${baseKey}:${this.nextRunJournalSequence()}`
         : baseKey,
@@ -6480,14 +6508,15 @@ export class OrchestratorCore {
   }
 
   /**
-   * Synchronously commit a verdict-class journal entry (SYMPH-405) to the
+   * Synchronously commit a visibility journal entry to the
    * in-memory journal, then hand the disk write to the ordered flush queue
    * fire-and-forget. Callable from sync paths (isDispatchEligible) — the
    * in-memory commit happens before any await, so overlapping appends can
    * never compute the same sequence from a stale journal. Verdict entries
-   * never carry a lease, so no lease bookkeeping is needed.
+   * and restart-visibility entries never carry a lease, so no lease
+   * bookkeeping is needed.
    */
-  private commitVerdictJournalEntrySync(
+  private commitRunJournalEntrySync(
     entry: Omit<DispatcherRunJournalEntry, "sequence">,
   ): number | null {
     const result = appendDispatcherRunJournalEntry(
@@ -6610,7 +6639,7 @@ export class OrchestratorCore {
     event: "page" | "recovery",
     eligibleCount: number,
   ): void {
-    this.commitVerdictJournalEntrySync({
+    this.commitRunJournalEntrySync({
       idempotencyKey: `page:${PIPELINE_VERDICT_SCOPE_ID}:${event}:${this.nextRunJournalSequence()}`,
       timestamp: this.now().toISOString(),
       kind: "dispatch_verdict",
@@ -6633,6 +6662,65 @@ export class OrchestratorCore {
         actor: this.buildVerdictActor(),
       },
     });
+  }
+
+  /**
+   * Restart-rehydrated active work visibility (SYMPH-455). A replayed
+   * `right_sizing` entry proves the issue already dispatched before this
+   * process. If it later spawns work again without a new rework cycle, emit a
+   * distinct journal-backed pickup event. Same-process stage continuations do
+   * not pass through the replay marker and remain silent.
+   */
+  private recordExistingActiveResumeIfNeeded(input: {
+    issue: Issue;
+    stageName: string | null;
+    attempt: number | null;
+    reworkCount: number;
+  }): void {
+    if (!this.replayedDispatchedIssueIds.has(input.issue.id)) {
+      return;
+    }
+    if (input.reworkCount > 0) {
+      this.replayedDispatchedIssueIds.delete(input.issue.id);
+      return;
+    }
+
+    const sequence = this.commitRunJournalEntrySync({
+      idempotencyKey: `resumed_existing_active:${input.issue.id}:${input.stageName ?? "no-stage"}:${formatAttemptKey(input.attempt)}:${this.nextRunJournalSequence()}`,
+      timestamp: this.now().toISOString(),
+      kind: "resumed_existing_active",
+      issueId: input.issue.id,
+      issueIdentifier: input.issue.identifier,
+      operation: "dispatcher",
+      stage: input.stageName,
+      attempt: input.attempt,
+      ownerId: this.leaseOwnerId,
+      lease: null,
+      summary: `Resumed existing active Pipeline work for ${input.issue.identifier} after journal replay.`,
+      metadata: {
+        schema_version: 1,
+        status: "completed",
+        source: "restart_replay",
+        resume_reason: "prior_dispatch_replayed",
+        rework_count: input.reworkCount,
+      },
+    });
+    this.replayedDispatchedIssueIds.delete(input.issue.id);
+
+    try {
+      this.onExistingActiveResumed?.({
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier,
+        issueTitle: input.issue.title,
+        issueUrl: input.issue.url ?? null,
+        stageName: input.stageName,
+        attempt: input.attempt,
+        reworkCount: input.reworkCount,
+        sequence,
+      });
+    } catch {
+      // Notification failures are always swallowed.
+    }
   }
 
   private async recordDispatcherDecisionEvent(input: {
@@ -7878,6 +7966,12 @@ export class OrchestratorCore {
       this.state.running[issue.id] = runEntry;
       this.state.claimed.add(issue.id);
       this.clearRetryEntry(issue.id);
+      this.recordExistingActiveResumeIfNeeded({
+        issue,
+        stageName,
+        attempt,
+        reworkCount,
+      });
       // Verdict event (SYMPH-405): the dispatch went out. The right-sizing
       // decision summary is already in hand, so it rides along in details.
       this.recordDispatchVerdict({
@@ -8546,7 +8640,7 @@ export class OrchestratorCore {
       // Sequence-suffixed key (not timestamp): a same-ms re-entry of the
       // same issue/signature after a membership reset must not drop the
       // latest membership snapshot from the replay record.
-      clusterJournalSequence = this.commitVerdictJournalEntrySync({
+      clusterJournalSequence = this.commitRunJournalEntrySync({
         idempotencyKey: `cluster:${clusterResult.signature}:${issueId}:${this.nextRunJournalSequence()}`,
         timestamp,
         kind: "cluster_transition",
