@@ -148,6 +148,40 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
     ).toBe(true);
   });
 
+  it("rejects retrospective replay runtime fields and depleted replay coverage", () => {
+    const corpus = loadCorpus();
+
+    const runtimeFieldCorpus = structuredClone(corpus);
+    (
+      runtimeFieldCorpus.retrospectiveReplay as unknown as Record<
+        string,
+        unknown
+      >
+    ).modelProvider = "claude";
+    expect(validateReviewCalibrationCorpus(runtimeFieldCorpus).errors).toEqual(
+      expect.arrayContaining([
+        {
+          path: "$.retrospectiveReplay.modelProvider",
+          message: "must not include forbidden runtime field",
+        },
+      ]),
+    );
+
+    const depletedReplayCorpus = structuredClone(corpus);
+    depletedReplayCorpus.retrospectiveReplay.cases =
+      depletedReplayCorpus.retrospectiveReplay.cases.slice(0, 9);
+    expect(
+      validateReviewCalibrationCorpus(depletedReplayCorpus).errors,
+    ).toEqual(
+      expect.arrayContaining([
+        {
+          path: "$.retrospectiveReplay.cases",
+          message: "must include at least 10 replay cases",
+        },
+      ]),
+    );
+  });
+
   it("pins malicious security outcomes and benign false-positive traps", () => {
     const corpus = loadCorpus();
     const maliciousClasses: ReviewCalibrationBugClass[] = [
