@@ -49,6 +49,18 @@ const ARTIFACT_SECTION_HEADINGS = [
 const ARTIFACT_SECTION_HEADING_KEYS = buildArtifactSectionHeadingKeys(
   ARTIFACT_SECTION_HEADINGS,
 );
+const ARTIFACT_HEADING_LABEL_SEPARATOR_CHARS = [
+  ":",
+  ".",
+  "!",
+  "?",
+  "-",
+  "–",
+  "—",
+] as const;
+const ARTIFACT_HEADING_LABEL_SEPARATOR_SET = new Set<string>(
+  ARTIFACT_HEADING_LABEL_SEPARATOR_CHARS,
+);
 const KNOWN_EXTENSIONLESS_ROOT_FILES = new Set([
   "authors",
   "changelog",
@@ -5241,9 +5253,10 @@ function isArtifactSectionBoundary(candidate: ArtifactHeadingMatch): boolean {
   );
 }
 
-// Markdown headings use strict normalization: `:` may stand in for a space, but
-// the broader preamble label separators below are only for fail-closed inline
-// label detection before the first real `## Verdict` section.
+// Markdown headings use strict normalization: `:` may stand in for a space and
+// whitespace runs collapse, but the broader preamble label separators below are
+// only for fail-closed inline label detection before the first real `## Verdict`
+// section.
 function normalizeArtifactHeadingText(heading: string): string {
   return heading.replace(/:/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
 }
@@ -5299,21 +5312,22 @@ function artifactHeadingLabelSuffixStartsWithSeparator(
   suffix: string,
   headingWordCount: number,
 ): boolean {
-  const match = /^[\s]*[:.!?\-–—]/.exec(suffix);
-  if (match === null) {
+  const leadingWhitespace = /^\s*/.exec(suffix)?.[0] ?? "";
+  const separatorIndex = leadingWhitespace.length;
+  const separator = suffix.charAt(separatorIndex);
+  if (!isArtifactHeadingLabelSeparatorChar(separator)) {
     return false;
   }
 
-  const separator = match[0].charAt(match[0].length - 1);
   if (headingWordCount !== 1 || !isArtifactHeadingDashSeparator(separator)) {
     return true;
   }
 
-  if (/^\s/.test(match[0])) {
+  if (leadingWhitespace !== "") {
     return true;
   }
 
-  const rest = suffix.slice(match[0].length);
+  const rest = suffix.slice(separatorIndex + separator.length);
   return (
     rest === "" || /^\s/.test(rest) || isCompactArtifactFindingPathSuffix(rest)
   );
@@ -5321,7 +5335,29 @@ function artifactHeadingLabelSuffixStartsWithSeparator(
 
 function isCompactArtifactFindingPathSuffix(suffix: string): boolean {
   const candidate = suffix.trimStart();
-  if (/^(?:\/|\.{1,2}[\\/]|[a-z]:[\\/])/i.test(candidate)) {
+  if (/^\/(?:[a-z0-9_.-]+[\\/])+(?=\s|$)/i.test(candidate)) {
+    return true;
+  }
+
+  if (
+    /^\/(?:[a-z0-9_.-]+[\\/])*[a-z0-9_.-]*\.[a-z0-9][a-z0-9_.-]*(?::\d+(?:\D|$)|(?=\s|$))/i.test(
+      candidate,
+    )
+  ) {
+    return true;
+  }
+
+  const absoluteRootLineReference =
+    /^\/(?:[a-z0-9_.-]+[\\/])*([a-z0-9_.-]+):\d+(?:\D|$)/i.exec(candidate);
+  if (
+    absoluteRootLineReference?.[1] !== undefined &&
+    (isFileNameWithExtension(absoluteRootLineReference[1]) ||
+      isLikelyExtensionlessRootFile(absoluteRootLineReference[1]))
+  ) {
+    return true;
+  }
+
+  if (/^(?:\.{1,2}[\\/]|[a-z]:[\\/])/i.test(candidate)) {
     return true;
   }
 
@@ -5388,16 +5424,11 @@ function isArtifactHeadingDashSeparator(char: string): boolean {
 }
 
 function isArtifactHeadingLabelSeparator(char: string): boolean {
-  return (
-    char === ":" ||
-    char === "." ||
-    char === "!" ||
-    char === "?" ||
-    char === "-" ||
-    char === "–" ||
-    char === "—" ||
-    /\s/.test(char)
-  );
+  return isArtifactHeadingLabelSeparatorChar(char) || /\s/.test(char);
+}
+
+function isArtifactHeadingLabelSeparatorChar(char: string): boolean {
+  return char.length > 0 && ARTIFACT_HEADING_LABEL_SEPARATOR_SET.has(char);
 }
 
 export function buildArtifactSectionHeadingKeys(
