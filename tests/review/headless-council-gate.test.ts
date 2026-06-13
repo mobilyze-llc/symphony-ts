@@ -6403,6 +6403,26 @@ describe("execFileCommand", () => {
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("signal SIGTERM");
   });
+
+  it("reports AbortSignal cancellations with distinct diagnostics", async () => {
+    const abortController = new AbortController();
+    const resultPromise = execFileCommand(
+      process.execPath,
+      ["-e", "setTimeout(() => {}, 5000)"],
+      {
+        cwd: process.cwd(),
+        env: process.env,
+        signal: abortController.signal,
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    abortController.abort();
+    const result = await resultPromise;
+
+    expect(result.exitCode).toBe(143);
+    expect(result.stderr).toContain("aborted by gate signal");
+  });
 });
 
 describe("stableJsonStringify", () => {

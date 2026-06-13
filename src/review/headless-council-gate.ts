@@ -6333,13 +6333,20 @@ async function execFileCommandWithPromise(
       stdout?: unknown;
       stderr?: unknown;
     };
+    const abortedBySignal =
+      commandError.name === "AbortError" || commandError.code === "ABORT_ERR";
     const stderr = commandOutput(commandError.stderr);
-    const fallbackStderr =
-      commandError.signal === undefined || commandError.signal === null
+    const fallbackStderr = abortedBySignal
+      ? `aborted by gate signal: ${commandError.message}`
+      : commandError.signal === undefined || commandError.signal === null
         ? commandError.message
         : `${commandError.message} (signal ${commandError.signal})`;
     return {
-      exitCode: typeof commandError.code === "number" ? commandError.code : 1,
+      exitCode: abortedBySignal
+        ? 143
+        : typeof commandError.code === "number"
+          ? commandError.code
+          : 1,
       stdout: commandOutput(commandError.stdout),
       stderr: stderr === "" ? fallbackStderr : stderr,
     };
