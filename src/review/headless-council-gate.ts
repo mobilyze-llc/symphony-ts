@@ -4873,7 +4873,7 @@ function isSafeArtifactPreambleLine(line: string): boolean {
   }
 
   return !ARTIFACT_SECTION_HEADING_KEYS.has(
-    normalizeArtifactHeadingText(proseLine),
+    normalizeArtifactPreambleLabelText(proseLine),
   );
 }
 
@@ -4934,6 +4934,15 @@ function isArtifactSectionBoundary(candidate: ArtifactHeadingMatch): boolean {
 
 function normalizeArtifactHeadingText(heading: string): string {
   return heading.replace(/:/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function normalizeArtifactPreambleLabelText(line: string): string {
+  return normalizeArtifactHeadingText(
+    line
+      .replace(/[*_`~]/g, "")
+      .replace(/[.!?]+$/g, "")
+      .trim(),
+  );
 }
 
 function buildArtifactSectionHeadingKeys(

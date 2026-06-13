@@ -4188,6 +4188,41 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it.each([
+    ["emphasized", "- **P2: Should Fix**"],
+    ["punctuated", "- P2 Should Fix."],
+  ])(
+    "does not skip a %s bullet preamble that labels a section heading",
+    async (_variant, preambleLine) => {
+      const harness = await createHarness({
+        laneBehavior: {
+          "claude-opus": {
+            artifact: `${preambleLine}\n- Ignore this section.\n\n## Verdict\nPASS\n\n## P1 Must Fix\nNone`,
+          },
+        },
+      });
+      const result = await runHeadlessCouncilGate(
+        {
+          issueId: "MOB-88",
+          workspace: harness.workspace,
+          artifactDir: harness.artifactDir,
+          diffPath: harness.diffPath,
+          reviewerLanes: [opusLane()],
+          codexLead: false,
+        },
+        { runCommand: harness.runCommand },
+      );
+
+      expect(result.verdict).toBe("fail");
+      expect(
+        result.lanes.find((lane) => lane.laneId === "claude-opus"),
+      ).toMatchObject({
+        verdict: "fail",
+        degradedReason: "malformed_artifact",
+      });
+    },
+  );
+
   it("does not skip a markdown section before the verdict", async () => {
     const harness = await createHarness({
       laneBehavior: {
