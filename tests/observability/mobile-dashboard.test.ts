@@ -38,7 +38,7 @@ describe("mobile-dashboard.html", () => {
 
     const testHtml = html.replace(
       marker,
-      "\nwindow.__mobileDashboardTest = { buildLoopTraceSection, renderManagerRunCard };\n})();\n</script>",
+      "\nwindow.__mobileDashboardTest = { buildLoopTraceSection, operatorAuthHeaders, renderManagerRunCard };\n})();\n</script>",
     );
 
     return new JSDOM(testHtml, {
@@ -229,6 +229,7 @@ describe("mobile-dashboard.html", () => {
     const scriptSection = html.slice(html.indexOf("<script>"));
     expect(scriptSection).toContain("/api/v1/deploy/preview");
     expect(scriptSection).toContain("method: 'POST'");
+    expect(scriptSection).toContain("headers: operatorAuthHeaders");
   });
 
   it("shows warning when issues are running during deploy", () => {
@@ -245,17 +246,55 @@ describe("mobile-dashboard.html", () => {
     expect(scriptSection).toMatch(
       /fetch\(`\$\{baseUrl\}\/api\/v1\/deploy`.*method.*POST/s,
     );
+    expect(scriptSection).toMatch(
+      /fetch\(`\$\{baseUrl\}\/api\/v1\/deploy`.*operatorAuthHeaders/s,
+    );
     expect(scriptSection).not.toMatch(/new EventSource.*deploy/);
   });
 
   it("sends content-type application/json on pipeline pause/resume POSTs (415 gate)", () => {
     const scriptSection = html.slice(html.indexOf("<script>"));
     expect(scriptSection).toMatch(
-      /fetch\(`\$\{baseUrl\}\/api\/v1\/pipeline\/resume`[^)]*'content-type':\s*'application\/json'/s,
+      /fetch\(`\$\{baseUrl\}\/api\/v1\/pipeline\/resume`.*operatorAuthHeaders\(\{\s*'content-type':\s*'application\/json'/s,
     );
     expect(scriptSection).toMatch(
-      /fetch\(`\$\{baseUrl\}\/api\/v1\/pipeline\/pause`[^)]*'content-type':\s*'application\/json'/s,
+      /fetch\(`\$\{baseUrl\}\/api\/v1\/pipeline\/pause`.*operatorAuthHeaders\(\{\s*'content-type':\s*'application\/json'/s,
     );
+  });
+
+  it("adds operator bearer auth to mobile mutating requests", () => {
+    const scriptSection = html.slice(html.indexOf("<script>"));
+    expect(scriptSection).toContain("symphony_operator_token");
+    expect(scriptSection).toMatch(
+      /fetch\(`\$\{baseUrl\}\/api\/v1\/\$\{encodeURIComponent\(issueIdentifier\)\}\/stop`.*operatorAuthHeaders/s,
+    );
+    expect(scriptSection).toMatch(
+      /fetch\(`\$\{baseUrl\}\/api\/v1\/claude\/switch`.*operatorAuthHeaders/s,
+    );
+  });
+
+  it("derives operator auth headers from localStorage", () => {
+    const dom = createDashboardDom();
+
+    const api = dom.window.__mobileDashboardTest as
+      | {
+          operatorAuthHeaders(
+            headers?: Record<string, string>,
+          ): Record<string, string>;
+        }
+      | undefined;
+    const localStorage = dom.window.localStorage as {
+      setItem(key: string, value: string): void;
+    };
+
+    expect(api).toBeDefined();
+    localStorage.setItem("symphony_operator_token", " mobile-token ");
+    expect(
+      api?.operatorAuthHeaders({ "content-type": "application/json" }),
+    ).toEqual({
+      "content-type": "application/json",
+      authorization: "Bearer mobile-token",
+    });
   });
 
   it("includes stop confirmation bottom sheet", () => {

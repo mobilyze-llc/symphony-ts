@@ -292,6 +292,27 @@ describe("dashboard server", () => {
     expect(response.statusCode).toBe(202);
   });
 
+  it("falls back to SYMPHONY_OPERATOR_TOKEN when operatorAuth token is null", async () => {
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+      operatorAuth: {
+        token: null,
+      },
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/refresh",
+      body: "{}",
+      headers: {
+        "content-type": "application/json",
+      },
+    });
+    expect(response.statusCode).toBe(202);
+  });
+
   it("rejects refresh requests before host mutation when operator auth is invalid", async () => {
     const refreshCalls: RefreshResponse[] = [];
     const server = await startDashboardServer({
