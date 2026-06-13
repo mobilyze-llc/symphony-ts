@@ -1,4 +1,4 @@
-import { dirname, normalize, resolve, sep } from "node:path";
+import { basename, dirname, normalize, resolve } from "node:path";
 import { Liquid } from "liquidjs";
 
 import type { Issue, WorkflowDefinition } from "../domain/model.js";
@@ -86,40 +86,42 @@ export async function renderPrompt(input: RenderPromptInput): Promise<string> {
 
 function createLiquidEngine(workflowPath?: string): Liquid {
   return new Liquid({
-    partials: resolvePartialRoots(workflowPath),
+    partials: resolvePromptPartialRoots(workflowPath),
     strictVariables: true,
     strictFilters: true,
     ownPropertyOnly: true,
   });
 }
 
-function resolvePartialRoots(workflowPath?: string): string[] {
+export function resolvePromptPartialRoots(workflowPath?: string): string[] {
   if (workflowPath === undefined) {
     return [...DEFAULT_PARTIAL_ROOTS];
   }
 
-  const workflowDirectory = normalize(dirname(workflowPath));
-  const pipelineConfigDirectory =
-    resolvePipelineConfigDirectory(workflowDirectory);
-
-  return Array.from(
-    new Set([
-      workflowDirectory,
-      pipelineConfigDirectory,
-      resolve(pipelineConfigDirectory, ".."),
-      ...DEFAULT_PARTIAL_ROOTS,
-    ]),
-  );
-}
-
-function resolvePipelineConfigDirectory(workflowDirectory: string): string {
-  const marker = `${sep}pipeline-config`;
-  const markerIndex = workflowDirectory.lastIndexOf(marker);
-  if (markerIndex !== -1) {
-    return workflowDirectory.slice(0, markerIndex + marker.length);
+  const workflowDirectory = normalize(resolve(dirname(workflowPath)));
+  const pipelineConfigDirectory = findPipelineConfigAncestor(workflowDirectory);
+  const roots = [workflowDirectory];
+  if (pipelineConfigDirectory === null) {
+    roots.push(resolve(workflowDirectory, "pipeline-config"));
+  } else {
+    roots.push(pipelineConfigDirectory, resolve(pipelineConfigDirectory, ".."));
   }
 
-  return resolve(workflowDirectory, "pipeline-config");
+  return Array.from(new Set(roots));
+}
+
+function findPipelineConfigAncestor(workflowDirectory: string): string | null {
+  let currentDirectory = workflowDirectory;
+
+  while (basename(currentDirectory) !== "pipeline-config") {
+    const parentDirectory = dirname(currentDirectory);
+    if (parentDirectory === currentDirectory) {
+      return null;
+    }
+    currentDirectory = parentDirectory;
+  }
+
+  return currentDirectory;
 }
 
 export async function buildTurnPrompt(
