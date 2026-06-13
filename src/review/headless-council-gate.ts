@@ -3715,6 +3715,16 @@ async function cleanupStalledLane(input: {
         timeoutMs: STALLED_LANE_CLEANUP_TIMEOUT_MS,
       },
     );
+    if (cleanup.exitCode !== 0) {
+      input.progress(
+        formatLaneProgress("cleanup_failed", {
+          laneId: input.laneId,
+          exitCode: cleanup.exitCode,
+          error: cleanup.stderr || cleanup.stdout || "cleanup exited non-zero",
+        }),
+      );
+      return;
+    }
     input.progress(
       formatLaneProgress("cleanup_completed", {
         laneId: input.laneId,

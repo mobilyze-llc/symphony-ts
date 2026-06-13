@@ -3900,6 +3900,45 @@ describe("runHeadlessCouncilGate", () => {
     );
   });
 
+  it("reports non-zero cleanup sweeps without blocking partial artifacts", async () => {
+    const progress: string[] = [];
+    const harness = await createHarness({
+      cleanupResult: {
+        exitCode: 1,
+        stdout: "",
+        stderr: "cleanup failed under test",
+      },
+      laneBehavior: {
+        "claude-opus": { hang: true },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      {
+        runCommand: harness.runCommand,
+        laneStallDeadlineMs: 50,
+        progress: (message) => progress.push(message),
+      },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain("substrate_stall:claude-opus");
+    expect(
+      progress.some(
+        (line) =>
+          line.includes("lane_cleanup_failed laneId=claude-opus") &&
+          line.includes("exitCode=1"),
+      ),
+    ).toBe(true);
+  });
+
   it("ignores a non-positive lane stall deadline override and completes healthy lanes", async () => {
     const harness = await createHarness();
     const result = await runHeadlessCouncilGate(
@@ -4037,6 +4076,50 @@ describe("runHeadlessCouncilGate", () => {
     expect(
       progress.some((line) =>
         line.includes("lane_stalled laneId=codex-high-lead"),
+      ),
+    ).toBe(true);
+  });
+
+  it("emits partial artifacts when the overall deadline elapses before the Codex lead starts", async () => {
+    const progress: string[] = [];
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": { delayMs: 35 },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        timeoutSeconds: 60,
+      },
+      {
+        runCommand: harness.runCommand,
+        laneStallDeadlineMs: 1_000,
+        overallLaneDeadlineMs: 10,
+        progress: (message) => progress.push(message),
+      },
+    );
+
+    const codexLeadLane = result.lanes.find(
+      (lane) => lane.laneId === "codex-high-lead",
+    );
+    expect(codexLeadLane).toMatchObject({
+      state: "timed_out",
+      verdict: "error",
+      degradedReason: "substrate_stall",
+    });
+    expect(codexLeadLane?.message).toContain(
+      "overall lane deadline elapsed before the Codex lead could start",
+    );
+    expect(
+      progress.some((line) =>
+        line.includes(
+          "lane_deadline_elapsed_before_start laneId=codex-high-lead",
+        ),
       ),
     ).toBe(true);
   });
@@ -6468,6 +6551,7 @@ async function createHarness(options?: {
   gitStatus?: CommandResult;
   gitStatusReject?: Error;
   cleanupDelayMs?: number;
+  cleanupResult?: CommandResult;
   laneBehavior?: Record<string, LaneBehavior>;
 }) {
   const root = await mkdtemp(join(tmpdir(), "symphony-headless-gate-"));
@@ -6509,6 +6593,9 @@ async function createHarness(options?: {
         await new Promise((resolve) =>
           setTimeout(resolve, options.cleanupDelayMs),
         );
+      }
+      if (options?.cleanupResult !== undefined) {
+        return options.cleanupResult;
       }
       return {
         exitCode: 0,
