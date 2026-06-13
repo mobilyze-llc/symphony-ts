@@ -45,8 +45,8 @@ const ARTIFACT_SECTION_HEADINGS = [
   "Triage",
   "Reviewer Artifacts",
 ] as const;
-const ARTIFACT_SECTION_HEADING_KEYS = new Set(
-  ARTIFACT_SECTION_HEADINGS.map(normalizeArtifactHeadingText),
+const ARTIFACT_SECTION_HEADING_KEYS = buildArtifactSectionHeadingKeys(
+  ARTIFACT_SECTION_HEADINGS,
 );
 // SYMPHONY_UNTRUSTED_DIFF matches as a substring (no word boundaries): the
 // real boundary token is `SYMPHONY_UNTRUSTED_DIFF_<uuid>` and `\b` fails on
@@ -4872,9 +4872,7 @@ function isSafeArtifactPreambleLine(line: string): boolean {
     return false;
   }
 
-  return !ARTIFACT_SECTION_HEADING_KEYS.has(
-    normalizeArtifactHeadingText(proseLine),
-  );
+  return !isArtifactPreambleSectionHeadingLine(proseLine);
 }
 
 interface ArtifactHeadingMatch {
@@ -4934,6 +4932,85 @@ function isArtifactSectionBoundary(candidate: ArtifactHeadingMatch): boolean {
 
 function normalizeArtifactHeadingText(heading: string): string {
   return heading.replace(/:/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function normalizeArtifactPreambleLabelText(line: string): string {
+  return normalizeArtifactHeadingText(
+    stripArtifactPreambleLabelDecorators(line)
+      .replace(/[.!?]+$/g, "")
+      .trim(),
+  );
+}
+
+function isArtifactPreambleSectionHeadingLine(line: string): boolean {
+  const normalizedLine = normalizeArtifactPreambleLabelText(line);
+  if (ARTIFACT_SECTION_HEADING_KEYS.has(normalizedLine)) {
+    return true;
+  }
+
+  const labelLine = stripArtifactPreambleLabelDecorators(line).trim();
+  return ARTIFACT_SECTION_HEADINGS.some((heading) =>
+    artifactPreambleLineStartsWithHeadingLabel(labelLine, heading),
+  );
+}
+
+function stripArtifactPreambleLabelDecorators(line: string): string {
+  return line.replace(/[*_`~]/g, "");
+}
+
+function artifactPreambleLineStartsWithHeadingLabel(
+  line: string,
+  heading: string,
+): boolean {
+  const lowerLine = line.toLowerCase();
+  const headingWords = heading.toLowerCase().trim().split(/\s+/);
+  let offset = 0;
+
+  for (const word of headingWords) {
+    offset = skipArtifactHeadingWordSeparator(lowerLine, offset);
+    if (!lowerLine.startsWith(word, offset)) {
+      return false;
+    }
+    offset += word.length;
+  }
+
+  const suffix = lowerLine.slice(offset);
+  return suffix.trim() === "" || /^[\s]*[:.!?\-–—]/.test(suffix);
+}
+
+function skipArtifactHeadingWordSeparator(
+  value: string,
+  offset: number,
+): number {
+  let index = offset;
+  while (index < value.length) {
+    const char = value.at(index);
+    if (char === undefined) {
+      break;
+    }
+    if (char !== ":" && !/\s/.test(char)) {
+      break;
+    }
+    index += 1;
+  }
+  return index;
+}
+
+function buildArtifactSectionHeadingKeys(
+  headings: readonly string[],
+): ReadonlySet<string> {
+  const normalizedHeadings = new Map<string, string>();
+  for (const heading of headings) {
+    const normalizedHeading = normalizeArtifactHeadingText(heading);
+    const previousHeading = normalizedHeadings.get(normalizedHeading);
+    if (previousHeading !== undefined) {
+      throw new Error(
+        `Artifact section heading "${heading}" normalizes to "${normalizedHeading}", which is already used by "${previousHeading}". Rename the heading or make the parser collision policy explicit.`,
+      );
+    }
+    normalizedHeadings.set(normalizedHeading, heading);
+  }
+  return new Set(normalizedHeadings.keys());
 }
 
 function isEmptySectionMarker(line: string): boolean {
