@@ -194,6 +194,8 @@ async function runLocalModelJudge(input: {
         },
         { role: "user", content: input.prompt },
       ],
+      response_format: { type: "json_object" },
+      chat_template_kwargs: { enable_thinking: false },
       temperature: 0,
       max_tokens: 4_096,
       reasoning_effort: "low",
