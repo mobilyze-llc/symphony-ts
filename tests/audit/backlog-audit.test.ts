@@ -82,7 +82,8 @@ describe("backlog audit", () => {
         const body = JSON.parse(String(init?.body));
         const prompt = JSON.stringify(body.messages ?? body.prompt ?? "");
         expect(String(input)).toContain("studio2.local:8000");
-        expect(body.response_format).toBeUndefined();
+        expect(body.response_format).toEqual({ type: "json_object" });
+        expect(body.chat_template_kwargs).toEqual({ enable_thinking: false });
         expect(body.max_tokens).toBe(4096);
         expect(body.reasoning_effort).toBe("low");
         expect(body.messages[0].role).toBe("system");
