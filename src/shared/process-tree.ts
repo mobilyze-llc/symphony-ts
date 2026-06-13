@@ -87,10 +87,15 @@ export async function terminateDetachedPidTree(
   const graceMs = options?.graceMs ?? 1_000;
   if (options !== undefined && "expectedIdentity" in options) {
     const expectedIdentity = options.expectedIdentity ?? null;
+    if (expectedIdentity === null) {
+      return { pid, sigtermSent: false, sigkillSent: false };
+    }
     const probeIdentity = options.probeIdentity ?? readProcessIdentity;
-    const observedIdentity =
-      expectedIdentity === null ? null : await probeIdentity(pid);
-    if (!processIdentityMatches(expectedIdentity, observedIdentity)) {
+    const observedIdentity = await probeIdentity(pid);
+    if (
+      observedIdentity !== null &&
+      !processIdentityMatches(expectedIdentity, observedIdentity)
+    ) {
       return { pid, sigtermSent: false, sigkillSent: false };
     }
   }
@@ -99,10 +104,15 @@ export async function terminateDetachedPidTree(
   await delay(graceMs);
   if (options !== undefined && "expectedIdentity" in options) {
     const expectedIdentity = options.expectedIdentity ?? null;
+    if (expectedIdentity === null) {
+      return { pid, sigtermSent, sigkillSent: false };
+    }
     const probeIdentity = options.probeIdentity ?? readProcessIdentity;
-    const observedIdentity =
-      expectedIdentity === null ? null : await probeIdentity(pid);
-    if (!processIdentityMatches(expectedIdentity, observedIdentity)) {
+    const observedIdentity = await probeIdentity(pid);
+    if (
+      observedIdentity !== null &&
+      !processIdentityMatches(expectedIdentity, observedIdentity)
+    ) {
       return { pid, sigtermSent, sigkillSent: false };
     }
   }

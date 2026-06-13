@@ -170,6 +170,69 @@ describe("process tree termination", () => {
     ]);
   });
 
+  it("cleans up a recovered detached process tree when the expected process is already absent", async () => {
+    vi.useFakeTimers();
+    const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const probeIdentity = vi.fn(async () => null);
+
+    const pending = terminateDetachedPidTree(1234, {
+      graceMs: 1_000,
+      expectedIdentity: createProcessIdentity(1234),
+      probeIdentity,
+      kill: ((pid: number, signal?: string | number) => {
+        calls.push({ pid, signal: signal as NodeJS.Signals });
+        return true;
+      }) as typeof process.kill,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_100);
+    const result = await pending;
+
+    expect(result).toEqual({
+      pid: 1234,
+      sigtermSent: true,
+      sigkillSent: true,
+    });
+    expect(probeIdentity).toHaveBeenCalledTimes(2);
+    expect(calls).toEqual([
+      { pid: -1234, signal: "SIGTERM" },
+      { pid: -1234, signal: "SIGKILL" },
+    ]);
+  });
+
+  it("finishes recovered detached cleanup when the expected identity exits during grace", async () => {
+    vi.useFakeTimers();
+    const identity = createProcessIdentity(1234);
+    const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const probeIdentity = vi
+      .fn()
+      .mockResolvedValueOnce(identity)
+      .mockResolvedValueOnce(null);
+
+    const pending = terminateDetachedPidTree(1234, {
+      graceMs: 1_000,
+      expectedIdentity: identity,
+      probeIdentity,
+      kill: ((pid: number, signal?: string | number) => {
+        calls.push({ pid, signal: signal as NodeJS.Signals });
+        return true;
+      }) as typeof process.kill,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_100);
+    const result = await pending;
+
+    expect(result).toEqual({
+      pid: 1234,
+      sigtermSent: true,
+      sigkillSent: true,
+    });
+    expect(calls).toEqual([
+      { pid: -1234, signal: "SIGTERM" },
+      { pid: -1234, signal: "SIGKILL" },
+    ]);
+  });
+
   it("refuses recovered detached cleanup when the process identity mismatches before SIGTERM", async () => {
     vi.useFakeTimers();
     const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
