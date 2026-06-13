@@ -506,7 +506,7 @@ function resolveOperatorAuth(
   const token =
     configuredToken === null || configuredToken.trim() === ""
       ? null
-      : configuredToken;
+      : configuredToken.trim();
   return {
     token,
     actor: options.operatorAuth?.actor ?? defaultOperatorAuthActor(),

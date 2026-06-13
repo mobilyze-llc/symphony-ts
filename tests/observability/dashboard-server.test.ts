@@ -273,6 +273,58 @@ describe("dashboard server", () => {
     expect(invalidRootMethod.headers.allow).toBe("GET");
   });
 
+  it("accepts a configured operator token with surrounding whitespace", async () => {
+    process.env.SYMPHONY_OPERATOR_TOKEN = `  ${OPERATOR_TOKEN}\n`;
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/refresh",
+      body: "{}",
+      headers: {
+        "content-type": "application/json",
+      },
+    });
+    expect(response.statusCode).toBe(202);
+  });
+
+  it("rejects refresh requests before host mutation when operator auth is invalid", async () => {
+    const refreshCalls: RefreshResponse[] = [];
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        requestRefresh: () => {
+          const response = {
+            queued: true,
+            coalesced: false,
+            requested_at: "2026-03-06T12:00:00.000Z",
+            operations: ["poll", "reconcile"],
+          } satisfies RefreshResponse;
+          refreshCalls.push(response);
+          return response;
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/refresh",
+      body: "{}",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer wrong-token",
+      },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(JSON.parse(response.body).error.code).toBe("unauthorized");
+    expect(refreshCalls).toEqual([]);
+  });
+
   it("returns snapshot_unavailable when the host snapshot fails", async () => {
     const server = createDashboardServer({
       host: createHost({
@@ -706,6 +758,42 @@ describe("dashboard server", () => {
       });
     }
     expect(stopCalls).toEqual(["ABC-123", "ABC-123"]);
+  });
+
+  it("rejects issue stop requests before host mutation when operator auth is invalid", async () => {
+    const stopCalls: string[] = [];
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        requestIssueStop: (issueIdentifier) => {
+          stopCalls.push(issueIdentifier);
+          return {
+            issue_identifier: issueIdentifier,
+            stopped: true,
+            reason: "manual_stop",
+          } satisfies StopIssueResponse;
+        },
+      }),
+    });
+    servers.push(server);
+
+    for (const stopPath of [
+      "/api/v1/issues/ABC-123/stop",
+      "/api/v1/ABC-123/stop",
+    ]) {
+      const response = await sendRequest(server.port, {
+        method: "POST",
+        path: stopPath,
+        body: "{}",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer wrong-token",
+        },
+      });
+      expect(response.statusCode).toBe(401);
+      expect(JSON.parse(response.body).error.code).toBe("unauthorized");
+    }
+    expect(stopCalls).toEqual([]);
   });
 
   it("returns 404 when stopping an issue that is not running", async () => {

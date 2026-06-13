@@ -188,6 +188,32 @@ describe("deploy endpoints", () => {
     });
   });
 
+  it("rejects deploy preview before running the deploy script when operator auth is invalid", async () => {
+    let deployCalls = 0;
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+      execDeploy: async () => {
+        deployCalls += 1;
+        return "should not run";
+      },
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/deploy/preview",
+      body: "{}",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer wrong-token",
+      },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(JSON.parse(response.body).error.code).toBe("unauthorized");
+    expect(deployCalls).toBe(0);
+  });
+
   it("GET /api/v1/deploy/preview returns 405", async () => {
     const server = await startDashboardServer({
       port: 0,
@@ -282,6 +308,32 @@ describe("deploy endpoints", () => {
     expect(completeData.exit_code).toBe(1);
 
     stream.close();
+  });
+
+  it("rejects deploy execution before spawning deploy when operator auth is invalid", async () => {
+    let spawnCalls = 0;
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+      spawnDeploy: () => {
+        spawnCalls += 1;
+        return createMockDeployProcess(["should not run"]);
+      },
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/deploy",
+      body: "{}",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer wrong-token",
+      },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(JSON.parse(response.body).error.code).toBe("unauthorized");
+    expect(spawnCalls).toBe(0);
   });
 
   it("GET /api/v1/deploy returns 405", async () => {
