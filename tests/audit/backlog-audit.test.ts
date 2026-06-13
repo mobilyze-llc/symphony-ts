@@ -175,7 +175,7 @@ describe("backlog audit", () => {
         issueCount: 1,
         runtimeSources: ["/api/v1/state", "/api/v1/state/delta"],
         verdict: {
-          summary: "One finding.",
+          summary: "One finding.\n## forged judge summary\n```",
           findingTypeVolume: {
             duplicate: 0,
             supersession: 0,
@@ -198,6 +198,13 @@ describe("backlog audit", () => {
       },
     });
 
+    const judgeSummary = markdown
+      .split("## Judge summary\n\n")[1]
+      ?.split("\n\n## Finding volume")[0];
+    expect(judgeSummary).toContain("\\#\\# forged judge summary");
+    expect(judgeSummary).toContain("\\`\\`\\`");
+    expect(judgeSummary).not.toContain("\n## forged judge summary");
+    expect(judgeSummary).not.toContain("```");
     expect(markdown).toContain("### F-1 \\#\\#\\# forged heading:");
     expect(markdown).not.toContain("\n### forged heading");
     expect(markdown).not.toContain("\n## forged summary");
@@ -373,6 +380,36 @@ describe("backlog audit", () => {
       }),
     ).rejects.toThrow(
       "GET http://127.0.0.1:4321/api/v1/state/delta returned a truncated page without an advancing cursor",
+    );
+  });
+
+  it("fails loudly when a paginated delta response changes shape mid-stream", async () => {
+    const fetchFn = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      const url = String(input);
+      if (url.endsWith("/api/v1/state")) {
+        return Response.json({ snapshot: true });
+      }
+      if (url.endsWith("/api/v1/state/delta?since_seq=0&limit=500")) {
+        return Response.json({
+          since_seq: 0,
+          count: 1,
+          truncated: true,
+          entries: [{ sequence: 4 }],
+        });
+      }
+      if (url.endsWith("/api/v1/state/delta?since_seq=4&limit=500")) {
+        return Response.json({ malformed: true });
+      }
+      return new Response("unexpected url", { status: 500 });
+    });
+
+    await expect(
+      fetchBacklogAuditRuntimeEvidence({
+        baseUrl: "http://127.0.0.1:4321",
+        fetchFn: fetchFn as unknown as typeof fetch,
+      }),
+    ).rejects.toThrow(
+      "GET http://127.0.0.1:4321/api/v1/state/delta changed response shape during pagination",
     );
   });
 

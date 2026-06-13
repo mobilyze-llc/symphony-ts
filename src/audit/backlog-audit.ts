@@ -93,6 +93,8 @@ function ensureLanTolerantNetworking(): void {
   }
   networkTimeoutApplied = true;
   try {
+    // Process-global by Node design. This disposable CLI prefers LAN/local
+    // endpoint tolerance over the platform's very short default attempt window.
     setDefaultAutoSelectFamilyAttemptTimeout(2_000);
   } catch {
     // Older runtimes without the setter keep platform defaults.
@@ -173,7 +175,7 @@ async function fetchCompleteStateDelta(
   timeoutMs: number | null | undefined,
 ): Promise<unknown> {
   let sinceSeq = 0;
-  let mergedEntries: unknown[] = [];
+  const mergedEntries: unknown[] = [];
   let firstPage: StateDeltaLike | null = null;
 
   for (let pageCount = 0; pageCount < 1_000; pageCount += 1) {
@@ -183,10 +185,15 @@ async function fetchCompleteStateDelta(
       timeoutMs,
     );
     if (!isStateDeltaLike(page)) {
+      if (firstPage !== null) {
+        throw new Error(
+          `GET ${base}/api/v1/state/delta changed response shape during pagination`,
+        );
+      }
       return page;
     }
     firstPage ??= page;
-    mergedEntries = [...mergedEntries, ...page.entries];
+    mergedEntries.push(...page.entries);
     if (page.truncated !== true) {
       return {
         ...page,
@@ -304,7 +311,7 @@ export function renderBacklogAuditReport(input: {
   lines.push("");
   lines.push("## Judge summary");
   lines.push("");
-  lines.push(input.report.verdict.summary);
+  lines.push(sanitizeMarkdownInline(input.report.verdict.summary));
   lines.push("");
   lines.push("## Finding volume");
   lines.push("");
@@ -320,11 +327,14 @@ export function renderBacklogAuditReport(input: {
     lines.push("_No findings returned by the local judge._");
   } else {
     for (const finding of input.report.verdict.findings) {
-      const findingId = sanitizeMarkdownInline(finding.findingId);
+      const findingId = sanitizeMarkdownInline(
+        finding.findingId,
+        "(blank finding id)",
+      );
       lines.push(`### ${findingId}: ${finding.type} (${finding.confidence})`);
       lines.push("");
       lines.push(
-        `- Issues: ${finding.issueIdentifiers.map(sanitizeMarkdownInline).join(", ")}`,
+        `- Issues: ${finding.issueIdentifiers.map((identifier) => sanitizeMarkdownInline(identifier)).join(", ")}`,
       );
       lines.push(`- Summary: ${sanitizeMarkdownInline(finding.summary)}`);
       lines.push(`- Evidence: ${sanitizeMarkdownInline(finding.evidence)}`);
@@ -352,9 +362,12 @@ export function renderBacklogAuditReport(input: {
   lines.push("");
   lines.push("Per-finding agreement:");
   for (const finding of input.report.verdict.findings) {
-    const findingId = sanitizeMarkdownInline(finding.findingId);
+    const findingId = sanitizeMarkdownInline(
+      finding.findingId,
+      "(blank finding id)",
+    );
     const issueIdentifiers = finding.issueIdentifiers
-      .map(sanitizeMarkdownInline)
+      .map((identifier) => sanitizeMarkdownInline(identifier))
       .join(", ");
     lines.push(
       `- ${findingId} (${finding.type}, ${issueIdentifiers}): agree|disagree - <note>`,
@@ -404,9 +417,9 @@ function stripStructuredBoundaryTags(text: string): string {
   );
 }
 
-function sanitizeMarkdownInline(text: string): string {
+function sanitizeMarkdownInline(text: string, blankText = "(blank)"): string {
   const normalized = text.replace(/[\r\n\t]+/g, " ").trim();
-  return (normalized === "" ? "(blank finding id)" : normalized).replace(
+  return (normalized === "" ? blankText : normalized).replace(
     /[\\`*_{}[\]<>()#+.!|]/g,
     "\\$&",
   );

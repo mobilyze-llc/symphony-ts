@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { promises as fs, realpathSync } from "node:fs";
+import { promises as fs, realpathSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -45,7 +45,7 @@ function usage(): string {
     "  --model-base-url <url>    Local OpenAI-compatible base URL, or SYMPHONY_QUEUE_AUDIT_BASE_URL",
     "  --model <name>            Local model name, or SYMPHONY_QUEUE_AUDIT_MODEL",
     "  --api-key <key>           Optional local endpoint API key, or SYMPHONY_QUEUE_AUDIT_API_KEY",
-    "  --timeout-ms <ms>         Local judge timeout (default: 600000)",
+    "  --timeout-ms <ms>         Runtime read-model and local judge timeout (default: 600000)",
     "  --states <csv>            Linear states to audit (default: workflow active_states)",
   ].join("\n");
 }
@@ -212,11 +212,38 @@ export async function runBacklogAuditCli(
     issueIdentifier: "SYMPH-482",
   });
   const tmpPath = `${outputPath}.tmp-${process.pid}`;
+  const unregisterCleanup = registerTempPathCleanup(tmpPath);
   await fs.mkdir(dirname(outputPath), { recursive: true });
-  await fs.writeFile(tmpPath, `${markdown}\n`, "utf8");
-  await fs.rename(tmpPath, outputPath);
+  try {
+    await fs.writeFile(tmpPath, `${markdown}\n`, "utf8");
+    await fs.rename(tmpPath, outputPath);
+    unregisterCleanup();
+  } catch (error) {
+    unregisterCleanup();
+    await fs.rm(tmpPath, { force: true });
+    throw error;
+  }
   console.error(`Backlog audit report written to ${outputPath}`);
   return 0;
+}
+
+function registerTempPathCleanup(tmpPath: string): () => void {
+  let active = true;
+  const cleanup = () => {
+    if (!active) {
+      return;
+    }
+    try {
+      rmSync(tmpPath, { force: true });
+    } catch {
+      // Best-effort cleanup for interrupted report writes.
+    }
+  };
+  process.once("exit", cleanup);
+  return () => {
+    active = false;
+    process.off("exit", cleanup);
+  };
 }
 
 function readValue(
