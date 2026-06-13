@@ -1510,23 +1510,29 @@ async function buildTargetedConvergenceHypothesis(input: {
         });
   const fixDeltaPaths =
     input.previousReviewedHeadSha !== null && currentHeadSha !== null
-      ? ((await listChangedFilesBestEffort({
-          leftRef: input.previousReviewedHeadSha,
-          rightRef: currentHeadSha,
-          runCommand: input.runCommand,
-          workspace: input.workspace,
-          env: input.env,
-        })) ?? changedPathsFromDiff)
+      ? fallbackToReviewBundlePaths(
+          await listChangedFilesBestEffort({
+            leftRef: input.previousReviewedHeadSha,
+            rightRef: currentHeadSha,
+            runCommand: input.runCommand,
+            workspace: input.workspace,
+            env: input.env,
+          }),
+          changedPathsFromDiff,
+        )
       : changedPathsFromDiff;
   const mergeBasePaths =
     mergeBaseSha !== null && currentHeadSha !== null
-      ? ((await listChangedFilesBestEffort({
-          leftRef: mergeBaseSha,
-          rightRef: currentHeadSha,
-          runCommand: input.runCommand,
-          workspace: input.workspace,
-          env: input.env,
-        })) ?? changedPathsFromDiff)
+      ? fallbackToReviewBundlePaths(
+          await listChangedFilesBestEffort({
+            leftRef: mergeBaseSha,
+            rightRef: currentHeadSha,
+            runCommand: input.runCommand,
+            workspace: input.workspace,
+            env: input.env,
+          }),
+          changedPathsFromDiff,
+        )
       : changedPathsFromDiff;
   const semanticNeighborhoodPaths = semanticNeighborhoodFor(
     fixDeltaPaths,
@@ -1695,6 +1701,19 @@ async function listChangedFilesBestEffort(input: {
   return result.exitCode === 0
     ? sortedUniquePaths(result.stdout.split(/\r?\n/))
     : null;
+}
+
+function fallbackToReviewBundlePaths(
+  listedPaths: readonly string[] | null,
+  changedPathsFromDiff: readonly string[],
+): string[] {
+  if (
+    listedPaths !== null &&
+    (listedPaths.length > 0 || changedPathsFromDiff.length === 0)
+  ) {
+    return [...listedPaths];
+  }
+  return [...changedPathsFromDiff];
 }
 
 function semanticNeighborhoodFor(
