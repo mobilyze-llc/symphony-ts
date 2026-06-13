@@ -49,6 +49,24 @@ const ARTIFACT_SECTION_HEADINGS = [
 const ARTIFACT_SECTION_HEADING_KEYS = buildArtifactSectionHeadingKeys(
   ARTIFACT_SECTION_HEADINGS,
 );
+const KNOWN_EXTENSIONLESS_ROOT_FILES = new Set([
+  "authors",
+  "changelog",
+  "changes",
+  "codeowners",
+  "copying",
+  "dockerfile",
+  "gemfile",
+  "justfile",
+  "license",
+  "makefile",
+  "notice",
+  "owners",
+  "procfile",
+  "rakefile",
+  "readme",
+  "taskfile",
+]);
 // SYMPHONY_UNTRUSTED_DIFF matches as a substring (no word boundaries): the
 // real boundary token is `SYMPHONY_UNTRUSTED_DIFF_<uuid>` and `\b` fails on
 // `_`-suffixed identifiers.
@@ -5223,6 +5241,9 @@ function isArtifactSectionBoundary(candidate: ArtifactHeadingMatch): boolean {
   );
 }
 
+// Markdown headings use strict normalization: `:` may stand in for a space, but
+// the broader preamble label separators below are only for fail-closed inline
+// label detection before the first real `## Verdict` section.
 function normalizeArtifactHeadingText(heading: string): string {
   return heading.replace(/:/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
 }
@@ -5267,8 +5288,84 @@ function artifactPreambleLineStartsWithHeadingLabel(
     offset += word.length;
   }
 
-  const suffix = lowerLine.slice(offset);
-  return suffix.trim() === "" || /^[\s]*[:.!?\-–—]/.test(suffix);
+  const suffix = line.slice(offset);
+  return (
+    suffix.trim() === "" ||
+    artifactHeadingLabelSuffixStartsWithSeparator(suffix, headingWords.length)
+  );
+}
+
+function artifactHeadingLabelSuffixStartsWithSeparator(
+  suffix: string,
+  headingWordCount: number,
+): boolean {
+  const match = /^[\s]*[:.!?\-–—]/.exec(suffix);
+  if (match === null) {
+    return false;
+  }
+
+  const separator = match[0].charAt(match[0].length - 1);
+  if (headingWordCount !== 1 || !isArtifactHeadingDashSeparator(separator)) {
+    return true;
+  }
+
+  if (/^\s/.test(match[0])) {
+    return true;
+  }
+
+  const rest = suffix.slice(match[0].length);
+  return (
+    rest === "" || /^\s/.test(rest) || isCompactArtifactFindingPathSuffix(rest)
+  );
+}
+
+function isCompactArtifactFindingPathSuffix(suffix: string): boolean {
+  const candidate = suffix.trimStart();
+  if (/^(?:\/|\.{1,2}[\\/]|[a-z]:[\\/])/i.test(candidate)) {
+    return true;
+  }
+
+  if (
+    /^(?:[a-z0-9_.-]+[\\/])+(?:[a-z0-9_.-]*\.[a-z0-9][a-z0-9_.-]*(?::\d+(?:\D|$)|(?=\s|$))|[a-z0-9_.-]+:\d+(?:\D|$))/i.test(
+      candidate,
+    )
+  ) {
+    return true;
+  }
+
+  const rootLineReference = /^([a-z0-9_.-]+):\d+(?:\D|$)/i.exec(candidate);
+  if (rootLineReference === null || rootLineReference[1] === undefined) {
+    return false;
+  }
+
+  return (
+    isFileNameWithExtension(rootLineReference[1]) ||
+    isLikelyExtensionlessRootFile(rootLineReference[1])
+  );
+}
+
+function isFileNameWithExtension(filename: string): boolean {
+  return /^[a-z0-9_.-]*\.[a-z0-9][a-z0-9_.-]*$/i.test(filename);
+}
+
+function isLikelyExtensionlessRootFile(filename: string): boolean {
+  return (
+    isKnownExtensionlessRootFile(filename) ||
+    isUppercaseRootFileName(filename) ||
+    isCapitalizedFileStyleName(filename)
+  );
+}
+
+function isKnownExtensionlessRootFile(filename: string): boolean {
+  return KNOWN_EXTENSIONLESS_ROOT_FILES.has(filename.toLowerCase());
+}
+
+function isUppercaseRootFileName(filename: string): boolean {
+  return /^[A-Z][A-Z0-9_-]*$/.test(filename);
+}
+
+function isCapitalizedFileStyleName(filename: string): boolean {
+  return /^[A-Z][A-Za-z0-9_-]*file$/.test(filename);
 }
 
 function skipArtifactHeadingWordSeparator(
@@ -5284,6 +5381,10 @@ function skipArtifactHeadingWordSeparator(
     index += 1;
   }
   return index;
+}
+
+function isArtifactHeadingDashSeparator(char: string): boolean {
+  return char === "-" || char === "–" || char === "—";
 }
 
 function isArtifactHeadingLabelSeparator(char: string): boolean {
