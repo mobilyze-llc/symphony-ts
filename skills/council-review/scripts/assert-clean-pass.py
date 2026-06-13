@@ -9,14 +9,22 @@ import sys
 PASS_MODE = "PR-backed draft"
 SAFE_BASE_EQUIVALENCE = {"exact", "origin-prefix-equivalent"}
 SHA_RE = re.compile(r"[0-9a-fA-F]{7,64}")
+REQUIRED_ARTIFACTS = (
+    "pr-mode.txt",
+    "pr-is-draft.txt",
+    "pr-view-exit-code.txt",
+    "git-status-short.txt",
+    "pr-diff-provenance.txt",
+    "pr-base-equivalence.txt",
+    "pr-head-sha.txt",
+    "local-head-sha.txt",
+    "pr-base-sha.txt",
+    "resolved-base-sha.txt",
+)
 
 
-def read_text(artifact_dir: Path, name: str, required: bool = True) -> str:
+def read_text(artifact_dir: Path, name: str) -> str:
     path = artifact_dir / name
-    if not path.exists():
-        if required:
-            raise FileNotFoundError(f"missing required artifact: {name}")
-        return ""
     return path.read_text(encoding="utf-8").strip()
 
 
@@ -27,23 +35,24 @@ def main() -> int:
 
     artifact_dir = Path(sys.argv[1])
     failures = []
+    missing = [name for name in REQUIRED_ARTIFACTS if not (artifact_dir / name).exists()]
 
-    try:
-        pr_mode = read_text(artifact_dir, "pr-mode.txt")
-        pr_is_draft = read_text(artifact_dir, "pr-is-draft.txt")
-        pr_view_exit = read_text(artifact_dir, "pr-view-exit-code.txt")
-        git_status = read_text(artifact_dir, "git-status-short.txt")
-        provenance = read_text(artifact_dir, "pr-diff-provenance.txt")
-        base_equivalence = read_text(artifact_dir, "pr-base-equivalence.txt")
-        pr_head_sha = read_text(artifact_dir, "pr-head-sha.txt")
-        local_head_sha = read_text(artifact_dir, "local-head-sha.txt")
-        pr_base_sha = read_text(artifact_dir, "pr-base-sha.txt")
-        resolved_base_sha = read_text(artifact_dir, "resolved-base-sha.txt")
-    except FileNotFoundError as exc:
-        failures.append(str(exc))
-        pr_mode = pr_is_draft = pr_view_exit = git_status = provenance = ""
-        base_equivalence = pr_head_sha = local_head_sha = ""
-        pr_base_sha = resolved_base_sha = ""
+    if missing:
+        print("FAIL council-review clean PASS assertion")
+        for name in missing:
+            print(f"- missing required artifact: {name}")
+        return 1
+
+    pr_mode = read_text(artifact_dir, "pr-mode.txt")
+    pr_is_draft = read_text(artifact_dir, "pr-is-draft.txt")
+    pr_view_exit = read_text(artifact_dir, "pr-view-exit-code.txt")
+    git_status = read_text(artifact_dir, "git-status-short.txt")
+    provenance = read_text(artifact_dir, "pr-diff-provenance.txt")
+    base_equivalence = read_text(artifact_dir, "pr-base-equivalence.txt")
+    pr_head_sha = read_text(artifact_dir, "pr-head-sha.txt")
+    local_head_sha = read_text(artifact_dir, "local-head-sha.txt")
+    pr_base_sha = read_text(artifact_dir, "pr-base-sha.txt")
+    resolved_base_sha = read_text(artifact_dir, "resolved-base-sha.txt")
 
     if pr_mode != PASS_MODE:
         failures.append(f"pr-mode.txt must be {PASS_MODE!r}, got {pr_mode!r}")

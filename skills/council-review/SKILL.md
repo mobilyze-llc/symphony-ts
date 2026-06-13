@@ -47,6 +47,7 @@ Read these files only when the workflow asks for them:
 | `templates/council-report.md` | Phase 3 report format | During triage |
 | `templates/cycle-report.md` | Final cycle summary format | During closeout |
 | `scripts/assert-clean-pass.py` | Executable closeout assertion over PR/diff provenance and clean-PASS artifacts | During Setup and Closeout |
+| `scripts/write-review-target-artifacts.py` | Executable setup helper that writes PR mode and diff provenance artifacts from `gh`, git, and base-ref facts | During Setup |
 | `scripts/smoke-clean-pass.sh` | Focused smoke matrix for clean draft, mismatch, degraded, and no-PR cases | During skill validation |
 
 Template paths are relative to `~/.codex/skills/council-review/`.
@@ -174,92 +175,7 @@ if [ -n "$UNTRACKED" ]; then
   exit 1
 fi
 
-PR_DETECTION_DEGRADED=false
-PR_DIFF_PROVENANCE_DEGRADED=false
-if [ -s "$COUNCIL_DIR/pr.json" ]; then
-  PR_IS_DRAFT="$(python3 -c 'import json,sys; value=json.load(open(sys.argv[1])).get("isDraft"); print(str(value).lower() if isinstance(value, bool) else value)' "$COUNCIL_DIR/pr.json" 2>/dev/null || true)"
-  if [ "$PR_IS_DRAFT" != "true" ] && [ "$PR_IS_DRAFT" != "false" ]; then
-    echo "Cannot mechanically assert PR draft state from gh/pr.json; refusing PR-backed clean PASS." >&2
-    exit 1
-  fi
-  printf '%s\n' "$PR_IS_DRAFT" > "$COUNCIL_DIR/pr-is-draft.txt"
-  python3 - "$COUNCIL_DIR/pr.json" "$COUNCIL_DIR" <<'PY'
-import json
-import pathlib
-import sys
-
-pr = json.load(open(sys.argv[1]))
-out = pathlib.Path(sys.argv[2])
-fields = {
-    "headRefOid": "pr-head-sha.txt",
-    "baseRefOid": "pr-base-sha.txt",
-    "baseRefName": "pr-base-ref.txt",
-}
-for field, filename in fields.items():
-    value = pr.get(field) or ""
-    (out / filename).write_text(f"{value}\n", encoding="utf-8")
-PY
-  PR_HEAD_SHA="$(cat "$COUNCIL_DIR/pr-head-sha.txt")"
-  LOCAL_HEAD_SHA="$(cat "$COUNCIL_DIR/local-head-sha.txt")"
-  PR_BASE_REF="$(cat "$COUNCIL_DIR/pr-base-ref.txt")"
-  RESOLVED_BASE_REF="$(cat "$COUNCIL_DIR/resolved-base-ref.txt")"
-  PR_BASE_SHA="$(cat "$COUNCIL_DIR/pr-base-sha.txt")"
-  RESOLVED_BASE_SHA="$(cat "$COUNCIL_DIR/resolved-base-sha.txt")"
-  BASE_REF_EQUIVALENCE="mismatch"
-  if [ "$PR_BASE_REF" = "$RESOLVED_BASE_REF" ]; then
-    BASE_REF_EQUIVALENCE="exact"
-  elif [ "$PR_BASE_REF" = "${RESOLVED_BASE_REF#origin/}" ]; then
-    BASE_REF_EQUIVALENCE="origin-prefix-equivalent"
-  fi
-  printf '%s\n' "$BASE_REF_EQUIVALENCE" > "$COUNCIL_DIR/pr-base-equivalence.txt"
-  if [ "$PR_HEAD_SHA" != "$LOCAL_HEAD_SHA" ]; then
-    printf 'mismatch pr-head\n' > "$COUNCIL_DIR/pr-diff-provenance.txt"
-    PR_DIFF_PROVENANCE_DEGRADED=true
-    echo "PR head SHA does not match local HEAD; refusing PR-backed clean PASS." >&2
-  elif [ "$BASE_REF_EQUIVALENCE" = "mismatch" ]; then
-    printf 'mismatch pr-base-ref\n' > "$COUNCIL_DIR/pr-diff-provenance.txt"
-    PR_DIFF_PROVENANCE_DEGRADED=true
-    echo "PR base ref does not match resolved BASE_BRANCH or an explicit safe equivalence; refusing PR-backed clean PASS." >&2
-  elif [ "$PR_BASE_SHA" != "$RESOLVED_BASE_SHA" ]; then
-    printf 'mismatch pr-base-sha\n' > "$COUNCIL_DIR/pr-diff-provenance.txt"
-    PR_DIFF_PROVENANCE_DEGRADED=true
-    echo "PR base SHA does not match resolved BASE_BRANCH SHA; refusing PR-backed clean PASS." >&2
-  else
-    printf 'match\n' > "$COUNCIL_DIR/pr-diff-provenance.txt"
-  fi
-elif [ "$PR_VIEW_STATUS" -ne 0 ] && ! grep -qi "no pull requests found" "$COUNCIL_DIR/pr.stderr" 2>/dev/null; then
-  PR_DETECTION_DEGRADED=true
-  printf 'unknown\n' > "$COUNCIL_DIR/pr-is-draft.txt"
-  printf 'unknown\n' > "$COUNCIL_DIR/pr-head-sha.txt"
-  printf 'unknown\n' > "$COUNCIL_DIR/pr-base-sha.txt"
-  printf 'unknown\n' > "$COUNCIL_DIR/pr-base-ref.txt"
-  printf 'unknown\n' > "$COUNCIL_DIR/pr-base-equivalence.txt"
-  printf 'unknown\n' > "$COUNCIL_DIR/pr-diff-provenance.txt"
-  echo "Cannot determine whether a PR exists or assert draft state; treating PR detection as degraded." >&2
-else
-  printf 'none\n' > "$COUNCIL_DIR/pr-is-draft.txt"
-  printf 'none\n' > "$COUNCIL_DIR/pr-head-sha.txt"
-  printf 'none\n' > "$COUNCIL_DIR/pr-base-sha.txt"
-  printf 'none\n' > "$COUNCIL_DIR/pr-base-ref.txt"
-  printf 'none\n' > "$COUNCIL_DIR/pr-base-equivalence.txt"
-  printf 'none\n' > "$COUNCIL_DIR/pr-diff-provenance.txt"
-fi
-
-if [ "$PR_DETECTION_DEGRADED" = "true" ]; then
-  printf 'DEGRADED gh-unavailable\n' > "$COUNCIL_DIR/pr-mode.txt"
-elif [ "$DIRTY" = "true" ]; then
-  printf 'DEGRADED dirty working tree\n' > "$COUNCIL_DIR/pr-mode.txt"
-elif [ ! -s "$COUNCIL_DIR/pr.json" ]; then
-  printf 'committed branch diff\n' > "$COUNCIL_DIR/pr-mode.txt"
-elif [ "$(cat "$COUNCIL_DIR/pr-is-draft.txt")" != "true" ]; then
-  printf 'PR-backed non-draft deviation\n' > "$COUNCIL_DIR/pr-mode.txt"
-elif [ "$PR_DIFF_PROVENANCE_DEGRADED" = "true" ]; then
-  printf 'DEGRADED pr-diff-provenance\n' > "$COUNCIL_DIR/pr-mode.txt"
-elif [ "$(cat "$COUNCIL_DIR/pr-is-draft.txt")" = "true" ]; then
-  printf 'PR-backed draft\n' > "$COUNCIL_DIR/pr-mode.txt"
-else
-  printf 'PR-backed non-draft deviation\n' > "$COUNCIL_DIR/pr-mode.txt"
-fi
+"$COUNCIL_REVIEW_SKILL_DIR/scripts/write-review-target-artifacts.py" "$COUNCIL_DIR" || exit 1
 
 CLEAN_PASS_ASSERTION_STATUS=0
 printf '%s\n' "$COUNCIL_REVIEW_SKILL_DIR/scripts/assert-clean-pass.py" \
