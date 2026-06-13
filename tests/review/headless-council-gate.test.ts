@@ -280,6 +280,12 @@ describe("runHeadlessCouncilGate", () => {
         expect.objectContaining({ laneId: "claude-opus", required: true }),
       ]),
     });
+    expect(result.termination).toMatchObject({
+      status: "continue",
+      reason: "blocking_findings",
+      action: "continue_fix_loop",
+      blockingFindingCount: 1,
+    });
   });
 
   it("records operator override when high-risk Codex-authored routing accepts narrower risk", async () => {

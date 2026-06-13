@@ -4705,7 +4705,10 @@ function assessCouncilTermination(input: {
   degradedConditions: readonly string[];
   priorStructuredArtifacts: readonly StructuredReviewerArtifact[];
 }): CouncilTerminationAssessment {
-  const currentArtifacts = currentTerminationArtifacts(input.lanes);
+  const currentArtifacts = currentTerminationArtifacts({
+    verdict: input.verdict,
+    lanes: input.lanes,
+  });
   const currentFindings = currentArtifacts.flatMap(
     (artifact) => artifact.findings,
   );
@@ -4777,23 +4780,39 @@ function assessCouncilTermination(input: {
   };
 }
 
-function currentTerminationArtifacts(
-  lanes: readonly HeadlessLaneResult[],
-): StructuredReviewerArtifact[] {
-  const codexLeadArtifact = lanes.find(
+function currentTerminationArtifacts(input: {
+  verdict: HeadlessGateVerdict;
+  lanes: readonly HeadlessLaneResult[];
+}): StructuredReviewerArtifact[] {
+  const allArtifacts = input.lanes.flatMap((lane) =>
+    lane.structuredArtifact === undefined || lane.structuredArtifact === null
+      ? []
+      : [lane.structuredArtifact],
+  );
+  const codexLeadArtifact = input.lanes.find(
     (lane) =>
       lane.laneId === CODEX_LEAD_LANE_ID &&
       lane.structuredArtifact !== undefined &&
       lane.structuredArtifact !== null,
   )?.structuredArtifact;
   if (codexLeadArtifact !== undefined && codexLeadArtifact !== null) {
+    const leadBlockingFindings = codexLeadArtifact.findings.filter(
+      isOpenBlockingFinding,
+    );
+    const nonLeadBlockingFindings = allArtifacts
+      .filter((artifact) => artifact !== codexLeadArtifact)
+      .flatMap((artifact) => artifact.findings)
+      .filter(isOpenBlockingFinding);
+    if (
+      input.verdict === "fail" &&
+      leadBlockingFindings.length === 0 &&
+      nonLeadBlockingFindings.length > 0
+    ) {
+      return allArtifacts;
+    }
     return [codexLeadArtifact];
   }
-  return lanes.flatMap((lane) =>
-    lane.structuredArtifact === undefined || lane.structuredArtifact === null
-      ? []
-      : [lane.structuredArtifact],
-  );
+  return allArtifacts;
 }
 
 function isOpenBlockingFinding(finding: StructuredReviewFinding): boolean {
