@@ -121,6 +121,7 @@ export type CouncilEscalationPredicate =
   | "high_risk_predicate"
   | "codex_author_codex_lead_tripwire"
   | "operator_force"
+  | "same_family_required_reviewer_recovery"
   | "operator_override_accept_narrower_risk";
 
 export interface CouncilTerminationLadderThresholds {
@@ -378,6 +379,7 @@ interface DefaultReviewerLaneOptions {
   codexExcavationModelAutoCompactTokenLimit?: number | undefined;
   routingMode?: CouncilRoutingMode | undefined;
   acceptsNarrowerRisk?: boolean | undefined;
+  requiresPiAuthorRecovery?: boolean | undefined;
 }
 
 export interface ReviewContext {
@@ -804,6 +806,9 @@ export async function runHeadlessCouncilGate(
           input.codexExcavationModelAutoCompactTokenLimit,
         routingMode: reviewRouting.mode,
         acceptsNarrowerRisk: operatorAcceptedNarrowerRisk(reviewRouting),
+        requiresPiAuthorRecovery: reviewRouting.escalationPredicates.includes(
+          "same_family_required_reviewer_recovery",
+        ),
       });
     const routedDuplicateLaneIds = findDuplicateLaneIds(reviewerLanes);
     if (routedDuplicateLaneIds.length > 0) {
@@ -1443,6 +1448,7 @@ export function defaultReviewerLanes(
   const lanes: HeadlessReviewerLaneConfig[] = [];
   if (
     routingMode === "legacy" ||
+    options.requiresPiAuthorRecovery === true ||
     (routingMode === "high-risk" && options.acceptsNarrowerRisk !== true) ||
     routingMode === "disagreement"
   ) {
@@ -1480,28 +1486,30 @@ function piReviewerLane(env: NodeJS.ProcessEnv): HeadlessReviewerLaneConfig {
   };
 }
 
-function buildInitialCouncilRouting(input: {
+function buildInitialCouncilRouting(args: {
   input: HeadlessCouncilGateInput;
   env: NodeJS.ProcessEnv;
   context: ReviewContext;
   codexLeadEnabled: boolean;
 }): CouncilReviewRouting {
-  const changedPaths = extractChangedPathsFromDiff(input.context.diff);
+  const gateInput = args.input;
+  const changedPaths = extractChangedPathsFromDiff(args.context.diff);
   const highRiskPredicate = classifyCouncilRiskPaths(changedPaths);
   const forcedMode =
-    input.input.routingMode ?? forcedCouncilRoutingMode(input.env);
-  const forceLegacy = envFlag(input.env.SYMPHONY_COUNCIL_FORCE_LEGACY);
-  const forceOpus = envFlag(input.env.SYMPHONY_COUNCIL_FORCE_OPUS);
-  const authorFamilies = inferAuthorFamilies(input.input.provenance ?? []);
+    gateInput.routingMode ?? forcedCouncilRoutingMode(args.env);
+  const forceLegacy = envFlag(args.env.SYMPHONY_COUNCIL_FORCE_LEGACY);
+  const forceOpus = envFlag(args.env.SYMPHONY_COUNCIL_FORCE_OPUS);
+  const authorFamilies = inferAuthorFamilies(gateInput.provenance ?? []);
   const codexAuthored = authorFamilies.includes("openai-codex");
+  const piAuthored = authorFamilies.includes("pi");
   const acceptsNarrowerRisk = envFlag(
-    input.env.SYMPHONY_COUNCIL_ACCEPT_NARROWER_RISK ??
-      input.env.SYMPHONY_COUNCIL_ACCEPT_NARROW_RISK,
+    args.env.SYMPHONY_COUNCIL_ACCEPT_NARROWER_RISK ??
+      args.env.SYMPHONY_COUNCIL_ACCEPT_NARROW_RISK,
   );
   const highRisk = highRiskPredicate.triggerHits.length > 0;
   const rawOperatorOverrideReason =
-    input.input.operatorOverrideReason ??
-    input.env.SYMPHONY_COUNCIL_OPERATOR_OVERRIDE_REASON ??
+    gateInput.operatorOverrideReason ??
+    args.env.SYMPHONY_COUNCIL_OPERATOR_OVERRIDE_REASON ??
     null;
   const operatorOverrideReason =
     typeof rawOperatorOverrideReason === "string" &&
@@ -1515,12 +1523,13 @@ function buildInitialCouncilRouting(input: {
     operatorOverrideReason !== null &&
     !forceLegacy &&
     !forceOpus &&
+    forcedMode !== "high-risk" &&
     forcedMode !== "legacy";
   const escalationPredicates: CouncilEscalationPredicate[] = [];
   if (highRisk) {
     escalationPredicates.push("high_risk_predicate");
   }
-  if (codexAuthored && input.codexLeadEnabled) {
+  if (codexAuthored && args.codexLeadEnabled) {
     escalationPredicates.push("codex_author_codex_lead_tripwire");
   }
   if (forceLegacy || forceOpus || forcedMode !== undefined) {
@@ -1541,22 +1550,30 @@ function buildInitialCouncilRouting(input: {
             ? "high-risk"
             : "standard";
   const selectedLanes =
-    input.input.reviewerLanes === undefined
+    gateInput.reviewerLanes === undefined
       ? defaultSelectedLanesForRouting({
-          env: input.env,
+          env: args.env,
           mode,
-          codexLeadEnabled: input.codexLeadEnabled,
-          codexExcavation: input.input.codexExcavation,
+          codexLeadEnabled: args.codexLeadEnabled,
+          codexExcavation: gateInput.codexExcavation,
           acceptsNarrowerRisk: acceptsNarrowerRiskForHighRisk,
+          requiresPiAuthorRecovery: piAuthored,
         })
       : explicitSelectedLanesForRouting({
-          lanes: input.input.reviewerLanes,
-          codexLeadEnabled: input.codexLeadEnabled,
+          lanes: gateInput.reviewerLanes,
+          codexLeadEnabled: args.codexLeadEnabled,
+          requiresPiAuthorRecovery: piAuthored,
         });
+  if (
+    piAuthored &&
+    selectedLanes.some((lane) => lane.laneId === "claude-opus")
+  ) {
+    escalationPredicates.push("same_family_required_reviewer_recovery");
+  }
   const skippedLanes = skippedLanesForRouting({
     mode,
     selectedLanes,
-    codexExcavation: input.input.codexExcavation,
+    codexExcavation: gateInput.codexExcavation,
     acceptsNarrowerRisk: acceptsNarrowerRiskForHighRisk,
   });
   return {
@@ -1572,7 +1589,7 @@ function buildInitialCouncilRouting(input: {
     operatorOverrideReason,
     highRiskPredicate,
     leadConfidenceThreshold: parseEnvNumber(
-      input.env.SYMPHONY_COUNCIL_LEAD_CONFIDENCE_THRESHOLD,
+      args.env.SYMPHONY_COUNCIL_LEAD_CONFIDENCE_THRESHOLD,
       DEFAULT_LEAD_CONFIDENCE_THRESHOLD,
     ),
   };
@@ -1584,19 +1601,33 @@ function defaultSelectedLanesForRouting(input: {
   codexLeadEnabled: boolean;
   codexExcavation: boolean | undefined;
   acceptsNarrowerRisk: boolean;
+  requiresPiAuthorRecovery: boolean;
 }): CouncilRoutingLaneSelection[] {
   const selections: CouncilRoutingLaneSelection[] = [];
   const includeOpus =
     input.mode === "legacy" ||
     input.mode === "disagreement" ||
+    input.requiresPiAuthorRecovery ||
     (input.mode === "high-risk" && !input.acceptsNarrowerRisk);
   if (includeOpus) {
     selections.push(laneSelection(opusReviewerLane(input.env), true, true));
   }
-  selections.push(laneSelection(piReviewerLane(input.env), true, true));
+  selections.push(
+    laneSelection(
+      piReviewerLane(input.env),
+      !input.requiresPiAuthorRecovery,
+      !input.requiresPiAuthorRecovery,
+    ),
+  );
   if (codexExcavationEnabled(input.env, input.codexExcavation)) {
     selections.push(
-      laneSelection(codexExcavationLane(input.env, {}), false, false),
+      laneSelection(
+        codexExcavationLane(input.env, {
+          codexExcavationSweep: routingCodexSweep(input.mode),
+        }),
+        false,
+        false,
+      ),
     );
   }
   if (input.codexLeadEnabled) {
@@ -1615,12 +1646,16 @@ function defaultSelectedLanesForRouting(input: {
 function explicitSelectedLanesForRouting(input: {
   lanes: readonly HeadlessReviewerLaneConfig[];
   codexLeadEnabled: boolean;
+  requiresPiAuthorRecovery: boolean;
 }): CouncilRoutingLaneSelection[] {
   const selections = input.lanes.map((lane) =>
     laneSelection(
       lane,
-      independentReviewerForLane(lane),
-      lane.agent !== "codex",
+      input.requiresPiAuthorRecovery && lane.agent === "pi"
+        ? false
+        : independentReviewerForLane(lane),
+      lane.agent !== "codex" &&
+        !(input.requiresPiAuthorRecovery && lane.agent === "pi"),
     ),
   );
   if (input.codexLeadEnabled) {
@@ -1650,7 +1685,9 @@ function laneSelection(
     reason:
       lane.agent === "codex"
         ? "direct_codex_excavation_signal"
-        : "non_author_family_reviewer_artifact",
+        : !decorrelatedSignal
+          ? "same_family_author_signal"
+          : "non_author_family_reviewer_artifact",
   };
 }
 
@@ -4990,6 +5027,9 @@ function currentTerminationArtifacts(input: {
       lane.structuredArtifact !== null,
   )?.structuredArtifact;
   if (codexLeadArtifact !== undefined && codexLeadArtifact !== null) {
+    if (input.verdict === "error") {
+      return allArtifacts;
+    }
     const leadBlockingFindings = codexLeadArtifact.findings.filter(
       isOpenBlockingFinding,
     );

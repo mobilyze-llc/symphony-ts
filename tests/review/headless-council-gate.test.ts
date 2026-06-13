@@ -296,7 +296,7 @@ describe("runHeadlessCouncilGate", () => {
     );
   });
 
-  it("fails closed when a required reviewer lane is same-family with the author", async () => {
+  it("recovers Pi-authored Standard reviews by requiring Opus instead of same-family Pi", async () => {
     const harness = await createHarness();
     const result = await runHeadlessCouncilGate(
       {
@@ -319,22 +319,96 @@ describe("runHeadlessCouncilGate", () => {
       { runCommand: harness.runCommand },
     );
 
-    expect(result.verdict).toBe("error");
-    expect(result.degradedConditions).toContain(
-      "routing_absent_decorrelated_reviewer_artifact",
-    );
-    expect(result.degradedConditions).toContain(
-      "routing_required_lane_not_decorrelated:pi-deepseek",
-    );
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "claude-opus",
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+    ]);
     expect(result.review_routing).toMatchObject({
       mode: "standard",
+      selectedLanes: expect.arrayContaining([
+        expect.objectContaining({
+          laneId: "claude-opus",
+          required: true,
+          decorrelatedSignal: true,
+        }),
+        expect.objectContaining({
+          laneId: "pi-deepseek",
+          required: false,
+          decorrelatedSignal: false,
+          reason: "same_family_author_signal",
+        }),
+      ]),
       decorrelationBasis: {
         authorFamilies: ["pi"],
-        requiredReviewerLaneIds: ["pi-deepseek"],
-        decorrelatedReviewerArtifacts: [],
-        mergeEligible: false,
+        requiredReviewerLaneIds: ["claude-opus"],
+        decorrelatedReviewerArtifacts: [
+          {
+            laneId: "claude-opus",
+            agent: "claude",
+            modelFamily: "anthropic",
+          },
+        ],
+        mergeEligible: true,
       },
-      escalationPredicates: ["absent_decorrelated_reviewer_artifact"],
+      escalationPredicates: ["same_family_required_reviewer_recovery"],
+    });
+  });
+
+  it("recovers explicit Pi-authored routes with Opus instead of requiring same-family Pi", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-501",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane(), piLane()],
+        provenance: [
+          {
+            role: "implementer",
+            agent: "pi",
+            modelFamily: "pi",
+            model: "deepseek-v4-pro",
+            reasoningEffort: "high",
+            sourceStage: "implement",
+            commitRange: null,
+          },
+        ],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.review_routing).toMatchObject({
+      selectedLanes: expect.arrayContaining([
+        expect.objectContaining({
+          laneId: "claude-opus",
+          required: true,
+          decorrelatedSignal: true,
+        }),
+        expect.objectContaining({
+          laneId: "pi-deepseek",
+          required: false,
+          decorrelatedSignal: false,
+          reason: "same_family_author_signal",
+        }),
+      ]),
+      decorrelationBasis: {
+        authorFamilies: ["pi"],
+        requiredReviewerLaneIds: ["claude-opus"],
+        decorrelatedReviewerArtifacts: [
+          {
+            laneId: "claude-opus",
+            agent: "claude",
+            modelFamily: "anthropic",
+          },
+        ],
+        mergeEligible: true,
+      },
+      escalationPredicates: ["same_family_required_reviewer_recovery"],
     });
   });
 
@@ -369,6 +443,38 @@ describe("runHeadlessCouncilGate", () => {
           "Review is not merge-eligible: author model family provenance is missing.",
       },
       escalationPredicates: ["absent_decorrelated_reviewer_artifact"],
+    });
+  });
+
+  it("preserves non-lead Track metadata for error verdict termination reporting", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "pi-deepseek": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n\n## Track\n- Preserve reviewer metadata when routing guarantee errors. confidence: 0.8\n",
+        },
+        "codex-high-lead": {
+          artifact: "## Verdict\nPASS\n\n## Triage\nNone\n\n## Track\nNone\n",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.termination).toMatchObject({
+      status: "degraded",
+      reason: "gate_error",
+      trackFindingCount: 1,
+      nonBlockingFindingCount: 1,
     });
   });
 
@@ -546,6 +652,53 @@ describe("runHeadlessCouncilGate", () => {
         "codex_author_codex_lead_tripwire",
       ],
     });
+  });
+
+  it("does not let narrower-risk env override an explicit high-risk route", async () => {
+    const harness = await createHarness();
+    await writeFile(
+      harness.diffPath,
+      "diff --git a/src/orchestrator/core.ts b/src/orchestrator/core.ts\n+const risk = true;\n",
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        routingMode: "high-risk",
+        provenance: [codexImplementerProvenance()],
+        env: {
+          SYMPHONY_COUNCIL_ACCEPT_NARROWER_RISK: "1",
+          SYMPHONY_COUNCIL_OPERATOR_OVERRIDE_REASON:
+            "operator accepts Pi-only decorrelation for automatic high-risk routing",
+        },
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "claude-opus",
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+    ]);
+    expect(result.review_routing).toMatchObject({
+      mode: "high-risk",
+      skippedLanes: [],
+      operatorOverrideReason:
+        "operator accepts Pi-only decorrelation for automatic high-risk routing",
+      escalationPredicates: [
+        "high_risk_predicate",
+        "codex_author_codex_lead_tripwire",
+        "operator_force",
+      ],
+    });
+    expect(result.review_routing?.escalationPredicates).not.toContain(
+      "operator_override_accept_narrower_risk",
+    );
   });
 
   it("still escalates disagreement when high-risk routing accepts narrower risk", async () => {
