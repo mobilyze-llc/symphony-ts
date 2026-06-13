@@ -147,6 +147,34 @@ function dispatchVerdict(input: {
   });
 }
 
+function queueBaseline(input: {
+  sequence: number;
+  consideredIssueIds: string[];
+  dispatchPicks: string[];
+}): DispatcherRunJournalEntry {
+  return entry({
+    sequence: input.sequence,
+    kind: "queue_baseline",
+    issueId: "__dispatch__",
+    issueIdentifier: "__dispatch__",
+    metadata: {
+      schema_version: 1,
+      comparator_version: "priority-fifo-control-v0",
+      considered_issue_ids: input.consideredIssueIds,
+      dispatch_picks: input.dispatchPicks,
+      manual_jumps_reorders: [{ sequence: 1, verb: "release" }],
+      quiet_death_outcomes: [{ sequence: 2, issue_identifier: "SYMPH-101" }],
+      urgent_reopen_outcomes: [],
+      delivery_outcomes: [
+        {
+          issue_identifier: "SYMPH-100",
+          spend: { total_tokens: 1234, turns: 3, stages: 1 },
+        },
+      ],
+    },
+  });
+}
+
 describe("calibration digest (SYMPH-411)", () => {
   it("retry_once → success plus retry_once → re-park yields 50% precision with both cursors", () => {
     const journal = [
@@ -540,6 +568,43 @@ describe("calibration digest (SYMPH-411)", () => {
     expect(report.operatorActions).toEqual([
       { verb: "release", count: 1, sequences: [4] },
     ]);
+  });
+
+  it("surfaces week-zero queue baseline samples from journaled read-model rows", () => {
+    const report = computeCalibrationReport([
+      queueBaseline({
+        sequence: 10,
+        consideredIssueIds: ["issue-a", "issue-b"],
+        dispatchPicks: ["issue-a"],
+      }),
+    ]);
+
+    expect(report.queueBaseline).toEqual([
+      {
+        sequence: 10,
+        comparatorVersion: "priority-fifo-control-v0",
+        consideredIssueIds: ["issue-a", "issue-b"],
+        dispatchPicks: ["issue-a"],
+        manualJumpsReorders: [{ sequence: 1, verb: "release" }],
+        quietDeathOutcomes: [{ sequence: 2, issue_identifier: "SYMPH-101" }],
+        urgentReopenOutcomes: [],
+        deliveryOutcomes: [
+          {
+            issue_identifier: "SYMPH-100",
+            spend: { total_tokens: 1234, turns: 3, stages: 1 },
+          },
+        ],
+      },
+    ]);
+
+    const digest = renderCalibrationDigest(report, {
+      generatedAt: "2026-06-12T00:00:00.000Z",
+      journalLabel: "synthetic",
+    });
+    expect(digest).toContain("## Queue baseline (week zero)");
+    expect(digest).toContain(
+      "| seq 10 | priority-fifo-control-v0 | 2 | 1 | 1 | 1 | 0 | 1 |",
+    );
   });
 
   it("renders the synthetic journal to the expected golden digest", () => {

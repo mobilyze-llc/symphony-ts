@@ -100,6 +100,17 @@ export interface OperatorActionRow {
   sequences: number[];
 }
 
+export interface QueueBaselineSample {
+  sequence: number;
+  comparatorVersion: string;
+  consideredIssueIds: string[];
+  dispatchPicks: string[];
+  manualJumpsReorders: unknown[];
+  quietDeathOutcomes: unknown[];
+  urgentReopenOutcomes: unknown[];
+  deliveryOutcomes: unknown[];
+}
+
 export interface CalibrationReport {
   journalEntryCount: number;
   firstSequence: number | null;
@@ -111,6 +122,7 @@ export interface CalibrationReport {
   breakerWindows: BreakerWindowRow[];
   alertVolume: AlertVolumeRow[];
   operatorActions: OperatorActionRow[];
+  queueBaseline: QueueBaselineSample[];
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +142,21 @@ function metaString(
 ): string | null {
   const value = entry.metadata[key];
   return typeof value === "string" ? value : null;
+}
+
+function metaStringArray(
+  entry: DispatcherRunJournalEntry,
+  key: string,
+): string[] {
+  const value = entry.metadata[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function metaArray(entry: DispatcherRunJournalEntry, key: string): unknown[] {
+  const value = entry.metadata[key];
+  return Array.isArray(value) ? value : [];
 }
 
 function actorKind(entry: DispatcherRunJournalEntry): string | null {
@@ -414,6 +441,24 @@ export function computeCalibrationReport(
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([verb, sequences]) => ({ verb, count: sequences.length, sequences }));
 
+  const queueBaseline: QueueBaselineSample[] = sorted.flatMap((entry) => {
+    if (entry.kind !== "queue_baseline") {
+      return [];
+    }
+    return [
+      {
+        sequence: entry.sequence,
+        comparatorVersion: metaString(entry, "comparator_version") ?? "unknown",
+        consideredIssueIds: metaStringArray(entry, "considered_issue_ids"),
+        dispatchPicks: metaStringArray(entry, "dispatch_picks"),
+        manualJumpsReorders: metaArray(entry, "manual_jumps_reorders"),
+        quietDeathOutcomes: metaArray(entry, "quiet_death_outcomes"),
+        urgentReopenOutcomes: metaArray(entry, "urgent_reopen_outcomes"),
+        deliveryOutcomes: metaArray(entry, "delivery_outcomes"),
+      },
+    ];
+  });
+
   return {
     journalEntryCount: sorted.length,
     firstSequence: sorted[0]?.sequence ?? null,
@@ -428,6 +473,7 @@ export function computeCalibrationReport(
     breakerWindows,
     alertVolume,
     operatorActions,
+    queueBaseline,
   };
 }
 
@@ -638,6 +684,30 @@ export function renderCalibrationDigest(
     for (const row of report.operatorActions) {
       lines.push(
         `- ${escapeMarkdownCell(row.verb)}: ${row.count} (${row.sequences.map((s) => `seq ${s}`).join(", ")})`,
+      );
+    }
+  }
+  lines.push("");
+
+  lines.push("## Queue baseline (week zero)");
+  lines.push("");
+  lines.push(
+    "FIFO-control samples recorded before queue-triage lanes gain authority.",
+    "Each row keeps the comparator version, considered issue ids, dispatch",
+    "picks, manual jumps/reorders, quiet-death and urgent-reopen outcomes,",
+    "plus spend/delivery outcomes per delivered ticket.",
+  );
+  lines.push("");
+  if (report.queueBaseline.length === 0) {
+    lines.push("_No queue baseline samples in window._");
+  } else {
+    lines.push(
+      "| seq | comparator | considered | picks | manual | quiet-death | urgent-reopen | delivery |",
+    );
+    lines.push("| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for (const sample of report.queueBaseline) {
+      lines.push(
+        `| seq ${sample.sequence} | ${escapeMarkdownCell(sample.comparatorVersion)} | ${sample.consideredIssueIds.length} | ${sample.dispatchPicks.length} | ${sample.manualJumpsReorders.length} | ${sample.quietDeathOutcomes.length} | ${sample.urgentReopenOutcomes.length} | ${sample.deliveryOutcomes.length} |`,
       );
     }
   }

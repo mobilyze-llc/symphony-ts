@@ -4,7 +4,10 @@ import type {
   ResolvedWorkflowConfig,
   StagesConfig,
 } from "../../src/config/types.js";
-import type { Issue } from "../../src/domain/model.js";
+import type {
+  DispatcherRunJournalEntry,
+  Issue,
+} from "../../src/domain/model.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
@@ -67,6 +70,570 @@ describe("dispatcher decision event emission", () => {
     );
   });
 
+  it("journals queue-baseline control-arm fields after a dispatch poll", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            priority: 2,
+          }),
+          createIssue({
+            id: "2",
+            identifier: "ISSUE-2",
+            priority: 1,
+          }),
+        ],
+      }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((entry) => entry.kind === "queue_baseline");
+
+    expect(baseline).toMatchObject({
+      kind: "queue_baseline",
+      issueId: "__dispatch__",
+      metadata: expect.objectContaining({
+        comparator_version: "priority-fifo-control-v0",
+        outcome_since_sequence: 0,
+        outcome_window_semantics: expect.stringContaining(
+          "urgent_reopen_outcomes may reference the earlier failure",
+        ),
+        considered_issue_ids: ["2", "1"],
+        dispatch_picks: ["2", "1"],
+        manual_jumps_reorders: [],
+        quiet_death_outcomes: [],
+        urgent_reopen_outcomes: [],
+        delivery_outcomes: [],
+      }),
+    });
+  });
+
+  it("does not journal queue-baseline samples for empty idle polls", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({ candidates: [] }),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.pollTick();
+
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.filter(
+          (entry) => entry.kind === "queue_baseline",
+        ),
+    ).toEqual([]);
+  });
+
+  it("journals outcome-only queue-baseline samples when the queue is empty", async () => {
+    const orchestrator = createOrchestrator({
+      runJournal: [
+        journalEntry({
+          sequence: 1,
+          kind: "failure_exhausted",
+          issueId: "dead",
+          issueIdentifier: "ISSUE-DEAD",
+          summary: "Retries exhausted.",
+          metadata: {
+            status: "completed",
+            reason: "max_retries",
+            failure_signature: "sig-dead",
+          },
+        }),
+      ],
+      tracker: createTracker({ candidates: [] }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+
+    expect(baseline?.metadata).toMatchObject({
+      considered_issue_ids: [],
+      dispatch_picks: [],
+      quiet_death_outcomes: [
+        expect.objectContaining({
+          issue_id: "dead",
+          failure_signature: "sig-dead",
+        }),
+      ],
+    });
+  });
+
+  it("journals non-empty queue-baseline outcome samples from prior journal entries", async () => {
+    const orchestrator = createOrchestrator({
+      runJournal: [
+        journalEntry({
+          sequence: 1,
+          kind: "failure_exhausted",
+          issueId: "dead",
+          issueIdentifier: "ISSUE-DEAD",
+          summary: "Retries exhausted.",
+          metadata: {
+            status: "completed",
+            reason: "max_retries",
+            failure_signature: "sig-dead",
+            failure_class: "infra",
+          },
+        }),
+        journalEntry({
+          sequence: 2,
+          kind: "intent",
+          issueId: "dead",
+          issueIdentifier: "ISSUE-DEAD",
+          summary: "Operator released issue.",
+          metadata: {
+            status: "applied",
+            verb: "release",
+            actor: { kind: "operator", host: "desk" },
+            reason: { class: "operator_release", human: "urgent reopen" },
+          },
+        }),
+        journalEntry({
+          sequence: 3,
+          kind: "stage_record",
+          issueId: "delivered",
+          issueIdentifier: "ISSUE-DONE",
+          stage: "implement",
+          summary: "Stage completed.",
+          metadata: {
+            stageName: "implement",
+            durationMs: 1200,
+            totalTokens: 1234,
+            inputTokens: 1000,
+            outputTokens: 234,
+            turns: 3,
+            outcome: "succeeded",
+            status: "completed",
+          },
+        }),
+        journalEntry({
+          sequence: 4,
+          kind: "tracker_write",
+          issueId: "delivered",
+          issueIdentifier: "ISSUE-DONE",
+          stage: "merge",
+          idempotencyKey: "tracker:delivered:terminal:completed",
+          summary: "Marked issue complete.",
+          metadata: { status: "completed" },
+        }),
+      ],
+      tracker: createTracker({
+        candidates: [createIssue({ id: "next", identifier: "ISSUE-NEXT" })],
+      }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+
+    expect(baseline?.metadata).toMatchObject({
+      manual_jumps_reorders: [
+        expect.objectContaining({
+          sequence: 2,
+          issue_id: "dead",
+          issue_identifier: "ISSUE-DEAD",
+          verb: "release",
+        }),
+      ],
+      quiet_death_outcomes: [
+        expect.objectContaining({
+          sequence: 1,
+          issue_id: "dead",
+          issue_identifier: "ISSUE-DEAD",
+          failure_signature: "sig-dead",
+        }),
+      ],
+      urgent_reopen_outcomes: [
+        expect.objectContaining({
+          issue_id: "dead",
+          reopened_after_sequence: 1,
+        }),
+      ],
+      delivery_outcomes: [
+        expect.objectContaining({
+          issue_id: "delivered",
+          issue_identifier: "ISSUE-DONE",
+          spend: {
+            scope: "baseline_window",
+            since_sequence: 0,
+            total_tokens: 1234,
+            turns: 3,
+            stages: 1,
+          },
+        }),
+      ],
+    });
+  });
+
+  it("journals only queue-baseline outcomes observed since the previous baseline", async () => {
+    const orchestrator = createOrchestrator({
+      runJournal: [
+        journalEntry({
+          sequence: 1,
+          kind: "failure_exhausted",
+          issueId: "old-dead",
+          issueIdentifier: "ISSUE-OLD",
+          summary: "Old retries exhausted.",
+          metadata: {
+            status: "completed",
+            reason: "max_retries",
+            failure_signature: "sig-old",
+          },
+        }),
+        journalEntry({
+          sequence: 2,
+          kind: "queue_baseline",
+          issueId: "__dispatch__",
+          issueIdentifier: "__dispatch__",
+          summary: "Prior baseline.",
+          metadata: {
+            schema_version: 1,
+            comparator_version: "priority-fifo-control-v0",
+          },
+        }),
+        journalEntry({
+          sequence: 3,
+          kind: "failure_exhausted",
+          issueId: "new-dead",
+          issueIdentifier: "ISSUE-NEW",
+          summary: "New retries exhausted.",
+          metadata: {
+            status: "completed",
+            reason: "max_retries",
+            failure_signature: "sig-new",
+          },
+        }),
+        journalEntry({
+          sequence: 4,
+          kind: "intent",
+          issueId: "old-dead",
+          issueIdentifier: "ISSUE-OLD",
+          summary: "Operator released old issue after the prior baseline.",
+          metadata: {
+            status: "applied",
+            verb: "release",
+            actor: { kind: "operator", host: "desk" },
+          },
+        }),
+      ],
+      tracker: createTracker({
+        candidates: [createIssue({ id: "next", identifier: "ISSUE-NEXT" })],
+      }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+
+    expect(baseline?.metadata).toMatchObject({
+      outcome_since_sequence: 2,
+      manual_jumps_reorders: [
+        expect.objectContaining({
+          sequence: 4,
+          issue_id: "old-dead",
+        }),
+      ],
+      quiet_death_outcomes: [
+        expect.objectContaining({
+          sequence: 3,
+          issue_id: "new-dead",
+          failure_signature: "sig-new",
+        }),
+      ],
+      urgent_reopen_outcomes: [
+        expect.objectContaining({
+          sequence: 4,
+          issue_id: "old-dead",
+          reopened_after_sequence: 1,
+        }),
+      ],
+    });
+    expect(baseline?.metadata).not.toMatchObject({
+      quiet_death_outcomes: [
+        expect.objectContaining({
+          issue_id: "old-dead",
+        }),
+      ],
+    });
+  });
+
+  it("keeps delivery spend windowed to stage records after the previous baseline", async () => {
+    const orchestrator = createOrchestrator({
+      runJournal: [
+        journalEntry({
+          sequence: 1,
+          kind: "stage_record",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "implement",
+          metadata: {
+            status: "completed",
+            stageName: "implement",
+            durationMs: 100,
+            totalTokens: 10_000,
+            inputTokens: 9_000,
+            outputTokens: 1_000,
+            turns: 9,
+            outcome: "succeeded",
+          },
+        }),
+        journalEntry({
+          sequence: 2,
+          kind: "tracker_write",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "merge",
+          idempotencyKey: "tracker:redelivered:terminal:completed",
+          metadata: { status: "completed" },
+        }),
+        journalEntry({
+          sequence: 3,
+          kind: "queue_baseline",
+          issueId: "__dispatch__",
+          issueIdentifier: "__dispatch__",
+          summary: "Prior baseline.",
+          metadata: {
+            schema_version: 1,
+            comparator_version: "priority-fifo-control-v0",
+          },
+        }),
+        journalEntry({
+          sequence: 4,
+          kind: "stage_record",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "implement",
+          metadata: {
+            status: "completed",
+            stageName: "implement",
+            durationMs: 200,
+            totalTokens: 250,
+            inputTokens: 200,
+            outputTokens: 50,
+            turns: 2,
+            outcome: "succeeded",
+          },
+        }),
+        journalEntry({
+          sequence: 5,
+          kind: "tracker_write",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "merge",
+          idempotencyKey: "tracker:redelivered:terminal:completed",
+          metadata: { status: "completed" },
+        }),
+      ],
+      tracker: createTracker({
+        candidates: [createIssue({ id: "next", identifier: "ISSUE-NEXT" })],
+      }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+
+    expect(baseline?.metadata).toMatchObject({
+      outcome_since_sequence: 3,
+      delivery_outcomes: [
+        expect.objectContaining({
+          sequence: 5,
+          issue_id: "redelivered",
+          spend: {
+            scope: "baseline_window",
+            since_sequence: 3,
+            total_tokens: 250,
+            turns: 2,
+            stages: 1,
+          },
+        }),
+      ],
+    });
+  });
+
+  it("partitions delivery spend between repeated terminal writes in one baseline window", async () => {
+    const orchestrator = createOrchestrator({
+      runJournal: [
+        journalEntry({
+          sequence: 1,
+          kind: "stage_record",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "implement",
+          metadata: {
+            status: "completed",
+            stageName: "implement",
+            durationMs: 100,
+            totalTokens: 100,
+            turns: 1,
+            outcome: "succeeded",
+          },
+        }),
+        journalEntry({
+          sequence: 2,
+          kind: "tracker_write",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "merge",
+          idempotencyKey: "tracker:redelivered:terminal:completed",
+          metadata: { status: "completed" },
+        }),
+        journalEntry({
+          sequence: 3,
+          kind: "stage_record",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "implement",
+          metadata: {
+            status: "completed",
+            stageName: "implement",
+            durationMs: 200,
+            totalTokens: 250,
+            turns: 2,
+            outcome: "succeeded",
+          },
+        }),
+        journalEntry({
+          sequence: 4,
+          kind: "tracker_write",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "merge",
+          idempotencyKey: "tracker:redelivered:terminal:completed",
+          metadata: { status: "completed" },
+        }),
+      ],
+      tracker: createTracker({
+        candidates: [createIssue({ id: "next", identifier: "ISSUE-NEXT" })],
+      }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+
+    expect(baseline?.metadata).toMatchObject({
+      delivery_outcomes: [
+        expect.objectContaining({
+          sequence: 2,
+          spend: expect.objectContaining({
+            total_tokens: 100,
+            turns: 1,
+            stages: 1,
+          }),
+        }),
+        expect.objectContaining({
+          sequence: 4,
+          spend: expect.objectContaining({
+            total_tokens: 250,
+            turns: 2,
+            stages: 1,
+          }),
+        }),
+      ],
+    });
+  });
+
+  it("journals a queue-baseline sample when pipeline-halt blocks dispatch", async () => {
+    const haltIssue = createIssue({
+      id: "halt",
+      identifier: "ISSUE-HALT",
+      title: "Pipeline halted",
+      labels: ["pipeline-halt"],
+    });
+    const tracker: IssueTracker = {
+      ...createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1", priority: 2 }),
+          createIssue({ id: "2", identifier: "ISSUE-2", priority: 1 }),
+        ],
+      }),
+      async fetchOpenIssuesByLabels() {
+        return [haltIssue];
+      },
+    };
+    const orchestrator = createOrchestrator({ tracker });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+    expect(baseline?.metadata).toMatchObject({
+      considered_issue_ids: ["2", "1"],
+      dispatch_picks: [],
+    });
+  });
+
+  it("journals a queue-baseline sample when the rate-limit admission gate blocks dispatch", async () => {
+    const orchestrator = createOrchestrator({
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+        },
+      }),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      limit_id: "codex",
+      primary: {
+        used_percent: 40,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+    expect(baseline?.metadata).toMatchObject({
+      considered_issue_ids: ["1"],
+      dispatch_picks: [],
+    });
+  });
+
   it("emits measurable pause and re-steer events when deterministic supervision blocks a co-run", async () => {
     const orchestrator = createOrchestrator({
       tracker: createTracker({
@@ -124,13 +691,15 @@ describe("dispatcher decision event emission", () => {
 });
 
 function createOrchestrator(overrides?: {
+  config?: ResolvedWorkflowConfig;
   tracker?: IssueTracker;
   requestSupervisionResteer?: OrchestratorCoreOptions["requestSupervisionResteer"];
   stages?: StagesConfig | null;
+  runJournal?: DispatcherRunJournalEntry[];
 }): OrchestratorCore {
   const stages = overrides?.stages !== undefined ? overrides.stages : null;
   const options: OrchestratorCoreOptions = {
-    config: createConfig({ stages }),
+    config: overrides?.config ?? createConfig({ stages }),
     tracker: overrides?.tracker ?? createTracker(),
     spawnWorker: async () => ({
       workerHandle: { pid: 1001 },
@@ -138,10 +707,40 @@ function createOrchestrator(overrides?: {
     }),
     now: () => new Date("2026-03-06T00:00:05.000Z"),
   };
+  if (overrides?.runJournal !== undefined) {
+    options.runJournal = overrides.runJournal;
+  }
   if (overrides?.requestSupervisionResteer !== undefined) {
     options.requestSupervisionResteer = overrides.requestSupervisionResteer;
   }
   return new OrchestratorCore(options);
+}
+
+function journalEntry(
+  overrides: Partial<DispatcherRunJournalEntry> & {
+    sequence: number;
+    kind: DispatcherRunJournalEntry["kind"];
+    issueId: string;
+    issueIdentifier: string;
+  },
+): DispatcherRunJournalEntry {
+  return {
+    sequence: overrides.sequence,
+    idempotencyKey:
+      overrides.idempotencyKey ??
+      `test:${overrides.kind}:${overrides.sequence}`,
+    timestamp: overrides.timestamp ?? "2026-03-05T00:00:00.000Z",
+    kind: overrides.kind,
+    issueId: overrides.issueId,
+    issueIdentifier: overrides.issueIdentifier,
+    operation: overrides.operation ?? "dispatcher",
+    stage: overrides.stage ?? null,
+    attempt: overrides.attempt ?? null,
+    ownerId: overrides.ownerId ?? "test-owner",
+    lease: overrides.lease ?? null,
+    summary: overrides.summary ?? "Synthetic journal entry.",
+    metadata: overrides.metadata ?? {},
+  };
 }
 
 function createTracker(input?: { candidates?: Issue[] }): IssueTracker {
@@ -162,6 +761,7 @@ function createTracker(input?: { candidates?: Issue[] }): IssueTracker {
 
 function createConfig(overrides?: {
   stages?: StagesConfig | null;
+  rateLimitAdmission?: ResolvedWorkflowConfig["rateLimitAdmission"];
 }): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
@@ -228,8 +828,10 @@ function createConfig(overrides?: {
       multiplier: 2,
     },
     rateLimitAdmission: {
-      minPrimaryHeadroomPct: null,
-      minSecondaryHeadroomPct: null,
+      minPrimaryHeadroomPct:
+        overrides?.rateLimitAdmission?.minPrimaryHeadroomPct ?? null,
+      minSecondaryHeadroomPct:
+        overrides?.rateLimitAdmission?.minSecondaryHeadroomPct ?? null,
     },
     server: {
       port: null,

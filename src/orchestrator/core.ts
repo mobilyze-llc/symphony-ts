@@ -1713,6 +1713,11 @@ export class OrchestratorCore {
         details: { haltIssueTitle: haltIssue.title },
       });
       this.trackDispatchStarvation(issues.length, 0);
+      await this.recordQueueBaselineSample({
+        consideredIssues: sortIssuesForDispatch(issues),
+        dispatchPicks: [],
+        force: true,
+      });
       return {
         validation,
         dispatchedIssueIds: [],
@@ -1743,6 +1748,11 @@ export class OrchestratorCore {
         details: gateVerdict.details,
       });
       this.trackDispatchStarvation(issues.length, 0);
+      await this.recordQueueBaselineSample({
+        consideredIssues: sortIssuesForDispatch(issues),
+        dispatchPicks: [],
+        force: true,
+      });
       return {
         validation,
         dispatchedIssueIds: [],
@@ -1769,7 +1779,8 @@ export class OrchestratorCore {
     const modeDecisions: RightSizingDecision[] = [];
     let eligibleCount = 0;
     const admittedSnapshots = this.buildRunningAdmissionSnapshots();
-    for (const issue of sortIssuesForDispatch(issues)) {
+    const sortedIssues = sortIssuesForDispatch(issues);
+    for (const issue of sortedIssues) {
       if (this.availableSlots() <= 0) {
         break;
       }
@@ -1841,6 +1852,10 @@ export class OrchestratorCore {
     }
 
     this.trackDispatchStarvation(eligibleCount, dispatchedIssueIds.length);
+    await this.recordQueueBaselineSample({
+      consideredIssues: sortedIssues,
+      dispatchPicks: dispatchedIssueIds,
+    });
 
     return {
       validation,
@@ -1851,6 +1866,90 @@ export class OrchestratorCore {
       reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
       runningCount: Object.keys(this.state.running).length,
     };
+  }
+
+  private async recordQueueBaselineSample(input: {
+    consideredIssues: readonly Issue[];
+    dispatchPicks: readonly string[];
+    force?: boolean;
+  }): Promise<void> {
+    const timestamp = this.now().toISOString();
+    let metadata: Record<string, unknown>;
+    try {
+      const outcomeSinceSequence = findLastQueueBaselineSequence(
+        this.state.dispatcherRunJournal,
+      );
+      const manualJumpsReorders = collectOperatorIntentSamples(
+        this.state.dispatcherRunJournal,
+        outcomeSinceSequence,
+      );
+      const quietDeathOutcomes = collectQuietDeathOutcomes(
+        this.state.dispatcherRunJournal,
+        outcomeSinceSequence,
+      );
+      const urgentReopenOutcomes = collectUrgentReopenOutcomes(
+        this.state.dispatcherRunJournal,
+        outcomeSinceSequence,
+        manualJumpsReorders,
+      );
+      const deliveryOutcomes = collectDeliveryOutcomes(
+        this.state.dispatcherRunJournal,
+        outcomeSinceSequence,
+      );
+      if (
+        input.force !== true &&
+        input.consideredIssues.length === 0 &&
+        input.dispatchPicks.length === 0 &&
+        manualJumpsReorders.length === 0 &&
+        quietDeathOutcomes.length === 0 &&
+        urgentReopenOutcomes.length === 0 &&
+        deliveryOutcomes.length === 0
+      ) {
+        return;
+      }
+      metadata = {
+        schema_version: 1,
+        comparator_version: "priority-fifo-control-v0",
+        outcome_since_sequence: outcomeSinceSequence,
+        outcome_window_semantics:
+          "Outcome arrays contain events observed after outcome_since_sequence. urgent_reopen_outcomes may reference the earlier failure it reopened. delivery_outcomes.spend is resource consumption inside the baseline window, not lifetime ticket total.",
+        considered_issue_ids: input.consideredIssues.map((issue) => issue.id),
+        considered_issue_identifiers: input.consideredIssues.map(
+          (issue) => issue.identifier,
+        ),
+        dispatch_picks: [...input.dispatchPicks],
+        manual_jumps_reorders: manualJumpsReorders,
+        quiet_death_outcomes: quietDeathOutcomes,
+        urgent_reopen_outcomes: urgentReopenOutcomes,
+        delivery_outcomes: deliveryOutcomes,
+      };
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to collect queue baseline sample: ${formatWarningError(error)}`,
+      );
+      return;
+    }
+
+    try {
+      await this.recordRunJournalEntry({
+        idempotencyKey: `queue_baseline:${timestamp}:${this.nextRunJournalSequence()}`,
+        timestamp,
+        kind: "queue_baseline",
+        issueId: PIPELINE_VERDICT_SCOPE_ID,
+        issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary: `Queue baseline sampled ${input.consideredIssues.length} considered issue(s) and ${input.dispatchPicks.length} dispatch pick(s).`,
+        metadata,
+      });
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to journal queue baseline sample: ${formatWarningError(error)}`,
+      );
+    }
   }
 
   /**
@@ -9350,6 +9449,183 @@ function readMetadataNumber(
 ): number | null {
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function collectOperatorIntentSamples(
+  journal: DispatcherRunJournal,
+  sinceSequence = 0,
+): Array<Record<string, unknown>> {
+  return journal.flatMap((entry) => {
+    if (
+      entry.sequence <= sinceSequence ||
+      entry.kind !== "intent" ||
+      readMetadataString(entry.metadata, "status") !== "applied"
+    ) {
+      return [];
+    }
+    const actor = entry.metadata.actor;
+    const actorKind =
+      typeof actor === "object" &&
+      actor !== null &&
+      !Array.isArray(actor) &&
+      typeof (actor as { kind?: unknown }).kind === "string"
+        ? (actor as { kind: string }).kind
+        : null;
+    if (actorKind !== "operator") {
+      return [];
+    }
+    return [
+      {
+        sequence: entry.sequence,
+        issue_id: entry.issueId,
+        issue_identifier: entry.issueIdentifier,
+        verb: readMetadataString(entry.metadata, "verb") ?? "unknown",
+        stage: entry.stage,
+      },
+    ];
+  });
+}
+
+function collectQuietDeathOutcomes(
+  journal: DispatcherRunJournal,
+  sinceSequence = 0,
+): Array<Record<string, unknown>> {
+  return journal.flatMap((entry) =>
+    entry.sequence > sinceSequence && entry.kind === "failure_exhausted"
+      ? [
+          {
+            sequence: entry.sequence,
+            issue_id: entry.issueId,
+            issue_identifier: entry.issueIdentifier,
+            reason: readMetadataString(entry.metadata, "reason"),
+            failure_signature: readMetadataString(
+              entry.metadata,
+              "failure_signature",
+            ),
+            failure_class: readMetadataString(entry.metadata, "failure_class"),
+          },
+        ]
+      : [],
+  );
+}
+
+function collectUrgentReopenOutcomes(
+  journal: DispatcherRunJournal,
+  sinceSequence = 0,
+  operatorIntentSamples = collectOperatorIntentSamples(journal, sinceSequence),
+): Array<Record<string, unknown>> {
+  const deathSequencesByIssue = new Map<string, number[]>();
+  for (const entry of journal) {
+    if (entry.kind !== "failure_exhausted") {
+      continue;
+    }
+    const sequences = deathSequencesByIssue.get(entry.issueId) ?? [];
+    sequences.push(entry.sequence);
+    deathSequencesByIssue.set(entry.issueId, sequences);
+  }
+
+  // The observed baseline outcome is the operator reopen in this window; the
+  // failure it reopens can legitimately predate the window.
+  return operatorIntentSamples.flatMap((sample) => {
+    const issueId = typeof sample.issue_id === "string" ? sample.issue_id : "";
+    const sequence =
+      typeof sample.sequence === "number" ? sample.sequence : Number.NaN;
+    const verb = typeof sample.verb === "string" ? sample.verb : "";
+    if (
+      !["release", "retry_once", "rework_with_hint", "resume"].includes(verb)
+    ) {
+      return [];
+    }
+    const reopenedAfter = (deathSequencesByIssue.get(issueId) ?? [])
+      .filter((deathSequence) => deathSequence < sequence)
+      .at(-1);
+    return reopenedAfter === undefined
+      ? []
+      : [{ ...sample, reopened_after_sequence: reopenedAfter }];
+  });
+}
+
+function collectDeliveryOutcomes(
+  journal: DispatcherRunJournal,
+  sinceSequence = 0,
+): Array<Record<string, unknown>> {
+  const historyByIssue = new Map<
+    string,
+    Array<{ sequence: number; stageRecord: StageRecord }>
+  >();
+  for (const entry of journal) {
+    if (
+      entry.sequence <= sinceSequence ||
+      entry.kind !== "stage_record" ||
+      readMetadataString(entry.metadata, "status") !== "completed"
+    ) {
+      continue;
+    }
+    const stageRecord = toStageRecordFromMetadata(entry.metadata);
+    if (stageRecord === null) {
+      continue;
+    }
+    const history = historyByIssue.get(entry.issueId) ?? [];
+    history.push({ sequence: entry.sequence, stageRecord });
+    historyByIssue.set(entry.issueId, history);
+  }
+
+  const previousTerminalSequenceByIssue = new Map<string, number>();
+  return journal.flatMap((entry) => {
+    if (
+      entry.sequence <= sinceSequence ||
+      entry.kind !== "tracker_write" ||
+      !entry.idempotencyKey.includes(":terminal:") ||
+      !entry.idempotencyKey.endsWith(":completed")
+    ) {
+      return [];
+    }
+    const previousTerminalSequence =
+      previousTerminalSequenceByIssue.get(entry.issueId) ?? sinceSequence;
+    previousTerminalSequenceByIssue.set(entry.issueId, entry.sequence);
+    const history = (historyByIssue.get(entry.issueId) ?? []).filter(
+      (stageEntry) =>
+        stageEntry.sequence > previousTerminalSequence &&
+        stageEntry.sequence <= entry.sequence,
+    );
+    const totalTokens = history.reduce(
+      (sum, { stageRecord }) => sum + stageRecord.totalTokens,
+      0,
+    );
+    const turns = history.reduce(
+      (sum, { stageRecord }) => sum + stageRecord.turns,
+      0,
+    );
+    return [
+      {
+        sequence: entry.sequence,
+        issue_id: entry.issueId,
+        issue_identifier: entry.issueIdentifier,
+        terminal_stage: entry.stage,
+        delivered_at: entry.timestamp,
+        spend: {
+          scope: "baseline_window",
+          since_sequence: sinceSequence,
+          total_tokens: totalTokens,
+          turns,
+          stages: history.length,
+        },
+      },
+    ];
+  });
+}
+
+function findLastQueueBaselineSequence(journal: DispatcherRunJournal): number {
+  return (
+    journal.findLast((entry) => entry.kind === "queue_baseline")?.sequence ?? 0
+  );
+}
+
+function formatWarningError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack ?? error.message;
+  }
+  return String(error);
 }
 
 function createPendingStageSignal(

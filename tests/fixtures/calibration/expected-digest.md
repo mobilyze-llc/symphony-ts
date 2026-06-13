@@ -74,3 +74,11 @@ Operator actions taken:
 
 - release: 2 (seq 11, seq 13)
 
+## Queue baseline (week zero)
+
+FIFO-control samples recorded before queue-triage lanes gain authority.
+Each row keeps the comparator version, considered issue ids, dispatch
+picks, manual jumps/reorders, quiet-death and urgent-reopen outcomes,
+plus spend/delivery outcomes per delivered ticket.
+
+_No queue baseline samples in window._
