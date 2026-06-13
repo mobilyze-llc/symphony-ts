@@ -2,6 +2,285 @@
   "schemaVersion": 1,
   "ownerIssue": "SYMPH-493",
   "parentIssue": "SYMPH-446",
+  "measurementPlan": {
+    "harnessMode": "fixture_only",
+    "routingMode": "council_v2_calibration_static",
+    "liveModelCalls": "forbidden",
+    "laneSet": [
+      "codex_excavation",
+      "pi_review",
+      "opus_escalation",
+      "lead_triage"
+    ],
+    "metrics": [
+      "reviewer_yield",
+      "false_positive_rate",
+      "fix_rereview_convergence",
+      "escalation_frequency",
+      "unique_real_findings",
+      "future_ref_hygiene"
+    ],
+    "scoring": {
+      "primarySignal": "Codex excavation unique real finding families versus legacy Opus overlap, with Pi and lead triage preserving blocking coverage.",
+      "falsePositiveSignal": "False-positive traps must stay no_finding; retrospective replay cases record expected false-positive count separately from raw finding volume.",
+      "rolloutGate": "Static replay must not regress caught bug classes versus legacy and must not increase false positives before legacy gate rollout changes are considered."
+    }
+  },
+  "retrospectiveReplay": {
+    "source": "replay",
+    "replayWindow": "Compact static subset of recent council-reviewed or review-gate merged PRs through PR #423, selected from PR bodies with explicit validation or review outcome text.",
+    "selectionBasis": "Source-backed cases only; omitted PRs without enough public PR-body outcome metadata rather than inventing hidden council artifacts.",
+    "noLiveModelCalls": true,
+    "forbiddenRuntimeFields": ["modelProvider", "modelPrompt", "gateMutation"],
+    "cases": [
+      {
+        "id": "pr-423-symph-497-targeted-convergence-hardening",
+        "source": "replay",
+        "sourceIssue": "SYMPH-497",
+        "sourcePullRequest": "PR #423",
+        "title": "Harden targeted convergence metadata",
+        "mergeCommit": "36d567d64ac876a96d0688aa3386eeff484f9499",
+        "reviewRounds": null,
+        "reviewerYield": {
+          "expectedRealFindingsLowerBound": 0,
+          "expectedTrackFindingsLowerBound": 0
+        },
+        "falsePositiveCount": 0,
+        "uniqueRealFindingFamilies": [],
+        "fixRereviewConvergence": "clean_final",
+        "escalationFrequency": "none_recorded",
+        "opusUsage": "not_recorded",
+        "followUpIssueIds": [],
+        "notes": [
+          "PR body records targeted-convergence metadata hardening and validation commands but no published council round count."
+        ]
+      },
+      {
+        "id": "pr-422-symph-495-calibration-validator-hardening",
+        "source": "replay",
+        "sourceIssue": "SYMPH-495",
+        "sourcePullRequest": "PR #422",
+        "title": "Harden calibration validator",
+        "mergeCommit": "19b1a2e0ea77f8f0bceb7ed5cd8a3786a836e9cc",
+        "reviewRounds": null,
+        "reviewerYield": {
+          "expectedRealFindingsLowerBound": 0,
+          "expectedTrackFindingsLowerBound": 1
+        },
+        "falsePositiveCount": 0,
+        "uniqueRealFindingFamilies": ["replay-required-source-ref-hygiene"],
+        "fixRereviewConvergence": "track_only_followups",
+        "escalationFrequency": "track_only",
+        "opusUsage": "not_recorded",
+        "followUpIssueIds": ["SYMPH-498"],
+        "notes": [
+          "SYMPH-498 records the non-blocking Track finding about replay.requiredSourceRefIds semantics surfaced by council review for PR #422."
+        ]
+      },
+      {
+        "id": "pr-419-symph-468-targeted-convergence-synthesis",
+        "source": "replay",
+        "sourceIssue": "SYMPH-468",
+        "sourcePullRequest": "PR #419",
+        "title": "Implement targeted convergence synthesis",
+        "mergeCommit": "c632eb47f22570eb8ee13b9dde000c4851dca18a",
+        "reviewRounds": null,
+        "reviewerYield": {
+          "expectedRealFindingsLowerBound": 0,
+          "expectedTrackFindingsLowerBound": 0
+        },
+        "falsePositiveCount": 0,
+        "uniqueRealFindingFamilies": [],
+        "fixRereviewConvergence": "clean_final",
+        "escalationFrequency": "none_recorded",
+        "opusUsage": "not_recorded",
+        "followUpIssueIds": [],
+        "notes": [
+          "PR body records the targeted-convergence implementation and focused review/journal validations while explicitly avoiding calibration paths."
+        ]
+      },
+      {
+        "id": "pr-416-symph-444-codex-excavation-lane",
+        "source": "replay",
+        "sourceIssue": "SYMPH-444",
+        "sourcePullRequest": "PR #416",
+        "title": "Add Codex excavation council lane",
+        "mergeCommit": "07ba2f307b87ada46a565f1d89c992eb71a5ba64",
+        "reviewRounds": null,
+        "reviewerYield": {
+          "expectedRealFindingsLowerBound": 0,
+          "expectedTrackFindingsLowerBound": 0
+        },
+        "falsePositiveCount": 0,
+        "uniqueRealFindingFamilies": [],
+        "fixRereviewConvergence": "clean_final",
+        "escalationFrequency": "none_recorded",
+        "opusUsage": "not_recorded",
+        "followUpIssueIds": [],
+        "notes": [
+          "PR body records the new Codex excavation lane, artifact paths, timing, token usage, state, and verdict fields for replay calibration."
+        ]
+      },
+      {
+        "id": "pr-415-symph-469-termination-ladder",
+        "source": "replay",
+        "sourceIssue": "SYMPH-469",
+        "sourcePullRequest": "PR #415",
+        "title": "Add termination ladder for review loops",
+        "mergeCommit": "972acf3bc5161ad6124607c52cf2d5227f43b577",
+        "reviewRounds": null,
+        "reviewerYield": {
+          "expectedRealFindingsLowerBound": 0,
+          "expectedTrackFindingsLowerBound": 0
+        },
+        "falsePositiveCount": 0,
+        "uniqueRealFindingFamilies": [],
+        "fixRereviewConvergence": "clean_final",
+        "escalationFrequency": "none_recorded",
+        "opusUsage": "not_recorded",
+        "followUpIssueIds": [],
+        "notes": [
+          "PR body records termination-ladder telemetry through review journal events and state projection with focused validation."
+        ]
+      },
+      {
+        "id": "pr-413-symph-479-review-lane-telemetry",
+        "source": "replay",
+        "sourceIssue": "SYMPH-479",
+        "sourcePullRequest": "PR #413",
+        "title": "Populate council review lane telemetry",
+        "mergeCommit": "e171b3c3bf369766c9d21b72264de96e1de5b738",
+        "reviewRounds": null,
+        "reviewerYield": {
+          "expectedRealFindingsLowerBound": 0,
+          "expectedTrackFindingsLowerBound": 0
+        },
+        "falsePositiveCount": 0,
+        "uniqueRealFindingFamilies": [],
+        "fixRereviewConvergence": "clean_final",
+        "escalationFrequency": "none_recorded",
+        "opusUsage": "not_recorded",
+        "followUpIssueIds": [],
+        "notes": [
+          "PR body records lane wall-time and token telemetry needed by calibration output fields."
+        ]
+      },
+      {
+        "id": "pr-410-symph-482-queue-audit-baseline",
+        "source": "replay",
+        "sourceIssue": "SYMPH-482",
+        "sourcePullRequest": "PR #410",
+        "title": "Add queue audit baseline instrumentation",
+        "mergeCommit": "6f4bc4d11e48dfc7a897af86441471736d9693f8",
+        "reviewRounds": 7,
+        "reviewerYield": {
+          "expectedRealFindingsLowerBound": 0,
+          "expectedTrackFindingsLowerBound": 5
+        },
+        "falsePositiveCount": 0,
+        "uniqueRealFindingFamilies": [
+          "audit-evidence-bounding",
+          "audit-tracker-field-boundary",
+          "queue-baseline-replay-cost"
+        ],
+        "fixRereviewConvergence": "track_only_followups",
+        "escalationFrequency": "multi_round",
+        "opusUsage": "invoked",
+        "followUpIssueIds": [
+          "SYMPH-487",
+          "SYMPH-488",
+          "SYMPH-489",
+          "SYMPH-490",
+          "SYMPH-491"
+        ],
+        "notes": [
+          "PR body records Round 7 PASS, no degraded lanes, and follow-up issues filed after council review."
+        ]
+      },
+      {
+        "id": "pr-395-symph-321-structured-reviewer-artifacts",
+        "source": "replay",
+        "sourceIssue": "SYMPH-321",
+        "sourcePullRequest": "PR #395",
+        "title": "Add structured council reviewer artifacts",
+        "mergeCommit": "838450fe70c183bd8eb74e19c2554f1855e90bb9",
+        "reviewRounds": 5,
+        "reviewerYield": {
+          "expectedRealFindingsLowerBound": 2,
+          "expectedTrackFindingsLowerBound": 1
+        },
+        "falsePositiveCount": 0,
+        "uniqueRealFindingFamilies": [
+          "structured-artifact-parser",
+          "lead-triage-preservation",
+          "evidence-path-hardening"
+        ],
+        "fixRereviewConvergence": "fixed_before_clean",
+        "escalationFrequency": "multi_round",
+        "opusUsage": "degraded",
+        "followUpIssueIds": [
+          "SYMPH-298",
+          "SYMPH-459",
+          "SYMPH-462",
+          "SYMPH-463",
+          "SYMPH-464",
+          "SYMPH-467"
+        ],
+        "notes": [
+          "PR body records real P1/P2 parser and triage issues fixed before final bounded convergence and a Track-only evidence-path note filed separately."
+        ]
+      },
+      {
+        "id": "pr-392-symph-440-budget-terminal-precedence",
+        "source": "replay",
+        "sourceIssue": "SYMPH-440",
+        "sourcePullRequest": "PR #392",
+        "title": "Preserve terminal signals across budget pauses",
+        "mergeCommit": "66a5209fcee9a4fff4a379b15f222c3112e5bf1b",
+        "reviewRounds": null,
+        "reviewerYield": {
+          "expectedRealFindingsLowerBound": 1,
+          "expectedTrackFindingsLowerBound": 0
+        },
+        "falsePositiveCount": 0,
+        "uniqueRealFindingFamilies": ["budget-terminal-precedence"],
+        "fixRereviewConvergence": "fixed_before_clean",
+        "escalationFrequency": "multi_round",
+        "opusUsage": "not_recorded",
+        "followUpIssueIds": [],
+        "notes": [
+          "PR body records broad convergence surfacing the live, rollback, replay, and side-effect invariant, followed by final targeted verification with no substantial findings."
+        ]
+      },
+      {
+        "id": "pr-385-symph-435-live-proof-hyphen",
+        "source": "replay",
+        "sourceIssue": "SYMPH-435",
+        "sourcePullRequest": "PR #385",
+        "title": "Tolerate live-proof hyphen variants",
+        "mergeCommit": "dbd1178090572be8ecebde178e57581c5ea48f29",
+        "reviewRounds": 6,
+        "reviewerYield": {
+          "expectedRealFindingsLowerBound": 4,
+          "expectedTrackFindingsLowerBound": 1
+        },
+        "falsePositiveCount": 0,
+        "uniqueRealFindingFamilies": [
+          "tautological-coverage",
+          "judge-enforcement",
+          "boundary-assertion",
+          "newline-regex"
+        ],
+        "fixRereviewConvergence": "fixed_before_clean",
+        "escalationFrequency": "multi_round",
+        "opusUsage": "invoked",
+        "followUpIssueIds": ["SYMPH-442"],
+        "notes": [
+          "PR body records meaningful fixes from earlier council rounds and a separate runtime-host cleanup flake filed as SYMPH-442."
+        ]
+      }
+    ]
+  },
   "fixtures": [
     {
       "id": "security-path-traversal-malicious",
@@ -305,11 +584,11 @@
     },
     {
       "id": "frontmatter-reviewer-metadata-drift",
-      "title": "Frontmatter reviewer metadata drifts from body ownership",
+      "title": "Frontmatter lint catches Codex-incompatible review metadata",
       "category": "frontmatter",
       "bugClass": "frontmatter:metadata_drift",
       "tags": ["frontmatter", "workflow", "metadata"],
-      "scenario": "Reviewer must flag frontmatter that routes a review artifact to the wrong lane.",
+      "scenario": "Reviewer must flag frontmatter that routes a review artifact to the wrong lane, using SYMPH-456 frontmatter lint as the first executable source case.",
       "subject": {
         "language": "markdown",
         "path": "docs/reviews/example.md",
@@ -330,6 +609,12 @@
           "id": "SYMPH-493",
           "note": "Fixture-only child issue defining frontmatter coverage.",
           "url": "https://linear.app/mobilyze-llc/issue/SYMPH-493/scaffold-council-v2-calibration-fixture-corpus"
+        },
+        {
+          "kind": "linear",
+          "id": "SYMPH-456",
+          "note": "First frontmatter-lint source case for Codex-incompatible skill metadata.",
+          "url": "https://linear.app/mobilyze-llc/issue/SYMPH-456/fix-codex-worker-linear-workflow-skill-load-errors"
         }
       ],
       "futureRefHygiene": {
@@ -404,6 +689,7 @@
         "expectedEventShape": {
           "eventName": "review_calibration_replay_case",
           "requiredFields": [
+            "source",
             "fixtureId",
             "sourceIssue",
             "sourcePullRequest",
@@ -422,11 +708,120 @@
             "gateMutation"
           ],
           "sample": {
+            "source": "replay",
             "fixtureId": "historical-symph-440-pr-392-placeholder",
             "sourceIssue": "SYMPH-440",
             "sourcePullRequest": "PR #392",
             "expectedDisposition": "metadata_only",
             "expectedFindingFamily": "budget-terminal-precedence",
+            "metadata": {
+              "ownerIssue": "SYMPH-493",
+              "parentIssue": "SYMPH-446",
+              "historicalCase": true,
+              "runtimeWiring": "not_wired"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "historical-symph-321-pr-395-structured-artifacts",
+      "title": "Historical replay for structured reviewer artifact parser and triage fixes",
+      "category": "historical-replay",
+      "bugClass": "historical:symphony_replay",
+      "tags": [
+        "historical",
+        "symphony",
+        "replay",
+        "council-v2",
+        "structured-artifacts"
+      ],
+      "scenario": "Replay should preserve the PR #395 council-review outcome where real P1/P2 parser and triage issues were fixed before final convergence.",
+      "subject": {
+        "language": "markdown",
+        "path": "tests/fixtures/review-calibration/historical/symph-321-pr-395.md",
+        "body": "# Historical replay\n\nSource case: SYMPH-321 / PR #395. Initial council found real P1/P2 parser and triage issues, final bounded convergence r5 passed, and Track-only evidence-path work was filed separately.\n"
+      },
+      "expectedReviewerOutcome": {
+        "disposition": "finding",
+        "severity": "high",
+        "confidence": "medium",
+        "shouldBlock": true,
+        "findingFamily": "structured-artifact-parser-triage",
+        "rationale": "The source PR body records real P1/P2 parser and triage defects found by council review before final convergence passed."
+      },
+      "falsePositiveTrap": null,
+      "sourceRefs": [
+        {
+          "kind": "linear",
+          "id": "SYMPH-321",
+          "note": "Council v2 structured reviewer artifacts issue whose PR body records fixed P1/P2 council findings.",
+          "url": "https://linear.app/mobilyze-llc/issue/SYMPH-321/council-v2-implement-structured-reviewer-artifacts-for-headless-gate"
+        },
+        {
+          "kind": "github_pr",
+          "id": "PR #395",
+          "note": "Historical pull request with initial council P1/P2 findings and final bounded convergence.",
+          "url": "https://github.com/mobilyze-llc/symphony-ts/pull/395"
+        },
+        {
+          "kind": "linear",
+          "id": "SYMPH-298",
+          "note": "Follow-up issue for the degraded Opus artifact contract evidence recorded on PR #395.",
+          "url": "https://linear.app/mobilyze-llc/issue/SYMPH-298"
+        },
+        {
+          "kind": "linear",
+          "id": "SYMPH-459",
+          "note": "Track-only evidence-path hardening filed from the final PR #395 convergence artifact.",
+          "url": "https://linear.app/mobilyze-llc/issue/SYMPH-459"
+        }
+      ],
+      "futureRefHygiene": {
+        "ownerIssue": "SYMPH-493",
+        "parentIssue": "SYMPH-446",
+        "futureConsumers": ["SYMPH-446", "SYMPH-468"],
+        "runtimeWiring": "not_wired",
+        "liveModelCalls": "forbidden",
+        "rolloutRouting": "forbidden",
+        "notes": [
+          "Historical replay execution remains outside this static calibration fixture."
+        ]
+      },
+      "replay": {
+        "kind": "historical_symphony_placeholder",
+        "status": "fixture_ready",
+        "requiredSourceRefIds": ["SYMPH-321", "PR #395"],
+        "expectedEventShape": {
+          "eventName": "review_calibration_replay_case",
+          "requiredFields": [
+            "source",
+            "fixtureId",
+            "sourceIssue",
+            "sourcePullRequest",
+            "expectedDisposition",
+            "expectedFindingFamily",
+            "expectedRealFindingsLowerBound"
+          ],
+          "metadataFields": [
+            "ownerIssue",
+            "parentIssue",
+            "historicalCase",
+            "runtimeWiring"
+          ],
+          "forbiddenRuntimeFields": [
+            "modelProvider",
+            "modelPrompt",
+            "gateMutation"
+          ],
+          "sample": {
+            "source": "replay",
+            "fixtureId": "historical-symph-321-pr-395-structured-artifacts",
+            "sourceIssue": "SYMPH-321",
+            "sourcePullRequest": "PR #395",
+            "expectedDisposition": "finding",
+            "expectedFindingFamily": "structured-artifact-parser-triage",
+            "expectedRealFindingsLowerBound": 2,
             "metadata": {
               "ownerIssue": "SYMPH-493",
               "parentIssue": "SYMPH-446",
@@ -483,6 +878,7 @@
         "expectedEventShape": {
           "eventName": "review_calibration_replay_case",
           "requiredFields": [
+            "source",
             "fixtureId",
             "priorFindingFamily",
             "currentFindingFamily",
@@ -500,6 +896,7 @@
             "gateMutation"
           ],
           "sample": {
+            "source": "replay",
             "fixtureId": "convergence-same-family-reopen",
             "priorFindingFamily": "budget-terminal-precedence",
             "currentFindingFamily": "budget-terminal-precedence",
@@ -560,6 +957,7 @@
         "expectedEventShape": {
           "eventName": "review_calibration_replay_case",
           "requiredFields": [
+            "source",
             "fixtureId",
             "priorFindingFamily",
             "currentFindingFamily",
@@ -577,6 +975,7 @@
             "gateMutation"
           ],
           "sample": {
+            "source": "replay",
             "fixtureId": "convergence-fix-round-regression-outside-family",
             "priorFindingFamily": "budget-terminal-precedence",
             "currentFindingFamily": "review-journal-idempotency-regression",
@@ -637,6 +1036,7 @@
         "expectedEventShape": {
           "eventName": "review_calibration_replay_case",
           "requiredFields": [
+            "source",
             "fixtureId",
             "bugClass",
             "expectedDisposition",
@@ -654,6 +1054,7 @@
             "gateMutation"
           ],
           "sample": {
+            "source": "replay",
             "fixtureId": "convergence-expected-replay-event-shape",
             "bugClass": "convergence:replay_event_shape",
             "expectedDisposition": "metadata_only",

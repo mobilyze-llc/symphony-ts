@@ -3,8 +3,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   REVIEW_CALIBRATION_BUG_CLASSES,
+  REVIEW_CALIBRATION_LANES,
+  REVIEW_CALIBRATION_METRICS,
   REVIEW_CALIBRATION_OWNER_ISSUE,
   REVIEW_CALIBRATION_PARENT_ISSUE,
+  REVIEW_CALIBRATION_REPLAY_SOURCE,
   type ReviewCalibrationBugClass,
   type ReviewCalibrationCorpus,
   type ReviewCalibrationFixture,
@@ -43,7 +46,7 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
 
     expect(result).toEqual({
       ok: true,
-      fixtureCount: 12,
+      fixtureCount: 13,
       errors: [],
     });
     expect(collectReviewCalibrationFutureRefHygieneGaps(corpus)).toEqual([]);
@@ -62,7 +65,7 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
     expect(coveredClasses).toEqual(new Set(REVIEW_CALIBRATION_BUG_CLASSES));
     for (const bugClass of REVIEW_CALIBRATION_BUG_CLASSES) {
       const fixtures = getReviewCalibrationFixturesByBugClass(corpus, bugClass);
-      expect(fixtures).toHaveLength(1);
+      expect(fixtures.length).toBeGreaterThanOrEqual(1);
       expect(fixtures[0]?.sourceRefs.length).toBeGreaterThan(0);
       expect(fixtures[0]?.tags.length).toBeGreaterThan(0);
     }
@@ -95,6 +98,54 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
       path: "$.fixtures[0].category",
       message: "must be security for bugClass security:path_traversal",
     });
+  });
+
+  it("records fixture-only measurement and retrospective replay metadata", () => {
+    const corpus = loadCorpus();
+
+    expect(corpus.measurementPlan).toMatchObject({
+      harnessMode: "fixture_only",
+      routingMode: "council_v2_calibration_static",
+      liveModelCalls: "forbidden",
+      laneSet: [...REVIEW_CALIBRATION_LANES],
+      metrics: [...REVIEW_CALIBRATION_METRICS],
+    });
+    expect(corpus.measurementPlan.scoring.primarySignal).toContain(
+      "Codex excavation unique real finding",
+    );
+    expect(corpus.retrospectiveReplay).toMatchObject({
+      source: REVIEW_CALIBRATION_REPLAY_SOURCE,
+      noLiveModelCalls: true,
+      forbiddenRuntimeFields: ["modelProvider", "modelPrompt", "gateMutation"],
+    });
+    expect(corpus.retrospectiveReplay.cases).toHaveLength(10);
+    expect(
+      corpus.retrospectiveReplay.cases.map((replayCase) => replayCase.id),
+    ).toEqual(
+      expect.arrayContaining([
+        "pr-422-symph-495-calibration-validator-hardening",
+        "pr-410-symph-482-queue-audit-baseline",
+        "pr-395-symph-321-structured-reviewer-artifacts",
+        "pr-392-symph-440-budget-terminal-precedence",
+      ]),
+    );
+    expect(
+      corpus.retrospectiveReplay.cases.every(
+        (replayCase) => replayCase.source === REVIEW_CALIBRATION_REPLAY_SOURCE,
+      ),
+    ).toBe(true);
+    expect(
+      corpus.retrospectiveReplay.cases.some(
+        (replayCase) =>
+          replayCase.fixRereviewConvergence === "fixed_before_clean" &&
+          replayCase.reviewerYield.expectedRealFindingsLowerBound > 0,
+      ),
+    ).toBe(true);
+    expect(
+      corpus.retrospectiveReplay.cases.some(
+        (replayCase) => replayCase.opusUsage === "degraded",
+      ),
+    ).toBe(true);
   });
 
   it("pins malicious security outcomes and benign false-positive traps", () => {
@@ -179,6 +230,11 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
       disposition: "finding",
       findingFamily: "review-frontmatter-drift",
     });
+    expect(
+      fixture(corpus, "frontmatter-reviewer-metadata-drift").sourceRefs.map(
+        (sourceRef) => sourceRef.id,
+      ),
+    ).toEqual(expect.arrayContaining(["SYMPH-456"]));
   });
 
   it("preserves historical Symphony replay metadata for SYMPH-440 and PR #392", () => {
@@ -210,8 +266,38 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
       },
     });
     expect(historical.replay?.expectedEventShape.sample).toMatchObject({
+      source: REVIEW_CALIBRATION_REPLAY_SOURCE,
       sourceIssue: "SYMPH-440",
       sourcePullRequest: "PR #392",
+    });
+  });
+
+  it("preserves PR #395 as a second historical council-finding fixture", () => {
+    const corpus = loadCorpus();
+    const historical = fixture(
+      corpus,
+      "historical-symph-321-pr-395-structured-artifacts",
+    );
+    const sourceIds = historical.sourceRefs.map((sourceRef) => sourceRef.id);
+
+    expect(sourceIds).toEqual(
+      expect.arrayContaining(["SYMPH-321", "PR #395", "SYMPH-298"]),
+    );
+    expect(historical.expectedReviewerOutcome).toMatchObject({
+      disposition: "finding",
+      shouldBlock: true,
+      findingFamily: "structured-artifact-parser-triage",
+    });
+    expect(historical.replay).toMatchObject({
+      kind: "historical_symphony_placeholder",
+      status: "fixture_ready",
+      requiredSourceRefIds: ["SYMPH-321", "PR #395"],
+    });
+    expect(historical.replay?.expectedEventShape.sample).toMatchObject({
+      source: REVIEW_CALIBRATION_REPLAY_SOURCE,
+      sourceIssue: "SYMPH-321",
+      sourcePullRequest: "PR #395",
+      expectedRealFindingsLowerBound: 2,
     });
   });
 
@@ -257,6 +343,26 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
       path: `$.fixtures[${historicalIndex}].replay.requiredSourceRefIds`,
       message: "must be an array",
     });
+
+    const nonHistoricalRequirementCorpus = structuredClone(corpus);
+    const convergenceIndex = nonHistoricalRequirementCorpus.fixtures.findIndex(
+      (candidate) => candidate.category === "targeted-convergence",
+    );
+    expect(convergenceIndex).toBeGreaterThanOrEqual(0);
+    const convergenceReplay =
+      nonHistoricalRequirementCorpus.fixtures[convergenceIndex]!.replay;
+    if (convergenceReplay === null) {
+      throw new Error("expected replay metadata");
+    }
+    convergenceReplay.requiredSourceRefIds = ["SYMPH-440"];
+
+    expect(
+      validateReviewCalibrationCorpus(nonHistoricalRequirementCorpus).errors,
+    ).toContainEqual({
+      path: `$.fixtures[${convergenceIndex}].replay.requiredSourceRefIds`,
+      message:
+        "only historical replay fixtures may declare requiredSourceRefIds",
+    });
   });
 
   it("pins targeted-convergence cases without wiring narrowing behavior", () => {
@@ -296,6 +402,7 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
     expect(replayShape.replay?.expectedEventShape).toMatchObject({
       eventName: "review_calibration_replay_case",
       requiredFields: [
+        "source",
         "fixtureId",
         "bugClass",
         "expectedDisposition",
@@ -351,6 +458,7 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
     }
 
     const cyclicSample: Record<string, unknown> = {
+      source: REVIEW_CALIBRATION_REPLAY_SOURCE,
       fixtureId: "convergence-expected-replay-event-shape",
       bugClass: "convergence:replay_event_shape",
       expectedDisposition: "metadata_only",
