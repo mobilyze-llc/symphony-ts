@@ -197,17 +197,25 @@ export type ReadWorkspaceBaseRevision = (
   workspacePath: string,
 ) => Promise<string | null>;
 
-export interface WorkerProcessTreeTerminationInput {
+export interface WorkerStopSignalDeliveryInput {
   issueId: string;
   issueIdentifier: string;
   reason: StopReason;
   workspacePath: string | null;
+  trackedProcessPid: number | null;
   attemptedAt: Date;
 }
 
-export type TerminateWorkerProcessTree = (
-  input: WorkerProcessTreeTerminationInput,
+export type DeliverWorkerStopSignal = (
+  input: WorkerStopSignalDeliveryInput,
 ) => Promise<StopSignalDelivery>;
+
+export interface ProcessSignalDeliveryResult {
+  status: Exclude<StopSignalDeliveryAttempt["sigterm"], "not_attempted">;
+  processGroupId: number | null;
+}
+
+type ProcessSignalSender = (pid: number, signal: NodeJS.Signals) => void;
 
 interface StoredLoopTrace {
   issueId: string;
@@ -245,7 +253,7 @@ export interface RuntimeHostOptions {
   terminateDetachedPidTree?: typeof terminateDetachedPidTreeDefault;
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
-  terminateWorkerProcessTree?: TerminateWorkerProcessTree;
+  deliverWorkerStopSignal?: DeliverWorkerStopSignal;
   /**
    * Injectable deploy-drift capture (SYMPH-407). Default runs git rev-parse
    * against the repo root once at the first snapshot; never refreshed (the
@@ -281,6 +289,7 @@ interface WorkerExecution {
   issueId: string;
   issueIdentifier: string;
   stageName: string | null;
+  codexAppServerPid: number | null;
   controller: AbortController;
   completion: Promise<void>;
   stopRequest: StopRequest | null;
@@ -336,7 +345,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   private readonly readWorkspaceBaseRevision: ReadWorkspaceBaseRevision;
 
-  private readonly terminateWorkerProcessTree: TerminateWorkerProcessTree;
+  private readonly deliverWorkerStopSignal: DeliverWorkerStopSignal;
 
   private readonly readLoopTraceJournal: (
     locator: LoopTraceArtifactLocator,
@@ -424,8 +433,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       options.readWorkspaceChangedFiles ?? readGitChangedFiles;
     this.readWorkspaceBaseRevision =
       options.readWorkspaceBaseRevision ?? readGitBaseRevision;
-    this.terminateWorkerProcessTree =
-      options.terminateWorkerProcessTree ?? terminateWorkspaceProcessTree;
+    this.deliverWorkerStopSignal =
+      options.deliverWorkerStopSignal ?? deliverTrackedWorkerStopSignal;
     this.readLoopTraceJournal =
       options.readLoopTraceJournal ?? readLoopTraceJournal;
     this.writeLoopTraceJournal =
@@ -446,6 +455,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       options.workspaceManager ??
       createWorkspaceManagerFromConfig(options.config, this.logger);
     this.agentEventSink = (event) => {
+      const execution = this.workers.get(event.issueId);
+      if (execution !== undefined) {
+        execution.codexAppServerPid = parseProcessId(event.codexAppServerPid);
+      }
       void this.enqueue(async () => {
         const codexEventResult = this.orchestrator.onCodexEvent({
           issueId: event.issueId,
@@ -3094,6 +3107,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       issueId: issue.id,
       issueIdentifier: issue.identifier,
       stageName,
+      codexAppServerPid: null,
       controller,
       stopRequest: null,
       lastResult: null,
@@ -3198,9 +3212,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       workspacePath = null;
     }
 
+    execution.controller.abort(`Stopped due to ${input.reason}.`);
+
     await this.logger?.info(
       "worker_stop_requested",
-      "Worker stop requested; aborting runner and attempting process-tree signal delivery.",
+      "Worker stop requested; aborting runner and attempting tracked process signal delivery.",
       {
         outcome: "requested",
         issue_id: execution.issueId,
@@ -3212,24 +3228,23 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       },
     );
 
-    execution.controller.abort(`Stopped due to ${input.reason}.`);
-
-    const delivery = await this.terminateWorkerProcessTreeSafe({
+    const delivery = await this.deliverWorkerStopSignalSafe({
       issueId: execution.issueId,
       issueIdentifier: execution.issueIdentifier,
       reason: input.reason,
       workspacePath,
+      trackedProcessPid: execution.codexAppServerPid,
       attemptedAt: this.now(),
     });
     await this.logStopSignalDelivery(delivery, execution);
     return delivery;
   }
 
-  private async terminateWorkerProcessTreeSafe(
-    input: WorkerProcessTreeTerminationInput,
+  private async deliverWorkerStopSignalSafe(
+    input: WorkerStopSignalDeliveryInput,
   ): Promise<StopSignalDelivery> {
     try {
-      return await this.terminateWorkerProcessTree(input);
+      return await this.deliverWorkerStopSignal(input);
     } catch (error) {
       return {
         status: "failed",
@@ -3237,7 +3252,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         attemptedAt: input.attemptedAt.toISOString(),
         workspacePath: input.workspacePath,
         attempts: [],
-        warning: `Process-tree signal delivery failed before attempts were recorded: ${toErrorMessage(error)}`,
+        warning: `Tracked process signal delivery failed before attempts were recorded: ${toErrorMessage(error)}`,
       };
     }
   }
@@ -3259,6 +3274,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       issue_identifier: execution.issueIdentifier,
       attempted_reason: delivery.reason,
       signal_delivery_status: delivery.status,
+      tracked_process_pid: delivery.attempts[0]?.pid ?? null,
       pids: delivery.attempts.map((attempt) => attempt.pid),
       process_group_ids: delivery.attempts
         .map((attempt) => attempt.processGroupId)
@@ -3278,7 +3294,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     if (delivery.status === "failed" || delivery.status === "partial") {
       await this.logger?.warn(
         "worker_stop_signal_delivery_failed",
-        "Worker stop signal delivery failed for one or more process-tree targets.",
+        "Worker stop signal delivery failed for one or more tracked process targets.",
         context,
       );
       return;
@@ -5280,8 +5296,8 @@ function toStopSignalDeliveryResponse(
   };
 }
 
-async function terminateWorkspaceProcessTree(
-  input: WorkerProcessTreeTerminationInput,
+async function deliverTrackedWorkerStopSignal(
+  input: WorkerStopSignalDeliveryInput,
 ): Promise<StopSignalDelivery> {
   if (input.workspacePath === null) {
     return {
@@ -5291,40 +5307,35 @@ async function terminateWorkspaceProcessTree(
       workspacePath: null,
       attempts: [],
       warning:
-        "Workspace path unavailable; process-tree signal delivery was not attempted.",
+        "Workspace path unavailable; tracked process signal delivery was not attempted.",
     };
   }
 
-  let stdout: string;
-  try {
-    ({ stdout } = await execFileAsync("lsof", ["-d", "cwd"], {
-      timeout: 5000,
-    }));
-  } catch (error) {
+  if (input.trackedProcessPid === null) {
     return {
-      status: "failed",
+      status: "not_attempted",
       reason: input.reason,
       attemptedAt: input.attemptedAt.toISOString(),
       workspacePath: input.workspacePath,
       attempts: [],
-      warning: `Unable to enumerate workspace process tree: ${toErrorMessage(error)}`,
+      warning:
+        "Worker process PID unavailable; process signal delivery was not attempted.",
     };
   }
 
-  const pids = extractWorkspacePids(stdout, input.workspacePath);
-  const attempts = pids.map((pid): StopSignalDeliveryAttempt => {
-    const sigterm = signalPidOrProcessGroup(pid, "SIGTERM");
-    const sigkill =
-      sigterm === "failed"
-        ? signalPidOrProcessGroup(pid, "SIGKILL")
-        : "not_attempted";
-    return {
-      pid,
-      processGroupId: pid,
-      sigterm,
-      sigkill,
-    };
-  });
+  const attempts = [input.trackedProcessPid].map(
+    (pid): StopSignalDeliveryAttempt => {
+      const sigterm = signalPid(pid, "SIGTERM");
+      const sigkill =
+        sigterm.status === "failed" ? signalPid(pid, "SIGKILL") : null;
+      return {
+        pid,
+        processGroupId: null,
+        sigterm: sigterm.status,
+        sigkill: sigkill?.status ?? "not_attempted",
+      };
+    },
+  );
 
   const failedAttempts = attempts.filter(
     (attempt) => attempt.sigterm === "failed" && attempt.sigkill === "failed",
@@ -5339,27 +5350,38 @@ async function terminateWorkspaceProcessTree(
     warning:
       failedAttempts.length === 0
         ? null
-        : `SIGTERM and SIGKILL both failed for ${failedAttempts.length} process-tree target(s): ${failedAttempts
-            .map(
-              (attempt) =>
-                `pid=${attempt.pid} process_group=${attempt.processGroupId ?? "unknown"}`,
-            )
+        : `SIGTERM and SIGKILL both failed for ${failedAttempts.length} worker process target(s): ${failedAttempts
+            .map((attempt) => `pid=${attempt.pid}`)
             .join(", ")}`,
   };
 }
 
-function extractWorkspacePids(stdout: string, workspacePath: string): number[] {
-  return [
-    ...new Set(
-      stdout
-        .split("\n")
-        .filter((line) => line.includes(workspacePath))
-        .map((line) => Number(line.trim().split(/\s+/)[1]))
-        .filter(
-          (pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid,
-        ),
-    ),
-  ];
+export function signalPid(
+  pid: number,
+  signal: NodeJS.Signals,
+  sendSignal: ProcessSignalSender = process.kill,
+): ProcessSignalDeliveryResult {
+  if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) {
+    return { status: "failed", processGroupId: null };
+  }
+
+  try {
+    sendSignal(pid, signal);
+    return { status: "delivered", processGroupId: null };
+  } catch (error) {
+    return {
+      status: isNoSuchProcess(error) ? "delivered" : "failed",
+      processGroupId: null,
+    };
+  }
+}
+
+function parseProcessId(value: string | null | undefined): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const pid = Number(value);
+  return Number.isInteger(pid) && pid > 1 && pid !== process.pid ? pid : null;
 }
 
 function getStopSignalDeliveryStatus(
@@ -5373,25 +5395,6 @@ function getStopSignalDeliveryStatus(
     return "delivered";
   }
   return failedAttempts.length === attempts.length ? "failed" : "partial";
-}
-
-function signalPidOrProcessGroup(
-  pid: number,
-  signal: NodeJS.Signals,
-): Exclude<StopSignalDeliveryAttempt["sigterm"], "not_attempted"> {
-  try {
-    process.kill(-pid, signal);
-    return "delivered";
-  } catch (groupError) {
-    try {
-      process.kill(pid, signal);
-      return "delivered";
-    } catch (pidError) {
-      return isNoSuchProcess(groupError) && isNoSuchProcess(pidError)
-        ? "delivered"
-        : "failed";
-    }
-  }
 }
 
 function isNoSuchProcess(error: unknown): boolean {

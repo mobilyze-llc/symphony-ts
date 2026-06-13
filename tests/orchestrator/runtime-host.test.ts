@@ -43,6 +43,7 @@ import {
   extractProductName,
   readGitBaseRevision,
   readGitChangedFiles,
+  signalPid,
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
 import type { ProcessIdentitySnapshot } from "../../src/shared/process-tree.js";
@@ -931,6 +932,16 @@ describe("OrchestratorRuntimeHost", () => {
           fakeRunner.onEvent = onEvent;
           return fakeRunner;
         },
+        deliverWorkerStopSignal: async (
+          input,
+        ): Promise<StopSignalDelivery> => ({
+          status: "not_attempted",
+          reason: input.reason,
+          attemptedAt: input.attemptedAt.toISOString(),
+          workspacePath: input.workspacePath,
+          attempts: [],
+          warning: null,
+        }),
         now: () => new Date("2026-03-06T00:00:05.000Z"),
       });
 
@@ -940,13 +951,22 @@ describe("OrchestratorRuntimeHost", () => {
       ]);
 
       const reconcileTick = await host.pollOnce();
-      expect(reconcileTick.stopRequests).toHaveLength(1);
-      expect(reconcileTick.stopRequests[0]).toMatchObject({
-        issueId: "1",
-        issueIdentifier: "ISSUE-1",
-        cleanupWorkspace: true,
-        reason: "terminal_state",
-      });
+      expect(reconcileTick.stopRequests).toEqual([
+        {
+          issueId: "1",
+          issueIdentifier: "ISSUE-1",
+          cleanupWorkspace: true,
+          reason: "terminal_state",
+          signalDelivery: {
+            status: "not_attempted",
+            reason: "terminal_state",
+            attemptedAt: "2026-03-06T00:00:05.000Z",
+            workspacePath: join(workspaceRoot, "1"),
+            attempts: [],
+            warning: null,
+          },
+        },
+      ]);
       await host.waitForIdle();
 
       expect(fakeRunner.abortReasons).toEqual([
@@ -5136,7 +5156,55 @@ describe("pipeline notifications", () => {
     expect(stillActive.dispatchedIssueIds).toEqual([]);
   });
 
-  it("surfaces process-tree signal delivery failures without undoing the stop", async () => {
+  it("aborts workers before awaiting stop-request telemetry logging", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    let resolveStopLog: (() => void) | undefined;
+    let observeStopLog: (() => void) | undefined;
+    const stopLogStarted = new Promise<void>((resolve) => {
+      observeStopLog = resolve;
+    });
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          if (entry.event !== "worker_stop_requested") {
+            return;
+          }
+          observeStopLog?.();
+          return new Promise<void>((resolve) => {
+            resolveStopLog = resolve;
+          });
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponsePromise = host.requestIssueStop("ISSUE-1");
+    await stopLogStarted;
+
+    expect(fakeRunner.abortReasons).toContain("Stopped due to manual_stop.");
+
+    resolveStopLog?.();
+    const stopResponse = await stopResponsePromise;
+    await host.waitForIdle();
+
+    expect(stopResponse).toMatchObject({
+      stopped: true,
+      reason: "manual_stop",
+    });
+  });
+
+  it("surfaces tracked process signal delivery failures without undoing the stop", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
     const notifier = createMockNotifier();
@@ -5157,9 +5225,7 @@ describe("pipeline notifications", () => {
         fakeRunner.onEvent = onEvent;
         return fakeRunner;
       },
-      terminateWorkerProcessTree: async (
-        input,
-      ): Promise<StopSignalDelivery> => ({
+      deliverWorkerStopSignal: async (input): Promise<StopSignalDelivery> => ({
         status: "failed",
         reason: input.reason,
         attemptedAt: input.attemptedAt.toISOString(),
@@ -5173,7 +5239,7 @@ describe("pipeline notifications", () => {
           },
         ],
         warning:
-          "SIGTERM and SIGKILL both failed for 1 process-tree target: pid=4242 process_group=4242",
+          "SIGTERM and SIGKILL both failed for 1 tracked process target: pid=4242 process_group=4242",
       }),
       now: () => new Date("2026-03-06T00:00:05.000Z"),
     });
@@ -5232,6 +5298,69 @@ describe("pipeline notifications", () => {
     expect(stillActive.dispatchedIssueIds).toEqual([]);
   });
 
+  it("targets the tracked app-server pid for stop signal delivery", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    let trackedProcessPid: number | null | undefined;
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      deliverWorkerStopSignal: async (input): Promise<StopSignalDelivery> => {
+        trackedProcessPid = input.trackedProcessPid;
+        return {
+          status: "delivered",
+          reason: input.reason,
+          attemptedAt: input.attemptedAt.toISOString(),
+          workspacePath: input.workspacePath,
+          attempts:
+            input.trackedProcessPid === null
+              ? []
+              : [
+                  {
+                    pid: input.trackedProcessPid,
+                    processGroupId: null,
+                    sigterm: "delivered",
+                    sigkill: "not_attempted",
+                  },
+                ],
+          warning: null,
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.emit("1", {
+      event: "session_started",
+      timestamp: "2026-03-06T00:00:02.000Z",
+      codexAppServerPid: "4242",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+    await host.flushEvents();
+
+    const stopResponse = await host.requestIssueStop("ISSUE-1");
+    await host.waitForIdle();
+
+    expect(trackedProcessPid).toBe(4242);
+    expect(stopResponse.signal_delivery).toMatchObject({
+      status: "delivered",
+      attempts: [
+        {
+          pid: 4242,
+          process_group_id: null,
+          sigterm: "delivered",
+          sigkill: "not_attempted",
+        },
+      ],
+    });
+  });
+
   it("logs successful signal delivery separately from stop acceptance", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
@@ -5251,9 +5380,7 @@ describe("pipeline notifications", () => {
         fakeRunner.onEvent = onEvent;
         return fakeRunner;
       },
-      terminateWorkerProcessTree: async (
-        input,
-      ): Promise<StopSignalDelivery> => ({
+      deliverWorkerStopSignal: async (input): Promise<StopSignalDelivery> => ({
         status: "delivered",
         reason: input.reason,
         attemptedAt: input.attemptedAt.toISOString(),
@@ -5330,7 +5457,7 @@ describe("pipeline notifications", () => {
         fakeRunner.onEvent = onEvent;
         return fakeRunner;
       },
-      terminateWorkerProcessTree: async () => {
+      deliverWorkerStopSignal: async () => {
         throw new Error("lsof unavailable");
       },
       now: () => new Date("2026-03-06T00:00:05.000Z"),
@@ -5347,7 +5474,7 @@ describe("pipeline notifications", () => {
       workspace_path: "/tmp/workspaces/1",
       attempts: [],
       warning:
-        "Process-tree signal delivery failed before attempts were recorded: lsof unavailable",
+        "Tracked process signal delivery failed before attempts were recorded: lsof unavailable",
     });
     expect(entries).toContainEqual(
       expect.objectContaining({
@@ -5361,12 +5488,42 @@ describe("pipeline notifications", () => {
         failed_pids: [],
         failed_process_group_ids: [],
         warning:
-          "Process-tree signal delivery failed before attempts were recorded: lsof unavailable",
+          "Tracked process signal delivery failed before attempts were recorded: lsof unavailable",
       }),
     );
     expect(notifier.events).toEqual([
       expect.objectContaining({ type: "issue_dispatched" }),
     ]);
+  });
+
+  it("signals only the tracked pid", () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const result = signalPid(4242, "SIGTERM", (pid, signal) => {
+      calls.push([pid, signal]);
+    });
+
+    expect(result).toEqual({
+      status: "delivered",
+      processGroupId: null,
+    });
+    expect(calls).toEqual([[4242, "SIGTERM"]]);
+  });
+
+  it("does not signal unsafe tracked pids", () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+
+    expect(
+      signalPid(1, "SIGTERM", (pid, signal) => {
+        calls.push([pid, signal]);
+      }),
+    ).toEqual({ status: "failed", processGroupId: null });
+
+    expect(
+      signalPid(process.pid, "SIGTERM", (pid, signal) => {
+        calls.push([pid, signal]);
+      }),
+    ).toEqual({ status: "failed", processGroupId: null });
+    expect(calls).toEqual([]);
   });
 
   it("does not emit issue_failed for a budget hard stop pause", async () => {
