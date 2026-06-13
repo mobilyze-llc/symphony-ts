@@ -29,6 +29,10 @@ interface DispatchEdge {
   reason: string;
 }
 
+type HardDispatchEdge = DispatchEdge & {
+  trust: Exclude<DispatchEdge["trust"], "advisory">;
+};
+
 export function sortIssuesForDispatch(issues: readonly Issue[]): Issue[] {
   return issues.slice().sort(compareIssuesForDispatch);
 }
@@ -43,7 +47,7 @@ export function computeDispatchOrder(
   );
   const terminalStates = new Set(input.terminalStates.map(normalizeIssueState));
   const edges = collectDependencyEdges(input, issueById, issueByIdentifier);
-  const hardEdges = edges.filter((edge) => edge.trust !== "advisory");
+  const hardEdges = edges.filter(isHardEdge);
   const hardCycle = findHardCycle(
     baseOrder,
     hardEdges.filter((edge) => isOpenBlocker(edge.blocker, terminalStates)),
@@ -189,14 +193,14 @@ function collectDependencyEdges(
       });
     }
 
-    const featureBlockerKeys = new Set(
-      feature.specLineage.blockedBy.map((edge) =>
-        formatRefKey(edge.issue.id, edge.issue.identifier),
-      ),
+    const featureBlockers = feature.specLineage.blockedBy.map(
+      (edge) => edge.issue,
     );
     for (const blocker of issue.blockedBy) {
       if (
-        !featureBlockerKeys.has(formatRefKey(blocker.id, blocker.identifier))
+        !featureBlockers.some((featureBlocker) =>
+          refsMatch(featureBlocker, blocker),
+        )
       ) {
         edges.push({
           issue,
@@ -217,14 +221,18 @@ function collectDependencyEdges(
   );
 }
 
-function toExclusion(edge: DispatchEdge): ComputedDispatchOrderExclusion {
+function isHardEdge(edge: DispatchEdge): edge is HardDispatchEdge {
+  return edge.trust !== "advisory";
+}
+
+function toExclusion(edge: HardDispatchEdge): ComputedDispatchOrderExclusion {
   return {
     issue_id: edge.issue.id,
     issue_identifier: edge.issue.identifier,
     blocker_issue_id: edge.blocker.id,
     blocker_issue_identifier: edge.blocker.identifier,
     blocker_state: edge.blocker.state,
-    edge_trust: edge.trust === "advisory" ? "legacy_hard" : edge.trust,
+    edge_trust: edge.trust,
     source: edge.source,
     reason: edge.reason,
   };
@@ -289,7 +297,7 @@ function dedupeAdvisoryWarnings(
 
 function topologicallySortIssues(
   issues: readonly Issue[],
-  hardOrderingEdges: readonly DispatchEdge[],
+  hardOrderingEdges: readonly HardDispatchEdge[],
   issueById: ReadonlyMap<string, Issue>,
   issueByIdentifier: ReadonlyMap<string, Issue>,
 ): Issue[] {
@@ -338,7 +346,7 @@ function topologicallySortIssues(
 
 function findHardCycle(
   issues: readonly Issue[],
-  hardOrderingEdges: readonly DispatchEdge[],
+  hardOrderingEdges: readonly HardDispatchEdge[],
   issueById: ReadonlyMap<string, Issue>,
   issueByIdentifier: ReadonlyMap<string, Issue>,
 ): ComputedDispatchOrderSnapshot["hard_cycle"] {
@@ -494,7 +502,7 @@ function buildRationale(
   issue: Issue,
   baseOrder: readonly Issue[],
   anchors: Readonly<Record<string, IssueAnchorRecord>>,
-  hardEdges: readonly DispatchEdge[],
+  hardEdges: readonly HardDispatchEdge[],
 ): string[] {
   const rationale = [
     `priority ${issue.priority ?? "none"}`,
@@ -565,8 +573,16 @@ function findIssueByRef(
   return null;
 }
 
-function formatRefKey(id: string | null, identifier: string | null): string {
-  return `${id ?? ""}:${identifier ?? ""}`;
+function refsMatch(
+  left: { id: string | null; identifier: string | null },
+  right: { id: string | null; identifier: string | null },
+): boolean {
+  return (
+    (left.id !== null && right.id !== null && left.id === right.id) ||
+    (left.identifier !== null &&
+      right.identifier !== null &&
+      left.identifier === right.identifier)
+  );
 }
 
 function compareIssuesForDispatch(left: Issue, right: Issue): number {

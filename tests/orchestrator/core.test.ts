@@ -120,48 +120,42 @@ describe("orchestrator core", () => {
     );
   });
 
-  it("journals ordering disagreement when the computed head reaches dispatch but another issue is admitted", async () => {
-    const config = createConfig();
-    config.stages = {
-      initialStage: "implement",
-      fastTrack: null,
-      stages: {
-        implement: {
-          type: "agent",
-          runner: null,
-          model: null,
-          prompt: null,
-          maxTurns: null,
-          timeoutMs: null,
-          concurrency: null,
-          gateType: null,
-          maxRework: null,
-          reviewers: [],
-          transitions: {
-            onComplete: "done",
-            onApprove: null,
-            onRework: null,
-          },
-          linearState: null,
-        },
-        done: {
-          type: "terminal",
-          runner: null,
-          model: null,
-          prompt: null,
-          maxTurns: null,
-          timeoutMs: null,
-          concurrency: null,
-          gateType: null,
-          maxRework: null,
-          reviewers: [],
-          transitions: { onComplete: null, onApprove: null, onRework: null },
-          linearState: null,
-        },
-      },
-    };
+  it("does not dispatch issues excluded by legacy hard blockers through pollTick", async () => {
     const orchestrator = createOrchestrator({
-      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            blockedBy: [
+              {
+                id: "2",
+                identifier: "ISSUE-2",
+                state: "In Progress",
+              },
+            ],
+          }),
+        ],
+      }),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().computedDispatchOrder).toMatchObject({
+      status: "linearized",
+      exclusions: [
+        expect.objectContaining({
+          issue_identifier: "ISSUE-1",
+          blocker_issue_identifier: "ISSUE-2",
+          edge_trust: "legacy_hard",
+        }),
+      ],
+    });
+  });
+
+  it("journals ordering disagreement when the computed head reaches dispatch but another issue is admitted", async () => {
+    const orchestrator = createOrchestrator({
       tracker: createTracker({
         candidates: [
           createIssue({
@@ -179,7 +173,14 @@ describe("orchestrator core", () => {
         ],
       }),
     });
-    orchestrator.getState().issueStages["1"] = "done";
+    orchestrator.getState().issuePendingStageSignals["1"] = {
+      signal: "complete",
+      stageName: null,
+      attempt: null,
+      agentMessage: "Previous worker completed while paused.\n[STAGE_COMPLETE]",
+      failureClass: null,
+      setBySequence: 42,
+    };
 
     const result = await orchestrator.pollTick();
 

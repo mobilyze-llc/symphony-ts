@@ -163,6 +163,40 @@ describe("dispatch comparator", () => {
     ).toEqual(["ISSUE-1", "ISSUE-2"]);
   });
 
+  it("dedupes TicketFeature blockers against native blockedBy by either id or identifier", () => {
+    const blocker = createIssue({ id: "2", identifier: "ISSUE-2" });
+    const dependent = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      blockedBy: [
+        {
+          id: null,
+          identifier: "ISSUE-2",
+          state: "In Progress",
+        },
+      ],
+    });
+
+    const order = computeDispatchOrder({
+      issues: [dependent, blocker],
+      anchors: {},
+      ticketFeatures: [
+        createFeature(dependent, [
+          createEdge(blocker, "advisory", "service_account"),
+        ]),
+        createFeature(blocker),
+      ],
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(order.exclusions).toEqual([]);
+    expect(order.advisory_warnings).toHaveLength(1);
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-1", "ISSUE-2"]);
+  });
+
   it("applies top anchors inside the candidate priority band", () => {
     const issue1 = createIssue({
       id: "1",
@@ -196,6 +230,43 @@ describe("dispatch comparator", () => {
       order.positions.map((position) => position.issue_identifier),
     ).toEqual(["ISSUE-2", "ISSUE-1", "ISSUE-3"]);
     expect(order.positions[0]?.rationale).toContain("operator_anchor top");
+  });
+
+  it("applies below anchors after their target issue", () => {
+    const issue1 = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      priority: 1,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    const issue2 = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+      priority: 1,
+      createdAt: "2026-06-02T00:00:00.000Z",
+    });
+    const issue3 = createIssue({
+      id: "3",
+      identifier: "ISSUE-3",
+      priority: 1,
+      createdAt: "2026-06-03T00:00:00.000Z",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [issue1, issue2, issue3],
+      anchors: {
+        "1": createAnchor(issue1, {
+          kind: "below",
+          issueIdentifier: "ISSUE-2",
+        }),
+      },
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-2", "ISSUE-1", "ISSUE-3"]);
   });
 
   it("preserves natural order and warns when a relative anchor target is unavailable", () => {
@@ -244,6 +315,70 @@ describe("dispatch comparator", () => {
       "Operator anchor for ISSUE-2 references unavailable target ISSUE-1; preserved natural priority/FIFO position.",
     );
   });
+
+  it("ignores anchors after until-merged expiry", () => {
+    const older = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      priority: 1,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    const completed = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+      priority: 1,
+      createdAt: "2026-06-02T00:00:00.000Z",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [older, completed],
+      anchors: {
+        "2": createAnchor(completed),
+      },
+      completedIssueIds: new Set(["2"]),
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-1", "ISSUE-2"]);
+  });
+
+  it("ignores anchors after until-date expiry", () => {
+    const older = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      priority: 1,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    const expired = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+      priority: 1,
+      createdAt: "2026-06-02T00:00:00.000Z",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [older, expired],
+      anchors: {
+        "2": createAnchor(
+          expired,
+          { kind: "top" },
+          {
+            kind: "until_date",
+            at: "2026-06-13T11:59:59.000Z",
+          },
+        ),
+      },
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-1", "ISSUE-2"]);
+  });
 });
 
 function createIssue(overrides: Partial<Issue>): Issue {
@@ -266,12 +401,13 @@ function createIssue(overrides: Partial<Issue>): Issue {
 function createAnchor(
   issue: Issue,
   placement: IssueAnchorRecord["placement"] = { kind: "top" },
+  expiry: IssueAnchorRecord["expiry"] = { kind: "until_merged" },
 ): IssueAnchorRecord {
   return {
     issueId: issue.id,
     issueIdentifier: issue.identifier,
     placement,
-    expiry: { kind: "until_merged" },
+    expiry,
     actor: { kind: "operator", host: "local", session: null },
     reason: { class: "operator_order", human: "Prioritize this issue" },
     source: "api",
