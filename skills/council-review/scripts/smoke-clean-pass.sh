@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ASSERT="$SCRIPT_DIR/assert-clean-pass.py"
+WRITE_TARGET="$SCRIPT_DIR/write-review-target-artifacts.py"
 WORK_DIR="${TMPDIR:-/tmp}/council-clean-pass-smoke.$$"
 mkdir -p "$WORK_DIR"
 trap 'rm -rf "$WORK_DIR"' EXIT
@@ -108,3 +109,15 @@ missing_status="$WORK_DIR/missing-git-status"
 write_case "$missing_status" "PR-backed draft" "true" "0" "" "match" "exact"
 rm "$missing_status/git-status-short.txt"
 expect_fail "missing git status artifact" "$missing_status"
+
+helper="$WORK_DIR/write-target-artifacts"
+mkdir -p "$helper"
+printf '%s\n' "0" > "$helper/pr-view-exit-code.txt"
+printf '%s' "" > "$helper/git-status-short.txt"
+printf '%s\n' "1111111111111111111111111111111111111111" > "$helper/local-head-sha.txt"
+printf '%s\n' "2222222222222222222222222222222222222222" > "$helper/resolved-base-sha.txt"
+printf '%s\n' "origin/main" > "$helper/resolved-base-ref.txt"
+printf '%s\n' '{"isDraft":true,"headRefOid":"1111111111111111111111111111111111111111","baseRefOid":"2222222222222222222222222222222222222222","baseRefName":"main"}' > "$helper/pr.json"
+"$WRITE_TARGET" "$helper"
+"$ASSERT" "$helper" > "$helper/assertion.out"
+echo "PASS write-review-target-artifacts clean draft"

@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -6,6 +8,11 @@ import { describe, expect, it } from "vitest";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "../..");
 const SKILL_ROOT = resolve(ROOT, "skills/council-review");
+const ASSERT_CLEAN_PASS = resolve(SKILL_ROOT, "scripts/assert-clean-pass.py");
+const WRITE_REVIEW_TARGET = resolve(
+  SKILL_ROOT,
+  "scripts/write-review-target-artifacts.py",
+);
 
 function readSkillFile(path: string): string {
   return readFileSync(resolve(SKILL_ROOT, path), "utf-8");
@@ -19,6 +26,82 @@ function expectAll(content: string, snippets: readonly string[]): void {
 
 function uniqueMatches(content: string, pattern: RegExp): string[] {
   return [...new Set(content.match(pattern) ?? [])];
+}
+
+function withArtifactDir(callback: (dir: string) => void): void {
+  const dir = mkdtempSync(resolve(tmpdir(), "council-review-test-"));
+  try {
+    callback(dir);
+  } finally {
+    rmSync(dir, { force: true, recursive: true });
+  }
+}
+
+function writeArtifact(dir: string, name: string, content: string): void {
+  writeFileSync(resolve(dir, name), content, "utf-8");
+}
+
+function readArtifact(dir: string, name: string): string {
+  return readFileSync(resolve(dir, name), "utf-8").trim();
+}
+
+function runPython(script: string, dir: string) {
+  return spawnSync("python3", [script, dir], { encoding: "utf-8" });
+}
+
+function writeBaseSetupFacts(dir: string): void {
+  writeArtifact(dir, "pr-view-exit-code.txt", "0\n");
+  writeArtifact(dir, "git-status-short.txt", "");
+  writeArtifact(
+    dir,
+    "local-head-sha.txt",
+    "1111111111111111111111111111111111111111\n",
+  );
+  writeArtifact(
+    dir,
+    "resolved-base-sha.txt",
+    "2222222222222222222222222222222222222222\n",
+  );
+  writeArtifact(dir, "resolved-base-ref.txt", "origin/main\n");
+  writeArtifact(
+    dir,
+    "pr.json",
+    JSON.stringify({
+      baseRefName: "main",
+      baseRefOid: "2222222222222222222222222222222222222222",
+      headRefOid: "1111111111111111111111111111111111111111",
+      isDraft: true,
+    }),
+  );
+}
+
+function writeCleanPassArtifacts(dir: string): void {
+  writeArtifact(dir, "pr-mode.txt", "PR-backed draft\n");
+  writeArtifact(dir, "pr-is-draft.txt", "true\n");
+  writeArtifact(dir, "pr-view-exit-code.txt", "0\n");
+  writeArtifact(dir, "git-status-short.txt", "");
+  writeArtifact(dir, "pr-diff-provenance.txt", "match\n");
+  writeArtifact(dir, "pr-base-equivalence.txt", "exact\n");
+  writeArtifact(
+    dir,
+    "pr-head-sha.txt",
+    "1111111111111111111111111111111111111111\n",
+  );
+  writeArtifact(
+    dir,
+    "local-head-sha.txt",
+    "1111111111111111111111111111111111111111\n",
+  );
+  writeArtifact(
+    dir,
+    "pr-base-sha.txt",
+    "2222222222222222222222222222222222222222\n",
+  );
+  writeArtifact(
+    dir,
+    "resolved-base-sha.txt",
+    "2222222222222222222222222222222222222222\n",
+  );
 }
 
 describe("council-review manual skill", () => {
@@ -158,5 +241,135 @@ describe("council-review manual skill", () => {
       "Do not launch another broad whole-diff round.",
       "unavailable evidence, not as a merge blocker",
     ]);
+  });
+
+  it("extracts setup provenance classification into a tested helper", () => {
+    expect(skill).toContain("scripts/write-review-target-artifacts.py");
+    expect(skill).toContain(
+      '"$COUNCIL_REVIEW_SKILL_DIR/scripts/write-review-target-artifacts.py" "$COUNCIL_DIR"',
+    );
+  });
+
+  it("classifies review-target modes and clean-pass outcomes", () => {
+    const cases = [
+      {
+        assertionExit: 0,
+        mode: "PR-backed draft",
+        provenance: "match",
+        setup: (dir: string) => writeBaseSetupFacts(dir),
+      },
+      {
+        assertionExit: 1,
+        mode: "PR-backed non-draft deviation",
+        provenance: "match",
+        setup: (dir: string) => {
+          writeBaseSetupFacts(dir);
+          writeArtifact(
+            dir,
+            "pr.json",
+            JSON.stringify({
+              baseRefName: "main",
+              baseRefOid: "2222222222222222222222222222222222222222",
+              headRefOid: "1111111111111111111111111111111111111111",
+              isDraft: false,
+            }),
+          );
+        },
+      },
+      {
+        assertionExit: 1,
+        mode: "DEGRADED dirty working tree",
+        provenance: "match",
+        setup: (dir: string) => {
+          writeBaseSetupFacts(dir);
+          writeArtifact(dir, "git-status-short.txt", " M SKILL.md\n");
+        },
+      },
+      {
+        assertionExit: 1,
+        mode: "DEGRADED gh-unavailable",
+        provenance: "unknown",
+        setup: (dir: string) => {
+          writeBaseSetupFacts(dir);
+          rmSync(resolve(dir, "pr.json"));
+          writeArtifact(dir, "pr-view-exit-code.txt", "1\n");
+          writeArtifact(dir, "pr.stderr", "gh api unavailable\n");
+        },
+      },
+      {
+        assertionExit: 1,
+        mode: "DEGRADED pr-diff-provenance",
+        provenance: "mismatch pr-base-sha",
+        setup: (dir: string) => {
+          writeBaseSetupFacts(dir);
+          writeArtifact(
+            dir,
+            "pr.json",
+            JSON.stringify({
+              baseRefName: "main",
+              baseRefOid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              headRefOid: "1111111111111111111111111111111111111111",
+              isDraft: true,
+            }),
+          );
+        },
+      },
+      {
+        assertionExit: 1,
+        mode: "committed branch diff",
+        provenance: "none",
+        setup: (dir: string) => {
+          writeBaseSetupFacts(dir);
+          rmSync(resolve(dir, "pr.json"));
+          writeArtifact(dir, "pr-view-exit-code.txt", "1\n");
+          writeArtifact(dir, "pr.stderr", "no pull requests found\n");
+        },
+      },
+    ];
+
+    for (const testCase of cases) {
+      withArtifactDir((dir) => {
+        testCase.setup(dir);
+
+        const classify = runPython(WRITE_REVIEW_TARGET, dir);
+        expect(classify.status).toBe(0);
+        expect(readArtifact(dir, "pr-mode.txt")).toBe(testCase.mode);
+        expect(readArtifact(dir, "pr-diff-provenance.txt")).toBe(
+          testCase.provenance,
+        );
+
+        const assertion = runPython(ASSERT_CLEAN_PASS, dir);
+        expect(assertion.status).toBe(testCase.assertionExit);
+      });
+    }
+  });
+
+  it("keeps missing-artifact diagnostics focused", () => {
+    const requiredArtifacts = [
+      "pr-mode.txt",
+      "pr-is-draft.txt",
+      "pr-view-exit-code.txt",
+      "git-status-short.txt",
+      "pr-diff-provenance.txt",
+      "pr-base-equivalence.txt",
+      "pr-head-sha.txt",
+      "local-head-sha.txt",
+      "pr-base-sha.txt",
+      "resolved-base-sha.txt",
+    ];
+
+    for (const missingArtifact of requiredArtifacts) {
+      withArtifactDir((dir) => {
+        writeCleanPassArtifacts(dir);
+        rmSync(resolve(dir, missingArtifact));
+
+        const assertion = runPython(ASSERT_CLEAN_PASS, dir);
+        expect(assertion.status).toBe(1);
+        expect(assertion.stdout).toContain(
+          `- missing required artifact: ${missingArtifact}`,
+        );
+        expect(assertion.stdout).not.toContain("must be");
+      });
+    }
   });
 });
