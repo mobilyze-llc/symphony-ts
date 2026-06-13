@@ -181,6 +181,32 @@ describe("dispatch comparator", () => {
     ).toEqual(["ISSUE-1", "ISSUE-2"]);
   });
 
+  it("does not warn for advisory blockers that are terminal", () => {
+    const blocker = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      state: "Done",
+    });
+    const dependent = createIssue({ id: "2", identifier: "ISSUE-2" });
+
+    const order = computeDispatchOrder({
+      issues: [dependent, blocker],
+      anchors: {},
+      ticketFeatures: [
+        createFeature(dependent, [
+          createEdge(blocker, "advisory", "service_account"),
+        ]),
+        createFeature(blocker),
+      ],
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(order.exclusions).toEqual([]);
+    expect(order.advisory_warnings).toEqual([]);
+    expect(order.would_have_been_excluded_by_advisory_edges).toEqual([]);
+  });
+
   it("dedupes TicketFeature blockers against native blockedBy by either id or identifier", () => {
     const blocker = createIssue({ id: "2", identifier: "ISSUE-2" });
     const dependent = createIssue({
@@ -213,6 +239,51 @@ describe("dispatch comparator", () => {
     expect(
       order.positions.map((position) => position.issue_identifier),
     ).toEqual(["ISSUE-1", "ISSUE-2"]);
+  });
+
+  it("warns and skips identifier-only ordering refs when candidate identifiers collide", () => {
+    const duplicateA = createIssue({
+      id: "a",
+      identifier: "ISSUE-DUP",
+      priority: 2,
+      createdAt: "2026-06-03T00:00:00.000Z",
+    });
+    const dependent = createIssue({
+      id: "c",
+      identifier: "ISSUE-DEPENDENT",
+      priority: 1,
+      createdAt: "2026-06-01T00:00:00.000Z",
+      blockedBy: [
+        {
+          id: null,
+          identifier: "ISSUE-DUP",
+          state: "Done",
+        },
+      ],
+    });
+    const duplicateB = createIssue({
+      id: "b",
+      identifier: "ISSUE-DUP",
+      priority: 1,
+      createdAt: "2026-06-02T00:00:00.000Z",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [duplicateA, dependent, duplicateB],
+      anchors: {},
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(order.exclusions).toEqual([]);
+    expect(order.warnings).toContain(
+      "Dispatch comparator observed duplicate candidate identifier ISSUE-DUP; identifier-only dependency refs for that identifier are ignored to avoid nondeterministic ordering.",
+    );
+    expect(order.positions.map((position) => position.issue_id)).toEqual([
+      "c",
+      "b",
+      "a",
+    ]);
   });
 
   it("applies top anchors inside the candidate priority band", () => {

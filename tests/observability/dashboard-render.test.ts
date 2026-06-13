@@ -158,6 +158,16 @@ describe("Dashboard Pipeline column", () => {
             source: "ticket_feature",
             reason: "Operator-confirmed blocked-by edge.",
           },
+          {
+            issue_id: "issue-2",
+            issue_identifier: "SYMPH-486",
+            blocker_issue_id: "issue-4",
+            blocker_issue_identifier: "SYMPH-488",
+            blocker_state: "In Progress",
+            edge_trust: "operator_confirmed",
+            source: "ticket_feature",
+            reason: "Operator-confirmed blocked-by edge.",
+          },
         ],
         advisory_warnings: [
           {
@@ -178,6 +188,8 @@ describe("Dashboard Pipeline column", () => {
     const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: true });
 
     expect(html).toContain("Computed dispatch order");
+    expect(html).toContain("Hard-excluded issues: 1");
+    expect(html).toContain("Hard exclusion edges: 2");
     expect(html).toContain("dispatch-comparator-v1");
     expect(html).toContain("SYMPH-485");
     expect(html).toContain("SYMPH-486");

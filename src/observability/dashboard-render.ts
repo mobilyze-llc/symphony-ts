@@ -1985,7 +1985,12 @@ function renderComputedOrder(snapshot: RuntimeSnapshot): string {
             order.hard_cycle.reason ||
             "cycle detected",
         )}</p>`;
-  const summary = `<p class="section-copy">Hard exclusions: ${formatInteger(
+  const hardExcludedIssueCount = new Set(
+    order.exclusions.map((exclusion) => exclusion.issue_id),
+  ).size;
+  const summary = `<p class="section-copy">Hard-excluded issues: ${formatInteger(
+    hardExcludedIssueCount,
+  )} · Hard exclusion edges: ${formatInteger(
     order.exclusions.length,
   )} · Advisory warnings: ${formatInteger(
     order.advisory_warnings.length,

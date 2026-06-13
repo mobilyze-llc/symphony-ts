@@ -29,6 +29,11 @@ interface DispatchEdge {
   reason: string;
 }
 
+interface IssueIdentifierIndex {
+  byIdentifier: ReadonlyMap<string, Issue>;
+  ambiguousIdentifiers: ReadonlySet<string>;
+}
+
 type HardDispatchEdge = DispatchEdge & {
   trust: Exclude<DispatchEdge["trust"], "advisory">;
 };
@@ -42,9 +47,7 @@ export function computeDispatchOrder(
 ): ComputedDispatchOrderSnapshot {
   const baseOrder = sortIssuesForDispatch(input.issues);
   const issueById = new Map(baseOrder.map((issue) => [issue.id, issue]));
-  const issueByIdentifier = new Map(
-    baseOrder.map((issue) => [issue.identifier, issue]),
-  );
+  const issueByIdentifier = buildIssueIdentifierIndex(baseOrder);
   const terminalStates = new Set(input.terminalStates.map(normalizeIssueState));
   const edges = collectDependencyEdges(input, issueById, issueByIdentifier);
   const hardEdges = edges.filter(isHardEdge);
@@ -65,12 +68,13 @@ export function computeDispatchOrder(
     )
     .map(toAdvisoryWarning);
   const warnings = [
-    ...new Set(
-      input.ticketFeatureUnavailableReason === null ||
-        input.ticketFeatureUnavailableReason === undefined
+    ...new Set([
+      ...(input.ticketFeatureUnavailableReason === null ||
+      input.ticketFeatureUnavailableReason === undefined
         ? []
-        : [input.ticketFeatureUnavailableReason],
-    ),
+        : [input.ticketFeatureUnavailableReason]),
+      ...buildIssueIdentifierCollisionWarnings(issueByIdentifier),
+    ]),
   ];
 
   const excludedIssueIds = new Set(
@@ -100,6 +104,7 @@ export function computeDispatchOrder(
         edges,
         issueById,
         issueByIdentifier,
+        terminalStates,
       ),
       would_have_been_excluded_by_advisory_edges: advisoryOpenEdges,
       hard_cycle: hardCycle,
@@ -107,13 +112,14 @@ export function computeDispatchOrder(
     };
   }
 
+  const linearized = topologicallySortIssues(
+    included,
+    hardOrderingEdges,
+    issueById,
+    issueByIdentifier,
+  );
   const anchored = applyAnchors(
-    topologicallySortIssues(
-      included,
-      hardOrderingEdges,
-      issueById,
-      issueByIdentifier,
-    ),
+    linearized.ordered,
     input.anchors,
     input.completedIssueIds ?? new Set<string>(),
     input.now,
@@ -136,30 +142,40 @@ export function computeDispatchOrder(
       edges,
       issueById,
       issueByIdentifier,
+      terminalStates,
     ),
     would_have_been_excluded_by_advisory_edges: advisoryOpenEdges,
     hard_cycle: null,
-    warnings: [...warnings, ...anchored.warnings],
+    warnings: [...warnings, ...linearized.warnings, ...anchored.warnings],
   };
 }
 
 function collectDependencyEdges(
   input: ComputeDispatchOrderInput,
   issueById: ReadonlyMap<string, Issue>,
-  issueByIdentifier: ReadonlyMap<string, Issue>,
+  issueByIdentifier: IssueIdentifierIndex,
 ): DispatchEdge[] {
   const featureByIssueId = new Map<string, TicketFeature>();
   const featureByIdentifier = new Map<string, TicketFeature>();
+  const ambiguousFeatureIdentifiers = new Set<string>();
   for (const feature of input.ticketFeatures ?? []) {
     featureByIssueId.set(feature.issue.id, feature);
-    featureByIdentifier.set(feature.issue.identifier, feature);
+    const existing = featureByIdentifier.get(feature.issue.identifier);
+    if (existing !== undefined && existing.issue.id !== feature.issue.id) {
+      featureByIdentifier.delete(feature.issue.identifier);
+      ambiguousFeatureIdentifiers.add(feature.issue.identifier);
+    } else if (!ambiguousFeatureIdentifiers.has(feature.issue.identifier)) {
+      featureByIdentifier.set(feature.issue.identifier, feature);
+    }
   }
 
   const edges: DispatchEdge[] = [];
   for (const issue of input.issues) {
     const feature =
       featureByIssueId.get(issue.id) ??
-      featureByIdentifier.get(issue.identifier);
+      (ambiguousFeatureIdentifiers.has(issue.identifier)
+        ? undefined
+        : featureByIdentifier.get(issue.identifier));
     if (feature === undefined) {
       for (const blocker of issue.blockedBy) {
         edges.push({
@@ -254,10 +270,15 @@ function toAdvisoryWarning(
 function buildAdvisoryWarnings(
   edges: readonly DispatchEdge[],
   issueById: ReadonlyMap<string, Issue>,
-  issueByIdentifier: ReadonlyMap<string, Issue>,
+  issueByIdentifier: IssueIdentifierIndex,
+  terminalStates: ReadonlySet<string>,
 ): ComputedDispatchOrderAdvisoryWarning[] {
   const warnings = edges
-    .filter((edge) => edge.trust === "advisory")
+    .filter(
+      (edge) =>
+        edge.trust === "advisory" &&
+        isOpenBlocker(edge.blocker, terminalStates),
+    )
     .map((edge) => {
       const blockerIssue = findIssueByRef(
         edge.blocker,
@@ -299,8 +320,8 @@ function topologicallySortIssues(
   issues: readonly Issue[],
   hardOrderingEdges: readonly HardDispatchEdge[],
   issueById: ReadonlyMap<string, Issue>,
-  issueByIdentifier: ReadonlyMap<string, Issue>,
-): Issue[] {
+  issueByIdentifier: IssueIdentifierIndex,
+): { ordered: Issue[]; warnings: string[] } {
   const orderedIds = new Set(issues.map((issue) => issue.id));
   const indegree = new Map(issues.map((issue) => [issue.id, 0]));
   const outgoing = new Map<string, string[]>();
@@ -341,14 +362,22 @@ function topologicallySortIssues(
       }
     }
   }
-  return result.length === issues.length ? result : [...issues];
+  if (result.length === issues.length) {
+    return { ordered: result, warnings: [] };
+  }
+  return {
+    ordered: [...issues],
+    warnings: [
+      `Dispatch comparator could not linearize ${issues.length - result.length} candidate(s) after hard-cycle detection; preserved natural priority/FIFO order.`,
+    ],
+  };
 }
 
 function findHardCycle(
   issues: readonly Issue[],
   hardOrderingEdges: readonly HardDispatchEdge[],
   issueById: ReadonlyMap<string, Issue>,
-  issueByIdentifier: ReadonlyMap<string, Issue>,
+  issueByIdentifier: IssueIdentifierIndex,
 ): ComputedDispatchOrderSnapshot["hard_cycle"] {
   const issueIds = new Set(issues.map((issue) => issue.id));
   const outgoing = new Map<string, string[]>();
@@ -556,7 +585,7 @@ function isOpenBlocker(
 function findIssueByRef(
   ref: BlockerRef,
   issueById: ReadonlyMap<string, Issue>,
-  issueByIdentifier: ReadonlyMap<string, Issue>,
+  issueByIdentifier: IssueIdentifierIndex,
 ): Issue | null {
   if (ref.id !== null) {
     const byId = issueById.get(ref.id);
@@ -565,12 +594,47 @@ function findIssueByRef(
     }
   }
   if (ref.identifier !== null) {
-    const byIdentifier = issueByIdentifier.get(ref.identifier);
+    if (issueByIdentifier.ambiguousIdentifiers.has(ref.identifier)) {
+      return null;
+    }
+    const byIdentifier = issueByIdentifier.byIdentifier.get(ref.identifier);
     if (byIdentifier !== undefined) {
       return byIdentifier;
     }
   }
   return null;
+}
+
+function buildIssueIdentifierIndex(
+  issues: readonly Issue[],
+): IssueIdentifierIndex {
+  const byIdentifier = new Map<string, Issue>();
+  const ambiguousIdentifiers = new Set<string>();
+  for (const issue of issues) {
+    const existing = byIdentifier.get(issue.identifier);
+    if (existing === undefined) {
+      if (!ambiguousIdentifiers.has(issue.identifier)) {
+        byIdentifier.set(issue.identifier, issue);
+      }
+      continue;
+    }
+    if (existing.id !== issue.id) {
+      byIdentifier.delete(issue.identifier);
+      ambiguousIdentifiers.add(issue.identifier);
+    }
+  }
+  return { byIdentifier, ambiguousIdentifiers };
+}
+
+function buildIssueIdentifierCollisionWarnings(
+  issueByIdentifier: IssueIdentifierIndex,
+): string[] {
+  return [...issueByIdentifier.ambiguousIdentifiers]
+    .sort((left, right) => left.localeCompare(right, "en"))
+    .map(
+      (identifier) =>
+        `Dispatch comparator observed duplicate candidate identifier ${identifier}; identifier-only dependency refs for that identifier are ignored to avoid nondeterministic ordering.`,
+    );
 }
 
 function refsMatch(

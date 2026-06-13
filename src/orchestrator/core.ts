@@ -2199,12 +2199,7 @@ export class OrchestratorCore {
   ): Promise<ComputedDispatchOrderSnapshot> {
     let ticketFeatures: TicketFeature[] | undefined;
     let ticketFeatureUnavailableReason: string | null = null;
-    const hasDependencyEdges = issues.some(
-      (issue) => issue.blockedBy.length > 0,
-    );
-    if (!hasDependencyEdges) {
-      ticketFeatures = [];
-    } else if (this.tracker.fetchTicketFeatureIssuesByStates === undefined) {
+    if (this.tracker.fetchTicketFeatureIssuesByStates === undefined) {
       ticketFeatureUnavailableReason =
         "TicketFeature feed unavailable; preserving current blockedBy eligibility semantics.";
     } else {
