@@ -99,6 +99,7 @@ describe("dispatcher decision event emission", () => {
       issueId: "__dispatch__",
       metadata: expect.objectContaining({
         comparator_version: "priority-fifo-control-v0",
+        outcome_since_sequence: 0,
         considered_issue_ids: ["2", "1"],
         dispatch_picks: ["2", "1"],
         manual_jumps_reorders: [],
@@ -153,6 +154,7 @@ describe("dispatcher decision event emission", () => {
             outputTokens: 234,
             turns: 3,
             outcome: "succeeded",
+            status: "completed",
           },
         }),
         journalEntry({
@@ -211,6 +213,102 @@ describe("dispatcher decision event emission", () => {
             turns: 3,
             stages: 1,
           },
+        }),
+      ],
+    });
+  });
+
+  it("journals only queue-baseline outcomes observed since the previous baseline", async () => {
+    const orchestrator = createOrchestrator({
+      runJournal: [
+        journalEntry({
+          sequence: 1,
+          kind: "failure_exhausted",
+          issueId: "old-dead",
+          issueIdentifier: "ISSUE-OLD",
+          summary: "Old retries exhausted.",
+          metadata: {
+            status: "completed",
+            reason: "max_retries",
+            failure_signature: "sig-old",
+          },
+        }),
+        journalEntry({
+          sequence: 2,
+          kind: "queue_baseline",
+          issueId: "__dispatch__",
+          issueIdentifier: "__dispatch__",
+          summary: "Prior baseline.",
+          metadata: {
+            schema_version: 1,
+            comparator_version: "priority-fifo-control-v0",
+          },
+        }),
+        journalEntry({
+          sequence: 3,
+          kind: "failure_exhausted",
+          issueId: "new-dead",
+          issueIdentifier: "ISSUE-NEW",
+          summary: "New retries exhausted.",
+          metadata: {
+            status: "completed",
+            reason: "max_retries",
+            failure_signature: "sig-new",
+          },
+        }),
+        journalEntry({
+          sequence: 4,
+          kind: "intent",
+          issueId: "old-dead",
+          issueIdentifier: "ISSUE-OLD",
+          summary: "Operator released old issue after the prior baseline.",
+          metadata: {
+            status: "applied",
+            verb: "release",
+            actor: { kind: "operator", host: "desk" },
+          },
+        }),
+      ],
+      tracker: createTracker({
+        candidates: [createIssue({ id: "next", identifier: "ISSUE-NEXT" })],
+      }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+
+    expect(baseline?.metadata).toMatchObject({
+      outcome_since_sequence: 2,
+      manual_jumps_reorders: [
+        expect.objectContaining({
+          sequence: 4,
+          issue_id: "old-dead",
+        }),
+      ],
+      quiet_death_outcomes: [
+        expect.objectContaining({
+          sequence: 3,
+          issue_id: "new-dead",
+          failure_signature: "sig-new",
+        }),
+      ],
+      urgent_reopen_outcomes: [
+        expect.objectContaining({
+          sequence: 4,
+          issue_id: "old-dead",
+          reopened_after_sequence: 1,
+        }),
+      ],
+    });
+    expect(baseline?.metadata).not.toMatchObject({
+      quiet_death_outcomes: [
+        expect.objectContaining({
+          issue_id: "old-dead",
         }),
       ],
     });

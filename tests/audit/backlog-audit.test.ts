@@ -188,9 +188,9 @@ describe("backlog audit", () => {
             {
               findingId: "F-1\n### forged heading",
               type: "thin_spec",
-              issueIdentifiers: ["SYMPH-100"],
-              summary: "Thin.",
-              evidence: "Sparse body.",
+              issueIdentifiers: ["SYMPH-100\n```"],
+              summary: "Thin.\n## forged summary",
+              evidence: "Sparse body.\n```",
               confidence: "medium",
             },
           ],
@@ -200,6 +200,7 @@ describe("backlog audit", () => {
 
     expect(markdown).toContain("### F-1 \\#\\#\\# forged heading:");
     expect(markdown).not.toContain("\n### forged heading");
+    expect(markdown).not.toContain("\n## forged summary");
   });
 
   it("requires explicit local model and state endpoints", () => {
@@ -308,6 +309,70 @@ describe("backlog audit", () => {
       }),
     ).rejects.toThrow(
       "GET http://127.0.0.1:4321/api/v1/state/delta?since_seq=0&limit=500 failed with HTTP 503",
+    );
+  });
+
+  it("paginates runtime delta read-model evidence until the journal cursor is complete", async () => {
+    const fetchFn = vi.fn(async (input: Parameters<typeof fetch>[0]) => {
+      const url = String(input);
+      if (url.endsWith("/api/v1/state")) {
+        return Response.json({ snapshot: true });
+      }
+      if (url.endsWith("/api/v1/state/delta?since_seq=0&limit=500")) {
+        return Response.json({
+          since_seq: 0,
+          as_of_sequence: 3,
+          count: 2,
+          truncated: true,
+          entries: [{ sequence: 1 }, { sequence: 2 }],
+        });
+      }
+      if (url.endsWith("/api/v1/state/delta?since_seq=2&limit=500")) {
+        return Response.json({
+          since_seq: 2,
+          as_of_sequence: 3,
+          count: 1,
+          truncated: false,
+          entries: [{ sequence: 3 }],
+        });
+      }
+      return new Response("unexpected url", { status: 500 });
+    });
+
+    const evidence = await fetchBacklogAuditRuntimeEvidence({
+      baseUrl: "http://127.0.0.1:4321",
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(evidence.stateDelta).toMatchObject({
+      since_seq: 0,
+      as_of_sequence: 3,
+      count: 3,
+      truncated: false,
+      entries: [{ sequence: 1 }, { sequence: 2 }, { sequence: 3 }],
+    });
+  });
+
+  it("fails loudly when a truncated delta page cannot advance the cursor", async () => {
+    const fetchFn = vi.fn(async (input: Parameters<typeof fetch>[0]) =>
+      String(input).endsWith("/api/v1/state")
+        ? Response.json({ snapshot: true })
+        : Response.json({
+            since_seq: 0,
+            as_of_sequence: 3,
+            count: 0,
+            truncated: true,
+            entries: [],
+          }),
+    );
+
+    await expect(
+      fetchBacklogAuditRuntimeEvidence({
+        baseUrl: "http://127.0.0.1:4321",
+        fetchFn: fetchFn as unknown as typeof fetch,
+      }),
+    ).rejects.toThrow(
+      "GET http://127.0.0.1:4321/api/v1/state/delta returned a truncated page without an advancing cursor",
     );
   });
 

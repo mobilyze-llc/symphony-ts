@@ -1873,25 +1873,35 @@ export class OrchestratorCore {
     const timestamp = this.now().toISOString();
     let metadata: Record<string, unknown>;
     try {
+      const outcomeSinceSequence = findLastQueueBaselineSequence(
+        this.state.dispatcherRunJournal,
+      );
+      const manualJumpsReorders = collectOperatorIntentSamples(
+        this.state.dispatcherRunJournal,
+        outcomeSinceSequence,
+      );
       metadata = {
         schema_version: 1,
         comparator_version: "priority-fifo-control-v0",
+        outcome_since_sequence: outcomeSinceSequence,
         considered_issue_ids: input.consideredIssues.map((issue) => issue.id),
         considered_issue_identifiers: input.consideredIssues.map(
           (issue) => issue.identifier,
         ),
         dispatch_picks: [...input.dispatchPicks],
-        manual_jumps_reorders: collectOperatorIntentSamples(
-          this.state.dispatcherRunJournal,
-        ),
+        manual_jumps_reorders: manualJumpsReorders,
         quiet_death_outcomes: collectQuietDeathOutcomes(
           this.state.dispatcherRunJournal,
+          outcomeSinceSequence,
         ),
         urgent_reopen_outcomes: collectUrgentReopenOutcomes(
           this.state.dispatcherRunJournal,
+          outcomeSinceSequence,
+          manualJumpsReorders,
         ),
         delivery_outcomes: collectDeliveryOutcomes(
           this.state.dispatcherRunJournal,
+          outcomeSinceSequence,
         ),
       };
     } catch (error) {
@@ -9424,9 +9434,11 @@ function readMetadataNumber(
 
 function collectOperatorIntentSamples(
   journal: DispatcherRunJournal,
+  sinceSequence = 0,
 ): Array<Record<string, unknown>> {
   return journal.flatMap((entry) => {
     if (
+      entry.sequence <= sinceSequence ||
       entry.kind !== "intent" ||
       readMetadataString(entry.metadata, "status") !== "applied"
     ) {
@@ -9457,9 +9469,10 @@ function collectOperatorIntentSamples(
 
 function collectQuietDeathOutcomes(
   journal: DispatcherRunJournal,
+  sinceSequence = 0,
 ): Array<Record<string, unknown>> {
   return journal.flatMap((entry) =>
-    entry.kind === "failure_exhausted"
+    entry.sequence > sinceSequence && entry.kind === "failure_exhausted"
       ? [
           {
             sequence: entry.sequence,
@@ -9479,6 +9492,8 @@ function collectQuietDeathOutcomes(
 
 function collectUrgentReopenOutcomes(
   journal: DispatcherRunJournal,
+  sinceSequence = 0,
+  operatorIntentSamples = collectOperatorIntentSamples(journal, sinceSequence),
 ): Array<Record<string, unknown>> {
   const deathSequencesByIssue = new Map<string, number[]>();
   for (const entry of journal) {
@@ -9490,7 +9505,7 @@ function collectUrgentReopenOutcomes(
     deathSequencesByIssue.set(entry.issueId, sequences);
   }
 
-  return collectOperatorIntentSamples(journal).flatMap((sample) => {
+  return operatorIntentSamples.flatMap((sample) => {
     const issueId = typeof sample.issue_id === "string" ? sample.issue_id : "";
     const sequence =
       typeof sample.sequence === "number" ? sample.sequence : Number.NaN;
@@ -9511,10 +9526,14 @@ function collectUrgentReopenOutcomes(
 
 function collectDeliveryOutcomes(
   journal: DispatcherRunJournal,
+  sinceSequence = 0,
 ): Array<Record<string, unknown>> {
   const historyByIssue = new Map<string, StageRecord[]>();
   for (const entry of journal) {
-    if (entry.kind !== "stage_record") {
+    if (
+      entry.kind !== "stage_record" ||
+      readMetadataString(entry.metadata, "status") !== "completed"
+    ) {
       continue;
     }
     const stageRecord = toStageRecordFromMetadata(entry.metadata);
@@ -9528,6 +9547,7 @@ function collectDeliveryOutcomes(
 
   return journal.flatMap((entry) => {
     if (
+      entry.sequence <= sinceSequence ||
       entry.kind !== "tracker_write" ||
       !entry.idempotencyKey.includes(":terminal:") ||
       !entry.idempotencyKey.endsWith(":completed")
@@ -9558,6 +9578,12 @@ function collectDeliveryOutcomes(
       },
     ];
   });
+}
+
+function findLastQueueBaselineSequence(journal: DispatcherRunJournal): number {
+  return (
+    journal.findLast((entry) => entry.kind === "queue_baseline")?.sequence ?? 0
+  );
 }
 
 function formatWarningError(error: unknown): string {

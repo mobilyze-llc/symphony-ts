@@ -83,6 +83,7 @@ const VERDICT_SCHEMA = z.object({
 });
 
 const DEFAULT_BACKLOG_AUDIT_TIMEOUT_MS = 600_000;
+const STATE_DELTA_PAGE_LIMIT = 500;
 const MAX_DESCRIPTION_CHARS = 900;
 
 let networkTimeoutApplied = false;
@@ -146,12 +147,10 @@ export async function fetchBacklogAuditRuntimeEvidence(input: {
     `${base}/api/v1/state`,
     input.timeoutMs,
   );
-  const stateDelta = await fetchJson(
-    fetchFn,
-    `${base}/api/v1/state/delta?since_seq=0&limit=500`,
-    input.timeoutMs,
-  );
-  return { state, stateDelta };
+  return {
+    state,
+    stateDelta: await fetchCompleteStateDelta(fetchFn, base, input.timeoutMs),
+  };
 }
 
 async function fetchJson(
@@ -166,6 +165,85 @@ async function fetchJson(
     throw new Error(`GET ${url} failed with HTTP ${response.status}`);
   }
   return response.json();
+}
+
+async function fetchCompleteStateDelta(
+  fetchFn: typeof fetch,
+  base: string,
+  timeoutMs: number | null | undefined,
+): Promise<unknown> {
+  let sinceSeq = 0;
+  let mergedEntries: unknown[] = [];
+  let firstPage: StateDeltaLike | null = null;
+
+  for (let pageCount = 0; pageCount < 1_000; pageCount += 1) {
+    const page = await fetchJson(
+      fetchFn,
+      `${base}/api/v1/state/delta?since_seq=${sinceSeq}&limit=${STATE_DELTA_PAGE_LIMIT}`,
+      timeoutMs,
+    );
+    if (!isStateDeltaLike(page)) {
+      return page;
+    }
+    firstPage ??= page;
+    mergedEntries = [...mergedEntries, ...page.entries];
+    if (page.truncated !== true) {
+      return {
+        ...page,
+        since_seq: firstPage.since_seq,
+        count: mergedEntries.length,
+        truncated: false,
+        entries: mergedEntries,
+      };
+    }
+    const lastSequence = readLastDeltaSequence(page.entries);
+    if (lastSequence === null || lastSequence <= sinceSeq) {
+      throw new Error(
+        `GET ${base}/api/v1/state/delta returned a truncated page without an advancing cursor`,
+      );
+    }
+    sinceSeq = lastSequence;
+  }
+
+  throw new Error(
+    `GET ${base}/api/v1/state/delta exceeded the pagination safety limit`,
+  );
+}
+
+interface StateDeltaLike {
+  since_seq: number;
+  count: number;
+  truncated: boolean;
+  entries: unknown[];
+}
+
+function isStateDeltaLike(value: unknown): value is StateDeltaLike {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as {
+    since_seq?: unknown;
+    count?: unknown;
+    truncated?: unknown;
+    entries?: unknown;
+  };
+  return (
+    typeof candidate.since_seq === "number" &&
+    typeof candidate.count === "number" &&
+    typeof candidate.truncated === "boolean" &&
+    Array.isArray(candidate.entries)
+  );
+}
+
+function readLastDeltaSequence(entries: readonly unknown[]): number | null {
+  const last = entries.at(-1);
+  if (typeof last !== "object" || last === null || Array.isArray(last)) {
+    return null;
+  }
+  const sequence = (last as { sequence?: unknown }).sequence;
+  return typeof sequence === "number" && Number.isFinite(sequence)
+    ? sequence
+    : null;
 }
 
 export function buildBacklogAuditPrompt(
@@ -245,9 +323,11 @@ export function renderBacklogAuditReport(input: {
       const findingId = sanitizeMarkdownInline(finding.findingId);
       lines.push(`### ${findingId}: ${finding.type} (${finding.confidence})`);
       lines.push("");
-      lines.push(`- Issues: ${finding.issueIdentifiers.join(", ")}`);
-      lines.push(`- Summary: ${finding.summary}`);
-      lines.push(`- Evidence: ${finding.evidence}`);
+      lines.push(
+        `- Issues: ${finding.issueIdentifiers.map(sanitizeMarkdownInline).join(", ")}`,
+      );
+      lines.push(`- Summary: ${sanitizeMarkdownInline(finding.summary)}`);
+      lines.push(`- Evidence: ${sanitizeMarkdownInline(finding.evidence)}`);
       lines.push("- Operator verdict: [ ] agree  [ ] disagree");
       lines.push("- Operator note:");
       lines.push("");
@@ -273,8 +353,11 @@ export function renderBacklogAuditReport(input: {
   lines.push("Per-finding agreement:");
   for (const finding of input.report.verdict.findings) {
     const findingId = sanitizeMarkdownInline(finding.findingId);
+    const issueIdentifiers = finding.issueIdentifiers
+      .map(sanitizeMarkdownInline)
+      .join(", ");
     lines.push(
-      `- ${findingId} (${finding.type}, ${finding.issueIdentifiers.join(", ")}): agree|disagree - <note>`,
+      `- ${findingId} (${finding.type}, ${issueIdentifiers}): agree|disagree - <note>`,
     );
   }
   lines.push("");
