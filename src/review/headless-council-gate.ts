@@ -2030,7 +2030,7 @@ function provenanceModelFamily(
   if (/claude|anthropic|opus|sonnet/.test(text)) {
     return "anthropic";
   }
-  if (/deepseek|pi\b/.test(text)) {
+  if (/(?:^|[^a-z0-9])(?:deepseek|pi)(?=$|[^a-z0-9])/.test(text)) {
     return "pi";
   }
   return entry.modelFamily ?? entry.agent ?? null;
