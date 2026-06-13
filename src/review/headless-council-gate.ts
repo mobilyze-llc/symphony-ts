@@ -113,7 +113,9 @@ export type LaneDegradedReason =
   | "malformed_artifact"
   | "malformed_substrate_json"
   | "substrate_stall"
-  | "artifact_persistence_failed";
+  | "artifact_persistence_failed"
+  | "workspace_integrity_check_failed"
+  | "workspace_mutation_detected";
 export type StructuredReviewFindingSeverity =
   | "P1"
   | "P2"
@@ -527,6 +529,24 @@ export interface HeadlessLaneTokenUsage {
   totalCostUsd: number | null;
 }
 
+export interface HeadlessWorkspaceCommandSnapshot {
+  command: "git rev-parse HEAD" | "git status --short --branch";
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+export interface HeadlessWorkspaceIntegritySnapshot {
+  head: HeadlessWorkspaceCommandSnapshot;
+  status: HeadlessWorkspaceCommandSnapshot;
+}
+
+export interface HeadlessWorkspaceIntegrityEvidence {
+  before: HeadlessWorkspaceIntegritySnapshot | null;
+  after: HeadlessWorkspaceIntegritySnapshot | null;
+  changes: string[];
+}
+
 export interface HeadlessLaneResult {
   laneId: string;
   agent: "claude" | "pi" | "codex";
@@ -548,6 +568,7 @@ export interface HeadlessLaneResult {
   rawArtifactPath?: string | null;
   structuredArtifactPath?: string | null;
   structuredArtifact?: StructuredReviewerArtifact | null;
+  workspaceIntegrity?: HeadlessWorkspaceIntegrityEvidence | null;
 }
 
 export interface HeadlessCouncilGateResult {
@@ -3381,6 +3402,34 @@ async function runReviewerLane(input: {
       input.riskContractArtifactPaths,
     ),
   );
+  const beforeWorkspaceIntegrity = await captureWorkspaceIntegritySnapshot({
+    runCommand: input.runCommand,
+    workspace: input.workspace,
+    env: input.env,
+  });
+  const beforeWorkspaceIntegrityError = workspaceIntegritySnapshotError(
+    beforeWorkspaceIntegrity,
+  );
+  if (beforeWorkspaceIntegrityError !== null) {
+    return workspaceIntegrityCheckFailedLaneResult({
+      laneId: input.lane.laneId,
+      agent: input.lane.agent,
+      role: input.lane.role,
+      model: input.lane.model,
+      reasoningEffort: laneReasoningEffort(input.lane),
+      independentReviewer: independentReviewerForLane(input.lane),
+      promptPath,
+      cliJsonPath,
+      stderrPath,
+      reviewBundle: input.reviewBundle,
+      message: `Workspace integrity preflight failed before reviewer lane launch: ${beforeWorkspaceIntegrityError}`,
+      evidence: {
+        before: beforeWorkspaceIntegrity,
+        after: null,
+        changes: ["workspace_integrity_preflight_failed"],
+      },
+    });
+  }
 
   const args = [
     "run",
@@ -3411,7 +3460,7 @@ async function runReviewerLane(input: {
   await writeFile(cliJsonPath, result.stdout);
   await writeFile(stderrPath, result.stderr);
 
-  return await parseLaneResult({
+  const laneResult = await parseLaneResult({
     laneId: input.lane.laneId,
     agent: input.lane.agent,
     role: input.lane.role,
@@ -3432,6 +3481,16 @@ async function runReviewerLane(input: {
       input.lane.laneId,
     ),
   });
+  const afterWorkspaceIntegrity = await captureWorkspaceIntegritySnapshot({
+    runCommand: input.runCommand,
+    workspace: input.workspace,
+    env: input.env,
+  });
+  return applyWorkspaceIntegrityGuard(
+    laneResult,
+    beforeWorkspaceIntegrity,
+    afterWorkspaceIntegrity,
+  );
 }
 
 async function runCodexLeadLane(input: {
@@ -3471,6 +3530,34 @@ async function runCodexLeadLane(input: {
       input.riskContractArtifactPaths,
     ),
   );
+  const beforeWorkspaceIntegrity = await captureWorkspaceIntegritySnapshot({
+    runCommand: input.runCommand,
+    workspace: input.workspace,
+    env: input.env,
+  });
+  const beforeWorkspaceIntegrityError = workspaceIntegritySnapshotError(
+    beforeWorkspaceIntegrity,
+  );
+  if (beforeWorkspaceIntegrityError !== null) {
+    return workspaceIntegrityCheckFailedLaneResult({
+      laneId,
+      agent: "codex",
+      role: CODEX_LEAD_ROLE,
+      model: CODEX_LEAD_MODEL,
+      reasoningEffort: DEFAULT_CODEX_EXCAVATION_REASONING_EFFORT,
+      independentReviewer: false,
+      promptPath,
+      cliJsonPath,
+      stderrPath,
+      reviewBundle: input.reviewBundle,
+      message: `Workspace integrity preflight failed before Codex lead launch: ${beforeWorkspaceIntegrityError}`,
+      evidence: {
+        before: beforeWorkspaceIntegrity,
+        after: null,
+        changes: ["workspace_integrity_preflight_failed"],
+      },
+    });
+  }
 
   const result = await input.runCommand(
     input.cmuxSpawnBin,
@@ -3505,7 +3592,7 @@ async function runCodexLeadLane(input: {
   await writeFile(cliJsonPath, result.stdout);
   await writeFile(stderrPath, result.stderr);
 
-  return await parseLaneResult({
+  const laneResult = await parseLaneResult({
     laneId,
     agent: "codex",
     role: CODEX_LEAD_ROLE,
@@ -3526,6 +3613,215 @@ async function runCodexLeadLane(input: {
       laneId,
     ),
   });
+  const afterWorkspaceIntegrity = await captureWorkspaceIntegritySnapshot({
+    runCommand: input.runCommand,
+    workspace: input.workspace,
+    env: input.env,
+  });
+  return applyWorkspaceIntegrityGuard(
+    laneResult,
+    beforeWorkspaceIntegrity,
+    afterWorkspaceIntegrity,
+  );
+}
+
+async function captureWorkspaceIntegritySnapshot(input: {
+  runCommand: CommandRunner;
+  workspace: string;
+  env: NodeJS.ProcessEnv;
+}): Promise<HeadlessWorkspaceIntegritySnapshot> {
+  const [head, status] = await Promise.all([
+    captureWorkspaceCommandSnapshot(input, ["rev-parse", "HEAD"] as const),
+    captureWorkspaceCommandSnapshot(input, [
+      "status",
+      "--short",
+      "--branch",
+    ] as const),
+  ]);
+  return { head, status };
+}
+
+async function captureWorkspaceCommandSnapshot(
+  input: {
+    runCommand: CommandRunner;
+    workspace: string;
+    env: NodeJS.ProcessEnv;
+  },
+  args:
+    | readonly ["rev-parse", "HEAD"]
+    | readonly ["status", "--short", "--branch"],
+): Promise<HeadlessWorkspaceCommandSnapshot> {
+  const command =
+    args[0] === "rev-parse"
+      ? "git rev-parse HEAD"
+      : "git status --short --branch";
+  try {
+    const result = await input.runCommand("git", args, {
+      cwd: input.workspace,
+      env: input.env,
+      timeoutMs: DEFAULT_PREFLIGHT_TIMEOUT_MS,
+    });
+    return { command, ...result };
+  } catch (error) {
+    const commandError = error as Error & {
+      code?: number | string | null;
+    };
+    const abortedBySignal =
+      commandError.name === "AbortError" || commandError.code === "ABORT_ERR";
+    return {
+      command,
+      exitCode: abortedBySignal
+        ? 143
+        : typeof commandError.code === "number"
+          ? commandError.code
+          : 1,
+      stdout: "",
+      stderr: formatError(error),
+    };
+  }
+}
+
+function applyWorkspaceIntegrityGuard(
+  laneResult: HeadlessLaneResult,
+  before: HeadlessWorkspaceIntegritySnapshot,
+  after: HeadlessWorkspaceIntegritySnapshot,
+): HeadlessLaneResult {
+  const afterError = workspaceIntegritySnapshotError(after);
+  if (afterError !== null) {
+    return workspaceIntegrityFailedLaneResult(laneResult, {
+      reason: "workspace_integrity_check_failed",
+      message: `Workspace integrity postflight failed after lane execution: ${afterError}`,
+      evidence: {
+        before,
+        after,
+        changes: ["workspace_integrity_postflight_failed"],
+      },
+    });
+  }
+
+  const changes = workspaceIntegrityChanges(before, after);
+  if (changes.length === 0) {
+    return {
+      ...laneResult,
+      workspaceIntegrity: {
+        before,
+        after,
+        changes: [],
+      },
+    };
+  }
+
+  return workspaceIntegrityFailedLaneResult(laneResult, {
+    reason: "workspace_mutation_detected",
+    message: `Reviewer lane changed the target workspace while producing review evidence: ${changes.join("; ")}`,
+    evidence: {
+      before,
+      after,
+      changes,
+    },
+  });
+}
+
+function workspaceIntegrityCheckFailedLaneResult(input: {
+  laneId: string;
+  agent: "claude" | "pi" | "codex";
+  role: string;
+  model: string;
+  reasoningEffort: string | null;
+  independentReviewer: boolean;
+  promptPath: string;
+  cliJsonPath: string;
+  stderrPath: string;
+  reviewBundle: ReviewBundleReference | null;
+  message: string;
+  evidence: HeadlessWorkspaceIntegrityEvidence;
+}): HeadlessLaneResult {
+  return {
+    laneId: input.laneId,
+    agent: input.agent,
+    role: input.role,
+    model: input.model,
+    reasoningEffort: input.reasoningEffort,
+    independentReviewer: input.independentReviewer,
+    state: "error",
+    verdict: "error",
+    artifactPath: null,
+    promptPath: input.promptPath,
+    cliJsonPath: input.cliJsonPath,
+    stderrPath: input.stderrPath,
+    message: input.message,
+    degradedReason: "workspace_integrity_check_failed",
+    reviewBundle: input.reviewBundle,
+    wallTimeMs: null,
+    tokenUsage: null,
+    rawArtifactPath: null,
+    structuredArtifactPath: null,
+    structuredArtifact: null,
+    workspaceIntegrity: input.evidence,
+  };
+}
+
+function workspaceIntegrityFailedLaneResult(
+  laneResult: HeadlessLaneResult,
+  input: {
+    reason: Extract<
+      LaneDegradedReason,
+      "workspace_integrity_check_failed" | "workspace_mutation_detected"
+    >;
+    message: string;
+    evidence: HeadlessWorkspaceIntegrityEvidence;
+  },
+): HeadlessLaneResult {
+  return {
+    ...laneResult,
+    state: "error",
+    verdict: "error",
+    message: input.message,
+    degradedReason: input.reason,
+    structuredArtifactPath: null,
+    structuredArtifact: null,
+    workspaceIntegrity: input.evidence,
+  };
+}
+
+function workspaceIntegritySnapshotError(
+  snapshot: HeadlessWorkspaceIntegritySnapshot,
+): string | null {
+  const failedCommands = [snapshot.head, snapshot.status].filter(
+    (command) => command.exitCode !== 0,
+  );
+  if (failedCommands.length === 0) {
+    return null;
+  }
+  return failedCommands
+    .map(
+      (command) =>
+        `${command.command} exited ${command.exitCode}: ${trimCommandOutput(command.stderr || command.stdout) || "no output"}`,
+    )
+    .join("; ");
+}
+
+function workspaceIntegrityChanges(
+  before: HeadlessWorkspaceIntegritySnapshot,
+  after: HeadlessWorkspaceIntegritySnapshot,
+): string[] {
+  const changes: string[] = [];
+  const beforeHead = before.head.stdout.trim();
+  const afterHead = after.head.stdout.trim();
+  if (beforeHead !== afterHead) {
+    changes.push(
+      `HEAD changed from ${beforeHead || "unknown"} to ${afterHead || "unknown"}`,
+    );
+  }
+  if (before.status.stdout !== after.status.stdout) {
+    changes.push("git status changed");
+  }
+  return changes;
+}
+
+function trimCommandOutput(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.length > 500 ? `${trimmed.slice(0, 500)}...` : trimmed;
 }
 
 function laneAgentArgs(
@@ -5635,6 +5931,8 @@ function isReviewSubstrateDegradedCondition(condition: string): boolean {
     condition.startsWith("malformed_artifact:") ||
     condition.startsWith("malformed_substrate_json:") ||
     condition.startsWith("artifact_persistence_failed:") ||
+    condition.startsWith("workspace_integrity_check_failed:") ||
+    condition.startsWith("workspace_mutation_detected:") ||
     condition.startsWith("substrate_stall:") ||
     condition.startsWith("review-bundle-footer-append-failed:")
   );
@@ -5853,6 +6151,9 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
     );
   }
 
+  lines.push("", "## Workspace Integrity", "");
+  lines.push(...formatWorkspaceIntegrityReportLines(result.lanes));
+
   const findings = result.lanes.flatMap(
     (lane) =>
       lane.structuredArtifact?.findings.map((finding) => ({
@@ -5957,6 +6258,56 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
     "",
   );
   return lines.join("\n");
+}
+
+function formatWorkspaceIntegrityReportLines(
+  lanes: readonly HeadlessLaneResult[],
+): string[] {
+  const implicatedLanes = lanes.filter(
+    (lane) =>
+      lane.workspaceIntegrity !== undefined &&
+      lane.workspaceIntegrity !== null &&
+      (lane.workspaceIntegrity.changes.length > 0 ||
+        lane.degradedReason === "workspace_integrity_check_failed" ||
+        lane.degradedReason === "workspace_mutation_detected"),
+  );
+  if (implicatedLanes.length === 0) {
+    return [
+      "- No reviewer-lane workspace mutation evidence recorded; lane JSON carries before/after fingerprints when available.",
+    ];
+  }
+
+  const lines: string[] = [];
+  for (const lane of implicatedLanes) {
+    const evidence = lane.workspaceIntegrity;
+    if (evidence === undefined || evidence === null) {
+      continue;
+    }
+    lines.push(
+      `- ${lane.laneId}: ${lane.degradedReason ?? "workspace_integrity"} (${evidence.changes.join("; ") || "no fingerprint delta"})`,
+    );
+    lines.push(
+      `  - Before: ${formatWorkspaceSnapshotForReport(evidence.before)}`,
+    );
+    lines.push(
+      `  - After: ${formatWorkspaceSnapshotForReport(evidence.after)}`,
+    );
+  }
+  return lines;
+}
+
+function formatWorkspaceSnapshotForReport(
+  snapshot: HeadlessWorkspaceIntegritySnapshot | null,
+): string {
+  if (snapshot === null) {
+    return "n/a";
+  }
+  const head = snapshot.head.stdout.trim() || "unknown";
+  const status =
+    trimCommandOutput(snapshot.status.stdout) ||
+    trimCommandOutput(snapshot.status.stderr) ||
+    "clean";
+  return `HEAD ${head}; status ${JSON.stringify(status)}`;
 }
 
 function formatSelectedRoutingLanes(
