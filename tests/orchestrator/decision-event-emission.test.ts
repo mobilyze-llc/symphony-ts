@@ -113,6 +113,62 @@ describe("dispatcher decision event emission", () => {
     });
   });
 
+  it("does not journal queue-baseline samples for empty idle polls", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({ candidates: [] }),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.pollTick();
+
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.filter(
+          (entry) => entry.kind === "queue_baseline",
+        ),
+    ).toEqual([]);
+  });
+
+  it("journals outcome-only queue-baseline samples when the queue is empty", async () => {
+    const orchestrator = createOrchestrator({
+      runJournal: [
+        journalEntry({
+          sequence: 1,
+          kind: "failure_exhausted",
+          issueId: "dead",
+          issueIdentifier: "ISSUE-DEAD",
+          summary: "Retries exhausted.",
+          metadata: {
+            status: "completed",
+            reason: "max_retries",
+            failure_signature: "sig-dead",
+          },
+        }),
+      ],
+      tracker: createTracker({ candidates: [] }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+
+    expect(baseline?.metadata).toMatchObject({
+      considered_issue_ids: [],
+      dispatch_picks: [],
+      quiet_death_outcomes: [
+        expect.objectContaining({
+          issue_id: "dead",
+          failure_signature: "sig-dead",
+        }),
+      ],
+    });
+  });
+
   it("journals non-empty queue-baseline outcome samples from prior journal entries", async () => {
     const orchestrator = createOrchestrator({
       runJournal: [
@@ -412,6 +468,93 @@ describe("dispatcher decision event emission", () => {
             turns: 2,
             stages: 1,
           },
+        }),
+      ],
+    });
+  });
+
+  it("partitions delivery spend between repeated terminal writes in one baseline window", async () => {
+    const orchestrator = createOrchestrator({
+      runJournal: [
+        journalEntry({
+          sequence: 1,
+          kind: "stage_record",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "implement",
+          metadata: {
+            status: "completed",
+            stageName: "implement",
+            durationMs: 100,
+            totalTokens: 100,
+            turns: 1,
+            outcome: "succeeded",
+          },
+        }),
+        journalEntry({
+          sequence: 2,
+          kind: "tracker_write",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "merge",
+          idempotencyKey: "tracker:redelivered:terminal:completed",
+          metadata: { status: "completed" },
+        }),
+        journalEntry({
+          sequence: 3,
+          kind: "stage_record",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "implement",
+          metadata: {
+            status: "completed",
+            stageName: "implement",
+            durationMs: 200,
+            totalTokens: 250,
+            turns: 2,
+            outcome: "succeeded",
+          },
+        }),
+        journalEntry({
+          sequence: 4,
+          kind: "tracker_write",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "merge",
+          idempotencyKey: "tracker:redelivered:terminal:completed",
+          metadata: { status: "completed" },
+        }),
+      ],
+      tracker: createTracker({
+        candidates: [createIssue({ id: "next", identifier: "ISSUE-NEXT" })],
+      }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+
+    expect(baseline?.metadata).toMatchObject({
+      delivery_outcomes: [
+        expect.objectContaining({
+          sequence: 2,
+          spend: expect.objectContaining({
+            total_tokens: 100,
+            turns: 1,
+            stages: 1,
+          }),
+        }),
+        expect.objectContaining({
+          sequence: 4,
+          spend: expect.objectContaining({
+            total_tokens: 250,
+            turns: 2,
+            stages: 1,
+          }),
         }),
       ],
     });

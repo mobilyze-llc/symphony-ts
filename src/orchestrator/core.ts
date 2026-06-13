@@ -1716,6 +1716,7 @@ export class OrchestratorCore {
       await this.recordQueueBaselineSample({
         consideredIssues: sortIssuesForDispatch(issues),
         dispatchPicks: [],
+        force: true,
       });
       return {
         validation,
@@ -1750,6 +1751,7 @@ export class OrchestratorCore {
       await this.recordQueueBaselineSample({
         consideredIssues: sortIssuesForDispatch(issues),
         dispatchPicks: [],
+        force: true,
       });
       return {
         validation,
@@ -1869,6 +1871,7 @@ export class OrchestratorCore {
   private async recordQueueBaselineSample(input: {
     consideredIssues: readonly Issue[];
     dispatchPicks: readonly string[];
+    force?: boolean;
   }): Promise<void> {
     const timestamp = this.now().toISOString();
     let metadata: Record<string, unknown>;
@@ -1880,6 +1883,30 @@ export class OrchestratorCore {
         this.state.dispatcherRunJournal,
         outcomeSinceSequence,
       );
+      const quietDeathOutcomes = collectQuietDeathOutcomes(
+        this.state.dispatcherRunJournal,
+        outcomeSinceSequence,
+      );
+      const urgentReopenOutcomes = collectUrgentReopenOutcomes(
+        this.state.dispatcherRunJournal,
+        outcomeSinceSequence,
+        manualJumpsReorders,
+      );
+      const deliveryOutcomes = collectDeliveryOutcomes(
+        this.state.dispatcherRunJournal,
+        outcomeSinceSequence,
+      );
+      if (
+        input.force !== true &&
+        input.consideredIssues.length === 0 &&
+        input.dispatchPicks.length === 0 &&
+        manualJumpsReorders.length === 0 &&
+        quietDeathOutcomes.length === 0 &&
+        urgentReopenOutcomes.length === 0 &&
+        deliveryOutcomes.length === 0
+      ) {
+        return;
+      }
       metadata = {
         schema_version: 1,
         comparator_version: "priority-fifo-control-v0",
@@ -1892,19 +1919,9 @@ export class OrchestratorCore {
         ),
         dispatch_picks: [...input.dispatchPicks],
         manual_jumps_reorders: manualJumpsReorders,
-        quiet_death_outcomes: collectQuietDeathOutcomes(
-          this.state.dispatcherRunJournal,
-          outcomeSinceSequence,
-        ),
-        urgent_reopen_outcomes: collectUrgentReopenOutcomes(
-          this.state.dispatcherRunJournal,
-          outcomeSinceSequence,
-          manualJumpsReorders,
-        ),
-        delivery_outcomes: collectDeliveryOutcomes(
-          this.state.dispatcherRunJournal,
-          outcomeSinceSequence,
-        ),
+        quiet_death_outcomes: quietDeathOutcomes,
+        urgent_reopen_outcomes: urgentReopenOutcomes,
+        delivery_outcomes: deliveryOutcomes,
       };
     } catch (error) {
       console.warn(
@@ -9532,7 +9549,10 @@ function collectDeliveryOutcomes(
   journal: DispatcherRunJournal,
   sinceSequence = 0,
 ): Array<Record<string, unknown>> {
-  const historyByIssue = new Map<string, StageRecord[]>();
+  const historyByIssue = new Map<
+    string,
+    Array<{ sequence: number; stageRecord: StageRecord }>
+  >();
   for (const entry of journal) {
     if (
       entry.sequence <= sinceSequence ||
@@ -9546,10 +9566,11 @@ function collectDeliveryOutcomes(
       continue;
     }
     const history = historyByIssue.get(entry.issueId) ?? [];
-    history.push(stageRecord);
+    history.push({ sequence: entry.sequence, stageRecord });
     historyByIssue.set(entry.issueId, history);
   }
 
+  const previousTerminalSequenceByIssue = new Map<string, number>();
   return journal.flatMap((entry) => {
     if (
       entry.sequence <= sinceSequence ||
@@ -9559,13 +9580,20 @@ function collectDeliveryOutcomes(
     ) {
       return [];
     }
-    const history = historyByIssue.get(entry.issueId) ?? [];
+    const previousTerminalSequence =
+      previousTerminalSequenceByIssue.get(entry.issueId) ?? sinceSequence;
+    previousTerminalSequenceByIssue.set(entry.issueId, entry.sequence);
+    const history = (historyByIssue.get(entry.issueId) ?? []).filter(
+      (stageEntry) =>
+        stageEntry.sequence > previousTerminalSequence &&
+        stageEntry.sequence <= entry.sequence,
+    );
     const totalTokens = history.reduce(
-      (sum, stageRecord) => sum + stageRecord.totalTokens,
+      (sum, { stageRecord }) => sum + stageRecord.totalTokens,
       0,
     );
     const turns = history.reduce(
-      (sum, stageRecord) => sum + stageRecord.turns,
+      (sum, { stageRecord }) => sum + stageRecord.turns,
       0,
     );
     return [
