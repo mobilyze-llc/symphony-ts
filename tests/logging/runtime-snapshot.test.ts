@@ -2108,6 +2108,131 @@ describe("state-document enrichment (SYMPH-407)", () => {
     expect(review.finding_counts_by_disposition).toEqual({});
   });
 
+  it("projects Council termination ladder thresholds from review events", () => {
+    const state = makeState();
+    const ladderMetadata = (metadata: Record<string, unknown>) =>
+      reviewMetadata({
+        round: 3,
+        routing_mode: "convergence",
+        bundle_hash: "bundle-ladder",
+        head_sha: "head-ladder",
+        rounds_per_cycle: 3,
+        round_warning_threshold: 2,
+        round_cap: 3,
+        termination_alert_level: "operator",
+        ...metadata,
+      });
+    state.dispatcherRunJournal = [
+      makeJournalEntry({
+        sequence: 13,
+        kind: "review_round",
+        metadata: ladderMetadata({}),
+      }),
+      makeJournalEntry({
+        sequence: 14,
+        kind: "review_escalation",
+        metadata: ladderMetadata({
+          escalation_reason: "same_family_reopen",
+          termination_status: "restructure_required",
+          termination_reason: "same_family_reopen",
+          termination_action:
+            "restructure_against_named_contract_or_park_with_synthesis",
+          tripwire_family_count: 1,
+          synthesis_count: 2,
+          blocking_finding_count: 1,
+          non_blocking_finding_count: 1,
+          track_finding_count: 1,
+        }),
+      }),
+      makeJournalEntry({
+        sequence: 15,
+        kind: "review_gate_result",
+        metadata: ladderMetadata({
+          gate_verdict: "fail",
+          termination_status: "restructure_required",
+          termination_reason: "same_family_reopen",
+          termination_action:
+            "restructure_against_named_contract_or_park_with_synthesis",
+          tripwire_family_count: 1,
+          synthesis_count: 2,
+          blocking_finding_count: 1,
+          non_blocking_finding_count: 1,
+          track_finding_count: 1,
+        }),
+      }),
+    ];
+
+    const review = buildRuntimeSnapshot(state).council_reviews!["issue-1"]!;
+
+    expect(review.status).toBe("escalated");
+    expect(review.next_action).toBe("restructure_or_park_with_synthesis");
+    expect(review.rounds_per_cycle).toEqual({
+      current: 3,
+      warning_threshold: 2,
+      cap: 3,
+      alert_level: "operator",
+    });
+    expect(review.termination).toEqual({
+      status: "restructure_required",
+      reason: "same_family_reopen",
+      action: "restructure_against_named_contract_or_park_with_synthesis",
+      alert_level: "operator",
+      tripwire_family_count: 1,
+      synthesis_count: 2,
+      blocking_finding_count: 1,
+      non_blocking_finding_count: 1,
+      track_finding_count: 1,
+    });
+  });
+
+  it("projects Council termination continue action instead of generic rework", () => {
+    const state = makeState();
+    const continueMetadata = (metadata: Record<string, unknown>) =>
+      reviewMetadata({
+        round: 2,
+        routing_mode: "convergence",
+        bundle_hash: "bundle-continue",
+        head_sha: "head-continue",
+        rounds_per_cycle: 2,
+        round_warning_threshold: 2,
+        round_cap: 3,
+        termination_alert_level: "warning",
+        ...metadata,
+      });
+    state.dispatcherRunJournal = [
+      makeJournalEntry({
+        sequence: 16,
+        kind: "review_round",
+        metadata: continueMetadata({}),
+      }),
+      makeJournalEntry({
+        sequence: 17,
+        kind: "review_gate_result",
+        metadata: continueMetadata({
+          gate_verdict: "fail",
+          termination_status: "continue",
+          termination_reason: "blocking_findings",
+          termination_action: "continue_fix_loop",
+          blocking_finding_count: 1,
+          non_blocking_finding_count: 0,
+          track_finding_count: 0,
+        }),
+      }),
+    ];
+
+    const review = buildRuntimeSnapshot(state).council_reviews!["issue-1"]!;
+
+    expect(review.status).toBe("failed");
+    expect(review.next_action).toBe("continue_fix_loop");
+    expect(review.termination).toMatchObject({
+      status: "continue",
+      reason: "blocking_findings",
+      action: "continue_fix_loop",
+      alert_level: "warning",
+      blocking_finding_count: 1,
+    });
+  });
+
   it("projects Council findings and fix-round rework without reviewer prose", () => {
     const state = makeState();
     const reworkMetadata = (metadata: Record<string, unknown>) =>
@@ -2851,6 +2976,17 @@ describe("buildStateDelta (SYMPH-407)", () => {
         gate_verdict: "error",
         blocking_finding_count: 1,
         degraded_condition_count: 2,
+        termination_status: "operator_decision",
+        termination_reason: "round_cap_hit",
+        termination_action: "operator_decision_required_with_synthesis",
+        termination_alert_level: "operator",
+        rounds_per_cycle: 3,
+        round_warning_threshold: 2,
+        round_cap: 3,
+        tripwire_family_count: 0,
+        synthesis_count: 1,
+        non_blocking_finding_count: 0,
+        track_finding_count: 0,
         degraded_conditions: ["artifact_parse_failed", "SECRET-condition"],
         finding_fingerprints: ["fp-private"],
         related_paths: ["src/private.ts"],
@@ -2879,6 +3015,17 @@ describe("buildStateDelta (SYMPH-407)", () => {
         gate_verdict: "error",
         blocking_finding_count: 1,
         degraded_condition_count: 2,
+        termination_status: "operator_decision",
+        termination_reason: "round_cap_hit",
+        termination_action: "operator_decision_required_with_synthesis",
+        termination_alert_level: "operator",
+        rounds_per_cycle: 3,
+        round_warning_threshold: 2,
+        round_cap: 3,
+        tripwire_family_count: 0,
+        synthesis_count: 1,
+        non_blocking_finding_count: 0,
+        track_finding_count: 0,
       },
     });
     expect(delta.entries[1]!.metadata).not.toHaveProperty(

@@ -278,6 +278,121 @@ describe("review journal events", () => {
     expect(JSON.stringify(delta)).not.toContain("SECRET");
   });
 
+  it("emits termination ladder telemetry through review journal events", () => {
+    const result = reviewResult({
+      verdict: "fail",
+      round: 3,
+      mode: "convergence",
+      termination: {
+        status: "operator_decision",
+        reason: "round_cap_hit",
+        action: "operator_decision_required_with_synthesis",
+        roundsPerCycle: 3,
+        thresholds: {
+          sameFamilyReopenLimit: 2,
+          roundWarning: 2,
+          roundCap: 3,
+        },
+        alertLevel: "operator",
+        blockingFindingCount: 0,
+        nonBlockingFindingCount: 0,
+        trackFindingCount: 0,
+        familySynthesisCount: 1,
+        synthesisAttached: true,
+        tripwireFamilyNames: [],
+        synthesisFamilyNames: ["termination ladder"],
+      },
+    });
+
+    const entries = buildReviewJournalEntries(result, {
+      issueIdentifier: "SYMPH-469",
+      ownerId: "worker-1",
+      source: "interactive",
+    });
+
+    expect(
+      entries.find((entry) => entry.kind === "review_round")?.metadata,
+    ).toMatchObject({
+      rounds_per_cycle: 3,
+      round_warning_threshold: 2,
+      round_cap: 3,
+      termination_alert_level: "operator",
+    });
+    expect(
+      entries.find((entry) => entry.kind === "review_escalation")?.metadata,
+    ).toMatchObject({
+      escalation_reason: "round_cap_hit",
+      termination_status: "operator_decision",
+      termination_reason: "round_cap_hit",
+      termination_action: "operator_decision_required_with_synthesis",
+      synthesis_count: 1,
+      blocking_finding_count: 0,
+    });
+    expect(
+      entries.find((entry) => entry.kind === "review_gate_result")?.metadata,
+    ).toMatchObject({
+      termination_status: "operator_decision",
+      termination_reason: "round_cap_hit",
+      termination_action: "operator_decision_required_with_synthesis",
+      rounds_per_cycle: 3,
+      round_warning_threshold: 2,
+      round_cap: 3,
+      termination_alert_level: "operator",
+      tripwire_family_count: 0,
+      synthesis_count: 1,
+      non_blocking_finding_count: 0,
+      track_finding_count: 0,
+    });
+  });
+
+  it("emits escalation when termination reason requires operator attention", () => {
+    const result = reviewResult({
+      verdict: "pass",
+      termination: {
+        status: "operator_decision",
+        reason: "round_cap_hit",
+        action: "operator_decision_required_with_synthesis",
+        roundsPerCycle: 3,
+        thresholds: {
+          sameFamilyReopenLimit: 2,
+          roundWarning: 2,
+          roundCap: 3,
+        },
+        alertLevel: "operator",
+        blockingFindingCount: 0,
+        nonBlockingFindingCount: 0,
+        trackFindingCount: 0,
+        familySynthesisCount: 1,
+        synthesisAttached: true,
+        tripwireFamilyNames: [],
+        synthesisFamilyNames: ["termination ladder"],
+      },
+    });
+
+    const entries = buildReviewJournalEntries(result, {
+      issueIdentifier: "SYMPH-469",
+      ownerId: "worker-1",
+      source: "interactive",
+    });
+
+    expect(entries.map((entry) => entry.kind)).toEqual([
+      "review_round",
+      "review_lane",
+      "review_escalation",
+      "review_gate_result",
+    ]);
+    expect(
+      entries.find((entry) => entry.kind === "review_escalation")?.metadata,
+    ).toMatchObject({
+      escalation_reason: "round_cap_hit",
+      termination_status: "operator_decision",
+      termination_reason: "round_cap_hit",
+      termination_action: "operator_decision_required_with_synthesis",
+      gate_verdict: "pass",
+      blocking_finding_count: 0,
+    });
+  });
+
   it("serializes concurrent standalone review appends into one journal sequence stream", async () => {
     const workspaceRoot = await mkdtemp(
       join(tmpdir(), "symphony-review-journal-concurrent-"),
@@ -476,7 +591,9 @@ function reviewResult(input: {
   artifact?: StructuredReviewerArtifact;
   wallTimeMs?: number | null;
   tokenUsage?: HeadlessCouncilGateResult["lanes"][number]["tokenUsage"];
+  termination?: HeadlessCouncilGateResult["termination"];
 }): HeadlessCouncilGateResult {
+  const round = input.round ?? 1;
   return {
     schemaVersion: 1,
     issueId: "issue-symph-450",
@@ -493,7 +610,7 @@ function reviewResult(input: {
       reviewed_head_sha: "head-sha",
       previous_reviewed_head_sha: input.previousReviewedHeadSha ?? null,
       base_sha: "base-sha",
-      round: input.round ?? 1,
+      round,
       mode: input.mode ?? "full",
       verdict: input.verdict,
     },
@@ -532,6 +649,9 @@ function reviewResult(input: {
       },
     ],
     degradedConditions: input.verdict === "error" ? ["cmux-failed"] : [],
+    termination:
+      input.termination ??
+      defaultTerminationAssessment(input.verdict, round, input.artifact),
     artifactPaths: {
       artifactDir: "/tmp",
       diff: "/tmp/diff.patch",
@@ -541,6 +661,60 @@ function reviewResult(input: {
       councilReport: "/tmp/council-report.md",
     },
     summary: "SECRET raw summary with diff --git payload",
+  };
+}
+
+function defaultTerminationAssessment(
+  verdict: "pass" | "fail" | "error",
+  round: number,
+  artifact: StructuredReviewerArtifact | undefined,
+): NonNullable<HeadlessCouncilGateResult["termination"]> {
+  const blockingFindingCount =
+    artifact?.findings.filter(
+      (finding) =>
+        (finding.severity === "P1" || finding.severity === "P2") &&
+        finding.leadDisposition === "open",
+    ).length ?? 0;
+  const status =
+    verdict === "pass"
+      ? "converged"
+      : verdict === "error"
+        ? "degraded"
+        : "continue";
+  return {
+    status,
+    reason:
+      status === "converged"
+        ? "clean"
+        : status === "degraded"
+          ? "gate_error"
+          : "blocking_findings",
+    action:
+      status === "converged"
+        ? "continue_pipeline"
+        : status === "degraded"
+          ? "inspect_review_substrate"
+          : "continue_fix_loop",
+    roundsPerCycle: round,
+    thresholds: {
+      sameFamilyReopenLimit: 2,
+      roundWarning: 2,
+      roundCap: 3,
+    },
+    alertLevel: round >= 3 ? "operator" : round >= 2 ? "warning" : "ok",
+    blockingFindingCount,
+    nonBlockingFindingCount:
+      (artifact?.findings.length ?? 0) - blockingFindingCount,
+    trackFindingCount:
+      artifact?.findings.filter(
+        (finding) =>
+          finding.severity === "Track" || finding.leadDisposition === "track",
+      ).length ?? 0,
+    familySynthesisCount: artifact?.familySyntheses.length ?? 0,
+    synthesisAttached: (artifact?.familySyntheses.length ?? 0) > 0,
+    tripwireFamilyNames: [],
+    synthesisFamilyNames:
+      artifact?.familySyntheses.map((synthesis) => synthesis.name) ?? [],
   };
 }
 

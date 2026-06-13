@@ -997,6 +997,11 @@ describe("runHeadlessCouncilGate", () => {
 
     expect(result.verdict).toBe("error");
     expect(result.degradedConditions).toContain("zero-reviewer-lanes");
+    expect(result.termination).toMatchObject({
+      status: "degraded",
+      reason: "gate_error",
+      action: "inspect_review_substrate",
+    });
     expect(harness.commands).toEqual([]);
   });
 
@@ -1021,6 +1026,10 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.degradedConditions).toContain(
       "duplicate-reviewer-lane-id:claude-opus",
     );
+    expect(result.termination).toMatchObject({
+      status: "degraded",
+      reason: "gate_error",
+    });
     expect(harness.commands).toEqual([]);
   });
 
@@ -1041,6 +1050,10 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.degradedConditions).toContain(
       "reserved-reviewer-lane-id:codex-high-lead",
     );
+    expect(result.termination).toMatchObject({
+      status: "degraded",
+      reason: "gate_error",
+    });
     expect(harness.commands).toEqual([]);
   });
 
@@ -1060,6 +1073,10 @@ describe("runHeadlessCouncilGate", () => {
 
     expect(result.verdict).toBe("error");
     expect(result.degradedConditions).toContain("cmux-preflight-failed");
+    expect(result.termination).toMatchObject({
+      status: "degraded",
+      reason: "gate_error",
+    });
     await expect(
       readFile(join(harness.artifactDir, "cmux-preflight.stdout"), "utf-8"),
     ).resolves.toBe("{}");
@@ -2102,6 +2119,21 @@ describe("runHeadlessCouncilGate", () => {
     );
 
     expect(result.verdict).toBe("pass");
+    expect(result.termination).toMatchObject({
+      status: "converged",
+      reason: "disposition_exit",
+      action: "continue_pipeline",
+      alertLevel: "ok",
+      blockingFindingCount: 0,
+      nonBlockingFindingCount: 1,
+      trackFindingCount: 1,
+      roundsPerCycle: 1,
+      thresholds: {
+        roundWarning: 2,
+        roundCap: 3,
+        sameFamilyReopenLimit: 2,
+      },
+    });
     const findings = result.lanes[0]!.structuredArtifact!.findings;
     expect(findings).toHaveLength(1);
     expect(findings[0]).toMatchObject({
@@ -2110,6 +2142,328 @@ describe("runHeadlessCouncilGate", () => {
       leadDisposition: "track",
       relatedPaths: ["docs/operators.md"],
     });
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain("## Termination Ladder");
+    expect(report).toContain("- Reason: disposition_exit");
+    expect(report).toContain("- Track findings to file: 1");
+  });
+
+  it("trips the termination ladder on a second same-family reopen", async () => {
+    const artifact = [
+      "## Verdict",
+      "FINDINGS",
+      "",
+      "## P1 Must Fix",
+      "None",
+      "",
+      "## P2 Should Fix",
+      "- src/review/headless-council-gate.ts:10 still violates the review-state contract. | family: review-state contract; safety_claim: review state must stop procedural patching after repeated invariant reopen; next_round_question: did the fix restructure against the named contract?; fixed_symptoms: first patch narrowed report copy; remaining_symptoms: projection can still loop",
+      "",
+      "## Track",
+      "None",
+      "",
+      "## Dismissed Or Theoretical",
+      "None",
+    ].join("\n");
+    const firstHarness = await createHarness({
+      laneBehavior: { "claude-opus": { artifact } },
+    });
+    const firstResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-469",
+        workspace: firstHarness.workspace,
+        artifactDir: firstHarness.artifactDir,
+        diffPath: firstHarness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: firstHarness.runCommand },
+    );
+    const priorArtifact = firstResult.lanes[0]!.structuredArtifact;
+    if (priorArtifact === null || priorArtifact === undefined) {
+      throw new Error("expected prior structured artifact");
+    }
+
+    const secondHarness = await createHarness({
+      laneBehavior: { "claude-opus": { artifact } },
+    });
+    const firstReopenResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-469",
+        workspace: secondHarness.workspace,
+        artifactDir: secondHarness.artifactDir,
+        diffPath: secondHarness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        mode: "convergence",
+        round: 2,
+        priorStructuredArtifacts: [priorArtifact],
+      },
+      { runCommand: secondHarness.runCommand },
+    );
+    const firstReopenArtifact = firstReopenResult.lanes[0]!.structuredArtifact;
+    if (firstReopenArtifact === null || firstReopenArtifact === undefined) {
+      throw new Error("expected first reopen structured artifact");
+    }
+
+    expect(firstReopenResult.termination).toMatchObject({
+      status: "continue",
+      reason: "blocking_findings",
+      tripwireFamilyNames: [],
+      roundsPerCycle: 2,
+    });
+
+    const thirdHarness = await createHarness({
+      laneBehavior: { "claude-opus": { artifact } },
+    });
+    const secondReopenResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-469",
+        workspace: thirdHarness.workspace,
+        artifactDir: thirdHarness.artifactDir,
+        diffPath: thirdHarness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        mode: "convergence",
+        round: 3,
+        priorStructuredArtifacts: [priorArtifact, firstReopenArtifact],
+      },
+      { runCommand: thirdHarness.runCommand },
+    );
+
+    expect(secondReopenResult.verdict).toBe("fail");
+    expect(secondReopenResult.termination).toMatchObject({
+      status: "restructure_required",
+      reason: "same_family_reopen",
+      action: "restructure_against_named_contract_or_park_with_synthesis",
+      alertLevel: "operator",
+      blockingFindingCount: 1,
+      familySynthesisCount: 1,
+      synthesisAttached: true,
+      tripwireFamilyNames: ["review-state contract"],
+      synthesisFamilyNames: ["review-state contract"],
+      roundsPerCycle: 3,
+    });
+    const report = await readFile(
+      secondReopenResult.artifactPaths.councilReport,
+      "utf-8",
+    );
+    expect(report).toContain("- Reason: same_family_reopen");
+    expect(report).toContain(
+      "- Action: restructure_against_named_contract_or_park_with_synthesis",
+    );
+    expect(report).toContain("- Trip-wire families: review-state contract");
+  });
+
+  it("counts same-family reopens by prior round instead of reviewer artifact count", async () => {
+    const priorArtifactText = [
+      "## Verdict",
+      "FINDINGS",
+      "",
+      "## P1 Must Fix",
+      "None",
+      "",
+      "## P2 Should Fix",
+      "- src/review/headless-council-gate.ts:10 first symptom. | family: review-state contract; safety_claim: review state must stop procedural patching after repeated invariant reopen; next_round_question: did the fix restructure against the named contract?; remaining_symptoms: first symptom",
+      "- src/review/headless-council-gate.ts:20 second symptom. | family: review-state contract; safety_claim: review state must stop procedural patching after repeated invariant reopen; next_round_question: did the fix restructure against the named contract?; remaining_symptoms: second symptom",
+      "",
+      "## Track",
+      "None",
+      "",
+      "## Dismissed Or Theoretical",
+      "None",
+    ].join("\n");
+    const currentArtifactText = [
+      "## Verdict",
+      "FINDINGS",
+      "",
+      "## P1 Must Fix",
+      "None",
+      "",
+      "## P2 Should Fix",
+      "- src/review/headless-council-gate.ts:30 reopened symptom. | family: review-state contract; safety_claim: review state must stop procedural patching after repeated invariant reopen; next_round_question: did the fix restructure against the named contract?; remaining_symptoms: reopened symptom",
+      "",
+      "## Track",
+      "None",
+      "",
+      "## Dismissed Or Theoretical",
+      "None",
+    ].join("\n");
+    const firstHarness = await createHarness({
+      laneBehavior: {
+        "claude-opus": { artifact: priorArtifactText },
+        "pi-deepseek": { artifact: priorArtifactText },
+      },
+    });
+    const firstResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-469",
+        workspace: firstHarness.workspace,
+        artifactDir: firstHarness.artifactDir,
+        diffPath: firstHarness.diffPath,
+        reviewerLanes: [opusLane(), piLane()],
+        codexLead: false,
+      },
+      { runCommand: firstHarness.runCommand },
+    );
+    const priorArtifacts = firstResult.lanes.flatMap((lane) =>
+      lane.structuredArtifact === null || lane.structuredArtifact === undefined
+        ? []
+        : [lane.structuredArtifact],
+    );
+    if (priorArtifacts.length !== 2) {
+      throw new Error("expected two prior structured artifacts");
+    }
+
+    const secondHarness = await createHarness({
+      laneBehavior: { "claude-opus": { artifact: currentArtifactText } },
+    });
+    const secondResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-469",
+        workspace: secondHarness.workspace,
+        artifactDir: secondHarness.artifactDir,
+        diffPath: secondHarness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        mode: "convergence",
+        round: 2,
+        priorStructuredArtifacts: priorArtifacts,
+      },
+      { runCommand: secondHarness.runCommand },
+    );
+
+    expect(secondResult.verdict).toBe("fail");
+    expect(secondResult.termination).toMatchObject({
+      status: "continue",
+      reason: "blocking_findings",
+      action: "continue_fix_loop",
+      blockingFindingCount: 1,
+      tripwireFamilyNames: [],
+    });
+  });
+
+  it("uses the Codex lead artifact as the termination count source when present", async () => {
+    const reviewerArtifact = [
+      "## Verdict",
+      "FINDINGS",
+      "",
+      "## P1 Must Fix",
+      "None",
+      "",
+      "## P2 Should Fix",
+      "- src/review/headless-council-gate.ts:10 reviewer raw finding. | family: lead contract; safety_claim: lead triage owns termination counts; next_round_question: did termination count adjudicated findings only?; remaining_symptoms: raw reviewer duplicate",
+      "",
+      "## Track",
+      "None",
+      "",
+      "## Dismissed Or Theoretical",
+      "None",
+    ].join("\n");
+    const leadArtifact = [
+      "## Verdict",
+      "FINDINGS",
+      "",
+      "## Triage",
+      "- P2 | open | new | src/review/headless-council-gate.ts:10 adjudicated lead finding. confidence: 0.91 | family: lead contract; safety_claim: lead triage owns termination counts; next_round_question: did termination count adjudicated findings only?; remaining_symptoms: adjudicated finding",
+      "",
+      "## Track",
+      "None",
+    ].join("\n");
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": { artifact: reviewerArtifact },
+        "codex-high-lead": { artifact: leadArtifact },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-469",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(result.termination).toMatchObject({
+      status: "continue",
+      reason: "blocking_findings",
+      blockingFindingCount: 1,
+      familySynthesisCount: 1,
+      synthesisFamilyNames: ["lead contract"],
+    });
+  });
+
+  it("turns a cap-hit into an operator decision with synthesis attached", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "FINDINGS",
+            "",
+            "## P1 Must Fix",
+            "None",
+            "",
+            "## P2 Should Fix",
+            "- src/review/headless-council-gate.ts:20 still needs a structural fix. | family: cap-hit contract; safety_claim: round caps must stop for operator synthesis rather than auto-abandon; next_round_question: does the operator have enough synthesis to decide?; remaining_symptoms: cap reached with surviving P2",
+            "",
+            "## Track",
+            "None",
+            "",
+            "## Dismissed Or Theoretical",
+            "None",
+          ].join("\n"),
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-469",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        mode: "convergence",
+        round: 3,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(result.termination).toMatchObject({
+      status: "operator_decision",
+      reason: "round_cap_hit",
+      action: "operator_decision_required_with_synthesis",
+      alertLevel: "operator",
+      blockingFindingCount: 1,
+      familySynthesisCount: 1,
+      synthesisAttached: true,
+      roundsPerCycle: 3,
+      thresholds: {
+        roundWarning: 2,
+        roundCap: 3,
+      },
+    });
+    const persisted = JSON.parse(
+      await readFile(result.artifactPaths.resultJson, "utf-8"),
+    ) as { termination: Record<string, unknown> };
+    expect(persisted.termination).toMatchObject({
+      status: "operator_decision",
+      reason: "round_cap_hit",
+    });
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain(
+      "- Action: operator_decision_required_with_synthesis",
+    );
+    expect(report).toContain("- Rounds per cycle: 3 (warning 2, cap 3)");
   });
 
   it("keeps Track-only FINDINGS as pass while preserving the Track finding", async () => {
