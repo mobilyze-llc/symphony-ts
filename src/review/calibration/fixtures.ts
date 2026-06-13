@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 export const REVIEW_CALIBRATION_CORPUS_SCHEMA_VERSION = 1;
 export const REVIEW_CALIBRATION_OWNER_ISSUE = "SYMPH-493";
 export const REVIEW_CALIBRATION_PARENT_ISSUE = "SYMPH-446";
+export const REVIEW_CALIBRATION_REPLAY_SOURCE = "replay";
 
 export const REVIEW_CALIBRATION_BUG_CLASSES = [
   "security:path_traversal",
@@ -33,6 +34,59 @@ export const REVIEW_CALIBRATION_CATEGORIES = [
 
 export type ReviewCalibrationCategory =
   (typeof REVIEW_CALIBRATION_CATEGORIES)[number];
+
+export const REVIEW_CALIBRATION_LANES = [
+  "codex_excavation",
+  "pi_review",
+  "opus_escalation",
+  "lead_triage",
+] as const;
+
+export type ReviewCalibrationLane = (typeof REVIEW_CALIBRATION_LANES)[number];
+
+export const REVIEW_CALIBRATION_METRICS = [
+  "reviewer_yield",
+  "false_positive_rate",
+  "fix_rereview_convergence",
+  "escalation_frequency",
+  "unique_real_findings",
+  "future_ref_hygiene",
+] as const;
+
+export type ReviewCalibrationMetric =
+  (typeof REVIEW_CALIBRATION_METRICS)[number];
+
+export const REVIEW_CALIBRATION_FIX_CONVERGENCE = [
+  "clean_baseline",
+  "clean_final",
+  "fixed_before_clean",
+  "track_only_followups",
+  "followup_fix",
+] as const;
+
+export type ReviewCalibrationFixConvergence =
+  (typeof REVIEW_CALIBRATION_FIX_CONVERGENCE)[number];
+
+export const REVIEW_CALIBRATION_OPUS_USAGE = [
+  "invoked",
+  "degraded",
+  "avoided",
+  "not_recorded",
+] as const;
+
+export type ReviewCalibrationOpusUsage =
+  (typeof REVIEW_CALIBRATION_OPUS_USAGE)[number];
+
+export const REVIEW_CALIBRATION_ESCALATION_FREQUENCIES = [
+  "none_recorded",
+  "single_round",
+  "multi_round",
+  "track_only",
+  "degraded",
+] as const;
+
+export type ReviewCalibrationEscalationFrequency =
+  (typeof REVIEW_CALIBRATION_ESCALATION_FREQUENCIES)[number];
 
 const REVIEW_CALIBRATION_CATEGORY_BY_BUG_CLASS = {
   "security:path_traversal": "security",
@@ -95,7 +149,56 @@ export interface ReviewCalibrationCorpus {
   schemaVersion: typeof REVIEW_CALIBRATION_CORPUS_SCHEMA_VERSION;
   ownerIssue: typeof REVIEW_CALIBRATION_OWNER_ISSUE;
   parentIssue: typeof REVIEW_CALIBRATION_PARENT_ISSUE;
+  measurementPlan: ReviewCalibrationMeasurementPlan;
+  retrospectiveReplay: ReviewCalibrationRetrospectiveReplay;
   fixtures: ReviewCalibrationFixture[];
+}
+
+export interface ReviewCalibrationMeasurementPlan {
+  harnessMode: "fixture_only";
+  routingMode: "council_v2_calibration_static";
+  liveModelCalls: "forbidden";
+  laneSet: ReviewCalibrationLane[];
+  metrics: ReviewCalibrationMetric[];
+  scoring: ReviewCalibrationScoringPlan;
+}
+
+export interface ReviewCalibrationScoringPlan {
+  primarySignal: string;
+  falsePositiveSignal: string;
+  rolloutGate: string;
+}
+
+export interface ReviewCalibrationRetrospectiveReplay {
+  source: typeof REVIEW_CALIBRATION_REPLAY_SOURCE;
+  replayWindow: string;
+  selectionBasis: string;
+  noLiveModelCalls: true;
+  forbiddenRuntimeFields: string[];
+  cases: ReviewCalibrationRetrospectiveReplayCase[];
+}
+
+export interface ReviewCalibrationRetrospectiveReplayCase {
+  id: string;
+  source: typeof REVIEW_CALIBRATION_REPLAY_SOURCE;
+  sourceIssue: string;
+  sourcePullRequest: string;
+  title: string;
+  mergeCommit: string;
+  reviewRounds: number | null;
+  reviewerYield: ReviewCalibrationReviewerYield;
+  falsePositiveCount: number;
+  uniqueRealFindingFamilies: string[];
+  fixRereviewConvergence: ReviewCalibrationFixConvergence;
+  escalationFrequency: ReviewCalibrationEscalationFrequency;
+  opusUsage: ReviewCalibrationOpusUsage;
+  followUpIssueIds: string[];
+  notes: string[];
+}
+
+export interface ReviewCalibrationReviewerYield {
+  expectedRealFindingsLowerBound: number;
+  expectedTrackFindingsLowerBound: number;
 }
 
 export interface ReviewCalibrationFixture {
@@ -238,6 +341,12 @@ export function validateReviewCalibrationCorpus(
   if (value.parentIssue !== REVIEW_CALIBRATION_PARENT_ISSUE) {
     addError("$.parentIssue", `must be ${REVIEW_CALIBRATION_PARENT_ISSUE}`);
   }
+  validateMeasurementPlan(value.measurementPlan, "$.measurementPlan", addError);
+  validateRetrospectiveReplay(
+    value.retrospectiveReplay,
+    "$.retrospectiveReplay",
+    addError,
+  );
   if (!Array.isArray(value.fixtures)) {
     addError("$.fixtures", "must be an array");
     return { ok: errors.length === 0, fixtureCount: 0, errors };
@@ -586,6 +695,15 @@ function validateReplay(
     addError,
   );
   if (
+    category !== "historical-replay" &&
+    Object.hasOwn(value, "requiredSourceRefIds")
+  ) {
+    addError(
+      `${path}.requiredSourceRefIds`,
+      "only historical replay fixtures may declare requiredSourceRefIds",
+    );
+  }
+  if (
     category === "historical-replay" &&
     value.kind !== "historical_symphony_placeholder"
   ) {
@@ -638,6 +756,12 @@ function validateReplayEventShape(
     addError(`${path}.sample`, "must be an object");
     return;
   }
+  if (value.sample.source !== REVIEW_CALIBRATION_REPLAY_SOURCE) {
+    addError(
+      `${path}.sample.source`,
+      `must be ${REVIEW_CALIBRATION_REPLAY_SOURCE}`,
+    );
+  }
   const metadataFields = stringArrayValues(value.metadataFields);
   if (metadataFields.length > 0) {
     if (!isRecord(value.sample.metadata)) {
@@ -681,9 +805,243 @@ function validateBugClassCoverage(
     ).length;
     if (count === 0) {
       addError(path, `must include one fixture for bug class ${bugClass}`);
-    } else if (count > 1) {
-      addError(path, `must include only one fixture for bug class ${bugClass}`);
     }
+  }
+}
+
+function validateMeasurementPlan(
+  value: unknown,
+  path: string,
+  addError: (path: string, message: string) => void,
+): void {
+  if (!isRecord(value)) {
+    addError(path, "must be an object");
+    return;
+  }
+  if (value.harnessMode !== "fixture_only") {
+    addError(`${path}.harnessMode`, "must be fixture_only");
+  }
+  if (value.routingMode !== "council_v2_calibration_static") {
+    addError(`${path}.routingMode`, "must be council_v2_calibration_static");
+  }
+  if (value.liveModelCalls !== "forbidden") {
+    addError(`${path}.liveModelCalls`, "must be forbidden");
+  }
+  validateOneOfArray(
+    value.laneSet,
+    REVIEW_CALIBRATION_LANES,
+    `${path}.laneSet`,
+    addError,
+    { allowEmpty: false },
+  );
+  for (const lane of REVIEW_CALIBRATION_LANES) {
+    if (!stringArrayValues(value.laneSet).includes(lane)) {
+      addError(`${path}.laneSet`, `must include ${lane}`);
+    }
+  }
+  validateOneOfArray(
+    value.metrics,
+    REVIEW_CALIBRATION_METRICS,
+    `${path}.metrics`,
+    addError,
+    { allowEmpty: false },
+  );
+  for (const metric of REVIEW_CALIBRATION_METRICS) {
+    if (!stringArrayValues(value.metrics).includes(metric)) {
+      addError(`${path}.metrics`, `must include ${metric}`);
+    }
+  }
+  validateScoringPlan(value.scoring, `${path}.scoring`, addError);
+}
+
+function validateScoringPlan(
+  value: unknown,
+  path: string,
+  addError: (path: string, message: string) => void,
+): void {
+  if (!isRecord(value)) {
+    addError(path, "must be an object");
+    return;
+  }
+  validateString(value.primarySignal, `${path}.primarySignal`, addError);
+  validateString(
+    value.falsePositiveSignal,
+    `${path}.falsePositiveSignal`,
+    addError,
+  );
+  validateString(value.rolloutGate, `${path}.rolloutGate`, addError);
+}
+
+function validateRetrospectiveReplay(
+  value: unknown,
+  path: string,
+  addError: (path: string, message: string) => void,
+): void {
+  if (!isRecord(value)) {
+    addError(path, "must be an object");
+    return;
+  }
+  if (value.source !== REVIEW_CALIBRATION_REPLAY_SOURCE) {
+    addError(`${path}.source`, `must be ${REVIEW_CALIBRATION_REPLAY_SOURCE}`);
+  }
+  validateString(value.replayWindow, `${path}.replayWindow`, addError);
+  validateString(value.selectionBasis, `${path}.selectionBasis`, addError);
+  if (value.noLiveModelCalls !== true) {
+    addError(`${path}.noLiveModelCalls`, "must be true");
+  }
+  validateStringArray(
+    value.forbiddenRuntimeFields,
+    `${path}.forbiddenRuntimeFields`,
+    addError,
+    { allowEmpty: false },
+  );
+  if (findForbiddenRuntimeField(value, value.forbiddenRuntimeFields) !== null) {
+    const forbiddenPath = findForbiddenRuntimeField(
+      value,
+      value.forbiddenRuntimeFields,
+    );
+    if (forbiddenPath !== null) {
+      addError(forbiddenPath, "must not include forbidden runtime field");
+    }
+  }
+  if (!Array.isArray(value.cases)) {
+    addError(`${path}.cases`, "must be an array");
+    return;
+  }
+  if (value.cases.length < 8) {
+    addError(`${path}.cases`, "must include roughly the last 10 replay cases");
+  }
+  value.cases.forEach((replayCase, index) => {
+    validateRetrospectiveReplayCase(
+      replayCase,
+      `${path}.cases[${index}]`,
+      addError,
+    );
+  });
+}
+
+function validateRetrospectiveReplayCase(
+  value: unknown,
+  path: string,
+  addError: (path: string, message: string) => void,
+): void {
+  if (!isRecord(value)) {
+    addError(path, "must be an object");
+    return;
+  }
+  const id = validateString(value.id, `${path}.id`, addError);
+  if (id !== null && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) {
+    addError(`${path}.id`, "must be kebab-case");
+  }
+  if (value.source !== REVIEW_CALIBRATION_REPLAY_SOURCE) {
+    addError(`${path}.source`, `must be ${REVIEW_CALIBRATION_REPLAY_SOURCE}`);
+  }
+  validateString(value.sourceIssue, `${path}.sourceIssue`, addError);
+  validateString(
+    value.sourcePullRequest,
+    `${path}.sourcePullRequest`,
+    addError,
+  );
+  validateString(value.title, `${path}.title`, addError);
+  const mergeCommit = validateString(
+    value.mergeCommit,
+    `${path}.mergeCommit`,
+    addError,
+  );
+  if (mergeCommit !== null && !/^[0-9a-f]{7,40}$/.test(mergeCommit)) {
+    addError(`${path}.mergeCommit`, "must be a git SHA prefix or full SHA");
+  }
+  const reviewRounds = value.reviewRounds;
+  if (
+    !(
+      reviewRounds === null ||
+      (typeof reviewRounds === "number" &&
+        Number.isInteger(reviewRounds) &&
+        reviewRounds >= 0)
+    )
+  ) {
+    addError(`${path}.reviewRounds`, "must be a non-negative integer or null");
+  }
+  validateReviewerYield(value.reviewerYield, `${path}.reviewerYield`, addError);
+  const falsePositiveCount = value.falsePositiveCount;
+  if (
+    !(
+      typeof falsePositiveCount === "number" &&
+      Number.isInteger(falsePositiveCount) &&
+      falsePositiveCount >= 0
+    )
+  ) {
+    addError(`${path}.falsePositiveCount`, "must be a non-negative integer");
+  }
+  validateStringArray(
+    value.uniqueRealFindingFamilies,
+    `${path}.uniqueRealFindingFamilies`,
+    addError,
+    { allowEmpty: true },
+  );
+  validateOneOf(
+    value.fixRereviewConvergence,
+    REVIEW_CALIBRATION_FIX_CONVERGENCE,
+    `${path}.fixRereviewConvergence`,
+    addError,
+  );
+  validateOneOf(
+    value.escalationFrequency,
+    REVIEW_CALIBRATION_ESCALATION_FREQUENCIES,
+    `${path}.escalationFrequency`,
+    addError,
+  );
+  validateOneOf(
+    value.opusUsage,
+    REVIEW_CALIBRATION_OPUS_USAGE,
+    `${path}.opusUsage`,
+    addError,
+  );
+  validateStringArray(
+    value.followUpIssueIds,
+    `${path}.followUpIssueIds`,
+    addError,
+    { allowEmpty: true },
+  );
+  validateStringArray(value.notes, `${path}.notes`, addError, {
+    allowEmpty: false,
+  });
+}
+
+function validateReviewerYield(
+  value: unknown,
+  path: string,
+  addError: (path: string, message: string) => void,
+): void {
+  if (!isRecord(value)) {
+    addError(path, "must be an object");
+    return;
+  }
+  const expectedRealFindingsLowerBound = value.expectedRealFindingsLowerBound;
+  if (
+    !(
+      typeof expectedRealFindingsLowerBound === "number" &&
+      Number.isInteger(expectedRealFindingsLowerBound) &&
+      expectedRealFindingsLowerBound >= 0
+    )
+  ) {
+    addError(
+      `${path}.expectedRealFindingsLowerBound`,
+      "must be a non-negative integer",
+    );
+  }
+  const expectedTrackFindingsLowerBound = value.expectedTrackFindingsLowerBound;
+  if (
+    !(
+      typeof expectedTrackFindingsLowerBound === "number" &&
+      Number.isInteger(expectedTrackFindingsLowerBound) &&
+      expectedTrackFindingsLowerBound >= 0
+    )
+  ) {
+    addError(
+      `${path}.expectedTrackFindingsLowerBound`,
+      "must be a non-negative integer",
+    );
   }
 }
 
@@ -769,6 +1127,25 @@ function validateStringArray(
   });
 }
 
+function validateOneOfArray<const T extends readonly string[]>(
+  value: unknown,
+  allowed: T,
+  path: string,
+  addError: (path: string, message: string) => void,
+  options: { allowEmpty: boolean },
+): void {
+  if (!Array.isArray(value)) {
+    addError(path, "must be an array");
+    return;
+  }
+  if (!options.allowEmpty && value.length === 0) {
+    addError(path, "must not be empty");
+  }
+  value.forEach((item, index) => {
+    validateOneOf(item, allowed, `${path}[${index}]`, addError);
+  });
+}
+
 function stringArrayValues(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter(
@@ -808,6 +1185,19 @@ function findOwnKeyPathDeep(
   }
   for (const [key, item] of Object.entries(value)) {
     const found = findOwnKeyPathDeep(item, field, `${path}.${key}`, seen);
+    if (found !== null) {
+      return found;
+    }
+  }
+  return null;
+}
+
+function findForbiddenRuntimeField(
+  value: unknown,
+  fields: unknown,
+): string | null {
+  for (const field of stringArrayValues(fields)) {
+    const found = findOwnKeyPathDeep(value, field, "$.retrospectiveReplay");
     if (found !== null) {
       return found;
     }
