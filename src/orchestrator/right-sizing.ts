@@ -3,7 +3,9 @@ import type {
   StageDefinition,
 } from "../config/types.js";
 import type {
+  CouncilRiskPredicateResult,
   Issue,
+  ReasoningEffortDecision,
   RightSizingBudget,
   RightSizingDecision,
   RightSizingImpactSurface,
@@ -32,6 +34,7 @@ export interface RightSizingInput {
   stageName: string | null;
   attempt: number | null;
   changedFiles?: readonly string[];
+  sameFamilyTripwire?: boolean;
 }
 
 export function createRightSizingDecision(
@@ -39,6 +42,12 @@ export function createRightSizingDecision(
 ): RightSizingDecision {
   const signals = collectSignals(input);
   const triggerHits = collectTriggerHits(signals);
+  const reasoningEffort = createReasoningEffortDecision({
+    configuredEffort: input.config.riskPredicateReasoning?.effort ?? null,
+    stageName: input.stageName,
+    riskPredicate: signals.riskPredicate,
+    sameFamilyTripwire: input.sameFamilyTripwire === true,
+  });
   if (signals.explicitModeHint !== null) {
     return {
       classifier: "deterministic-v1",
@@ -61,6 +70,7 @@ export function createRightSizingDecision(
               allowed: false,
               reason: "not_needed",
             },
+      reasoningEffort,
     };
   }
 
@@ -141,6 +151,14 @@ export function createRightSizingDecision(
     rationale.push("Existing blockers favor a more governed path.");
   }
 
+  if (reasoningEffort.escalated) {
+    rationale.push(
+      reasoningEffort.reason === "same_family_tripwire"
+        ? `Reasoning effort escalates to ${reasoningEffort.selectedEffort} after a same-family rework trip-wire.`
+        : `Reasoning effort escalates to ${reasoningEffort.selectedEffort} for shared risk predicate matches: ${reasoningEffort.riskPredicateTriggers.join(", ")}.`,
+    );
+  }
+
   switch (signals.budget) {
     case "low": {
       scores.prototype += 2;
@@ -193,6 +211,7 @@ export function createRightSizingDecision(
     riskPredicate: signals.riskPredicate,
     signals,
     modelRouting,
+    reasoningEffort,
   };
 }
 
@@ -360,6 +379,47 @@ function collectTriggerHits(signals: RightSizingSignals): string[] {
     hits.add("high_cost_budget");
   }
   return [...hits].sort();
+}
+
+function createReasoningEffortDecision(input: {
+  configuredEffort: ReasoningEffortDecision["configuredEffort"];
+  stageName: string | null;
+  riskPredicate: CouncilRiskPredicateResult;
+  sameFamilyTripwire: boolean;
+}): ReasoningEffortDecision {
+  const stageEligible = isReasoningEffortStage(input.stageName);
+  const matchedRiskPredicate = input.riskPredicate.triggerHits.length > 0;
+  const selectedEffort =
+    input.configuredEffort !== null &&
+    stageEligible &&
+    (input.sameFamilyTripwire || matchedRiskPredicate)
+      ? input.configuredEffort
+      : null;
+  const reason: ReasoningEffortDecision["reason"] =
+    input.configuredEffort === null
+      ? "not_configured"
+      : !stageEligible
+        ? "stage_not_eligible"
+        : input.sameFamilyTripwire
+          ? "same_family_tripwire"
+          : matchedRiskPredicate
+            ? "risk_predicate"
+            : "no_risk_match";
+
+  return {
+    configuredEffort: input.configuredEffort,
+    selectedEffort,
+    escalated: selectedEffort !== null && selectedEffort !== "low",
+    reason,
+    stageEligible,
+    riskPredicateTriggers: input.riskPredicate.triggerHits,
+    matchedPaths: input.riskPredicate.matchedPaths,
+    sameFamilyTripwire: input.sameFamilyTripwire,
+  };
+}
+
+function isReasoningEffortStage(stageName: string | null): boolean {
+  return stageName === "investigate" || stageName === "implement";
 }
 
 function rankModes(scores: Record<RightSizingMode, number>): Array<{

@@ -139,6 +139,111 @@ describe("AgentRunner", () => {
     expect(result.runAttempt.workspacePath).toBe(join(root, "issue-1"));
   });
 
+  it("overrides only model_reasoning_effort for a risk-escalated run", async () => {
+    const root = await createRoot();
+    const prompts: string[] = [];
+    let observedCommand: string | null = null;
+    const tracker = createTracker({
+      refreshStates: [{ id: "issue-1", identifier: "ABC-123", state: "Done" }],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        codex: {
+          ...createConfig(root, "unused").codex,
+          command:
+            "codex --config 'model_reasoning_effort=\"low\"' --config 'project_doc_max_bytes=0' app-server",
+        },
+      },
+      tracker,
+      createCodexClient: (input) => {
+        observedCommand = input.command;
+        return createStubCodexClient(prompts, input, {
+          statuses: ["completed"],
+        });
+      },
+    });
+
+    await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      reasoningEffort: "high",
+    });
+
+    expect(observedCommand).toBe(
+      "codex --config 'model_reasoning_effort=\"high\"' --config 'project_doc_max_bytes=0' app-server",
+    );
+    expect(prompts).toHaveLength(1);
+  });
+
+  it("inserts model_reasoning_effort before app-server when the command has no existing effort config", async () => {
+    const root = await createRoot();
+    let observedCommand: string | null = null;
+    const tracker = createTracker({
+      refreshStates: [{ id: "issue-1", identifier: "ABC-123", state: "Done" }],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        codex: {
+          ...createConfig(root, "unused").codex,
+          command: "codex app-server",
+        },
+      },
+      tracker,
+      createCodexClient: (input) => {
+        observedCommand = input.command;
+        return createStubCodexClient([], input, {
+          statuses: ["completed"],
+        });
+      },
+    });
+
+    await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      reasoningEffort: "high",
+    });
+
+    expect(observedCommand).toBe(
+      "codex --config 'model_reasoning_effort=\"high\"' app-server",
+    );
+  });
+
+  it("replaces existing model_reasoning_effort with single-quoted inner values", async () => {
+    const root = await createRoot();
+    let observedCommand: string | null = null;
+    const tracker = createTracker({
+      refreshStates: [{ id: "issue-1", identifier: "ABC-123", state: "Done" }],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        codex: {
+          ...createConfig(root, "unused").codex,
+          command: "codex --config \"model_reasoning_effort='low'\" app-server",
+        },
+      },
+      tracker,
+      createCodexClient: (input) => {
+        observedCommand = input.command;
+        return createStubCodexClient([], input, {
+          statuses: ["completed"],
+        });
+      },
+    });
+
+    await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      reasoningEffort: "medium",
+    });
+
+    expect(observedCommand).toBe(
+      "codex --config 'model_reasoning_effort=\"medium\"' app-server",
+    );
+  });
+
   it("fetches the configured base ref before refreshing a reused workspace", async () => {
     const root = await createRoot();
     const source = join(root, "source");

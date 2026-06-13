@@ -36,6 +36,7 @@ import type {
 import {
   type Issue,
   type LiveSession,
+  type ReasoningEffort,
   type RunAttempt,
   type RunAttemptPhase,
   type Workspace,
@@ -153,6 +154,11 @@ export interface AgentRunInput {
    * undefined means no escalation.
    */
   budgetMultiplier?: number;
+  /**
+   * Per-run Codex reasoning override for risk-predicate escalation. null or
+   * undefined preserves the workflow's baseline command.
+   */
+  reasoningEffort?: ReasoningEffort | null;
 }
 
 export interface AgentRunResult {
@@ -412,7 +418,10 @@ export class AgentRunner {
       );
       const buildClient = (): AgentRunnerCodexClient =>
         effectiveClientFactory({
-          command: this.config.codex.command,
+          command: applyReasoningEffortToCodexCommand(
+            this.config.codex.command,
+            input.reasoningEffort ?? null,
+          ),
           ephemeralHome: this.config.codex.ephemeralHome === true,
           disableSkills: this.config.codex.disableSkills === true,
           cwd: workspacePath,
@@ -1345,6 +1354,29 @@ function toErrorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+const MODEL_REASONING_EFFORT_CONFIG_PATTERN =
+  /--config\s+(?:"model_reasoning_effort=(?:\\"|["'])?(?:low|medium|high)(?:\\"|["'])?"|'model_reasoning_effort=(?:"|')?(?:low|medium|high)(?:"|')?'|model_reasoning_effort=(?:"(?:low|medium|high)"|'(?:low|medium|high)'|(?:low|medium|high)))/;
+
+function applyReasoningEffortToCodexCommand(
+  command: string,
+  effort: ReasoningEffort | null,
+): string {
+  if (effort === null) {
+    return command;
+  }
+
+  const configFlag = `--config 'model_reasoning_effort="${effort}"'`;
+  if (MODEL_REASONING_EFFORT_CONFIG_PATTERN.test(command)) {
+    return command.replace(MODEL_REASONING_EFFORT_CONFIG_PATTERN, configFlag);
+  }
+
+  const inserted = command.replace(
+    /(^|\s)app-server(\s|$)/,
+    `$1${configFlag} app-server$2`,
+  );
+  return inserted === command ? `${command} ${configFlag}` : inserted;
 }
 
 function createDefaultClientFactory(

@@ -189,6 +189,222 @@ describe("orchestrator core", () => {
     ]);
   });
 
+  it("journals and passes risk-predicate reasoning effort provenance at dispatch", async () => {
+    const spawned: Array<
+      Parameters<OrchestratorCoreOptions["spawnWorker"]>[0]
+    > = [];
+    const config = createInvestigateImplementConfig();
+    config.riskPredicateReasoning = { effort: "high" };
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            description:
+              "## Declared file scope\n- src/logging/run-journal.ts\n",
+          }),
+        ],
+      }),
+      spawnWorker: async (input) => {
+        spawned.push(input);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+    });
+
+    await orchestrator.pollTick();
+
+    expect(spawned[0]?.rightSizingDecision.reasoningEffort).toMatchObject({
+      configuredEffort: "high",
+      selectedEffort: "high",
+      escalated: true,
+      reason: "risk_predicate",
+      riskPredicateTriggers: ["journal_producer"],
+      matchedPaths: ["src/logging/run-journal.ts"],
+    });
+    const rightSizingEntry = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((entry) => entry.kind === "right_sizing");
+    expect(rightSizingEntry?.metadata.reasoningEffort).toMatchObject({
+      configuredEffort: "high",
+      selectedEffort: "high",
+      escalated: true,
+      reason: "risk_predicate",
+      stageEligible: true,
+      riskPredicateTriggers: ["journal_producer"],
+      matchedPaths: ["src/logging/run-journal.ts"],
+      sameFamilyTripwire: false,
+    });
+  });
+
+  it("does not escalate implement rework after the first review failure", async () => {
+    const spawned: Array<
+      Parameters<OrchestratorCoreOptions["spawnWorker"]>[0]
+    > = [];
+    const config = createConfig({
+      riskPredicateReasoning: { effort: "high" },
+    });
+    config.stages = {
+      initialStage: "implement",
+      fastTrack: null,
+      stages: {
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "done",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: null,
+        },
+      },
+    };
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            description: "## Declared file scope\n- src/features/copy.ts\n",
+          }),
+        ],
+      }),
+      spawnWorker: async (input) => {
+        spawned.push(input);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+    });
+    orchestrator.getState().issueReviewFailureStreaks["1"] = {
+      signature: "same-criterion",
+      count: 1,
+    };
+
+    await orchestrator.pollTick();
+
+    expect(spawned[0]?.rightSizingDecision.riskPredicate.triggerHits).toEqual(
+      [],
+    );
+    expect(spawned[0]?.rightSizingDecision.reasoningEffort).toMatchObject({
+      selectedEffort: null,
+      escalated: false,
+      reason: "no_risk_match",
+      sameFamilyTripwire: false,
+    });
+  });
+
+  it("escalates implement rework after a repeated same-family trip-wire without making high effort global", async () => {
+    const spawned: Array<
+      Parameters<OrchestratorCoreOptions["spawnWorker"]>[0]
+    > = [];
+    const config = createConfig({
+      riskPredicateReasoning: { effort: "high" },
+    });
+    config.stages = {
+      initialStage: "implement",
+      fastTrack: null,
+      stages: {
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "done",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: null,
+        },
+      },
+    };
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            description: "## Declared file scope\n- src/features/copy.ts\n",
+          }),
+        ],
+      }),
+      spawnWorker: async (input) => {
+        spawned.push(input);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+    });
+    orchestrator.getState().issueReviewFailureStreaks["1"] = {
+      signature: "same-criterion",
+      count: 2,
+    };
+
+    await orchestrator.pollTick();
+
+    expect(spawned[0]?.rightSizingDecision.riskPredicate.triggerHits).toEqual(
+      [],
+    );
+    expect(spawned[0]?.rightSizingDecision.reasoningEffort).toMatchObject({
+      selectedEffort: "high",
+      escalated: true,
+      reason: "same_family_tripwire",
+      sameFamilyTripwire: true,
+    });
+  });
+
   it("pauses dispatch when declared file scopes overlap a co-running worker", async () => {
     const resteers: SupervisionResteerRequest[] = [];
     const trackerWrites: TrackerIssueWriteRequest[] = [];
@@ -9453,6 +9669,7 @@ function createOrchestrator(overrides?: {
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
   onGateFailed?: OrchestratorCoreOptions["onGateFailed"];
   onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
+  spawnWorker?: OrchestratorCoreOptions["spawnWorker"];
   now?: () => Date;
   runJournal?: DispatcherRunJournal;
 }) {
@@ -9465,10 +9682,12 @@ function createOrchestrator(overrides?: {
   const options: OrchestratorCoreOptions = {
     config: overrides?.config ?? createConfig(),
     tracker,
-    spawnWorker: async () => ({
-      workerHandle: { pid: 1001 },
-      monitorHandle: { ref: "monitor-1" },
-    }),
+    spawnWorker:
+      overrides?.spawnWorker ??
+      (async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      })),
     now: overrides?.now ?? (() => new Date("2026-03-06T00:00:05.000Z")),
   };
 
@@ -9605,6 +9824,7 @@ function createConfig(overrides?: {
   specFidelity?: ResolvedWorkflowConfig["specFidelity"];
   admissionCard?: ResolvedWorkflowConfig["admissionCard"];
   watchdog?: ResolvedWorkflowConfig["watchdog"];
+  riskPredicateReasoning?: ResolvedWorkflowConfig["riskPredicateReasoning"];
 }): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
@@ -9669,6 +9889,9 @@ function createConfig(overrides?: {
       systemicThreshold: 2,
       circuitBreaker: true,
       maxFilingsPerHour: 3,
+    },
+    riskPredicateReasoning: overrides?.riskPredicateReasoning ?? {
+      effort: null,
     },
     server: {
       port: null,

@@ -35,6 +35,8 @@ hard_stops:
   premium_budget_pause_ratio: 0.8
   estimated_cost_per_1k_tokens_usd: 0.05
 
+risk_predicate_reasoning_effort: high
+
 codex:
   command: codex --disable plugins --disable hooks --disable plugin_hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use --disable multi_agent --disable goals --disable memories --disable tool_call_mcp_elicitation --config 'model_reasoning_effort="low"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server
   ephemeral_home: true

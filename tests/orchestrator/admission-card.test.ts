@@ -19,6 +19,16 @@ function decision(
     rationale: ["scope under threshold"],
     triggerHits: [],
     riskPredicate,
+    reasoningEffort: {
+      configuredEffort: null,
+      selectedEffort: null,
+      escalated: false,
+      reason: "not_configured",
+      stageEligible: true,
+      riskPredicateTriggers: [],
+      matchedPaths: [],
+      sameFamilyTripwire: false,
+    },
     signals: {
       explicitModeHint: null,
       declaredScopeFiles: ["src/a.ts", "src/b.ts"],

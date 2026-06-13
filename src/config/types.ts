@@ -1,3 +1,4 @@
+import type { ReasoningEffort } from "../domain/model.js";
 import type { ContractViolation } from "./config-contracts.js";
 
 export interface WorkflowHooksConfig {
@@ -174,6 +175,14 @@ export interface WorkflowCodexConfig {
   sessionRotationInputTokens?: number;
 }
 
+export interface WorkflowRiskPredicateReasoningConfig {
+  /**
+   * Reasoning effort applied only to eligible risk-predicate stages:
+   * `investigate` and `implement`. Other stage names keep the baseline command.
+   */
+  effort: ReasoningEffort | null;
+}
+
 export interface WorkflowServerConfig {
   port: number | null;
   /**
@@ -325,6 +334,11 @@ export interface ResolvedWorkflowConfig {
   verdicts?: WorkflowVerdictsConfig;
   runner: WorkflowRunnerConfig;
   continuousFeedback?: WorkflowContinuousFeedbackConfig;
+  /**
+   * Optional so older hand-built fixtures keep compiling; resolveWorkflowConfig
+   * always sets it. null effort means no per-run reasoning override.
+   */
+  riskPredicateReasoning?: WorkflowRiskPredicateReasoningConfig;
   codex: WorkflowCodexConfig;
   server: WorkflowServerConfig;
   notifications: WorkflowNotificationsConfig;

@@ -831,6 +831,9 @@ export type RightSizingImpactSurface =
 export const RIGHT_SIZING_BUDGETS = ["low", "medium", "high"] as const;
 export type RightSizingBudget = (typeof RIGHT_SIZING_BUDGETS)[number];
 
+export const REASONING_EFFORTS = ["low", "medium", "high"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
 export const COUNCIL_RISK_PREDICATE_TRIGGERS = [
   "high_risk_path",
   "journal_producer",
@@ -879,6 +882,22 @@ export interface RightSizingModelRouting {
   reason: "not_needed" | "ambiguous_routing" | "risk_trigger";
 }
 
+export interface ReasoningEffortDecision {
+  configuredEffort: ReasoningEffort | null;
+  selectedEffort: ReasoningEffort | null;
+  escalated: boolean;
+  reason:
+    | "not_configured"
+    | "stage_not_eligible"
+    | "no_risk_match"
+    | "risk_predicate"
+    | "same_family_tripwire";
+  stageEligible: boolean;
+  riskPredicateTriggers: CouncilRiskPredicateTrigger[];
+  matchedPaths: string[];
+  sameFamilyTripwire: boolean;
+}
+
 export interface RightSizingDecision {
   classifier: "deterministic-v1";
   mode: RightSizingMode;
@@ -889,6 +908,7 @@ export interface RightSizingDecision {
   riskPredicate: CouncilRiskPredicateResult;
   signals: RightSizingSignals;
   modelRouting: RightSizingModelRouting;
+  reasoningEffort: ReasoningEffortDecision;
 }
 
 export interface DecorrelatedGateLane {

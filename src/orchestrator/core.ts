@@ -149,6 +149,7 @@ const CONTINUATION_RETRY_DELAY_MS = 1_000;
  * round N, and a third round against an unchanged criterion is futile.
  */
 const MAX_SAME_CRITERION_REVIEW_FAILURES = 3;
+const SAME_FAMILY_REASONING_TRIPWIRE_COUNT = 2;
 const MAX_REVIEW_SUBSTRATE_STALL_FAILURES = 2;
 const MAX_REVIEW_GATE_ERROR_FAILURES = 2;
 const SUBSTRATE_STALL_REGEX = /\bsubstrate_stall:/i;
@@ -7974,6 +7975,9 @@ export class OrchestratorCore {
       config: this.config,
       stageName,
       attempt,
+      sameFamilyTripwire:
+        (this.state.issueReviewFailureStreaks[issue.id]?.count ?? 0) >=
+        SAME_FAMILY_REASONING_TRIPWIRE_COUNT,
     });
     this.state.issueRightSizingDecisions[issue.id] = rightSizingDecision;
     const dispatchLeaseId = createDispatcherLeaseId({
@@ -8061,6 +8065,19 @@ export class OrchestratorCore {
         mode: rightSizingDecision.mode,
         classifier: rightSizingDecision.classifier,
         modelRoutingReason: rightSizingDecision.modelRouting.reason,
+        reasoningEffort: {
+          configuredEffort:
+            rightSizingDecision.reasoningEffort.configuredEffort,
+          selectedEffort: rightSizingDecision.reasoningEffort.selectedEffort,
+          escalated: rightSizingDecision.reasoningEffort.escalated,
+          reason: rightSizingDecision.reasoningEffort.reason,
+          stageEligible: rightSizingDecision.reasoningEffort.stageEligible,
+          riskPredicateTriggers:
+            rightSizingDecision.reasoningEffort.riskPredicateTriggers,
+          matchedPaths: rightSizingDecision.reasoningEffort.matchedPaths,
+          sameFamilyTripwire:
+            rightSizingDecision.reasoningEffort.sameFamilyTripwire,
+        },
       },
     });
     if (
@@ -8122,6 +8139,7 @@ export class OrchestratorCore {
           stageCount: rightSizingDecision.signals.stageCount,
           gateCount: rightSizingDecision.signals.gateCount,
           reviewerCount: rightSizingDecision.signals.reviewerCount,
+          reasoningEffort: rightSizingDecision.reasoningEffort,
         },
       },
       expectedOutcome: {
@@ -8152,6 +8170,7 @@ export class OrchestratorCore {
         details: {
           mode: rightSizingDecision.mode,
           routingReason: rightSizingDecision.modelRouting.reason,
+          reasoningEffort: rightSizingDecision.reasoningEffort,
         },
       },
       expectedOutcome: {
@@ -8243,6 +8262,7 @@ export class OrchestratorCore {
           mode: rightSizingDecision.mode,
           classifier: rightSizingDecision.classifier,
           modelRoutingReason: rightSizingDecision.modelRouting.reason,
+          reasoningEffort: rightSizingDecision.reasoningEffort,
         },
       });
       return {

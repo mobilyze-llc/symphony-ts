@@ -55,6 +55,7 @@ export const DEFAULT_BUDGET_ESCALATION_MULTIPLIER = 2;
 // Pause triage (SYMPH-337 slice 2) is off until a WORKFLOW provides the
 // local endpoint; verdict-authorized continuations are bounded per issue.
 export const DEFAULT_PAUSE_TRIAGE_MAX_RESUMES = 2;
+export const DEFAULT_RISK_PREDICATE_REASONING_EFFORT = null;
 
 export const DEFAULT_RUNNER_KIND = "codex";
 export const DEFAULT_CONTINUOUS_FEEDBACK_ENABLED = true;
@@ -170,6 +171,9 @@ export const SPEC_DEFAULTS = Object.freeze({
     model: DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
     role: DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
     bounceOnFinding: DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
+  },
+  riskPredicateReasoning: {
+    effort: DEFAULT_RISK_PREDICATE_REASONING_EFFORT,
   },
   codex: {
     command: DEFAULT_CODEX_COMMAND,
