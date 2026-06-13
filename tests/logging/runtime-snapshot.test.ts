@@ -2882,6 +2882,16 @@ describe("buildStateDelta (SYMPH-407)", () => {
     expect(delta.entries.map((entry) => entry.sequence)).toEqual([3, 4, 5]);
   });
 
+  it("returns committed entries after the cursor across sparse sequence gaps", () => {
+    const journal = [1, 4, 7].map(entryAt);
+    const delta = buildStateDelta(journal, { sinceSeq: 2 });
+    expect(delta.since_seq).toBe(2);
+    expect(delta.as_of_sequence).toBe(7);
+    expect(delta.count).toBe(2);
+    expect(delta.truncated).toBe(false);
+    expect(delta.entries.map((entry) => entry.sequence)).toEqual([4, 7]);
+  });
+
   it("bounds the page and reports truncation", () => {
     const journal = Array.from({ length: 10 }, (_, index) =>
       entryAt(index + 1),

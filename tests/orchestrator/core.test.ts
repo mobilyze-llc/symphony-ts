@@ -11,6 +11,7 @@ import type {
 } from "../../src/domain/model.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 import { normalizeErrorSignature } from "../../src/errors/signature.js";
+import { buildStateDelta } from "../../src/logging/runtime-snapshot.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
@@ -2346,6 +2347,70 @@ describe("orchestrator core", () => {
     expect(completed[0]?.sequence).toBe(rolledBackSequence + 1);
     expect(journal.some((entry) => entry.sequence === rolledBackSequence)).toBe(
       false,
+    );
+  });
+
+  it("advertises only the durable journal cursor after a rolled-back burn so restart reuse is not skipped", async () => {
+    const durableJournal: DispatcherRunJournal = [];
+    let failNextCompletedWrite = true;
+    const orchestrator = createOrchestrator({
+      timerScheduler: createFakeTimerScheduler(),
+      writeRunJournalEntry: async (entry) => {
+        if (entry.lease?.status === "completed" && failNextCompletedWrite) {
+          failNextCompletedWrite = false;
+          throw new Error("journal disk unavailable");
+        }
+        durableJournal.push(entry);
+      },
+    });
+
+    await orchestrator.pollTick();
+    const durableCursorBeforeFailure = orchestrator.getRunJournalCursor();
+    const rolledBackSequence = durableCursorBeforeFailure + 1;
+
+    await expect(
+      orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" }),
+    ).rejects.toThrow("journal disk unavailable");
+
+    const advertisedCursorAfterRollback = orchestrator.getRunJournalCursor();
+    expect(advertisedCursorAfterRollback).toBe(durableCursorBeforeFailure);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) => entry.sequence === rolledBackSequence,
+        ),
+    ).toBe(false);
+
+    const restarted = createOrchestrator({
+      timerScheduler: createFakeTimerScheduler(),
+      runJournal: durableJournal,
+    });
+    const restartEntry = await restarted.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "pro14" },
+      reason: {
+        class: "operator_anchor",
+        human: "post-restart cursor regression entry",
+      },
+      anchor: {
+        placement: { kind: "top" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+
+    expect(restartEntry.status).toBe("applied");
+    expect(restartEntry.sequence).toBe(rolledBackSequence);
+    expect(restarted.getRunJournalCursor()).toBe(rolledBackSequence);
+    const delta = buildStateDelta(restarted.getState().dispatcherRunJournal, {
+      sinceSeq: advertisedCursorAfterRollback,
+      asOfSequence: restarted.getRunJournalCursor(),
+    });
+    expect(delta.entries.map((entry) => entry.sequence)).toContain(
+      rolledBackSequence,
     );
   });
 

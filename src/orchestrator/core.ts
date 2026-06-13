@@ -930,12 +930,13 @@ export class OrchestratorCore {
   }
 
   /**
-   * Current journal cursor (SYMPH-407): the sequence of the last committed
-   * journal entry, accounting for burned sequences from idempotent rollbacks.
-   * The snapshot's `as_of_sequence` and the delta endpoint's upper cursor.
+   * Current durable journal cursor (SYMPH-407): the sequence of the last
+   * committed journal entry. Burned rollback sequences are an in-process
+   * allocator floor only; advertising them would let since_seq consumers skip
+   * a reused committed entry after restart.
    */
   getRunJournalCursor(): number {
-    return this.nextRunJournalSequence() - 1;
+    return this.state.dispatcherRunJournal.at(-1)?.sequence ?? 0;
   }
 
   confirmEmergencyStopProcessCleanup(issueId: string): void {
