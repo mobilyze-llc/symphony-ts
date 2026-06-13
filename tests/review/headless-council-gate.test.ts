@@ -146,6 +146,241 @@ describe("runHeadlessCouncilGate", () => {
     );
   });
 
+  it("fails closed when a reviewer lane leaves the target workspace dirty", async () => {
+    const harness = await createHarness({
+      gitStatus: [
+        { exitCode: 0, stdout: "## HEAD\n", stderr: "" },
+        { exitCode: 0, stdout: "## HEAD\n", stderr: "" },
+        {
+          exitCode: 0,
+          stdout: "## HEAD\n M src/review/headless-council-gate.ts\n",
+          stderr: "",
+        },
+      ],
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-546",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.summary).toContain("workspace_mutation_detected:claude-opus");
+    expect(result.degradedConditions).toContain(
+      "workspace_mutation_detected:claude-opus",
+    );
+    expect(result.lanes[0]).toMatchObject({
+      laneId: "claude-opus",
+      state: "error",
+      verdict: "error",
+      degradedReason: "workspace_mutation_detected",
+      structuredArtifact: null,
+      structuredArtifactPath: null,
+      rawArtifactPath: result.lanes[0]?.artifactPath,
+      workspaceIntegrity: {
+        changes: ["git status changed"],
+      },
+    });
+    const persisted = JSON.parse(
+      await readFile(result.artifactPaths.resultJson, "utf-8"),
+    ) as typeof result;
+    expect(persisted.lanes[0]?.workspaceIntegrity?.after?.status.stdout).toBe(
+      "## HEAD\n M src/review/headless-council-gate.ts\n",
+    );
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain("## Workspace Integrity");
+    expect(report).toContain("claude-opus: workspace_mutation_detected");
+    expect(report).toContain("git status changed");
+  });
+
+  it("fails closed when a reviewer lane advances HEAD with a clean status", async () => {
+    const harness = await createHarness({
+      gitStatus: [
+        { exitCode: 0, stdout: "## HEAD\n", stderr: "" },
+        { exitCode: 0, stdout: "## HEAD\n", stderr: "" },
+        { exitCode: 0, stdout: "## HEAD\n", stderr: "" },
+      ],
+      gitRevParse: {
+        HEAD: [
+          { exitCode: 0, stdout: "review-head-before\n", stderr: "" },
+          { exitCode: 0, stdout: "review-head-after\n", stderr: "" },
+        ],
+        "feature-branch": {
+          exitCode: 0,
+          stdout: "review-head-before\n",
+          stderr: "",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-546",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        headRef: "feature-branch",
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "workspace_mutation_detected:claude-opus",
+    );
+    expect(result.lanes[0]?.workspaceIntegrity?.changes).toEqual([
+      "HEAD changed from review-head-before to review-head-after",
+    ]);
+  });
+
+  it("fails closed before reviewer launch when workspace integrity preflight fails", async () => {
+    const harness = await createHarness({
+      gitStatus: [
+        { exitCode: 0, stdout: "## HEAD\n", stderr: "" },
+        {
+          exitCode: 128,
+          stdout: "",
+          stderr: "fatal: not a git repository",
+        },
+      ],
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-546",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "workspace_integrity_check_failed:claude-opus",
+    );
+    expect(result.lanes[0]).toMatchObject({
+      laneId: "claude-opus",
+      state: "error",
+      verdict: "error",
+      degradedReason: "workspace_integrity_check_failed",
+      artifactPath: null,
+      workspaceIntegrity: {
+        changes: ["workspace_integrity_preflight_failed"],
+        before: {
+          status: {
+            exitCode: 128,
+            stderr: "fatal: not a git repository",
+          },
+        },
+        after: null,
+      },
+    });
+    expect(harness.commands.some((command) => command.args[0] === "run")).toBe(
+      false,
+    );
+  });
+
+  it("records clean workspace integrity evidence for the Codex lead lane", async () => {
+    const harness = await createHarness();
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-546",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        reviewerLanes: [opusLane()],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const leadLane = result.lanes.find(
+      (lane) => lane.laneId === "codex-high-lead",
+    );
+    expect(result.verdict).toBe("pass");
+    expect(leadLane).toMatchObject({
+      state: "complete",
+      verdict: "pass",
+      workspaceIntegrity: {
+        changes: [],
+      },
+    });
+    const persisted = JSON.parse(
+      await readFile(result.artifactPaths.resultJson, "utf-8"),
+    ) as typeof result;
+    const persistedLeadLane = persisted.lanes.find(
+      (lane) => lane.laneId === "codex-high-lead",
+    );
+    expect(persistedLeadLane?.workspaceIntegrity?.changes).toEqual([]);
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain("No reviewer-lane workspace mutation evidence");
+  });
+
+  it("fails closed when the Codex lead lane advances HEAD with a clean status", async () => {
+    const harness = await createHarness({
+      gitRevParse: {
+        HEAD: [
+          { exitCode: 0, stdout: "review-head-before\n", stderr: "" },
+          { exitCode: 0, stdout: "review-head-before\n", stderr: "" },
+          { exitCode: 0, stdout: "review-head-before\n", stderr: "" },
+          { exitCode: 0, stdout: "review-head-after\n", stderr: "" },
+        ],
+        "feature-branch": {
+          exitCode: 0,
+          stdout: "review-head-before\n",
+          stderr: "",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-546",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        headRef: "feature-branch",
+        reviewerLanes: [opusLane()],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const leadLane = result.lanes.find(
+      (lane) => lane.laneId === "codex-high-lead",
+    );
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toContain(
+      "workspace_mutation_detected:codex-high-lead",
+    );
+    expect(leadLane?.workspaceIntegrity?.changes).toEqual([
+      "HEAD changed from review-head-before to review-head-after",
+    ]);
+    expect(leadLane).toMatchObject({
+      state: "error",
+      verdict: "error",
+      degradedReason: "workspace_mutation_detected",
+      structuredArtifact: null,
+      structuredArtifactPath: null,
+    });
+  });
+
   it("routes Codex-authored Standard reviews through Pi and Codex without Opus", async () => {
     const harness = await createHarness();
     const result = await runHeadlessCouncilGate(
@@ -6670,8 +6905,8 @@ async function createHarness(options?: {
   gitDiffNameOnly?: CommandResult;
   gitDiffNameOnlyByRange?: Record<string, CommandResult>;
   gitMergeBase?: CommandResult;
-  gitRevParse?: Record<string, CommandResult>;
-  gitStatus?: CommandResult;
+  gitRevParse?: Record<string, CommandResult | CommandResult[]>;
+  gitStatus?: CommandResult | CommandResult[];
   gitStatusReject?: Error;
   cleanupDelayMs?: number;
   cleanupResult?: CommandResult;
@@ -6681,6 +6916,16 @@ async function createHarness(options?: {
   const workspace = join(root, "workspace");
   const artifactDir = join(root, "artifacts");
   const diffPath = join(root, "diff.patch");
+  const gitStatusSequence = Array.isArray(options?.gitStatus)
+    ? [...options.gitStatus]
+    : null;
+  const gitRevParseSequences = new Map<string, CommandResult[]>();
+  for (const [ref, result] of Object.entries(options?.gitRevParse ?? {})) {
+    if (Array.isArray(result)) {
+      gitRevParseSequences.set(ref, [...result]);
+    }
+  }
+  let gitStatusReject = options?.gitStatusReject ?? null;
   await writeFile(
     diffPath,
     "diff --git a/file.ts b/file.ts\n+const ok = true;\n",
@@ -6766,13 +7011,19 @@ async function createHarness(options?: {
 
     if (command === "git" && args[0] === "rev-parse") {
       const ref = args[1]!;
-      return (
-        options?.gitRevParse?.[ref] ?? {
-          exitCode: 0,
-          stdout: ref === "origin/main" ? "base-sha\n" : "head-sha\n",
-          stderr: "",
-        }
-      );
+      const sequenced = takeSequencedResult(gitRevParseSequences.get(ref));
+      if (sequenced !== null) {
+        return sequenced;
+      }
+      const configured = options?.gitRevParse?.[ref];
+      if (configured !== undefined && !Array.isArray(configured)) {
+        return configured;
+      }
+      return {
+        exitCode: 0,
+        stdout: ref === "origin/main" ? "base-sha\n" : "head-sha\n",
+        stderr: "",
+      };
     }
 
     if (command === "git" && args[0] === "diff" && args[1] === "--name-only") {
@@ -6810,16 +7061,26 @@ async function createHarness(options?: {
     }
 
     if (command === "git" && args.join(" ") === "status --short --branch") {
-      if (options?.gitStatusReject !== undefined) {
-        throw options.gitStatusReject;
+      if (gitStatusReject !== null) {
+        const error = gitStatusReject;
+        gitStatusReject = null;
+        throw error;
       }
-      return (
-        options?.gitStatus ?? {
-          exitCode: 0,
-          stdout: "## HEAD\n",
-          stderr: "",
-        }
-      );
+      const sequenced = takeSequencedResult(gitStatusSequence);
+      if (sequenced !== null) {
+        return sequenced;
+      }
+      if (
+        options?.gitStatus !== undefined &&
+        !Array.isArray(options.gitStatus)
+      ) {
+        return options.gitStatus;
+      }
+      return {
+        exitCode: 0,
+        stdout: "## HEAD\n",
+        stderr: "",
+      };
     }
 
     if (args[0] === "run") {
@@ -6885,6 +7146,18 @@ async function createHarness(options?: {
   };
 
   return { root, workspace, artifactDir, diffPath, commands, runCommand };
+}
+
+function takeSequencedResult(
+  sequence: CommandResult[] | null | undefined,
+): CommandResult | null {
+  if (sequence === null || sequence === undefined || sequence.length === 0) {
+    return null;
+  }
+  if (sequence.length === 1) {
+    return sequence[0]!;
+  }
+  return sequence.shift()!;
 }
 
 function opusLane(): HeadlessReviewerLaneConfig {
