@@ -511,6 +511,12 @@ curl -s http://localhost:3000/api/v1/state | jq '{
   safe Pi/DeepSeek prose rejected solely by the bound; keep the malformed,
   diff-token, markdown-structure, and smuggled-heading rejection tests paired
   with any bound change.
+- Preamble list and task-list lines fail closed when they start with an
+  artifact section label. Supported heading-label delimiters are `:`, `.`, `!`,
+  `?`, `-`, `–`, and `—`; the parser accepts the same label separators between
+  heading words, so both `P2 Should Fix - ...` and `P2 - Should Fix: ...` are
+  rejected before `## Verdict`. This keeps reviewer prose from smuggling a
+  blocking section into text that would otherwise be skipped.
 - Artifact section headings normalize by replacing colons with spaces,
   collapsing whitespace, and lowercasing. New `ARTIFACT_SECTION_HEADINGS`
   entries must have unique normalized keys; module initialization fails on a

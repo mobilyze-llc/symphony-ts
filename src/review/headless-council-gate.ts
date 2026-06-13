@@ -4867,12 +4867,24 @@ function isSafeArtifactPreambleLine(line: string): boolean {
     return false;
   }
 
-  const proseLine = line.replace(/^(?:[-*+]\s+|\d+[.)]\s+)/, "");
+  const proseLine = stripArtifactPreambleListPrefix(line);
   if (/^(#{1,6}\s|`{3,}|~{3,}|>\s|\|)/.test(proseLine)) {
     return false;
   }
 
   return !isArtifactPreambleSectionHeadingLine(proseLine);
+}
+
+function stripArtifactPreambleListPrefix(line: string): string {
+  let strippedLine = line;
+  let previousLine: string;
+  do {
+    previousLine = strippedLine;
+    strippedLine = strippedLine
+      .replace(/^(?:[-*+]\s+|\d+[.)]\s+)/, "")
+      .replace(/^\[[ xX]\]\s*/, "");
+  } while (strippedLine !== previousLine);
+  return strippedLine;
 }
 
 interface ArtifactHeadingMatch {
@@ -4984,11 +4996,8 @@ function skipArtifactHeadingWordSeparator(
 ): number {
   let index = offset;
   while (index < value.length) {
-    const char = value.at(index);
-    if (char === undefined) {
-      break;
-    }
-    if (char !== ":" && !/\s/.test(char)) {
+    const char = value.charAt(index);
+    if (!isArtifactHeadingLabelSeparator(char)) {
       break;
     }
     index += 1;
@@ -4996,7 +5005,20 @@ function skipArtifactHeadingWordSeparator(
   return index;
 }
 
-function buildArtifactSectionHeadingKeys(
+function isArtifactHeadingLabelSeparator(char: string): boolean {
+  return (
+    char === ":" ||
+    char === "." ||
+    char === "!" ||
+    char === "?" ||
+    char === "-" ||
+    char === "–" ||
+    char === "—" ||
+    /\s/.test(char)
+  );
+}
+
+export function buildArtifactSectionHeadingKeys(
   headings: readonly string[],
 ): ReadonlySet<string> {
   const normalizedHeadings = new Map<string, string>();
