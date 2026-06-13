@@ -9531,6 +9531,7 @@ function collectDeliveryOutcomes(
   const historyByIssue = new Map<string, StageRecord[]>();
   for (const entry of journal) {
     if (
+      entry.sequence <= sinceSequence ||
       entry.kind !== "stage_record" ||
       readMetadataString(entry.metadata, "status") !== "completed"
     ) {

@@ -314,6 +314,176 @@ describe("dispatcher decision event emission", () => {
     });
   });
 
+  it("keeps delivery spend windowed to stage records after the previous baseline", async () => {
+    const orchestrator = createOrchestrator({
+      runJournal: [
+        journalEntry({
+          sequence: 1,
+          kind: "stage_record",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "implement",
+          metadata: {
+            status: "completed",
+            stageName: "implement",
+            durationMs: 100,
+            totalTokens: 10_000,
+            inputTokens: 9_000,
+            outputTokens: 1_000,
+            turns: 9,
+            outcome: "succeeded",
+          },
+        }),
+        journalEntry({
+          sequence: 2,
+          kind: "tracker_write",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "merge",
+          idempotencyKey: "tracker:redelivered:terminal:completed",
+          metadata: { status: "completed" },
+        }),
+        journalEntry({
+          sequence: 3,
+          kind: "queue_baseline",
+          issueId: "__dispatch__",
+          issueIdentifier: "__dispatch__",
+          summary: "Prior baseline.",
+          metadata: {
+            schema_version: 1,
+            comparator_version: "priority-fifo-control-v0",
+          },
+        }),
+        journalEntry({
+          sequence: 4,
+          kind: "stage_record",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "implement",
+          metadata: {
+            status: "completed",
+            stageName: "implement",
+            durationMs: 200,
+            totalTokens: 250,
+            inputTokens: 200,
+            outputTokens: 50,
+            turns: 2,
+            outcome: "succeeded",
+          },
+        }),
+        journalEntry({
+          sequence: 5,
+          kind: "tracker_write",
+          issueId: "redelivered",
+          issueIdentifier: "ISSUE-REDO",
+          stage: "merge",
+          idempotencyKey: "tracker:redelivered:terminal:completed",
+          metadata: { status: "completed" },
+        }),
+      ],
+      tracker: createTracker({
+        candidates: [createIssue({ id: "next", identifier: "ISSUE-NEXT" })],
+      }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+
+    expect(baseline?.metadata).toMatchObject({
+      outcome_since_sequence: 3,
+      delivery_outcomes: [
+        expect.objectContaining({
+          sequence: 5,
+          issue_id: "redelivered",
+          spend: {
+            total_tokens: 250,
+            turns: 2,
+            stages: 1,
+          },
+        }),
+      ],
+    });
+  });
+
+  it("journals a queue-baseline sample when pipeline-halt blocks dispatch", async () => {
+    const haltIssue = createIssue({
+      id: "halt",
+      identifier: "ISSUE-HALT",
+      title: "Pipeline halted",
+      labels: ["pipeline-halt"],
+    });
+    const tracker: IssueTracker = {
+      ...createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1", priority: 2 }),
+          createIssue({ id: "2", identifier: "ISSUE-2", priority: 1 }),
+        ],
+      }),
+      async fetchOpenIssuesByLabels() {
+        return [haltIssue];
+      },
+    };
+    const orchestrator = createOrchestrator({ tracker });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+    expect(baseline?.metadata).toMatchObject({
+      considered_issue_ids: ["2", "1"],
+      dispatch_picks: [],
+    });
+  });
+
+  it("journals a queue-baseline sample when the rate-limit admission gate blocks dispatch", async () => {
+    const orchestrator = createOrchestrator({
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+        },
+      }),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      limit_id: "codex",
+      primary: {
+        used_percent: 40,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+    expect(baseline?.metadata).toMatchObject({
+      considered_issue_ids: ["1"],
+      dispatch_picks: [],
+    });
+  });
+
   it("emits measurable pause and re-steer events when deterministic supervision blocks a co-run", async () => {
     const orchestrator = createOrchestrator({
       tracker: createTracker({
@@ -371,6 +541,7 @@ describe("dispatcher decision event emission", () => {
 });
 
 function createOrchestrator(overrides?: {
+  config?: ResolvedWorkflowConfig;
   tracker?: IssueTracker;
   requestSupervisionResteer?: OrchestratorCoreOptions["requestSupervisionResteer"];
   stages?: StagesConfig | null;
@@ -378,7 +549,7 @@ function createOrchestrator(overrides?: {
 }): OrchestratorCore {
   const stages = overrides?.stages !== undefined ? overrides.stages : null;
   const options: OrchestratorCoreOptions = {
-    config: createConfig({ stages }),
+    config: overrides?.config ?? createConfig({ stages }),
     tracker: overrides?.tracker ?? createTracker(),
     spawnWorker: async () => ({
       workerHandle: { pid: 1001 },
@@ -440,6 +611,7 @@ function createTracker(input?: { candidates?: Issue[] }): IssueTracker {
 
 function createConfig(overrides?: {
   stages?: StagesConfig | null;
+  rateLimitAdmission?: ResolvedWorkflowConfig["rateLimitAdmission"];
 }): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
@@ -506,8 +678,10 @@ function createConfig(overrides?: {
       multiplier: 2,
     },
     rateLimitAdmission: {
-      minPrimaryHeadroomPct: null,
-      minSecondaryHeadroomPct: null,
+      minPrimaryHeadroomPct:
+        overrides?.rateLimitAdmission?.minPrimaryHeadroomPct ?? null,
+      minSecondaryHeadroomPct:
+        overrides?.rateLimitAdmission?.minSecondaryHeadroomPct ?? null,
     },
     server: {
       port: null,
