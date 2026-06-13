@@ -102,7 +102,7 @@ describe("runHeadlessCouncilGate", () => {
     });
 
     const harness = await createHarness();
-    await runHeadlessCouncilGate(
+    const result = await runHeadlessCouncilGate(
       {
         issueId: "SYMPH-444",
         workspace: harness.workspace,
@@ -130,6 +130,18 @@ describe("runHeadlessCouncilGate", () => {
         "--config",
         "model_auto_compact_token_limit=80000",
       ]),
+    );
+    expect(result.review_routing?.selectedLanes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          laneId: "codex-excavation",
+          codexExcavationSweep: "high-risk",
+        }),
+      ]),
+    );
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain(
+      "codex-excavation:optional:direct:direct_codex_excavation_signal:sweep=high-risk",
     );
   });
 
@@ -170,6 +182,7 @@ describe("runHeadlessCouncilGate", () => {
         expect.objectContaining({
           laneId: "codex-excavation",
           decorrelatedSignal: false,
+          codexExcavationSweep: "standard",
         }),
         expect.objectContaining({ laneId: "codex-high-lead" }),
       ],
@@ -273,6 +286,12 @@ describe("runHeadlessCouncilGate", () => {
     ]);
     expect(result.review_routing).toMatchObject({
       mode: "high-risk",
+      selectedLanes: expect.arrayContaining([
+        expect.objectContaining({
+          laneId: "codex-excavation",
+          codexExcavationSweep: "high-risk",
+        }),
+      ]),
       escalationPredicates: [
         "high_risk_predicate",
         "codex_author_codex_lead_tripwire",
@@ -402,6 +421,69 @@ describe("runHeadlessCouncilGate", () => {
         decorrelatedReviewerArtifacts: [
           {
             laneId: "claude-opus",
+            agent: "claude",
+            modelFamily: "anthropic",
+          },
+        ],
+        mergeEligible: true,
+      },
+      escalationPredicates: ["same_family_required_reviewer_recovery"],
+    });
+  });
+
+  it("labels Pi-authored recovery when a custom non-Pi reviewer lane is required", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-508",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [
+          {
+            laneId: "claude-reviewer-canary",
+            agent: "claude",
+            role: "opus-direct-reviewer",
+            model: "opus",
+          },
+          piLane(),
+        ],
+        provenance: [
+          {
+            role: "implementer",
+            agent: "pi",
+            modelFamily: "pi",
+            model: "deepseek-v4-pro",
+            reasoningEffort: "high",
+            sourceStage: "implement",
+            commitRange: null,
+          },
+        ],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.review_routing).toMatchObject({
+      selectedLanes: expect.arrayContaining([
+        expect.objectContaining({
+          laneId: "claude-reviewer-canary",
+          required: true,
+          decorrelatedSignal: true,
+        }),
+        expect.objectContaining({
+          laneId: "pi-deepseek",
+          required: false,
+          decorrelatedSignal: false,
+          reason: "same_family_author_signal",
+        }),
+      ]),
+      decorrelationBasis: {
+        authorFamilies: ["pi"],
+        requiredReviewerLaneIds: ["claude-reviewer-canary"],
+        decorrelatedReviewerArtifacts: [
+          {
+            laneId: "claude-reviewer-canary",
             agent: "claude",
             modelFamily: "anthropic",
           },
