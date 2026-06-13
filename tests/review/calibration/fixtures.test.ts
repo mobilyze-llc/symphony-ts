@@ -277,6 +277,52 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
     );
   });
 
+  it("requires historical replay metadata and nested runtime-field hygiene", () => {
+    const corpus = loadCorpus();
+
+    const missingReplayCorpus = structuredClone(corpus);
+    const historicalIndex = missingReplayCorpus.fixtures.findIndex(
+      (candidate) => candidate.category === "historical-replay",
+    );
+    expect(historicalIndex).toBeGreaterThanOrEqual(0);
+    missingReplayCorpus.fixtures[historicalIndex]!.replay = null;
+    expect(
+      validateReviewCalibrationCorpus(missingReplayCorpus).errors,
+    ).toContainEqual({
+      path: `$.fixtures[${historicalIndex}].replay`,
+      message: "historical replay fixtures require replay metadata",
+    });
+
+    const nestedRuntimeCorpus = structuredClone(corpus);
+    const replayShapeIndex = nestedRuntimeCorpus.fixtures.findIndex(
+      (candidate) => candidate.id === "convergence-expected-replay-event-shape",
+    );
+    expect(replayShapeIndex).toBeGreaterThanOrEqual(0);
+    const replay = nestedRuntimeCorpus.fixtures[replayShapeIndex]!.replay;
+    if (replay === null) {
+      throw new Error("expected replay metadata");
+    }
+    const sampleMetadata = replay.expectedEventShape.sample.metadata;
+    if (
+      sampleMetadata === null ||
+      typeof sampleMetadata !== "object" ||
+      Array.isArray(sampleMetadata)
+    ) {
+      throw new Error("expected replay sample metadata");
+    }
+    replay.expectedEventShape.sample.metadata = {
+      ...(sampleMetadata as Record<string, unknown>),
+      gateMutation: "unsafe runtime mutation",
+    };
+
+    expect(
+      validateReviewCalibrationCorpus(nestedRuntimeCorpus).errors,
+    ).toContainEqual({
+      path: `$.fixtures[${replayShapeIndex}].replay.expectedEventShape.sample.metadata.gateMutation`,
+      message: "must not include forbidden runtime field",
+    });
+  });
+
   it("requires future-ref hygiene fields on every fixture", () => {
     const corpus = loadCorpus();
 

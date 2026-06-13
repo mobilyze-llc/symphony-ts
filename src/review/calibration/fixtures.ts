@@ -363,6 +363,12 @@ function validateFixture(
       `${path}.sourceRefs`,
       addError,
     );
+    if (!isRecord(value.replay)) {
+      addError(
+        `${path}.replay`,
+        "historical replay fixtures require replay metadata",
+      );
+    }
   }
   if (category === "targeted-convergence" && !isRecord(value.replay)) {
     addError(
@@ -625,11 +631,13 @@ function validateReplayEventShape(
     }
   }
   for (const field of stringArrayValues(value.forbiddenRuntimeFields)) {
-    if (Object.hasOwn(value.sample, field)) {
-      addError(
-        `${path}.sample.${field}`,
-        "must not include forbidden runtime field",
-      );
+    const forbiddenPath = findOwnKeyPathDeep(
+      value.sample,
+      field,
+      `${path}.sample`,
+    );
+    if (forbiddenPath !== null) {
+      addError(forbiddenPath, "must not include forbidden runtime field");
     }
   }
 }
@@ -734,6 +742,35 @@ function stringArrayValues(value: unknown): string[] {
           typeof item === "string" && item.trim().length > 0,
       )
     : [];
+}
+
+function findOwnKeyPathDeep(
+  value: unknown,
+  field: string,
+  path: string,
+): string | null {
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      const found = findOwnKeyPathDeep(item, field, `${path}[${index}]`);
+      if (found !== null) {
+        return found;
+      }
+    }
+    return null;
+  }
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (Object.hasOwn(value, field)) {
+    return `${path}.${field}`;
+  }
+  for (const [key, item] of Object.entries(value)) {
+    const found = findOwnKeyPathDeep(item, field, `${path}.${key}`);
+    if (found !== null) {
+      return found;
+    }
+  }
+  return null;
 }
 
 function validateOneOf<const T extends readonly string[]>(
