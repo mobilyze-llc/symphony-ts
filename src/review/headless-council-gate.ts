@@ -272,6 +272,18 @@ export interface CouncilReviewMetadata {
   verdict: HeadlessGateVerdict;
 }
 
+export interface HeadlessLaneTokenUsage {
+  available: true;
+  model: string | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  totalTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  reasoningTokens: number | null;
+  totalCostUsd: number | null;
+}
+
 export interface HeadlessLaneResult {
   laneId: string;
   agent: "claude" | "pi" | "codex";
@@ -287,6 +299,8 @@ export interface HeadlessLaneResult {
   message: string | null;
   degradedReason: LaneDegradedReason | null;
   reviewBundle: ReviewBundleReference | null;
+  wallTimeMs: number | null;
+  tokenUsage: HeadlessLaneTokenUsage | null;
   rawArtifactPath?: string | null;
   structuredArtifactPath?: string | null;
   structuredArtifact?: StructuredReviewerArtifact | null;
@@ -375,12 +389,34 @@ interface CmuxRunJson {
   state?: string;
   artifact_path?: string;
   message?: string;
+  status_path?: string;
+  usage?: unknown;
+  wall_time_ms?: unknown;
+  wallTimeMs?: unknown;
+  elapsed_ms?: unknown;
+  elapsedMs?: unknown;
+  duration_ms?: unknown;
+  durationMs?: unknown;
+  started_at?: unknown;
+  startedAt?: unknown;
+  updated_at?: unknown;
+  updatedAt?: unknown;
+  completed_at?: unknown;
+  completedAt?: unknown;
+  // Optional inline status payload; lane terminal state is `state`, not this
+  // field, because some cmux-spawn variants use `status` for structured data.
+  status?: unknown;
 }
 
 interface ParsedArtifactVerdict {
   verdict: HeadlessGateVerdict;
   message: string | null;
   degradedReason: LaneDegradedReason | null;
+}
+
+interface LaneTelemetry {
+  wallTimeMs: number | null;
+  tokenUsage: HeadlessLaneTokenUsage | null;
 }
 
 export async function runHeadlessCouncilGate(
@@ -1656,6 +1692,8 @@ async function withLaneStallDeadline(
           stderrPath: null,
           message: `Lane stalled past ${deadlineMs}ms and the stall handler threw: ${formatError(error)}`,
           reviewBundle: null,
+          wallTimeMs: null,
+          tokenUsage: null,
         });
       }
     }, deadlineMs);
@@ -1693,6 +1731,8 @@ function laneStallResult(
     stderrPath: null,
     message: `Lane never reached a terminal state within ${deadlineMs}ms; gate emitted partial artifacts (substrate stall, not a council FAIL).`,
     reviewBundle,
+    wallTimeMs: null,
+    tokenUsage: null,
   };
 }
 
@@ -1717,6 +1757,8 @@ function reviewerLaneExecutionErrorResult(
     message: `Review lane execution failed: ${formatError(error)}`,
     degradedReason: null,
     reviewBundle,
+    wallTimeMs: null,
+    tokenUsage: null,
   };
 }
 
@@ -1740,6 +1782,8 @@ function codexLeadExecutionErrorResult(
     message: `Codex lead execution failed: ${formatError(error)}`,
     degradedReason: null,
     reviewBundle,
+    wallTimeMs: null,
+    tokenUsage: null,
   };
 }
 
@@ -1778,6 +1822,8 @@ async function parseLaneResult(input: {
       artifactPath: null,
       message: "cmux-spawn returned malformed JSON.",
       degradedReason: null,
+      wallTimeMs: null,
+      tokenUsage: null,
       rawArtifactPath: null,
       structuredArtifactPath: null,
       structuredArtifact: null,
@@ -1785,6 +1831,7 @@ async function parseLaneResult(input: {
   }
 
   const state = parseLaneState(parsed.state);
+  const telemetry = await laneTelemetryFromCmuxRun(parsed, state);
   if (commandResult.exitCode !== 0 || state !== "complete") {
     return {
       ...laneIdentity,
@@ -1795,6 +1842,7 @@ async function parseLaneResult(input: {
         parsed.message ??
         `cmux-spawn lane ended in ${state} with exit code ${commandResult.exitCode}.`,
       degradedReason: null,
+      ...telemetry,
       rawArtifactPath: stringOrNull(parsed.artifact_path),
       structuredArtifactPath: null,
       structuredArtifact: null,
@@ -1810,6 +1858,7 @@ async function parseLaneResult(input: {
       artifactPath,
       message: "Reviewer artifact was missing or empty.",
       degradedReason: null,
+      ...telemetry,
       rawArtifactPath: artifactPath,
       structuredArtifactPath: null,
       structuredArtifact: null,
@@ -1830,6 +1879,7 @@ async function parseLaneResult(input: {
       artifactPath,
       message: persistedArtifact.error,
       degradedReason: "artifact_persistence_failed",
+      ...telemetry,
       rawArtifactPath: persistedArtifact.rawArtifactPath,
       structuredArtifactPath: null,
       structuredArtifact: null,
@@ -1857,9 +1907,143 @@ async function parseLaneResult(input: {
     artifactPath,
     message: parsedVerdict.message,
     degradedReason: parsedVerdict.degradedReason,
+    ...telemetry,
     rawArtifactPath: persistedArtifact.rawArtifactPath,
     structuredArtifactPath,
     structuredArtifact,
+  };
+}
+
+async function laneTelemetryFromCmuxRun(
+  parsed: CmuxRunJson,
+  state: HeadlessLaneResult["state"],
+): Promise<LaneTelemetry> {
+  const status = await readCmuxStatus(parsed.status_path);
+  return {
+    wallTimeMs: wallTimeMsFromCmuxRun(parsed, status, state),
+    tokenUsage: tokenUsageFromCmuxRun(parsed.usage),
+  };
+}
+
+async function readCmuxStatus(
+  statusPath: string | undefined,
+): Promise<Record<string, unknown> | null> {
+  const path = stringOrNull(statusPath);
+  if (path === null) {
+    return null;
+  }
+  try {
+    return recordOrNull(JSON.parse(await readFile(path, "utf-8")));
+  } catch {
+    return null;
+  }
+}
+
+function wallTimeMsFromCmuxRun(
+  parsed: CmuxRunJson,
+  status: Record<string, unknown> | null,
+  state: HeadlessLaneResult["state"],
+): number | null {
+  const direct =
+    finiteNumberOrNull(parsed.wall_time_ms) ??
+    finiteNumberOrNull(parsed.wallTimeMs) ??
+    finiteNumberOrNull(parsed.elapsed_ms) ??
+    finiteNumberOrNull(parsed.elapsedMs) ??
+    finiteNumberOrNull(parsed.duration_ms) ??
+    finiteNumberOrNull(parsed.durationMs);
+  if (direct !== null) {
+    return Math.max(0, Math.round(direct));
+  }
+
+  const statusRecord = status ?? recordOrNull(parsed.status);
+  const startedAt =
+    stringOrNull(parsed.started_at) ??
+    stringOrNull(parsed.startedAt) ??
+    stringOrNull(statusRecord?.started_at) ??
+    stringOrNull(statusRecord?.startedAt);
+  const completedAt =
+    stringOrNull(parsed.completed_at) ??
+    stringOrNull(parsed.completedAt) ??
+    stringOrNull(statusRecord?.completed_at) ??
+    stringOrNull(statusRecord?.completedAt) ??
+    (state === "complete"
+      ? (stringOrNull(parsed.updated_at) ??
+        stringOrNull(parsed.updatedAt) ??
+        stringOrNull(statusRecord?.updated_at) ??
+        stringOrNull(statusRecord?.updatedAt))
+      : null);
+  if (startedAt === null || completedAt === null) {
+    return null;
+  }
+  const startedMs = Date.parse(startedAt);
+  const completedMs = Date.parse(completedAt);
+  if (
+    Number.isNaN(startedMs) ||
+    Number.isNaN(completedMs) ||
+    completedMs < startedMs
+  ) {
+    return null;
+  }
+  return completedMs - startedMs;
+}
+
+function tokenUsageFromCmuxRun(
+  usageInput: unknown,
+): HeadlessLaneTokenUsage | null {
+  const usage = recordOrNull(usageInput);
+  if (usage === null) {
+    return null;
+  }
+  if (usage.available === false) {
+    return null;
+  }
+
+  const inputTokens =
+    integerOrNull(usage.input_tokens) ?? integerOrNull(usage.inputTokens);
+  const outputTokens =
+    integerOrNull(usage.output_tokens) ?? integerOrNull(usage.outputTokens);
+  const totalTokens =
+    integerOrNull(usage.total_tokens) ??
+    integerOrNull(usage.totalTokens) ??
+    (inputTokens !== null && outputTokens !== null
+      ? inputTokens + outputTokens
+      : null);
+  const cacheReadTokens =
+    integerOrNull(usage.cache_read_tokens) ??
+    integerOrNull(usage.cacheReadTokens);
+  const cacheWriteTokens =
+    integerOrNull(usage.cache_write_tokens) ??
+    integerOrNull(usage.cacheWriteTokens);
+  const reasoningTokens =
+    integerOrNull(usage.reasoning_tokens) ??
+    integerOrNull(usage.reasoningTokens);
+  const totalCostUsd =
+    finiteNumberOrNull(usage.total_cost_usd) ??
+    finiteNumberOrNull(usage.totalCostUsd) ??
+    finiteNumberOrNull(usage.cost_usd) ??
+    finiteNumberOrNull(usage.costUsd);
+  const hasUsageData = [
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    reasoningTokens,
+    totalCostUsd,
+  ].some((value) => value !== null);
+  if (!hasUsageData) {
+    return null;
+  }
+  return {
+    available: true,
+    model: stringOrNull(usage.model),
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    reasoningTokens,
+    totalCostUsd,
   };
 }
 
@@ -1943,6 +2127,8 @@ function buildStructuredReviewerArtifact(input: {
     | "artifactPath"
     | "message"
     | "degradedReason"
+    | "wallTimeMs"
+    | "tokenUsage"
     | "rawArtifactPath"
     | "structuredArtifactPath"
     | "structuredArtifact"
@@ -3538,6 +3724,25 @@ function assertDiffWithinLimit(diff: string, source: string): string {
 
 function commandTimeoutMs(timeoutSeconds: number): number {
   return (timeoutSeconds + DEFAULT_COMMAND_TIMEOUT_GRACE_SECONDS) * 1000;
+}
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function finiteNumberOrNull(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function integerOrNull(value: unknown): number | null {
+  return typeof value === "number" &&
+    Number.isInteger(value) &&
+    Number.isFinite(value) &&
+    value >= 0
+    ? value
+    : null;
 }
 
 function stringOrNull(value: unknown): string | null {

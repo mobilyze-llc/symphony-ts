@@ -311,6 +311,123 @@ describe("runHeadlessCouncilGate", () => {
     );
   });
 
+  it("normalizes cmux-spawn lane wall-time and token usage telemetry", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          status: {
+            started_at: "2026-06-12T10:00:00.000Z",
+            completed_at: "2026-06-12T10:00:02.500Z",
+          },
+          json: {
+            usage: {
+              available: true,
+              model: "opus",
+              session_id: "SECRET-session-id",
+              input_tokens: 120,
+              output_tokens: 30,
+              cache_read_tokens: 12,
+              total_cost_usd: 0.42,
+            },
+          },
+        },
+        "pi-deepseek": {
+          status: {
+            started_at: "2026-06-12T10:00:03.000Z",
+            updated_at: "2026-06-12T10:00:07.000Z",
+          },
+          json: {
+            usage: {
+              available: false,
+              model: "deepseek-v4-pro",
+            },
+          },
+        },
+        "codex-high-lead": {
+          json: {
+            wall_time_ms: -1750,
+            usage: {
+              available: true,
+              model: "codex",
+              total_tokens: 14_810,
+              input_tokens: null,
+              output_tokens: null,
+              total_cost_usd: null,
+            },
+          },
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-479",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const claudeLane = result.lanes.find(
+      (lane) => lane.laneId === "claude-opus",
+    )!;
+    expect(claudeLane).toMatchObject({
+      wallTimeMs: 2500,
+      tokenUsage: {
+        available: true,
+        model: "opus",
+        inputTokens: 120,
+        outputTokens: 30,
+        totalTokens: 150,
+        cacheReadTokens: 12,
+        cacheWriteTokens: null,
+        reasoningTokens: null,
+        totalCostUsd: 0.42,
+      },
+    });
+    expect(
+      claudeLane.tokenUsage as unknown as Record<string, unknown>,
+    ).not.toHaveProperty("session_id");
+
+    expect(
+      result.lanes.find((lane) => lane.laneId === "pi-deepseek"),
+    ).toMatchObject({
+      wallTimeMs: 4000,
+      tokenUsage: null,
+    });
+    expect(
+      result.lanes.find((lane) => lane.laneId === "codex-high-lead"),
+    ).toMatchObject({
+      wallTimeMs: 0,
+      tokenUsage: {
+        available: true,
+        model: "codex",
+        inputTokens: null,
+        outputTokens: null,
+        totalTokens: 14_810,
+        totalCostUsd: null,
+      },
+    });
+
+    const persisted = JSON.parse(
+      await readFile(result.artifactPaths.resultJson, "utf-8"),
+    ) as { lanes: Array<Record<string, unknown>> };
+    const persistedClaude = persisted.lanes.find(
+      (lane) => lane.laneId === "claude-opus",
+    )!;
+    expect(persistedClaude).toMatchObject({
+      wallTimeMs: 2500,
+      tokenUsage: {
+        inputTokens: 120,
+        outputTokens: 30,
+        totalTokens: 150,
+        totalCostUsd: 0.42,
+      },
+    });
+    expect(JSON.stringify(persisted)).not.toContain("SECRET-session-id");
+  });
+
   it("scopes Claude write access to the artifact directory", async () => {
     const harness = await createHarness();
 
@@ -1005,6 +1122,10 @@ describe("runHeadlessCouncilGate", () => {
       laneBehavior: {
         "pi-deepseek": {
           exitCode: 1,
+          status: {
+            started_at: "2026-06-12T10:00:00.000Z",
+            updated_at: "2026-06-12T10:00:30.000Z",
+          },
           json: { state: "timed_out", message: "timed out" },
         },
       },
@@ -1025,6 +1146,7 @@ describe("runHeadlessCouncilGate", () => {
     ).toMatchObject({
       state: "timed_out",
       verdict: "error",
+      wallTimeMs: null,
     });
     expect(
       result.degradedConditions.filter((condition) =>
@@ -3129,6 +3251,7 @@ interface LaneBehavior {
   exitCode?: number;
   stdout?: string;
   json?: Record<string, unknown>;
+  status?: Record<string, unknown>;
   artifact?: string;
   afterArtifactWrite?: (artifactPath: string) => Promise<void>;
   reject?: Error;
@@ -3282,6 +3405,7 @@ async function createHarness(options?: {
         typeof behavior.json?.artifact_path === "string"
           ? behavior.json.artifact_path
           : join(artifactDir, `${artifactName}.md`);
+      const statusPath = join(artifactDir, `${artifactName}.status.json`);
       if (behavior.json?.artifact_path === undefined) {
         await writeFile(
           artifactPath,
@@ -3289,11 +3413,15 @@ async function createHarness(options?: {
         );
         await behavior.afterArtifactWrite?.(artifactPath);
       }
+      if (behavior.status !== undefined) {
+        await writeFile(statusPath, `${JSON.stringify(behavior.status)}\n`);
+      }
       return {
         exitCode: behavior.exitCode ?? 0,
         stdout: JSON.stringify({
           state: "complete",
           artifact_path: artifactPath,
+          ...(behavior.status === undefined ? {} : { status_path: statusPath }),
           ...(behavior.json ?? {}),
         }),
         stderr: "",
