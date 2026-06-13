@@ -2611,6 +2611,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   async requestPipelinePause(
     context?: PipelineControlContext,
   ): Promise<PipelineStatusResponse> {
+    return await this.enqueue(async () => {
+      return await this.requestPipelinePauseUnqueued(context);
+    });
+  }
+
+  private async requestPipelinePauseUnqueued(
+    context?: PipelineControlContext,
+  ): Promise<PipelineStatusResponse> {
     await this.ensureDispatcherRunJournalLoaded();
     const actor = context?.actor ?? this.defaultPipelineControlActor();
     const reason: IntentReason = {
@@ -2685,6 +2693,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   /** See requestPipelinePause for the transaction ordering contract. */
   async requestPipelineResume(
+    context?: PipelineControlContext,
+  ): Promise<PipelineStatusResponse> {
+    return await this.enqueue(async () => {
+      return await this.requestPipelineResumeUnqueued(context);
+    });
+  }
+
+  private async requestPipelineResumeUnqueued(
     context?: PipelineControlContext,
   ): Promise<PipelineStatusResponse> {
     await this.ensureDispatcherRunJournalLoaded();
@@ -2783,7 +2799,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     context?: PipelineControlContext,
   ): Promise<EmergencyStopResponse> {
     const actor = context?.actor ?? this.defaultPipelineControlActor();
-    const response = await this.enqueue(async () => {
+    return await this.enqueue(async () => {
       await this.ensureDispatcherRunJournalLoaded();
       const result = await this.orchestrator.requestEmergencyStop({
         actor,
@@ -2793,7 +2809,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         },
       });
 
-      return {
+      const response = {
         status: result.status,
         detail: result.detail,
         sequence: result.sequence,
@@ -2809,22 +2825,22 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           reason: request.reason,
         })),
       };
+
+      try {
+        await this.requestPipelinePauseUnqueued({
+          actor,
+          reason: "emergency stop asserted runtime halt condition",
+        });
+      } catch (error) {
+        await this.logger?.warn(
+          "emergency_stop_halt_view_failed",
+          "Emergency stop applied, but asserting the pipeline-halt Linear view failed.",
+          { error: toErrorMessage(error) },
+        );
+      }
+
+      return response;
     });
-
-    try {
-      await this.requestPipelinePause({
-        actor,
-        reason: "emergency stop asserted runtime halt condition",
-      });
-    } catch (error) {
-      await this.logger?.warn(
-        "emergency_stop_halt_view_failed",
-        "Emergency stop applied, but asserting the pipeline-halt Linear view failed.",
-        { error: toErrorMessage(error) },
-      );
-    }
-
-    return response;
   }
 
   private async getPipelineRestartSafety(): Promise<PipelineRestartSafetyResponse> {
@@ -3315,13 +3331,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       ];
 
       if (pidsToKill.length > 0) {
-        for (const pid of pidsToKill) {
-          try {
-            await terminateDetachedPidTree(Number(pid), { graceMs: 1_000 });
-          } catch {
-            // Process may have already exited
-          }
-        }
+        await Promise.all(
+          pidsToKill.map(async (pid) => {
+            try {
+              await terminateDetachedPidTree(Number(pid), { graceMs: 1_000 });
+            } catch {
+              // Process may have already exited
+            }
+          }),
+        );
         await this.logger?.log(
           "info",
           "orphaned_processes_killed",

@@ -427,6 +427,63 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
     expect(replayed.getState().resumeRequiredMarks.pipeline).toBeUndefined();
     expect(replayed.getState().resumeRequired.size).toBe(0);
   });
+
+  it("serializes emergency-stop halt assertion before a concurrent resume", async () => {
+    const tracker = createLinearTracker();
+    const haltIssue = createIssue({
+      id: "halt-1",
+      identifier: "ENG-99",
+      title: "Pipeline Halt",
+      state: "Todo",
+    });
+    let haltActive = false;
+    const haltCreated = deferred<void>();
+    const createHaltIssue = vi
+      .spyOn(tracker, "createIssue")
+      .mockImplementation(async () => {
+        await haltCreated.promise;
+        haltActive = true;
+        return haltIssue;
+      });
+    vi.spyOn(tracker, "fetchOpenIssuesByLabels").mockImplementation(async () =>
+      haltActive ? [haltIssue] : [],
+    );
+    const updateIssueState = vi
+      .spyOn(tracker, "updateIssueState")
+      .mockImplementation(async (issueId, state) => {
+        if (issueId === haltIssue.id && state === "Cancelled") {
+          haltActive = false;
+        }
+      });
+    const host = createHost({ tracker });
+
+    const stop = host.requestEmergencyStop({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "stop now",
+    });
+    await waitForCondition(() => createHaltIssue.mock.calls.length === 1);
+
+    const resume = host.requestPipelineResume({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "resume after triage",
+    });
+    expect(updateIssueState).not.toHaveBeenCalled();
+
+    haltCreated.resolve();
+    const [stopStatus, resumeStatus] = await Promise.all([stop, resume]);
+
+    expect(stopStatus.status).toBe("applied");
+    expect(resumeStatus).toMatchObject({ paused: false, issues: [] });
+    expect(updateIssueState).toHaveBeenCalledWith("halt-1", "Cancelled", "");
+    expect(haltActive).toBe(false);
+    expect(host.getState().emergencyStop).toBeNull();
+    expect(pipelineEntries(host, "pipeline_pause")[0]?.metadata.status).toBe(
+      "applied",
+    );
+    expect(pipelineEntries(host, "pipeline_resume")[0]?.metadata.status).toBe(
+      "applied",
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -560,4 +617,24 @@ function createIssue(overrides?: Partial<Issue>): Issue {
     updatedAt: "2026-06-01T00:00:00.000Z",
     ...overrides,
   };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+async function waitForCondition(condition: () => boolean): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (condition()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  throw new Error("Timed out waiting for test condition.");
 }
