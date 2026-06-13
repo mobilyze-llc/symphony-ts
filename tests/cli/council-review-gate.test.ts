@@ -528,6 +528,48 @@ describe("parseCouncilReviewGateArgs", () => {
     });
   });
 
+  it("writes lane progress to stderr without corrupting result JSON stdout", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-council-cli-"));
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+
+    const code = await runCouncilReviewGateCli(
+      [
+        "--issue-id",
+        "issue-symph-414",
+        "--artifact-dir",
+        join(root, "artifacts"),
+        "--workspace",
+        root,
+      ],
+      {
+        stdout: (message) => {
+          stdout.push(message);
+          return true;
+        },
+        stderr: (message) => {
+          stderr.push(message);
+          return true;
+        },
+      },
+      {
+        runHeadlessCouncilGate: async (_input, dependencies) => {
+          dependencies?.progress?.(
+            "[headless-council-gate] lane_started laneId=claude-opus",
+          );
+          return { ...cliReviewResult(), issueId: _input.issueId };
+        },
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(stderr.join("")).toContain("lane_started laneId=claude-opus");
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      issueId: "issue-symph-414",
+      verdict: "pass",
+    });
+  });
+
   it.each(["pipeline", "interactive"] as const)(
     "fails closed when %s review result journaling fails",
     async (journalSource) => {

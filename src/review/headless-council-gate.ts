@@ -20,6 +20,7 @@ const DEFAULT_CMUX_SPAWN_BIN = "cmux-spawn";
 const DEFAULT_TIMEOUT_SECONDS = 1_800;
 const DEFAULT_PREFLIGHT_TIMEOUT_MS = 30_000;
 const DEFAULT_COMMAND_TIMEOUT_GRACE_SECONDS = 60;
+const STALLED_LANE_CLEANUP_TIMEOUT_MS = 5_000;
 const MAX_DIFF_BYTES = 5 * 1024 * 1024;
 const MAX_COMMAND_BUFFER_BYTES = 20 * 1024 * 1024;
 const CODEX_LEAD_LANE_ID = "codex-high-lead";
@@ -282,7 +283,12 @@ export interface CommandResult {
 export type CommandRunner = (
   command: string,
   args: readonly string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs?: number },
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  },
 ) => Promise<CommandResult>;
 
 export interface HeadlessReviewerLaneConfig {
@@ -588,12 +594,19 @@ export interface CouncilFreshnessResult {
 interface HeadlessCouncilGateDependencies {
   runCommand?: CommandRunner;
   now?: () => Date;
+  progress?: (message: string) => void;
   /**
    * Hard ceiling (ms) before a lane that never reached a terminal state is
    * reported as a substrate stall. Defaults to the lane command timeout plus
    * an extra grace window; override only in tests.
    */
   laneStallDeadlineMs?: number;
+  /**
+   * Overall wall-clock ceiling (ms) for the reviewer + lead lane phase.
+   * Defaults to the configured gate timeout plus bounded grace; override only
+   * in tests.
+   */
+  overallLaneDeadlineMs?: number;
 }
 
 interface CmuxRunJson {
@@ -630,12 +643,19 @@ interface LaneTelemetry {
   tokenUsage: HeadlessLaneTokenUsage | null;
 }
 
+interface LaneExecutionBudget {
+  timeoutSeconds: number;
+  stallDeadlineMs: number;
+  remainingOverallMs: number;
+}
+
 export async function runHeadlessCouncilGate(
   input: HeadlessCouncilGateInput,
   dependencies: HeadlessCouncilGateDependencies = {},
 ): Promise<HeadlessCouncilGateResult> {
   const now = dependencies.now ?? (() => new Date());
   const runCommand = dependencies.runCommand ?? execFileCommand;
+  const progress = dependencies.progress ?? (() => {});
   const env = input.env ?? process.env;
   const artifactDir = resolve(input.artifactDir);
   const workspace = resolve(input.workspace);
@@ -891,9 +911,97 @@ export async function runHeadlessCouncilGate(
       : commandTimeoutMs(laneTimeoutSeconds) +
         DEFAULT_LANE_STALL_GRACE_SECONDS * 1000;
 
+  const lanePhaseStartedAtMs = Date.now();
+  const overallTimeoutSeconds = Math.max(
+    timeoutSeconds,
+    ...reviewerLanes.map((lane) => timeoutSecondsForLane(lane, timeoutSeconds)),
+  );
+  const overallLaneDeadlineMs =
+    dependencies.overallLaneDeadlineMs !== undefined &&
+    Number.isFinite(dependencies.overallLaneDeadlineMs) &&
+    dependencies.overallLaneDeadlineMs > 0
+      ? dependencies.overallLaneDeadlineMs
+      : laneStallDeadlineMsFor(overallTimeoutSeconds);
+  const overallLaneDeadlineAtMs = lanePhaseStartedAtMs + overallLaneDeadlineMs;
+  const remainingOverallLaneMs = () =>
+    Math.max(0, overallLaneDeadlineAtMs - Date.now());
+  const laneBudgetFor = (laneTimeoutSeconds: number): LaneExecutionBudget => {
+    const remainingMs = remainingOverallLaneMs();
+    const stallDeadlineMs = Math.min(
+      laneStallDeadlineMsFor(laneTimeoutSeconds),
+      remainingMs,
+    );
+    return {
+      timeoutSeconds: Math.max(
+        1,
+        Math.min(laneTimeoutSeconds, Math.ceil(stallDeadlineMs / 1000)),
+      ),
+      stallDeadlineMs,
+      remainingOverallMs: remainingMs,
+    };
+  };
+  let inFlightStalledLaneCleanup: Promise<void> | null = null;
+  const cleanupStalledLaneCoalesced = (
+    cleanupInput: Parameters<typeof cleanupStalledLane>[0],
+  ) => {
+    if (inFlightStalledLaneCleanup !== null) {
+      cleanupInput.progress(
+        formatLaneProgress("cleanup_joined", {
+          laneId: cleanupInput.laneId,
+        }),
+      );
+      return inFlightStalledLaneCleanup;
+    }
+    inFlightStalledLaneCleanup = cleanupStalledLane(cleanupInput).finally(
+      () => {
+        inFlightStalledLaneCleanup = null;
+      },
+    );
+    return inFlightStalledLaneCleanup;
+  };
+
   const runReviewerLaneWithDeadline = (lane: HeadlessReviewerLaneConfig) => {
     const laneTimeoutSeconds = timeoutSecondsForLane(lane, timeoutSeconds);
-    const laneStallDeadlineMs = laneStallDeadlineMsFor(laneTimeoutSeconds);
+    const budget = laneBudgetFor(laneTimeoutSeconds);
+    const identity = {
+      laneId: lane.laneId,
+      agent: lane.agent,
+      role: lane.role,
+      model: lane.model,
+      reasoningEffort: laneReasoningEffort(lane),
+      independentReviewer: independentReviewerForLane(lane),
+    };
+    if (budget.stallDeadlineMs <= 0) {
+      progress(
+        formatLaneProgress("deadline_elapsed_before_start", {
+          laneId: lane.laneId,
+          role: lane.role,
+          elapsedMs: Date.now() - lanePhaseStartedAtMs,
+          remainingOverallMs: budget.remainingOverallMs,
+        }),
+      );
+      return Promise.resolve(
+        laneStallResult(
+          identity,
+          artifactDir,
+          budget.stallDeadlineMs,
+          reviewBundle.reference,
+          "Council overall lane deadline elapsed before this lane could start; gate emitted partial artifacts (substrate stall, not a council FAIL).",
+        ),
+      );
+    }
+
+    const startedAtMs = Date.now();
+    const abortController = new AbortController();
+    progress(
+      formatLaneProgress("started", {
+        laneId: lane.laneId,
+        role: lane.role,
+        timeoutSeconds: budget.timeoutSeconds,
+        deadlineMs: budget.stallDeadlineMs,
+        remainingOverallMs: budget.remainingOverallMs,
+      }),
+    );
     return withLaneStallDeadline(
       runReviewerLane({
         lane,
@@ -901,8 +1009,8 @@ export async function runHeadlessCouncilGate(
         artifactDir,
         workspace,
         cmuxSpawnBin,
-        timeoutSeconds: laneTimeoutSeconds,
-        runCommand,
+        timeoutSeconds: budget.timeoutSeconds,
+        runCommand: runCommandWithSignal(runCommand, abortController.signal),
         env,
         reviewBundle: reviewBundle.reference,
         mode,
@@ -919,69 +1027,164 @@ export async function runHeadlessCouncilGate(
           reviewBundle.reference,
         ),
       ),
-      laneStallDeadlineMs,
-      () =>
-        laneStallResult(
-          {
-            laneId: lane.laneId,
-            agent: lane.agent,
-            role: lane.role,
-            model: lane.model,
-            reasoningEffort: laneReasoningEffort(lane),
-            independentReviewer: independentReviewerForLane(lane),
-          },
+      budget.stallDeadlineMs,
+      () => {
+        abortController.abort();
+        return laneStallResult(
+          identity,
           artifactDir,
-          laneStallDeadlineMs,
+          budget.stallDeadlineMs,
           reviewBundle.reference,
-        ),
-    );
+        );
+      },
+      {
+        onStall: async () => {
+          progress(
+            formatLaneProgress("stalled", {
+              laneId: lane.laneId,
+              role: lane.role,
+              elapsedMs: Date.now() - startedAtMs,
+              deadlineMs: budget.stallDeadlineMs,
+            }),
+          );
+          await cleanupStalledLaneCoalesced({
+            cmuxSpawnBin,
+            workspace,
+            env,
+            runCommand,
+            laneId: lane.laneId,
+            progress,
+          });
+        },
+      },
+    ).then((result) => {
+      progress(
+        formatLaneProgress("completed", {
+          laneId: lane.laneId,
+          role: lane.role,
+          state: result.state,
+          verdict: result.verdict,
+          degradedReason: result.degradedReason ?? "none",
+          elapsedMs: Date.now() - startedAtMs,
+        }),
+      );
+      return result;
+    });
   };
 
   let lanes = await Promise.all(reviewerLanes.map(runReviewerLaneWithDeadline));
   if (codexLeadEnabled) {
-    const codexLeadStallDeadlineMs = laneStallDeadlineMsFor(timeoutSeconds);
-    const codexLeadResult = await withLaneStallDeadline(
-      runCodexLeadLane({
-        context,
-        reviewerResults: lanes,
-        artifactDir,
-        workspace,
-        cmuxSpawnBin,
-        timeoutSeconds,
-        runCommand,
-        env,
-        reviewBundle: reviewBundle.reference,
-        mode,
-        routingMode: reviewRouting.mode,
-        round,
-        terminationThresholds,
-        targetedConvergence,
-        priorStructuredArtifacts: input.priorStructuredArtifacts ?? [],
-        riskContractArtifactPaths: input.riskContractArtifactPaths ?? [],
-      }).catch((error: unknown) =>
-        codexLeadExecutionErrorResult(
-          artifactDir,
-          error,
-          reviewBundle.reference,
-        ),
-      ),
-      codexLeadStallDeadlineMs,
-      () =>
+    const codexLeadBudget = laneBudgetFor(timeoutSeconds);
+    const codexLeadIdentity = {
+      laneId: CODEX_LEAD_LANE_ID,
+      agent: "codex" as const,
+      role: CODEX_LEAD_ROLE,
+      model: CODEX_LEAD_MODEL,
+      reasoningEffort: DEFAULT_CODEX_EXCAVATION_REASONING_EFFORT,
+      independentReviewer: false,
+    };
+    if (codexLeadBudget.stallDeadlineMs <= 0) {
+      progress(
+        formatLaneProgress("deadline_elapsed_before_start", {
+          laneId: CODEX_LEAD_LANE_ID,
+          role: CODEX_LEAD_ROLE,
+          elapsedMs: Date.now() - lanePhaseStartedAtMs,
+          remainingOverallMs: codexLeadBudget.remainingOverallMs,
+        }),
+      );
+      lanes = [
+        ...lanes,
         laneStallResult(
-          {
-            laneId: CODEX_LEAD_LANE_ID,
-            agent: "codex",
-            role: CODEX_LEAD_ROLE,
-            model: CODEX_LEAD_MODEL,
-            reasoningEffort: DEFAULT_CODEX_EXCAVATION_REASONING_EFFORT,
-            independentReviewer: false,
-          },
+          codexLeadIdentity,
           artifactDir,
-          codexLeadStallDeadlineMs,
+          codexLeadBudget.stallDeadlineMs,
           reviewBundle.reference,
+          "Council overall lane deadline elapsed before the Codex lead could start; gate emitted partial artifacts (substrate stall, not a council FAIL).",
         ),
-    );
-    lanes = [...lanes, codexLeadResult];
+      ];
+    } else {
+      const codexLeadStartedAtMs = Date.now();
+      const codexLeadAbortController = new AbortController();
+      progress(
+        formatLaneProgress("started", {
+          laneId: CODEX_LEAD_LANE_ID,
+          role: CODEX_LEAD_ROLE,
+          timeoutSeconds: codexLeadBudget.timeoutSeconds,
+          deadlineMs: codexLeadBudget.stallDeadlineMs,
+          remainingOverallMs: codexLeadBudget.remainingOverallMs,
+        }),
+      );
+      const codexLeadResult = await withLaneStallDeadline(
+        runCodexLeadLane({
+          context,
+          reviewerResults: lanes,
+          artifactDir,
+          workspace,
+          cmuxSpawnBin,
+          timeoutSeconds: codexLeadBudget.timeoutSeconds,
+          runCommand: runCommandWithSignal(
+            runCommand,
+            codexLeadAbortController.signal,
+          ),
+          env,
+          reviewBundle: reviewBundle.reference,
+          mode,
+          routingMode: reviewRouting.mode,
+          round,
+          terminationThresholds,
+          targetedConvergence,
+          priorStructuredArtifacts: input.priorStructuredArtifacts ?? [],
+          riskContractArtifactPaths: input.riskContractArtifactPaths ?? [],
+        }).catch((error: unknown) =>
+          codexLeadExecutionErrorResult(
+            artifactDir,
+            error,
+            reviewBundle.reference,
+          ),
+        ),
+        codexLeadBudget.stallDeadlineMs,
+        () => {
+          codexLeadAbortController.abort();
+          return laneStallResult(
+            codexLeadIdentity,
+            artifactDir,
+            codexLeadBudget.stallDeadlineMs,
+            reviewBundle.reference,
+          );
+        },
+        {
+          onStall: async () => {
+            progress(
+              formatLaneProgress("stalled", {
+                laneId: CODEX_LEAD_LANE_ID,
+                role: CODEX_LEAD_ROLE,
+                elapsedMs: Date.now() - codexLeadStartedAtMs,
+                deadlineMs: codexLeadBudget.stallDeadlineMs,
+              }),
+            );
+            await cleanupStalledLaneCoalesced({
+              cmuxSpawnBin,
+              workspace,
+              env,
+              runCommand,
+              laneId: CODEX_LEAD_LANE_ID,
+              progress,
+            });
+          },
+        },
+      );
+      progress(
+        formatLaneProgress("completed", {
+          laneId: CODEX_LEAD_LANE_ID,
+          role: CODEX_LEAD_ROLE,
+          state: codexLeadResult.state,
+          verdict: codexLeadResult.verdict,
+          degradedReason: codexLeadResult.degradedReason ?? "none",
+          elapsedMs: Date.now() - codexLeadStartedAtMs,
+        }),
+      );
+      lanes = [...lanes, codexLeadResult];
+    }
   }
 
   const disagreementPredicates = collectDisagreementEscalationPredicates(
@@ -3428,6 +3631,7 @@ async function withLaneStallDeadline(
   laneResult: Promise<HeadlessLaneResult>,
   deadlineMs: number,
   onStall: () => HeadlessLaneResult,
+  hooks: { onStall?: () => Promise<void> } = {},
 ): Promise<HeadlessLaneResult> {
   // MOB-113 gate-side hardening: even the per-command timeout can fail to
   // fire when cmux-spawn never finalizes (status.json never terminal). Race
@@ -3437,7 +3641,13 @@ async function withLaneStallDeadline(
   const deadline = new Promise<HeadlessLaneResult>((resolveDeadline) => {
     timer = setTimeout(() => {
       try {
-        resolveDeadline(onStall());
+        const stalledResult = onStall();
+        resolveDeadline(stalledResult);
+        void Promise.resolve(hooks.onStall?.()).catch(() => {
+          // Cleanup failure is deliberately reported through the progress
+          // hook itself. The gate must still emit partial aggregate
+          // artifacts rather than hanging inside cleanup.
+        });
       } catch (error) {
         resolveDeadline({
           laneId: "unknown-stalled-lane",
@@ -3471,6 +3681,76 @@ async function withLaneStallDeadline(
   }
 }
 
+function runCommandWithSignal(
+  runCommand: CommandRunner,
+  signal: AbortSignal,
+): CommandRunner {
+  return async (command, args, options) =>
+    await runCommand(command, args, { ...options, signal });
+}
+
+async function cleanupStalledLane(input: {
+  cmuxSpawnBin: string;
+  workspace: string;
+  env: NodeJS.ProcessEnv;
+  runCommand: CommandRunner;
+  laneId: string;
+  progress: (message: string) => void;
+}): Promise<void> {
+  input.progress(
+    formatLaneProgress("cleanup_started", {
+      laneId: input.laneId,
+      timeoutMs: STALLED_LANE_CLEANUP_TIMEOUT_MS,
+    }),
+  );
+  try {
+    // Use the raw runner, not the lane's signal-wrapped runner: this cleanup
+    // is intentionally allowed to outlive the already-aborted lane command.
+    const cleanup = await input.runCommand(
+      input.cmuxSpawnBin,
+      ["cleanup", "--sweep"],
+      {
+        cwd: input.workspace,
+        env: input.env,
+        timeoutMs: STALLED_LANE_CLEANUP_TIMEOUT_MS,
+      },
+    );
+    if (cleanup.exitCode !== 0) {
+      input.progress(
+        formatLaneProgress("cleanup_failed", {
+          laneId: input.laneId,
+          exitCode: cleanup.exitCode,
+          error: cleanup.stderr || cleanup.stdout || "cleanup exited non-zero",
+        }),
+      );
+      return;
+    }
+    input.progress(
+      formatLaneProgress("cleanup_completed", {
+        laneId: input.laneId,
+        exitCode: cleanup.exitCode,
+      }),
+    );
+  } catch (error) {
+    input.progress(
+      formatLaneProgress("cleanup_failed", {
+        laneId: input.laneId,
+        error: formatError(error),
+      }),
+    );
+  }
+}
+
+function formatLaneProgress(
+  event: string,
+  fields: Record<string, string | number>,
+): string {
+  const renderedFields = Object.entries(fields)
+    .map(([key, value]) => `${key}=${String(value)}`)
+    .join(" ");
+  return `[headless-council-gate] lane_${event} ${renderedFields}`;
+}
+
 function laneStallResult(
   identity: {
     laneId: string;
@@ -3483,6 +3763,7 @@ function laneStallResult(
   artifactDir: string,
   deadlineMs: number,
   reviewBundle: ReviewBundleReference | null,
+  message = `Lane never reached a terminal state within ${deadlineMs}ms; gate emitted partial artifacts (substrate stall, not a council FAIL).`,
 ): HeadlessLaneResult {
   return {
     ...identity,
@@ -3493,7 +3774,7 @@ function laneStallResult(
     promptPath: `${artifactDir}/${identity.laneId}.prompt.md`,
     cliJsonPath: null,
     stderrPath: null,
-    message: `Lane never reached a terminal state within ${deadlineMs}ms; gate emitted partial artifacts (substrate stall, not a council FAIL).`,
+    message,
     reviewBundle,
     wallTimeMs: null,
     tokenUsage: null,
@@ -6034,7 +6315,12 @@ export const execFileCommand: CommandRunner = async (command, args, options) =>
 async function execFileCommandWithPromise(
   command: string,
   args: readonly string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs?: number },
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  },
 ): Promise<CommandResult> {
   try {
     const { stdout, stderr } = await execFileAsync(command, [...args], {
@@ -6043,6 +6329,7 @@ async function execFileCommandWithPromise(
       encoding: "utf-8",
       maxBuffer: MAX_COMMAND_BUFFER_BYTES,
       timeout: options.timeoutMs,
+      signal: options.signal,
     });
     return {
       exitCode: 0,
@@ -6056,13 +6343,20 @@ async function execFileCommandWithPromise(
       stdout?: unknown;
       stderr?: unknown;
     };
+    const abortedBySignal =
+      commandError.name === "AbortError" || commandError.code === "ABORT_ERR";
     const stderr = commandOutput(commandError.stderr);
-    const fallbackStderr =
-      commandError.signal === undefined || commandError.signal === null
+    const fallbackStderr = abortedBySignal
+      ? `aborted by gate signal: ${commandError.message}`
+      : commandError.signal === undefined || commandError.signal === null
         ? commandError.message
         : `${commandError.message} (signal ${commandError.signal})`;
     return {
-      exitCode: typeof commandError.code === "number" ? commandError.code : 1,
+      exitCode: abortedBySignal
+        ? 143
+        : typeof commandError.code === "number"
+          ? commandError.code
+          : 1,
       stdout: commandOutput(commandError.stdout),
       stderr: stderr === "" ? fallbackStderr : stderr,
     };

@@ -354,7 +354,11 @@ export async function runCouncilReviewGateCli(
     appendReviewJournalEventsToDispatcherJournalImpl;
 
   if (parsed.assertFreshReview === undefined) {
-    const result = await runHeadlessCouncilGate(parsed);
+    const result = await runHeadlessCouncilGate(parsed, {
+      progress: (message) => {
+        io.stderr(`${message}\n`);
+      },
+    });
     if (parsed.journalWorkspaceRoot !== undefined) {
       try {
         await appendReviewJournalEventsToDispatcherJournal({
