@@ -4467,6 +4467,26 @@ describe("runHeadlessCouncilGate", () => {
       "- Triage-src/foo.ts:12 surviving P2",
     ],
     [
+      "single-word dash-adjacent compact absolute path finding",
+      "- Track-/tmp/symphony/src/foo.ts:12 record reviewer note",
+    ],
+    [
+      "single-word dash-adjacent compact dot-relative path finding",
+      "- Track-./src/foo.ts:12 record reviewer note",
+    ],
+    [
+      "single-word dash-adjacent compact parent-relative path finding",
+      "- Track-../src/foo.ts:12 record reviewer note",
+    ],
+    [
+      "single-word dash-adjacent compact drive-letter path finding",
+      "- Track-C:\\repo\\src\\foo.ts:12 record reviewer note",
+    ],
+    [
+      "single-word dash-adjacent compact directory-prefix-only finding",
+      "- Track-/tmp/symphony/src/ record reviewer note",
+    ],
+    [
       "single-word dash-adjacent compact root extension path finding",
       "- Triage-package.json:12 surviving P2",
     ],
@@ -4602,6 +4622,10 @@ describe("runHeadlessCouncilGate", () => {
   it.each([
     ["hyphen", "- Track-based workflow remains safe prose."],
     ["hyphen with slash prose", "- Track-check/in remains safe prose."],
+    [
+      "hyphen with absolute slash prose",
+      "- Track-/read/the/docs remains safe prose.",
+    ],
     ["hyphen with colon prose", "- Track-count:123 remains safe prose."],
     [
       "hyphen with lowercase colon prose",
