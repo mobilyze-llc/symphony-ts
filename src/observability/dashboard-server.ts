@@ -11,7 +11,7 @@ import {
   type ServerResponse,
   createServer,
 } from "node:http";
-import { homedir } from "node:os";
+import { homedir, hostname as osHostname } from "node:os";
 import { dirname, join, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -37,7 +37,6 @@ import {
 // tests/observability/dashboard-no-bypass.test.ts).
 import {
   type AnchorIntentPayload,
-  INTENT_ACTOR_KINDS,
   INTENT_VERBS,
   type IntentActor,
   type IntentFence,
@@ -311,6 +310,11 @@ export interface PipelineControlContext {
   reason: string;
 }
 
+export interface DashboardOperatorAuthOptions {
+  token?: string | null;
+  actor?: IntentActor;
+}
+
 export interface DashboardServerHost {
   getRuntimeSnapshot(): RuntimeSnapshot | Promise<RuntimeSnapshot>;
   /**
@@ -350,12 +354,6 @@ export interface DashboardServerHost {
     | Promise<PipelineStatusResponse>;
 }
 
-const intentActorSchema = z.object({
-  kind: z.enum(INTENT_ACTOR_KINDS),
-  host: z.string().min(1).max(256),
-  session: z.string().min(1).max(256).optional(),
-});
-
 const anchorPlacementSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("top") }),
   z.object({
@@ -390,7 +388,6 @@ const intentRequestSchema = z
     issueId: z.string().min(1).max(256).optional(),
     issueIdentifier: z.string().min(1).max(256).optional(),
     reason: z.string().min(1).max(2048),
-    actor: intentActorSchema,
     fence: z
       .object({ expectedParkSeq: z.number().int().positive() })
       .optional(),
@@ -440,9 +437,8 @@ const anchorFieldEditRequestSchema = z
     },
   );
 
-/** Optional attribution body for the pipeline pause/resume endpoints. */
+/** Optional body for the pipeline pause/resume endpoints. */
 const pipelineControlBodySchema = z.object({
-  actor: intentActorSchema.optional(),
   reason: z.string().min(1).max(2048).optional(),
 });
 
@@ -488,36 +484,105 @@ function isAuthorizedAnchorFieldEditRequest(
   );
 }
 
+interface OperatorAuthContext {
+  token: string | null;
+  actor: IntentActor;
+}
+
+function defaultOperatorAuthActor(): IntentActor {
+  const label = osHostname().split(".")[0];
+  return {
+    kind: "operator",
+    host: label === undefined || label === "" ? osHostname() : label,
+    session: "dashboard",
+  };
+}
+
+function resolveOperatorAuth(
+  options: DashboardServerOptions,
+): OperatorAuthContext {
+  const configuredToken =
+    options.operatorAuth?.token ?? process.env.SYMPHONY_OPERATOR_TOKEN ?? null;
+  const token =
+    configuredToken === null || configuredToken.trim() === ""
+      ? null
+      : configuredToken;
+  return {
+    token,
+    actor: options.operatorAuth?.actor ?? defaultOperatorAuthActor(),
+  };
+}
+
+function bearerTokenFromRequest(request: IncomingMessage): string | null {
+  const header = request.headers.authorization;
+  const authorization = Array.isArray(header) ? header[0] : header;
+  if (typeof authorization !== "string") {
+    return null;
+  }
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() || null;
+}
+
+function tokenMatches(expectedToken: string, suppliedToken: string): boolean {
+  const expected = Buffer.from(expectedToken);
+  const supplied = Buffer.from(suppliedToken);
+  return (
+    expected.length === supplied.length && timingSafeEqual(expected, supplied)
+  );
+}
+
+function authenticateOperatorRequest(
+  request: IncomingMessage,
+  auth: OperatorAuthContext,
+):
+  | { status: "ok"; actor: IntentActor }
+  | { status: "unconfigured" | "invalid" } {
+  if (auth.token === null) {
+    return { status: "unconfigured" };
+  }
+  const suppliedToken = bearerTokenFromRequest(request);
+  if (suppliedToken === null || !tokenMatches(auth.token, suppliedToken)) {
+    return { status: "invalid" };
+  }
+  return { status: "ok", actor: auth.actor };
+}
+
+function requireOperatorAuth(
+  request: IncomingMessage,
+  response: ServerResponse,
+  auth: OperatorAuthContext,
+): IntentActor | null {
+  const authenticated = authenticateOperatorRequest(request, auth);
+  if (authenticated.status === "ok") {
+    return authenticated.actor;
+  }
+  if (authenticated.status === "unconfigured") {
+    writeJsonError(response, 403, "operator_auth_unconfigured", {
+      message:
+        "Dashboard mutating routes require SYMPHONY_OPERATOR_TOKEN or operatorAuth.token.",
+    });
+    return null;
+  }
+  writeJsonError(response, 401, "unauthorized", {
+    message: "Dashboard mutating routes require a valid operator bearer token.",
+  });
+  return null;
+}
+
 function writeUnsupportedMediaType(response: ServerResponse): void {
   writeJsonError(response, 415, "unsupported_media_type", {
     message: "Content-Type must be application/json.",
   });
 }
 
-/**
- * Default actor for pipeline pause/resume requests that carry no
- * attribution body: an operator clicking the dashboard.
- */
-function defaultDashboardActor(): IntentActor {
-  return { kind: "operator", host: "dashboard" };
-}
-
-/** Drop undefined optionals so exactOptionalPropertyTypes is satisfied. */
-function toIntentActor(actor: z.infer<typeof intentActorSchema>): IntentActor {
-  return {
-    kind: actor.kind,
-    host: actor.host,
-    ...(actor.session === undefined ? {} : { session: actor.session }),
-  };
-}
-
 function toIntentRequest(
   data: z.infer<typeof intentRequestSchema>,
+  actor: IntentActor,
 ): IntentRequest {
   return {
     verb: data.verb,
     reason: data.reason,
-    actor: toIntentActor(data.actor),
+    actor,
     ...(data.issueId === undefined ? {} : { issueId: data.issueId }),
     ...(data.issueIdentifier === undefined
       ? {}
@@ -585,6 +650,7 @@ export interface DashboardServerOptions {
   refreshMs?: number;
   renderIntervalMs?: number;
   liveUpdatesEnabled?: boolean;
+  operatorAuth?: DashboardOperatorAuthOptions;
   anchorFieldEditSecret?: string | null;
   /** GitHub repo slug (e.g. "org/repo"). Falls back to REPO_URL env var. */
   githubRepoSlug?: string;
@@ -689,6 +755,7 @@ export function createDashboardRequestHandler(
   const spawnDeployFn = options.spawnDeploy ?? defaultSpawnDeploy;
   let githubQueueCache: GitHubQueueCache | null = null;
   const execCommand = options.execCommand ?? defaultExecCommand;
+  const operatorAuth = resolveOperatorAuth(options);
 
   function clearSwitchUsageCache(): void {
     claudeUsageCache = null;
@@ -821,6 +888,10 @@ export function createDashboardRequestHandler(
           return;
         }
 
+        if (requireOperatorAuth(request, response, operatorAuth) === null) {
+          return;
+        }
+
         await readRequestBody(request);
         const refresh = await options.host.requestRefresh();
         writeJson(response, 202, refresh);
@@ -830,6 +901,10 @@ export function createDashboardRequestHandler(
       if (url.pathname === "/api/v1/claude/switch") {
         if (method !== "POST") {
           writeMethodNotAllowed(response, ["POST"]);
+          return;
+        }
+
+        if (requireOperatorAuth(request, response, operatorAuth) === null) {
           return;
         }
 
@@ -936,6 +1011,10 @@ export function createDashboardRequestHandler(
           return;
         }
 
+        if (requireOperatorAuth(request, response, operatorAuth) === null) {
+          return;
+        }
+
         await readRequestBody(request);
 
         try {
@@ -957,6 +1036,10 @@ export function createDashboardRequestHandler(
       if (url.pathname === "/api/v1/deploy") {
         if (method !== "POST") {
           writeMethodNotAllowed(response, ["POST"]);
+          return;
+        }
+
+        if (requireOperatorAuth(request, response, operatorAuth) === null) {
           return;
         }
 
@@ -1029,6 +1112,15 @@ export function createDashboardRequestHandler(
           return;
         }
 
+        const operatorActor = requireOperatorAuth(
+          request,
+          response,
+          operatorAuth,
+        );
+        if (operatorActor === null) {
+          return;
+        }
+
         if (options.host.requestIntent === undefined) {
           writeJsonError(response, 501, "not_implemented", {
             message: "Intent verbs are not supported by this host.",
@@ -1067,7 +1159,7 @@ export function createDashboardRequestHandler(
         }
 
         const result = await options.host.requestIntent(
-          toIntentRequest(parsed.data),
+          toIntentRequest(parsed.data, operatorActor),
         );
         const statusCode =
           result.status === "issue_not_found"
@@ -1168,6 +1260,15 @@ export function createDashboardRequestHandler(
           return;
         }
 
+        const operatorActor = requireOperatorAuth(
+          request,
+          response,
+          operatorAuth,
+        );
+        if (operatorActor === null) {
+          return;
+        }
+
         const handler =
           action === "pause"
             ? options.host.requestPipelinePause?.bind(options.host)
@@ -1207,14 +1308,8 @@ export function createDashboardRequestHandler(
           return;
         }
 
-        // Attribution travels with the request so the journaled intent
-        // entry names the real actor; an attribution-less request is an
-        // operator on the dashboard (SYMPH-408b).
         const result = await handler({
-          actor:
-            parsed.data.actor === undefined
-              ? defaultDashboardActor()
-              : toIntentActor(parsed.data.actor),
+          actor: operatorActor,
           reason:
             parsed.data.reason ??
             (action === "stop"
@@ -1253,6 +1348,10 @@ export function createDashboardRequestHandler(
         if (stopMatch !== null) {
           if (method !== "POST") {
             writeMethodNotAllowed(response, ["POST"]);
+            return;
+          }
+
+          if (requireOperatorAuth(request, response, operatorAuth) === null) {
             return;
           }
 

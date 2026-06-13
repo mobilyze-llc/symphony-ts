@@ -1,6 +1,6 @@
 import { type IncomingMessage, request as httpRequest } from "node:http";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { DispatcherRunJournalEntry } from "../../src/domain/model.js";
 import {
@@ -16,11 +16,24 @@ import {
   startDashboardServer,
 } from "../../src/observability/dashboard-server.js";
 
+const OPERATOR_TOKEN = "operator-token";
+const ORIGINAL_OPERATOR_TOKEN = process.env.SYMPHONY_OPERATOR_TOKEN;
+const AUTH_HEADERS = { authorization: `Bearer ${OPERATOR_TOKEN}` };
+
 describe("dashboard server", () => {
   const servers: Array<{ close: () => Promise<void> }> = [];
 
+  beforeEach(() => {
+    process.env.SYMPHONY_OPERATOR_TOKEN = OPERATOR_TOKEN;
+  });
+
   afterEach(async () => {
     await Promise.all(servers.splice(0).map((server) => server.close()));
+    if (ORIGINAL_OPERATOR_TOKEN === undefined) {
+      Reflect.deleteProperty(process.env, "SYMPHONY_OPERATOR_TOKEN");
+    } else {
+      process.env.SYMPHONY_OPERATOR_TOKEN = ORIGINAL_OPERATOR_TOKEN;
+    }
   });
 
   it("serves the html dashboard and json state snapshot", async () => {
@@ -977,7 +990,10 @@ function sendRequest(
         port,
         method: input.method,
         path: input.path,
-        headers: input.headers,
+        headers: {
+          ...(input.method === "POST" ? AUTH_HEADERS : {}),
+          ...input.headers,
+        },
       },
       (response) => {
         const chunks: Buffer[] = [];

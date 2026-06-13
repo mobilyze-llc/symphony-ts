@@ -8,8 +8,6 @@
  * file; do not grow it.
  */
 
-import { hostname } from "node:os";
-
 import { fileURLToPath } from "node:url";
 
 import {
@@ -46,6 +44,7 @@ export interface SymphonyctlCommand {
   anchorPlacement?: AnchorPlacement;
   anchorExpiry?: AnchorExpiry;
   hard?: boolean;
+  operatorToken?: string;
 }
 
 export class SymphonyctlUsageError extends Error {}
@@ -67,11 +66,13 @@ Commands:
 Cold-shell hard stop:
   curl -fsS -X POST "\${SYMPHONYCTL_BASE_URL:-${DEFAULT_BASE_URL}}/api/v1/pipeline/stop" \\
     -H 'content-type: application/json' \\
+    -H "authorization: Bearer \${SYMPHONY_OPERATOR_TOKEN}" \\
     --data '{"reason":"emergency stop from shell"}'
 
 Options:
   --base-url <url>               Dashboard base URL (default ${DEFAULT_BASE_URL},
                                  or SYMPHONYCTL_BASE_URL)
+  --operator-token <token>        Operator bearer token (default SYMPHONY_OPERATOR_TOKEN)
   --until <iso-timestamp>         Anchor expiry timestamp must be a ${ANCHOR_UNTIL_TIMESTAMP_FORMAT}
 `;
 
@@ -112,6 +113,8 @@ export function parseSymphonyctlArgs(
     env.SYMPHONYCTL_BASE_URL ??
     DEFAULT_BASE_URL
   ).replace(/\/$/, "");
+  const operatorToken =
+    flags.get("operator-token") ?? env.SYMPHONY_OPERATOR_TOKEN;
 
   const command = positional[0];
   if (command === undefined || command === "help") {
@@ -120,6 +123,9 @@ export function parseSymphonyctlArgs(
 
   if (command === "state" || command === "pause" || command === "resume") {
     const result: SymphonyctlCommand = { command, baseUrl };
+    if (operatorToken !== undefined && operatorToken !== "") {
+      result.operatorToken = operatorToken;
+    }
     const reason = flags.get("reason");
     if (reason !== undefined) {
       result.reason = reason;
@@ -141,6 +147,9 @@ export function parseSymphonyctlArgs(
       anchorPlacement: placement,
       anchorExpiry: expiry,
     };
+    if (operatorToken !== undefined && operatorToken !== "") {
+      result.operatorToken = operatorToken;
+    }
     const reason = flags.get("reason");
     if (reason !== undefined) {
       result.reason = reason;
@@ -154,6 +163,9 @@ export function parseSymphonyctlArgs(
       throw new SymphonyctlUsageError("unanchor requires an issue identifier.");
     }
     const result: SymphonyctlCommand = { command: "unanchor", baseUrl, issue };
+    if (operatorToken !== undefined && operatorToken !== "") {
+      result.operatorToken = operatorToken;
+    }
     const reason = flags.get("reason");
     if (reason !== undefined) {
       result.reason = reason;
@@ -166,6 +178,9 @@ export function parseSymphonyctlArgs(
       throw new SymphonyctlUsageError("stop requires --hard.");
     }
     const result: SymphonyctlCommand = { command, baseUrl, hard: true };
+    if (operatorToken !== undefined && operatorToken !== "") {
+      result.operatorToken = operatorToken;
+    }
     const reason = flags.get("reason");
     if (reason !== undefined) {
       result.reason = reason;
@@ -197,6 +212,9 @@ export function parseSymphonyctlArgs(
       issue,
       reason,
     };
+    if (operatorToken !== undefined && operatorToken !== "") {
+      result.operatorToken = operatorToken;
+    }
     const hint = flags.get("hint");
     if (hint !== undefined) {
       result.hint = hint;
@@ -216,15 +234,6 @@ export function parseSymphonyctlArgs(
   }
 
   throw new SymphonyctlUsageError(`Unknown command: ${command}`);
-}
-
-function ctlActor(): { kind: "operator"; host: string; session: string } {
-  const label = hostname().split(".")[0];
-  return {
-    kind: "operator",
-    host: label === undefined || label === "" ? hostname() : label,
-    session: "symphonyctl",
-  };
 }
 
 function parseAnchorPlacementFlags(
@@ -290,10 +299,16 @@ async function httpJson(
   method: "GET" | "POST",
   url: string,
   body?: unknown,
+  options?: { operatorToken?: string | undefined },
 ): Promise<{ status: number; payload: unknown }> {
   const response = await fetch(url, {
     method,
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(options?.operatorToken === undefined
+        ? {}
+        : { authorization: `Bearer ${options.operatorToken}` }),
+    },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
   const text = await response.text();
@@ -447,13 +462,13 @@ export async function runSymphonyctl(
       "POST",
       `${parsed.baseUrl}/api/v1/pipeline/${action}`,
       {
-        actor: ctlActor(),
         reason:
           parsed.reason ??
           (parsed.command === "stop"
             ? "emergency stop via symphonyctl"
             : `pipeline ${parsed.command} via symphonyctl`),
       },
+      { operatorToken: parsed.operatorToken },
     );
     log(JSON.stringify(payload, null, 2));
     return status === 200 ? 0 : 1;
@@ -470,7 +485,6 @@ export async function runSymphonyctl(
         reason:
           parsed.reason ??
           `${parsed.command} ${parsed.issue ?? "issue"} via symphonyctl`,
-        actor: ctlActor(),
         ...(isAnchor
           ? {
               anchor: {
@@ -481,6 +495,7 @@ export async function runSymphonyctl(
             }
           : {}),
       },
+      { operatorToken: parsed.operatorToken },
     );
     log(JSON.stringify(payload, null, 2));
     return status === 200 ? 0 : 1;
@@ -494,13 +509,13 @@ export async function runSymphonyctl(
       verb: parsed.verb,
       ...issueBody(parsed.issue ?? ""),
       reason: parsed.reason,
-      actor: ctlActor(),
       ...(parsed.fence === undefined
         ? {}
         : { fence: { expectedParkSeq: parsed.fence } }),
       ...(parsed.hint === undefined ? {} : { hint: parsed.hint }),
       ...(parsed.stage === undefined ? {} : { stage: parsed.stage }),
     },
+    { operatorToken: parsed.operatorToken },
   );
   log(JSON.stringify(payload, null, 2));
   return status === 200 ? 0 : 1;
