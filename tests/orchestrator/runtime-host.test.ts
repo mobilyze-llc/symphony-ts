@@ -42,6 +42,8 @@ import {
   createWorkspaceHookLogger,
   deliverTrackedWorkerStopSignal,
   extractProductName,
+  findWorkspaceCwdProcessIds,
+  parseLsofCwdProcessEntries,
   readGitBaseRevision,
   readGitChangedFiles,
   signalPid,
@@ -5585,6 +5587,40 @@ describe("pipeline notifications", () => {
     expect(calls).toEqual([]);
   });
 
+  it("allows a tracked pid whose cwd is inside the workspace boundary", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "manual_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        readProcessCwd: async () => "/tmp/workspaces/1/packages/app",
+        readProcessCommand: async () => "bash -lc codex app-server",
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "delivered",
+      attempts: [
+        {
+          pid: 4242,
+          processGroupId: null,
+          sigterm: "delivered",
+          sigkill: "not_attempted",
+        },
+      ],
+    });
+    expect(calls).toEqual([[4242, "SIGTERM"]]);
+  });
+
   it("does not report failed signal delivery when the tracked pid is already gone", async () => {
     const calls: Array<[number, NodeJS.Signals]> = [];
     const delivery = await deliverTrackedWorkerStopSignal(
@@ -5641,6 +5677,61 @@ describe("pipeline notifications", () => {
         "Tracked process PID 4242 was not signaled: process command does not look like a Codex app-server",
     });
     expect(calls).toEqual([]);
+  });
+
+  it("parses lsof cwd field output into safe PID/path entries", () => {
+    expect(
+      parseLsofCwdProcessEntries(
+        [
+          "p1001",
+          "n/tmp/workspaces/1",
+          "p1",
+          "n/tmp/workspaces/1",
+          `p${process.pid}`,
+          "n/tmp/workspaces/1",
+          "pnot-a-pid",
+          "n/tmp/workspaces/1",
+          "p2002",
+          "n/tmp/workspaces/1/packages/app",
+        ].join("\n"),
+      ),
+    ).toEqual([
+      { pid: 1001, cwdPath: "/tmp/workspaces/1" },
+      { pid: 2002, cwdPath: "/tmp/workspaces/1/packages/app" },
+    ]);
+  });
+
+  it("parses legacy lsof cwd table output without prefix-matching sibling workspaces", async () => {
+    const output = [
+      "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
+      "node     1001 eric  cwd    DIR   1,23      128  100 /tmp/workspaces/1",
+      "bash     2002 eric  cwd    DIR   1,23      128  101 /tmp/workspaces/1/packages/app",
+      "node     3003 eric  cwd    DIR   1,23      128  102 /tmp/workspaces/10",
+      "node        1 eric  cwd    DIR   1,23      128  103 /tmp/workspaces/1",
+      `node ${process.pid} eric  cwd    DIR   1,23      128  104 /tmp/workspaces/1`,
+    ].join("\n");
+
+    await expect(
+      findWorkspaceCwdProcessIds(output, "/tmp/workspaces/1"),
+    ).resolves.toEqual([1001, 2002]);
+  });
+
+  it("deduplicates workspace cwd discovery from lsof field output", async () => {
+    const output = [
+      "p1001",
+      "n/tmp/workspaces/1",
+      "n/tmp/workspaces/1/packages/app",
+      "p2002",
+      "n/tmp/workspaces/10",
+      "p3003",
+      "n/tmp/workspaces/1-other",
+      "p4004",
+      "n/tmp/workspaces/1/packages/worker",
+    ].join("\n");
+
+    await expect(
+      findWorkspaceCwdProcessIds(output, "/tmp/workspaces/1"),
+    ).resolves.toEqual([1001, 4004]);
   });
 
   it("does not emit issue_failed for a budget hard stop pause", async () => {
