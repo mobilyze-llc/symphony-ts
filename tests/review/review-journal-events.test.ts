@@ -212,6 +212,72 @@ describe("review journal events", () => {
     expect(serializedDelta).not.toContain("evidence_locations");
   });
 
+  it("persists lane wall-time and token telemetry through state delta", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-telemetry-"),
+    );
+    const result = reviewResult({
+      verdict: "pass",
+      wallTimeMs: 12_345,
+      tokenUsage: {
+        available: true,
+        model: "opus",
+        inputTokens: 200,
+        outputTokens: 50,
+        totalTokens: 250,
+        cacheReadTokens: 25,
+        cacheWriteTokens: null,
+        reasoningTokens: null,
+        totalCostUsd: 0.19,
+      },
+    });
+
+    const entries = buildReviewJournalEntries(result, {
+      issueIdentifier: "SYMPH-479",
+      ownerId: "worker-1",
+      source: "pipeline",
+    });
+    expect(
+      entries.find((entry) => entry.kind === "review_lane")?.metadata,
+    ).toMatchObject({
+      lane_id: "claude-opus",
+      wall_time_ms: 12_345,
+      input_tokens: 200,
+      output_tokens: 50,
+      total_tokens: 250,
+    });
+    expect(
+      entries.find((entry) => entry.kind === "review_lane")?.metadata,
+    ).not.toHaveProperty("totalCostUsd");
+
+    await appendReviewJournalEventsToDispatcherJournal({
+      workspaceRoot,
+      result,
+      options: {
+        issueIdentifier: "SYMPH-479",
+        ownerId: "worker-1",
+        source: "pipeline",
+      },
+    });
+    const delta = buildStateDelta(
+      await readDispatcherRunJournal(workspaceRoot),
+      {
+        sinceSeq: 0,
+      },
+    );
+    expect(
+      delta.entries.find((entry) => entry.kind === "review_lane")?.metadata,
+    ).toMatchObject({
+      lane_id: "claude-opus",
+      wall_time_ms: 12_345,
+      input_tokens: 200,
+      output_tokens: 50,
+      total_tokens: 250,
+    });
+    expect(JSON.stringify(delta)).not.toContain("totalCostUsd");
+    expect(JSON.stringify(delta)).not.toContain("SECRET");
+  });
+
   it("serializes concurrent standalone review appends into one journal sequence stream", async () => {
     const workspaceRoot = await mkdtemp(
       join(tmpdir(), "symphony-review-journal-concurrent-"),
@@ -408,6 +474,8 @@ function reviewResult(input: {
   mode?: "full" | "convergence";
   previousReviewedHeadSha?: string | null;
   artifact?: StructuredReviewerArtifact;
+  wallTimeMs?: number | null;
+  tokenUsage?: HeadlessCouncilGateResult["lanes"][number]["tokenUsage"];
 }): HeadlessCouncilGateResult {
   return {
     schemaVersion: 1,
@@ -456,6 +524,8 @@ function reviewResult(input: {
           bundleHash: "bundle-hash",
           hashAlgorithm: "sha256",
         },
+        wallTimeMs: input.wallTimeMs ?? null,
+        tokenUsage: input.tokenUsage ?? null,
         rawArtifactPath: "/tmp/claude.md",
         structuredArtifactPath: "/tmp/claude.structured.json",
         structuredArtifact: input.artifact ?? null,
