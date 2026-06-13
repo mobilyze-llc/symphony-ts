@@ -7,6 +7,7 @@ import {
   LINEAR_ISSUE_LABELS_BY_NAMES_QUERY,
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
+  LINEAR_TICKET_FEATURE_ISSUES_QUERY,
   LinearTrackerClient,
   type TrackerError,
 } from "../../src/index.js";
@@ -96,6 +97,165 @@ describe("LinearTrackerClient", () => {
 
     await expect(client.fetchIssuesByStates([])).resolves.toEqual([]);
     expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("returns empty immediately when fetchTicketFeatureIssuesByStates receives no states", async () => {
+    const fetchFn = vi.fn<typeof fetch>();
+    const client = createClient({ fetchFn });
+
+    await expect(client.fetchTicketFeatureIssuesByStates([])).resolves.toEqual(
+      [],
+    );
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("fetches ticket feature issues with creator and relation history evidence", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [
+              ticketFeatureIssueNode({
+                id: "issue-483",
+                identifier: "SYMPH-483",
+                title: "TicketFeature extractor",
+              }),
+            ],
+            pageInfo: {
+              hasNextPage: false,
+              endCursor: null,
+            },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+
+    const issues = await client.fetchTicketFeatureIssuesByStates(["Backlog"]);
+
+    expect(issues).toHaveLength(1);
+    expect(issues[0]).toMatchObject({
+      id: "issue-483",
+      identifier: "SYMPH-483",
+      creator: {
+        email: "agent@mobilyze.com",
+      },
+      blockedBy: [
+        {
+          relationId: "rel-480",
+          relationType: "blocks",
+          attributionSource: "issue_history",
+          author: {
+            email: "operator@mobilyze.com",
+          },
+          issue: {
+            identifier: "SYMPH-480",
+          },
+        },
+      ],
+    });
+
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toBe(LINEAR_TICKET_FEATURE_ISSUES_QUERY);
+    expect(request.query).toContain("history(first: $historyFirst)");
+    expect(request.query).toContain("pageInfo");
+    expect(request.query).toContain("relationChanges");
+    expect(request.query).toContain("creator");
+    expect(request.variables).toEqual({
+      projectSlug: "ENG",
+      stateNames: ["Backlog"],
+      first: 50,
+      relationFirst: 250,
+      historyFirst: 250,
+      after: null,
+    });
+  });
+
+  it("paginates ticket feature issues by states", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issues: {
+              nodes: [
+                ticketFeatureIssueNode({
+                  id: "issue-483",
+                  identifier: "SYMPH-483",
+                  title: "TicketFeature extractor",
+                }),
+              ],
+              pageInfo: {
+                hasNextPage: true,
+                endCursor: "cursor-1",
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issues: {
+              nodes: [
+                ticketFeatureIssueNode({
+                  id: "issue-484",
+                  identifier: "SYMPH-484",
+                  title: "Next TicketFeature extractor",
+                }),
+              ],
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null,
+              },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    const issues = await client.fetchTicketFeatureIssuesByStates(["Backlog"]);
+
+    expect(issues.map((issue) => issue.identifier)).toEqual([
+      "SYMPH-483",
+      "SYMPH-484",
+    ]);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(
+      parseRequestBody(fetchFn.mock.calls[0]?.[1]).variables,
+    ).toMatchObject({
+      after: null,
+    });
+    expect(
+      parseRequestBody(fetchFn.mock.calls[1]?.[1]).variables,
+    ).toMatchObject({
+      after: "cursor-1",
+    });
+  });
+
+  it("fails closed when ticket feature pagination has no end cursor", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [],
+            pageInfo: {
+              hasNextPage: true,
+              endCursor: "",
+            },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+
+    await expect(
+      client.fetchTicketFeatureIssuesByStates(["Backlog"]),
+    ).rejects.toThrow(
+      expect.objectContaining<Partial<TrackerError>>({
+        code: ERROR_CODES.linearMissingEndCursor,
+      }),
+    );
   });
 
   it("fetches minimal issue states by GraphQL ID list", async () => {
@@ -718,6 +878,65 @@ function issueNode(input: {
     },
     inverseRelations: {
       nodes: [],
+    },
+  };
+}
+
+function ticketFeatureIssueNode(input: {
+  id: string;
+  identifier: string;
+  title: string;
+}): Record<string, unknown> {
+  return {
+    id: input.id,
+    identifier: input.identifier,
+    title: input.title,
+    description: "Feature issue body.",
+    priority: 2,
+    branchName: null,
+    url: null,
+    createdAt: "2026-06-13T00:00:00.000Z",
+    updatedAt: "2026-06-13T00:10:00.000Z",
+    state: {
+      name: "Backlog",
+    },
+    labels: {
+      nodes: [{ name: "source:user-report" }, { name: "area:scheduling" }],
+    },
+    creator: {
+      id: "agent-user",
+      name: "Mobilyze Agents",
+      displayName: "Mobilyze Agents",
+      email: "agent@mobilyze.com",
+    },
+    parent: null,
+    inverseRelations: {
+      nodes: [
+        {
+          id: "rel-480",
+          type: "blocks",
+          issue: {
+            id: "issue-480",
+            identifier: "SYMPH-480",
+            title: "Provenance gap",
+            state: { name: "Done" },
+          },
+        },
+      ],
+    },
+    history: {
+      nodes: [
+        {
+          createdAt: "2026-06-13T00:05:00.000Z",
+          actor: {
+            id: "operator-user",
+            name: "Operator",
+            displayName: "Operator",
+            email: "operator@mobilyze.com",
+          },
+          relationChanges: [{ identifier: "SYMPH-480", type: "blocks" }],
+        },
+      ],
     },
   };
 }

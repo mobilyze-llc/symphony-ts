@@ -32,6 +32,7 @@ export * from "./tracker/errors.js";
 export * from "./tracker/linear-client.js";
 export * from "./tracker/linear-normalize.js";
 export * from "./tracker/linear-queries.js";
+export * from "./tracker/ticket-feature.js";
 export * from "./tracker/tracker.js";
 export * from "./runners/index.js";
 export * from "./workspace/path-safety.js";

@@ -1,4 +1,5 @@
 import type { Issue } from "../domain/model.js";
+import type { TicketFeatureSourceIssue } from "./ticket-feature.js";
 
 export interface IssueStateSnapshot {
   id: string;
@@ -20,6 +21,9 @@ export interface IssueTracker {
     stateName: string,
   ): Promise<string | null>;
   fetchIssuesByStates(stateNames: string[]): Promise<Issue[]>;
+  fetchTicketFeatureIssuesByStates?(
+    stateNames: string[],
+  ): Promise<TicketFeatureSourceIssue[]>;
   fetchIssueStatesByIds(issueIds: string[]): Promise<IssueStateSnapshot[]>;
   fetchIssuesByLabels?(labelNames: string[]): Promise<Issue[]>;
   fetchOpenIssuesByLabels?(

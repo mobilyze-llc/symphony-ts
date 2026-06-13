@@ -30,6 +30,101 @@ const ISSUE_FIELDS = `
   }
 `;
 
+const TICKET_FEATURE_ISSUE_FIELDS = `
+  id
+  identifier
+  title
+  description
+  priority
+  branchName
+  url
+  createdAt
+  updatedAt
+  state {
+    name
+  }
+  labels {
+    nodes {
+      name
+    }
+  }
+  creator {
+    id
+    name
+    displayName
+    email
+  }
+  parent {
+    id
+    identifier
+    title
+    state {
+      name
+    }
+  }
+  inverseRelations(first: $relationFirst) {
+    nodes {
+      id
+      type
+      createdAt
+      issue {
+        id
+        identifier
+        title
+        state {
+          name
+        }
+      }
+      relatedIssue {
+        id
+        identifier
+        title
+        state {
+          name
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+  history(first: $historyFirst) {
+    nodes {
+      createdAt
+      actor {
+        id
+        name
+        displayName
+        email
+      }
+      botActor {
+        id
+        type
+        subType
+        name
+        userDisplayName
+      }
+      relationChanges {
+        identifier
+        type
+      }
+      toParent {
+        id
+        identifier
+        title
+        state {
+          name
+        }
+      }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
+  }
+`;
+
 export const LINEAR_CANDIDATE_ISSUES_QUERY = `
   query SymphonyCandidateIssues(
     $projectSlug: String!
@@ -77,6 +172,35 @@ export const LINEAR_ISSUES_BY_STATES_QUERY = `
     ) {
       nodes {
         ${ISSUE_FIELDS}
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`.trim();
+
+export const LINEAR_TICKET_FEATURE_ISSUES_QUERY = `
+  query SymphonyTicketFeatureIssues(
+    $projectSlug: String!
+    $stateNames: [String!]!
+    $first: Int!
+    $relationFirst: Int!
+    $historyFirst: Int!
+    $after: String
+  ) {
+    issues(
+      first: $first
+      after: $after
+      filter: {
+        project: { slugId: { eq: $projectSlug } }
+        state: { name: { in: $stateNames } }
+      }
+      orderBy: createdAt
+    ) {
+      nodes {
+        ${TICKET_FEATURE_ISSUE_FIELDS}
       }
       pageInfo {
         hasNextPage
