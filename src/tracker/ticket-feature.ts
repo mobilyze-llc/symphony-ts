@@ -289,7 +289,7 @@ const PROVENANCE_LABELS: Array<{
 ];
 
 const COMPONENT_LABEL_PREFIXES = ["area:", "company:", "component:"];
-const AC_HEADING_REGEX = /^(#{2,4})\s*Acceptance Criteria\b[^\n]*$/im;
+const AC_HEADING_REGEX = /^(#{1,6})\s*Acceptance Criteria\b[^\n]*$/im;
 
 export function normalizeLinearTicketFeatureIssue(
   node: unknown,
@@ -478,16 +478,15 @@ function resolveRelationAttribution(
   TicketFeatureSourceEdge,
   "author" | "authoredAt" | "attributionSource"
 > {
-  const relationType = relation.type ?? "";
   const relatedIdentifier = normalizeIdentifier(relatedIssue.identifier);
-  if (relationType === "" || relatedIdentifier === null) {
+  if (relatedIdentifier === null) {
     return missingAttribution();
   }
 
   const match = latestHistoryMatch(historyNodes, (history) =>
     (history.relationChanges ?? []).some(
       (change) =>
-        change.type === relationType &&
+        change.type === relation.type &&
         normalizeIdentifier(change.identifier) === relatedIdentifier,
     ),
   );

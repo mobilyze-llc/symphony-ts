@@ -99,6 +99,16 @@ describe("LinearTrackerClient", () => {
     expect(fetchFn).not.toHaveBeenCalled();
   });
 
+  it("returns empty immediately when fetchTicketFeatureIssuesByStates receives no states", async () => {
+    const fetchFn = vi.fn<typeof fetch>();
+    const client = createClient({ fetchFn });
+
+    await expect(client.fetchTicketFeatureIssuesByStates([])).resolves.toEqual(
+      [],
+    );
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
   it("fetches ticket feature issues with creator and relation history evidence", async () => {
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({
@@ -155,8 +165,8 @@ describe("LinearTrackerClient", () => {
       projectSlug: "ENG",
       stateNames: ["Backlog"],
       first: 50,
-      relationFirst: 50,
-      historyFirst: 50,
+      relationFirst: 250,
+      historyFirst: 250,
       after: null,
     });
   });

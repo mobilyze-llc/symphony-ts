@@ -366,6 +366,27 @@ describe("ticket feature extractor", () => {
     expect(neitherFeature.intentSufficiency.status).toBe("thin");
   });
 
+  it.each(["#", "##", "###", "####", "#####", "######"])(
+    "recognizes %s Acceptance Criteria headings",
+    (headingMarker) => {
+      const feature = extractTicketFeature({
+        issue: normalizeLinearTicketFeatureIssue({
+          id: `issue-${headingMarker.length}`,
+          identifier: `SYMPH-${headingMarker.length}`,
+          title: "TicketFeature extractor",
+          description: `${headingMarker} Acceptance Criteria\n- prove the ticket intent`,
+          state: { name: "Backlog" },
+        }),
+      });
+
+      expect(feature.acPosture).toMatchObject({
+        kind: "author_ac",
+        hasAuthorAcceptanceCriteria: true,
+      });
+      expect(feature.intentSufficiency.status).toBe("sufficient");
+    },
+  );
+
   it("rejects malformed Linear feature payloads at the Zod boundary", () => {
     expect(() =>
       normalizeLinearTicketFeatureIssue({

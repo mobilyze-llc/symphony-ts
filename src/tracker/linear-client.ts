@@ -79,6 +79,8 @@ interface LinearCandidateData {
   issues?: LinearGraphqlConnection<unknown>;
 }
 
+const TICKET_FEATURE_NESTED_CONNECTION_FIRST = 250;
+
 type LinearStatesData = LinearCandidateData;
 
 interface LinearIssueStatesData {
@@ -290,8 +292,8 @@ export class LinearTrackerClient implements IssueTracker {
         projectSlug: this.requireProjectSlug(),
         stateNames,
         first: this.pageSize,
-        relationFirst: this.pageSize,
-        historyFirst: this.pageSize,
+        relationFirst: TICKET_FEATURE_NESTED_CONNECTION_FIRST,
+        historyFirst: TICKET_FEATURE_NESTED_CONNECTION_FIRST,
       },
     );
   }
