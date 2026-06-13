@@ -1323,6 +1323,9 @@ function councilRoutingEvidenceError(
   ) {
     return "Council review artifact routing metadata is missing or inconsistent with review_routing.mode.";
   }
+  if (!routing.decorrelationBasis.requiredNonAuthorFamilyReviewer) {
+    return "Council review artifact does not require its non-author-family reviewer guarantee.";
+  }
   if (
     routing.decorrelationBasis.requiredNonAuthorFamilyReviewer &&
     routing.decorrelationBasis.authorFamilies.length === 0
