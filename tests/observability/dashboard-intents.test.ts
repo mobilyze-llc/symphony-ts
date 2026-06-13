@@ -17,6 +17,7 @@ import type { RuntimeSnapshot } from "../../src/logging/runtime-snapshot.js";
 import {
   type AnchorFieldEditRequest,
   type AnchorFieldEditResult,
+  type DashboardOperatorAuthOptions,
   type DashboardServerHost,
   type IntentRequest,
   type IntentRequestResult,
@@ -30,6 +31,14 @@ import {
 import type { IntentActor } from "../../src/orchestrator/intent.js";
 import type { IssueTracker } from "../../src/tracker/tracker.js";
 
+const OPERATOR_AUTH = {
+  token: "operator-token",
+  actor: { kind: "operator", host: "trusted-host", session: "dashboard" },
+} satisfies DashboardOperatorAuthOptions;
+const AUTH_HEADERS = {
+  authorization: `Bearer ${OPERATOR_AUTH.token}`,
+};
+
 describe("POST /api/v1/intents", () => {
   const servers: Array<{ close: () => Promise<void> }> = [];
 
@@ -41,6 +50,7 @@ describe("POST /api/v1/intents", () => {
     const server = await startDashboardServer({
       port: 0,
       host: createHost(overrides),
+      operatorAuth: OPERATOR_AUTH,
     });
     servers.push(server);
     return server;
@@ -101,15 +111,61 @@ describe("POST /api/v1/intents", () => {
     );
   });
 
-  it("rejects an unknown actor kind with 400", async () => {
+  it("rejects unauthenticated intent requests before host mutation", async () => {
+    const received: IntentRequest[] = [];
     const server = await startServer({
-      requestIntent: () => appliedResult(),
+      requestIntent: (input) => {
+        received.push(input);
+        return appliedResult();
+      },
+    });
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/intents",
+      body: JSON.stringify(validBody()),
+      headers: { "content-type": "application/json" },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(JSON.parse(response.body).error.code).toBe("unauthorized");
+    expect(received).toHaveLength(0);
+  });
+
+  it("rejects invalid operator tokens before host mutation", async () => {
+    const received: IntentRequest[] = [];
+    const server = await startServer({
+      requestIntent: (input) => {
+        received.push(input);
+        return appliedResult();
+      },
+    });
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/intents",
+      body: JSON.stringify(validBody()),
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer wrong-token",
+      },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(JSON.parse(response.body).error.code).toBe("unauthorized");
+    expect(received).toHaveLength(0);
+  });
+
+  it("derives intent actor from operator auth instead of body content", async () => {
+    const received: IntentRequest[] = [];
+    const server = await startServer({
+      requestIntent: (input) => {
+        received.push(input);
+        return appliedResult();
+      },
     });
     const response = await postIntent(server.port, {
       ...validBody(),
-      actor: { kind: "root", host: "pro14" },
+      actor: { kind: "watchdog-l2", host: "spoofed-host" },
     });
-    expect(response.statusCode).toBe(400);
+    expect(response.statusCode).toBe(200);
+    expect(received[0]?.actor).toEqual(OPERATOR_AUTH.actor);
   });
 
   it("rejects malformed JSON with 400", async () => {
@@ -120,7 +176,7 @@ describe("POST /api/v1/intents", () => {
       method: "POST",
       path: "/api/v1/intents",
       body: "{not json",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...AUTH_HEADERS },
     });
     expect(response.statusCode).toBe(400);
   });
@@ -147,7 +203,7 @@ describe("POST /api/v1/intents", () => {
         verb: "release",
         issueIdentifier: "SYMPH-1",
         reason: "released after host fix",
-        actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+        actor: OPERATOR_AUTH.actor,
         fence: { expectedParkSeq: 3 },
         hint: "check the lockfile",
         stage: "review",
@@ -275,6 +331,7 @@ describe("POST /api/v1/intents", () => {
       method: "POST",
       path: "/api/v1/intents",
       body: JSON.stringify(validBody()),
+      headers: AUTH_HEADERS,
     });
     expect(response.statusCode).toBe(415);
     expect(JSON.parse(response.body).error.code).toBe("unsupported_media_type");
@@ -319,7 +376,7 @@ describe("POST /api/v1/intents", () => {
         ...validBody(),
         reason: "x".repeat(70 * 1024),
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...AUTH_HEADERS },
     });
     expect(response.statusCode).toBe(413);
     expect(JSON.parse(response.body).error.code).toBe("payload_too_large");
@@ -333,10 +390,11 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
     await Promise.all(servers.splice(0).map((server) => server.close()));
   });
 
-  it("forwards the request body's actor and reason to the host", async () => {
+  it("derives the actor from operator auth and forwards the request reason", async () => {
     const received: Array<PipelineControlContext | undefined> = [];
     const server = await startDashboardServer({
       port: 0,
+      operatorAuth: OPERATOR_AUTH,
       host: createHost({
         requestPipelinePause: (context) => {
           received.push(context);
@@ -353,21 +411,22 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
         actor: { kind: "watchdog-l2", host: "pro14" },
         reason: "halting for deploy",
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...AUTH_HEADERS },
     });
     expect(response.statusCode).toBe(200);
     expect(received).toEqual([
       {
-        actor: { kind: "watchdog-l2", host: "pro14" },
+        actor: OPERATOR_AUTH.actor,
         reason: "halting for deploy",
       },
     ]);
   });
 
-  it("defaults to an operator@dashboard actor when no body is sent", async () => {
+  it("uses the authenticated operator actor when no body is sent", async () => {
     const received: Array<PipelineControlContext | undefined> = [];
     const server = await startDashboardServer({
       port: 0,
+      operatorAuth: OPERATOR_AUTH,
       host: createHost({
         requestPipelineResume: (context) => {
           received.push(context);
@@ -381,17 +440,45 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
       method: "POST",
       path: "/api/v1/pipeline/resume",
       body: "",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...AUTH_HEADERS },
     });
     expect(response.statusCode).toBe(200);
-    expect(received[0]?.actor).toEqual({ kind: "operator", host: "dashboard" });
+    expect(received[0]?.actor).toEqual(OPERATOR_AUTH.actor);
     expect(received[0]?.reason).toContain("dashboard");
+  });
+
+  it("rejects unauthenticated pipeline control before host mutation", async () => {
+    const received: Array<PipelineControlContext | undefined> = [];
+    const server = await startDashboardServer({
+      port: 0,
+      operatorAuth: OPERATOR_AUTH,
+      host: createHost({
+        requestPipelinePause: (context) => {
+          received.push(context);
+          return { paused: true, issues: [] };
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/pipeline/pause",
+      body: JSON.stringify({
+        actor: { kind: "watchdog-l2", host: "spoofed" },
+        reason: "spoofed",
+      }),
+      headers: { "content-type": "application/json" },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(received).toHaveLength(0);
   });
 
   it("rejects pause/resume without content-type: application/json with 415", async () => {
     const received: Array<PipelineControlContext | undefined> = [];
     const server = await startDashboardServer({
       port: 0,
+      operatorAuth: OPERATOR_AUTH,
       host: createHost({
         requestPipelinePause: (context) => {
           received.push(context);
@@ -410,6 +497,7 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
         method: "POST",
         path,
         body: "{}",
+        headers: AUTH_HEADERS,
       });
       expect(response.statusCode).toBe(415);
     }
@@ -420,6 +508,7 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
     const received: Array<PipelineControlContext | undefined> = [];
     const server = await startDashboardServer({
       port: 0,
+      operatorAuth: OPERATOR_AUTH,
       host: createHost({
         requestEmergencyStop: (context) => {
           received.push(context);
@@ -456,7 +545,7 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
         actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
         reason: "runaway token burn",
       }),
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...AUTH_HEADERS },
     });
 
     expect(response.statusCode).toBe(200);
@@ -467,7 +556,7 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
     });
     expect(received).toEqual([
       {
-        actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+        actor: OPERATOR_AUTH.actor,
         reason: "runaway token burn",
       },
     ]);
@@ -804,18 +893,19 @@ describe("POST /api/v1/anchor-field-edits", () => {
   });
 });
 
-describe("indistinguishable journal entries AC (SYMPH-408)", () => {
+describe("authenticated intent actor binding (SYMPH-449)", () => {
   const servers: Array<{ close: () => Promise<void> }> = [];
 
   afterEach(async () => {
     await Promise.all(servers.splice(0).map((server) => server.close()));
   });
 
-  it("watchdog-l2 and operator intents via the endpoint differ only in the actor field", async () => {
-    const journalEntryFor = async (actor: IntentActor) => {
+  it("body actor content cannot spoof the journaled authenticated actor", async () => {
+    const journalEntryFor = async (bodyActor: IntentActor) => {
       const orchestrator = createOrchestrator();
       const server = await startDashboardServer({
         port: 0,
+        operatorAuth: OPERATOR_AUTH,
         host: createHost({
           // Mirror of OrchestratorRuntimeHost.requestIntent: a thin route
           // into writeIntent, no extra semantics.
@@ -845,7 +935,7 @@ describe("indistinguishable journal entries AC (SYMPH-408)", () => {
         issueId: "1",
         issueIdentifier: "ISSUE-1",
         reason: "pausing for deploy",
-        actor,
+        actor: bodyActor,
       });
       expect(response.statusCode).toBe(200);
       expect(JSON.parse(response.body).status).toBe("applied");
@@ -870,22 +960,17 @@ describe("indistinguishable journal entries AC (SYMPH-408)", () => {
     expect(Object.keys(watchdogEntry.metadata).sort()).toEqual(
       Object.keys(operatorEntry.metadata).sort(),
     );
-    // ...and identical values everywhere except the actor (and the strings
-    // that render the actor: summary + the actor-discriminated idempotency
-    // key).
-    const { actor: operatorActor, ...operatorRest } = operatorEntry.metadata;
-    const { actor: watchdogActor, ...watchdogRest } = watchdogEntry.metadata;
-    expect(watchdogRest).toEqual(operatorRest);
+    // ...and identical values. The request body actor no longer influences
+    // journal attribution; the server binds it to authenticated operator auth.
+    const operatorActor = operatorEntry.metadata.actor;
+    const watchdogActor = watchdogEntry.metadata.actor;
+    expect(watchdogEntry.metadata).toEqual(operatorEntry.metadata);
     expect(operatorActor).toEqual({
       kind: "operator",
-      host: "pro14",
-      session: null,
+      host: "trusted-host",
+      session: "dashboard",
     });
-    expect(watchdogActor).toEqual({
-      kind: "watchdog-l2",
-      host: "pro14",
-      session: null,
-    });
+    expect(watchdogActor).toEqual(operatorActor);
 
     // The non-metadata envelope matches too (same kind, issue, stage...).
     for (const field of [
@@ -944,7 +1029,7 @@ function postIntent(port: number, body: unknown) {
     method: "POST",
     path: "/api/v1/intents",
     body: JSON.stringify(body),
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...AUTH_HEADERS },
   });
 }
 

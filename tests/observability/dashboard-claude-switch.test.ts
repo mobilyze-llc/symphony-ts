@@ -23,10 +23,15 @@ import {
   startDashboardServer,
 } from "../../src/observability/dashboard-server.js";
 
+const OPERATOR_TOKEN = "operator-token";
+const ORIGINAL_OPERATOR_TOKEN = process.env.SYMPHONY_OPERATOR_TOKEN;
+const AUTH_HEADERS = { authorization: `Bearer ${OPERATOR_TOKEN}` };
+
 describe("POST /api/v1/claude/switch", () => {
   const servers: Array<{ close: () => Promise<void> }> = [];
 
   beforeEach(() => {
+    process.env.SYMPHONY_OPERATOR_TOKEN = OPERATOR_TOKEN;
     clearClaudeUsageCache();
     mockFetchClaudeUsage.mockReset();
     mockFetchClaudeUsage.mockResolvedValue({
@@ -36,6 +41,11 @@ describe("POST /api/v1/claude/switch", () => {
 
   afterEach(async () => {
     await Promise.all(servers.splice(0).map((server) => server.close()));
+    if (ORIGINAL_OPERATOR_TOKEN === undefined) {
+      Reflect.deleteProperty(process.env, "SYMPHONY_OPERATOR_TOKEN");
+    } else {
+      process.env.SYMPHONY_OPERATOR_TOKEN = ORIGINAL_OPERATOR_TOKEN;
+    }
   });
 
   it("executes cswap --switch when no agents are running", async () => {
@@ -209,6 +219,31 @@ describe("POST /api/v1/claude/switch", () => {
     expect(execCommand).not.toHaveBeenCalled();
   });
 
+  it("rejects switch before cswap when operator auth is invalid", async () => {
+    const execCommand = vi.fn<ExecCommandFn>();
+
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        getRuntimeSnapshot: () => createSnapshotWithRunning(0),
+      }),
+      execCommand,
+    });
+    servers.push(server);
+
+    const res = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/claude/switch",
+      headers: {
+        authorization: "Bearer wrong-token",
+      },
+    });
+
+    expect(res.statusCode).toBe(401);
+    expect(JSON.parse(res.body).error.code).toBe("unauthorized");
+    expect(execCommand).not.toHaveBeenCalled();
+  });
+
   it("handles cswap failure and returns 500", async () => {
     const execCommand = vi.fn<ExecCommandFn>();
     execCommand.mockRejectedValue(new Error("cswap: command not found"));
@@ -371,7 +406,10 @@ function sendRequest(
         port,
         method: input.method,
         path: input.path,
-        headers: input.headers,
+        headers: {
+          ...(input.method === "POST" ? AUTH_HEADERS : {}),
+          ...input.headers,
+        },
       },
       (response) => {
         const chunks: Buffer[] = [];

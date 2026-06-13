@@ -104,7 +104,9 @@ as `WORKFLOW.md`, then change these fields before starting Symphony:
 
 If you want the dashboard, keep `server.port` in the workflow or pass `--port` on the CLI.
 The web dashboard now opens with a server-rendered snapshot and continues updating live in the
-browser over server-sent events.
+browser over server-sent events. Read-only dashboard routes stay open; mutating routes require
+`Authorization: Bearer $SYMPHONY_OPERATOR_TOKEN`. `symphonyctl` reads the same environment
+variable automatically, or accepts `--operator-token`.
 
 If your agent workflow needs access to environment variables from the launching shell, configure
 Codex to inherit them in `codex.command`, for example:

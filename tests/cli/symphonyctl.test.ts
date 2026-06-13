@@ -3,14 +3,21 @@
  * tests cover only the argument-parsing and formatting seams — the verb
  * semantics live behind the endpoints and are tested there.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   DEFAULT_BASE_URL,
   SymphonyctlUsageError,
   formatStateSummary,
   parseSymphonyctlArgs,
+  runSymphonyctl,
 } from "../../src/cli/symphonyctl.js";
+
+const originalFetch = globalThis.fetch;
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 
 describe("parseSymphonyctlArgs", () => {
   it("parses state with the default base URL", () => {
@@ -200,6 +207,25 @@ describe("parseSymphonyctlArgs", () => {
     });
   });
 
+  it("parses operator tokens from flags and environment", () => {
+    expect(
+      parseSymphonyctlArgs(["pause", "--operator-token", "flag-token"], {
+        SYMPHONY_OPERATOR_TOKEN: "env-token",
+      }),
+    ).toMatchObject({
+      command: "pause",
+      operatorToken: "flag-token",
+    });
+    expect(
+      parseSymphonyctlArgs(["resume"], {
+        SYMPHONY_OPERATOR_TOKEN: "env-token",
+      }),
+    ).toMatchObject({
+      command: "resume",
+      operatorToken: "env-token",
+    });
+  });
+
   it("parses hard emergency stop with a reason", () => {
     expect(
       parseSymphonyctlArgs(["stop", "--hard", "--reason", "runaway spend"], {}),
@@ -215,6 +241,42 @@ describe("parseSymphonyctlArgs", () => {
     expect(() => parseSymphonyctlArgs(["stop"], {})).toThrow(
       SymphonyctlUsageError,
     );
+  });
+});
+
+describe("runSymphonyctl", () => {
+  it("sends operator bearer auth and omits body actor on mutating requests", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      requests.push({ url: String(input), init: init ?? {} });
+      return new Response(JSON.stringify({ status: "applied" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    const exitCode = await runSymphonyctl(
+      parseSymphonyctlArgs(
+        ["intent", "release", "--issue", "SYMPH-1", "--reason", "release"],
+        { SYMPHONY_OPERATOR_TOKEN: "env-token" },
+      ),
+      () => undefined,
+    );
+
+    expect(exitCode).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(`${DEFAULT_BASE_URL}/api/v1/intents`);
+    expect(requests[0]?.init.headers).toMatchObject({
+      authorization: "Bearer env-token",
+    });
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
+      verb: "release",
+      issueIdentifier: "SYMPH-1",
+      reason: "release",
+    });
   });
 });
 

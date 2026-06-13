@@ -2,7 +2,7 @@ import { type IncomingMessage, request as httpRequest } from "node:http";
 import { dirname, resolve as pathResolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { RuntimeSnapshot } from "../../src/logging/runtime-snapshot.js";
 import {
@@ -11,6 +11,10 @@ import {
   resolveDeployScriptPath,
   startDashboardServer,
 } from "../../src/observability/dashboard-server.js";
+
+const OPERATOR_TOKEN = "operator-token";
+const ORIGINAL_OPERATOR_TOKEN = process.env.SYMPHONY_OPERATOR_TOKEN;
+const AUTH_HEADERS = { authorization: `Bearer ${OPERATOR_TOKEN}` };
 
 describe("resolveDeployScriptPath", () => {
   it("resolves 3 levels up from dist/src/observability/ to repo root", () => {
@@ -56,8 +60,17 @@ describe("resolveDeployScriptPath", () => {
 describe("deploy endpoints", () => {
   const servers: Array<{ close: () => Promise<void> }> = [];
 
+  beforeEach(() => {
+    process.env.SYMPHONY_OPERATOR_TOKEN = OPERATOR_TOKEN;
+  });
+
   afterEach(async () => {
     await Promise.all(servers.splice(0).map((server) => server.close()));
+    if (ORIGINAL_OPERATOR_TOKEN === undefined) {
+      Reflect.deleteProperty(process.env, "SYMPHONY_OPERATOR_TOKEN");
+    } else {
+      process.env.SYMPHONY_OPERATOR_TOKEN = ORIGINAL_OPERATOR_TOKEN;
+    }
   });
 
   // ── Deploy Preview ──────────────────────────────────────────────
@@ -175,6 +188,32 @@ describe("deploy endpoints", () => {
     });
   });
 
+  it("rejects deploy preview before running the deploy script when operator auth is invalid", async () => {
+    let deployCalls = 0;
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+      execDeploy: async () => {
+        deployCalls += 1;
+        return "should not run";
+      },
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/deploy/preview",
+      body: "{}",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer wrong-token",
+      },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(JSON.parse(response.body).error.code).toBe("unauthorized");
+    expect(deployCalls).toBe(0);
+  });
+
   it("GET /api/v1/deploy/preview returns 405", async () => {
     const server = await startDashboardServer({
       port: 0,
@@ -269,6 +308,32 @@ describe("deploy endpoints", () => {
     expect(completeData.exit_code).toBe(1);
 
     stream.close();
+  });
+
+  it("rejects deploy execution before spawning deploy when operator auth is invalid", async () => {
+    let spawnCalls = 0;
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+      spawnDeploy: () => {
+        spawnCalls += 1;
+        return createMockDeployProcess(["should not run"]);
+      },
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/deploy",
+      body: "{}",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer wrong-token",
+      },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(JSON.parse(response.body).error.code).toBe("unauthorized");
+    expect(spawnCalls).toBe(0);
   });
 
   it("GET /api/v1/deploy returns 405", async () => {
@@ -467,7 +532,10 @@ function sendRequest(
         port,
         method: input.method,
         path: input.path,
-        headers: input.headers,
+        headers: {
+          ...(input.method === "POST" ? AUTH_HEADERS : {}),
+          ...input.headers,
+        },
       },
       (response) => {
         const chunks: Buffer[] = [];
@@ -512,7 +580,10 @@ async function openEventStream(
     port,
     method,
     path,
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      ...(method === "POST" ? AUTH_HEADERS : {}),
+    },
   });
 
   await new Promise<void>((resolve, reject) => {

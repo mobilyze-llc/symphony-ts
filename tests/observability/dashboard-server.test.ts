@@ -1,6 +1,6 @@
 import { type IncomingMessage, request as httpRequest } from "node:http";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { DispatcherRunJournalEntry } from "../../src/domain/model.js";
 import {
@@ -16,11 +16,24 @@ import {
   startDashboardServer,
 } from "../../src/observability/dashboard-server.js";
 
+const OPERATOR_TOKEN = "operator-token";
+const ORIGINAL_OPERATOR_TOKEN = process.env.SYMPHONY_OPERATOR_TOKEN;
+const AUTH_HEADERS = { authorization: `Bearer ${OPERATOR_TOKEN}` };
+
 describe("dashboard server", () => {
   const servers: Array<{ close: () => Promise<void> }> = [];
 
+  beforeEach(() => {
+    process.env.SYMPHONY_OPERATOR_TOKEN = OPERATOR_TOKEN;
+  });
+
   afterEach(async () => {
     await Promise.all(servers.splice(0).map((server) => server.close()));
+    if (ORIGINAL_OPERATOR_TOKEN === undefined) {
+      Reflect.deleteProperty(process.env, "SYMPHONY_OPERATOR_TOKEN");
+    } else {
+      process.env.SYMPHONY_OPERATOR_TOKEN = ORIGINAL_OPERATOR_TOKEN;
+    }
   });
 
   it("serves the html dashboard and json state snapshot", async () => {
@@ -258,6 +271,112 @@ describe("dashboard server", () => {
     });
     expect(invalidRootMethod.statusCode).toBe(405);
     expect(invalidRootMethod.headers.allow).toBe("GET");
+  });
+
+  it("accepts a configured operator token with surrounding whitespace", async () => {
+    process.env.SYMPHONY_OPERATOR_TOKEN = `  ${OPERATOR_TOKEN}\n`;
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/refresh",
+      body: "{}",
+      headers: {
+        "content-type": "application/json",
+      },
+    });
+    expect(response.statusCode).toBe(202);
+  });
+
+  it("falls back to SYMPHONY_OPERATOR_TOKEN when operatorAuth token is null", async () => {
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+      operatorAuth: {
+        token: null,
+      },
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/refresh",
+      body: "{}",
+      headers: {
+        "content-type": "application/json",
+      },
+    });
+    expect(response.statusCode).toBe(202);
+  });
+
+  it("rejects refresh requests before host mutation when operator auth is invalid", async () => {
+    const refreshCalls: RefreshResponse[] = [];
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        requestRefresh: () => {
+          const response = {
+            queued: true,
+            coalesced: false,
+            requested_at: "2026-03-06T12:00:00.000Z",
+            operations: ["poll", "reconcile"],
+          } satisfies RefreshResponse;
+          refreshCalls.push(response);
+          return response;
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/refresh",
+      body: "{}",
+      headers: {
+        "content-type": "application/json",
+        authorization: "Bearer wrong-token",
+      },
+    });
+    expect(response.statusCode).toBe(401);
+    expect(JSON.parse(response.body).error.code).toBe("unauthorized");
+    expect(refreshCalls).toEqual([]);
+  });
+
+  it("accepts bearer operator auth with mixed case and extra horizontal whitespace", async () => {
+    const refreshCalls: RefreshResponse[] = [];
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        requestRefresh: () => {
+          const response = {
+            queued: true,
+            coalesced: false,
+            requested_at: "2026-03-06T12:00:00.000Z",
+            operations: ["poll", "reconcile"],
+          } satisfies RefreshResponse;
+          refreshCalls.push(response);
+          return response;
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/refresh",
+      body: "{}",
+      headers: {
+        "content-type": "application/json",
+        authorization: `bEaReR \t ${OPERATOR_TOKEN}   `,
+      },
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(refreshCalls).toHaveLength(1);
   });
 
   it("returns snapshot_unavailable when the host snapshot fails", async () => {
@@ -695,6 +814,42 @@ describe("dashboard server", () => {
     expect(stopCalls).toEqual(["ABC-123", "ABC-123"]);
   });
 
+  it("rejects issue stop requests before host mutation when operator auth is invalid", async () => {
+    const stopCalls: string[] = [];
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        requestIssueStop: (issueIdentifier) => {
+          stopCalls.push(issueIdentifier);
+          return {
+            issue_identifier: issueIdentifier,
+            stopped: true,
+            reason: "manual_stop",
+          } satisfies StopIssueResponse;
+        },
+      }),
+    });
+    servers.push(server);
+
+    for (const stopPath of [
+      "/api/v1/issues/ABC-123/stop",
+      "/api/v1/ABC-123/stop",
+    ]) {
+      const response = await sendRequest(server.port, {
+        method: "POST",
+        path: stopPath,
+        body: "{}",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer wrong-token",
+        },
+      });
+      expect(response.statusCode).toBe(401);
+      expect(JSON.parse(response.body).error.code).toBe("unauthorized");
+    }
+    expect(stopCalls).toEqual([]);
+  });
+
   it("returns 404 when stopping an issue that is not running", async () => {
     const server = await startDashboardServer({
       port: 0,
@@ -977,7 +1132,10 @@ function sendRequest(
         port,
         method: input.method,
         path: input.path,
-        headers: input.headers,
+        headers: {
+          ...(input.method === "POST" ? AUTH_HEADERS : {}),
+          ...input.headers,
+        },
       },
       (response) => {
         const chunks: Buffer[] = [];
