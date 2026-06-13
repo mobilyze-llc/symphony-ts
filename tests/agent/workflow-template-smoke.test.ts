@@ -696,19 +696,19 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
 });
 
 function expectEligibilityOnRewriteRule(output: string): void {
-    expect(output).toContain("Eligibility on Ticket Rewrite (SYMPH-515)");
-    expect(output).toContain("rewrite or rescope a Linear ticket");
-    expect(output).toContain(
-      "project, state, labels, owner, and dispatch eligibility",
-    );
-    expect(output).toContain(
-      "Pipeline project or another active dispatch surface",
-    );
-    expect(output).toContain("Council v2 review finding");
-    expect(output).toContain(
-      '2026-06-12 retro "Review Convergence Discipline for Journal Invariants"',
-    );
-    expect(output).toContain("SYMPH-321");
+  expect(output).toContain("Eligibility on Ticket Rewrite (SYMPH-515)");
+  expect(output).toContain("rewrite or rescope a Linear ticket");
+  expect(output).toContain(
+    "project, state, labels, owner, and dispatch eligibility",
+  );
+  expect(output).toContain(
+    "Pipeline project or another active dispatch surface",
+  );
+  expect(output).toContain("Council v2 review finding");
+  expect(output).toContain(
+    '2026-06-12 retro "Review Convergence Discipline for Journal Invariants"',
+  );
+  expect(output).toContain("SYMPH-321");
 }
 
 function isGitIgnored(path: string): boolean {
