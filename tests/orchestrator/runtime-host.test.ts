@@ -5354,7 +5354,6 @@ describe("pipeline notifications", () => {
       attempts: [
         {
           pid: 4242,
-          process_group_id: null,
           sigterm: "delivered",
           sigkill: "not_attempted",
         },
@@ -5409,7 +5408,6 @@ describe("pipeline notifications", () => {
       attempts: [
         {
           pid: 4242,
-          process_group_id: null,
           sigterm: "delivered",
           sigkill: "not_attempted",
         },
@@ -5430,9 +5428,7 @@ describe("pipeline notifications", () => {
         outcome: "delivered",
         signal_delivery_status: "delivered",
         pids: [4242],
-        process_group_ids: [],
         failed_pids: [],
-        failed_process_group_ids: [],
       }),
     );
   });
@@ -5485,9 +5481,7 @@ describe("pipeline notifications", () => {
         signal_delivery_status: "failed",
         issue_identifier: "ISSUE-1",
         pids: [],
-        process_group_ids: [],
         failed_pids: [],
-        failed_process_group_ids: [],
         warning:
           "Tracked process signal delivery failed before attempts were recorded: lsof unavailable",
       }),

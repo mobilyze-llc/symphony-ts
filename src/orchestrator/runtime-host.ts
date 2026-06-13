@@ -3278,6 +3278,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const failedAttempts = delivery.attempts.filter(
       (attempt) => attempt.sigterm === "failed" && attempt.sigkill === "failed",
     );
+    const processGroupIds = delivery.attempts
+      .map((attempt) => attempt.processGroupId)
+      .filter((id): id is number => id !== null);
+    const failedProcessGroupIds = failedAttempts
+      .map((attempt) => attempt.processGroupId)
+      .filter((id): id is number => id !== null);
     const context = {
       outcome:
         delivery.status === "failed" || delivery.status === "partial"
@@ -3290,14 +3296,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       signal_delivery_status: delivery.status,
       tracked_process_pid: delivery.attempts[0]?.pid ?? null,
       pids: delivery.attempts.map((attempt) => attempt.pid),
-      process_group_ids: delivery.attempts
-        .map((attempt) => attempt.processGroupId)
-        .filter((id): id is number => id !== null),
       failed_pids: failedAttempts.map((attempt) => attempt.pid),
-      failed_process_group_ids: failedAttempts
-        .map((attempt) => attempt.processGroupId)
-        .filter((id): id is number => id !== null),
       attempts: delivery.attempts,
+      ...(processGroupIds.length === 0
+        ? {}
+        : { process_group_ids: processGroupIds }),
+      ...(failedProcessGroupIds.length === 0
+        ? {}
+        : { failed_process_group_ids: failedProcessGroupIds }),
       ...(delivery.workspacePath === null
         ? {}
         : { workspace_path: delivery.workspacePath }),
@@ -5302,7 +5308,9 @@ function toStopSignalDeliveryResponse(
     workspace_path: delivery.workspacePath,
     attempts: delivery.attempts.map((attempt) => ({
       pid: attempt.pid,
-      process_group_id: attempt.processGroupId,
+      ...(attempt.processGroupId === null
+        ? {}
+        : { process_group_id: attempt.processGroupId }),
       sigterm: attempt.sigterm,
       sigkill: attempt.sigkill,
     })),

@@ -187,7 +187,7 @@ export interface StopSignalDeliveryResponse {
   workspace_path: string | null;
   attempts: Array<{
     pid: number;
-    process_group_id: number | null;
+    process_group_id?: number;
     sigterm: "delivered" | "failed";
     sigkill: "delivered" | "failed" | "not_attempted";
   }>;
