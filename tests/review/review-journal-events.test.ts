@@ -819,6 +819,8 @@ function targetedConvergenceHypothesis(): TargetedConvergenceHypothesis {
     schemaVersion: 1,
     kind: "symphony-targeted-convergence-hypothesis",
     hypothesisVersion: "targeted_convergence_v1",
+    familyMetadataTrustBoundary:
+      "prior_reviewer_family_metadata_untrusted_data",
     trigger: "shared_asserted_family",
     family: "journal substrate",
     namedInvariant: "every journal write is replayable",
@@ -848,6 +850,10 @@ function targetedConvergenceHypothesis(): TargetedConvergenceHypothesis {
       ],
       producerPaths: ["src/review/review-journal-events.ts"],
       consumerPaths: ["tests/review/review-journal-events.test.ts"],
+      fixDeltaSource: "git_range_exact",
+      mergeBaseSource: "git_merge_base_exact",
+      semanticNeighborhoodSource: "merge_base_exact",
+      scopeDegradedReasons: [],
       skipUnchangedRemainder: true,
     },
   };
