@@ -392,7 +392,10 @@ If both Opus and Pi succeeded in Phase 1, also ask Opus to
 cross-examine Pi's findings:
 
 1. Read `templates/cross-exam-opus-prompt.md`.
-2. Replace `[content from Pi Phase 1 findings]`.
+2. Replace `{WORKSPACE_PATH}`, `{BASE_BRANCH}`, `{REVIEW_MODE}`,
+   `{CURRENT_HEAD_SHA}`, `{PREVIOUS_REVIEWED_HEAD_SHA}`,
+   `{ARTIFACT_STATUS}`, and
+   `[content from Reviewer Beta Phase 1 findings]`.
 3. Write `$COUNCIL_DIR/cross-exam-opus-prompt.md`.
 4. Keep Pi labeled as Reviewer Beta in that prompt; do not include
    model names in the cross-exam text.

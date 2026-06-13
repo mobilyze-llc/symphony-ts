@@ -114,6 +114,26 @@ describe("council-review manual skill", () => {
     ]);
   });
 
+  it("covers Opus cross-exam template variables in setup instructions", () => {
+    const start = skill.indexOf(
+      "If both Opus and Pi succeeded in Phase 1, also ask Opus",
+    );
+    const end = skill.indexOf("```bash", start);
+    const opusSetup = skill.slice(start, end);
+
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    expectAll(opusSetup, [
+      "{WORKSPACE_PATH}",
+      "{BASE_BRANCH}",
+      "{REVIEW_MODE}",
+      "{CURRENT_HEAD_SHA}",
+      "{PREVIOUS_REVIEWED_HEAD_SHA}",
+      "{ARTIFACT_STATUS}",
+      "[content from Reviewer Beta Phase 1 findings]",
+    ]);
+  });
+
   it("captures a forward-test that narrows the historical stale Pipeline family", () => {
     const forwardTest = readFileSync(
       resolve(ROOT, "docs/council-review-forward-test.md"),
