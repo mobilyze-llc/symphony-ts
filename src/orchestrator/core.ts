@@ -10835,8 +10835,10 @@ function readProcessIdentityMetadata(
     startedAt.trim() === "" ||
     typeof command !== "string" ||
     command.trim() === "" ||
-    typeof launchToken !== "string" ||
-    launchToken.trim() === ""
+    !(
+      launchToken === null ||
+      (typeof launchToken === "string" && launchToken.trim() !== "")
+    )
   ) {
     return null;
   }

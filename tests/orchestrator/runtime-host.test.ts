@@ -476,6 +476,10 @@ describe("OrchestratorRuntimeHost", () => {
       sigtermSent: true,
       sigkillSent: true,
     }));
+    const codexAppServerIdentity = createProcessIdentity(1001, {
+      sessionId: 0,
+      launchToken: null,
+    });
     const writtenEntries: DispatcherRunJournalEntry[] = [];
     const journal: DispatcherRunJournal = [
       {
@@ -522,7 +526,7 @@ describe("OrchestratorRuntimeHost", () => {
               stage: "implement",
               attempt: null,
               codexAppServerPid: "1001",
-              codexAppServerIdentity: createProcessIdentity(1001),
+              codexAppServerIdentity,
             },
           ],
         },
@@ -567,7 +571,7 @@ describe("OrchestratorRuntimeHost", () => {
 
     expect(terminateDetachedPidTree).toHaveBeenCalledWith(1001, {
       graceMs: 1_000,
-      expectedIdentity: createProcessIdentity(1001),
+      expectedIdentity: codexAppServerIdentity,
     });
     expect(tick.dispatchedIssueIds).toEqual(["1"]);
     expect(fakeRunner.runInputs).toHaveLength(1);
@@ -583,7 +587,7 @@ describe("OrchestratorRuntimeHost", () => {
             recovery: "journal_hydration",
             sourceSequence: 2,
             codexAppServerPid: "1001",
-            codexAppServerIdentity: createProcessIdentity(1001),
+            codexAppServerIdentity,
           }),
         }),
       ]),
@@ -733,6 +737,62 @@ describe("OrchestratorRuntimeHost", () => {
     const terminateDetachedPidTree = vi.fn(async () => ({
       pid: 1001,
       sigtermSent: false,
+      sigkillSent: false,
+    }));
+    const writtenEntries: DispatcherRunJournalEntry[] = [];
+    const journal: DispatcherRunJournal = [
+      createPipelineStopJournalEntry(1, "1001", createProcessIdentity(1001)),
+      createPipelineResumeJournalEntry(2),
+    ];
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => journal,
+      writeDispatcherRunJournalEntry: async (_workspaceRoot, entry) => {
+        writtenEntries.push(entry);
+      },
+      terminateDetachedPidTree,
+      now: () => new Date("2026-03-06T00:02:00.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+
+    expect(terminateDetachedPidTree).toHaveBeenCalledWith(
+      1001,
+      expect.objectContaining({
+        expectedIdentity: createProcessIdentity(1001),
+      }),
+    );
+    expect(tick.dispatchedIssueIds).toEqual([]);
+    expect(fakeRunner.runInputs).toHaveLength(0);
+    expect(host.getState().resumeRequired.has("1")).toBe(true);
+    expect(host.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run_unconfirmed",
+      setBySequence: 1,
+    });
+    expect(
+      writtenEntries.some(
+        (entry) =>
+          entry.kind === "hard_stop_trigger" &&
+          entry.metadata.reason === "emergency_stop" &&
+          entry.metadata.recovery === "journal_hydration",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps recovered emergency-stop cleanup fail-closed when SIGKILL is not confirmed", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ state: "Resume" })],
+      stateSnapshots: [{ id: "1", identifier: "ISSUE-1", state: "Resume" }],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const terminateDetachedPidTree = vi.fn(async () => ({
+      pid: 1001,
+      sigtermSent: true,
       sigkillSent: false,
     }));
     const writtenEntries: DispatcherRunJournalEntry[] = [];

@@ -1675,7 +1675,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               graceMs: 1_000,
               expectedIdentity: plan.codexAppServerIdentity,
             });
-            if (termination.sigtermSent || termination.sigkillSent) {
+            if (termination.sigkillSent) {
               targetedCleanupSucceeded = true;
               await this.logger?.log(
                 "info",
@@ -5135,8 +5135,10 @@ function readProcessIdentityMetadata(
     startedAt.trim() === "" ||
     typeof command !== "string" ||
     command.trim() === "" ||
-    typeof launchToken !== "string" ||
-    launchToken.trim() === ""
+    !(
+      launchToken === null ||
+      (typeof launchToken === "string" && launchToken.trim() !== "")
+    )
   ) {
     return null;
   }
