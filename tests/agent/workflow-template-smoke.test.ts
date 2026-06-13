@@ -665,6 +665,37 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       reworkCount: 0,
     });
 
+    expectEligibilityOnRewriteRule(output);
+  });
+
+  it("documents eligibility-on-rewrite in the primary staged implement prompt", async () => {
+    const primaryWorkflow = await loadWorkflowDefinition(
+      PIPELINE_WORKFLOW_PATH,
+    );
+    const primaryConfig = resolveWorkflowConfig(primaryWorkflow, {
+      LINEAR_API_KEY: "test-token",
+      LINEAR_PROJECT_SLUG: "test-project",
+    });
+    const primaryImplementPrompt =
+      primaryConfig.stages?.stages.implement?.prompt;
+    expect(primaryImplementPrompt).toBe("prompts/implement.liquid");
+    const primaryImplementTemplate = await readFile(
+      resolve(dirname(PIPELINE_WORKFLOW_PATH), primaryImplementPrompt!),
+      "utf8",
+    );
+    const output = await renderPrompt({
+      workflow: { promptTemplate: primaryImplementTemplate },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "implement",
+      reworkCount: 0,
+    });
+
+    expectEligibilityOnRewriteRule(output);
+  });
+});
+
+function expectEligibilityOnRewriteRule(output: string): void {
     expect(output).toContain("Eligibility on Ticket Rewrite (SYMPH-515)");
     expect(output).toContain("rewrite or rescope a Linear ticket");
     expect(output).toContain(
@@ -678,8 +709,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       '2026-06-12 retro "Review Convergence Discipline for Journal Invariants"',
     );
     expect(output).toContain("SYMPH-321");
-  });
-});
+}
 
 function isGitIgnored(path: string): boolean {
   try {
