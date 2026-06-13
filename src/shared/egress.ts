@@ -36,14 +36,6 @@ export const DEFAULT_REWORK_CHANNEL_MAX_LEN = 20000;
 const TRUNCATION_MARKER = "\n…[truncated by egress cap]";
 
 /**
- * `key=value` / `key: value` pairs whose key looks credential-shaped.
- * The value is replaced, the key survives so the operator can see WHAT
- * leaked without the leak itself.
- */
-const SECRET_ASSIGNMENT_REGEX =
-  /\b([A-Za-z0-9_-]*(?:token|secret|password|api[_-]?key)[A-Za-z0-9_-]*)(\s*[=:]\s*)(["']?)[^\s"'`]+\3/gi;
-
-/**
  * JWT/JOSE tokens: three dot-separated base64url segments anchored on the
  * standard JOSE header prefix (`eyJ` — base64url of `{"`). High precision:
  * the anchor plus the dotted three-segment shape never matches git SHAs,
@@ -61,7 +53,7 @@ const JWT_REGEX =
  * identifiers, hashed path segments — are routine diagnostic content in a
  * coding orchestrator and are never auto-redacted. This rule is
  * best-effort defense-in-depth only (dotted shapes are handled by the
- * dedicated JWT_REGEX above); SECRET_ASSIGNMENT_REGEX is the primary
+ * dedicated JWT_REGEX above); redactSecretAssignments is the primary
  * secret control.
  */
 const BASE64_RUN_REGEX =
@@ -74,10 +66,156 @@ const MARKDOWN_LINK_REGEX = /\[([^\]\n]*)\]\(([^)\n]*)\)/g;
 const FENCE_REGEX = /`{3,}/g;
 
 function redactSecrets(text: string): string {
-  return text
-    .replace(SECRET_ASSIGNMENT_REGEX, "$1$2$3[REDACTED]$3")
+  return redactSecretAssignments(text)
     .replace(JWT_REGEX, "[REDACTED:token]")
     .replace(BASE64_RUN_REGEX, "[REDACTED:token]");
+}
+
+/**
+ * `key=value` / `key: value` pairs whose key looks credential-shaped.
+ * The value is replaced, the key survives so the operator can see WHAT
+ * leaked without the leak itself.
+ */
+function redactSecretAssignments(text: string): string {
+  let output = "";
+  let cursor = 0;
+  let index = 0;
+
+  while (index < text.length) {
+    const code = text.charCodeAt(index);
+    if (
+      !isAssignmentKeyChar(code) ||
+      (index > 0 && isAssignmentKeyChar(text.charCodeAt(index - 1)))
+    ) {
+      index += 1;
+      continue;
+    }
+
+    const keyStart = index;
+    let keyEnd = index + 1;
+    while (
+      keyEnd < text.length &&
+      isAssignmentKeyChar(text.charCodeAt(keyEnd))
+    ) {
+      keyEnd += 1;
+    }
+
+    const key = text.slice(keyStart, keyEnd);
+    if (!isSecretAssignmentKey(key)) {
+      index = keyEnd;
+      continue;
+    }
+
+    let valueStart = keyEnd;
+    while (
+      valueStart < text.length &&
+      isAssignmentWhitespace(text.charCodeAt(valueStart))
+    ) {
+      valueStart += 1;
+    }
+    const separator = text[valueStart];
+    if (separator !== "=" && separator !== ":") {
+      index = keyEnd;
+      continue;
+    }
+    valueStart += 1;
+    while (
+      valueStart < text.length &&
+      isAssignmentWhitespace(text.charCodeAt(valueStart))
+    ) {
+      valueStart += 1;
+    }
+
+    const quote =
+      text[valueStart] === '"' || text[valueStart] === "'"
+        ? text[valueStart]
+        : "";
+    if (quote !== "") {
+      valueStart += 1;
+    }
+
+    let valueEnd = valueStart;
+    let hasClosingQuote = false;
+    if (quote === "") {
+      while (
+        valueEnd < text.length &&
+        !isUnquotedAssignmentValueTerminator(text.charCodeAt(valueEnd))
+      ) {
+        valueEnd += 1;
+      }
+    } else {
+      while (valueEnd < text.length) {
+        const valueChar = text[valueEnd];
+        if (valueChar === quote) {
+          hasClosingQuote = true;
+          break;
+        }
+        if (valueChar === "`") {
+          break;
+        }
+        valueEnd += 1;
+      }
+    }
+
+    if (valueEnd === valueStart) {
+      index = keyEnd;
+      continue;
+    }
+
+    const replacementEnd = hasClosingQuote ? valueEnd + 1 : valueEnd;
+    output += text.slice(cursor, keyStart);
+    output += key;
+    output += text.slice(keyEnd, valueStart);
+    output += "[REDACTED]";
+    if (hasClosingQuote) {
+      output += quote;
+    }
+    cursor = replacementEnd;
+    index = replacementEnd;
+  }
+
+  if (cursor === 0) {
+    return text;
+  }
+  return `${output}${text.slice(cursor)}`;
+}
+
+function isAssignmentKeyChar(code: number): boolean {
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    code === 45 ||
+    code === 95
+  );
+}
+
+function isAssignmentWhitespace(code: number): boolean {
+  return (
+    code === 9 ||
+    code === 10 ||
+    code === 11 ||
+    code === 12 ||
+    code === 13 ||
+    code === 32
+  );
+}
+
+function isUnquotedAssignmentValueTerminator(code: number): boolean {
+  return (
+    isAssignmentWhitespace(code) || code === 34 || code === 39 || code === 96
+  );
+}
+
+function isSecretAssignmentKey(key: string): boolean {
+  const lower = key.toLowerCase();
+  const compact = lower.split("_").join("").split("-").join("");
+  return (
+    lower.includes("token") ||
+    lower.includes("secret") ||
+    lower.includes("password") ||
+    compact.includes("apikey")
+  );
 }
 
 function capLength(text: string, maxLen: number): string {

@@ -65,6 +65,63 @@ describe("parseSymphonyctlArgs", () => {
     });
   });
 
+  it("parses anchor with placement and until-merged expiry", () => {
+    const parsed = parseSymphonyctlArgs(
+      [
+        "anchor",
+        "SYMPH-42",
+        "--above",
+        "SYMPH-41",
+        "--until-merged",
+        "--reason",
+        "operator veto",
+      ],
+      {},
+    );
+    expect(parsed).toEqual({
+      command: "anchor",
+      baseUrl: DEFAULT_BASE_URL,
+      issue: "SYMPH-42",
+      anchorPlacement: { kind: "above", issueIdentifier: "SYMPH-41" },
+      anchorExpiry: { kind: "until_merged" },
+      reason: "operator veto",
+    });
+  });
+
+  it("parses boolean anchor flags without consuming following positional tokens", () => {
+    const parsed = parseSymphonyctlArgs(
+      ["anchor", "--top", "SYMPH-42", "--until-merged"],
+      {},
+    );
+    expect(parsed).toEqual({
+      command: "anchor",
+      baseUrl: DEFAULT_BASE_URL,
+      issue: "SYMPH-42",
+      anchorPlacement: { kind: "top" },
+      anchorExpiry: { kind: "until_merged" },
+    });
+  });
+
+  it("parses unanchor", () => {
+    expect(parseSymphonyctlArgs(["unanchor", "SYMPH-42"], {})).toEqual({
+      command: "unanchor",
+      baseUrl: DEFAULT_BASE_URL,
+      issue: "SYMPH-42",
+    });
+  });
+
+  it("rejects ambiguous anchor placement or expiry", () => {
+    expect(() =>
+      parseSymphonyctlArgs(
+        ["anchor", "SYMPH-1", "--top", "--above", "SYMPH-0", "--until-merged"],
+        {},
+      ),
+    ).toThrow(SymphonyctlUsageError);
+    expect(() =>
+      parseSymphonyctlArgs(["anchor", "SYMPH-1", "--top"], {}),
+    ).toThrow(SymphonyctlUsageError);
+  });
+
   it("rejects an unknown intent verb", () => {
     expect(() =>
       parseSymphonyctlArgs(
@@ -125,10 +182,28 @@ describe("formatStateSummary", () => {
       explicit_resume_required: {
         "9": { reason: "intent:park:operator_pause" },
       },
+      anchors: [
+        {
+          issue_identifier: "SYMPH-8",
+          placement: { kind: "below", issue_identifier: "SYMPH-7" },
+          expiry: { kind: "until_merged" },
+          provenance: {
+            actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+            source: "linear_field_edit",
+            field_name: "Queue Anchor",
+            editor_email: "operator@mobilyze.com",
+            reason: { human: "field edit" },
+          },
+        },
+      ],
     });
     expect(summary).toContain("running=1");
     expect(summary).toContain("SYMPH-7 working");
     expect(summary).toContain("9 intent:park:operator_pause");
+    expect(summary).toContain("SYMPH-8 below SYMPH-7 until merged");
+    expect(summary).toContain(
+      "operator@pro14#symphonyctl · linear_field_edit · operator@mobilyze.com · Queue Anchor · field edit",
+    );
   });
 
   it("reports an idle runtime", () => {

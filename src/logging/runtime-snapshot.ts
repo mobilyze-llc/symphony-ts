@@ -14,6 +14,7 @@ import type {
   DispatcherRunJournal,
   DispatcherRunJournalEntry,
   DispatcherRunJournalEventKind,
+  IssueAnchorRecord,
   IssueDispositionRecord,
   OrchestratorState,
   RecentActivityEntry,
@@ -154,6 +155,31 @@ export interface RuntimeSnapshotRetryRow {
   error: string | null;
 }
 
+export interface RuntimeSnapshotAnchorRow {
+  issue_id: string;
+  issue_identifier: string;
+  placement:
+    | { kind: "top" }
+    | { kind: "above" | "below"; issue_identifier: string };
+  expiry: { kind: "until_merged" } | { kind: "until_date"; at: string };
+  provenance: {
+    actor: {
+      kind: string;
+      host: string;
+      session: string | null;
+    };
+    source: "symphonyctl" | "api" | "linear_field_edit";
+    field_name: string | null;
+    editor_email: string | null;
+    reason: {
+      class: string;
+      human: string;
+    };
+  };
+  set_at: string;
+  set_by_sequence: number | null;
+}
+
 export interface RuntimeSnapshotDecorrelatedGateOutcome {
   issue_id: string;
   issue_identifier: string;
@@ -244,6 +270,11 @@ export interface RuntimeSnapshot {
   };
   running: RuntimeSnapshotRunningRow[];
   retrying: RuntimeSnapshotRetryRow[];
+  /**
+   * Active SYMPH-486 anchors. This read-model is visible provenance only;
+   * dispatch order remains priority/FIFO until the comparator consumes it.
+   */
+  anchors?: RuntimeSnapshotAnchorRow[];
   codex_totals: {
     input_tokens: number;
     output_tokens: number;
@@ -673,6 +704,7 @@ export function buildRuntimeSnapshot(
     },
     running,
     retrying,
+    anchors: buildAnchorSnapshots(state, now),
     codex_totals: toSnapshotCodexTotals(
       state.codexTotals,
       getAggregateSecondsRunning(state, now),
@@ -711,6 +743,58 @@ export function buildRuntimeSnapshot(
     council_reviews: buildCouncilReviewSnapshots(state),
     components: enrichment?.components ?? {},
   };
+}
+
+function buildAnchorSnapshots(
+  state: OrchestratorState,
+  now: Date,
+): RuntimeSnapshotAnchorRow[] {
+  return Object.values(state.issueAnchors)
+    .filter((anchor) => !isSnapshotAnchorExpired(anchor, state, now))
+    .sort((left, right) => {
+      const sequenceDelta =
+        (left.setBySequence ?? Number.MAX_SAFE_INTEGER) -
+        (right.setBySequence ?? Number.MAX_SAFE_INTEGER);
+      if (sequenceDelta !== 0) {
+        return sequenceDelta;
+      }
+      return left.issueIdentifier.localeCompare(right.issueIdentifier, "en");
+    })
+    .map((anchor) => ({
+      issue_id: anchor.issueId,
+      issue_identifier: anchor.issueIdentifier,
+      placement:
+        anchor.placement.kind === "top"
+          ? { kind: "top" }
+          : {
+              kind: anchor.placement.kind,
+              issue_identifier: anchor.placement.issueIdentifier,
+            },
+      expiry:
+        anchor.expiry.kind === "until_merged"
+          ? { kind: "until_merged" }
+          : { kind: "until_date", at: anchor.expiry.at },
+      provenance: {
+        actor: anchor.actor,
+        source: anchor.source,
+        field_name: anchor.fieldName,
+        editor_email: anchor.editorEmail,
+        reason: anchor.reason,
+      },
+      set_at: anchor.setAt,
+      set_by_sequence: anchor.setBySequence,
+    }));
+}
+
+function isSnapshotAnchorExpired(
+  anchor: IssueAnchorRecord,
+  state: OrchestratorState,
+  now: Date,
+): boolean {
+  if (anchor.expiry.kind === "until_merged") {
+    return state.completed.has(anchor.issueId);
+  }
+  return Date.parse(anchor.expiry.at) <= now.getTime();
 }
 
 const REVIEW_JOURNAL_EVENT_KINDS = new Set<DispatcherRunJournalEventKind>([

@@ -18,10 +18,15 @@ import type {
   ResolvedWorkflowConfig,
   StagesConfig,
 } from "../../src/config/types.js";
-import type { Issue } from "../../src/domain/model.js";
+import type {
+  DispatcherRunJournalEntry,
+  Issue,
+} from "../../src/domain/model.js";
+import { buildRuntimeSnapshot } from "../../src/logging/runtime-snapshot.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
+  sortIssuesForDispatch,
 } from "../../src/orchestrator/core.js";
 import type { IntentActor } from "../../src/orchestrator/intent.js";
 import type { IssueTracker } from "../../src/tracker/tracker.js";
@@ -118,6 +123,977 @@ describe("writeIntent semantics 1: idempotency", () => {
       });
     }
     expect(intentEntries(orchestrator)).toHaveLength(1);
+  });
+});
+
+describe("anchor intent family (SYMPH-486)", () => {
+  it("anchor journals attribution, idempotency, provenance, and visible read-model state", async () => {
+    const orchestrator = createOrchestrator();
+
+    const first = await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "keep first" },
+      anchor: {
+        placement: { kind: "above", issueIdentifier: "ISSUE-0" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+    expect(first.status).toBe("applied");
+
+    const second = await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "keep first" },
+      anchor: {
+        placement: { kind: "above", issueIdentifier: "ISSUE-0" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+    expect(second.status).toBe("no_op");
+
+    const anchor = orchestrator.getState().issueAnchors["1"];
+    expect(anchor).toMatchObject({
+      issueIdentifier: "ISSUE-1",
+      placement: { kind: "above", issueIdentifier: "ISSUE-0" },
+      expiry: { kind: "until_merged" },
+      source: "symphonyctl",
+      setBySequence: first.sequence,
+    });
+
+    const entries = intentEntries(orchestrator).filter(
+      (entry) => entry.metadata.verb === "anchor",
+    );
+    expect(entries.map((entry) => entry.metadata.status)).toEqual([
+      "applied",
+      "no_op",
+    ]);
+    expect(entries[0]?.metadata.actor).toEqual({
+      kind: "operator",
+      host: "pro14",
+      session: null,
+    });
+    expect(entries[0]?.metadata.anchor).toMatchObject({
+      placement: { kind: "above", issueIdentifier: "ISSUE-0" },
+      expiry: { kind: "until_merged" },
+      source: "symphonyctl",
+    });
+
+    const snapshot = buildRuntimeSnapshot(orchestrator.getState(), {
+      now: new Date("2026-06-11T12:30:00.000Z"),
+    });
+    expect(snapshot.anchors).toEqual([
+      expect.objectContaining({
+        issue_id: "1",
+        issue_identifier: "ISSUE-1",
+        placement: { kind: "above", issue_identifier: "ISSUE-0" },
+        expiry: { kind: "until_merged" },
+        set_by_sequence: first.sequence,
+      }),
+    ]);
+  });
+
+  it("unanchor removes the active anchor and replays cleanly", async () => {
+    const orchestrator = createOrchestrator();
+    await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "pin" },
+      anchor: {
+        placement: { kind: "top" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+
+    const result = await orchestrator.writeIntent({
+      verb: "unanchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_unanchor", human: "done" },
+    });
+    expect(result.status).toBe("applied");
+    expect(orchestrator.getState().issueAnchors["1"]).toBeUndefined();
+
+    const replayed = createOrchestrator({
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    expect(replayed.getState().issueAnchors["1"]).toBeUndefined();
+  });
+
+  it("flip-back anchors append fresh journal evidence and replay to the live state", async () => {
+    const orchestrator = createOrchestrator();
+    await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "pin to top" },
+      anchor: {
+        placement: { kind: "top" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+    await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "pin below" },
+      anchor: {
+        placement: { kind: "below", issueIdentifier: "ISSUE-0" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+
+    const flipBack = await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "pin to top again" },
+      anchor: {
+        placement: { kind: "top" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+
+    expect(flipBack.status).toBe("applied");
+    expect(flipBack.sequence).toBe(3);
+    expect(
+      intentEntries(orchestrator).filter(
+        (entry) => entry.metadata.verb === "anchor",
+      ),
+    ).toHaveLength(3);
+    expect(orchestrator.getState().issueAnchors["1"]?.placement).toEqual({
+      kind: "top",
+    });
+
+    const replayed = createOrchestrator({
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    expect(replayed.getState().issueAnchors["1"]?.placement).toEqual({
+      kind: "top",
+    });
+    expect(replayed.getState().issueAnchors["1"]?.setBySequence).toBe(3);
+  });
+
+  it("expired anchors drop from the explicit anchor read-model", async () => {
+    const orchestrator = createOrchestrator();
+    await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "short pin" },
+      anchor: {
+        placement: { kind: "top" },
+        expiry: { kind: "until_date", at: "2026-06-11T11:00:00.000Z" },
+        source: "symphonyctl",
+      },
+    });
+    expect(
+      buildRuntimeSnapshot(orchestrator.getState(), {
+        now: new Date("2026-06-11T12:00:00.000Z"),
+      }).anchors,
+    ).toEqual([]);
+  });
+
+  it("until-merged anchors are consumed by terminal journal evidence and do not resurrect on reopen", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+    const anchorResult = await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "until merged" },
+      anchor: {
+        placement: { kind: "top" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+    const terminalEntry: DispatcherRunJournalEntry = {
+      sequence: (anchorResult.sequence ?? 1) + 1,
+      idempotencyKey: "tracker_write:1:terminal:done:Done:completed",
+      timestamp: "2026-06-11T12:01:00.000Z",
+      kind: "tracker_write",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      operation: "tracker_write",
+      stage: "done",
+      attempt: null,
+      ownerId: "test-owner",
+      lease: null,
+      summary: "Move ISSUE-1 to terminal state Done.",
+      metadata: { status: "completed" },
+    };
+
+    const replayed = createOrchestrator({
+      config,
+      runJournal: [
+        ...orchestrator.getState().dispatcherRunJournal,
+        terminalEntry,
+      ],
+    });
+    expect(replayed.getState().completed.has("1")).toBe(true);
+    expect(replayed.getState().issueAnchors["1"]).toBeUndefined();
+    expect(
+      buildRuntimeSnapshot(replayed.getState(), {
+        now: new Date("2026-06-11T12:00:00.000Z"),
+      }).anchors,
+    ).toEqual([]);
+
+    // A close/reopen cycle must not reveal a consumed anchor again.
+    replayed.getState().completed.delete("1");
+    expect(
+      buildRuntimeSnapshot(replayed.getState(), {
+        now: new Date("2026-06-11T12:02:00.000Z"),
+      }).anchors,
+    ).toEqual([]);
+
+    const delayedEdit = await replayed.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below ISSUE-0 until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:00:30.000Z",
+    });
+    expect(delayedEdit.status).toBe("rejected_stale");
+    expect(delayedEdit.sequence).toBeNull();
+    expect(replayed.getState().issueAnchors["1"]).toBeUndefined();
+  });
+
+  it("service-account field edits never produce operator anchors; allowlisted operator edits do", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: ["eric@mobilyze.com"],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+
+    const service = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "eric@mobilyze.com",
+      editedAt: "2026-06-11T12:00:00.000Z",
+    });
+    expect(service.status).toBe("ignored");
+    expect(orchestrator.getState().issueAnchors["1"]).toBeUndefined();
+    expect(intentEntries(orchestrator)).toHaveLength(0);
+
+    const operator = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below ISSUE-0 until-merged",
+      editorEmail: "Operator@Mobilyze.com",
+      editedAt: "2026-06-11T12:01:00.000Z",
+    });
+    expect(operator.status).toBe("applied");
+    expect(orchestrator.getState().issueAnchors["1"]).toMatchObject({
+      placement: { kind: "below", issueIdentifier: "ISSUE-0" },
+      source: "linear_field_edit",
+      editorEmail: "operator@mobilyze.com",
+    });
+  });
+
+  it("rejects field edit values with trailing tokens after until-merged", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+
+    for (const { value, editedAt } of [
+      {
+        value: "top until-merged below ISSUE-2",
+        editedAt: "2026-06-11T12:00:00.000Z",
+      },
+      {
+        value: "above ISSUE-0 until-merged typo",
+        editedAt: "2026-06-11T12:01:00.000Z",
+      },
+    ]) {
+      const result = await orchestrator.ingestAnchorFieldEdit({
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value,
+        editorEmail: "operator@mobilyze.com",
+        editedAt,
+      });
+      expect(result.status).toBe("invalid");
+      expect(typeof result.sequence).toBe("number");
+    }
+    expect(orchestrator.getState().issueAnchors["1"]).toBeUndefined();
+    const entries = intentEntries(orchestrator);
+    expect(entries).toHaveLength(2);
+    expect(entries.map((entry) => entry.metadata.status)).toEqual([
+      "no_op",
+      "no_op",
+    ]);
+    expect(entries.map((entry) => entry.metadata.reason)).toEqual([
+      expect.objectContaining({ class: "linear_field_edit_anchor_invalid" }),
+      expect.objectContaining({ class: "linear_field_edit_anchor_invalid" }),
+    ]);
+    expect(entries.map((entry) => entry.metadata.anchorEditedAt)).toEqual([
+      "2026-06-11T12:00:00.000Z",
+      "2026-06-11T12:01:00.000Z",
+    ]);
+  });
+
+  it("invalid allowlisted field edits advance the cursor against older delayed edits", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+
+    const invalid = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged below ISSUE-2",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:05:00.000Z",
+    });
+    expect(invalid.status).toBe("invalid");
+    expect(typeof invalid.sequence).toBe("number");
+
+    const replayed = createOrchestrator({
+      config,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    const delayedAfterReplay = await replayed.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:04:00.000Z",
+    });
+    expect(delayedAfterReplay.status).toBe("rejected_stale");
+    expect(delayedAfterReplay.sequence).toBeNull();
+    expect(replayed.getState().issueAnchors["1"]).toBeUndefined();
+
+    const delayedValid = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:04:00.000Z",
+    });
+    expect(delayedValid.status).toBe("rejected_stale");
+    expect(delayedValid.sequence).toBeNull();
+    expect(orchestrator.getState().issueAnchors["1"]).toBeUndefined();
+  });
+
+  it("field edit ingestion is inert when no anchor field name is configured", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: null,
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+
+    const result = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Any Field",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:00:00.000Z",
+    });
+    expect(result.status).toBe("ignored");
+    expect(orchestrator.getState().issueAnchors["1"]).toBeUndefined();
+  });
+
+  it("field edits older than the anchor cursor are rejected stale", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+
+    const newer = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:01:00.000Z",
+    });
+    expect(newer.status).toBe("applied");
+
+    const stale = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below ISSUE-0 until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:00:00.000Z",
+    });
+    expect(stale.status).toBe("rejected_stale");
+    expect(stale.sequence).toBeNull();
+    expect(orchestrator.getState().issueAnchors["1"]?.placement).toEqual({
+      kind: "top",
+    });
+  });
+
+  it("same-value field edit no-ops advance the cursor across replay", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+
+    const first = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:01:00.000Z",
+    });
+    expect(first.status).toBe("applied");
+
+    const sameValue = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:05:00.000Z",
+    });
+    expect(sameValue.status).toBe("no_op");
+
+    const delayed = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below ISSUE-0 until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:03:00.000Z",
+    });
+    expect(delayed.status).toBe("rejected_stale");
+    expect(delayed.sequence).toBeNull();
+    expect(orchestrator.getState().issueAnchors["1"]?.placement).toEqual({
+      kind: "top",
+    });
+
+    const replayed = createOrchestrator({
+      config,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    const delayedAfterReplay = await replayed.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below ISSUE-0 until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:03:00.000Z",
+    });
+    expect(delayedAfterReplay.status).toBe("rejected_stale");
+    expect(delayedAfterReplay.sequence).toBeNull();
+    expect(replayed.getState().issueAnchors["1"]?.placement).toEqual({
+      kind: "top",
+    });
+  });
+
+  it("repeated clear field edit no-ops advance the cursor across replay", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+
+    const anchor = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:01:00.000Z",
+    });
+    expect(anchor.status).toBe("applied");
+
+    const clear = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: null,
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:05:00.000Z",
+    });
+    expect(clear.status).toBe("applied");
+    expect(orchestrator.getState().issueAnchors["1"]).toBeUndefined();
+
+    const repeatedClear = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:07:00.000Z",
+    });
+    expect(repeatedClear.status).toBe("no_op");
+
+    const delayed = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below ISSUE-0 until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:06:00.000Z",
+    });
+    expect(delayed.status).toBe("rejected_stale");
+    expect(delayed.sequence).toBeNull();
+    expect(orchestrator.getState().issueAnchors["1"]).toBeUndefined();
+
+    const replayed = createOrchestrator({
+      config,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    const delayedAfterReplay = await replayed.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below ISSUE-0 until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:06:00.000Z",
+    });
+    expect(delayedAfterReplay.status).toBe("rejected_stale");
+    expect(delayedAfterReplay.sequence).toBeNull();
+    expect(replayed.getState().issueAnchors["1"]).toBeUndefined();
+  });
+
+  it("serializes same-issue field edits so older concurrent webhooks cannot overwrite newer edits", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+
+    let flushCount = 0;
+    const firstFlush = { release: null as (() => void) | null };
+    let resolveFirstFlushStarted!: () => void;
+    const firstFlushStarted = new Promise<void>((resolve) => {
+      resolveFirstFlushStarted = resolve;
+    });
+    const writeRunJournalEntry = vi.fn(async () => {
+      flushCount += 1;
+      if (flushCount !== 1) {
+        return;
+      }
+      resolveFirstFlushStarted();
+      await new Promise<void>((resolve) => {
+        firstFlush.release = resolve;
+      });
+    });
+    const orchestrator = createOrchestrator({ config, writeRunJournalEntry });
+
+    const newer = orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:01:00.000Z",
+    });
+    await firstFlushStarted;
+
+    const older = orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below ISSUE-0 until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:00:00.000Z",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const releaseFirstFlush = firstFlush.release;
+    if (releaseFirstFlush === null) {
+      throw new Error("expected first journal flush to be pending");
+    }
+    releaseFirstFlush();
+
+    await expect(newer).resolves.toMatchObject({ status: "applied" });
+    await expect(older).resolves.toMatchObject({ status: "rejected_stale" });
+    expect(writeRunJournalEntry).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().issueAnchors["1"]?.placement).toEqual({
+      kind: "top",
+    });
+  });
+
+  it("serializes direct anchor writes before mutating live anchor state", async () => {
+    let flushCount = 0;
+    const firstFlush = { release: null as (() => void) | null };
+    let resolveFirstFlushStarted!: () => void;
+    const firstFlushStarted = new Promise<void>((resolve) => {
+      resolveFirstFlushStarted = resolve;
+    });
+    const writeRunJournalEntry = vi.fn(async () => {
+      flushCount += 1;
+      if (flushCount !== 1) {
+        return;
+      }
+      resolveFirstFlushStarted();
+      await new Promise<void>((resolve) => {
+        firstFlush.release = resolve;
+      });
+    });
+    const orchestrator = createOrchestrator({ writeRunJournalEntry });
+
+    const first = orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "first direct anchor" },
+      anchor: {
+        placement: { kind: "top" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+    await firstFlushStarted;
+
+    const second = orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "second direct anchor" },
+      anchor: {
+        placement: { kind: "below", issueIdentifier: "ISSUE-0" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(writeRunJournalEntry).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().issueAnchors["1"]?.placement).toEqual({
+      kind: "top",
+    });
+
+    const releaseFirstFlush = firstFlush.release;
+    if (releaseFirstFlush === null) {
+      throw new Error("expected first journal flush to be pending");
+    }
+    releaseFirstFlush();
+
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    expect(firstResult.status).toBe("applied");
+    expect(secondResult.status).toBe("applied");
+    expect(orchestrator.getState().issueAnchors["1"]).toMatchObject({
+      placement: { kind: "below", issueIdentifier: "ISSUE-0" },
+      setBySequence: secondResult.sequence,
+    });
+    expect(writeRunJournalEntry).toHaveBeenCalledTimes(2);
+  });
+
+  it("field edit cursors advance by source edit time, not local process time", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({
+      config,
+      now: () => new Date("2026-06-11T13:00:00.000Z"),
+    });
+
+    const first = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:01:00.000Z",
+    });
+    expect(first.status).toBe("applied");
+
+    const newer = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below ISSUE-0 until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:02:00.000Z",
+    });
+    expect(newer.status).toBe("applied");
+    expect(orchestrator.getState().issueAnchors["1"]?.placement).toEqual({
+      kind: "below",
+      issueIdentifier: "ISSUE-0",
+    });
+
+    const replayed = createOrchestrator({
+      config,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+      now: () => new Date("2026-06-11T13:00:00.000Z"),
+    });
+    const staleAfterReplay = await replayed.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:01:30.000Z",
+    });
+    expect(staleAfterReplay.status).toBe("rejected_stale");
+  });
+
+  it("direct anchor cursors use the journal timestamp fallback in live state and replay", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const moments = [
+      "2026-06-11T12:00:00.000Z",
+      "2026-06-11T12:00:00.010Z",
+      "2026-06-11T12:00:00.020Z",
+      "2026-06-11T12:00:00.030Z",
+    ];
+    let nextMoment = 0;
+    const orchestrator = createOrchestrator({
+      config,
+      now: () => {
+        const moment =
+          moments[Math.min(nextMoment++, moments.length - 1)] ??
+          "2026-06-11T12:00:00.030Z";
+        return new Date(moment);
+      },
+    });
+
+    const directAnchor = await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "direct anchor" },
+      anchor: {
+        placement: { kind: "top" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+    expect(directAnchor.status).toBe("applied");
+    const journalAfterDirectAnchor = orchestrator
+      .getState()
+      .dispatcherRunJournal.slice();
+    expect(journalAfterDirectAnchor.at(-1)?.timestamp).toBe(
+      "2026-06-11T12:00:00.020Z",
+    );
+
+    const liveEdit = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below ISSUE-0 until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:00:00.025Z",
+    });
+    expect(liveEdit.status).toBe("applied");
+
+    const replayed = createOrchestrator({
+      config,
+      runJournal: journalAfterDirectAnchor,
+      now: () => new Date("2026-06-11T12:00:00.030Z"),
+    });
+    const replayedEdit = await replayed.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below ISSUE-0 until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:00:00.025Z",
+    });
+    expect(replayedEdit.status).toBe("applied");
+  });
+
+  it("expired until-date anchors do not wall-clock-pin later field edits", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+
+    const expiredAnchor = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until 2026-06-11T11:00:00.000Z",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T10:00:00.000Z",
+    });
+    expect(expiredAnchor.status).toBe("applied");
+
+    const freshEdit = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below ISSUE-0 until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T11:30:00.000Z",
+    });
+    expect(freshEdit.status).toBe("applied");
+    expect(orchestrator.getState().issueAnchors["1"]?.placement).toEqual({
+      kind: "below",
+      issueIdentifier: "ISSUE-0",
+    });
+  });
+
+  it("stale-fenced unanchor does not lazily mutate expired anchor state", async () => {
+    const orchestrator = createOrchestrator();
+    await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "short pin" },
+      anchor: {
+        placement: { kind: "top" },
+        expiry: { kind: "until_date", at: "2026-06-11T11:00:00.000Z" },
+        source: "symphonyctl",
+      },
+    });
+
+    const stale = await orchestrator.writeIntent({
+      verb: "unanchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_unanchor", human: "stale release" },
+      fence: { expectedParkSeq: 99 },
+    });
+    expect(stale.status).toBe("rejected_stale");
+    expect(orchestrator.getState().issueAnchors["1"]).toBeDefined();
+  });
+
+  it("resume admission preserves active anchors until explicit unanchor or expiry", async () => {
+    const tracker: IssueTracker = {
+      async fetchCandidateIssues() {
+        return [createIssue({ state: "Resume" })];
+      },
+      async fetchIssuesByStates() {
+        return [];
+      },
+      async fetchIssueStatesByIds() {
+        return [{ id: "1", identifier: "ISSUE-1", state: "Resume" }];
+      },
+    };
+    const orchestrator = createOrchestrator({ tracker });
+    await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "pin resumed issue" },
+      anchor: {
+        placement: { kind: "below", issueIdentifier: "ISSUE-0" },
+        expiry: { kind: "until_date", at: "2026-06-11T13:00:00.000Z" },
+        source: "symphonyctl",
+      },
+    });
+    orchestrator.getState().failed.add("1");
+
+    await orchestrator.pollTick();
+
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().issueAnchors["1"]?.placement).toEqual({
+      kind: "below",
+      issueIdentifier: "ISSUE-0",
+    });
+  });
+
+  it("anchor input does not affect current dispatch ordering", async () => {
+    const orchestrator = createOrchestrator();
+    await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "2",
+      issueIdentifier: "ISSUE-2",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "pin newer issue" },
+      anchor: {
+        placement: { kind: "top" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+
+    const ordered = sortIssuesForDispatch([
+      createIssue({
+        id: "2",
+        identifier: "ISSUE-2",
+        createdAt: "2026-03-02T00:00:00.000Z",
+      }),
+      createIssue({
+        id: "1",
+        identifier: "ISSUE-1",
+        createdAt: "2026-03-01T00:00:00.000Z",
+      }),
+    ]);
+    expect(ordered.map((issue) => issue.identifier)).toEqual([
+      "ISSUE-1",
+      "ISSUE-2",
+    ]);
   });
 });
 
@@ -663,14 +1639,18 @@ describe("sync pause-triage continue routes through writeIntent (SYMPH-422)", ()
 // ---------------------------------------------------------------------------
 
 function createOrchestrator(overrides?: {
+  config?: ResolvedWorkflowConfig;
   postComment?: (issueId: string, body: string) => Promise<void>;
   updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
   runJournal?: OrchestratorCoreOptions["runJournal"];
   runPauseTriage?: OrchestratorCoreOptions["runPauseTriage"];
+  tracker?: IssueTracker;
+  now?: OrchestratorCoreOptions["now"];
+  writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
 }): OrchestratorCore {
   const options: OrchestratorCoreOptions = {
-    config: createConfig(),
-    tracker: createTracker(),
+    config: overrides?.config ?? createConfig(),
+    tracker: overrides?.tracker ?? createTracker(),
     spawnWorker: async () => ({
       workerHandle: { pid: 9001 },
       monitorHandle: { ref: "monitor-1" },
@@ -687,7 +1667,10 @@ function createOrchestrator(overrides?: {
     ...(overrides?.runPauseTriage !== undefined
       ? { runPauseTriage: overrides.runPauseTriage }
       : {}),
-    now: () => new Date("2026-06-11T12:00:00.000Z"),
+    ...(overrides?.writeRunJournalEntry !== undefined
+      ? { writeRunJournalEntry: overrides.writeRunJournalEntry }
+      : {}),
+    now: overrides?.now ?? (() => new Date("2026-06-11T12:00:00.000Z")),
   };
   return new OrchestratorCore(options);
 }

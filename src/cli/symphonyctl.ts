@@ -12,13 +12,25 @@ import { hostname } from "node:os";
 
 import { fileURLToPath } from "node:url";
 
-import { INTENT_VERBS, type IntentVerb } from "../orchestrator/intent.js";
+import {
+  type AnchorExpiry,
+  type AnchorPlacement,
+  INTENT_VERBS,
+  type IntentVerb,
+} from "../orchestrator/intent.js";
 
 /** Dashboard port of the symphony product's own WORKFLOW config. */
 export const DEFAULT_BASE_URL = "http://127.0.0.1:4321";
 
 export interface SymphonyctlCommand {
-  command: "state" | "intent" | "pause" | "resume" | "help";
+  command:
+    | "state"
+    | "intent"
+    | "anchor"
+    | "unanchor"
+    | "pause"
+    | "resume"
+    | "help";
   baseUrl: string;
   verb?: IntentVerb;
   issue?: string;
@@ -26,6 +38,8 @@ export interface SymphonyctlCommand {
   hint?: string;
   fence?: number;
   stage?: string;
+  anchorPlacement?: AnchorPlacement;
+  anchorExpiry?: AnchorExpiry;
 }
 
 export class SymphonyctlUsageError extends Error {}
@@ -36,6 +50,10 @@ Commands:
   state                          Pretty summary of GET /api/v1/state
   intent <verb> --issue <id> --reason <text> [--hint <text>] [--fence <seq>] [--stage <stage>]
                                  POST /api/v1/intents (verbs: ${INTENT_VERBS.join(", ")})
+  anchor <issue> (--top|--above <ref>|--below <ref>) (--until-merged|--until <date>) [--reason <text>]
+                                 POST an anchor intent with operator attribution
+  unanchor <issue> [--reason <text>]
+                                 POST an unanchor intent with operator attribution
   pause [--reason <text>]        POST /api/v1/pipeline/pause
   resume [--reason <text>]       POST /api/v1/pipeline/resume
 
@@ -50,6 +68,7 @@ export function parseSymphonyctlArgs(
 ): SymphonyctlCommand {
   const positional: string[] = [];
   const flags = new Map<string, string>();
+  const booleanFlags = new Set(["top", "until-merged"]);
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === undefined) {
@@ -59,11 +78,16 @@ export function parseSymphonyctlArgs(
       return { command: "help", baseUrl: DEFAULT_BASE_URL };
     }
     if (arg.startsWith("--")) {
+      const name = arg.slice(2);
+      if (booleanFlags.has(name)) {
+        flags.set(name, "true");
+        continue;
+      }
       const value = argv[i + 1];
       if (value === undefined || value.startsWith("--")) {
         throw new SymphonyctlUsageError(`Flag ${arg} requires a value.`);
       }
-      flags.set(arg.slice(2), value);
+      flags.set(name, value);
       i += 1;
       continue;
     }
@@ -83,6 +107,40 @@ export function parseSymphonyctlArgs(
 
   if (command === "state" || command === "pause" || command === "resume") {
     const result: SymphonyctlCommand = { command, baseUrl };
+    const reason = flags.get("reason");
+    if (reason !== undefined) {
+      result.reason = reason;
+    }
+    return result;
+  }
+
+  if (command === "anchor") {
+    const issue = positional[1];
+    if (issue === undefined) {
+      throw new SymphonyctlUsageError("anchor requires an issue identifier.");
+    }
+    const placement = parseAnchorPlacementFlags(flags);
+    const expiry = parseAnchorExpiryFlags(flags);
+    const result: SymphonyctlCommand = {
+      command: "anchor",
+      baseUrl,
+      issue,
+      anchorPlacement: placement,
+      anchorExpiry: expiry,
+    };
+    const reason = flags.get("reason");
+    if (reason !== undefined) {
+      result.reason = reason;
+    }
+    return result;
+  }
+
+  if (command === "unanchor") {
+    const issue = positional[1];
+    if (issue === undefined) {
+      throw new SymphonyctlUsageError("unanchor requires an issue identifier.");
+    }
+    const result: SymphonyctlCommand = { command: "unanchor", baseUrl, issue };
     const reason = flags.get("reason");
     if (reason !== undefined) {
       result.reason = reason;
@@ -142,6 +200,54 @@ function ctlActor(): { kind: "operator"; host: string; session: string } {
     host: label === undefined || label === "" ? hostname() : label,
     session: "symphonyctl",
   };
+}
+
+function parseAnchorPlacementFlags(
+  flags: ReadonlyMap<string, string>,
+): AnchorPlacement {
+  const top = flags.has("top");
+  const above = flags.get("above");
+  const below = flags.get("below");
+  const placementCount =
+    (top ? 1 : 0) +
+    (above === undefined ? 0 : 1) +
+    (below === undefined ? 0 : 1);
+  if (placementCount !== 1) {
+    throw new SymphonyctlUsageError(
+      "anchor requires exactly one of --top, --above <ref>, or --below <ref>.",
+    );
+  }
+  if (top) {
+    return { kind: "top" };
+  }
+  if (above !== undefined) {
+    return { kind: "above", issueIdentifier: above };
+  }
+  if (below !== undefined) {
+    return { kind: "below", issueIdentifier: below };
+  }
+  throw new SymphonyctlUsageError("anchor placement is missing.");
+}
+
+function parseAnchorExpiryFlags(
+  flags: ReadonlyMap<string, string>,
+): AnchorExpiry {
+  const untilMerged = flags.has("until-merged");
+  const until = flags.get("until");
+  const expiryCount = (untilMerged ? 1 : 0) + (until === undefined ? 0 : 1);
+  if (expiryCount !== 1) {
+    throw new SymphonyctlUsageError(
+      "anchor requires exactly one of --until-merged or --until <date>.",
+    );
+  }
+  if (untilMerged) {
+    return { kind: "until_merged" };
+  }
+  const parsed = new Date(until ?? "");
+  if (Number.isNaN(parsed.valueOf())) {
+    throw new SymphonyctlUsageError("--until must be a parseable date.");
+  }
+  return { kind: "until_date", at: parsed.toISOString() };
 }
 
 /** Only a full UUID is treated as an issue id; anything else (e.g. SYMPH-123) is an identifier. */
@@ -207,10 +313,79 @@ export function formatStateSummary(snapshot: Record<string, unknown>): string {
       lines.push(`  ${issueId} ${reason}`.trimEnd());
     }
   }
+  const anchors = snapshot.anchors;
+  if (Array.isArray(anchors) && anchors.length > 0) {
+    lines.push("anchors:");
+    for (const anchor of anchors as Array<Record<string, unknown>>) {
+      const issue = String(
+        anchor.issue_identifier ?? anchor.issue_id ?? "unknown",
+      );
+      lines.push(
+        `  ${issue} ${formatSnapshotAnchorPlacement(anchor.placement)} ${formatSnapshotAnchorExpiry(anchor.expiry)} — ${formatSnapshotAnchorProvenance(anchor)}`,
+      );
+    }
+  }
   if (lines.length === 0) {
     lines.push("(no runtime activity)");
   }
   return lines.join("\n");
+}
+
+function formatSnapshotAnchorPlacement(value: unknown): string {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return "top";
+  }
+  const record = value as Record<string, unknown>;
+  const kind =
+    record.kind === "above" || record.kind === "below" ? record.kind : "top";
+  return kind === "top"
+    ? "top"
+    : `${kind} ${String(record.issue_identifier ?? "unknown")}`;
+}
+
+function formatSnapshotAnchorExpiry(value: unknown): string {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return "until merged";
+  }
+  const record = value as Record<string, unknown>;
+  return record.kind === "until_date"
+    ? `until ${String(record.at ?? "unknown")}`
+    : "until merged";
+}
+
+function formatSnapshotAnchorProvenance(
+  anchor: Record<string, unknown>,
+): string {
+  const provenance =
+    anchor.provenance !== null &&
+    typeof anchor.provenance === "object" &&
+    !Array.isArray(anchor.provenance)
+      ? (anchor.provenance as Record<string, unknown>)
+      : {};
+  const actor =
+    provenance.actor !== null &&
+    typeof provenance.actor === "object" &&
+    !Array.isArray(provenance.actor)
+      ? (provenance.actor as Record<string, unknown>)
+      : {};
+  const actorLabel = `${String(actor.kind ?? "unknown")}@${String(
+    actor.host ?? "unknown",
+  )}${actor.session === undefined || actor.session === null ? "" : `#${String(actor.session)}`}`;
+  const reason =
+    provenance.reason !== null &&
+    typeof provenance.reason === "object" &&
+    !Array.isArray(provenance.reason)
+      ? (provenance.reason as Record<string, unknown>)
+      : {};
+  return [
+    actorLabel,
+    String(provenance.source ?? "unknown"),
+    provenance.editor_email,
+    provenance.field_name,
+    reason.human,
+  ]
+    .filter((value) => typeof value === "string" && value.length > 0)
+    .join(" · ");
 }
 
 export async function runSymphonyctl(
@@ -242,6 +417,33 @@ export async function runSymphonyctl(
       {
         actor: ctlActor(),
         reason: parsed.reason ?? `pipeline ${parsed.command} via symphonyctl`,
+      },
+    );
+    log(JSON.stringify(payload, null, 2));
+    return status === 200 ? 0 : 1;
+  }
+
+  if (parsed.command === "anchor" || parsed.command === "unanchor") {
+    const isAnchor = parsed.command === "anchor";
+    const { status, payload } = await httpJson(
+      "POST",
+      `${parsed.baseUrl}/api/v1/intents`,
+      {
+        verb: parsed.command,
+        ...issueBody(parsed.issue ?? ""),
+        reason:
+          parsed.reason ??
+          `${parsed.command} ${parsed.issue ?? "issue"} via symphonyctl`,
+        actor: ctlActor(),
+        ...(isAnchor
+          ? {
+              anchor: {
+                placement: parsed.anchorPlacement,
+                expiry: parsed.anchorExpiry,
+                source: "symphonyctl",
+              },
+            }
+          : {}),
       },
     );
     log(JSON.stringify(payload, null, 2));

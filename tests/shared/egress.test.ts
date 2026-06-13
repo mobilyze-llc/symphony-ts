@@ -77,6 +77,21 @@ describe("sanitizeForLinear", () => {
     expect(sanitizeForLinear("MY_SECRET=abc and apikey=def")).toBe(
       "MY_SECRET=[REDACTED] and apikey=[REDACTED]",
     );
+    expect(sanitizeForLinear("spawn failed: token=tok_123 <runaway>")).toBe(
+      "spawn failed: token=[REDACTED] <runaway>",
+    );
+    expect(sanitizeForLinear("api_key=abc==")).toBe("api_key=[REDACTED]");
+    expect(sanitizeForLinear('password="p=q"')).toBe('password="[REDACTED]"');
+    expect(sanitizeForLinear("secret=aGVsbG8=")).toBe("secret=[REDACTED]");
+    expect(sanitizeForLinear("token=tok_123&foo=1")).toBe("token=[REDACTED]");
+  });
+
+  it("keeps credential assignment scanning linear on repeated key text", () => {
+    const repeatedKey = `${"token".repeat(2500)}=secret-value`;
+    expect(sanitizeForLinear(repeatedKey, { maxLen: 20_000 })).toBe(
+      `${"token".repeat(2500)}=[REDACTED]`,
+    );
+    expect(sanitizeForLinear("ordinary_key=value")).toBe("ordinary_key=value");
   });
 
   it("preserves git SHAs and sha256 digests — diagnostic identifiers, not secrets", () => {

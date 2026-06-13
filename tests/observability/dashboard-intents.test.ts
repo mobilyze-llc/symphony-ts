@@ -15,6 +15,8 @@ import type {
 import type { Issue } from "../../src/domain/model.js";
 import type { RuntimeSnapshot } from "../../src/logging/runtime-snapshot.js";
 import {
+  type AnchorFieldEditRequest,
+  type AnchorFieldEditResult,
   type DashboardServerHost,
   type IntentRequest,
   type IntentRequestResult,
@@ -71,6 +73,20 @@ describe("POST /api/v1/intents", () => {
     });
     expect(response.statusCode).toBe(400);
     expect(JSON.parse(response.body).error.code).toBe("invalid_request");
+  });
+
+  it("requires anchor details for the anchor verb", async () => {
+    const server = await startServer({
+      requestIntent: () => appliedResult(),
+    });
+    const response = await postIntent(server.port, {
+      ...validBody(),
+      verb: "anchor",
+    });
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error.message).toContain(
+      "anchor placement",
+    );
   });
 
   it("rejects a body without issueId or issueIdentifier with 400", async () => {
@@ -137,6 +153,77 @@ describe("POST /api/v1/intents", () => {
         stage: "review",
       },
     ]);
+  });
+
+  it("passes validated anchor payloads to the host", async () => {
+    const received: IntentRequest[] = [];
+    const server = await startServer({
+      requestIntent: (input) => {
+        received.push(input);
+        return { ...appliedResult(), verb: "anchor" };
+      },
+    });
+
+    const response = await postIntent(server.port, {
+      verb: "anchor",
+      issueIdentifier: "SYMPH-1",
+      reason: "pin this one",
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      anchor: {
+        placement: { kind: "above", issueIdentifier: "SYMPH-0" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(received[0]?.anchor).toEqual({
+      placement: { kind: "above", issueIdentifier: "SYMPH-0" },
+      expiry: { kind: "until_merged" },
+      source: "symphonyctl",
+      fieldName: null,
+      editorEmail: null,
+    });
+  });
+
+  it("rejects Linear field-edit provenance on the generic intent endpoint", async () => {
+    const received: IntentRequest[] = [];
+    const server = await startServer({
+      requestIntent: (input) => {
+        received.push(input);
+        return { ...appliedResult(), verb: "anchor" };
+      },
+    });
+
+    const forgedSource = await postIntent(server.port, {
+      verb: "anchor",
+      issueIdentifier: "SYMPH-1",
+      reason: "pin this one",
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      anchor: {
+        placement: { kind: "top" },
+        expiry: { kind: "until_merged" },
+        source: "linear_field_edit",
+        fieldName: "Queue Anchor",
+        editorEmail: "operator@mobilyze.com",
+      },
+    });
+    expect(forgedSource.statusCode).toBe(400);
+
+    const forgedFields = await postIntent(server.port, {
+      verb: "anchor",
+      issueIdentifier: "SYMPH-1",
+      reason: "pin this one",
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      anchor: {
+        placement: { kind: "top" },
+        expiry: { kind: "until_merged" },
+        source: "api",
+        fieldName: "Queue Anchor",
+        editorEmail: "operator@mobilyze.com",
+      },
+    });
+    expect(forgedFields.statusCode).toBe(400);
+    expect(received).toHaveLength(0);
   });
 
   it("maps rejected_stale to 409", async () => {
@@ -330,6 +417,336 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
   });
 });
 
+describe("POST /api/v1/anchor-field-edits", () => {
+  const servers: Array<{ close: () => Promise<void> }> = [];
+
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((server) => server.close()));
+  });
+
+  it("returns 501 when the host does not support anchor field edits", async () => {
+    const server = await startDashboardServer({
+      port: 0,
+      anchorFieldEditSecret: "shared-secret",
+      host: createHost(),
+    });
+    servers.push(server);
+
+    const response = await postAnchorFieldEdit(
+      server.port,
+      {
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value: "top until-merged",
+        editorEmail: "operator@mobilyze.com",
+        editedAt: "2026-06-12T12:00:00.000Z",
+      },
+      {
+        secret: "shared-secret",
+      },
+    );
+    expect(response.statusCode).toBe(501);
+  });
+
+  it("passes validated field edits to the host", async () => {
+    const received: AnchorFieldEditRequest[] = [];
+    const server = await startDashboardServer({
+      port: 0,
+      anchorFieldEditSecret: "shared-secret",
+      host: createHost({
+        requestAnchorFieldEdit: (input) => {
+          received.push(input);
+          return anchorFieldEditResult({ status: "ignored" });
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await postAnchorFieldEdit(
+      server.port,
+      {
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value: null,
+        editorEmail: "operator@mobilyze.com",
+        editedAt: "2026-06-12T12:00:00.000Z",
+      },
+      {
+        secret: "shared-secret",
+      },
+    );
+    expect(response.statusCode).toBe(200);
+    expect(received).toEqual([
+      {
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value: null,
+        editorEmail: "operator@mobilyze.com",
+        editedAt: "2026-06-12T12:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("rejects field edits that omit value instead of treating them as clears", async () => {
+    const received: AnchorFieldEditRequest[] = [];
+    const server = await startDashboardServer({
+      port: 0,
+      anchorFieldEditSecret: "shared-secret",
+      host: createHost({
+        requestAnchorFieldEdit: (input) => {
+          received.push(input);
+          return anchorFieldEditResult({ status: "applied" });
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await postAnchorFieldEdit(
+      server.port,
+      {
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        editorEmail: "operator@mobilyze.com",
+        editedAt: "2026-06-12T12:00:00.000Z",
+      },
+      {
+        secret: "shared-secret",
+      },
+    );
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error.code).toBe("invalid_request");
+    expect(received).toEqual([]);
+  });
+
+  it("rejects field edits without the configured ingress secret before calling the host", async () => {
+    const received: AnchorFieldEditRequest[] = [];
+    const server = await startDashboardServer({
+      port: 0,
+      anchorFieldEditSecret: "shared-secret",
+      host: createHost({
+        requestAnchorFieldEdit: (input) => {
+          received.push(input);
+          return anchorFieldEditResult({ status: "applied" });
+        },
+      }),
+    });
+    servers.push(server);
+
+    const missing = await postAnchorFieldEdit(server.port, {
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-12T12:00:00.000Z",
+    });
+    expect(missing.statusCode).toBe(403);
+
+    const wrong = await postAnchorFieldEdit(
+      server.port,
+      {
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value: "top until-merged",
+        editorEmail: "operator@mobilyze.com",
+        editedAt: "2026-06-12T12:00:00.000Z",
+      },
+      {
+        secret: "wrong-secret",
+      },
+    );
+    expect(wrong.statusCode).toBe(403);
+    expect(received).toEqual([]);
+  });
+
+  it("rejects unauthenticated field edits before host and content-type distinctions", async () => {
+    const server = await startDashboardServer({
+      port: 0,
+      anchorFieldEditSecret: "shared-secret",
+      host: createHost(),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/anchor-field-edits",
+      body: JSON.stringify({
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value: "top until-merged",
+        editorEmail: "operator@mobilyze.com",
+        editedAt: "2026-06-12T12:00:00.000Z",
+      }),
+    });
+    expect(response.statusCode).toBe(403);
+  });
+
+  it("routes allowlisted field edits through the anchor ingestion primitive and leaves service-account edits inert", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: ["agent@mobilyze.com"],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+    const server = await startDashboardServer({
+      port: 0,
+      anchorFieldEditSecret: "shared-secret",
+      host: createHost({
+        requestAnchorFieldEdit: async (input) => {
+          const result = await orchestrator.ingestAnchorFieldEdit({
+            issueId: input.issueId ?? "1",
+            issueIdentifier: input.issueIdentifier ?? "ISSUE-1",
+            fieldName: input.fieldName,
+            value: input.value,
+            editorEmail: input.editorEmail,
+            editedAt: input.editedAt,
+          });
+          return anchorFieldEditResult({
+            status: result.status,
+            detail: result.detail,
+            sequence: result.sequence,
+          });
+        },
+      }),
+    });
+    servers.push(server);
+
+    const service = await postAnchorFieldEdit(
+      server.port,
+      {
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value: "top until-merged",
+        editorEmail: "agent@mobilyze.com",
+        editedAt: "2026-06-12T12:00:00.000Z",
+      },
+      {
+        secret: "shared-secret",
+      },
+    );
+    expect(service.statusCode).toBe(200);
+    expect(JSON.parse(service.body).status).toBe("ignored");
+    expect(orchestrator.getState().issueAnchors["1"]).toBeUndefined();
+
+    const operator = await postAnchorFieldEdit(
+      server.port,
+      {
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value: "below ISSUE-0 until-merged",
+        editorEmail: "operator@mobilyze.com",
+        editedAt: "2026-06-12T12:01:00.000Z",
+      },
+      {
+        secret: "shared-secret",
+      },
+    );
+    expect(operator.statusCode).toBe(200);
+    expect(JSON.parse(operator.body).status).toBe("applied");
+    expect(orchestrator.getState().issueAnchors["1"]).toMatchObject({
+      placement: { kind: "below", issueIdentifier: "ISSUE-0" },
+      source: "linear_field_edit",
+      editorEmail: "operator@mobilyze.com",
+    });
+  });
+
+  it("maps stale field edits to 409 through the runtime ingestion path", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+    const server = await startDashboardServer({
+      port: 0,
+      anchorFieldEditSecret: "shared-secret",
+      host: createHost({
+        requestAnchorFieldEdit: async (input) => {
+          const result = await orchestrator.ingestAnchorFieldEdit({
+            issueId: input.issueId ?? "1",
+            issueIdentifier: input.issueIdentifier ?? "ISSUE-1",
+            fieldName: input.fieldName,
+            value: input.value,
+            editorEmail: input.editorEmail,
+            editedAt: input.editedAt,
+          });
+          return anchorFieldEditResult({
+            status: result.status,
+            detail: result.detail,
+            sequence: result.sequence,
+          });
+        },
+      }),
+    });
+    servers.push(server);
+
+    const first = await postAnchorFieldEdit(
+      server.port,
+      {
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value: "top until-merged",
+        editorEmail: "operator@mobilyze.com",
+        editedAt: "2026-06-12T12:01:00.000Z",
+      },
+      {
+        secret: "shared-secret",
+      },
+    );
+    expect(first.statusCode).toBe(200);
+    expect(JSON.parse(first.body).status).toBe("applied");
+
+    const stale = await postAnchorFieldEdit(
+      server.port,
+      {
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value: "below ISSUE-0 until-merged",
+        editorEmail: "operator@mobilyze.com",
+        editedAt: "2026-06-12T12:00:00.000Z",
+      },
+      {
+        secret: "shared-secret",
+      },
+    );
+    expect(stale.statusCode).toBe(409);
+    expect(JSON.parse(stale.body).status).toBe("rejected_stale");
+  });
+
+  it("rejects field edits without JSON content-type before calling the host", async () => {
+    const received: AnchorFieldEditRequest[] = [];
+    const server = await startDashboardServer({
+      port: 0,
+      anchorFieldEditSecret: "shared-secret",
+      host: createHost({
+        requestAnchorFieldEdit: (input) => {
+          received.push(input);
+          return anchorFieldEditResult({ status: "ignored" });
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/anchor-field-edits",
+      body: JSON.stringify({
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value: "top until-merged",
+        editorEmail: "operator@mobilyze.com",
+        editedAt: "2026-06-12T12:00:00.000Z",
+      }),
+      headers: { "x-symphony-anchor-secret": "shared-secret" },
+    });
+    expect(response.statusCode).toBe(415);
+    expect(received).toHaveLength(0);
+  });
+});
+
 describe("indistinguishable journal entries AC (SYMPH-408)", () => {
   const servers: Array<{ close: () => Promise<void> }> = [];
 
@@ -452,12 +869,43 @@ function appliedResult(): IntentRequestResult {
   };
 }
 
+function anchorFieldEditResult(
+  overrides?: Partial<AnchorFieldEditResult>,
+): AnchorFieldEditResult {
+  return {
+    status: "ignored",
+    detail: "service-account field edit is advisory only",
+    sequence: null,
+    issue_id: "1",
+    issue_identifier: "ISSUE-1",
+    ...overrides,
+  };
+}
+
 function postIntent(port: number, body: unknown) {
   return sendRequest(port, {
     method: "POST",
     path: "/api/v1/intents",
     body: JSON.stringify(body),
     headers: { "content-type": "application/json" },
+  });
+}
+
+function postAnchorFieldEdit(
+  port: number,
+  body: unknown,
+  options?: { secret?: string },
+) {
+  return sendRequest(port, {
+    method: "POST",
+    path: "/api/v1/anchor-field-edits",
+    body: JSON.stringify(body),
+    headers: {
+      "content-type": "application/json",
+      ...(options?.secret === undefined
+        ? {}
+        : { "x-symphony-anchor-secret": options.secret }),
+    },
   });
 }
 
@@ -483,6 +931,7 @@ function createSnapshot(): RuntimeSnapshot {
     counts: { running: 0, retrying: 0, completed: 0, failed: 0 },
     running: [],
     retrying: [],
+    anchors: [],
     codex_totals: {
       input_tokens: 0,
       output_tokens: 0,
@@ -547,7 +996,9 @@ function sendRequest(
 
 // Orchestrator harness (mirrors tests/orchestrator/write-intent.test.ts).
 
-function createOrchestrator(): OrchestratorCore {
+function createOrchestrator(
+  overrides?: Partial<OrchestratorCoreOptions>,
+): OrchestratorCore {
   const options: OrchestratorCoreOptions = {
     config: createConfig(),
     tracker: createTracker(),
@@ -556,6 +1007,7 @@ function createOrchestrator(): OrchestratorCore {
       monitorHandle: { ref: "monitor-1" },
     }),
     now: () => new Date("2026-06-12T12:00:00.000Z"),
+    ...overrides,
   };
   return new OrchestratorCore(options);
 }

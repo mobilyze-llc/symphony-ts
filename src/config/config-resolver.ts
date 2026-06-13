@@ -10,6 +10,7 @@ import {
   normalizeIssueState,
 } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
+import { normalizeAccountEmail } from "../shared/account-email.js";
 import {
   checkConfigContracts,
   formatContractViolations,
@@ -113,6 +114,7 @@ export function resolveWorkflowConfig(
   const acGate = asRecord(config.ac_gate);
   const specFidelity = asRecord(config.spec_fidelity);
   const admissionCard = asRecord(config.admission_card);
+  const operatorAnchors = asRecord(config.operator_anchors);
   const watchdog = asRecord(config.watchdog);
   const verdicts = asRecord(config.verdicts);
   const runner = asRecord(config.runner);
@@ -259,6 +261,20 @@ export function resolveWorkflowConfig(
     },
     admissionCard: {
       enabled: admissionCard.enabled === true,
+    },
+    operatorAnchors: {
+      operatorAllowlist: readStringList(
+        operatorAnchors.operator_allowlist,
+        [],
+      ).map(normalizeAccountEmail),
+      serviceAccounts: readStringList(operatorAnchors.service_accounts, []).map(
+        normalizeAccountEmail,
+      ),
+      fieldName: readString(operatorAnchors.field_name),
+      ingestSecret: resolveEnvReference(
+        readString(operatorAnchors.ingest_secret),
+        environment,
+      ),
     },
     watchdog: {
       systemicThreshold:

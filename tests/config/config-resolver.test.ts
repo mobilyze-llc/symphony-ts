@@ -130,6 +130,39 @@ describe("config-resolver", () => {
       DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
     );
     expect(resolved.server.slackNotifyChannel).toBeNull();
+    expect(resolved.operatorAnchors).toEqual({
+      operatorAllowlist: [],
+      serviceAccounts: [],
+      fieldName: null,
+      ingestSecret: null,
+    });
+  });
+
+  it("resolves operator anchor ingestion config with normalized account emails", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          operator_anchors: {
+            operator_allowlist: ["Operator@Mobilyze.com"],
+            service_accounts: "Eric@Mobilyze.com, worker@mobilyze.com",
+            field_name: "Queue Anchor",
+            ingest_secret: "$ANCHOR_INGEST_SECRET",
+          },
+        },
+      },
+      {
+        ANCHOR_INGEST_SECRET: "shared-secret",
+      },
+    );
+
+    expect(resolved.operatorAnchors).toEqual({
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: ["eric@mobilyze.com", "worker@mobilyze.com"],
+      fieldName: "Queue Anchor",
+      ingestSecret: "shared-secret",
+    });
   });
 
   it("coerces env-backed fields, path-like roots, and state limits", () => {

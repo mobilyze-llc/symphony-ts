@@ -35,6 +35,8 @@ export const INTENT_SCHEMA_VERSION = 1;
 export const INTENT_VERBS = [
   "park",
   "release",
+  "anchor",
+  "unanchor",
   "halt",
   "retry_once",
   "rework_with_hint",
@@ -121,6 +123,26 @@ export interface IntentWriteResult {
   detail: string;
   /** Journal sequence of the recorded intent event, when one was written. */
   sequence: number | null;
+}
+
+export const ANCHOR_PLACEMENT_KINDS = ["top", "above", "below"] as const;
+
+export type AnchorPlacementKind = (typeof ANCHOR_PLACEMENT_KINDS)[number];
+
+export type AnchorPlacement =
+  | { kind: "top" }
+  | { kind: "above" | "below"; issueIdentifier: string };
+
+export type AnchorExpiry =
+  | { kind: "until_merged" }
+  | { kind: "until_date"; at: string };
+
+export interface AnchorIntentPayload {
+  placement: AnchorPlacement;
+  expiry: AnchorExpiry;
+  source: "symphonyctl" | "api" | "linear_field_edit";
+  fieldName?: string | null;
+  editorEmail?: string | null;
 }
 
 /**

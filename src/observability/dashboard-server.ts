@@ -3,6 +3,7 @@ import {
   execFile as execFileCb,
   spawn,
 } from "node:child_process";
+import { timingSafeEqual } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import {
   type IncomingMessage,
@@ -35,6 +36,7 @@ import {
 // that routes the orchestrator's intent-verb layer (SYMPH-408; enforced by
 // tests/observability/dashboard-no-bypass.test.ts).
 import {
+  type AnchorIntentPayload,
   INTENT_ACTOR_KINDS,
   INTENT_VERBS,
   type IntentActor,
@@ -219,6 +221,7 @@ export interface IntentRequest {
   fence?: IntentFence;
   hint?: string;
   stage?: string;
+  anchor?: AnchorIntentPayload;
 }
 
 export interface IntentRequestResult {
@@ -226,6 +229,36 @@ export interface IntentRequestResult {
   detail: string;
   sequence: number | null;
   verb: IntentVerb;
+  issue_id: string | null;
+  issue_identifier: string | null;
+}
+
+/**
+ * Validated body of POST /api/v1/anchor-field-edits (SYMPH-486). This is the
+ * production ingress for Linear field-edit events: the dashboard validates the
+ * event envelope, then the runtime host resolves the issue and routes through
+ * the anchor field-edit ingestion path.
+ */
+export interface AnchorFieldEditRequest {
+  issueId?: string;
+  issueIdentifier?: string;
+  fieldName: string;
+  value: string | null;
+  editorEmail: string;
+  editedAt: string;
+}
+
+export interface AnchorFieldEditResult {
+  status:
+    | "applied"
+    | "no_op"
+    | "rejected_stale"
+    | "ignored"
+    | "invalid"
+    | "issue_not_found"
+    | "invalid_request";
+  detail: string;
+  sequence: number | null;
   issue_id: string | null;
   issue_identifier: string | null;
 }
@@ -262,6 +295,9 @@ export interface DashboardServerHost {
   requestIntent?(
     input: IntentRequest,
   ): IntentRequestResult | Promise<IntentRequestResult>;
+  requestAnchorFieldEdit?(
+    input: AnchorFieldEditRequest,
+  ): AnchorFieldEditResult | Promise<AnchorFieldEditResult>;
   requestPipelinePause?(
     context?: PipelineControlContext,
   ): PipelineStatusResponse | Promise<PipelineStatusResponse>;
@@ -279,6 +315,34 @@ const intentActorSchema = z.object({
   session: z.string().min(1).max(256).optional(),
 });
 
+const anchorPlacementSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("top") }),
+  z.object({
+    kind: z.literal("above"),
+    issueIdentifier: z.string().min(1).max(256),
+  }),
+  z.object({
+    kind: z.literal("below"),
+    issueIdentifier: z.string().min(1).max(256),
+  }),
+]);
+
+const anchorExpirySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("until_merged") }),
+  z.object({
+    kind: z.literal("until_date"),
+    at: z.string().datetime(),
+  }),
+]);
+
+const anchorRequestSchema = z
+  .object({
+    placement: anchorPlacementSchema,
+    expiry: anchorExpirySchema,
+    source: z.enum(["symphonyctl", "api"]).default("api"),
+  })
+  .strict();
+
 const intentRequestSchema = z
   .object({
     verb: z.enum(INTENT_VERBS),
@@ -291,6 +355,7 @@ const intentRequestSchema = z
       .optional(),
     hint: z.string().min(1).max(1024).optional(),
     stage: z.string().min(1).max(1024).optional(),
+    anchor: anchorRequestSchema.optional(),
   })
   .refine(
     (value) =>
@@ -304,6 +369,33 @@ const intentRequestSchema = z
     {
       message:
         "The pipeline sentinel is not an addressable issue; use the pipeline pause/resume endpoints.",
+    },
+  )
+  .refine((value) => value.verb !== "anchor" || value.anchor !== undefined, {
+    message: "anchor intent requires anchor placement and expiry.",
+  });
+
+const anchorFieldEditRequestSchema = z
+  .object({
+    issueId: z.string().min(1).max(256).optional(),
+    issueIdentifier: z.string().min(1).max(256).optional(),
+    fieldName: z.string().min(1).max(256),
+    value: z.string().max(2048).nullable(),
+    editorEmail: z.string().min(1).max(320),
+    editedAt: z.string().datetime(),
+  })
+  .refine(
+    (value) =>
+      value.issueId !== undefined || value.issueIdentifier !== undefined,
+    { message: "Either issueId or issueIdentifier is required." },
+  )
+  .refine(
+    (value) =>
+      !isPipelineSentinelValue(value.issueId) &&
+      !isPipelineSentinelValue(value.issueIdentifier),
+    {
+      message:
+        "The pipeline sentinel is not an addressable issue; field edits must target a real issue.",
     },
   );
 
@@ -332,6 +424,27 @@ function hasJsonContentType(request: IncomingMessage): boolean {
     return false;
   }
   return header.split(";")[0]?.trim().toLowerCase() === "application/json";
+}
+
+function isAuthorizedAnchorFieldEditRequest(
+  request: IncomingMessage,
+  configuredSecret: string | null,
+): boolean {
+  if (configuredSecret === null || configuredSecret.trim() === "") {
+    return false;
+  }
+  const suppliedHeader = request.headers["x-symphony-anchor-secret"];
+  const suppliedSecret = Array.isArray(suppliedHeader)
+    ? suppliedHeader[0]
+    : suppliedHeader;
+  if (typeof suppliedSecret !== "string") {
+    return false;
+  }
+  const expected = Buffer.from(configuredSecret);
+  const supplied = Buffer.from(suppliedSecret);
+  return (
+    expected.length === supplied.length && timingSafeEqual(expected, supplied)
+  );
 }
 
 function writeUnsupportedMediaType(response: ServerResponse): void {
@@ -371,6 +484,32 @@ function toIntentRequest(
     ...(data.fence === undefined ? {} : { fence: data.fence }),
     ...(data.hint === undefined ? {} : { hint: data.hint }),
     ...(data.stage === undefined ? {} : { stage: data.stage }),
+    ...(data.anchor === undefined
+      ? {}
+      : {
+          anchor: {
+            placement: data.anchor.placement,
+            expiry: data.anchor.expiry,
+            source: data.anchor.source,
+            fieldName: null,
+            editorEmail: null,
+          },
+        }),
+  };
+}
+
+function toAnchorFieldEditRequest(
+  data: z.infer<typeof anchorFieldEditRequestSchema>,
+): AnchorFieldEditRequest {
+  return {
+    ...(data.issueId === undefined ? {} : { issueId: data.issueId }),
+    ...(data.issueIdentifier === undefined
+      ? {}
+      : { issueIdentifier: data.issueIdentifier }),
+    fieldName: data.fieldName,
+    value: data.value ?? null,
+    editorEmail: data.editorEmail,
+    editedAt: data.editedAt,
   };
 }
 
@@ -405,6 +544,7 @@ export interface DashboardServerOptions {
   refreshMs?: number;
   renderIntervalMs?: number;
   liveUpdatesEnabled?: boolean;
+  anchorFieldEditSecret?: string | null;
   /** GitHub repo slug (e.g. "org/repo"). Falls back to REPO_URL env var. */
   githubRepoSlug?: string;
   /** Injectable gh CLI executor for testing. Defaults to child_process.execFile("gh", ...). */
@@ -538,7 +678,7 @@ export function createDashboardRequestHandler(
       response.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
       response.setHeader(
         "access-control-allow-headers",
-        "Content-Type, Authorization",
+        "Content-Type, Authorization, X-Symphony-Anchor-Secret",
       );
 
       // Handle CORS preflight
@@ -892,6 +1032,78 @@ export function createDashboardRequestHandler(
           result.status === "issue_not_found"
             ? 404
             : result.status === "invalid_request"
+              ? 400
+              : result.status === "rejected_stale"
+                ? 409
+                : 200;
+        writeJson(response, statusCode, result);
+        return;
+      }
+
+      if (url.pathname === "/api/v1/anchor-field-edits") {
+        if (method !== "POST") {
+          writeMethodNotAllowed(response, ["POST"]);
+          return;
+        }
+
+        if (
+          !isAuthorizedAnchorFieldEditRequest(
+            request,
+            options.anchorFieldEditSecret ?? null,
+          )
+        ) {
+          writeJsonError(response, 403, "forbidden", {
+            message:
+              "Anchor field-edit ingestion requires the configured ingress secret.",
+          });
+          return;
+        }
+
+        if (options.host.requestAnchorFieldEdit === undefined) {
+          writeJsonError(response, 501, "not_implemented", {
+            message:
+              "Anchor field-edit ingestion is not supported by this host.",
+          });
+          return;
+        }
+
+        if (!hasJsonContentType(request)) {
+          writeUnsupportedMediaType(response);
+          return;
+        }
+
+        const rawBody = await readRequestBodyText(request);
+        let parsedBody: unknown;
+        try {
+          parsedBody = parseJsonBody(rawBody);
+        } catch {
+          writeJsonError(response, 400, "invalid_request", {
+            message: "Request body is not valid JSON.",
+          });
+          return;
+        }
+
+        const parsed = anchorFieldEditRequestSchema.safeParse(parsedBody);
+        if (!parsed.success) {
+          writeJsonError(response, 400, "invalid_request", {
+            message: parsed.error.issues
+              .map((issue) =>
+                issue.path.length > 0
+                  ? `${issue.path.join(".")}: ${issue.message}`
+                  : issue.message,
+              )
+              .join("; "),
+          });
+          return;
+        }
+
+        const result = await options.host.requestAnchorFieldEdit(
+          toAnchorFieldEditRequest(parsed.data),
+        );
+        const statusCode =
+          result.status === "issue_not_found"
+            ? 404
+            : result.status === "invalid_request" || result.status === "invalid"
               ? 400
               : result.status === "rejected_stale"
                 ? 409
