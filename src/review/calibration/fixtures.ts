@@ -153,6 +153,7 @@ export interface ReviewCalibrationFutureRefHygiene {
 export interface ReviewCalibrationReplayMetadata {
   kind: "historical_symphony_placeholder" | "targeted_convergence";
   status: "metadata_only" | "fixture_ready";
+  requiredSourceRefIds?: string[];
   expectedEventShape: ReviewCalibrationReplayEventShape;
 }
 
@@ -361,6 +362,8 @@ function validateFixture(
     validateHistoricalSourceRefs(
       value.sourceRefs,
       `${path}.sourceRefs`,
+      value.replay,
+      `${path}.replay`,
       addError,
     );
     if (!isRecord(value.replay)) {
@@ -481,25 +484,35 @@ function validateSourceRefs(
 }
 
 function validateHistoricalSourceRefs(
-  value: unknown,
-  path: string,
+  sourceRefs: unknown,
+  sourceRefsPath: string,
+  replay: unknown,
+  replayPath: string,
   addError: (path: string, message: string) => void,
 ): void {
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(sourceRefs) || !isRecord(replay)) {
     return;
   }
   const ids = new Set(
-    value
+    sourceRefs
       .filter(isRecord)
       .map((sourceRef) => sourceRef.id)
       .filter((id): id is string => typeof id === "string"),
   );
-  if (!ids.has("SYMPH-440")) {
-    addError(path, "historical replay fixtures must reference SYMPH-440");
+  for (const requiredId of stringArrayValues(replay.requiredSourceRefIds)) {
+    if (!ids.has(requiredId)) {
+      addError(
+        sourceRefsPath,
+        `must include required historical source ref ${requiredId}`,
+      );
+    }
   }
-  if (!ids.has("PR #392")) {
-    addError(path, "historical replay fixtures must reference PR #392");
-  }
+  validateStringArray(
+    replay.requiredSourceRefIds,
+    `${replayPath}.requiredSourceRefIds`,
+    addError,
+    { allowEmpty: false },
+  );
 }
 
 function validateFutureRefHygiene(
@@ -769,10 +782,21 @@ function findOwnKeyPathDeep(
   value: unknown,
   field: string,
   path: string,
+  seen: WeakSet<object> = new WeakSet(),
 ): string | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  if (seen.has(value)) {
+    return null;
+  }
+  seen.add(value);
+  if (Object.hasOwn(value, field)) {
+    return `${path}.${field}`;
+  }
   if (Array.isArray(value)) {
     for (const [index, item] of value.entries()) {
-      const found = findOwnKeyPathDeep(item, field, `${path}[${index}]`);
+      const found = findOwnKeyPathDeep(item, field, `${path}[${index}]`, seen);
       if (found !== null) {
         return found;
       }
@@ -782,11 +806,8 @@ function findOwnKeyPathDeep(
   if (!isRecord(value)) {
     return null;
   }
-  if (Object.hasOwn(value, field)) {
-    return `${path}.${field}`;
-  }
   for (const [key, item] of Object.entries(value)) {
-    const found = findOwnKeyPathDeep(item, field, `${path}.${key}`);
+    const found = findOwnKeyPathDeep(item, field, `${path}.${key}`, seen);
     if (found !== null) {
       return found;
     }

@@ -199,6 +199,7 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
     expect(historical.replay).toMatchObject({
       kind: "historical_symphony_placeholder",
       status: "metadata_only",
+      requiredSourceRefIds: ["SYMPH-440", "PR #392"],
       expectedEventShape: {
         eventName: "review_calibration_replay_case",
         forbiddenRuntimeFields: [
@@ -211,6 +212,50 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
     expect(historical.replay?.expectedEventShape.sample).toMatchObject({
       sourceIssue: "SYMPH-440",
       sourcePullRequest: "PR #392",
+    });
+  });
+
+  it("drives required historical source refs from replay metadata", () => {
+    const corpus = loadCorpus();
+    const historicalIndex = corpus.fixtures.findIndex(
+      (candidate) => candidate.category === "historical-replay",
+    );
+    expect(historicalIndex).toBeGreaterThanOrEqual(0);
+
+    const missingRefCorpus = structuredClone(corpus);
+    const missingRefReplay = missingRefCorpus.fixtures[historicalIndex]!.replay;
+    if (missingRefReplay === null) {
+      throw new Error("expected replay metadata");
+    }
+    missingRefReplay.requiredSourceRefIds = ["SYMPH-440", "PR #999"];
+
+    expect(validateReviewCalibrationCorpus(missingRefCorpus).errors).toEqual(
+      expect.arrayContaining([
+        {
+          path: `$.fixtures[${historicalIndex}].sourceRefs`,
+          message: "must include required historical source ref PR #999",
+        },
+      ]),
+    );
+
+    const undeclaredRequirementCorpus = structuredClone(corpus);
+    const undeclaredRequirementReplay =
+      undeclaredRequirementCorpus.fixtures[historicalIndex]!.replay;
+    if (undeclaredRequirementReplay === null) {
+      throw new Error("expected replay metadata");
+    }
+    const {
+      requiredSourceRefIds: _requiredSourceRefIds,
+      ...replayWithoutRequiredSourceRefIds
+    } = undeclaredRequirementReplay;
+    undeclaredRequirementCorpus.fixtures[historicalIndex]!.replay =
+      replayWithoutRequiredSourceRefIds;
+
+    expect(
+      validateReviewCalibrationCorpus(undeclaredRequirementCorpus).errors,
+    ).toContainEqual({
+      path: `$.fixtures[${historicalIndex}].replay.requiredSourceRefIds`,
+      message: "must be an array",
     });
   });
 
@@ -290,6 +335,44 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
           message: "must not include forbidden runtime field",
         },
       ]),
+    );
+  });
+
+  it("handles cyclic in-memory replay samples while scanning forbidden runtime fields", () => {
+    const corpus = loadCorpus();
+    const cyclicCorpus = structuredClone(corpus);
+    const fixtureIndex = cyclicCorpus.fixtures.findIndex(
+      (candidate) => candidate.id === "convergence-expected-replay-event-shape",
+    );
+    expect(fixtureIndex).toBeGreaterThanOrEqual(0);
+    const replay = cyclicCorpus.fixtures[fixtureIndex]!.replay;
+    if (replay === null) {
+      throw new Error("expected replay metadata");
+    }
+
+    const cyclicSample: Record<string, unknown> = {
+      fixtureId: "convergence-expected-replay-event-shape",
+      bugClass: "convergence:replay_event_shape",
+      expectedDisposition: "metadata_only",
+      expectedFindingFamily: null,
+      metadata: {
+        ownerIssue: REVIEW_CALIBRATION_OWNER_ISSUE,
+        parentIssue: REVIEW_CALIBRATION_PARENT_ISSUE,
+        futureConsumers: ["SYMPH-446", "SYMPH-468"],
+        runtimeWiring: "not_wired",
+      },
+    };
+    cyclicSample.self = cyclicSample;
+    cyclicSample.nestedUnsafe = {
+      modelPrompt: "unsafe runtime prompt",
+    };
+    replay.expectedEventShape.sample = cyclicSample;
+
+    expect(validateReviewCalibrationCorpus(cyclicCorpus).errors).toContainEqual(
+      {
+        path: `$.fixtures[${fixtureIndex}].replay.expectedEventShape.sample.nestedUnsafe.modelPrompt`,
+        message: "must not include forbidden runtime field",
+      },
     );
   });
 
