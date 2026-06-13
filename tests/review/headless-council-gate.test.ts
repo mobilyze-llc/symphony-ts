@@ -4471,6 +4471,18 @@ describe("runHeadlessCouncilGate", () => {
       "- Triage-package.json:12 surviving P2",
     ],
     [
+      "single-word dash-adjacent compact known extensionless root path finding",
+      "- Triage-LICENSE:1 surviving P2",
+    ],
+    [
+      "single-word dash-adjacent compact uppercase extensionless root path finding",
+      "- Triage-CONTRIBUTING:12 surviving P2",
+    ],
+    [
+      "single-word dash-adjacent compact file-style extensionless root path finding",
+      "- Triage-Jenkinsfile:1 surviving P2",
+    ],
+    [
       "single-word space-hyphen compact path finding",
       "- Triage -src/foo.ts:12 surviving P2",
     ],
@@ -4591,6 +4603,14 @@ describe("runHeadlessCouncilGate", () => {
     ["hyphen", "- Track-based workflow remains safe prose."],
     ["hyphen with slash prose", "- Track-check/in remains safe prose."],
     ["hyphen with colon prose", "- Track-count:123 remains safe prose."],
+    [
+      "hyphen with lowercase colon prose",
+      "- Track-contributing:123 remains safe prose.",
+    ],
+    [
+      "hyphen with non-line root file prose",
+      "- Track-readme:notaline remains safe prose.",
+    ],
     ["en dash", "- Track–based workflow remains safe prose."],
     ["em dash", "- Track—based workflow remains safe prose."],
   ])(

@@ -5288,7 +5288,7 @@ function artifactPreambleLineStartsWithHeadingLabel(
     offset += word.length;
   }
 
-  const suffix = lowerLine.slice(offset);
+  const suffix = line.slice(offset);
   return (
     suffix.trim() === "" ||
     artifactHeadingLabelSuffixStartsWithSeparator(suffix, headingWords.length)
@@ -5340,7 +5340,7 @@ function isCompactArtifactFindingPathSuffix(suffix: string): boolean {
 
   return (
     isFileNameWithExtension(rootLineReference[1]) ||
-    isKnownExtensionlessRootFile(rootLineReference[1])
+    isLikelyExtensionlessRootFile(rootLineReference[1])
   );
 }
 
@@ -5348,8 +5348,24 @@ function isFileNameWithExtension(filename: string): boolean {
   return /^[a-z0-9_.-]*\.[a-z0-9][a-z0-9_.-]*$/i.test(filename);
 }
 
+function isLikelyExtensionlessRootFile(filename: string): boolean {
+  return (
+    isKnownExtensionlessRootFile(filename) ||
+    isUppercaseRootFileName(filename) ||
+    isCapitalizedFileStyleName(filename)
+  );
+}
+
 function isKnownExtensionlessRootFile(filename: string): boolean {
   return KNOWN_EXTENSIONLESS_ROOT_FILES.has(filename.toLowerCase());
+}
+
+function isUppercaseRootFileName(filename: string): boolean {
+  return /^[A-Z][A-Z0-9_-]*$/.test(filename);
+}
+
+function isCapitalizedFileStyleName(filename: string): boolean {
+  return /^[A-Z][A-Za-z0-9_-]*file$/.test(filename);
 }
 
 function skipArtifactHeadingWordSeparator(
