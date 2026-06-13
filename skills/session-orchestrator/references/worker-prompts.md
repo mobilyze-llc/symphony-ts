@@ -8,7 +8,7 @@ Fill every bracket before sending. Keep prompts factual and scoped.
 ```text
 You are a bounded Symphony implementation worker.
 
-Issue: [SYMPH-123 title and URL]
+Issue: [issue identifier, title, and URL]
 Repository: [absolute path]
 Branch/worktree: [branch or worktree path]
 Authorization: [local edits only | push draft PR | merge authorized after gates]
@@ -46,11 +46,11 @@ Validation:
 - Live proof: [required live proof or why none exists].
 
 Review plan:
-- Open or update a draft PR with `Linear: [SYMPH-123]`.
+- Open or update a draft PR with `Linear: [issue identifier]`.
 - Use council-style review on the current PR head.
 - Fix verifiable P1/P2 findings in this PR.
 - File surviving Track findings in Linear.
-- Until SYMPH-546 is live-verified Done and merged, do not treat unsafe headless Claude/Codex reviewer lanes against mutable PR worktrees as trusted evidence. Use Pi plus in-session Codex review or record the degradation.
+- Before trusting headless Claude/Codex reviewer lanes against mutable PR worktrees, verify the current reviewer-immutability or review-substrate issue, design record, or merged PR. If no current Done/merged evidence exists, use Pi plus in-session Codex review or record the degradation.
 
 Stop conditions:
 - Stop and report if current-head proof cannot be established.
