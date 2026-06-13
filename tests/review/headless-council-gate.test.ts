@@ -509,6 +509,61 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("still escalates disagreement when high-risk routing accepts narrower risk", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "pi-deepseek": {
+          artifact:
+            "## Verdict\nFINDINGS\n\n## P1 Must Fix\n- file.ts:1 loses a required reviewer artifact. confidence: 0.95\n",
+        },
+        "codex-high-lead": {
+          artifact: "## Verdict\nPASS\n\n## Triage\nNone\n\n## Track\nNone\n",
+        },
+      },
+    });
+    await writeFile(
+      harness.diffPath,
+      "diff --git a/src/orchestrator/core.ts b/src/orchestrator/core.ts\n+const risk = true;\n",
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-445",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [codexImplementerProvenance()],
+        env: {
+          SYMPHONY_COUNCIL_ACCEPT_NARROWER_RISK: "1",
+          SYMPHONY_COUNCIL_OPERATOR_OVERRIDE_REASON:
+            "operator accepts Pi-only decorrelation until disagreement",
+        },
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+      "claude-opus",
+    ]);
+    expect(result.review_routing).toMatchObject({
+      mode: "high-risk",
+      escalationPredicates: expect.arrayContaining([
+        "operator_override_accept_narrower_risk",
+        "p1_verdict_disagreement",
+      ]),
+      selectedLanes: expect.arrayContaining([
+        expect.objectContaining({ laneId: "claude-opus", required: true }),
+      ]),
+      skippedLanes: expect.not.arrayContaining([
+        expect.objectContaining({ laneId: "claude-opus" }),
+      ]),
+    });
+  });
+
   it("uses legacy routing when the operator forces legacy mode", async () => {
     const harness = await createHarness();
     const result = await runHeadlessCouncilGate(

@@ -974,11 +974,7 @@ export async function runHeadlessCouncilGate(
     lanes,
     reviewRouting.leadConfidenceThreshold,
   );
-  if (
-    disagreementPredicates.length > 0 &&
-    !hasLane(lanes, "claude-opus") &&
-    !operatorAcceptedNarrowerRisk(reviewRouting)
-  ) {
+  if (disagreementPredicates.length > 0 && !hasLane(lanes, "claude-opus")) {
     reviewRouting = escalateRoutingForDisagreement(
       reviewRouting,
       disagreementPredicates,
@@ -1794,6 +1790,9 @@ function collectRoutingGuaranteeDegradedConditions(
     } else if (
       lane.degradedReason !== null ||
       lane.state !== "complete" ||
+      // A reviewer FAIL is a valid code-review outcome, not routing substrate
+      // degradation; aggregateHeadlessVerdict and termination assessment handle
+      // blocking findings from completed reviewer artifacts.
       lane.verdict === "error"
     ) {
       conditions.push(`routing_required_lane_degraded:${laneId}`);
