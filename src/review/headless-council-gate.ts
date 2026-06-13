@@ -51,7 +51,10 @@ export type HeadlessLaneState =
   | "timed_out"
   | "stopped"
   | "error";
-export type LaneDegradedReason = "malformed_artifact" | "substrate_stall";
+export type LaneDegradedReason =
+  | "malformed_artifact"
+  | "substrate_stall"
+  | "artifact_persistence_failed";
 export type StructuredReviewFindingSeverity =
   | "P1"
   | "P2"
@@ -1432,7 +1435,7 @@ async function runReviewerLane(input: {
     phase,
     "--timeout-seconds",
     String(input.timeoutSeconds),
-    ...laneAgentArgs(input.lane),
+    ...laneAgentArgs(input.lane, input.artifactDir),
   ];
 
   const result = await input.runCommand(input.cmuxSpawnBin, args, {
@@ -1549,7 +1552,10 @@ async function runCodexLeadLane(input: {
   });
 }
 
-function laneAgentArgs(lane: HeadlessReviewerLaneConfig): string[] {
+function laneAgentArgs(
+  lane: HeadlessReviewerLaneConfig,
+  artifactDir: string,
+): string[] {
   if (lane.agent === "claude") {
     return [
       "--model",
@@ -1557,7 +1563,7 @@ function laneAgentArgs(lane: HeadlessReviewerLaneConfig): string[] {
       "--profile",
       "legacy",
       "--allowed-tools",
-      claudeAllowedToolsForArtifact(lane.allowedTools),
+      claudeAllowedToolsForArtifact(lane.allowedTools, artifactDir),
     ];
   }
 
@@ -1575,12 +1581,20 @@ function laneAgentArgs(lane: HeadlessReviewerLaneConfig): string[] {
 
 function claudeAllowedToolsForArtifact(
   allowedTools: string | undefined,
+  artifactDir: string,
 ): string {
   const tools = allowedTools ?? "Read,Grep,Glob,Bash(git diff *)";
+  const artifactWriteTool = `Write(${artifactDir}/*)`;
+  if (tools.trim() === "") {
+    return artifactWriteTool;
+  }
   if (tools.split(",").some((tool) => tool.trim() === "Write")) {
     return tools;
   }
-  return `${tools},Write`;
+  if (tools.split(",").some((tool) => tool.trim() === artifactWriteTool)) {
+    return tools;
+  }
+  return `${tools},${artifactWriteTool}`;
 }
 
 function findDuplicateLaneIds(
@@ -1806,6 +1820,19 @@ async function parseLaneResult(input: {
     artifactPath,
     artifact,
   });
+  if (persistedArtifact.error !== null) {
+    return {
+      ...laneIdentity,
+      state: "error",
+      verdict: "error",
+      artifactPath,
+      message: persistedArtifact.error,
+      degradedReason: "artifact_persistence_failed",
+      rawArtifactPath: persistedArtifact.rawArtifactPath,
+      structuredArtifactPath: null,
+      structuredArtifact: null,
+    };
+  }
   const structuredArtifact = buildStructuredReviewerArtifact({
     lane: laneIdentity,
     artifact: persistedArtifact.artifact,
@@ -1837,30 +1864,45 @@ async function parseLaneResult(input: {
 async function persistContractArtifact(input: {
   artifactPath: string;
   artifact: string;
-}): Promise<{ artifact: string; rawArtifactPath: string }> {
+}): Promise<{
+  artifact: string;
+  rawArtifactPath: string;
+  error: string | null;
+}> {
   const normalizedArtifact = normalizeArtifactStart(input.artifact);
   if (
     normalizedArtifact === input.artifact ||
     !artifactStartsWithVerdict(normalizedArtifact)
   ) {
-    return { artifact: input.artifact, rawArtifactPath: input.artifactPath };
+    return {
+      artifact: input.artifact,
+      rawArtifactPath: input.artifactPath,
+      error: null,
+    };
   }
 
-  let rawArtifactPath = input.artifactPath;
   const rawSnapshotPath = rawArtifactSnapshotPath(input.artifactPath);
+  const rawArtifactPath = rawSnapshotPath;
   try {
     await replaceFileAtomically(rawSnapshotPath, input.artifact);
-    rawArtifactPath = rawSnapshotPath;
-  } catch {
-    rawArtifactPath = input.artifactPath;
+  } catch (error) {
+    return {
+      artifact: input.artifact,
+      rawArtifactPath: input.artifactPath,
+      error: `Reviewer artifact raw snapshot could not be written: ${formatError(error)}`,
+    };
   }
 
   try {
     await replaceFileAtomically(input.artifactPath, normalizedArtifact);
-  } catch {
-    return { artifact: normalizedArtifact, rawArtifactPath };
+  } catch (error) {
+    return {
+      artifact: input.artifact,
+      rawArtifactPath,
+      error: `Reviewer artifact could not be normalized on disk: ${formatError(error)}`,
+    };
   }
-  return { artifact: normalizedArtifact, rawArtifactPath };
+  return { artifact: normalizedArtifact, rawArtifactPath, error: null };
 }
 
 function rawArtifactSnapshotPath(artifactPath: string): string {
@@ -1874,7 +1916,7 @@ async function replaceFileAtomically(
   path: string,
   content: string,
 ): Promise<void> {
-  const tmpPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const tmpPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
   try {
     await writeFile(tmpPath, content);
     await rename(tmpPath, path);
