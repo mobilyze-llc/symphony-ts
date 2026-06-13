@@ -1166,6 +1166,25 @@ export async function assertFreshCouncilReview(
         "Council review artifact is not a clean PASS with reviewed_head_sha metadata.",
     });
   }
+  const routingEvidenceError = councilRoutingEvidenceError(reviewResult);
+  if (routingEvidenceError !== null) {
+    return await writeFreshnessResult({
+      schemaVersion: 1,
+      issueId: input.issueId,
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha,
+      currentHeadSha: null,
+      baseSha,
+      reviewMode: metadata.mode,
+      reviewRound: metadata.round,
+      materialChangedFiles: [],
+      allowlistedChangedFiles: [],
+      allowedChangePatterns: [...(input.allowedChangePatterns ?? [])],
+      guidance: "rerun convergence review against HEAD.",
+      summary: routingEvidenceError,
+    });
+  }
 
   let currentHeadSha: string;
   let currentBaseSha: string | null;
@@ -1288,6 +1307,41 @@ export async function assertFreshCouncilReview(
     summary:
       "Council review artifact head differs, but every changed file is explicitly allowlisted.",
   });
+}
+
+function councilRoutingEvidenceError(
+  result: HeadlessCouncilGateResult,
+): string | null {
+  const routing = result.review_routing;
+  const metadataRoutingMode = result.review_metadata.routing_mode;
+  if (routing === null) {
+    return "Council review artifact is missing Council v2 review_routing evidence.";
+  }
+  if (
+    metadataRoutingMode === undefined ||
+    metadataRoutingMode !== routing.mode
+  ) {
+    return "Council review artifact routing metadata is missing or inconsistent with review_routing.mode.";
+  }
+  const decorrelatedLaneIds = new Set(
+    routing.decorrelationBasis.decorrelatedReviewerArtifacts.map(
+      (artifact) => artifact.laneId,
+    ),
+  );
+  const missingRequiredDecorrelated =
+    routing.decorrelationBasis.requiredReviewerLaneIds.filter(
+      (laneId) => !decorrelatedLaneIds.has(laneId),
+    );
+  if (missingRequiredDecorrelated.length > 0) {
+    return `Council review artifact lacks non-author-family decorrelated artifacts for required reviewer lane(s): ${missingRequiredDecorrelated.join(", ")}.`;
+  }
+  if (
+    routing.decorrelationBasis.requiredNonAuthorFamilyReviewer &&
+    !routing.decorrelationBasis.mergeEligible
+  ) {
+    return "Council review artifact is not merge-eligible under its recorded decorrelation basis.";
+  }
+  return null;
 }
 
 export function defaultReviewerLanes(
@@ -1595,7 +1649,16 @@ function finalizeCouncilRouting(
       ];
     })
     .sort((left, right) => left.laneId.localeCompare(right.laneId, "en"));
-  const mergeEligible = decorrelatedReviewerArtifacts.length > 0;
+  const decorrelatedLaneIds = new Set(
+    decorrelatedReviewerArtifacts.map((artifact) => artifact.laneId),
+  );
+  const missingRequiredDecorrelatedLaneIds =
+    routing.decorrelationBasis.requiredReviewerLaneIds.filter(
+      (laneId) => !decorrelatedLaneIds.has(laneId),
+    );
+  const mergeEligible =
+    decorrelatedReviewerArtifacts.length > 0 &&
+    missingRequiredDecorrelatedLaneIds.length === 0;
   return {
     ...routing,
     decorrelationBasis: {
@@ -1605,7 +1668,9 @@ function finalizeCouncilRouting(
       mergeEligible,
       summary: mergeEligible
         ? `Merge-eligible decorrelated reviewer artifact(s): ${decorrelatedReviewerArtifacts.map((artifact) => artifact.laneId).join(", ")}.`
-        : "Review is not merge-eligible: no completed non-author-family reviewer artifact was recorded.",
+        : missingRequiredDecorrelatedLaneIds.length > 0
+          ? `Review is not merge-eligible: required reviewer lane(s) lack non-author-family artifacts: ${missingRequiredDecorrelatedLaneIds.join(", ")}.`
+          : "Review is not merge-eligible: no completed non-author-family reviewer artifact was recorded.",
     },
   };
 }
@@ -1634,6 +1699,16 @@ function collectRoutingGuaranteeDegradedConditions(
   if (!routing.decorrelationBasis.mergeEligible) {
     conditions.push("routing_absent_decorrelated_reviewer_artifact");
   }
+  const decorrelatedLaneIds = new Set(
+    routing.decorrelationBasis.decorrelatedReviewerArtifacts.map(
+      (artifact) => artifact.laneId,
+    ),
+  );
+  for (const laneId of routing.decorrelationBasis.requiredReviewerLaneIds) {
+    if (!decorrelatedLaneIds.has(laneId)) {
+      conditions.push(`routing_required_lane_not_decorrelated:${laneId}`);
+    }
+  }
   return conditions;
 }
 
@@ -1649,6 +1724,10 @@ function routingGuaranteeEscalationPredicates(
     } else if (condition.startsWith("routing_required_lane_degraded:")) {
       predicates.push("degraded_required_lane");
     } else if (condition === "routing_absent_decorrelated_reviewer_artifact") {
+      predicates.push("absent_decorrelated_reviewer_artifact");
+    } else if (
+      condition.startsWith("routing_required_lane_not_decorrelated:")
+    ) {
       predicates.push("absent_decorrelated_reviewer_artifact");
     }
   }
