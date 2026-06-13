@@ -3623,15 +3623,12 @@ async function withLaneStallDeadline(
     timer = setTimeout(() => {
       try {
         const stalledResult = onStall();
-        void Promise.resolve(hooks.onStall?.())
-          .catch(() => {
-            // Cleanup failure is deliberately reported through the progress
-            // hook itself. The gate must still emit partial aggregate
-            // artifacts rather than hanging inside cleanup.
-          })
-          .finally(() => {
-            resolveDeadline(stalledResult);
-          });
+        resolveDeadline(stalledResult);
+        void Promise.resolve(hooks.onStall?.()).catch(() => {
+          // Cleanup failure is deliberately reported through the progress
+          // hook itself. The gate must still emit partial aggregate
+          // artifacts rather than hanging inside cleanup.
+        });
       } catch (error) {
         resolveDeadline({
           laneId: "unknown-stalled-lane",
@@ -3688,6 +3685,8 @@ async function cleanupStalledLane(input: {
     }),
   );
   try {
+    // Use the raw runner, not the lane's signal-wrapped runner: this cleanup
+    // is intentionally allowed to outlive the already-aborted lane command.
     const cleanup = await input.runCommand(
       input.cmuxSpawnBin,
       ["cleanup", "--sweep"],

@@ -557,7 +557,7 @@ describe("parseCouncilReviewGateArgs", () => {
           dependencies?.progress?.(
             "[headless-council-gate] lane_started laneId=claude-opus",
           );
-          return cliReviewResult();
+          return { ...cliReviewResult(), issueId: _input.issueId };
         },
       },
     );
@@ -565,7 +565,7 @@ describe("parseCouncilReviewGateArgs", () => {
     expect(code).toBe(0);
     expect(stderr.join("")).toContain("lane_started laneId=claude-opus");
     expect(JSON.parse(stdout.join(""))).toMatchObject({
-      issueId: "issue-symph-450",
+      issueId: "issue-symph-414",
       verdict: "pass",
     });
   });

@@ -3830,7 +3830,16 @@ describe("runHeadlessCouncilGate", () => {
     );
 
     expect(result.verdict).toBe("error");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      state: "timed_out",
+      verdict: "error",
+      degradedReason: "substrate_stall",
+    });
+    expect(result.degradedConditions).toContain("substrate_stall:claude-opus");
     expect(aborted).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(
       harness.commands.some(
         (command) =>
