@@ -346,6 +346,39 @@ describe("dashboard server", () => {
     expect(refreshCalls).toEqual([]);
   });
 
+  it("accepts bearer operator auth with mixed case and extra horizontal whitespace", async () => {
+    const refreshCalls: RefreshResponse[] = [];
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        requestRefresh: () => {
+          const response = {
+            queued: true,
+            coalesced: false,
+            requested_at: "2026-03-06T12:00:00.000Z",
+            operations: ["poll", "reconcile"],
+          } satisfies RefreshResponse;
+          refreshCalls.push(response);
+          return response;
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/refresh",
+      body: "{}",
+      headers: {
+        "content-type": "application/json",
+        authorization: `bEaReR \t ${OPERATOR_TOKEN}   `,
+      },
+    });
+
+    expect(response.statusCode).toBe(202);
+    expect(refreshCalls).toHaveLength(1);
+  });
+
   it("returns snapshot_unavailable when the host snapshot fails", async () => {
     const server = createDashboardServer({
       host: createHost({

@@ -519,8 +519,23 @@ function bearerTokenFromRequest(request: IncomingMessage): string | null {
   if (typeof authorization !== "string") {
     return null;
   }
-  const match = authorization.match(/^Bearer\s+(.+)$/i);
-  return match?.[1]?.trim() || null;
+  if (authorization.slice(0, 6).toLowerCase() !== "bearer") {
+    return null;
+  }
+  const separator = authorization.charCodeAt(6);
+  if (separator !== 0x20 && separator !== 0x09) {
+    return null;
+  }
+  let tokenStart = 7;
+  while (tokenStart < authorization.length) {
+    const code = authorization.charCodeAt(tokenStart);
+    if (code !== 0x20 && code !== 0x09) {
+      break;
+    }
+    tokenStart += 1;
+  }
+  const token = authorization.slice(tokenStart).trim();
+  return token === "" ? null : token;
 }
 
 function tokenMatches(expectedToken: string, suppliedToken: string): boolean {
