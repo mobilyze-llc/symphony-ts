@@ -201,6 +201,37 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain("operator_anchor top");
   });
 
+  it("renders hard-cycle computed orders with danger styling while preserving linearized status", () => {
+    const snapshot: RuntimeSnapshot = {
+      ...buildSnapshot({}),
+      computed_order: {
+        comparator_version: "dispatch-comparator-v1",
+        generated_at: "2026-06-13T12:00:00.000Z",
+        status: "linearized",
+        positions: [],
+        exclusions: [],
+        advisory_warnings: [],
+        would_have_been_excluded_by_advisory_edges: [],
+        hard_cycle: {
+          issue_ids: ["issue-1", "issue-2"],
+          issue_identifiers: ["SYMPH-485", "SYMPH-486"],
+          edge_trust: "operator_confirmed",
+          reason: "Hard-edge cycle detected.",
+        },
+        warnings: [],
+      },
+    };
+
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+
+    expect(html).toContain(
+      '<span class="state-badge state-badge-danger">linearized</span>',
+    );
+    expect(html).toContain("Hard cycle:");
+    expect(html).toContain("SYMPH-485");
+    expect(html).toContain("SYMPH-486");
+  });
+
   it("dashboard shows version in hero header", () => {
     const snapshot = buildSnapshot({});
     const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });

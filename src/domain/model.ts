@@ -1083,7 +1083,7 @@ export interface IssueAnchorRecord {
   setBySequence: number | null;
 }
 
-export type ComputedDispatchOrderStatus = "linearized" | "hard_cycle";
+export type ComputedDispatchOrderStatus = "linearized";
 
 export type ComputedDispatchEdgeTrust =
   | "operator_confirmed"

@@ -2046,44 +2046,6 @@ export class OrchestratorCore {
       });
     }
 
-    if (computedDispatchOrder.status === "hard_cycle") {
-      const hardCycleTrust =
-        computedDispatchOrder.hard_cycle?.edge_trust ?? "operator_confirmed";
-      console.warn(
-        `[orchestrator] Dispatch comparator refused linearization: ${computedDispatchOrder.hard_cycle?.reason ?? "hard-edge cycle"}`,
-      );
-      this.recordDispatchVerdict({
-        issueId: PIPELINE_VERDICT_SCOPE_ID,
-        issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
-        disposition: "gate",
-        reasonCode: "computed_order_hard_cycle",
-        remedy:
-          hardCycleTrust === "operator_confirmed"
-            ? "Resolve the operator-confirmed blocked-by cycle before dispatch can linearize the queue."
-            : "Resolve the hard blocked-by cycle before dispatch can linearize the queue.",
-        details: {
-          comparatorVersion: computedDispatchOrder.comparator_version,
-          cycle: computedDispatchOrder.hard_cycle,
-        },
-      });
-      this.trackDispatchStarvation(issues.length, 0);
-      await this.recordQueueBaselineSample({
-        consideredIssues: [],
-        dispatchPicks: [],
-        computedOrder: computedDispatchOrder,
-        force: true,
-      });
-      return {
-        validation,
-        dispatchedIssueIds: [],
-        modeDecisions: [],
-        stopRequests: reconcileResult.stopRequests,
-        trackerFetchFailed: false,
-        reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
-        runningCount: Object.keys(this.state.running).length,
-      };
-    }
-
     const dispatchedIssueIds: string[] = [];
     const modeDecisions: RightSizingDecision[] = [];
     let eligibleCount = 0;
@@ -2242,9 +2204,6 @@ export class OrchestratorCore {
     computedOrder: ComputedDispatchOrderSnapshot,
     issues: readonly Issue[],
   ): Issue[] {
-    if (computedOrder.status !== "linearized") {
-      return [];
-    }
     const issueById = new Map(issues.map((issue) => [issue.id, issue]));
     return computedOrder.positions
       .map((position) => issueById.get(position.issue_id) ?? null)
@@ -2257,11 +2216,7 @@ export class OrchestratorCore {
     issues: readonly Issue[];
     dispatchPicks: readonly string[];
   }): Promise<void> {
-    if (
-      input.computedOrder.status !== "linearized" ||
-      input.expectedIssue === null ||
-      input.dispatchPicks.length === 0
-    ) {
+    if (input.expectedIssue === null || input.dispatchPicks.length === 0) {
       return;
     }
     const computedTop = input.computedOrder.positions[0];

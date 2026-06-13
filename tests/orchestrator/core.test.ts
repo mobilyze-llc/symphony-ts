@@ -96,7 +96,7 @@ describe("orchestrator core", () => {
       expect.objectContaining({
         kind: "dispatch_verdict",
         metadata: expect.objectContaining({
-          reason_code: "computed_order_hard_cycle",
+          disposition: "gate",
         }),
       }),
     );

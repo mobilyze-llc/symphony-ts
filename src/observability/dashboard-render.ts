@@ -1267,7 +1267,7 @@ function renderDashboardClientScript(
           if (!order) {
             return '<p class="empty-state">No computed dispatch order has been sampled yet.</p>';
           }
-          var statusClass = order.status === 'hard_cycle' ? 'state-badge state-badge-danger' : 'state-badge state-badge-active';
+          var statusClass = order.hard_cycle ? 'state-badge state-badge-danger' : 'state-badge state-badge-active';
           var status = '<p class="section-copy"><span class="' + statusClass + '">' + escapeHtml(order.status) + '</span> <span class="mono muted">' + escapeHtml(order.comparator_version || 'unknown') + '</span></p>';
           var cycle = order.hard_cycle
             ? '<p class="section-copy"><strong>Hard cycle:</strong> ' + escapeHtml((order.hard_cycle.issue_identifiers || []).join(' → ') || order.hard_cycle.reason || 'cycle detected') + '</p>'
@@ -1983,7 +1983,7 @@ function renderComputedOrder(snapshot: RuntimeSnapshot): string {
     return '<p class="empty-state">No computed dispatch order has been sampled yet.</p>';
   }
   const statusClass =
-    order.status === "hard_cycle"
+    order.hard_cycle !== null
       ? "state-badge state-badge-danger"
       : "state-badge state-badge-active";
   const status = `<p class="section-copy"><span class="${statusClass}">${escapeHtml(
