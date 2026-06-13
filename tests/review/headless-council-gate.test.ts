@@ -4467,6 +4467,10 @@ describe("runHeadlessCouncilGate", () => {
       "- Triage-src/foo.ts:12 surviving P2",
     ],
     [
+      "single-word dash-adjacent compact root extension path finding",
+      "- Triage-package.json:12 surviving P2",
+    ],
+    [
       "single-word space-hyphen compact path finding",
       "- Triage -src/foo.ts:12 surviving P2",
     ],

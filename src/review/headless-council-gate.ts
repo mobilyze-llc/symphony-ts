@@ -5338,7 +5338,14 @@ function isCompactArtifactFindingPathSuffix(suffix: string): boolean {
     return false;
   }
 
-  return isKnownExtensionlessRootFile(rootLineReference[1]);
+  return (
+    isFileNameWithExtension(rootLineReference[1]) ||
+    isKnownExtensionlessRootFile(rootLineReference[1])
+  );
+}
+
+function isFileNameWithExtension(filename: string): boolean {
+  return /^[a-z0-9_.-]*\.[a-z0-9][a-z0-9_.-]*$/i.test(filename);
 }
 
 function isKnownExtensionlessRootFile(filename: string): boolean {
