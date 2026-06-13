@@ -1871,6 +1871,36 @@ export class OrchestratorCore {
     dispatchPicks: readonly string[];
   }): Promise<void> {
     const timestamp = this.now().toISOString();
+    let metadata: Record<string, unknown>;
+    try {
+      metadata = {
+        schema_version: 1,
+        comparator_version: "priority-fifo-control-v0",
+        considered_issue_ids: input.consideredIssues.map((issue) => issue.id),
+        considered_issue_identifiers: input.consideredIssues.map(
+          (issue) => issue.identifier,
+        ),
+        dispatch_picks: [...input.dispatchPicks],
+        manual_jumps_reorders: collectOperatorIntentSamples(
+          this.state.dispatcherRunJournal,
+        ),
+        quiet_death_outcomes: collectQuietDeathOutcomes(
+          this.state.dispatcherRunJournal,
+        ),
+        urgent_reopen_outcomes: collectUrgentReopenOutcomes(
+          this.state.dispatcherRunJournal,
+        ),
+        delivery_outcomes: collectDeliveryOutcomes(
+          this.state.dispatcherRunJournal,
+        ),
+      };
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to collect queue baseline sample: ${formatWarningError(error)}`,
+      );
+      return;
+    }
+
     try {
       await this.recordRunJournalEntry({
         idempotencyKey: `queue_baseline:${timestamp}:${this.nextRunJournalSequence()}`,
@@ -1884,31 +1914,11 @@ export class OrchestratorCore {
         ownerId: this.leaseOwnerId,
         lease: null,
         summary: `Queue baseline sampled ${input.consideredIssues.length} considered issue(s) and ${input.dispatchPicks.length} dispatch pick(s).`,
-        metadata: {
-          schema_version: 1,
-          comparator_version: "priority-fifo-control-v0",
-          considered_issue_ids: input.consideredIssues.map((issue) => issue.id),
-          considered_issue_identifiers: input.consideredIssues.map(
-            (issue) => issue.identifier,
-          ),
-          dispatch_picks: [...input.dispatchPicks],
-          manual_jumps_reorders: collectOperatorIntentSamples(
-            this.state.dispatcherRunJournal,
-          ),
-          quiet_death_outcomes: collectQuietDeathOutcomes(
-            this.state.dispatcherRunJournal,
-          ),
-          urgent_reopen_outcomes: collectUrgentReopenOutcomes(
-            this.state.dispatcherRunJournal,
-          ),
-          delivery_outcomes: collectDeliveryOutcomes(
-            this.state.dispatcherRunJournal,
-          ),
-        },
+        metadata,
       });
     } catch (error) {
       console.warn(
-        `[orchestrator] failed to journal queue baseline sample: ${error instanceof Error ? error.message : String(error)}`,
+        `[orchestrator] failed to journal queue baseline sample: ${formatWarningError(error)}`,
       );
     }
   }
@@ -9548,6 +9558,13 @@ function collectDeliveryOutcomes(
       },
     ];
   });
+}
+
+function formatWarningError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.stack ?? error.message;
+  }
+  return String(error);
 }
 
 function createPendingStageSignal(

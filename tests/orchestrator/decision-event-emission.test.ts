@@ -4,7 +4,10 @@ import type {
   ResolvedWorkflowConfig,
   StagesConfig,
 } from "../../src/config/types.js";
-import type { Issue } from "../../src/domain/model.js";
+import type {
+  DispatcherRunJournalEntry,
+  Issue,
+} from "../../src/domain/model.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
@@ -106,6 +109,113 @@ describe("dispatcher decision event emission", () => {
     });
   });
 
+  it("journals non-empty queue-baseline outcome samples from prior journal entries", async () => {
+    const orchestrator = createOrchestrator({
+      runJournal: [
+        journalEntry({
+          sequence: 1,
+          kind: "failure_exhausted",
+          issueId: "dead",
+          issueIdentifier: "ISSUE-DEAD",
+          summary: "Retries exhausted.",
+          metadata: {
+            status: "completed",
+            reason: "max_retries",
+            failure_signature: "sig-dead",
+            failure_class: "infra",
+          },
+        }),
+        journalEntry({
+          sequence: 2,
+          kind: "intent",
+          issueId: "dead",
+          issueIdentifier: "ISSUE-DEAD",
+          summary: "Operator released issue.",
+          metadata: {
+            status: "applied",
+            verb: "release",
+            actor: { kind: "operator", host: "desk" },
+            reason: { class: "operator_release", human: "urgent reopen" },
+          },
+        }),
+        journalEntry({
+          sequence: 3,
+          kind: "stage_record",
+          issueId: "delivered",
+          issueIdentifier: "ISSUE-DONE",
+          stage: "implement",
+          summary: "Stage completed.",
+          metadata: {
+            stageName: "implement",
+            durationMs: 1200,
+            totalTokens: 1234,
+            inputTokens: 1000,
+            outputTokens: 234,
+            turns: 3,
+            outcome: "succeeded",
+          },
+        }),
+        journalEntry({
+          sequence: 4,
+          kind: "tracker_write",
+          issueId: "delivered",
+          issueIdentifier: "ISSUE-DONE",
+          stage: "merge",
+          idempotencyKey: "tracker:delivered:terminal:completed",
+          summary: "Marked issue complete.",
+          metadata: { status: "completed" },
+        }),
+      ],
+      tracker: createTracker({
+        candidates: [createIssue({ id: "next", identifier: "ISSUE-NEXT" })],
+      }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      );
+
+    expect(baseline?.metadata).toMatchObject({
+      manual_jumps_reorders: [
+        expect.objectContaining({
+          sequence: 2,
+          issue_id: "dead",
+          issue_identifier: "ISSUE-DEAD",
+          verb: "release",
+        }),
+      ],
+      quiet_death_outcomes: [
+        expect.objectContaining({
+          sequence: 1,
+          issue_id: "dead",
+          issue_identifier: "ISSUE-DEAD",
+          failure_signature: "sig-dead",
+        }),
+      ],
+      urgent_reopen_outcomes: [
+        expect.objectContaining({
+          issue_id: "dead",
+          reopened_after_sequence: 1,
+        }),
+      ],
+      delivery_outcomes: [
+        expect.objectContaining({
+          issue_id: "delivered",
+          issue_identifier: "ISSUE-DONE",
+          spend: {
+            total_tokens: 1234,
+            turns: 3,
+            stages: 1,
+          },
+        }),
+      ],
+    });
+  });
+
   it("emits measurable pause and re-steer events when deterministic supervision blocks a co-run", async () => {
     const orchestrator = createOrchestrator({
       tracker: createTracker({
@@ -166,6 +276,7 @@ function createOrchestrator(overrides?: {
   tracker?: IssueTracker;
   requestSupervisionResteer?: OrchestratorCoreOptions["requestSupervisionResteer"];
   stages?: StagesConfig | null;
+  runJournal?: DispatcherRunJournalEntry[];
 }): OrchestratorCore {
   const stages = overrides?.stages !== undefined ? overrides.stages : null;
   const options: OrchestratorCoreOptions = {
@@ -177,10 +288,40 @@ function createOrchestrator(overrides?: {
     }),
     now: () => new Date("2026-03-06T00:00:05.000Z"),
   };
+  if (overrides?.runJournal !== undefined) {
+    options.runJournal = overrides.runJournal;
+  }
   if (overrides?.requestSupervisionResteer !== undefined) {
     options.requestSupervisionResteer = overrides.requestSupervisionResteer;
   }
   return new OrchestratorCore(options);
+}
+
+function journalEntry(
+  overrides: Partial<DispatcherRunJournalEntry> & {
+    sequence: number;
+    kind: DispatcherRunJournalEntry["kind"];
+    issueId: string;
+    issueIdentifier: string;
+  },
+): DispatcherRunJournalEntry {
+  return {
+    sequence: overrides.sequence,
+    idempotencyKey:
+      overrides.idempotencyKey ??
+      `test:${overrides.kind}:${overrides.sequence}`,
+    timestamp: overrides.timestamp ?? "2026-03-05T00:00:00.000Z",
+    kind: overrides.kind,
+    issueId: overrides.issueId,
+    issueIdentifier: overrides.issueIdentifier,
+    operation: overrides.operation ?? "dispatcher",
+    stage: overrides.stage ?? null,
+    attempt: overrides.attempt ?? null,
+    ownerId: overrides.ownerId ?? "test-owner",
+    lease: overrides.lease ?? null,
+    summary: overrides.summary ?? "Synthetic journal entry.",
+    metadata: overrides.metadata ?? {},
+  };
 }
 
 function createTracker(input?: { candidates?: Issue[] }): IssueTracker {

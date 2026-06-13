@@ -127,8 +127,8 @@ export async function runBacklogAudit(
     runtimeSources: [
       "/api/v1/state",
       "/api/v1/state/delta",
-      "admission/right-sizing journal read-models",
-      "council review journal read-models",
+      "admission/right-sizing projections via state/delta",
+      "council review projections via state/delta",
     ],
     verdict: object,
   };
@@ -284,11 +284,14 @@ function toAuditIssue(issue: Issue): Record<string, unknown> {
   return {
     id: issue.id,
     identifier: issue.identifier,
-    title: fenceTrackerText(issue.title),
+    title: stripStructuredBoundaryTags(issue.title),
     description:
       issue.description === null
         ? null
-        : fenceTrackerText(issue.description).slice(0, MAX_DESCRIPTION_CHARS),
+        : stripStructuredBoundaryTags(issue.description).slice(
+            0,
+            MAX_DESCRIPTION_CHARS,
+          ),
     priority: issue.priority,
     state: issue.state,
     labels: issue.labels,
@@ -299,6 +302,9 @@ function toAuditIssue(issue: Issue): Record<string, unknown> {
   };
 }
 
-function fenceTrackerText(text: string): string {
-  return text.replace(/<\/?(?:tracker_|runtime_|audit_)[a-z_]*>/gi, "");
+function stripStructuredBoundaryTags(text: string): string {
+  return text.replace(
+    /<\/?(?:tracker_|runtime_|audit_)[a-z_]*(?:\s[^<>]*)?\/?>/gi,
+    "",
+  );
 }
