@@ -4,7 +4,11 @@ import type {
   ResolvedWorkflowConfig,
   ReviewerDefinition,
 } from "../../src/config/types.js";
-import type { DispatcherRunJournal, Issue } from "../../src/domain/model.js";
+import type {
+  ComputedDispatchOrderSnapshot,
+  DispatcherRunJournal,
+  Issue,
+} from "../../src/domain/model.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 import { normalizeErrorSignature } from "../../src/errors/signature.js";
 import {
@@ -208,6 +212,158 @@ describe("orchestrator core", () => {
         }),
       ],
     });
+  });
+
+  it("fails closed when comparator execution throws", async () => {
+    const malformedIssue = {
+      ...createIssue({ id: "1", identifier: "ISSUE-1" }),
+      blockedBy: null as unknown as Issue["blockedBy"],
+    };
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [malformedIssue],
+      }),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(Object.keys(orchestrator.getState().running)).toEqual([]);
+    expect(orchestrator.getState().computedDispatchOrder).toMatchObject({
+      positions: [],
+      warnings: [
+        expect.stringContaining(
+          "Dispatch comparator failed; skipped dispatch for this poll",
+        ),
+      ],
+    });
+    expect(orchestrator.getState().dispatcherRunJournal).toContainEqual(
+      expect.objectContaining({
+        kind: "dispatcher_decision",
+        summary:
+          "Dispatch comparator failed closed; no new issue dispatches were admitted.",
+        metadata: expect.objectContaining({
+          decisionEvent: expect.objectContaining({
+            context: expect.objectContaining({
+              findingKinds: ["dispatch_comparator_exception"],
+            }),
+            observedOutcome: expect.objectContaining({
+              decision: "skip_dispatch",
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("fails closed when dispatch loop candidates drift outside the computed-order snapshot", async () => {
+    const issue = createIssue({ id: "1", identifier: "ISSUE-1" });
+    const outsideSnapshot = createIssue({
+      id: "outside",
+      identifier: "ISSUE-OUTSIDE",
+    });
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({ candidates: [issue] }),
+    });
+    vi.spyOn(
+      orchestrator as unknown as {
+        issuesFromComputedOrder(
+          computedOrder: ComputedDispatchOrderSnapshot,
+          issues: readonly Issue[],
+        ): Issue[];
+      },
+      "issuesFromComputedOrder",
+    ).mockReturnValue([outsideSnapshot]);
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(Object.keys(orchestrator.getState().running)).toEqual([]);
+    expect(orchestrator.getState().dispatcherRunJournal).toContainEqual(
+      expect.objectContaining({
+        kind: "dispatcher_decision",
+        summary:
+          "Dispatch loop candidate set drifted from computed-order snapshot; no new issue dispatches were admitted.",
+        metadata: expect.objectContaining({
+          decisionEvent: expect.objectContaining({
+            context: expect.objectContaining({
+              findingKinds: ["computed_order_candidate_outside_snapshot"],
+              details: expect.objectContaining({
+                outside_snapshot_issue_identifiers: ["ISSUE-OUTSIDE"],
+              }),
+            }),
+            observedOutcome: expect.objectContaining({
+              decision: "skip_dispatch",
+            }),
+          }),
+        }),
+      }),
+    );
+  });
+
+  it("skips TicketFeature fetch when pipeline halt blocks dispatch", async () => {
+    const haltIssue = createIssue({
+      id: "halt-1",
+      identifier: "SYMPH-123",
+      title: "Main branch build broken",
+      state: "In Progress",
+      labels: ["pipeline-halt"],
+    });
+    const fetchTicketFeatureIssuesByStates = vi.fn(async () => [
+      createTicketFeatureSourceIssue(
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+      ),
+    ]);
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        fetchOpenIssuesByLabels: async () => [haltIssue],
+        fetchTicketFeatureIssuesByStates,
+      }),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(fetchTicketFeatureIssuesByStates).not.toHaveBeenCalled();
+    expect(orchestrator.getState().computedDispatchOrder?.warnings).toContain(
+      "TicketFeature fetch skipped because pipeline halt blocks dispatch for this poll.",
+    );
+  });
+
+  it("skips TicketFeature fetch when rate-limit admission blocks dispatch", async () => {
+    const fetchTicketFeatureIssuesByStates = vi.fn(async () => [
+      createTicketFeatureSourceIssue(
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+      ),
+    ]);
+    const orchestrator = createOrchestrator({
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+        },
+      }),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        fetchTicketFeatureIssuesByStates,
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(fetchTicketFeatureIssuesByStates).not.toHaveBeenCalled();
+    expect(orchestrator.getState().computedDispatchOrder?.warnings).toContain(
+      "TicketFeature fetch skipped because the rate-limit admission gate blocks dispatch for this poll.",
+    );
   });
 
   it("preserves native hard blockers when TicketFeature blocker trust is not allowlisted", async () => {
