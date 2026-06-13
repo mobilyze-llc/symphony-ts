@@ -23,10 +23,9 @@ Ground decisions in current truth, not in memory:
   `symphony-ts` checkout.
 - `SPEC.mobilyze.md` for fork-specific behavior and `SPEC.upstream.md` for
   upstream compatibility.
-- Existing priority tickets instead of duplicate process lanes:
-  `SYMPH-376`, `SYMPH-340`, `SYMPH-371`, `SYMPH-449`, `SYMPH-452`,
-  `SYMPH-524`, `SYMPH-526`, `SYMPH-546`, `SYMPH-549`, `SYMPH-553`,
-  and `SYMPH-554`.
+- Live Linear discovery instead of hardcoded ticket memory. Search for active
+  issues and docs by current labels, keywords, project membership, and recent
+  comments before creating or prioritizing process work.
 
 ## Skill Contents
 
@@ -35,7 +34,7 @@ Read these references only when needed:
 | File | Contents | When to read |
 | --- | --- | --- |
 | `references/worker-prompts.md` | Copy-ready prompts for implementation workers and read-only review/triage workers. | Before delegating, refreshing, or forward-testing worker instructions. |
-| `references/operator-decision-brief.md` | Cap-hit and operator decision brief template aligned with `SYMPH-376`. | When a ticket reaches review cap, budget cap, substrate degradation, unclear split/merge choice, or a non-autonomous decision boundary. |
+| `references/operator-decision-brief.md` | Cap-hit and operator decision brief template. | When a ticket reaches review cap, budget cap, substrate degradation, unclear split/merge choice, or a non-autonomous decision boundary. |
 
 ## Session Start Checklist
 
@@ -47,7 +46,7 @@ Read these references only when needed:
    `git status --short --branch`, and the relevant `gh pr view` or
    `gh run list` commands.
 3. Read the live Linear issues before touching state. For each candidate:
-   `linear-pp-cli issues SYMPH-123 --agent --data-source live --select identifier,title,description,state.name,url,project.name,parent.identifier,labels.name`.
+   `linear-pp-cli issues <ISSUE-ID> --agent --data-source live --select identifier,title,description,state.name,url,project.name,parent.identifier,labels.name`.
 4. Classify each candidate with the risk taxonomy below before assigning work.
 5. Claim only the tickets you will actively run. Use visible Linear state and
    a short comment that names the orchestrator, branch or worker, scope, and stop
@@ -68,7 +67,7 @@ Classify every ticket before execution:
 | --- | --- | --- | --- |
 | `normal` | Localized code, tests, docs, small CLI or parser work. | Clear issue, bounded files, normal validation path. | One broad review, then scoped convergence or Track filing. |
 | `high-risk invariant` | Journal/replay, dispatcher admission, review gates, emergency stop, auth, anchors, comparator behavior, budget or topology boundaries. | State contract table before code. | First pass broad; later passes falsify the named invariant and fix delta. |
-| `substrate-degraded` | Reviewer artifacts missing, malformed, stale, mutating, or untrusted; cmux/codex/pi/claude substrate failure. | Identify whether the product diff is blocked or review evidence is degraded. | Do not burn implementation cycles chasing bad evidence; park or route substrate work to existing tickets such as `SYMPH-546`. |
+| `substrate-degraded` | Reviewer artifacts missing, malformed, stale, mutating, or untrusted; cmux/codex/pi/claude substrate failure. | Identify whether the product diff is blocked or review evidence is degraded. | Do not burn implementation cycles chasing bad evidence; park or route substrate work to the current active issue for that substrate family. |
 | `backlog-normalization` | Clustering, demoting, deduplicating, or reprioritizing Track tickets. | Search and read existing issues first. | Produce fewer execution clusters, not more unowned prose. |
 | `operational-debug` | Live runtime, LAN, launchd, CI, merge queue, or local machine incidents. | Current machine truth and exact repro/status commands. | Verify against the live boundary before closeout. |
 
@@ -103,7 +102,7 @@ For `high-risk invariant`, write this state contract before code:
 Use the repo's PR-backed pattern for non-trivial changes:
 
 1. Implement on a branch containing the Linear issue ID.
-2. Push and open a draft PR with `Linear: SYMPH-123` in the body.
+2. Push and open a draft PR with `Linear: <ISSUE-ID>` in the body.
 3. Run council-style review on the current PR head.
 4. Fix verifiable P1/P2s in the PR.
 5. File or update Track findings in Linear before naming them in prose.
@@ -112,11 +111,12 @@ Use the repo's PR-backed pattern for non-trivial changes:
 7. Mark ready, merge through the repo's normal method, verify `origin/main`,
    close Linear, and publish the completion report.
 
-Important guard: until `SYMPH-546` is live-verified Done and merged, do not
-treat headless Claude/Codex reviewer lanes against mutable PR worktrees as
-trusted review evidence. Use Pi plus in-session Codex review when review is
-needed, record the lane degradation explicitly, and avoid counting thin,
-empty, stale, or malformed artifacts as passes.
+Important guard: before treating headless Claude/Codex reviewer lanes against
+mutable PR worktrees as trusted review evidence, live-discover the current
+reviewer-immutability or review-substrate issue, design record, or merged PR.
+If no current Done/merged evidence exists, use Pi plus in-session Codex review
+when review is needed, record the lane degradation explicitly, and avoid
+counting thin, empty, stale, or malformed artifacts as passes.
 
 Round policy:
 
@@ -134,6 +134,13 @@ Use the `linear-workflow` and `pp-linear` command family:
 
 - Search before create with `linear-pp-cli similar ... --team SYMPH --agent`
   or live issue reads.
+- For process and review-substrate work, search active Linear issues and docs
+  by labels and keywords such as `area:review-tooling`, `kind:test`,
+  `substrate_stall`, `reviewer immutability`, `cap-hit`, `operator decision`,
+  `backlog normalization`, and `merge queue`.
+- Treat ticket IDs in handoffs, comments, or older checkpoints as dated
+  pointers. Verify live state and recency before using them as priority or
+  dependency signals.
 - For new durable work, create or update Linear issues with source refs,
   acceptance criteria, and verification. Use file-backed Markdown bodies.
 - Prefer sub-issues under the active issue when the work belongs to the same

@@ -66,23 +66,29 @@ describe("session-orchestrator skill", () => {
     }
   });
 
-  it("guards unsafe headless Claude/Codex reviewer lanes until SYMPH-546 lands", () => {
-    expect(skillContent).toContain("SYMPH-546");
-    expect(skillContent).toMatch(
-      /do not\s+treat headless Claude\/Codex reviewer lanes/i,
+  it("guards unsafe headless Claude/Codex reviewer lanes with live discovery", () => {
+    expect(skillContent).toContain("reviewer-immutability");
+    expect(skillContent).toContain(
+      "before treating headless Claude/Codex reviewer lanes",
     );
-    expect(skillContent).toContain("Use Pi plus in-session Codex review");
+    expect(skillContent).toContain("use Pi plus in-session Codex review");
     expect(workerPrompts).toContain(
-      "Until SYMPH-546 is live-verified Done and merged",
+      "verify the current reviewer-immutability or review-substrate issue",
     );
   });
 
-  it("keeps durable follow-up in Linear and references existing process tickets", () => {
+  it("keeps durable follow-up in Linear through live discovery", () => {
     expect(skillContent).toContain("Search before create");
     expect(skillContent).toContain("linear-pp-cli similar");
-    expect(skillContent).toContain("SYMPH-376");
-    expect(skillContent).toContain("SYMPH-340");
+    expect(skillContent).toContain("area:review-tooling");
+    expect(skillContent).toContain("Treat ticket IDs in handoffs");
     expect(skillContent).not.toContain("docs/tracked-items.md");
+  });
+
+  it("does not bake dated concrete ticket IDs into the reusable skill", () => {
+    expect(skillContent).not.toMatch(/\bSYMPH-\d+\b/);
+    expect(workerPrompts).not.toMatch(/\bSYMPH-\d+\b/);
+    expect(decisionBrief).not.toMatch(/\bSYMPH-\d+\b/);
   });
 
   it("provides copy-ready implementation and read-only worker prompt skeletons", () => {
@@ -112,8 +118,8 @@ describe("session-orchestrator skill", () => {
     expect(workerPrompts).toContain("review-loop discipline");
   });
 
-  it("includes a SYMPH-376 aligned operator decision brief", () => {
-    expect(decisionBrief).toContain("aligned with `SYMPH-376`");
+  it("includes an operator decision brief", () => {
+    expect(decisionBrief).toContain("operator judgment");
     expect(decisionBrief).toContain("## Recommendation");
     expect(decisionBrief).toContain("## Current Truth");
     expect(decisionBrief).toContain("## Options");

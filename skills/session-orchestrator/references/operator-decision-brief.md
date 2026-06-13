@@ -3,16 +3,17 @@
 Use this template when a session-orchestrated ticket hits a non-autonomous boundary:
 review round cap, budget cap, repeated same-family reopen, degraded review
 substrate, missing live proof, unclear split/merge decision, or conflicting
-ownership. This is the pause point aligned with `SYMPH-376`.
+ownership. This is the pause point for operator judgment instead of another
+automatic round.
 
 ```markdown
-# Operator Decision Brief - [SYMPH-123 / PR #123]
+# Operator Decision Brief - [issue identifier / PR #123]
 
 ## Recommendation
 [Continue scoped | split | park | merge Track-only | abandon/rework] because [one concise reason].
 
 ## Current Truth
-- Issue: [SYMPH-123 title and URL]
+- Issue: [issue identifier, title, and URL]
 - PR: [URL or none]
 - Branch/head: [branch] @ [head sha]
 - Base: [base ref] @ [base sha]
