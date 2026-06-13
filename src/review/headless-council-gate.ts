@@ -49,6 +49,24 @@ const ARTIFACT_SECTION_HEADINGS = [
 const ARTIFACT_SECTION_HEADING_KEYS = buildArtifactSectionHeadingKeys(
   ARTIFACT_SECTION_HEADINGS,
 );
+const KNOWN_EXTENSIONLESS_ROOT_FILES = new Set([
+  "authors",
+  "changelog",
+  "changes",
+  "codeowners",
+  "copying",
+  "dockerfile",
+  "gemfile",
+  "justfile",
+  "license",
+  "makefile",
+  "notice",
+  "owners",
+  "procfile",
+  "rakefile",
+  "readme",
+  "taskfile",
+]);
 // SYMPHONY_UNTRUSTED_DIFF matches as a substring (no word boundaries): the
 // real boundary token is `SYMPHONY_UNTRUSTED_DIFF_<uuid>` and `\b` fails on
 // `_`-suffixed identifiers.
@@ -5291,6 +5309,10 @@ function artifactHeadingLabelSuffixStartsWithSeparator(
     return true;
   }
 
+  if (/^\s/.test(match[0])) {
+    return true;
+  }
+
   const rest = suffix.slice(match[0].length);
   return (
     rest === "" || /^\s/.test(rest) || isCompactArtifactFindingPathSuffix(rest)
@@ -5299,9 +5321,28 @@ function artifactHeadingLabelSuffixStartsWithSeparator(
 
 function isCompactArtifactFindingPathSuffix(suffix: string): boolean {
   const candidate = suffix.trimStart();
-  return /^(?:\/|\.{1,2}[\\/]|[a-z]:[\\/]|[a-z0-9_.-]+[\\/]|[a-z0-9_.-]+:\d+(?:\D|$)|[a-z0-9_.-]+\.[a-z0-9][a-z0-9_.-]*:\d+(?:\D|$))/i.test(
-    candidate,
-  );
+  if (/^(?:\/|\.{1,2}[\\/]|[a-z]:[\\/])/i.test(candidate)) {
+    return true;
+  }
+
+  if (
+    /^(?:[a-z0-9_.-]+[\\/])+(?:[a-z0-9_.-]*\.[a-z0-9][a-z0-9_.-]*(?::\d+(?:\D|$)|(?=\s|$))|[a-z0-9_.-]+:\d+(?:\D|$))/i.test(
+      candidate,
+    )
+  ) {
+    return true;
+  }
+
+  const rootLineReference = /^([a-z0-9_.-]+):\d+(?:\D|$)/i.exec(candidate);
+  if (rootLineReference === null || rootLineReference[1] === undefined) {
+    return false;
+  }
+
+  return isKnownExtensionlessRootFile(rootLineReference[1]);
+}
+
+function isKnownExtensionlessRootFile(filename: string): boolean {
+  return KNOWN_EXTENSIONLESS_ROOT_FILES.has(filename.toLowerCase());
 }
 
 function skipArtifactHeadingWordSeparator(

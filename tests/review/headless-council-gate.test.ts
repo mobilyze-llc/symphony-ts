@@ -4459,7 +4459,15 @@ describe("runHeadlessCouncilGate", () => {
       "- Track - src/foo.ts:12 record reviewer note",
     ],
     [
-      "single-word compact hyphen path finding",
+      "single-word hyphen-delimited urgent inline finding",
+      "- Track -urgent: investigate further",
+    ],
+    [
+      "single-word dash-adjacent compact hyphen path finding",
+      "- Triage-src/foo.ts:12 surviving P2",
+    ],
+    [
+      "single-word space-hyphen compact path finding",
       "- Triage -src/foo.ts:12 surviving P2",
     ],
     [
@@ -4577,6 +4585,8 @@ describe("runHeadlessCouncilGate", () => {
 
   it.each([
     ["hyphen", "- Track-based workflow remains safe prose."],
+    ["hyphen with slash prose", "- Track-check/in remains safe prose."],
+    ["hyphen with colon prose", "- Track-count:123 remains safe prose."],
     ["en dash", "- Track–based workflow remains safe prose."],
     ["em dash", "- Track—based workflow remains safe prose."],
   ])(
