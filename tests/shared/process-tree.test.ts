@@ -83,6 +83,33 @@ describe("process tree termination", () => {
     ]);
   });
 
+  it("does not signal or wait when the child already exited before teardown", async () => {
+    vi.useFakeTimers();
+    const child = new EventEmitter() as EventEmitter & {
+      pid: number;
+      exitCode: number | null;
+      signalCode: NodeJS.Signals | null;
+    };
+    child.pid = 1234;
+    child.exitCode = 0;
+    child.signalCode = null;
+    const kill = vi.fn() as unknown as typeof process.kill;
+
+    const result = await terminateChildProcessTree(child, {
+      graceMs: 1_000,
+      kill,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_100);
+
+    expect(result).toEqual({
+      pid: 1234,
+      sigtermSent: false,
+      sigkillSent: false,
+    });
+    expect(kill).not.toHaveBeenCalled();
+  });
+
   it("escalates detached process groups without checking leader liveness", async () => {
     vi.useFakeTimers();
     const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];

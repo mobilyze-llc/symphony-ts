@@ -28,6 +28,9 @@ export async function terminateChildProcessTree(
   if (pid === null) {
     return { pid, sigtermSent: false, sigkillSent: false };
   }
+  if (childHasExited(child)) {
+    return { pid, sigtermSent: false, sigkillSent: false };
+  }
 
   const kill = options?.kill ?? process.kill;
   const graceMs = options?.graceMs ?? 1_000;
