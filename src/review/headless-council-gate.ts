@@ -12,6 +12,8 @@ import {
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 
+import type { CouncilRiskPredicateResult } from "../domain/model.js";
+import { classifyCouncilRiskPaths } from "../orchestrator/council-risk-predicate.js";
 import { stableJsonStringify } from "./stable-json.js";
 
 const DEFAULT_CMUX_SPAWN_BIN = "cmux-spawn";
@@ -33,6 +35,7 @@ const HIGH_RISK_CODEX_EXCAVATION_TIMEOUT_SECONDS = 3_600;
 const HIGH_RISK_CODEX_EXCAVATION_TOOL_OUTPUT_TOKEN_LIMIT = 4_000;
 const HIGH_RISK_CODEX_EXCAVATION_MODEL_AUTO_COMPACT_TOKEN_LIMIT = 80_000;
 const DEFAULT_LANE_STALL_GRACE_SECONDS = 60;
+const DEFAULT_LEAD_CONFIDENCE_THRESHOLD = 0.7;
 const ARTIFACT_SECTION_HEADINGS = [
   "Verdict",
   "P1 Must Fix",
@@ -54,6 +57,14 @@ const execFileAsync = promisify(execFile);
 
 export type HeadlessGateVerdict = "pass" | "fail" | "error";
 export type CouncilReviewMode = "full" | "convergence";
+export const COUNCIL_ROUTING_MODES = [
+  "fast",
+  "standard",
+  "high-risk",
+  "disagreement",
+  "legacy",
+] as const;
+export type CouncilRoutingMode = (typeof COUNCIL_ROUTING_MODES)[number];
 export type HeadlessLaneState =
   | "complete"
   | "failed"
@@ -99,6 +110,18 @@ export type CouncilTerminationAction =
 export type CouncilTerminationAlertLevel = "ok" | "warning" | "operator";
 export type CodexExcavationSweep = "standard" | "high-risk";
 export type CodexReasoningEffort = "low" | "medium" | "high";
+export type CouncilEscalationPredicate =
+  | "missing_required_lane"
+  | "malformed_required_lane"
+  | "degraded_required_lane"
+  | "absent_decorrelated_reviewer_artifact"
+  | "p1_verdict_disagreement"
+  | "lead_dismissed_lane_p1"
+  | "lead_confidence_below_threshold"
+  | "high_risk_predicate"
+  | "codex_author_codex_lead_tripwire"
+  | "operator_force"
+  | "operator_override_accept_narrower_risk";
 
 export interface CouncilTerminationLadderThresholds {
   sameFamilyReopenLimit: number;
@@ -181,6 +204,7 @@ export interface StructuredReviewerArtifact {
   };
   routing: {
     mode: CouncilReviewMode;
+    routingMode: CouncilRoutingMode | null;
     round: number;
   };
   reviewBundle: ReviewBundleReference | null;
@@ -271,6 +295,49 @@ export interface HeadlessReviewerLaneConfig {
   independentReviewer?: boolean;
 }
 
+export interface CouncilRoutingLaneSelection {
+  laneId: string;
+  agent: "claude" | "pi" | "codex";
+  role: string;
+  required: boolean;
+  decorrelatedSignal: boolean;
+  reason: string;
+}
+
+export interface CouncilRoutingSkippedLane {
+  laneId: string;
+  agent: "claude" | "pi" | "codex";
+  reason: string;
+}
+
+export interface CouncilDecorrelatedReviewerArtifact {
+  laneId: string;
+  agent: "claude" | "pi" | "codex";
+  modelFamily: string;
+}
+
+export interface CouncilDecorrelationBasis {
+  authorFamilies: string[];
+  requiredNonAuthorFamilyReviewer: boolean;
+  requiredReviewerLaneIds: string[];
+  directSignalLaneIds: string[];
+  decorrelatedReviewerArtifacts: CouncilDecorrelatedReviewerArtifact[];
+  mergeEligible: boolean;
+  summary: string;
+}
+
+export interface CouncilReviewRouting {
+  schemaVersion: 1;
+  mode: CouncilRoutingMode;
+  selectedLanes: CouncilRoutingLaneSelection[];
+  skippedLanes: CouncilRoutingSkippedLane[];
+  decorrelationBasis: CouncilDecorrelationBasis;
+  escalationPredicates: CouncilEscalationPredicate[];
+  operatorOverrideReason: string | null;
+  highRiskPredicate: CouncilRiskPredicateResult;
+  leadConfidenceThreshold: number;
+}
+
 export interface HeadlessCouncilGateInput {
   issueId: string;
   workspace: string;
@@ -291,6 +358,8 @@ export interface HeadlessCouncilGateInput {
   codexExcavationModelAutoCompactTokenLimit?: number;
   round?: number;
   mode?: CouncilReviewMode;
+  routingMode?: CouncilRoutingMode;
+  operatorOverrideReason?: string;
   previousReviewedHeadSha?: string;
   evidenceDatasetPaths?: readonly string[];
   promptPaths?: readonly string[];
@@ -307,6 +376,8 @@ interface DefaultReviewerLaneOptions {
   codexExcavationTimeoutSeconds?: number | undefined;
   codexExcavationToolOutputTokenLimit?: number | undefined;
   codexExcavationModelAutoCompactTokenLimit?: number | undefined;
+  routingMode?: CouncilRoutingMode | undefined;
+  acceptsNarrowerRisk?: boolean | undefined;
 }
 
 export interface ReviewContext {
@@ -352,6 +423,7 @@ export interface ReviewBundleArtifact {
     repo: string | null;
     prNumber: number | null;
     mode: CouncilReviewMode;
+    routingMode: CouncilRoutingMode | null;
     round: number;
   };
   refs: {
@@ -392,6 +464,7 @@ export interface CouncilReviewMetadata {
   base_sha: string | null;
   round: number;
   mode: CouncilReviewMode;
+  routing_mode?: CouncilRoutingMode;
   verdict: HeadlessGateVerdict;
 }
 
@@ -443,6 +516,7 @@ export interface HeadlessCouncilGateResult {
     headRef: string | null;
   };
   review_metadata: CouncilReviewMetadata;
+  review_routing: CouncilReviewRouting | null;
   review_bundle: ReviewBundleReference | null;
   targeted_convergence: TargetedConvergenceHypothesis | null;
   lanes: HeadlessLaneResult[];
@@ -572,12 +646,14 @@ export async function runHeadlessCouncilGate(
   const buildReviewMetadata = (
     context: Partial<ReviewContext>,
     verdict: HeadlessGateVerdict,
+    reviewRouting: CouncilReviewRouting | null = null,
   ): CouncilReviewMetadata => ({
     reviewed_head_sha: context.headSha ?? null,
     previous_reviewed_head_sha: input.previousReviewedHeadSha ?? null,
     base_sha: context.baseSha ?? null,
     round,
     mode,
+    ...(reviewRouting === null ? {} : { routing_mode: reviewRouting.mode }),
     verdict,
   });
 
@@ -589,6 +665,7 @@ export async function runHeadlessCouncilGate(
     summary: string,
     diffPath: string | null = null,
     reviewBundle: ReviewBundleReference | null = null,
+    reviewRouting: CouncilReviewRouting | null = null,
   ) =>
     await writeResult({
       schemaVersion: 1,
@@ -602,7 +679,8 @@ export async function runHeadlessCouncilGate(
         baseRef: context.baseRef ?? input.baseRef ?? null,
         headRef: context.headRef ?? input.headRef ?? null,
       },
-      review_metadata: buildReviewMetadata(context, verdict),
+      review_metadata: buildReviewMetadata(context, verdict, reviewRouting),
+      review_routing: reviewRouting,
       review_bundle: reviewBundle,
       targeted_convergence: null,
       lanes,
@@ -627,21 +705,11 @@ export async function runHeadlessCouncilGate(
 
   await mkdir(artifactDir, { recursive: true });
 
-  const reviewerLanes =
-    input.reviewerLanes === undefined
-      ? defaultReviewerLanes(env, {
-          codexExcavation: input.codexExcavation,
-          codexExcavationSweep: input.codexExcavationSweep,
-          codexExcavationTimeoutSeconds: input.codexExcavationTimeoutSeconds,
-          codexExcavationToolOutputTokenLimit:
-            input.codexExcavationToolOutputTokenLimit,
-          codexExcavationModelAutoCompactTokenLimit:
-            input.codexExcavationModelAutoCompactTokenLimit,
-        })
-      : [...input.reviewerLanes];
+  const explicitReviewerLanes =
+    input.reviewerLanes === undefined ? null : [...input.reviewerLanes];
   const codexLeadEnabled = input.codexLead !== false;
 
-  if (reviewerLanes.length === 0) {
+  if (explicitReviewerLanes?.length === 0) {
     return await fail(
       "error",
       {},
@@ -650,7 +718,7 @@ export async function runHeadlessCouncilGate(
       "No reviewer lanes were configured; review gate failed closed.",
     );
   }
-  const duplicateLaneIds = findDuplicateLaneIds(reviewerLanes);
+  const duplicateLaneIds = findDuplicateLaneIds(explicitReviewerLanes ?? []);
   if (duplicateLaneIds.length > 0) {
     return await fail(
       "error",
@@ -660,7 +728,7 @@ export async function runHeadlessCouncilGate(
       `Duplicate reviewer lane IDs are not allowed: ${duplicateLaneIds.join(", ")}`,
     );
   }
-  const reservedLaneIds = findReservedLaneIds(reviewerLanes);
+  const reservedLaneIds = findReservedLaneIds(explicitReviewerLanes ?? []);
   if (reservedLaneIds.length > 0) {
     return await fail(
       "error",
@@ -698,6 +766,8 @@ export async function runHeadlessCouncilGate(
     artifact: ReviewBundleArtifact;
     reference: ReviewBundleReference;
   };
+  let reviewerLanes: HeadlessReviewerLaneConfig[];
+  let reviewRouting: CouncilReviewRouting;
   let targetedConvergence: TargetedConvergenceHypothesis | null = null;
   try {
     context = await loadReviewContext(input, {
@@ -715,6 +785,56 @@ export async function runHeadlessCouncilGate(
       workspace,
       env,
     });
+    reviewRouting = buildInitialCouncilRouting({
+      input,
+      env,
+      context,
+      codexLeadEnabled,
+    });
+    reviewerLanes =
+      explicitReviewerLanes ??
+      defaultReviewerLanes(env, {
+        codexExcavation: input.codexExcavation,
+        codexExcavationSweep:
+          input.codexExcavationSweep ?? routingCodexSweep(reviewRouting.mode),
+        codexExcavationTimeoutSeconds: input.codexExcavationTimeoutSeconds,
+        codexExcavationToolOutputTokenLimit:
+          input.codexExcavationToolOutputTokenLimit,
+        codexExcavationModelAutoCompactTokenLimit:
+          input.codexExcavationModelAutoCompactTokenLimit,
+        routingMode: reviewRouting.mode,
+        acceptsNarrowerRisk: operatorAcceptedNarrowerRisk(reviewRouting),
+      });
+    const routedDuplicateLaneIds = findDuplicateLaneIds(reviewerLanes);
+    if (routedDuplicateLaneIds.length > 0) {
+      return await fail(
+        "error",
+        context,
+        [],
+        routedDuplicateLaneIds.map(
+          (laneId) => `duplicate-reviewer-lane-id:${laneId}`,
+        ),
+        `Duplicate reviewer lane IDs are not allowed: ${routedDuplicateLaneIds.join(", ")}`,
+        diffPath,
+        null,
+        reviewRouting,
+      );
+    }
+    const routedReservedLaneIds = findReservedLaneIds(reviewerLanes);
+    if (routedReservedLaneIds.length > 0) {
+      return await fail(
+        "error",
+        context,
+        [],
+        routedReservedLaneIds.map(
+          (laneId) => `reserved-reviewer-lane-id:${laneId}`,
+        ),
+        `Reviewer lane IDs cannot use reserved gate lane IDs: ${routedReservedLaneIds.join(", ")}`,
+        diffPath,
+        null,
+        reviewRouting,
+      );
+    }
     reviewBundle = await writeReviewBundle(input, context, {
       artifactDir,
       diffPath,
@@ -723,6 +843,7 @@ export async function runHeadlessCouncilGate(
       env,
       round,
       mode,
+      routingMode: reviewRouting.mode,
       targetedConvergence,
     });
   } catch (error) {
@@ -744,6 +865,7 @@ export async function runHeadlessCouncilGate(
       "Review diff was empty; review gate failed closed.",
       diffPath,
       reviewBundle.reference,
+      reviewRouting,
     );
   }
 
@@ -755,52 +877,53 @@ export async function runHeadlessCouncilGate(
       : commandTimeoutMs(laneTimeoutSeconds) +
         DEFAULT_LANE_STALL_GRACE_SECONDS * 1000;
 
-  let lanes = await Promise.all(
-    reviewerLanes.map((lane) => {
-      const laneTimeoutSeconds = timeoutSecondsForLane(lane, timeoutSeconds);
-      const laneStallDeadlineMs = laneStallDeadlineMsFor(laneTimeoutSeconds);
-      return withLaneStallDeadline(
-        runReviewerLane({
+  const runReviewerLaneWithDeadline = (lane: HeadlessReviewerLaneConfig) => {
+    const laneTimeoutSeconds = timeoutSecondsForLane(lane, timeoutSeconds);
+    const laneStallDeadlineMs = laneStallDeadlineMsFor(laneTimeoutSeconds);
+    return withLaneStallDeadline(
+      runReviewerLane({
+        lane,
+        context,
+        artifactDir,
+        workspace,
+        cmuxSpawnBin,
+        timeoutSeconds: laneTimeoutSeconds,
+        runCommand,
+        env,
+        reviewBundle: reviewBundle.reference,
+        mode,
+        routingMode: reviewRouting.mode,
+        round,
+        targetedConvergence,
+        priorStructuredArtifacts: input.priorStructuredArtifacts ?? [],
+        riskContractArtifactPaths: input.riskContractArtifactPaths ?? [],
+      }).catch((error: unknown) =>
+        reviewerLaneExecutionErrorResult(
           lane,
-          context,
           artifactDir,
-          workspace,
-          cmuxSpawnBin,
-          timeoutSeconds: laneTimeoutSeconds,
-          runCommand,
-          env,
-          reviewBundle: reviewBundle.reference,
-          mode,
-          round,
-          targetedConvergence,
-          priorStructuredArtifacts: input.priorStructuredArtifacts ?? [],
-          riskContractArtifactPaths: input.riskContractArtifactPaths ?? [],
-        }).catch((error: unknown) =>
-          reviewerLaneExecutionErrorResult(
-            lane,
-            artifactDir,
-            error,
-            reviewBundle.reference,
-          ),
+          error,
+          reviewBundle.reference,
         ),
-        laneStallDeadlineMs,
-        () =>
-          laneStallResult(
-            {
-              laneId: lane.laneId,
-              agent: lane.agent,
-              role: lane.role,
-              model: lane.model,
-              reasoningEffort: laneReasoningEffort(lane),
-              independentReviewer: independentReviewerForLane(lane),
-            },
-            artifactDir,
-            laneStallDeadlineMs,
-            reviewBundle.reference,
-          ),
-      );
-    }),
-  );
+      ),
+      laneStallDeadlineMs,
+      () =>
+        laneStallResult(
+          {
+            laneId: lane.laneId,
+            agent: lane.agent,
+            role: lane.role,
+            model: lane.model,
+            reasoningEffort: laneReasoningEffort(lane),
+            independentReviewer: independentReviewerForLane(lane),
+          },
+          artifactDir,
+          laneStallDeadlineMs,
+          reviewBundle.reference,
+        ),
+    );
+  };
+
+  let lanes = await Promise.all(reviewerLanes.map(runReviewerLaneWithDeadline));
   if (codexLeadEnabled) {
     const codexLeadStallDeadlineMs = laneStallDeadlineMsFor(timeoutSeconds);
     const codexLeadResult = await withLaneStallDeadline(
@@ -815,6 +938,7 @@ export async function runHeadlessCouncilGate(
         env,
         reviewBundle: reviewBundle.reference,
         mode,
+        routingMode: reviewRouting.mode,
         round,
         terminationThresholds,
         targetedConvergence,
@@ -846,6 +970,31 @@ export async function runHeadlessCouncilGate(
     lanes = [...lanes, codexLeadResult];
   }
 
+  const disagreementPredicates = collectDisagreementEscalationPredicates(
+    lanes,
+    reviewRouting.leadConfidenceThreshold,
+  );
+  if (
+    disagreementPredicates.length > 0 &&
+    !hasLane(lanes, "claude-opus") &&
+    !operatorAcceptedNarrowerRisk(reviewRouting)
+  ) {
+    reviewRouting = escalateRoutingForDisagreement(
+      reviewRouting,
+      disagreementPredicates,
+      env,
+    );
+    lanes = [
+      ...lanes,
+      await runReviewerLaneWithDeadline(opusReviewerLane(env)),
+    ];
+  } else if (disagreementPredicates.length > 0) {
+    reviewRouting = addEscalationPredicates(
+      reviewRouting,
+      disagreementPredicates,
+    );
+  }
+
   const degradedConditions = collectDegradedConditions(lanes);
   try {
     await appendReviewBundleReferenceToLaneArtifacts(
@@ -859,8 +1008,22 @@ export async function runHeadlessCouncilGate(
   if (!codexLeadEnabled) {
     degradedConditions.push("codex-lead-disabled");
   }
+  reviewRouting = finalizeCouncilRouting(reviewRouting, lanes);
+  const routingGuaranteeConditions = collectRoutingGuaranteeDegradedConditions(
+    reviewRouting,
+    lanes,
+  );
+  reviewRouting = addEscalationPredicates(
+    reviewRouting,
+    routingGuaranteeEscalationPredicates(routingGuaranteeConditions),
+  );
+  degradedConditions.push(...routingGuaranteeConditions);
 
-  const verdict = aggregateHeadlessVerdict(lanes);
+  const laneVerdict = aggregateHeadlessVerdict(lanes);
+  const verdict =
+    laneVerdict === "pass" && routingGuaranteeConditions.length > 0
+      ? "error"
+      : laneVerdict;
   const summary = summarizeVerdict(verdict, lanes, degradedConditions);
   const termination = assessCouncilTermination({
     verdict,
@@ -883,7 +1046,8 @@ export async function runHeadlessCouncilGate(
       baseRef: context.baseRef,
       headRef: context.headRef,
     },
-    review_metadata: buildReviewMetadata(context, verdict),
+    review_metadata: buildReviewMetadata(context, verdict, reviewRouting),
+    review_routing: reviewRouting,
     review_bundle: reviewBundle.reference,
     targeted_convergence: targetedConvergence,
     lanes,
@@ -1130,35 +1294,564 @@ export function defaultReviewerLanes(
   env: NodeJS.ProcessEnv = process.env,
   options: DefaultReviewerLaneOptions = {},
 ): HeadlessReviewerLaneConfig[] {
-  const piThinking = parseThinkingEffort(
-    env.SYMPHONY_COUNCIL_PI_THINKING,
-    "high",
-  );
-  const lanes: HeadlessReviewerLaneConfig[] = [
-    {
-      laneId: "claude-opus",
-      agent: "claude",
-      role: "opus-direct-reviewer",
-      model: env.SYMPHONY_COUNCIL_CLAUDE_MODEL ?? "opus",
-      profile: env.SYMPHONY_COUNCIL_CLAUDE_PROFILE ?? "legacy",
-      allowedTools:
-        env.SYMPHONY_COUNCIL_CLAUDE_ALLOWED_TOOLS ??
-        "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git status *),Bash(git ls-files *),Bash(gh pr view *),Bash(gh pr diff *)",
-    },
-    {
-      laneId: "pi-deepseek",
-      agent: "pi",
-      role: "deepseek-direct-reviewer",
-      provider: env.SYMPHONY_COUNCIL_PI_PROVIDER ?? "deepseek",
-      model: env.SYMPHONY_COUNCIL_PI_MODEL ?? "deepseek-v4-pro",
-      thinking: piThinking,
-      tools: env.SYMPHONY_COUNCIL_PI_TOOLS ?? "read,grep,find,ls",
-    },
-  ];
+  const routingMode =
+    options.routingMode ?? forcedCouncilRoutingMode(env) ?? "standard";
+  const lanes: HeadlessReviewerLaneConfig[] = [];
+  if (
+    routingMode === "legacy" ||
+    (routingMode === "high-risk" && options.acceptsNarrowerRisk !== true) ||
+    routingMode === "disagreement"
+  ) {
+    lanes.push(opusReviewerLane(env));
+  }
+  lanes.push(piReviewerLane(env));
   if (codexExcavationEnabled(env, options.codexExcavation)) {
     lanes.push(codexExcavationLane(env, options));
   }
   return lanes;
+}
+
+function opusReviewerLane(env: NodeJS.ProcessEnv): HeadlessReviewerLaneConfig {
+  return {
+    laneId: "claude-opus",
+    agent: "claude",
+    role: "opus-direct-reviewer",
+    model: env.SYMPHONY_COUNCIL_CLAUDE_MODEL ?? "opus",
+    profile: env.SYMPHONY_COUNCIL_CLAUDE_PROFILE ?? "legacy",
+    allowedTools:
+      env.SYMPHONY_COUNCIL_CLAUDE_ALLOWED_TOOLS ??
+      "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git status *),Bash(git ls-files *),Bash(gh pr view *),Bash(gh pr diff *)",
+  };
+}
+
+function piReviewerLane(env: NodeJS.ProcessEnv): HeadlessReviewerLaneConfig {
+  return {
+    laneId: "pi-deepseek",
+    agent: "pi",
+    role: "deepseek-direct-reviewer",
+    provider: env.SYMPHONY_COUNCIL_PI_PROVIDER ?? "deepseek",
+    model: env.SYMPHONY_COUNCIL_PI_MODEL ?? "deepseek-v4-pro",
+    thinking: parseThinkingEffort(env.SYMPHONY_COUNCIL_PI_THINKING, "high"),
+    tools: env.SYMPHONY_COUNCIL_PI_TOOLS ?? "read,grep,find,ls",
+  };
+}
+
+function buildInitialCouncilRouting(input: {
+  input: HeadlessCouncilGateInput;
+  env: NodeJS.ProcessEnv;
+  context: ReviewContext;
+  codexLeadEnabled: boolean;
+}): CouncilReviewRouting {
+  const changedPaths = extractChangedPathsFromDiff(input.context.diff);
+  const highRiskPredicate = classifyCouncilRiskPaths(changedPaths);
+  const forcedMode =
+    input.input.routingMode ?? forcedCouncilRoutingMode(input.env);
+  const forceLegacy = envFlag(input.env.SYMPHONY_COUNCIL_FORCE_LEGACY);
+  const forceOpus = envFlag(input.env.SYMPHONY_COUNCIL_FORCE_OPUS);
+  const authorFamilies = inferAuthorFamilies(input.input.provenance ?? []);
+  const codexAuthored = authorFamilies.includes("openai-codex");
+  const acceptsNarrowerRisk = envFlag(
+    input.env.SYMPHONY_COUNCIL_ACCEPT_NARROWER_RISK ??
+      input.env.SYMPHONY_COUNCIL_ACCEPT_NARROW_RISK,
+  );
+  const highRisk = highRiskPredicate.triggerHits.length > 0;
+  const operatorOverrideReason =
+    input.input.operatorOverrideReason ??
+    input.env.SYMPHONY_COUNCIL_OPERATOR_OVERRIDE_REASON ??
+    null;
+  const acceptsNarrowerRiskForHighRisk =
+    acceptsNarrowerRisk &&
+    highRisk &&
+    codexAuthored &&
+    !forceLegacy &&
+    !forceOpus &&
+    forcedMode !== "legacy";
+  const escalationPredicates: CouncilEscalationPredicate[] = [];
+  if (highRisk) {
+    escalationPredicates.push("high_risk_predicate");
+  }
+  if (codexAuthored && input.codexLeadEnabled) {
+    escalationPredicates.push("codex_author_codex_lead_tripwire");
+  }
+  if (forceLegacy || forceOpus || forcedMode !== undefined) {
+    escalationPredicates.push("operator_force");
+  }
+  if (acceptsNarrowerRiskForHighRisk) {
+    escalationPredicates.push("operator_override_accept_narrower_risk");
+  }
+
+  const mode =
+    forceLegacy || forcedMode === "legacy"
+      ? "legacy"
+      : forceOpus
+        ? "high-risk"
+        : forcedMode !== undefined
+          ? forcedMode
+          : highRisk
+            ? "high-risk"
+            : "standard";
+  const selectedLanes =
+    input.input.reviewerLanes === undefined
+      ? defaultSelectedLanesForRouting({
+          env: input.env,
+          mode,
+          codexLeadEnabled: input.codexLeadEnabled,
+          codexExcavation: input.input.codexExcavation,
+          acceptsNarrowerRisk: acceptsNarrowerRiskForHighRisk,
+        })
+      : explicitSelectedLanesForRouting({
+          lanes: input.input.reviewerLanes,
+          codexLeadEnabled: input.codexLeadEnabled,
+        });
+  const skippedLanes = skippedLanesForRouting({
+    mode,
+    selectedLanes,
+    codexExcavation: input.input.codexExcavation,
+    acceptsNarrowerRisk: acceptsNarrowerRiskForHighRisk,
+  });
+  return {
+    schemaVersion: 1,
+    mode,
+    selectedLanes,
+    skippedLanes,
+    decorrelationBasis: emptyDecorrelationBasis(
+      authorFamilies,
+      requiredDecorrelatedLaneIds(selectedLanes),
+    ),
+    escalationPredicates: uniqueEscalationPredicates(escalationPredicates),
+    operatorOverrideReason,
+    highRiskPredicate,
+    leadConfidenceThreshold: parseEnvNumber(
+      input.env.SYMPHONY_COUNCIL_LEAD_CONFIDENCE_THRESHOLD,
+      DEFAULT_LEAD_CONFIDENCE_THRESHOLD,
+    ),
+  };
+}
+
+function defaultSelectedLanesForRouting(input: {
+  env: NodeJS.ProcessEnv;
+  mode: CouncilRoutingMode;
+  codexLeadEnabled: boolean;
+  codexExcavation: boolean | undefined;
+  acceptsNarrowerRisk: boolean;
+}): CouncilRoutingLaneSelection[] {
+  const selections: CouncilRoutingLaneSelection[] = [];
+  const includeOpus =
+    input.mode === "legacy" ||
+    input.mode === "disagreement" ||
+    (input.mode === "high-risk" && !input.acceptsNarrowerRisk);
+  if (includeOpus) {
+    selections.push(laneSelection(opusReviewerLane(input.env), true, true));
+  }
+  selections.push(laneSelection(piReviewerLane(input.env), true, true));
+  if (codexExcavationEnabled(input.env, input.codexExcavation)) {
+    selections.push(
+      laneSelection(codexExcavationLane(input.env, {}), false, false),
+    );
+  }
+  if (input.codexLeadEnabled) {
+    selections.push({
+      laneId: CODEX_LEAD_LANE_ID,
+      agent: "codex",
+      role: CODEX_LEAD_ROLE,
+      required: false,
+      decorrelatedSignal: false,
+      reason: "codex_lead_triage",
+    });
+  }
+  return selections;
+}
+
+function explicitSelectedLanesForRouting(input: {
+  lanes: readonly HeadlessReviewerLaneConfig[];
+  codexLeadEnabled: boolean;
+}): CouncilRoutingLaneSelection[] {
+  const selections = input.lanes.map((lane) =>
+    laneSelection(
+      lane,
+      independentReviewerForLane(lane),
+      lane.agent !== "codex",
+    ),
+  );
+  if (input.codexLeadEnabled) {
+    selections.push({
+      laneId: CODEX_LEAD_LANE_ID,
+      agent: "codex",
+      role: CODEX_LEAD_ROLE,
+      required: false,
+      decorrelatedSignal: false,
+      reason: "codex_lead_triage",
+    });
+  }
+  return selections;
+}
+
+function laneSelection(
+  lane: HeadlessReviewerLaneConfig,
+  required: boolean,
+  decorrelatedSignal: boolean,
+): CouncilRoutingLaneSelection {
+  return {
+    laneId: lane.laneId,
+    agent: lane.agent,
+    role: lane.role,
+    required,
+    decorrelatedSignal,
+    reason:
+      lane.agent === "codex"
+        ? "direct_codex_excavation_signal"
+        : "non_author_family_reviewer_artifact",
+  };
+}
+
+function skippedLanesForRouting(input: {
+  mode: CouncilRoutingMode;
+  selectedLanes: readonly CouncilRoutingLaneSelection[];
+  codexExcavation: boolean | undefined;
+  acceptsNarrowerRisk: boolean;
+}): CouncilRoutingSkippedLane[] {
+  const skipped: CouncilRoutingSkippedLane[] = [];
+  if (!input.selectedLanes.some((lane) => lane.laneId === "claude-opus")) {
+    skipped.push({
+      laneId: "claude-opus",
+      agent: "claude",
+      reason: input.acceptsNarrowerRisk
+        ? "operator_override_accept_narrower_high_risk"
+        : input.mode === "standard" || input.mode === "fast"
+          ? `${input.mode}_mode_routes_off_opus`
+          : "not_selected_by_routing",
+    });
+  }
+  if (
+    input.codexExcavation === false &&
+    !input.selectedLanes.some(
+      (lane) => lane.laneId === CODEX_EXCAVATION_LANE_ID,
+    )
+  ) {
+    skipped.push({
+      laneId: CODEX_EXCAVATION_LANE_ID,
+      agent: "codex",
+      reason: "operator_disabled_codex_excavation",
+    });
+  }
+  return skipped;
+}
+
+function emptyDecorrelationBasis(
+  authorFamilies: readonly string[],
+  requiredReviewerLaneIds: readonly string[],
+): CouncilDecorrelationBasis {
+  return {
+    authorFamilies: [...authorFamilies],
+    requiredNonAuthorFamilyReviewer: true,
+    requiredReviewerLaneIds: [...requiredReviewerLaneIds],
+    directSignalLaneIds: [],
+    decorrelatedReviewerArtifacts: [],
+    mergeEligible: false,
+    summary:
+      "No completed non-author-family reviewer artifact has been recorded yet.",
+  };
+}
+
+function requiredDecorrelatedLaneIds(
+  selectedLanes: readonly CouncilRoutingLaneSelection[],
+): string[] {
+  return selectedLanes
+    .filter((lane) => lane.required && lane.decorrelatedSignal)
+    .map((lane) => lane.laneId);
+}
+
+function finalizeCouncilRouting(
+  routing: CouncilReviewRouting,
+  lanes: readonly HeadlessLaneResult[],
+): CouncilReviewRouting {
+  const directSignalLaneIds = lanes
+    .filter((lane) => lane.agent === "codex" && !lane.independentReviewer)
+    .map((lane) => lane.laneId)
+    .sort();
+  const decorrelatedReviewerArtifacts = lanes
+    .flatMap((lane) => {
+      const artifact = lane.structuredArtifact;
+      if (
+        artifact === undefined ||
+        artifact === null ||
+        lane.state !== "complete" ||
+        lane.verdict !== "pass" ||
+        lane.degradedReason !== null ||
+        !lane.independentReviewer
+      ) {
+        return [];
+      }
+      const modelFamily = artifact.lane.modelFamily;
+      if (routing.decorrelationBasis.authorFamilies.includes(modelFamily)) {
+        return [];
+      }
+      return [
+        {
+          laneId: lane.laneId,
+          agent: lane.agent,
+          modelFamily,
+        } satisfies CouncilDecorrelatedReviewerArtifact,
+      ];
+    })
+    .sort((left, right) => left.laneId.localeCompare(right.laneId, "en"));
+  const mergeEligible = decorrelatedReviewerArtifacts.length > 0;
+  return {
+    ...routing,
+    decorrelationBasis: {
+      ...routing.decorrelationBasis,
+      directSignalLaneIds,
+      decorrelatedReviewerArtifacts,
+      mergeEligible,
+      summary: mergeEligible
+        ? `Merge-eligible decorrelated reviewer artifact(s): ${decorrelatedReviewerArtifacts.map((artifact) => artifact.laneId).join(", ")}.`
+        : "Review is not merge-eligible: no completed non-author-family reviewer artifact was recorded.",
+    },
+  };
+}
+
+function collectRoutingGuaranteeDegradedConditions(
+  routing: CouncilReviewRouting,
+  lanes: readonly HeadlessLaneResult[],
+): string[] {
+  const conditions: string[] = [];
+  for (const laneId of routing.decorrelationBasis.requiredReviewerLaneIds) {
+    const lane = lanes.find((candidate) => candidate.laneId === laneId);
+    if (lane === undefined) {
+      conditions.push(`routing_required_lane_missing:${laneId}`);
+      continue;
+    }
+    if (lane.degradedReason === "malformed_artifact") {
+      conditions.push(`routing_required_lane_malformed:${laneId}`);
+    } else if (
+      lane.degradedReason !== null ||
+      lane.state !== "complete" ||
+      lane.verdict === "error"
+    ) {
+      conditions.push(`routing_required_lane_degraded:${laneId}`);
+    }
+  }
+  if (!routing.decorrelationBasis.mergeEligible) {
+    conditions.push("routing_absent_decorrelated_reviewer_artifact");
+  }
+  return conditions;
+}
+
+function routingGuaranteeEscalationPredicates(
+  conditions: readonly string[],
+): CouncilEscalationPredicate[] {
+  const predicates: CouncilEscalationPredicate[] = [];
+  for (const condition of conditions) {
+    if (condition.startsWith("routing_required_lane_missing:")) {
+      predicates.push("missing_required_lane");
+    } else if (condition.startsWith("routing_required_lane_malformed:")) {
+      predicates.push("malformed_required_lane");
+    } else if (condition.startsWith("routing_required_lane_degraded:")) {
+      predicates.push("degraded_required_lane");
+    } else if (condition === "routing_absent_decorrelated_reviewer_artifact") {
+      predicates.push("absent_decorrelated_reviewer_artifact");
+    }
+  }
+  return uniqueEscalationPredicates(predicates);
+}
+
+function collectDisagreementEscalationPredicates(
+  lanes: readonly HeadlessLaneResult[],
+  leadConfidenceThreshold: number,
+): CouncilEscalationPredicate[] {
+  const predicates: CouncilEscalationPredicate[] = [];
+  const leadArtifact = lanes.find(
+    (lane) => lane.laneId === CODEX_LEAD_LANE_ID,
+  )?.structuredArtifact;
+  if (leadArtifact === undefined || leadArtifact === null) {
+    return predicates;
+  }
+  if (leadArtifact.confidence < leadConfidenceThreshold) {
+    predicates.push("lead_confidence_below_threshold");
+  }
+  const laneP1s = lanes.flatMap((lane) => {
+    if (lane.laneId === CODEX_LEAD_LANE_ID) {
+      return [];
+    }
+    return (
+      lane.structuredArtifact?.findings
+        .filter(
+          (finding) =>
+            finding.emittedSeverity === "P1" &&
+            finding.leadDisposition === "open",
+        )
+        .map((finding) => finding.fingerprint) ?? []
+    );
+  });
+  if (laneP1s.length === 0) {
+    return uniqueEscalationPredicates(predicates);
+  }
+  const leadOpenP1s = leadArtifact.findings.filter(
+    (finding) =>
+      finding.severity === "P1" && finding.leadDisposition === "open",
+  );
+  if (leadOpenP1s.length === 0) {
+    predicates.push("p1_verdict_disagreement");
+  }
+  const laneP1Set = new Set(laneP1s);
+  const dismissedLaneP1 = leadArtifact.findings.some(
+    (finding) =>
+      finding.severity === "P1" &&
+      (finding.leadDisposition === "dismissed" ||
+        finding.leadDisposition === "refuted" ||
+        finding.leadDisposition === "track") &&
+      finding.repeatOf !== null &&
+      laneP1Set.has(finding.repeatOf),
+  );
+  if (dismissedLaneP1) {
+    predicates.push("lead_dismissed_lane_p1");
+  }
+  return uniqueEscalationPredicates(predicates);
+}
+
+function escalateRoutingForDisagreement(
+  routing: CouncilReviewRouting,
+  predicates: readonly CouncilEscalationPredicate[],
+  env: NodeJS.ProcessEnv,
+): CouncilReviewRouting {
+  const opusSelection = laneSelection(opusReviewerLane(env), true, true);
+  const selectedLanes = routing.selectedLanes.some(
+    (lane) => lane.laneId === opusSelection.laneId,
+  )
+    ? routing.selectedLanes
+    : [...routing.selectedLanes, opusSelection];
+  return {
+    ...addEscalationPredicates(routing, predicates),
+    mode: "disagreement",
+    selectedLanes,
+    skippedLanes: routing.skippedLanes.filter(
+      (lane) => lane.laneId !== opusSelection.laneId,
+    ),
+    decorrelationBasis: {
+      ...routing.decorrelationBasis,
+      requiredReviewerLaneIds: requiredDecorrelatedLaneIds(selectedLanes),
+    },
+  };
+}
+
+function addEscalationPredicates(
+  routing: CouncilReviewRouting,
+  predicates: readonly CouncilEscalationPredicate[],
+): CouncilReviewRouting {
+  return {
+    ...routing,
+    escalationPredicates: uniqueEscalationPredicates([
+      ...routing.escalationPredicates,
+      ...predicates,
+    ]),
+  };
+}
+
+function hasLane(
+  lanes: readonly HeadlessLaneResult[],
+  laneId: string,
+): boolean {
+  return lanes.some((lane) => lane.laneId === laneId);
+}
+
+function operatorAcceptedNarrowerRisk(routing: CouncilReviewRouting): boolean {
+  return routing.escalationPredicates.includes(
+    "operator_override_accept_narrower_risk",
+  );
+}
+
+function inferAuthorFamilies(
+  provenance: readonly ReviewBundleProvenanceEntry[],
+): string[] {
+  return [
+    ...new Set(
+      provenance
+        .filter((entry) =>
+          isAuthorProvenanceRole(entry.role, entry.sourceStage),
+        )
+        .map((entry) => provenanceModelFamily(entry))
+        .filter((family): family is string => family !== null),
+    ),
+  ].sort((left, right) => left.localeCompare(right, "en"));
+}
+
+function isAuthorProvenanceRole(
+  role: string,
+  sourceStage: string | null,
+): boolean {
+  const text = `${role} ${sourceStage ?? ""}`.toLowerCase();
+  if (/\b(review|reviewer|gate|triage)\b/.test(text)) {
+    return false;
+  }
+  return /\b(author|implement|implementation|fix|worker|coding|merge)\b/.test(
+    text,
+  );
+}
+
+function provenanceModelFamily(
+  entry: ReviewBundleProvenanceEntry,
+): string | null {
+  const text =
+    `${entry.agent ?? ""} ${entry.modelFamily ?? ""} ${entry.model ?? ""}`.toLowerCase();
+  if (/\bcodex\b|openai|gpt-/.test(text)) {
+    return "openai-codex";
+  }
+  if (/claude|anthropic|opus|sonnet/.test(text)) {
+    return "anthropic";
+  }
+  if (/deepseek|pi\b/.test(text)) {
+    return "pi";
+  }
+  return entry.modelFamily ?? entry.agent ?? null;
+}
+
+function routingCodexSweep(mode: CouncilRoutingMode): CodexExcavationSweep {
+  return mode === "high-risk" || mode === "disagreement"
+    ? "high-risk"
+    : "standard";
+}
+
+function forcedCouncilRoutingMode(
+  env: NodeJS.ProcessEnv,
+): CouncilRoutingMode | undefined {
+  if (envFlag(env.SYMPHONY_COUNCIL_FORCE_LEGACY)) {
+    return "legacy";
+  }
+  if (envFlag(env.SYMPHONY_COUNCIL_FORCE_OPUS)) {
+    return "high-risk";
+  }
+  return parseCouncilRoutingMode(
+    env.SYMPHONY_COUNCIL_REVIEW_ROUTING_MODE ??
+      env.SYMPHONY_COUNCIL_ROUTING_MODE,
+  );
+}
+
+function parseCouncilRoutingMode(
+  value: string | undefined,
+): CouncilRoutingMode | undefined {
+  return COUNCIL_ROUTING_MODES.includes(value as CouncilRoutingMode)
+    ? (value as CouncilRoutingMode)
+    : undefined;
+}
+
+function envFlag(value: string | undefined): boolean {
+  return value === "1" || value === "true" || value === "yes";
+}
+
+function parseEnvNumber(value: string | undefined, fallback: number): number {
+  if (value === undefined) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1
+    ? parsed
+    : fallback;
+}
+
+function uniqueEscalationPredicates(
+  predicates: readonly CouncilEscalationPredicate[],
+): CouncilEscalationPredicate[] {
+  return [...new Set(predicates)];
 }
 
 function parseThinkingEffort(
@@ -1418,6 +2111,7 @@ async function writeReviewBundle(
     env: NodeJS.ProcessEnv;
     round: number;
     mode: CouncilReviewMode;
+    routingMode: CouncilRoutingMode | null;
     targetedConvergence: TargetedConvergenceHypothesis | null;
   },
 ): Promise<{
@@ -1446,6 +2140,7 @@ async function writeReviewBundle(
       repo: context.repo,
       prNumber: context.prNumber,
       mode: options.mode,
+      routingMode: options.routingMode,
       round: options.round,
     },
     refs: {
@@ -2180,6 +2875,7 @@ async function runReviewerLane(input: {
   env: NodeJS.ProcessEnv;
   reviewBundle: ReviewBundleReference;
   mode: CouncilReviewMode;
+  routingMode: CouncilRoutingMode | null;
   round: number;
   targetedConvergence: TargetedConvergenceHypothesis | null;
   priorStructuredArtifacts: readonly StructuredReviewerArtifact[];
@@ -2244,6 +2940,7 @@ async function runReviewerLane(input: {
     reviewBundle: input.reviewBundle,
     context: input.context,
     mode: input.mode,
+    routingMode: input.routingMode,
     round: input.round,
     structuredArtifactPath: structuredArtifactPathFor(
       input.artifactDir,
@@ -2263,6 +2960,7 @@ async function runCodexLeadLane(input: {
   env: NodeJS.ProcessEnv;
   reviewBundle: ReviewBundleReference;
   mode: CouncilReviewMode;
+  routingMode: CouncilRoutingMode | null;
   round: number;
   terminationThresholds: CouncilTerminationLadderThresholds;
   targetedConvergence: TargetedConvergenceHypothesis | null;
@@ -2336,6 +3034,7 @@ async function runCodexLeadLane(input: {
     reviewBundle: input.reviewBundle,
     context: input.context,
     mode: input.mode,
+    routingMode: input.routingMode,
     round: input.round,
     structuredArtifactPath: structuredArtifactPathFor(
       input.artifactDir,
@@ -2616,6 +3315,7 @@ async function parseLaneResult(input: {
   reviewBundle: ReviewBundleReference | null;
   context: ReviewContext;
   mode: CouncilReviewMode;
+  routingMode: CouncilRoutingMode | null;
   round: number;
   structuredArtifactPath: string;
 }): Promise<HeadlessLaneResult> {
@@ -2623,6 +3323,7 @@ async function parseLaneResult(input: {
     commandResult,
     context,
     mode,
+    routingMode,
     round,
     structuredArtifactPath,
     ...laneIdentity
@@ -2709,6 +3410,7 @@ async function parseLaneResult(input: {
     parsedVerdict,
     context,
     mode,
+    routingMode,
     round,
     reviewBundle: input.reviewBundle,
   });
@@ -2955,6 +3657,7 @@ function buildStructuredReviewerArtifact(input: {
   parsedVerdict: ParsedArtifactVerdict;
   context: ReviewContext;
   mode: CouncilReviewMode;
+  routingMode: CouncilRoutingMode | null;
   round: number;
   reviewBundle: ReviewBundleReference | null;
 }): StructuredReviewerArtifact {
@@ -3028,6 +3731,7 @@ function buildStructuredReviewerArtifact(input: {
     },
     routing: {
       mode: input.mode,
+      routingMode: input.routingMode,
       round: input.round,
     },
     reviewBundle: input.reviewBundle,
@@ -4310,6 +5014,27 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
     `- Base: ${result.pr.baseRef ?? "n/a"}`,
     `- Head: ${result.pr.headRef ?? "n/a"}`,
     "",
+    "## Review Routing",
+    "",
+    ...(result.review_routing === null
+      ? ["- Not recorded"]
+      : [
+          `- Mode: ${result.review_routing.mode}`,
+          `- Selected lanes: ${formatSelectedRoutingLanes(result.review_routing.selectedLanes)}`,
+          `- Skipped lanes: ${formatSkippedRoutingLanes(result.review_routing.skippedLanes)}`,
+          `- Escalation predicates: ${result.review_routing.escalationPredicates.join(", ") || "none"}`,
+          `- Operator override reason: ${result.review_routing.operatorOverrideReason ?? "n/a"}`,
+          `- Author families: ${result.review_routing.decorrelationBasis.authorFamilies.join(", ") || "unknown"}`,
+          `- Required non-author-family reviewer: ${result.review_routing.decorrelationBasis.requiredNonAuthorFamilyReviewer ? "yes" : "no"}`,
+          `- Required reviewer lanes: ${result.review_routing.decorrelationBasis.requiredReviewerLaneIds.join(", ") || "none"}`,
+          `- Direct signal lanes: ${result.review_routing.decorrelationBasis.directSignalLaneIds.join(", ") || "none"}`,
+          `- Decorrelated reviewer artifacts: ${result.review_routing.decorrelationBasis.decorrelatedReviewerArtifacts.map((artifact) => `${artifact.laneId}:${artifact.modelFamily}`).join(", ") || "none"}`,
+          `- Merge eligible: ${result.review_routing.decorrelationBasis.mergeEligible ? "yes" : "no"}`,
+          `- Decorrelation basis: ${result.review_routing.decorrelationBasis.summary}`,
+          `- High-risk predicate triggers: ${result.review_routing.highRiskPredicate.triggerHits.join(", ") || "none"}`,
+          `- High-risk predicate paths: ${result.review_routing.highRiskPredicate.matchedPaths.join(", ") || "none"}`,
+        ]),
+    "",
     "## Review Bundle",
     "",
     `- Path: ${result.review_bundle?.path ?? "n/a"}`,
@@ -4434,6 +5159,31 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
     "",
   );
   return lines.join("\n");
+}
+
+function formatSelectedRoutingLanes(
+  lanes: readonly CouncilRoutingLaneSelection[],
+): string {
+  return (
+    lanes
+      .map((lane) =>
+        [
+          lane.laneId,
+          lane.required ? "required" : "optional",
+          lane.decorrelatedSignal ? "decorrelated" : "direct",
+          lane.reason,
+        ].join(":"),
+      )
+      .join(", ") || "none"
+  );
+}
+
+function formatSkippedRoutingLanes(
+  lanes: readonly CouncilRoutingSkippedLane[],
+): string {
+  return (
+    lanes.map((lane) => `${lane.laneId}:${lane.reason}`).join(", ") || "none"
+  );
 }
 
 function buildReviewerPrompt(
