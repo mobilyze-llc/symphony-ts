@@ -1049,6 +1049,35 @@ export interface ResumeRequiredMark {
   since: string;
 }
 
+export type IssueAnchorPlacement =
+  | { kind: "top" }
+  | { kind: "above" | "below"; issueIdentifier: string };
+
+export type IssueAnchorExpiry =
+  | { kind: "until_merged" }
+  | { kind: "until_date"; at: string };
+
+export interface IssueAnchorRecord {
+  issueId: string;
+  issueIdentifier: string;
+  placement: IssueAnchorPlacement;
+  expiry: IssueAnchorExpiry;
+  actor: {
+    kind: string;
+    host: string;
+    session: string | null;
+  };
+  reason: {
+    class: string;
+    human: string;
+  };
+  source: "symphonyctl" | "api" | "linear_field_edit";
+  fieldName: string | null;
+  editorEmail: string | null;
+  setAt: string;
+  setBySequence: number | null;
+}
+
 interface PendingStageSignalBase {
   stageName: string | null;
   attempt: number | null;
@@ -1087,6 +1116,12 @@ export interface OrchestratorState {
    * operator never has to grep the journal to learn why an issue skips.
    */
   resumeRequiredMarks: Record<string, ResumeRequiredMark>;
+  /**
+   * Active operator anchors reduced from intent journal events (SYMPH-486).
+   * This is a read-model only in this slice; dispatch order remains the
+   * upstream priority/FIFO comparator until the comparator ticket consumes it.
+   */
+  issueAnchors: Record<string, IssueAnchorRecord>;
   codexTotals: CodexTotals;
   codexRateLimits: CodexRateLimits;
   rateLimitAdmission: RateLimitAdmissionState | null;
@@ -1285,6 +1320,7 @@ export function createInitialOrchestratorState(input: {
     failed: new Set<string>(),
     resumeRequired: new Set<string>(),
     resumeRequiredMarks: {},
+    issueAnchors: {},
     codexTotals: {
       inputTokens: 0,
       outputTokens: 0,

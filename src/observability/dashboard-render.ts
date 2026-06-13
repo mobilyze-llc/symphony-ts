@@ -746,6 +746,30 @@ ${DASHBOARD_STYLES}
         <section class="section-card">
           <div class="section-header">
             <div>
+              <h2 class="section-title">Anchors</h2>
+              <p class="section-copy">Operator queue anchors with provenance and expiry. Current dispatch ordering remains priority/FIFO until comparator support lands.</p>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="data-table" style="min-width: 760px;">
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>Placement</th>
+                  <th>Expiry</th>
+                  <th>Provenance</th>
+                  <th>Sequence</th>
+                </tr>
+              </thead>
+              <tbody id="anchor-rows">${renderAnchorRows(snapshot)}</tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
               <h2 class="section-title">Rate limits</h2>
               <p class="section-copy">Latest upstream rate-limit snapshot, when available.</p>
             </div>
@@ -1199,6 +1223,48 @@ function renderDashboardClientScript(
           }).join('');
         }
 
+        function anchorPlacementLabel(placement) {
+          if (!placement || placement.kind === 'top') {
+            return 'top';
+          }
+          return String(placement.kind) + ' ' + String(placement.issue_identifier || '');
+        }
+
+        function anchorExpiryLabel(expiry) {
+          if (!expiry || expiry.kind === 'until_merged') {
+            return 'until merged';
+          }
+          return 'until ' + String(expiry.at || '');
+        }
+
+        function anchorProvenanceLabel(anchor) {
+          var provenance = anchor && anchor.provenance ? anchor.provenance : {};
+          var actor = provenance.actor || {};
+          var actorLabel = String(actor.kind || 'unknown') + '@' + String(actor.host || 'unknown');
+          if (actor.session) actorLabel += '#' + String(actor.session);
+          var parts = [actorLabel, provenance.source || 'unknown'];
+          if (provenance.editor_email) parts.push(provenance.editor_email);
+          if (provenance.field_name) parts.push(provenance.field_name);
+          if (provenance.reason && provenance.reason.human) parts.push(provenance.reason.human);
+          return parts.join(' · ');
+        }
+
+        function renderAnchorRows(next) {
+          var anchors = Array.isArray(next.anchors) ? next.anchors : [];
+          if (anchors.length === 0) {
+            return '<tr><td colspan="5"><p class="empty-state">No active anchors.</p></td></tr>';
+          }
+          return anchors.map(function (anchor) {
+            return '<tr>' +
+              '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(anchor.issue_identifier || anchor.issue_id) + '</span></div></td>' +
+              '<td>' + escapeHtml(anchorPlacementLabel(anchor.placement)) + '</td>' +
+              '<td>' + escapeHtml(anchorExpiryLabel(anchor.expiry)) + '</td>' +
+              '<td><div class="detail-stack"><span>' + escapeHtml(anchorProvenanceLabel(anchor)) + '</span><span class="muted event-meta">' + escapeHtml(anchor.set_at || 'n/a') + '</span></div></td>' +
+              '<td class="numeric">' + (anchor.set_by_sequence == null ? 'n/a' : formatInteger(anchor.set_by_sequence)) + '</td>' +
+              '</tr>';
+          }).join('');
+        }
+
         function setStatus(text, live) {
           const element = document.getElementById('live-status');
           if (!element) return;
@@ -1220,6 +1286,7 @@ function renderDashboardClientScript(
           document.getElementById('metric-runtime').textContent = formatRuntimeSeconds(next.codex_totals.seconds_running);
           document.getElementById('decision-quality').innerHTML = renderDecisionQuality(next);
           document.getElementById('manager-runs').innerHTML = renderManagerRuns(next);
+          document.getElementById('anchor-rows').innerHTML = renderAnchorRows(next);
           // Preserve expand/collapse state before DOM replacement (SYMPH-37)
           var expandedIds = new Set();
           document.querySelectorAll('.expand-toggle[aria-expanded="true"]').forEach(function(btn) {
@@ -1840,6 +1907,69 @@ function renderRetryRows(snapshot: RuntimeSnapshot): string {
             </tr>`,
         )
         .join("");
+}
+
+function renderAnchorRows(snapshot: RuntimeSnapshot): string {
+  const anchors = snapshot.anchors ?? [];
+  return anchors.length === 0
+    ? '<tr><td colspan="5"><p class="empty-state">No active anchors.</p></td></tr>'
+    : anchors
+        .map(
+          (anchor) => `
+            <tr>
+              <td>
+                <div class="issue-stack">
+                  <span class="issue-id">${escapeHtml(anchor.issue_identifier)}</span>
+                </div>
+              </td>
+              <td>${escapeHtml(formatAnchorPlacement(anchor.placement))}</td>
+              <td>${escapeHtml(formatAnchorExpiry(anchor.expiry))}</td>
+              <td>
+                <div class="detail-stack">
+                  <span>${escapeHtml(formatAnchorProvenance(anchor))}</span>
+                  <span class="muted event-meta">${escapeHtml(anchor.set_at)}</span>
+                </div>
+              </td>
+              <td class="numeric">${
+                anchor.set_by_sequence === null
+                  ? "n/a"
+                  : formatInteger(anchor.set_by_sequence)
+              }</td>
+            </tr>`,
+        )
+        .join("");
+}
+
+function formatAnchorPlacement(
+  placement: NonNullable<RuntimeSnapshot["anchors"]>[number]["placement"],
+): string {
+  return placement.kind === "top"
+    ? "top"
+    : `${placement.kind} ${placement.issue_identifier}`;
+}
+
+function formatAnchorExpiry(
+  expiry: NonNullable<RuntimeSnapshot["anchors"]>[number]["expiry"],
+): string {
+  return expiry.kind === "until_merged" ? "until merged" : `until ${expiry.at}`;
+}
+
+function formatAnchorProvenance(
+  anchor: NonNullable<RuntimeSnapshot["anchors"]>[number],
+): string {
+  const actor = anchor.provenance.actor;
+  const actorLabel = `${actor.kind}@${actor.host}${
+    actor.session === null ? "" : `#${actor.session}`
+  }`;
+  return [
+    actorLabel,
+    anchor.provenance.source,
+    anchor.provenance.editor_email,
+    anchor.provenance.field_name,
+    anchor.provenance.reason.human,
+  ]
+    .filter((value): value is string => value !== null && value !== "")
+    .join(" · ");
 }
 
 function renderHealthBadge(

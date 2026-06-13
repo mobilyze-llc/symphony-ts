@@ -93,6 +93,7 @@ describe("dashboard no-bypass boundary (SYMPH-408)", () => {
       "requestPipelinePause",
       "requestPipelineResume",
       "getPipelineStatus",
+      "requestAnchorFieldEdit",
     ]);
     for (const call of hostCalls) {
       expect

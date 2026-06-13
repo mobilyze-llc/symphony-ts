@@ -549,6 +549,56 @@ describe("dashboard server", () => {
     );
   });
 
+  it("renders active anchors with provenance and expiry", async () => {
+    const snapshot: RuntimeSnapshot = {
+      ...createSnapshot(),
+      anchors: [
+        {
+          issue_id: "issue-3",
+          issue_identifier: "ABC-125",
+          placement: { kind: "below", issue_identifier: "ABC-123" },
+          expiry: { kind: "until_merged" },
+          provenance: {
+            actor: {
+              kind: "operator",
+              host: "pro14",
+              session: "symphonyctl",
+            },
+            source: "linear_field_edit",
+            field_name: "Queue Anchor",
+            editor_email: "operator@mobilyze.com",
+            reason: {
+              class: "linear_field_edit_anchor",
+              human: "field edit",
+            },
+          },
+          set_at: "2026-03-06T10:02:00.000Z",
+          set_by_sequence: 42,
+        },
+      ],
+    };
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost({
+        getRuntimeSnapshot: () => snapshot,
+      }),
+    });
+    servers.push(server);
+
+    const dashboard = await sendRequest(server.port, {
+      method: "GET",
+      path: "/",
+    });
+    expect(dashboard.statusCode).toBe(200);
+    expect(dashboard.body).toContain("Anchors");
+    expect(dashboard.body).toContain("ABC-125");
+    expect(dashboard.body).toContain("below ABC-123");
+    expect(dashboard.body).toContain("until merged");
+    expect(dashboard.body).toContain(
+      "operator@pro14#symphonyctl · linear_field_edit · operator@mobilyze.com · Queue Anchor · field edit",
+    );
+  });
+
   it("returns a plain 404 for undefined routes", async () => {
     const server = await startDashboardServer({
       port: 0,
@@ -582,7 +632,7 @@ describe("dashboard server", () => {
       "GET, POST, OPTIONS",
     );
     expect(response.headers["access-control-allow-headers"]).toBe(
-      "Content-Type, Authorization",
+      "Content-Type, Authorization, X-Symphony-Anchor-Secret",
     );
   });
 
@@ -604,7 +654,7 @@ describe("dashboard server", () => {
       "GET, POST, OPTIONS",
     );
     expect(response.headers["access-control-allow-headers"]).toBe(
-      "Content-Type, Authorization",
+      "Content-Type, Authorization, X-Symphony-Anchor-Secret",
     );
   });
 

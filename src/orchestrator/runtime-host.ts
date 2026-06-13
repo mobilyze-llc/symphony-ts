@@ -95,6 +95,8 @@ import {
 } from "../logging/structured-logger.js";
 import { buildComponentStatuses } from "../observability/component-status.js";
 import {
+  type AnchorFieldEditRequest,
+  type AnchorFieldEditResult,
   type DashboardServerHost,
   type DashboardServerInstance,
   type IntentRequest,
@@ -2331,6 +2333,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       ...(input.fence === undefined ? {} : { fence: input.fence }),
       ...(input.hint === undefined ? {} : { hint: input.hint }),
       ...(input.stage === undefined ? {} : { stage: input.stage }),
+      ...(input.anchor === undefined ? {} : { anchor: input.anchor }),
     });
 
     return {
@@ -2338,6 +2341,56 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       detail: result.detail,
       sequence: result.sequence,
       verb: input.verb,
+      issue_id: resolved.issueId,
+      issue_identifier: resolved.issueIdentifier,
+    };
+  }
+
+  async requestAnchorFieldEdit(
+    input: AnchorFieldEditRequest,
+  ): Promise<AnchorFieldEditResult> {
+    await this.ensureDispatcherRunJournalLoaded();
+
+    const resolved = await this.resolveIntentIssue({
+      verb: "anchor",
+      ...(input.issueId === undefined ? {} : { issueId: input.issueId }),
+      ...(input.issueIdentifier === undefined
+        ? {}
+        : { issueIdentifier: input.issueIdentifier }),
+      reason: `Linear field edit for ${input.fieldName}`,
+      actor: { kind: "operator", host: input.editorEmail },
+    });
+    if (resolved.outcome === "mismatch") {
+      return {
+        status: "invalid_request",
+        detail: `issueIdentifier '${input.issueIdentifier ?? ""}' does not match the known identifier '${resolved.knownIdentifier}' for issue id '${input.issueId ?? ""}'.`,
+        sequence: null,
+        issue_id: input.issueId ?? null,
+        issue_identifier: input.issueIdentifier ?? null,
+      };
+    }
+    if (resolved.outcome === "not_found") {
+      return {
+        status: "issue_not_found",
+        detail: `Issue '${input.issueIdentifier ?? input.issueId ?? ""}' could not be resolved from runtime state or the tracker's active states.`,
+        sequence: null,
+        issue_id: input.issueId ?? null,
+        issue_identifier: input.issueIdentifier ?? null,
+      };
+    }
+
+    const result = await this.orchestrator.ingestAnchorFieldEdit({
+      issueId: resolved.issueId,
+      issueIdentifier: resolved.issueIdentifier,
+      fieldName: input.fieldName,
+      value: input.value,
+      editorEmail: input.editorEmail,
+      editedAt: input.editedAt,
+    });
+    return {
+      status: result.status,
+      detail: result.detail,
+      sequence: result.sequence,
       issue_id: resolved.issueId,
       issue_identifier: resolved.issueIdentifier,
     };
@@ -3476,6 +3529,8 @@ export async function startRuntimeService(
           refreshMs: currentConfig.observability.refreshMs,
           renderIntervalMs: currentConfig.observability.renderIntervalMs,
           liveUpdatesEnabled: currentConfig.observability.dashboardEnabled,
+          anchorFieldEditSecret:
+            currentConfig.operatorAnchors?.ingestSecret ?? null,
         });
 
   const stopController = new AbortController();

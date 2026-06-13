@@ -129,6 +129,18 @@ export interface WorkflowAdmissionCardConfig {
   enabled: boolean;
 }
 
+/**
+ * Operator anchor ingestion (SYMPH-486). The allowlist gates Linear
+ * field-edit ingestion; service account edits are explicitly inert so
+ * agent-authored tracker writes cannot mint operator anchors.
+ */
+export interface WorkflowOperatorAnchorsConfig {
+  operatorAllowlist: string[];
+  serviceAccounts: string[];
+  fieldName: string | null;
+  ingestSecret: string | null;
+}
+
 export interface WorkflowPauseTriageConfig {
   baseUrl: string | null;
   model: string | null;
@@ -329,6 +341,7 @@ export interface ResolvedWorkflowConfig {
   acGate: WorkflowAcGateConfig;
   specFidelity: WorkflowSpecFidelityConfig;
   admissionCard: WorkflowAdmissionCardConfig;
+  operatorAnchors?: WorkflowOperatorAnchorsConfig;
   watchdog: WorkflowWatchdogConfig;
   /** Optional so existing fixtures keep compiling; consumers default to 10. */
   verdicts?: WorkflowVerdictsConfig;

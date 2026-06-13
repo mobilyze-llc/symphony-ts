@@ -49,6 +49,9 @@ import {
   FAILURE_CLASSES,
   type FailureClass,
   type Issue,
+  type IssueAnchorExpiry,
+  type IssueAnchorPlacement,
+  type IssueAnchorRecord,
   type LiveSession,
   type OrchestratorState,
   type PendingStageSignal,
@@ -87,6 +90,7 @@ import type {
   HardStopDecision,
   HardStopTrigger,
 } from "../policy/hard-stops.js";
+import { normalizeAccountEmail } from "../shared/account-email.js";
 import { sanitizeForLinear } from "../shared/egress.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 import { formatAdmissionCard } from "./admission-card.js";
@@ -105,6 +109,7 @@ import {
   formatReviewFindingsComment,
 } from "./gate-handler.js";
 import {
+  type AnchorIntentPayload,
   INTENT_SCHEMA_VERSION,
   type IntentActor,
   type IntentFence,
@@ -189,6 +194,8 @@ interface PendingStageConsumptionRollbackSnapshot {
   issueParkGenerations: Map<string, number>;
   triagedParkGenerations: Map<string, number>;
   escalatedParkGenerations: Map<string, number | null>;
+  issueAnchorCursors: Map<string, { generation: number; atMs: number }>;
+  anchorCursorSequence: number;
   parkSequence: number;
 }
 
@@ -225,6 +232,37 @@ export interface StopRequest {
   cleanupWorkspace: boolean;
   reason: StopReason;
 }
+
+interface IntentWriteInput {
+  verb: IntentVerb;
+  issueId: string;
+  issueIdentifier: string;
+  actor: IntentActor;
+  reason: IntentReason;
+  fence?: IntentFence;
+  /** Stage context: restored for retry_once; rework source for rework_with_hint. */
+  stage?: string | null;
+  /** Hint text for rework_with_hint (journaled; the caller renders it). */
+  hint?: string | null;
+  /** Anchor payload for the anchor verb (SYMPH-486). */
+  anchor?: AnchorIntentPayload;
+  /** Tracker state at write time, journaled for replay parity. */
+  issueState?: string | null;
+  /** Signature the retry_once grant guards against (SYMPH-396 fields). */
+  grantSignature?: string | null;
+  /**
+   * When false, suppress the intent's own attribution comment (callers
+   * that render a richer attributed surface, e.g. triage verdicts, must
+   * include formatIntentAttribution themselves).
+   */
+  renderComment?: boolean;
+  extraMetadata?: Record<string, unknown>;
+}
+
+type IntentWriteOutput = IntentWriteResult & {
+  stopRequest?: StopRequest | null;
+  retryEntry?: RetryEntry | null;
+};
 
 export interface PollTickResult {
   validation: DispatchValidationResult;
@@ -761,6 +799,19 @@ export class OrchestratorCore {
    */
   private readonly escalatedParkGenerations = new Map<string, number | null>();
 
+  private anchorCursorSequence = 0;
+
+  /**
+   * Last effective anchor-family mutation per issue. This covers anchor,
+   * unanchor, expiry, and terminal-consumption clears, including the
+   * unanchored state where `issueAnchors` has no record left to compare.
+   */
+  private readonly issueAnchorCursors = new Map<
+    string,
+    { generation: number; atMs: number }
+  >();
+  private readonly anchorMutationLocks = new Map<string, Promise<void>>();
+
   /**
    * Single retry_once grant per issue (SYMPH-399): the signature of the
    * park the grant was issued against. Consumed on the first post-grant
@@ -854,6 +905,9 @@ export class OrchestratorCore {
     this.lastVerdictKeys.clear();
     this.state.issueDispositions = {};
     this.state.resumeRequiredMarks = {};
+    this.state.issueAnchors = {};
+    this.issueAnchorCursors.clear();
+    this.anchorCursorSequence = 0;
     this.state.issuePendingStageSignals = {};
     // Re-invocation safety (council R2): the stage_record reducer is
     // additive, so a replay against a different journal (runtime-host root
@@ -926,9 +980,24 @@ export class OrchestratorCore {
       // journaled release/retry/rework clears any earlier park so replay of
       // park → release converges on released (SYMPH-368: operator releases
       // used to be invisible to the journal and replay re-parked over them).
+      if (
+        entry.kind === "intent" &&
+        entry.metadata.status === "no_op" &&
+        (entry.metadata.verb === "anchor" ||
+          entry.metadata.verb === "unanchor") &&
+        parseAnchorCursorTimestamp(entry.metadata.anchorEditedAt) !== null
+      ) {
+        this.recordAnchorCursorFromJournalEntry(entry);
+      }
+
       if (entry.kind === "intent" && entry.metadata.status === "applied") {
         const verb = entry.metadata.verb;
-        if (verb === "park" || verb === "halt") {
+        if (verb === "anchor") {
+          this.applyAnchorJournalEntry(entry);
+        } else if (verb === "unanchor") {
+          delete this.state.issueAnchors[entry.issueId];
+          this.recordAnchorCursorFromJournalEntry(entry);
+        } else if (verb === "park" || verb === "halt") {
           this.markIssueRequiresExplicitResume(
             entry.issueId,
             readMetadataString(entry.metadata, "issueState"),
@@ -1123,7 +1192,10 @@ export class OrchestratorCore {
         // performed — a reopened issue starts with fresh counters.
         this.state.completed.add(entry.issueId);
         this.releaseClaim(entry.issueId);
-        this.clearTerminalIssueRuntimeState(entry.issueId);
+        this.clearTerminalIssueRuntimeState(
+          entry.issueId,
+          this.journalEntryTimestampMs(entry),
+        );
       }
 
       if (
@@ -1177,7 +1249,10 @@ export class OrchestratorCore {
         if (recovered?.status === "skipped_prototype") {
           this.state.completed.add(entry.issueId);
           this.releaseClaim(entry.issueId);
-          this.clearTerminalIssueRuntimeState(entry.issueId);
+          this.clearTerminalIssueRuntimeState(
+            entry.issueId,
+            this.journalEntryTimestampMs(entry),
+          );
         } else if (recovered !== null) {
           this.recoverCompletedGateTransition(entry, recovered);
         }
@@ -1389,7 +1464,10 @@ export class OrchestratorCore {
     }
     if (entry.metadata.completed === true) {
       this.state.completed.add(entry.issueId);
-      this.clearTerminalIssueRuntimeState(entry.issueId);
+      this.clearTerminalIssueRuntimeState(
+        entry.issueId,
+        this.journalEntryTimestampMs(entry),
+      );
       return;
     }
     const signal = readMetadataString(entry.metadata, "signal");
@@ -1450,7 +1528,10 @@ export class OrchestratorCore {
     ) {
       this.state.failed.add(entry.issueId);
       this.releaseClaim(entry.issueId);
-      this.clearTerminalIssueRuntimeState(entry.issueId);
+      this.clearTerminalIssueRuntimeState(
+        entry.issueId,
+        this.journalEntryTimestampMs(entry),
+      );
       return;
     }
 
@@ -2966,6 +3047,8 @@ export class OrchestratorCore {
       issueParkGenerations: new Map(this.issueParkGenerations),
       triagedParkGenerations: new Map(this.triagedParkGenerations),
       escalatedParkGenerations: new Map(this.escalatedParkGenerations),
+      issueAnchorCursors: new Map(this.issueAnchorCursors),
+      anchorCursorSequence: this.anchorCursorSequence,
       parkSequence: this.parkSequence,
     };
   }
@@ -2982,6 +3065,8 @@ export class OrchestratorCore {
       this.escalatedParkGenerations,
       snapshot.escalatedParkGenerations,
     );
+    restoreMap(this.issueAnchorCursors, snapshot.issueAnchorCursors);
+    this.anchorCursorSequence = snapshot.anchorCursorSequence;
     this.parkSequence = snapshot.parkSequence;
   }
 
@@ -5455,7 +5540,10 @@ export class OrchestratorCore {
     });
   }
 
-  private clearTerminalIssueRuntimeState(issueId: string): void {
+  private clearTerminalIssueRuntimeState(
+    issueId: string,
+    anchorCursorAtMs = this.now().getTime(),
+  ): void {
     delete this.state.issueStages[issueId];
     delete this.state.issuePendingStageSignals[issueId];
     delete this.state.issueReworkCounts[issueId];
@@ -5471,6 +5559,10 @@ export class OrchestratorCore {
     delete this.state.loopTraceJournal[issueId];
     this.replayedDispatchedIssueIds.delete(issueId);
     delete this.state.continuousFeedback[issueId];
+    if (this.state.issueAnchors[issueId] !== undefined) {
+      this.recordAnchorCursor(issueId, anchorCursorAtMs);
+    }
+    delete this.state.issueAnchors[issueId];
     // Clear the exhaustion-dedup marker so a resumed issue can fire the alert
     // again if it exhausts retries in a new lifecycle (SYMPH-397).
     this.state.failureExhaustedIds.delete(issueId);
@@ -5653,6 +5745,8 @@ export class OrchestratorCore {
   private clearResumedIssueLifecycleState(issueId: string): void {
     this.state.completed.delete(issueId);
     this.state.failed.delete(issueId);
+    // Resume starts a fresh failure lifecycle, not a queue-anchor lifecycle.
+    // Anchors clear only by unanchor, terminal consumption, or declared expiry.
     // A resumed issue starts a fresh park/failure lifecycle. Keep the reset set
     // shared across poll admission and retry admission so fences, breakers, and
     // alert dedupe do not drift between the two dispatch paths.
@@ -5664,6 +5758,11 @@ export class OrchestratorCore {
     this.retryOnceGrants.delete(issueId);
     this.escalatedParkGenerations.delete(issueId);
     this.clearResumeRequirement(issueId);
+  }
+
+  private journalEntryTimestampMs(entry: DispatcherRunJournalEntry): number {
+    const parsed = Date.parse(entry.timestamp);
+    return Number.isFinite(parsed) ? parsed : this.now().getTime();
   }
 
   // -------------------------------------------------------------------------
@@ -5758,34 +5857,18 @@ export class OrchestratorCore {
    *   recoverFromRunJournal, so park followed by release converges on
    *   released (SYMPH-368 regression).
    */
-  async writeIntent(input: {
-    verb: IntentVerb;
-    issueId: string;
-    issueIdentifier: string;
-    actor: IntentActor;
-    reason: IntentReason;
-    fence?: IntentFence;
-    /** Stage context: restored for retry_once; rework source for rework_with_hint. */
-    stage?: string | null;
-    /** Hint text for rework_with_hint (journaled; the caller renders it). */
-    hint?: string | null;
-    /** Tracker state at write time, journaled for replay parity. */
-    issueState?: string | null;
-    /** Signature the retry_once grant guards against (SYMPH-396 fields). */
-    grantSignature?: string | null;
-    /**
-     * When false, suppress the intent's own attribution comment (callers
-     * that render a richer attributed surface, e.g. triage verdicts, must
-     * include formatIntentAttribution themselves).
-     */
-    renderComment?: boolean;
-    extraMetadata?: Record<string, unknown>;
-  }): Promise<
-    IntentWriteResult & {
-      stopRequest?: StopRequest | null;
-      retryEntry?: RetryEntry | null;
+  async writeIntent(input: IntentWriteInput): Promise<IntentWriteOutput> {
+    if (input.verb === "anchor" || input.verb === "unanchor") {
+      return this.withAnchorMutationLock(input.issueId, () =>
+        this.writeIntentUnlocked(input),
+      );
     }
-  > {
+    return this.writeIntentUnlocked(input);
+  }
+
+  private async writeIntentUnlocked(
+    input: IntentWriteInput,
+  ): Promise<IntentWriteOutput> {
     const currentGen = this.issueParkGenerations.get(input.issueId) ?? null;
 
     // Idempotency-key format (SYMPH-422; keys are opaque equality tokens,
@@ -5813,18 +5896,25 @@ export class OrchestratorCore {
       return { status: "rejected_stale", detail, sequence };
     }
 
+    const idempotencyContext = this.intentIdempotencyContext(input, currentGen);
     const application = await this.applyIntentVerb(input, currentGen);
     const generationAfter =
       this.issueParkGenerations.get(input.issueId) ?? currentGen;
+    const appliedIdempotencyContext =
+      input.verb === "anchor" || input.verb === "unanchor"
+        ? idempotencyContext
+        : `gen-${generationAfter ?? "none"}`;
+    const journalTimestamp = this.now().toISOString();
     const sequence = await this.recordIntentJournalEntry({
       input,
       status: application.status,
       detail: application.detail,
       generation: generationAfter,
+      timestamp: journalTimestamp,
       idempotencyKey:
         application.status === "no_op"
-          ? `intent:${input.verb}:${input.issueId}:${actorKey}:gen-${currentGen ?? "none"}:no_op`
-          : `intent:${input.verb}:${input.issueId}:${actorKey}:gen-${generationAfter ?? "none"}`,
+          ? `intent:${input.verb}:${input.issueId}:${actorKey}:${idempotencyContext}:no_op`
+          : `intent:${input.verb}:${input.issueId}:${actorKey}:${appliedIdempotencyContext}`,
       ...(application.journalMetadata === undefined
         ? {}
         : { journalMetadata: application.journalMetadata }),
@@ -5847,6 +5937,29 @@ export class OrchestratorCore {
           setBySequence: sequence,
         };
       }
+    }
+
+    if (application.status === "applied" && input.verb === "anchor") {
+      const standingAnchor = this.state.issueAnchors[input.issueId];
+      if (standingAnchor !== undefined && sequence !== null) {
+        this.state.issueAnchors[input.issueId] = {
+          ...standingAnchor,
+          setBySequence: sequence,
+        };
+      }
+      this.recordAnchorCursor(
+        input.issueId,
+        this.anchorCursorTimestampForIntent(input, journalTimestamp),
+        sequence ?? undefined,
+      );
+    }
+
+    if (application.status === "applied" && input.verb === "unanchor") {
+      this.recordAnchorCursor(
+        input.issueId,
+        this.anchorCursorTimestampForIntent(input, journalTimestamp),
+        sequence ?? undefined,
+      );
     }
 
     if (application.status === "applied" && input.renderComment !== false) {
@@ -5880,12 +5993,195 @@ export class OrchestratorCore {
     };
   }
 
+  async ingestAnchorFieldEdit(input: {
+    issueId: string;
+    issueIdentifier: string;
+    fieldName: string;
+    value: string | null;
+    editorEmail: string;
+    editedAt: string;
+  }): Promise<{
+    status: "applied" | "no_op" | "rejected_stale" | "ignored" | "invalid";
+    detail: string;
+    sequence: number | null;
+  }> {
+    return this.withAnchorMutationLock(input.issueId, () =>
+      this.ingestAnchorFieldEditLocked(input),
+    );
+  }
+
+  private async withAnchorMutationLock<T>(
+    issueId: string,
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.anchorMutationLocks.get(issueId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = previous.catch(() => undefined).then(() => current);
+    this.anchorMutationLocks.set(issueId, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await action();
+    } finally {
+      release();
+      if (this.anchorMutationLocks.get(issueId) === tail) {
+        this.anchorMutationLocks.delete(issueId);
+      }
+    }
+  }
+
+  private async ingestAnchorFieldEditLocked(input: {
+    issueId: string;
+    issueIdentifier: string;
+    fieldName: string;
+    value: string | null;
+    editorEmail: string;
+    editedAt: string;
+  }): Promise<{
+    status: "applied" | "no_op" | "rejected_stale" | "ignored" | "invalid";
+    detail: string;
+    sequence: number | null;
+  }> {
+    const config = this.config.operatorAnchors ?? {
+      operatorAllowlist: [],
+      serviceAccounts: [],
+      fieldName: null,
+    };
+    const editorEmail = normalizeAccountEmail(input.editorEmail);
+    const configuredFieldName = config.fieldName;
+    if (configuredFieldName === null) {
+      return {
+        status: "ignored",
+        detail: "anchor field ingestion is not configured",
+        sequence: null,
+      };
+    }
+    if (
+      normalizeAnchorFieldName(input.fieldName) !==
+      normalizeAnchorFieldName(configuredFieldName)
+    ) {
+      return {
+        status: "ignored",
+        detail: `field "${input.fieldName}" is not configured for anchor ingestion`,
+        sequence: null,
+      };
+    }
+    if (config.serviceAccounts.includes(editorEmail)) {
+      return {
+        status: "ignored",
+        detail: "service-account field edit is advisory only",
+        sequence: null,
+      };
+    }
+    if (!config.operatorAllowlist.includes(editorEmail)) {
+      return {
+        status: "ignored",
+        detail: "editor is not allowlisted for operator anchors",
+        sequence: null,
+      };
+    }
+
+    const editedAtMs = Date.parse(input.editedAt);
+    if (!Number.isFinite(editedAtMs)) {
+      return {
+        status: "invalid",
+        detail: "anchor field edit must include a valid editedAt timestamp",
+        sequence: null,
+      };
+    }
+    this.getActiveIssueAnchor(input.issueId);
+    const cursor = this.issueAnchorCursors.get(input.issueId);
+    if (cursor !== undefined && editedAtMs <= cursor.atMs) {
+      return {
+        status: "rejected_stale",
+        detail: `stale field edit at ${input.editedAt}; current anchor cursor is ${new Date(cursor.atMs).toISOString()}`,
+        sequence: null,
+      };
+    }
+
+    const actor: IntentActor = {
+      kind: "operator",
+      host: editorEmail,
+      session: "linear-field-edit",
+    };
+    const parsed = parseAnchorFieldEditValue(input.value);
+    if (parsed === null) {
+      const detail =
+        "anchor field value must be empty/unanchor, top until-merged, above <issue> until-merged, below <issue> until-merged, or use until <date>";
+      const sequence = await this.recordInvalidAnchorFieldEdit({
+        input,
+        actor,
+        editorEmail,
+        editedAtMs,
+        detail,
+      });
+      return {
+        status: "invalid",
+        detail,
+        sequence,
+      };
+    }
+
+    if (parsed === "unanchor") {
+      const result = await this.writeIntentUnlocked({
+        verb: "unanchor",
+        issueId: input.issueId,
+        issueIdentifier: input.issueIdentifier,
+        actor,
+        reason: {
+          class: "linear_field_edit_unanchor",
+          human: `Linear field "${input.fieldName}" cleared by ${editorEmail}`,
+        },
+        extraMetadata: { anchorEditedAt: input.editedAt },
+      });
+      this.recordAnchorCursorForNoOpFieldEdit(
+        input.issueId,
+        editedAtMs,
+        result,
+      );
+      return {
+        status: result.status,
+        detail: result.detail,
+        sequence: result.sequence,
+      };
+    }
+
+    const result = await this.writeIntentUnlocked({
+      verb: "anchor",
+      issueId: input.issueId,
+      issueIdentifier: input.issueIdentifier,
+      actor,
+      reason: {
+        class: "linear_field_edit_anchor",
+        human: `Linear field "${input.fieldName}" set by ${editorEmail}`,
+      },
+      anchor: {
+        ...parsed,
+        source: "linear_field_edit",
+        fieldName: input.fieldName,
+        editorEmail,
+      },
+      extraMetadata: { anchorEditedAt: input.editedAt },
+    });
+    this.recordAnchorCursorForNoOpFieldEdit(input.issueId, editedAtMs, result);
+    return {
+      status: result.status,
+      detail: result.detail,
+      sequence: result.sequence,
+    };
+  }
+
   private async applyIntentVerb(
     input: {
       verb: IntentVerb;
       issueId: string;
       issueIdentifier: string;
+      actor: IntentActor;
+      reason: IntentReason;
       stage?: string | null;
+      anchor?: AnchorIntentPayload;
       issueState?: string | null;
       grantSignature?: string | null;
     },
@@ -5906,6 +6202,52 @@ export class OrchestratorCore {
     const { issueId } = input;
 
     switch (input.verb) {
+      case "anchor": {
+        if (input.anchor === undefined) {
+          return {
+            status: "no_op",
+            detail: "missing anchor placement and expiry",
+          };
+        }
+        const active = this.getActiveIssueAnchor(issueId);
+        if (
+          active !== null &&
+          anchorPayloadMatchesRecord(input.anchor, active)
+        ) {
+          return { status: "no_op", detail: "anchor already active" };
+        }
+        this.state.issueAnchors[issueId] = {
+          issueId,
+          issueIdentifier: input.issueIdentifier,
+          placement: input.anchor.placement,
+          expiry: input.anchor.expiry,
+          actor: {
+            kind: input.actor.kind,
+            host: input.actor.host,
+            session: input.actor.session ?? null,
+          },
+          reason: { class: input.reason.class, human: input.reason.human },
+          source: input.anchor.source,
+          fieldName: input.anchor.fieldName ?? null,
+          editorEmail: input.anchor.editorEmail ?? null,
+          setAt: this.now().toISOString(),
+          setBySequence: null,
+        };
+        return {
+          status: "applied",
+          detail: `anchored ${formatAnchorPlacement(input.anchor.placement)} ${formatAnchorExpiry(input.anchor.expiry)}`,
+        };
+      }
+
+      case "unanchor": {
+        const active = this.getActiveIssueAnchor(issueId);
+        if (active === null) {
+          return { status: "no_op", detail: "not anchored" };
+        }
+        delete this.state.issueAnchors[issueId];
+        return { status: "applied", detail: "unanchored" };
+      }
+
       case "park": {
         if (this.isIssueParked(issueId)) {
           return { status: "no_op", detail: "already parked" };
@@ -6090,23 +6432,12 @@ export class OrchestratorCore {
   }
 
   private async recordIntentJournalEntry(args: {
-    input: {
-      verb: IntentVerb;
-      issueId: string;
-      issueIdentifier: string;
-      actor: IntentActor;
-      reason: IntentReason;
-      fence?: IntentFence;
-      stage?: string | null;
-      hint?: string | null;
-      issueState?: string | null;
-      grantSignature?: string | null;
-      extraMetadata?: Record<string, unknown>;
-    };
+    input: IntentWriteInput;
     status: "applied" | "no_op" | "rejected_stale";
     detail: string;
     generation: number | null;
     idempotencyKey: string;
+    timestamp?: string;
     /** Resolved values from applyIntentVerb that replay reads back verbatim. */
     journalMetadata?: Record<string, unknown>;
   }): Promise<number | null> {
@@ -6114,7 +6445,7 @@ export class OrchestratorCore {
     try {
       const entry = await this.recordRunJournalEntry({
         idempotencyKey: args.idempotencyKey,
-        timestamp: this.now().toISOString(),
+        timestamp: args.timestamp ?? this.now().toISOString(),
         kind: "intent",
         issueId: input.issueId,
         issueIdentifier: input.issueIdentifier,
@@ -6142,6 +6473,17 @@ export class OrchestratorCore {
           ...(input.hint === undefined || input.hint === null
             ? {}
             : { hint: input.hint }),
+          ...(input.anchor === undefined
+            ? {}
+            : {
+                anchor: {
+                  placement: input.anchor.placement,
+                  expiry: input.anchor.expiry,
+                  source: input.anchor.source,
+                  fieldName: input.anchor.fieldName ?? null,
+                  editorEmail: input.anchor.editorEmail ?? null,
+                },
+              }),
           ...(input.issueState === undefined || input.issueState === null
             ? {}
             : { issueState: input.issueState }),
@@ -9242,6 +9584,179 @@ export class OrchestratorCore {
     this.clearRetryEntry(issueId);
     this.state.claimed.delete(issueId);
   }
+
+  private intentIdempotencyContext(
+    input: {
+      verb: IntentVerb;
+      issueId: string;
+      anchor?: AnchorIntentPayload;
+    },
+    currentGen: number | null,
+  ): string {
+    if (input.verb === "anchor") {
+      return `anchor-${this.anchorCursorContext(input.issueId)}-${hashAnchorPayload(input.anchor)}`;
+    }
+    if (input.verb === "unanchor") {
+      this.getActiveIssueAnchor(input.issueId);
+      return `anchor-${this.anchorCursorContext(input.issueId)}`;
+    }
+    return `gen-${currentGen ?? "none"}`;
+  }
+
+  private anchorCursorContext(issueId: string): string {
+    return String(this.issueAnchorCursors.get(issueId)?.generation ?? "none");
+  }
+
+  private getActiveIssueAnchor(issueId: string): IssueAnchorRecord | null {
+    const anchor = this.state.issueAnchors[issueId];
+    if (anchor === undefined) {
+      return null;
+    }
+    // Lazy expiry is a read-model cleanup, not an operator edit; it must not
+    // advance the Linear field-edit cursor used for stale-webhook rejection.
+    if (this.isAnchorExpired(anchor)) {
+      delete this.state.issueAnchors[issueId];
+      return null;
+    }
+    return anchor;
+  }
+
+  private isAnchorExpired(anchor: IssueAnchorRecord): boolean {
+    if (anchor.expiry.kind === "until_merged") {
+      return this.state.completed.has(anchor.issueId);
+    }
+    return Date.parse(anchor.expiry.at) <= this.now().getTime();
+  }
+
+  private applyAnchorJournalEntry(entry: DispatcherRunJournalEntry): void {
+    const anchor = parseAnchorMetadata(entry.metadata.anchor);
+    if (anchor === null) {
+      return;
+    }
+    const actor = parseIntentMetadataActor(entry.metadata.actor);
+    const reason = parseIntentMetadataReason(entry.metadata.reason);
+    const record: IssueAnchorRecord = {
+      issueId: entry.issueId,
+      issueIdentifier: entry.issueIdentifier,
+      placement: anchor.placement,
+      expiry: anchor.expiry,
+      actor,
+      reason,
+      source: anchor.source,
+      fieldName: anchor.fieldName ?? null,
+      editorEmail: anchor.editorEmail ?? null,
+      setAt: entry.timestamp,
+      setBySequence: entry.sequence,
+    };
+    if (this.isAnchorExpired(record)) {
+      delete this.state.issueAnchors[entry.issueId];
+      this.recordAnchorCursorFromJournalEntry(entry);
+      return;
+    }
+    this.state.issueAnchors[entry.issueId] = record;
+    this.recordAnchorCursorFromJournalEntry(entry);
+  }
+
+  private recordAnchorCursorFromJournalEntry(
+    entry: DispatcherRunJournalEntry,
+  ): void {
+    const timestampMs =
+      parseAnchorCursorTimestamp(entry.metadata.anchorEditedAt) ??
+      Date.parse(entry.timestamp);
+    this.recordAnchorCursor(
+      entry.issueId,
+      Number.isFinite(timestampMs) ? timestampMs : this.now().getTime(),
+      entry.sequence,
+    );
+  }
+
+  private anchorCursorTimestampForIntent(
+    input: {
+      extraMetadata?: Record<string, unknown>;
+    },
+    journalTimestamp?: string,
+  ): number {
+    const parsedJournalTimestamp =
+      journalTimestamp === undefined
+        ? Number.NaN
+        : Date.parse(journalTimestamp);
+    return (
+      parseAnchorCursorTimestamp(input.extraMetadata?.anchorEditedAt) ??
+      (Number.isFinite(parsedJournalTimestamp)
+        ? parsedJournalTimestamp
+        : null) ??
+      this.now().getTime()
+    );
+  }
+
+  private recordAnchorCursor(
+    issueId: string,
+    atMs: number,
+    generationHint?: number,
+  ): void {
+    const generation = Math.max(
+      this.anchorCursorSequence + 1,
+      generationHint ?? 0,
+    );
+    this.anchorCursorSequence = generation;
+    this.issueAnchorCursors.set(issueId, { generation, atMs });
+  }
+
+  private recordAnchorCursorForNoOpFieldEdit(
+    issueId: string,
+    editedAtMs: number,
+    result: Pick<IntentWriteResult, "status" | "sequence">,
+  ): void {
+    if (result.status !== "no_op") {
+      return;
+    }
+    this.recordAnchorCursor(issueId, editedAtMs, result.sequence ?? undefined);
+  }
+
+  private async recordInvalidAnchorFieldEdit(args: {
+    input: {
+      issueId: string;
+      issueIdentifier: string;
+      fieldName: string;
+      editedAt: string;
+    };
+    actor: IntentActor;
+    editorEmail: string;
+    editedAtMs: number;
+    detail: string;
+  }): Promise<number | null> {
+    const actorKey = formatIntentActorKey(args.actor);
+    const journalInput: IntentWriteInput = {
+      verb: "anchor",
+      issueId: args.input.issueId,
+      issueIdentifier: args.input.issueIdentifier,
+      actor: args.actor,
+      reason: {
+        class: "linear_field_edit_anchor_invalid",
+        human: `Linear field "${args.input.fieldName}" rejected by ${args.editorEmail}`,
+      },
+      renderComment: false,
+      extraMetadata: {
+        anchorEditedAt: args.input.editedAt,
+        anchorFieldEditStatus: "invalid",
+        fieldName: args.input.fieldName,
+        editorEmail: args.editorEmail,
+      },
+    };
+    const sequence = await this.recordIntentJournalEntry({
+      input: journalInput,
+      status: "no_op",
+      detail: args.detail,
+      generation: this.issueParkGenerations.get(args.input.issueId) ?? null,
+      idempotencyKey: `intent:anchor:${args.input.issueId}:${actorKey}:field-edit-invalid:${args.input.editedAt}`,
+    });
+    this.recordAnchorCursor(
+      args.input.issueId,
+      args.editedAtMs,
+      sequence ?? undefined,
+    );
+    return sequence;
+  }
 }
 
 export function sortIssuesForDispatch(issues: readonly Issue[]): Issue[] {
@@ -9499,6 +10014,207 @@ function toOptionalNumber(value: unknown): number | null {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+type ParsedAnchorFieldEdit =
+  | "unanchor"
+  | Pick<AnchorIntentPayload, "placement" | "expiry">;
+
+function parseAnchorFieldEditValue(
+  value: string | null,
+): ParsedAnchorFieldEdit | null {
+  const trimmed = value?.trim() ?? "";
+  if (trimmed === "" || trimmed.toLowerCase() === "unanchor") {
+    return "unanchor";
+  }
+
+  const tokens = trimmed.split(/\s+/);
+  const placementKind = tokens[0]?.toLowerCase();
+  let placement: IssueAnchorPlacement;
+  let expiryStart = 1;
+  if (placementKind === "top") {
+    placement = { kind: "top" };
+  } else if (placementKind === "above" || placementKind === "below") {
+    const issueIdentifier = tokens[1];
+    if (issueIdentifier === undefined || issueIdentifier.trim() === "") {
+      return null;
+    }
+    placement = { kind: placementKind, issueIdentifier };
+    expiryStart = 2;
+  } else {
+    return null;
+  }
+
+  const expiryToken = tokens[expiryStart]?.toLowerCase();
+  if (expiryToken === "until-merged") {
+    if (tokens.length !== expiryStart + 1) {
+      return null;
+    }
+    return { placement, expiry: { kind: "until_merged" } };
+  }
+  if (expiryToken === "until") {
+    const rawDate = tokens.slice(expiryStart + 1).join(" ");
+    const parsed = new Date(rawDate);
+    if (rawDate === "" || Number.isNaN(parsed.valueOf())) {
+      return null;
+    }
+    return {
+      placement,
+      expiry: { kind: "until_date", at: parsed.toISOString() },
+    };
+  }
+  return null;
+}
+
+function normalizeAnchorFieldName(value: string): string {
+  return value.trim().toLowerCase();
+}
+
+function parseAnchorCursorTimestamp(value: unknown): number | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function hashAnchorPayload(anchor: AnchorIntentPayload | undefined): string {
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalAnchorPayload(anchor)))
+    .digest("hex")
+    .slice(0, 16);
+}
+
+type CanonicalAnchorPayloadSource = Pick<
+  IssueAnchorRecord,
+  "placement" | "expiry" | "source" | "fieldName" | "editorEmail"
+>;
+
+function canonicalAnchorPayload(
+  anchor: AnchorIntentPayload | CanonicalAnchorPayloadSource | undefined,
+): Record<string, unknown> {
+  if (anchor === undefined) {
+    return { missing: true };
+  }
+  return {
+    placement: anchor.placement,
+    expiry: anchor.expiry,
+    source: anchor.source,
+    fieldName: anchor.fieldName ?? null,
+    editorEmail:
+      anchor.editorEmail === undefined || anchor.editorEmail === null
+        ? null
+        : normalizeAccountEmail(anchor.editorEmail),
+  };
+}
+
+function anchorPayloadMatchesRecord(
+  payload: AnchorIntentPayload,
+  record: IssueAnchorRecord,
+): boolean {
+  return (
+    JSON.stringify(canonicalAnchorPayload(payload)) ===
+    JSON.stringify(canonicalAnchorPayload(record))
+  );
+}
+
+function formatAnchorPlacement(placement: IssueAnchorPlacement): string {
+  if (placement.kind === "top") {
+    return "at top";
+  }
+  return `${placement.kind} ${placement.issueIdentifier}`;
+}
+
+function formatAnchorExpiry(expiry: IssueAnchorExpiry): string {
+  return expiry.kind === "until_merged" ? "until merged" : `until ${expiry.at}`;
+}
+
+function parseAnchorMetadata(value: unknown): AnchorIntentPayload | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const placement = parseAnchorPlacementMetadata(value.placement);
+  const expiry = parseAnchorExpiryMetadata(value.expiry);
+  const source = value.source;
+  if (
+    placement === null ||
+    expiry === null ||
+    (source !== "symphonyctl" &&
+      source !== "api" &&
+      source !== "linear_field_edit")
+  ) {
+    return null;
+  }
+  return {
+    placement,
+    expiry,
+    source,
+    fieldName: typeof value.fieldName === "string" ? value.fieldName : null,
+    editorEmail:
+      typeof value.editorEmail === "string" ? value.editorEmail : null,
+  };
+}
+
+function parseAnchorPlacementMetadata(
+  value: unknown,
+): IssueAnchorPlacement | null {
+  if (!isRecord(value) || typeof value.kind !== "string") {
+    return null;
+  }
+  if (value.kind === "top") {
+    return { kind: "top" };
+  }
+  if (
+    (value.kind === "above" || value.kind === "below") &&
+    typeof value.issueIdentifier === "string" &&
+    value.issueIdentifier.trim() !== ""
+  ) {
+    return {
+      kind: value.kind,
+      issueIdentifier: value.issueIdentifier,
+    };
+  }
+  return null;
+}
+
+function parseAnchorExpiryMetadata(value: unknown): IssueAnchorExpiry | null {
+  if (!isRecord(value) || typeof value.kind !== "string") {
+    return null;
+  }
+  if (value.kind === "until_merged") {
+    return { kind: "until_merged" };
+  }
+  if (
+    value.kind === "until_date" &&
+    typeof value.at === "string" &&
+    !Number.isNaN(Date.parse(value.at))
+  ) {
+    return { kind: "until_date", at: new Date(value.at).toISOString() };
+  }
+  return null;
+}
+
+function parseIntentMetadataActor(value: unknown): IssueAnchorRecord["actor"] {
+  if (!isRecord(value)) {
+    return { kind: "unknown", host: "unknown", session: null };
+  }
+  return {
+    kind: typeof value.kind === "string" ? value.kind : "unknown",
+    host: typeof value.host === "string" ? value.host : "unknown",
+    session: typeof value.session === "string" ? value.session : null,
+  };
+}
+
+function parseIntentMetadataReason(
+  value: unknown,
+): IssueAnchorRecord["reason"] {
+  if (!isRecord(value)) {
+    return { class: "unknown", human: "unknown" };
+  }
+  return {
+    class: typeof value.class === "string" ? value.class : "unknown",
+    human: typeof value.human === "string" ? value.human : "unknown",
+  };
 }
 
 function formatSupervisionFindingSignature(
@@ -9912,6 +10628,9 @@ function isFailureClass(value: string | null): value is FailureClass {
   );
 }
 
+// Public state clone only. Private orchestrator cursors/registries that live
+// outside OrchestratorState must be snapshotted by the caller; pending-stage
+// rollback does that explicitly for anchor cursors and park generations.
 function cloneOrchestratorState(state: OrchestratorState): OrchestratorState {
   return {
     pollIntervalMs: state.pollIntervalMs,
@@ -9923,6 +10642,7 @@ function cloneOrchestratorState(state: OrchestratorState): OrchestratorState {
     failed: new Set(state.failed),
     resumeRequired: new Set(state.resumeRequired),
     resumeRequiredMarks: clonePlain(state.resumeRequiredMarks),
+    issueAnchors: clonePlain(state.issueAnchors),
     codexTotals: clonePlain(state.codexTotals),
     codexRateLimits: clonePlain(state.codexRateLimits),
     rateLimitAdmission: clonePlain(state.rateLimitAdmission),
@@ -9966,6 +10686,7 @@ function restoreOrchestratorState(
   target.failed = snapshot.failed;
   target.resumeRequired = snapshot.resumeRequired;
   target.resumeRequiredMarks = snapshot.resumeRequiredMarks;
+  target.issueAnchors = snapshot.issueAnchors;
   target.codexTotals = snapshot.codexTotals;
   target.codexRateLimits = snapshot.codexRateLimits;
   target.rateLimitAdmission = snapshot.rateLimitAdmission;
