@@ -881,6 +881,20 @@ body {
     };
   }
 
+  async function fetchWithOperatorAuth(url, options = {}) {
+    const response = await fetch(url, {
+      ...options,
+      headers: operatorAuthHeaders(options.headers || {}),
+    });
+    if (response.status !== 401) return response;
+
+    localStorage.removeItem(operatorTokenStorageKey);
+    return fetch(url, {
+      ...options,
+      headers: operatorAuthHeaders(options.headers || {}),
+    });
+  }
+
   function connect() {
     startSSE();
     loadReports();
@@ -1543,9 +1557,8 @@ body {
     });
 
     try {
-      const resp = await fetch(`${baseUrl}/api/v1/${encodeURIComponent(issueIdentifier)}/stop`, {
+      const resp = await fetchWithOperatorAuth(`${baseUrl}/api/v1/${encodeURIComponent(issueIdentifier)}/stop`, {
         method: 'POST',
-        headers: operatorAuthHeaders(),
       });
       const data = await resp.json();
 
@@ -1720,9 +1733,9 @@ body {
     const container = $('#deploy-content');
 
     try {
-      const resp = await fetch(`${baseUrl}/api/v1/deploy/preview`, {
+      const resp = await fetchWithOperatorAuth(`${baseUrl}/api/v1/deploy/preview`, {
         method: 'POST',
-        headers: operatorAuthHeaders({ 'content-type': 'application/json' }),
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({}),
       });
       if (!resp.ok) {
@@ -1851,9 +1864,9 @@ body {
     statusEl.classList.remove('visible', 'success', 'failure');
 
     try {
-      const resp = await fetch(`${baseUrl}/api/v1/deploy`, {
+      const resp = await fetchWithOperatorAuth(`${baseUrl}/api/v1/deploy`, {
         method: 'POST',
-        headers: operatorAuthHeaders({ 'content-type': 'application/json' }),
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({}),
       });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -1976,9 +1989,9 @@ body {
           resumeBtn.disabled = true;
           resumeBtn.textContent = 'Resuming…';
           try {
-            const resp = await fetch(`${baseUrl}/api/v1/pipeline/resume`, {
+            const resp = await fetchWithOperatorAuth(`${baseUrl}/api/v1/pipeline/resume`, {
               method: 'POST',
-              headers: operatorAuthHeaders({ 'content-type': 'application/json' }),
+              headers: { 'content-type': 'application/json' },
               body: JSON.stringify({}),
             });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -1996,9 +2009,9 @@ body {
         wireHoldToConfirm(pauseBtn, async () => {
           pauseBtn.disabled = true;
           try {
-            const resp = await fetch(`${baseUrl}/api/v1/pipeline/pause`, {
+            const resp = await fetchWithOperatorAuth(`${baseUrl}/api/v1/pipeline/pause`, {
               method: 'POST',
-              headers: operatorAuthHeaders({ 'content-type': 'application/json' }),
+              headers: { 'content-type': 'application/json' },
               body: JSON.stringify({}),
             });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
@@ -2213,9 +2226,8 @@ body {
       switchBtn.textContent = 'Switching…';
       try {
         // TODO: POST to /api/v1/claude/switch endpoint (SYMPH-241 or related task)
-        const resp = await fetch(`${baseUrl}/api/v1/claude/switch`, {
+        const resp = await fetchWithOperatorAuth(`${baseUrl}/api/v1/claude/switch`, {
           method: 'POST',
-          headers: operatorAuthHeaders(),
         });
         if (!resp.ok) {
           const body = await resp.json().catch(() => ({}));
