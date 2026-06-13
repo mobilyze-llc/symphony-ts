@@ -521,9 +521,30 @@ describe("anchor intent family (SYMPH-486)", () => {
         editedAt: `2026-06-11T12:0${index}:00.000Z`,
       });
       expect(result.status).toBe("invalid");
+      expect(typeof result.sequence).toBe("number");
     }
 
     expect(orchestrator.getState().issueAnchors["1"]).toBeUndefined();
+    const entries = intentEntries(orchestrator);
+    expect(entries).toHaveLength(4);
+    expect(entries.map((entry) => entry.metadata.status)).toEqual([
+      "no_op",
+      "no_op",
+      "no_op",
+      "no_op",
+    ]);
+    expect(entries.map((entry) => entry.metadata.reason)).toEqual([
+      expect.objectContaining({ class: "linear_field_edit_anchor_invalid" }),
+      expect.objectContaining({ class: "linear_field_edit_anchor_invalid" }),
+      expect.objectContaining({ class: "linear_field_edit_anchor_invalid" }),
+      expect.objectContaining({ class: "linear_field_edit_anchor_invalid" }),
+    ]);
+    expect(entries.map((entry) => entry.metadata.anchorEditedAt)).toEqual([
+      "2026-06-11T12:00:00.000Z",
+      "2026-06-11T12:01:00.000Z",
+      "2026-06-11T12:02:00.000Z",
+      "2026-06-11T12:03:00.000Z",
+    ]);
   });
 
   it("invalid allowlisted field edits advance the cursor against older delayed edits", async () => {
