@@ -509,7 +509,7 @@ function renderUsage(): string {
     "  --codex-excavation-model-auto-compact-token-limit N  Override Codex excavation auto-compact cap",
     "  --round N                     Council loop round number (default: 1)",
     "  --mode full|convergence       Council loop mode (default: full)",
-    "  --routing-mode fast|standard|high-risk|disagreement|legacy  Force Council v2 routing mode for this run",
+    "  --routing-mode fast|standard|high-risk|disagreement|legacy  Force Council v2 routing mode; fast currently uses Standard lane selection with fast metadata",
     "  --operator-override-reason TEXT  Record the operator reason for force/override routing",
     "  --author-family FAMILY       Author implementation model family; repeatable for Council v2 decorrelation evidence",
     "  --previous-reviewed-head SHA  Previous reviewed head SHA for convergence metadata",

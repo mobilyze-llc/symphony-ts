@@ -652,6 +652,9 @@ describe("parseCouncilReviewGateArgs", () => {
     expect(() => parseCouncilReviewGateArgs(["--help"], "/cwd")).toThrow(
       /--journal-workspace-root DIR[\s\S]*fail closed on append errors/,
     );
+    expect(() => parseCouncilReviewGateArgs(["--help"], "/cwd")).toThrow(
+      /fast currently uses Standard lane selection/,
+    );
   });
 
   it("recognizes direct bin execution through symlink paths", async () => {
