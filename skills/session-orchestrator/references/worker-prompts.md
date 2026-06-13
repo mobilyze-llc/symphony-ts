@@ -1,6 +1,6 @@
-# Symphony Manual Manager Worker Prompts
+# Symphony Session Orchestrator Worker Prompts
 
-Use these skeletons when assigning bounded work from a root manager session.
+Use these skeletons when assigning bounded work from a root orchestrator session.
 Fill every bracket before sending. Keep prompts factual and scoped.
 
 ## Implementation Worker
@@ -101,7 +101,7 @@ Output:
 Use this to forward-test the skill without live mutations:
 
 ```text
-Use $symphony-manual-manager from [path/to/skill] to plan a manual Symphony ticket wave from these mock issues. This is a dry run: do not edit files, call Linear, call GitHub, create threads, or mutate live systems. Produce a manager plan with risk classification, worker contracts, stop conditions, review-loop discipline, and backlog normalization notes.
+Use $session-orchestrator from [path/to/skill] to plan a Symphony ticket wave from these mock issues. This is a dry run: do not edit files, call Linear, call GitHub, create threads, or mutate live systems. Produce a session orchestration plan with risk classification, worker contracts, stop conditions, review-loop discipline, and backlog normalization notes.
 
 Mock issues:
 - SYMPH-A: comparator throws during computed order.

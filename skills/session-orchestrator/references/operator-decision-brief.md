@@ -1,6 +1,6 @@
 # Symphony Operator Decision Brief
 
-Use this template when a manual-manager ticket hits a non-autonomous boundary:
+Use this template when a session-orchestrated ticket hits a non-autonomous boundary:
 review round cap, budget cap, repeated same-family reopen, degraded review
 substrate, missing live proof, unclear split/merge decision, or conflicting
 ownership. This is the pause point aligned with `SYMPH-376`.
@@ -56,7 +56,7 @@ Decision brief rules:
 
 - Refresh live Linear and GitHub immediately before writing the brief.
 - Do not ask for a decision from stale PR or worker state.
-- Include the manager's recommendation. Do not hand the operator an undigested
+- Include the orchestrator's recommendation. Do not hand the operator an undigested
   list of findings.
 - If the brief names durable follow-up, create or update the Linear issue
   before publishing the brief and include the issue ID.

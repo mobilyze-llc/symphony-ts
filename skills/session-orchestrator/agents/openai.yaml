@@ -1,0 +1,4 @@
+interface:
+  display_name: "Symphony Session Orchestrator"
+  short_description: "Symphony session orchestration runbook"
+  default_prompt: "Use $session-orchestrator to plan and run a bounded Symphony ticket wave."
