@@ -5,7 +5,12 @@ export const REVIEW_CALIBRATION_OWNER_ISSUE = "SYMPH-493";
 export const REVIEW_CALIBRATION_PARENT_ISSUE = "SYMPH-446";
 export const REVIEW_CALIBRATION_REPLAY_SOURCE = "replay";
 
-const RETROSPECTIVE_REPLAY_MIN_CASES = 10;
+/**
+ * Canonical retrospective replay corpora intentionally require at least 10
+ * cases. See tests/fixtures/review-calibration/README.md for the compatibility
+ * expectation and SYMPH-506 audit result for persisted corpus copies.
+ */
+export const RETROSPECTIVE_REPLAY_MIN_CASES = 10;
 
 export const REVIEW_CALIBRATION_BUG_CLASSES = [
   "security:path_traversal",

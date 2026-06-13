@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  RETROSPECTIVE_REPLAY_MIN_CASES,
   REVIEW_CALIBRATION_BUG_CLASSES,
   REVIEW_CALIBRATION_LANES,
   REVIEW_CALIBRATION_METRICS,
@@ -118,7 +119,9 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
       noLiveModelCalls: true,
       forbiddenRuntimeFields: ["modelProvider", "modelPrompt", "gateMutation"],
     });
-    expect(corpus.retrospectiveReplay.cases).toHaveLength(10);
+    expect(corpus.retrospectiveReplay.cases).toHaveLength(
+      RETROSPECTIVE_REPLAY_MIN_CASES,
+    );
     expect(
       corpus.retrospectiveReplay.cases.map((replayCase) => replayCase.id),
     ).toEqual(
@@ -169,14 +172,17 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
 
     const depletedReplayCorpus = structuredClone(corpus);
     depletedReplayCorpus.retrospectiveReplay.cases =
-      depletedReplayCorpus.retrospectiveReplay.cases.slice(0, 9);
+      depletedReplayCorpus.retrospectiveReplay.cases.slice(
+        0,
+        RETROSPECTIVE_REPLAY_MIN_CASES - 1,
+      );
     expect(
       validateReviewCalibrationCorpus(depletedReplayCorpus).errors,
     ).toEqual(
       expect.arrayContaining([
         {
           path: "$.retrospectiveReplay.cases",
-          message: "must include at least 10 replay cases",
+          message: `must include at least ${RETROSPECTIVE_REPLAY_MIN_CASES} replay cases`,
         },
       ]),
     );
