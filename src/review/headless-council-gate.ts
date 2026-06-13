@@ -2252,7 +2252,7 @@ function extractFindingEvidence(
 ): StructuredReviewFindingEvidence[] {
   const evidence: StructuredReviewFindingEvidence[] = [];
   const pathPattern =
-    /(?:^|[\s([`])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|[A-Za-z0-9_.-]+\.[A-Za-z0-9]+)(?::(\d+)(?:-(\d+))?)?/g;
+    /(?:^|[\s([`])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+(?:\.[A-Za-z0-9]+)?|[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|[A-Za-z0-9_.-]+(?=:\d))(?::(\d+)(?:-(\d+))?)?/g;
   let match = pathPattern.exec(text);
   while (match !== null) {
     const lineStart = parseOptionalLine(match[2]);
@@ -2351,11 +2351,17 @@ function isRecognizedEvidencePath(
   path: string,
   lineStart: number | null,
 ): boolean {
+  if (lineStart !== null) {
+    return true;
+  }
   const extension = evidencePathExtension(path);
+  if (path.includes("/") && extension !== null) {
+    return true;
+  }
   if (extension === null || !RECOGNIZED_EVIDENCE_EXTENSIONS.has(extension)) {
     return false;
   }
-  return path.includes("/") || lineStart !== null || isRecognizedBasename(path);
+  return isRecognizedBasename(path);
 }
 
 function evidencePathExtension(path: string): string | null {

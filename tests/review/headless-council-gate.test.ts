@@ -1473,7 +1473,7 @@ describe("runHeadlessCouncilGate", () => {
       "None",
       "",
       "## P2 Should Fix",
-      "- e.g., i.e., and Node.js describe runtime context, but src/review/headless-council-gate.ts:2258 loses file.ts and vitest.config.ts:12 evidence.",
+      "- e.g., i.e., and Node.js describe runtime context, but src/review/headless-council-gate.ts:2258 loses file.ts, vitest.config.ts:12, src/proto/service.proto:42, and Dockerfile:12 evidence.",
       "",
       "## Track",
       "None",
@@ -1542,10 +1542,23 @@ describe("runHeadlessCouncilGate", () => {
         lineEnd: 12,
         changedPath: false,
       },
+      {
+        path: "src/proto/service.proto",
+        lineStart: 42,
+        lineEnd: 42,
+        changedPath: false,
+      },
+      {
+        path: "Dockerfile",
+        lineStart: 12,
+        lineEnd: 12,
+        changedPath: false,
+      },
     ]);
-    expect(firstFinding.evidence.map((item) => item.path)).not.toEqual(
-      expect.arrayContaining(["e.g", "i.e", "Node.js"]),
-    );
+    const evidencePaths = firstFinding.evidence.map((item) => item.path);
+    for (const proseToken of ["e.g", "i.e", "Node.js"]) {
+      expect(evidencePaths).not.toContain(proseToken);
+    }
     expect(secondFinding.evidence).toEqual(firstFinding.evidence);
     expect(secondFinding.fingerprint).toBe(firstFinding.fingerprint);
   });
