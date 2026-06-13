@@ -17,6 +17,10 @@ function expectAll(content: string, snippets: readonly string[]): void {
   }
 }
 
+function uniqueMatches(content: string, pattern: RegExp): string[] {
+  return [...new Set(content.match(pattern) ?? [])];
+}
+
 describe("council-review manual skill", () => {
   const skill = readSkillFile("SKILL.md");
   const opusPrompt = readSkillFile("templates/phase1-opus-prompt.md");
@@ -120,10 +124,14 @@ describe("council-review manual skill", () => {
     );
     const end = skill.indexOf("```bash", start);
     const opusSetup = skill.slice(start, end);
+    const templateTokens = [
+      ...uniqueMatches(opusCrossExam, /\{[A-Z_]+\}/g),
+      ...uniqueMatches(opusCrossExam, /\[content from [^\]]+\]/g),
+    ];
 
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    expectAll(opusSetup, [
+    for (const expected of [
       "{WORKSPACE_PATH}",
       "{BASE_BRANCH}",
       "{REVIEW_MODE}",
@@ -131,7 +139,10 @@ describe("council-review manual skill", () => {
       "{PREVIOUS_REVIEWED_HEAD_SHA}",
       "{ARTIFACT_STATUS}",
       "[content from Reviewer Beta Phase 1 findings]",
-    ]);
+    ]) {
+      expect(templateTokens).toContain(expected);
+    }
+    expectAll(opusSetup, templateTokens);
   });
 
   it("captures a forward-test that narrows the historical stale Pipeline family", () => {
