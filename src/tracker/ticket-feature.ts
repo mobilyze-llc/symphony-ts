@@ -444,9 +444,7 @@ function normalizeBlockedByEdges(
     if (relation.type !== "blocks") {
       return [];
     }
-    const relatedIssue = normalizeIssueRef(
-      relation.issue ?? relation.relatedIssue,
-    );
+    const relatedIssue = normalizeIssueRef(relation.issue);
     if (relatedIssue === null) {
       return [];
     }

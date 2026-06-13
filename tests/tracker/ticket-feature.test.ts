@@ -207,6 +207,56 @@ describe("ticket feature extractor", () => {
     });
   });
 
+  it("drops malformed blocked-by relations that lack the blocking issue", () => {
+    const feature = extractTicketFeature({
+      issue: normalizeLinearTicketFeatureIssue({
+        id: "issue-483",
+        identifier: "SYMPH-483",
+        title: "TicketFeature extractor",
+        state: { name: "Backlog" },
+        inverseRelations: {
+          nodes: [
+            {
+              id: "rel-self",
+              type: "blocks",
+              issue: null,
+              relatedIssue: {
+                id: "issue-483",
+                identifier: "SYMPH-483",
+                title: "TicketFeature extractor",
+                state: { name: "Backlog" },
+              },
+            },
+          ],
+        },
+      }),
+    });
+
+    expect(feature.specLineage.blockedBy).toEqual([]);
+    expect(feature.relationSummary.totalEdges).toBe(0);
+  });
+
+  it("surfaces capped relation pages without inventing missing edges", () => {
+    const feature = extractTicketFeature({
+      issue: normalizeLinearTicketFeatureIssue({
+        id: "issue-483",
+        identifier: "SYMPH-483",
+        title: "TicketFeature extractor",
+        state: { name: "Backlog" },
+        inverseRelations: {
+          nodes: [],
+          pageInfo: { hasNextPage: true, endCursor: "relation-cursor" },
+        },
+      }),
+    });
+
+    expect(feature.sourceVisibility).toEqual({
+      relationPageTruncated: true,
+      relationHistoryTruncated: false,
+    });
+    expect(feature.specLineage.blockedBy).toEqual([]);
+  });
+
   it("marks unmatched lineage as history-truncated when visible history is capped", () => {
     const feature = extractTicketFeature({
       issue: normalizeLinearTicketFeatureIssue({
@@ -375,6 +425,27 @@ describe("ticket feature extractor", () => {
           identifier: `SYMPH-${headingMarker.length}`,
           title: "TicketFeature extractor",
           description: `${headingMarker} Acceptance Criteria\n- prove the ticket intent`,
+          state: { name: "Backlog" },
+        }),
+      });
+
+      expect(feature.acPosture).toMatchObject({
+        kind: "author_ac",
+        hasAuthorAcceptanceCriteria: true,
+      });
+      expect(feature.intentSufficiency.status).toBe("sufficient");
+    },
+  );
+
+  it.each(["ACCEPTANCE CRITERIA", "acceptance criteria"])(
+    "recognizes %s headings case-insensitively",
+    (heading) => {
+      const feature = extractTicketFeature({
+        issue: normalizeLinearTicketFeatureIssue({
+          id: `issue-${heading}`,
+          identifier: "SYMPH-483",
+          title: "TicketFeature extractor",
+          description: `## ${heading}\n- prove the ticket intent`,
           state: { name: "Backlog" },
         }),
       });
