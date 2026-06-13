@@ -34,6 +34,24 @@ export const REVIEW_CALIBRATION_CATEGORIES = [
 export type ReviewCalibrationCategory =
   (typeof REVIEW_CALIBRATION_CATEGORIES)[number];
 
+const REVIEW_CALIBRATION_CATEGORY_BY_BUG_CLASS = {
+  "security:path_traversal": "security",
+  "security:shell_injection": "security",
+  "security:secret_exposure": "security",
+  "security:safe_filesystem": "security",
+  "security:safe_auth_adjacent": "security",
+  "instruction:prompt_injection": "instruction",
+  "workflow:state_transition": "workflow",
+  "frontmatter:metadata_drift": "frontmatter",
+  "historical:symphony_replay": "historical-replay",
+  "convergence:same_family_reopen": "targeted-convergence",
+  "convergence:fix_round_regression": "targeted-convergence",
+  "convergence:replay_event_shape": "targeted-convergence",
+} as const satisfies Record<
+  ReviewCalibrationBugClass,
+  ReviewCalibrationCategory
+>;
+
 export const REVIEW_CALIBRATION_REVIEWER_DISPOSITIONS = [
   "finding",
   "no_finding",
@@ -223,11 +241,15 @@ export function validateReviewCalibrationCorpus(
     addError("$.fixtures", "must be an array");
     return { ok: errors.length === 0, fixtureCount: 0, errors };
   }
+  if (value.fixtures.length === 0) {
+    addError("$.fixtures", "must not be empty");
+  }
 
   const seenIds = new Set<string>();
   value.fixtures.forEach((fixture, index) => {
     validateFixture(fixture, `$.fixtures[${index}]`, seenIds, addError);
   });
+  validateBugClassCoverage(value.fixtures, "$.fixtures", addError);
 
   return {
     ok: errors.length === 0,
@@ -302,6 +324,16 @@ function validateFixture(
     `${path}.bugClass`,
     addError,
   );
+  if (
+    category !== null &&
+    bugClass !== null &&
+    REVIEW_CALIBRATION_CATEGORY_BY_BUG_CLASS[bugClass] !== category
+  ) {
+    addError(
+      `${path}.category`,
+      `must be ${REVIEW_CALIBRATION_CATEGORY_BY_BUG_CLASS[bugClass]} for bugClass ${bugClass}`,
+    );
+  }
   validateStringArray(value.tags, `${path}.tags`, addError, {
     allowEmpty: false,
   });
@@ -585,6 +617,37 @@ function validateReplayEventShape(
   );
   if (!isRecord(value.sample)) {
     addError(`${path}.sample`, "must be an object");
+    return;
+  }
+  for (const field of stringArrayValues(value.requiredFields)) {
+    if (!Object.hasOwn(value.sample, field)) {
+      addError(`${path}.sample.${field}`, "must include required field");
+    }
+  }
+  for (const field of stringArrayValues(value.forbiddenRuntimeFields)) {
+    if (Object.hasOwn(value.sample, field)) {
+      addError(
+        `${path}.sample.${field}`,
+        "must not include forbidden runtime field",
+      );
+    }
+  }
+}
+
+function validateBugClassCoverage(
+  fixtures: readonly unknown[],
+  path: string,
+  addError: (path: string, message: string) => void,
+): void {
+  for (const bugClass of REVIEW_CALIBRATION_BUG_CLASSES) {
+    const count = fixtures.filter(
+      (fixture) => isRecord(fixture) && fixture.bugClass === bugClass,
+    ).length;
+    if (count === 0) {
+      addError(path, `must include one fixture for bug class ${bugClass}`);
+    } else if (count > 1) {
+      addError(path, `must include only one fixture for bug class ${bugClass}`);
+    }
   }
 }
 
@@ -662,6 +725,15 @@ function validateStringArray(
       addError(`${path}[${index}]`, "must be a non-empty string");
     }
   });
+}
+
+function stringArrayValues(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter(
+        (item): item is string =>
+          typeof item === "string" && item.trim().length > 0,
+      )
+    : [];
 }
 
 function validateOneOf<const T extends readonly string[]>(

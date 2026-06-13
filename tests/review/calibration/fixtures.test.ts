@@ -68,6 +68,35 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
     }
   });
 
+  it("rejects depleted coverage and category/bug-class drift", () => {
+    const corpus = loadCorpus();
+    const emptyCorpus = structuredClone(corpus);
+    emptyCorpus.fixtures = [];
+
+    expect(validateReviewCalibrationCorpus(emptyCorpus).errors).toEqual(
+      expect.arrayContaining([
+        {
+          path: "$.fixtures",
+          message: "must not be empty",
+        },
+        {
+          path: "$.fixtures",
+          message:
+            "must include one fixture for bug class security:path_traversal",
+        },
+      ]),
+    );
+
+    const driftedCorpus = structuredClone(corpus);
+    driftedCorpus.fixtures[0]!.category = "workflow";
+    expect(
+      validateReviewCalibrationCorpus(driftedCorpus).errors,
+    ).toContainEqual({
+      path: "$.fixtures[0].category",
+      message: "must be security for bugClass security:path_traversal",
+    });
+  });
+
   it("pins malicious security outcomes and benign false-positive traps", () => {
     const corpus = loadCorpus();
     const maliciousClasses: ReviewCalibrationBugClass[] = [
@@ -213,6 +242,39 @@ describe("review calibration fixture corpus (SYMPH-493)", () => {
       ],
       forbiddenRuntimeFields: ["modelProvider", "modelPrompt", "gateMutation"],
     });
+  });
+
+  it("rejects replay samples that omit required fields or include forbidden runtime fields", () => {
+    const corpus = loadCorpus();
+    const invalidCorpus = structuredClone(corpus);
+    const fixtureIndex = invalidCorpus.fixtures.findIndex(
+      (candidate) => candidate.id === "convergence-expected-replay-event-shape",
+    );
+    expect(fixtureIndex).toBeGreaterThanOrEqual(0);
+    const replay = invalidCorpus.fixtures[fixtureIndex]!.replay;
+    if (replay === null) {
+      throw new Error("expected replay metadata");
+    }
+
+    const { fixtureId: _fixtureId, ...sampleWithoutFixtureId } =
+      replay.expectedEventShape.sample;
+    replay.expectedEventShape.sample = {
+      ...sampleWithoutFixtureId,
+      modelPrompt: "unsafe runtime prompt",
+    };
+
+    expect(validateReviewCalibrationCorpus(invalidCorpus).errors).toEqual(
+      expect.arrayContaining([
+        {
+          path: `$.fixtures[${fixtureIndex}].replay.expectedEventShape.sample.fixtureId`,
+          message: "must include required field",
+        },
+        {
+          path: `$.fixtures[${fixtureIndex}].replay.expectedEventShape.sample.modelPrompt`,
+          message: "must not include forbidden runtime field",
+        },
+      ]),
+    );
   });
 
   it("requires future-ref hygiene fields on every fixture", () => {
