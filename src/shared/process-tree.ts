@@ -96,6 +96,7 @@ export interface ChildProcessForTermination {
 export async function terminateChildProcessTree(
   child: ChildProcessForTermination,
   options?: {
+    forceKillAfterGrace?: boolean;
     graceMs?: number;
     kill?: ProcessKill;
   },
@@ -111,6 +112,10 @@ export async function terminateChildProcessTree(
   const kill = options?.kill ?? process.kill;
   const graceMs = options?.graceMs ?? 1_000;
   const sigtermSent = signalPidOrProcessGroup(pid, "SIGTERM", kill);
+  if (options?.forceKillAfterGrace === false) {
+    await waitForChildExit(child);
+    return { pid, sigtermSent, sigkillSent: false };
+  }
   await delay(graceMs);
 
   const sigkillSent = signalPidOrProcessGroup(pid, "SIGKILL", kill);
@@ -138,10 +143,11 @@ export async function terminateDetachedPidTree(
     }
     const probeIdentity = options.probeIdentity ?? readProcessIdentity;
     const observedIdentity = await probeIdentity(pid);
-    if (
-      observedIdentity !== null &&
-      !processIdentityMatches(expectedIdentity, observedIdentity)
-    ) {
+    if (observedIdentity === null) {
+      if (!isPidDefinitelyAbsent(pid, kill)) {
+        return { pid, sigtermSent: false, sigkillSent: false };
+      }
+    } else if (!processIdentityMatches(expectedIdentity, observedIdentity)) {
       return { pid, sigtermSent: false, sigkillSent: false };
     }
   }
@@ -155,10 +161,11 @@ export async function terminateDetachedPidTree(
     }
     const probeIdentity = options.probeIdentity ?? readProcessIdentity;
     const observedIdentity = await probeIdentity(pid);
-    if (
-      observedIdentity !== null &&
-      !processIdentityMatches(expectedIdentity, observedIdentity)
-    ) {
+    if (observedIdentity === null) {
+      if (!isPidDefinitelyAbsent(pid, kill)) {
+        return { pid, sigtermSent, sigkillSent: false };
+      }
+    } else if (!processIdentityMatches(expectedIdentity, observedIdentity)) {
       return { pid, sigtermSent, sigkillSent: false };
     }
   }
@@ -415,6 +422,15 @@ function childHasExited(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isPidDefinitelyAbsent(pid: number, kill: ProcessKill): boolean {
+  try {
+    kill(pid, 0);
+    return false;
+  } catch (error) {
+    return isNoSuchProcess(error);
+  }
 }
 
 function isNoSuchProcess(error: unknown): boolean {

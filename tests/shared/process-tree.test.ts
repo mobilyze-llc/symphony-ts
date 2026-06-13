@@ -87,6 +87,41 @@ describe("process tree termination", () => {
     ]);
   });
 
+  it("can wait for graceful child exit without escalating to SIGKILL", async () => {
+    vi.useFakeTimers();
+    const child = new EventEmitter() as EventEmitter & {
+      pid: number;
+      exitCode: number | null;
+      signalCode: NodeJS.Signals | null;
+    };
+    child.pid = 1234;
+    child.exitCode = null;
+    child.signalCode = null;
+    const calls: Array<{ pid: number; signal: string | number | undefined }> =
+      [];
+
+    const pending = terminateChildProcessTree(child, {
+      forceKillAfterGrace: false,
+      graceMs: 1_000,
+      kill: ((pid: number, signal?: string | number) => {
+        calls.push({ pid, signal });
+        return true;
+      }) as typeof process.kill,
+    });
+
+    child.exitCode = 0;
+    child.emit("exit");
+    await vi.advanceTimersByTimeAsync(1_100);
+    const result = await pending;
+
+    expect(result).toEqual({
+      pid: 1234,
+      sigtermSent: true,
+      sigkillSent: false,
+    });
+    expect(calls).toEqual([{ pid: -1234, signal: "SIGTERM" }]);
+  });
+
   it("does not signal or wait when the child already exited before teardown", async () => {
     vi.useFakeTimers();
     const child = new EventEmitter() as EventEmitter & {
@@ -173,7 +208,8 @@ describe("process tree termination", () => {
 
   it("cleans up a recovered detached process tree when the expected process is already absent", async () => {
     vi.useFakeTimers();
-    const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const calls: Array<{ pid: number; signal: string | number | undefined }> =
+      [];
     const probeIdentity = vi.fn(async () => null);
 
     const pending = terminateDetachedPidTree(1234, {
@@ -181,7 +217,10 @@ describe("process tree termination", () => {
       expectedIdentity: createProcessIdentity(1234),
       probeIdentity,
       kill: ((pid: number, signal?: string | number) => {
-        calls.push({ pid, signal: signal as NodeJS.Signals });
+        calls.push({ pid, signal });
+        if (pid === 1234 && signal === 0) {
+          throw createNoSuchProcessError();
+        }
         return true;
       }) as typeof process.kill,
     });
@@ -196,7 +235,9 @@ describe("process tree termination", () => {
     });
     expect(probeIdentity).toHaveBeenCalledTimes(2);
     expect(calls).toEqual([
+      { pid: 1234, signal: 0 },
       { pid: -1234, signal: "SIGTERM" },
+      { pid: 1234, signal: 0 },
       { pid: -1234, signal: "SIGKILL" },
     ]);
   });
@@ -204,7 +245,8 @@ describe("process tree termination", () => {
   it("finishes recovered detached cleanup when the expected identity exits during grace", async () => {
     vi.useFakeTimers();
     const identity = createProcessIdentity(1234);
-    const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const calls: Array<{ pid: number; signal: string | number | undefined }> =
+      [];
     const probeIdentity = vi
       .fn()
       .mockResolvedValueOnce(identity)
@@ -215,7 +257,10 @@ describe("process tree termination", () => {
       expectedIdentity: identity,
       probeIdentity,
       kill: ((pid: number, signal?: string | number) => {
-        calls.push({ pid, signal: signal as NodeJS.Signals });
+        calls.push({ pid, signal });
+        if (pid === 1234 && signal === 0) {
+          throw createNoSuchProcessError();
+        }
         return true;
       }) as typeof process.kill,
     });
@@ -230,8 +275,34 @@ describe("process tree termination", () => {
     });
     expect(calls).toEqual([
       { pid: -1234, signal: "SIGTERM" },
+      { pid: 1234, signal: 0 },
       { pid: -1234, signal: "SIGKILL" },
     ]);
+  });
+
+  it("refuses recovered detached cleanup when identity probing is inconclusive but the pid still exists", async () => {
+    vi.useFakeTimers();
+    const calls: Array<{ pid: number; signal: string | number | undefined }> =
+      [];
+
+    const result = await terminateDetachedPidTree(1234, {
+      graceMs: 1_000,
+      expectedIdentity: createProcessIdentity(1234),
+      probeIdentity: vi.fn(async () => null),
+      kill: ((pid: number, signal?: string | number) => {
+        calls.push({ pid, signal });
+        return true;
+      }) as typeof process.kill,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_100);
+
+    expect(result).toEqual({
+      pid: 1234,
+      sigtermSent: false,
+      sigkillSent: false,
+    });
+    expect(calls).toEqual([{ pid: 1234, signal: 0 }]);
   });
 
   it("refuses recovered detached cleanup when the process identity mismatches before SIGTERM", async () => {
@@ -464,4 +535,10 @@ function createProcessIdentity(
     launchToken: "launch-token",
     ...overrides,
   };
+}
+
+function createNoSuchProcessError(): Error & { code: string } {
+  const error = new Error("missing process") as Error & { code: string };
+  error.code = "ESRCH";
+  return error;
 }

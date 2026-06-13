@@ -314,7 +314,7 @@ export class CodexAppServerClient {
       return;
     }
 
-    await terminateChildProcessTree(child);
+    await terminateChildProcessTree(child, { forceKillAfterGrace: false });
     await this.cleanupEphemeralCodexHome();
   }
 

@@ -966,6 +966,8 @@ export class OrchestratorCore {
         summary: `Emergency-stop recovery cleanup completed for ${input.issueIdentifier}.`,
         metadata: {
           status: "completed",
+          // Recovery cleanup only proves the detached process tree is gone;
+          // preserving the workspace keeps post-mortem state available.
           cleanupWorkspace: false,
           reason: "emergency_stop",
           recovery: "journal_hydration",
