@@ -68,6 +68,7 @@ describe("domain model", () => {
       threadId: null,
       turnId: null,
       codexAppServerPid: null,
+      codexAppServerIdentity: null,
       lastCodexEvent: null,
       lastCodexTimestamp: null,
       lastCodexMessage: null,

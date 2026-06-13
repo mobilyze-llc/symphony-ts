@@ -44,6 +44,7 @@ import {
   readGitChangedFiles,
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
+import type { ProcessIdentitySnapshot } from "../../src/shared/process-tree.js";
 import { TrackerError } from "../../src/tracker/errors.js";
 import { LinearTrackerClient } from "../../src/tracker/linear-client.js";
 import type {
@@ -408,6 +409,7 @@ describe("OrchestratorRuntimeHost", () => {
         threadId: "thread-1",
         turnId: "turn-1",
         codexAppServerPid: "1001",
+        codexAppServerIdentity: null,
         lastCodexEvent: "turn_completed",
         lastCodexTimestamp: "2026-03-06T00:00:02.000Z",
         lastCodexMessage: "turn completed",
@@ -520,6 +522,7 @@ describe("OrchestratorRuntimeHost", () => {
               stage: "implement",
               attempt: null,
               codexAppServerPid: "1001",
+              codexAppServerIdentity: createProcessIdentity(1001),
             },
           ],
         },
@@ -564,6 +567,7 @@ describe("OrchestratorRuntimeHost", () => {
 
     expect(terminateDetachedPidTree).toHaveBeenCalledWith(1001, {
       graceMs: 1_000,
+      expectedIdentity: createProcessIdentity(1001),
     });
     expect(tick.dispatchedIssueIds).toEqual(["1"]);
     expect(fakeRunner.runInputs).toHaveLength(1);
@@ -579,6 +583,7 @@ describe("OrchestratorRuntimeHost", () => {
             recovery: "journal_hydration",
             sourceSequence: 2,
             codexAppServerPid: "1001",
+            codexAppServerIdentity: createProcessIdentity(1001),
           }),
         }),
       ]),
@@ -606,6 +611,7 @@ describe("OrchestratorRuntimeHost", () => {
       createPipelineStopJournalEntry(3, "2002"),
       createEmergencyStopHardStopJournalEntry(4, {
         codexAppServerPid: "2002",
+        codexAppServerIdentity: createProcessIdentity(2002),
         sourceSequence: 3,
       }),
       createPipelineResumeJournalEntry(5),
@@ -630,10 +636,12 @@ describe("OrchestratorRuntimeHost", () => {
     expect(terminateDetachedPidTree).toHaveBeenCalledTimes(1);
     expect(terminateDetachedPidTree).toHaveBeenCalledWith(1001, {
       graceMs: 1_000,
+      expectedIdentity: createProcessIdentity(1001),
     });
-    expect(terminateDetachedPidTree).not.toHaveBeenCalledWith(2002, {
-      graceMs: 1_000,
-    });
+    expect(terminateDetachedPidTree).not.toHaveBeenCalledWith(
+      2002,
+      expect.anything(),
+    );
     expect(tick.dispatchedIssueIds).toEqual(["1"]);
     expect(fakeRunner.runInputs).toHaveLength(1);
     expect(host.getState().resumeRequired.has("1")).toBe(false);
@@ -648,6 +656,7 @@ describe("OrchestratorRuntimeHost", () => {
             recovery: "journal_hydration",
             sourceSequence: 1,
             codexAppServerPid: "1001",
+            codexAppServerIdentity: createProcessIdentity(1001),
           }),
         }),
       ]),
@@ -714,6 +723,62 @@ describe("OrchestratorRuntimeHost", () => {
       ).toBe(false);
     },
   );
+
+  it("keeps recovered emergency-stop cleanup fail-closed when process identity no longer matches", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ state: "Resume" })],
+      stateSnapshots: [{ id: "1", identifier: "ISSUE-1", state: "Resume" }],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const terminateDetachedPidTree = vi.fn(async () => ({
+      pid: 1001,
+      sigtermSent: false,
+      sigkillSent: false,
+    }));
+    const writtenEntries: DispatcherRunJournalEntry[] = [];
+    const journal: DispatcherRunJournal = [
+      createPipelineStopJournalEntry(1, "1001", createProcessIdentity(1001)),
+      createPipelineResumeJournalEntry(2),
+    ];
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => journal,
+      writeDispatcherRunJournalEntry: async (_workspaceRoot, entry) => {
+        writtenEntries.push(entry);
+      },
+      terminateDetachedPidTree,
+      now: () => new Date("2026-03-06T00:02:00.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+
+    expect(terminateDetachedPidTree).toHaveBeenCalledWith(
+      1001,
+      expect.objectContaining({
+        expectedIdentity: createProcessIdentity(1001),
+      }),
+    );
+    expect(tick.dispatchedIssueIds).toEqual([]);
+    expect(fakeRunner.runInputs).toHaveLength(0);
+    expect(host.getState().resumeRequired.has("1")).toBe(true);
+    expect(host.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run_unconfirmed",
+      setBySequence: 1,
+    });
+    expect(
+      writtenEntries.some(
+        (entry) =>
+          entry.kind === "hard_stop_trigger" &&
+          entry.metadata.reason === "emergency_stop" &&
+          entry.metadata.recovery === "journal_hydration",
+      ),
+    ).toBe(false);
+  });
 
   it.each([
     {
@@ -3199,6 +3264,7 @@ describe("OrchestratorRuntimeHost", () => {
         threadId: "thread-1",
         turnId: "turn-1",
         codexAppServerPid: "1001",
+        codexAppServerIdentity: null,
         lastCodexEvent: "turn_completed",
         lastCodexTimestamp: "2026-03-06T00:00:02.000Z",
         lastCodexMessage: "done",
@@ -3361,6 +3427,7 @@ describe("OrchestratorRuntimeHost", () => {
         threadId: "thread-1",
         turnId: "turn-1",
         codexAppServerPid: "1001",
+        codexAppServerIdentity: null,
         lastCodexEvent: "turn_completed",
         lastCodexTimestamp: "2026-03-06T00:00:02.000Z",
         lastCodexMessage: "done",
@@ -3457,6 +3524,7 @@ describe("OrchestratorRuntimeHost", () => {
         threadId: "thread-1",
         turnId: "turn-1",
         codexAppServerPid: "1001",
+        codexAppServerIdentity: null,
         lastCodexEvent: "turn_completed",
         lastCodexTimestamp: "2026-03-06T00:00:02.000Z",
         lastCodexMessage: "done",
@@ -3551,6 +3619,7 @@ describe("OrchestratorRuntimeHost", () => {
         threadId: "thread-1",
         turnId: "turn-1",
         codexAppServerPid: "1001",
+        codexAppServerIdentity: null,
         lastCodexEvent: "turn_completed",
         lastCodexTimestamp: "2026-03-06T00:00:02.000Z",
         lastCodexMessage: "done",
@@ -3696,6 +3765,7 @@ describe("OrchestratorRuntimeHost", () => {
         threadId: "thread-1",
         turnId: "turn-2",
         codexAppServerPid: "1001",
+        codexAppServerIdentity: null,
         lastCodexEvent: "turn_completed",
         lastCodexTimestamp: "2026-03-06T00:00:04.000Z",
         lastCodexMessage: "turn 2 done",
@@ -5979,6 +6049,10 @@ function readDispatcherJournal(workspaceRoot: string): DispatcherRunJournal {
 function createPipelineStopJournalEntry(
   sequence: number,
   codexAppServerPid: string | null,
+  codexAppServerIdentity: ProcessIdentitySnapshot | null = codexAppServerPid !==
+    null && /^\d+$/.test(codexAppServerPid)
+    ? createProcessIdentity(Number(codexAppServerPid))
+    : null,
 ): DispatcherRunJournalEntry {
   return {
     sequence,
@@ -6005,6 +6079,7 @@ function createPipelineStopJournalEntry(
           stage: "implement",
           attempt: null,
           codexAppServerPid,
+          codexAppServerIdentity,
         },
       ],
     },
@@ -6038,7 +6113,11 @@ function createPipelineResumeJournalEntry(
 
 function createEmergencyStopHardStopJournalEntry(
   sequence: number,
-  input: { codexAppServerPid: string | null; sourceSequence: number },
+  input: {
+    codexAppServerPid: string | null;
+    codexAppServerIdentity?: ProcessIdentitySnapshot | null;
+    sourceSequence: number;
+  },
 ): DispatcherRunJournalEntry {
   return {
     sequence,
@@ -6059,7 +6138,23 @@ function createEmergencyStopHardStopJournalEntry(
       issueState: "Todo",
       sourceSequence: input.sourceSequence,
       codexAppServerPid: input.codexAppServerPid,
+      codexAppServerIdentity: input.codexAppServerIdentity ?? null,
     },
+  };
+}
+
+function createProcessIdentity(
+  pid: number,
+  overrides: Partial<ProcessIdentitySnapshot> = {},
+): ProcessIdentitySnapshot {
+  return {
+    pid,
+    processGroupId: pid,
+    sessionId: pid,
+    startedAt: "linux-starttime:123456",
+    command: "bash -lc codex-app-server",
+    launchToken: "launch-token",
+    ...overrides,
   };
 }
 
@@ -6234,6 +6329,7 @@ function createNormalResult(): AgentRunResult {
       threadId: "thread-1",
       turnId: "turn-1",
       codexAppServerPid: "1001",
+      codexAppServerIdentity: null,
       lastCodexEvent: "turn_completed",
       lastCodexTimestamp: "2026-03-06T00:00:02.000Z",
       lastCodexMessage: "done",

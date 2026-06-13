@@ -2164,6 +2164,7 @@ describe("orchestrator core", () => {
         stage: null,
         attempt: null,
         codexAppServerPid: null,
+        codexAppServerIdentity: null,
       },
     ]);
     expect(stopRunningIssue).toHaveBeenCalledWith(

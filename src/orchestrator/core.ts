@@ -293,13 +293,7 @@ export interface EmergencyStopResult {
   status: "applied" | "no_op";
   detail: string;
   sequence: number | null;
-  interruptedIssues: Array<{
-    issueId: string;
-    issueIdentifier: string;
-    stage: string | null;
-    attempt: number | null;
-    codexAppServerPid: string | null;
-  }>;
+  interruptedIssues: PipelineEmergencyStopState["interruptedIssues"];
   stopRequests: StopRequest[];
 }
 
@@ -952,6 +946,7 @@ export class OrchestratorCore {
     issueId: string;
     issueIdentifier: string;
     codexAppServerPid: string | null;
+    codexAppServerIdentity: PipelineEmergencyStopState["interruptedIssues"][number]["codexAppServerIdentity"];
     sourceSequence: number;
   }): Promise<number | null> {
     try {
@@ -975,6 +970,7 @@ export class OrchestratorCore {
           recovery: "journal_hydration",
           sourceSequence: input.sourceSequence,
           codexAppServerPid: input.codexAppServerPid,
+          codexAppServerIdentity: input.codexAppServerIdentity,
         },
       });
       this.recoverHardStopTrigger(entry);
@@ -7274,6 +7270,7 @@ export class OrchestratorCore {
       stage: this.state.issueStages[runningEntry.issue.id] ?? null,
       attempt: runningEntry.retryAttempt,
       codexAppServerPid: runningEntry.codexAppServerPid,
+      codexAppServerIdentity: runningEntry.codexAppServerIdentity,
     };
   }
 
@@ -9517,6 +9514,7 @@ export class OrchestratorCore {
           ? {
               sourceSequence: options.emergencyStopSourceSequence ?? null,
               codexAppServerPid: runningEntry.codexAppServerPid,
+              codexAppServerIdentity: runningEntry.codexAppServerIdentity,
             }
           : {}),
       },
@@ -9562,6 +9560,7 @@ export class OrchestratorCore {
             ? {
                 sourceSequence: options.emergencyStopSourceSequence ?? null,
                 codexAppServerPid: runningEntry.codexAppServerPid,
+                codexAppServerIdentity: runningEntry.codexAppServerIdentity,
               }
             : {}),
         },
@@ -10784,6 +10783,9 @@ function readInterruptedIssues(
     const stage = record.stage;
     const attempt = record.attempt;
     const codexAppServerPid = record.codexAppServerPid;
+    const codexAppServerIdentity = readProcessIdentityMetadata(
+      record.codexAppServerIdentity,
+    );
     return [
       {
         issueId,
@@ -10798,9 +10800,54 @@ function readInterruptedIssues(
           codexAppServerPid.trim() !== ""
             ? codexAppServerPid
             : null,
+        codexAppServerIdentity,
       },
     ];
   });
+}
+
+function readProcessIdentityMetadata(
+  value: unknown,
+): PipelineEmergencyStopState["interruptedIssues"][number]["codexAppServerIdentity"] {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const pid = value.pid;
+  const processGroupId = value.processGroupId;
+  const sessionId = value.sessionId;
+  const startedAt = value.startedAt;
+  const command = value.command;
+  const launchToken = value.launchToken;
+  if (
+    typeof pid !== "number" ||
+    !Number.isSafeInteger(pid) ||
+    pid <= 0 ||
+    typeof processGroupId !== "number" ||
+    !Number.isSafeInteger(processGroupId) ||
+    processGroupId <= 0 ||
+    !(
+      sessionId === null ||
+      (typeof sessionId === "number" &&
+        Number.isSafeInteger(sessionId) &&
+        sessionId >= 0)
+    ) ||
+    typeof startedAt !== "string" ||
+    startedAt.trim() === "" ||
+    typeof command !== "string" ||
+    command.trim() === "" ||
+    typeof launchToken !== "string" ||
+    launchToken.trim() === ""
+  ) {
+    return null;
+  }
+  return {
+    pid,
+    processGroupId,
+    sessionId,
+    startedAt,
+    command,
+    launchToken,
+  };
 }
 
 function collectQuietDeathOutcomes(

@@ -1,4 +1,5 @@
 import type { ErrorSignatureClass } from "../errors/signature.js";
+import type { ProcessIdentitySnapshot } from "../shared/process-tree.js";
 
 export const ORCHESTRATOR_ISSUE_STATUSES = [
   "unclaimed",
@@ -757,6 +758,7 @@ export interface LiveSession {
   threadId: string | null;
   turnId: string | null;
   codexAppServerPid: string | null;
+  codexAppServerIdentity: ProcessIdentitySnapshot | null;
   lastCodexEvent: string | null;
   lastCodexTimestamp: string | null;
   lastCodexMessage: string | null;
@@ -1213,6 +1215,7 @@ export interface PipelineEmergencyStopState {
     stage: string | null;
     attempt: number | null;
     codexAppServerPid: string | null;
+    codexAppServerIdentity: ProcessIdentitySnapshot | null;
   }>;
 }
 
@@ -1288,6 +1291,7 @@ export function createEmptyLiveSession(): LiveSession {
     threadId: null,
     turnId: null,
     codexAppServerPid: null,
+    codexAppServerIdentity: null,
     lastCodexEvent: null,
     lastCodexTimestamp: null,
     lastCodexMessage: null,

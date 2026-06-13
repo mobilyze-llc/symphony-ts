@@ -123,6 +123,7 @@ import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
 import { terminateDetachedPidTree as terminateDetachedPidTreeDefault } from "../shared/process-tree.js";
+import type { ProcessIdentitySnapshot } from "../shared/process-tree.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
 import type { IssueTracker } from "../tracker/tracker.js";
@@ -1663,25 +1664,49 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         const parsedPid = parseProcessPid(plan.codexAppServerPid);
         let targetedCleanupSucceeded = false;
         try {
-          if (parsedPid !== null && parsedPid !== process.pid) {
-            await this.terminateDetachedPidTree(parsedPid, { graceMs: 1_000 });
-            targetedCleanupSucceeded = true;
-            await this.logger?.log(
-              "info",
-              "emergency_stop_recovery_process_tree_killed",
-              `Killed recovered emergency-stop process tree for ${plan.issueIdentifier}.`,
-              {
-                issue_id: issueId,
-                issue_identifier: plan.issueIdentifier,
-                codex_app_server_pid: plan.codexAppServerPid,
-                source_sequence: plan.setBySequence,
-              },
-            );
+          if (
+            parsedPid !== null &&
+            parsedPid !== process.pid &&
+            plan.codexAppServerIdentity !== null &&
+            plan.codexAppServerIdentity.pid === parsedPid &&
+            plan.codexAppServerIdentity.processGroupId === parsedPid
+          ) {
+            const termination = await this.terminateDetachedPidTree(parsedPid, {
+              graceMs: 1_000,
+              expectedIdentity: plan.codexAppServerIdentity,
+            });
+            if (termination.sigtermSent || termination.sigkillSent) {
+              targetedCleanupSucceeded = true;
+              await this.logger?.log(
+                "info",
+                "emergency_stop_recovery_process_tree_killed",
+                `Killed recovered emergency-stop process tree for ${plan.issueIdentifier}.`,
+                {
+                  issue_id: issueId,
+                  issue_identifier: plan.issueIdentifier,
+                  codex_app_server_pid: plan.codexAppServerPid,
+                  source_sequence: plan.setBySequence,
+                },
+              );
+            } else {
+              unconfirmedPlans.push(plan);
+              await this.logger?.warn(
+                "emergency_stop_recovery_identity_mismatch",
+                "Emergency-stop recovery found a Codex app-server PID whose process identity could not be confirmed.",
+                {
+                  outcome: "degraded",
+                  issue_id: issueId,
+                  issue_identifier: plan.issueIdentifier,
+                  codex_app_server_pid: plan.codexAppServerPid,
+                  source_sequence: plan.setBySequence,
+                },
+              );
+            }
           } else {
             unconfirmedPlans.push(plan);
             await this.logger?.warn(
               "emergency_stop_recovery_missing_pid",
-              "Emergency-stop recovery found an interrupted issue without a usable Codex app-server PID.",
+              "Emergency-stop recovery found an interrupted issue without a usable Codex app-server PID and process identity.",
               {
                 outcome: "degraded",
                 issue_id: issueId,
@@ -1701,6 +1726,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 issueId,
                 issueIdentifier: plan.issueIdentifier,
                 codexAppServerPid: plan.codexAppServerPid,
+                codexAppServerIdentity: plan.codexAppServerIdentity,
                 sourceSequence: plan.setBySequence,
               });
             if (cleanupSequence === null) {
@@ -4957,6 +4983,7 @@ interface EmergencyStopRecoveryCleanupPlan {
   issueId: string;
   issueIdentifier: string;
   codexAppServerPid: string | null;
+  codexAppServerIdentity: ProcessIdentitySnapshot | null;
   setBySequence: number;
   since: string;
 }
@@ -4982,6 +5009,7 @@ function collectUnconfirmedEmergencyStopCleanupPlans(
           issueId: issue.issueId,
           issueIdentifier: issue.issueIdentifier,
           codexAppServerPid: issue.codexAppServerPid,
+          codexAppServerIdentity: issue.codexAppServerIdentity,
           setBySequence: entry.sequence,
           since: entry.timestamp,
         };
@@ -5044,6 +5072,7 @@ function readEmergencyStopInterruptedIssues(
   issueId: string;
   issueIdentifier: string;
   codexAppServerPid: string | null;
+  codexAppServerIdentity: ProcessIdentitySnapshot | null;
 }> {
   const value = metadata.interruptedIssues;
   if (!Array.isArray(value)) {
@@ -5059,6 +5088,9 @@ function readEmergencyStopInterruptedIssues(
       return [];
     }
     const codexAppServerPid = item.codexAppServerPid;
+    const codexAppServerIdentity = readProcessIdentityMetadata(
+      item.codexAppServerIdentity,
+    );
     return [
       {
         issueId,
@@ -5068,9 +5100,54 @@ function readEmergencyStopInterruptedIssues(
           codexAppServerPid.trim() !== ""
             ? codexAppServerPid
             : null,
+        codexAppServerIdentity,
       },
     ];
   });
+}
+
+function readProcessIdentityMetadata(
+  value: unknown,
+): ProcessIdentitySnapshot | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const pid = value.pid;
+  const processGroupId = value.processGroupId;
+  const sessionId = value.sessionId;
+  const startedAt = value.startedAt;
+  const command = value.command;
+  const launchToken = value.launchToken;
+  if (
+    typeof pid !== "number" ||
+    !Number.isSafeInteger(pid) ||
+    pid <= 0 ||
+    typeof processGroupId !== "number" ||
+    !Number.isSafeInteger(processGroupId) ||
+    processGroupId <= 0 ||
+    !(
+      sessionId === null ||
+      (typeof sessionId === "number" &&
+        Number.isSafeInteger(sessionId) &&
+        sessionId >= 0)
+    ) ||
+    typeof startedAt !== "string" ||
+    startedAt.trim() === "" ||
+    typeof command !== "string" ||
+    command.trim() === "" ||
+    typeof launchToken !== "string" ||
+    launchToken.trim() === ""
+  ) {
+    return null;
+  }
+  return {
+    pid,
+    processGroupId,
+    sessionId,
+    startedAt,
+    command,
+    launchToken,
+  };
 }
 
 function readEmergencyStopSourceSequence(

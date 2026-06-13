@@ -3,6 +3,9 @@ import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  type ProcessIdentitySnapshot,
+  processIdentityMatches,
+  readProcessIdentity,
   signalPidOrProcessGroup,
   terminateChildProcessTree,
   terminateDetachedPidTree,
@@ -136,6 +139,168 @@ describe("process tree termination", () => {
     ]);
   });
 
+  it("terminates a recovered detached process tree only when identity matches", async () => {
+    vi.useFakeTimers();
+    const identity = createProcessIdentity(1234);
+    const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const probeIdentity = vi.fn(async () => identity);
+
+    const pending = terminateDetachedPidTree(1234, {
+      graceMs: 1_000,
+      expectedIdentity: identity,
+      probeIdentity,
+      kill: ((pid: number, signal?: string | number) => {
+        calls.push({ pid, signal: signal as NodeJS.Signals });
+        return true;
+      }) as typeof process.kill,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_100);
+    const result = await pending;
+
+    expect(result).toEqual({
+      pid: 1234,
+      sigtermSent: true,
+      sigkillSent: true,
+    });
+    expect(probeIdentity).toHaveBeenCalledTimes(2);
+    expect(calls).toEqual([
+      { pid: -1234, signal: "SIGTERM" },
+      { pid: -1234, signal: "SIGKILL" },
+    ]);
+  });
+
+  it("refuses recovered detached cleanup when the process identity mismatches before SIGTERM", async () => {
+    vi.useFakeTimers();
+    const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+
+    const result = await terminateDetachedPidTree(1234, {
+      graceMs: 1_000,
+      expectedIdentity: createProcessIdentity(1234),
+      probeIdentity: vi.fn(async () =>
+        createProcessIdentity(1234, { launchToken: "other-token" }),
+      ),
+      kill: ((pid: number, signal?: string | number) => {
+        calls.push({ pid, signal: signal as NodeJS.Signals });
+        return true;
+      }) as typeof process.kill,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_100);
+
+    expect(result).toEqual({
+      pid: 1234,
+      sigtermSent: false,
+      sigkillSent: false,
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("re-checks recovered detached process identity before SIGKILL", async () => {
+    vi.useFakeTimers();
+    const identity = createProcessIdentity(1234);
+    const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const probeIdentity = vi
+      .fn()
+      .mockResolvedValueOnce(identity)
+      .mockResolvedValueOnce(
+        createProcessIdentity(1234, { launchToken: "reused-pid" }),
+      );
+
+    const pending = terminateDetachedPidTree(1234, {
+      graceMs: 1_000,
+      expectedIdentity: identity,
+      probeIdentity,
+      kill: ((pid: number, signal?: string | number) => {
+        calls.push({ pid, signal: signal as NodeJS.Signals });
+        return true;
+      }) as typeof process.kill,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_100);
+    const result = await pending;
+
+    expect(result).toEqual({
+      pid: 1234,
+      sigtermSent: true,
+      sigkillSent: false,
+    });
+    expect(calls).toEqual([{ pid: -1234, signal: "SIGTERM" }]);
+  });
+
+  it("accepts tokenless process identities when stable process metadata matches", () => {
+    const identity = createProcessIdentity(1234, { launchToken: null });
+
+    expect(processIdentityMatches(identity, identity)).toBe(true);
+  });
+
+  it("rejects tokenless process identities when command metadata changes", () => {
+    const expected = createProcessIdentity(1234, { launchToken: null });
+    const observed = createProcessIdentity(1234, {
+      command: "node reused-process.js",
+      launchToken: null,
+    });
+
+    expect(processIdentityMatches(expected, observed)).toBe(false);
+  });
+
+  it("reads Linux process identity from /proc stat, cmdline, and environ", async () => {
+    const identity = await readProcessIdentity(1234, {
+      readFile: async (path) => {
+        if (path.endsWith("/stat")) {
+          return "1234 (bash) S 1 1234 1234 0 -1 4194560 0 0 0 0 1 2 0 0 20 0 1 0 987654 0 0";
+        }
+        if (path.endsWith("/cmdline")) {
+          return "bash\0-lc\0codex-app-server\0";
+        }
+        if (path.endsWith("/environ")) {
+          return "PATH=/bin\0SYMPHONY_CODEX_APP_SERVER_TOKEN=launch-token\0";
+        }
+        throw new Error(`unexpected path ${path}`);
+      },
+      execFile: async () => {
+        throw new Error("ps fallback should not run");
+      },
+    });
+
+    expect(identity).toEqual({
+      pid: 1234,
+      processGroupId: 1234,
+      sessionId: 1234,
+      startedAt: "linux-starttime:987654",
+      command: "bash -lc codex-app-server",
+      launchToken: "launch-token",
+    });
+  });
+
+  it("reads ps fallback process identity with a zero session id", async () => {
+    const identity = await readProcessIdentity(1234, {
+      readFile: async () => {
+        throw new Error("no procfs");
+      },
+      execFile: async (_file, args) => {
+        if (args.includes("pgid=")) {
+          return {
+            stdout: "1234 0 Sat Jun 13 07:00:18 2026 sleep 5\n",
+          };
+        }
+        if (args.includes("eww")) {
+          return { stdout: "sleep 5\n" };
+        }
+        throw new Error(`unexpected args ${args.join(" ")}`);
+      },
+    });
+
+    expect(identity).toEqual({
+      pid: 1234,
+      processGroupId: 1234,
+      sessionId: 0,
+      startedAt: "Sat Jun 13 07:00:18 2026",
+      command: "sleep 5",
+      launchToken: null,
+    });
+  });
+
   it("falls back to the child pid when the process group is already gone", () => {
     const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
     const kill = ((pid: number, signal?: string | number) => {
@@ -194,3 +359,18 @@ describe("process tree termination", () => {
     ]);
   });
 });
+
+function createProcessIdentity(
+  pid: number,
+  overrides: Partial<ProcessIdentitySnapshot> = {},
+): ProcessIdentitySnapshot {
+  return {
+    pid,
+    processGroupId: pid,
+    sessionId: pid,
+    startedAt: "linux-starttime:123456",
+    command: "bash -lc codex-app-server",
+    launchToken: "launch-token",
+    ...overrides,
+  };
+}
