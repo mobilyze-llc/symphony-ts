@@ -1317,6 +1317,27 @@ function councilRoutingEvidenceError(
   if (routing == null) {
     return "Council review artifact is missing Council v2 review_routing evidence.";
   }
+  const routingRecord = recordOrNull(routing);
+  const decorrelationBasisRecord = recordOrNull(
+    routingRecord?.decorrelationBasis,
+  );
+  if (
+    routingRecord === null ||
+    decorrelationBasisRecord === null ||
+    !Array.isArray(decorrelationBasisRecord.authorFamilies) ||
+    !decorrelationBasisRecord.authorFamilies.every(isStringValue) ||
+    typeof decorrelationBasisRecord.requiredNonAuthorFamilyReviewer !==
+      "boolean" ||
+    !Array.isArray(decorrelationBasisRecord.requiredReviewerLaneIds) ||
+    !decorrelationBasisRecord.requiredReviewerLaneIds.every(isStringValue) ||
+    !Array.isArray(decorrelationBasisRecord.decorrelatedReviewerArtifacts) ||
+    !decorrelationBasisRecord.decorrelatedReviewerArtifacts.every(
+      isDecorrelatedReviewerArtifactRecord,
+    ) ||
+    typeof decorrelationBasisRecord.mergeEligible !== "boolean"
+  ) {
+    return "Council review artifact has malformed Council v2 review_routing evidence.";
+  }
   if (
     metadataRoutingMode === undefined ||
     metadataRoutingMode !== routing.mode
@@ -1401,6 +1422,20 @@ function councilRoutingEvidenceError(
     return "Council review artifact is not merge-eligible under its recorded decorrelation basis.";
   }
   return null;
+}
+
+function isStringValue(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+function isDecorrelatedReviewerArtifactRecord(value: unknown): boolean {
+  const record = recordOrNull(value);
+  return (
+    record !== null &&
+    typeof record.laneId === "string" &&
+    typeof record.agent === "string" &&
+    typeof record.modelFamily === "string"
+  );
 }
 
 export function defaultReviewerLanes(
