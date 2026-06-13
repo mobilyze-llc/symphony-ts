@@ -1314,7 +1314,7 @@ function councilRoutingEvidenceError(
 ): string | null {
   const routing = result.review_routing;
   const metadataRoutingMode = result.review_metadata.routing_mode;
-  if (routing === null) {
+  if (routing == null) {
     return "Council review artifact is missing Council v2 review_routing evidence.";
   }
   if (
@@ -1328,6 +1328,12 @@ function councilRoutingEvidenceError(
     routing.decorrelationBasis.authorFamilies.length === 0
   ) {
     return "Council review artifact lacks author model family provenance for its required non-author-family reviewer guarantee.";
+  }
+  if (
+    routing.decorrelationBasis.requiredNonAuthorFamilyReviewer &&
+    routing.decorrelationBasis.requiredReviewerLaneIds.length === 0
+  ) {
+    return "Council review artifact lacks required reviewer lane evidence for its non-author-family reviewer guarantee.";
   }
   const decorrelatedLaneIds = new Set(
     routing.decorrelationBasis.decorrelatedReviewerArtifacts.map(

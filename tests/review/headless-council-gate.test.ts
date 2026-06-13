@@ -3915,6 +3915,105 @@ describe("runHeadlessCouncilGate", () => {
     );
   });
 
+  it("rejects Council v2 routing evidence with an empty required lane set", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "head-sha",
+        }),
+        stderr: "",
+      },
+    });
+    const reviewResult = cleanReviewResult({
+      reviewedHeadSha: "head-sha",
+      includeLaneEvidence: false,
+    });
+    if (reviewResult.review_routing === null) {
+      throw new Error("expected routing evidence");
+    }
+    reviewResult.review_routing.decorrelationBasis.requiredReviewerLaneIds = [];
+    reviewResult.review_routing.decorrelationBasis.decorrelatedReviewerArtifacts =
+      [];
+    reviewResult.review_routing.decorrelationBasis.mergeEligible = true;
+    const reviewResultPath = join(
+      harness.artifactDir,
+      "self-certified-routing.json",
+    );
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(reviewResult, null, 2)}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha: "head-sha",
+      currentHeadSha: null,
+      guidance: "rerun convergence review against HEAD.",
+    });
+    expect(result.summary).toContain("lacks required reviewer lane evidence");
+  });
+
+  it("rejects malformed Council v2 artifacts with routing metadata but no routing object", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "head-sha",
+        }),
+        stderr: "",
+      },
+    });
+    const reviewResult = cleanReviewResult({ reviewedHeadSha: "head-sha" });
+    (reviewResult as { review_routing?: unknown }).review_routing = undefined;
+    const reviewResultPath = join(
+      harness.artifactDir,
+      "missing-routing-object.json",
+    );
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(reviewResult, null, 2)}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha: "head-sha",
+      currentHeadSha: null,
+      guidance: "rerun convergence review against HEAD.",
+    });
+    expect(result.summary).toContain("review_routing evidence");
+  });
+
   it("rejects a clean review artifact from a different issue", async () => {
     const harness = await createHarness();
     const reviewResultPath = join(harness.artifactDir, "wrong-issue.json");
