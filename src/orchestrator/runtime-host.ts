@@ -6,7 +6,7 @@ import {
   mkdirSync,
   openSync,
 } from "node:fs";
-import { access, lstat, mkdir, readdir } from "node:fs/promises";
+import { access, lstat, mkdir, readdir, realpath } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
@@ -109,6 +109,7 @@ import {
   type PipelineStatusResponse,
   type RefreshResponse,
   type StopIssueResponse,
+  type StopSignalDeliveryResponse,
   startDashboardServer,
 } from "../observability/dashboard-server.js";
 import {
@@ -141,7 +142,10 @@ import {
 import type {
   ContinuousFeedbackCheckpointResult,
   OrchestratorCoreOptions,
+  StopReason,
   StopRequest,
+  StopSignalDelivery,
+  StopSignalDeliveryAttempt,
   SupervisionResteerRequest,
   TimerScheduler,
 } from "./core.js";
@@ -193,6 +197,40 @@ export type ReadWorkspaceBaseRevision = (
   workspacePath: string,
 ) => Promise<string | null>;
 
+export interface WorkerStopSignalDeliveryInput {
+  issueId: string;
+  issueIdentifier: string;
+  reason: StopReason;
+  workspacePath: string | null;
+  trackedProcessPid: number | null;
+  attemptedAt: Date;
+}
+
+export type DeliverWorkerStopSignal = (
+  input: WorkerStopSignalDeliveryInput,
+) => Promise<StopSignalDelivery>;
+
+export interface ProcessSignalDeliveryResult {
+  status: Exclude<StopSignalDeliveryAttempt["sigterm"], "not_attempted">;
+  processGroupId: number | null;
+}
+
+type ProcessSignalSender = (pid: number, signal: NodeJS.Signals) => void;
+type ProcessCwdReader = (pid: number) => Promise<string | null>;
+type ProcessCommandReader = (pid: number) => Promise<string | null>;
+
+interface TrackedWorkerStopSignalDeliveryOptions {
+  readProcessCwd?: ProcessCwdReader;
+  readProcessCommand?: ProcessCommandReader;
+  sendSignal?: ProcessSignalSender;
+}
+
+export interface TrackedProcessSignalTargetVerification {
+  verified: boolean;
+  failureKind: "unavailable" | "mismatch" | null;
+  warning: string | null;
+}
+
 interface StoredLoopTrace {
   issueId: string;
   artifactPath: string;
@@ -229,6 +267,7 @@ export interface RuntimeHostOptions {
   terminateDetachedPidTree?: typeof terminateDetachedPidTreeDefault;
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
+  deliverWorkerStopSignal?: DeliverWorkerStopSignal;
   /**
    * Injectable deploy-drift capture (SYMPH-407). Default runs git rev-parse
    * against the repo root once at the first snapshot; never refreshed (the
@@ -264,6 +303,7 @@ interface WorkerExecution {
   issueId: string;
   issueIdentifier: string;
   stageName: string | null;
+  codexAppServerPid: number | null;
   controller: AbortController;
   completion: Promise<void>;
   stopRequest: StopRequest | null;
@@ -318,6 +358,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private readonly readWorkspaceChangedFiles: ReadWorkspaceChangedFiles;
 
   private readonly readWorkspaceBaseRevision: ReadWorkspaceBaseRevision;
+
+  private readonly deliverWorkerStopSignal: DeliverWorkerStopSignal;
 
   private readonly readLoopTraceJournal: (
     locator: LoopTraceArtifactLocator,
@@ -405,6 +447,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       options.readWorkspaceChangedFiles ?? readGitChangedFiles;
     this.readWorkspaceBaseRevision =
       options.readWorkspaceBaseRevision ?? readGitBaseRevision;
+    this.deliverWorkerStopSignal =
+      options.deliverWorkerStopSignal ?? deliverTrackedWorkerStopSignal;
     this.readLoopTraceJournal =
       options.readLoopTraceJournal ?? readLoopTraceJournal;
     this.writeLoopTraceJournal =
@@ -425,6 +469,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       options.workspaceManager ??
       createWorkspaceManagerFromConfig(options.config, this.logger);
     this.agentEventSink = (event) => {
+      const execution = this.workers.get(event.issueId);
+      if (execution !== undefined) {
+        execution.codexAppServerPid = parseProcessId(event.codexAppServerPid);
+      }
       void this.enqueue(async () => {
         const codexEventResult = this.orchestrator.onCodexEvent({
           issueId: event.issueId,
@@ -645,7 +693,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         });
       },
       stopRunningIssue: async (input) => {
-        await this.stopWorkerExecution(input.issueId, {
+        return await this.stopWorkerExecution(input.issueId, {
           issueId: input.issueId,
           issueIdentifier: input.runningEntry.identifier,
           cleanupWorkspace: input.cleanupWorkspace,
@@ -1485,6 +1533,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       issue_identifier: issueIdentifier,
       stopped: true,
       reason: "manual_stop",
+      signal_delivery:
+        stopRequest.signalDelivery === undefined
+          ? null
+          : toStopSignalDeliveryResponse(stopRequest.signalDelivery),
     };
   }
 
@@ -3069,6 +3121,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       issueId: issue.id,
       issueIdentifier: issue.identifier,
       stageName,
+      codexAppServerPid: null,
       controller,
       stopRequest: null,
       lastResult: null,
@@ -3158,14 +3211,120 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private async stopWorkerExecution(
     issueId: string,
     input: StopRequest,
-  ): Promise<void> {
+  ): Promise<StopSignalDelivery | null> {
     const execution = this.workers.get(issueId);
     if (execution === undefined) {
-      return;
+      return null;
     }
 
     execution.stopRequest = input;
+    let workspacePath: string | null = null;
+    try {
+      workspacePath =
+        this.workspaceManager.resolveForIssue(issueId).workspacePath;
+    } catch {
+      workspacePath = null;
+    }
+
     execution.controller.abort(`Stopped due to ${input.reason}.`);
+
+    await this.logger?.info(
+      "worker_stop_requested",
+      "Worker stop requested; aborting runner and attempting tracked process signal delivery.",
+      {
+        outcome: "requested",
+        issue_id: execution.issueId,
+        issue_identifier: execution.issueIdentifier,
+        reason: input.reason,
+        attempted_reason: input.reason,
+        ...(execution.stageName === null ? {} : { stage: execution.stageName }),
+        ...(workspacePath === null ? {} : { workspace_path: workspacePath }),
+      },
+    );
+
+    const delivery = await this.deliverWorkerStopSignalSafe({
+      issueId: execution.issueId,
+      issueIdentifier: execution.issueIdentifier,
+      reason: input.reason,
+      workspacePath,
+      trackedProcessPid: execution.codexAppServerPid,
+      attemptedAt: this.now(),
+    });
+    await this.logStopSignalDelivery(delivery, execution);
+    return delivery;
+  }
+
+  private async deliverWorkerStopSignalSafe(
+    input: WorkerStopSignalDeliveryInput,
+  ): Promise<StopSignalDelivery> {
+    try {
+      return await this.deliverWorkerStopSignal(input);
+    } catch (error) {
+      return {
+        status: "failed",
+        reason: input.reason,
+        attemptedAt: input.attemptedAt.toISOString(),
+        workspacePath: input.workspacePath,
+        attempts: [],
+        warning: `Tracked process signal delivery failed before attempts were recorded: ${toErrorMessage(error)}`,
+      };
+    }
+  }
+
+  private async logStopSignalDelivery(
+    delivery: StopSignalDelivery,
+    execution: WorkerExecution,
+  ): Promise<void> {
+    const failedAttempts = delivery.attempts.filter(
+      (attempt) => attempt.sigterm === "failed" && attempt.sigkill === "failed",
+    );
+    const processGroupIds = delivery.attempts
+      .map((attempt) => attempt.processGroupId)
+      .filter((id): id is number => id !== null);
+    const failedProcessGroupIds = failedAttempts
+      .map((attempt) => attempt.processGroupId)
+      .filter((id): id is number => id !== null);
+    const context = {
+      outcome:
+        delivery.status === "failed" || delivery.status === "partial"
+          ? "degraded"
+          : delivery.status,
+      reason: delivery.reason,
+      issue_id: execution.issueId,
+      issue_identifier: execution.issueIdentifier,
+      attempted_reason: delivery.reason,
+      signal_delivery_status: delivery.status,
+      tracked_process_pid: delivery.attempts[0]?.pid ?? null,
+      pids: delivery.attempts.map((attempt) => attempt.pid),
+      failed_pids: failedAttempts.map((attempt) => attempt.pid),
+      attempts: delivery.attempts,
+      ...(processGroupIds.length === 0
+        ? {}
+        : { process_group_ids: processGroupIds }),
+      ...(failedProcessGroupIds.length === 0
+        ? {}
+        : { failed_process_group_ids: failedProcessGroupIds }),
+      ...(delivery.workspacePath === null
+        ? {}
+        : { workspace_path: delivery.workspacePath }),
+      ...(execution.stageName === null ? {} : { stage: execution.stageName }),
+      ...(delivery.warning === null ? {} : { warning: delivery.warning }),
+    };
+
+    if (delivery.status === "failed" || delivery.status === "partial") {
+      await this.logger?.warn(
+        "worker_stop_signal_delivery_failed",
+        "Worker stop signal delivery failed for one or more tracked process targets.",
+        context,
+      );
+      return;
+    }
+
+    await this.logger?.info(
+      "worker_stop_signal_delivery",
+      "Worker stop signal delivery telemetry recorded.",
+      context,
+    );
   }
 
   private async finalizeWorkerExecution(
@@ -5134,6 +5293,269 @@ function toErrorMessage(error: unknown): string {
   }
 
   return "worker failed";
+}
+
+function toStopSignalDeliveryResponse(
+  delivery: StopSignalDelivery | null,
+): StopSignalDeliveryResponse | null {
+  if (delivery === null) {
+    return null;
+  }
+  return {
+    status: delivery.status,
+    reason: delivery.reason,
+    attempted_at: delivery.attemptedAt,
+    workspace_path: delivery.workspacePath,
+    attempts: delivery.attempts.map((attempt) => ({
+      pid: attempt.pid,
+      ...(attempt.processGroupId === null
+        ? {}
+        : { process_group_id: attempt.processGroupId }),
+      sigterm: attempt.sigterm,
+      sigkill: attempt.sigkill,
+    })),
+    warning: delivery.warning,
+  };
+}
+
+export async function deliverTrackedWorkerStopSignal(
+  input: WorkerStopSignalDeliveryInput,
+  options: TrackedWorkerStopSignalDeliveryOptions = {},
+): Promise<StopSignalDelivery> {
+  if (input.workspacePath === null) {
+    return {
+      status: "not_attempted",
+      reason: input.reason,
+      attemptedAt: input.attemptedAt.toISOString(),
+      workspacePath: null,
+      attempts: [],
+      warning:
+        "Workspace path unavailable; tracked process signal delivery was not attempted.",
+    };
+  }
+
+  if (input.trackedProcessPid === null) {
+    return {
+      status: "not_attempted",
+      reason: input.reason,
+      attemptedAt: input.attemptedAt.toISOString(),
+      workspacePath: input.workspacePath,
+      attempts: [],
+      warning:
+        "Worker process PID unavailable; process signal delivery was not attempted.",
+    };
+  }
+
+  const ownership = await verifyTrackedProcessSignalTarget({
+    pid: input.trackedProcessPid,
+    workspacePath: input.workspacePath,
+    readProcessCwd: options.readProcessCwd ?? readProcessCwd,
+    readProcessCommand: options.readProcessCommand ?? readProcessCommand,
+  });
+  if (!ownership.verified) {
+    return {
+      status: ownership.failureKind === "mismatch" ? "failed" : "not_attempted",
+      reason: input.reason,
+      attemptedAt: input.attemptedAt.toISOString(),
+      workspacePath: input.workspacePath,
+      attempts: [],
+      warning: `Tracked process PID ${input.trackedProcessPid} was not signaled: ${ownership.warning}`,
+    };
+  }
+
+  const attempts = [input.trackedProcessPid].map(
+    (pid): StopSignalDeliveryAttempt => {
+      const sigterm = signalPid(pid, "SIGTERM", options.sendSignal);
+      const sigkill =
+        sigterm.status === "failed"
+          ? signalPid(pid, "SIGKILL", options.sendSignal)
+          : null;
+      return {
+        pid,
+        processGroupId: null,
+        sigterm: sigterm.status,
+        sigkill: sigkill?.status ?? "not_attempted",
+      };
+    },
+  );
+
+  const failedAttempts = attempts.filter(
+    (attempt) => attempt.sigterm === "failed" && attempt.sigkill === "failed",
+  );
+  const status = getStopSignalDeliveryStatus(attempts, failedAttempts);
+  return {
+    status,
+    reason: input.reason,
+    attemptedAt: input.attemptedAt.toISOString(),
+    workspacePath: input.workspacePath,
+    attempts,
+    warning:
+      failedAttempts.length === 0
+        ? null
+        : `SIGTERM and SIGKILL both failed for ${failedAttempts.length} worker process target(s): ${failedAttempts
+            .map((attempt) => `pid=${attempt.pid}`)
+            .join(", ")}`,
+  };
+}
+
+export async function verifyTrackedProcessSignalTarget(input: {
+  pid: number;
+  workspacePath: string;
+  readProcessCwd?: ProcessCwdReader;
+  readProcessCommand?: ProcessCommandReader;
+}): Promise<TrackedProcessSignalTargetVerification> {
+  const readCwd = input.readProcessCwd ?? readProcessCwd;
+  const readCommand = input.readProcessCommand ?? readProcessCommand;
+  const [processCwd, processCommand] = await Promise.all([
+    readCwd(input.pid),
+    readCommand(input.pid),
+  ]);
+
+  if (processCwd === null) {
+    return {
+      verified: false,
+      failureKind: "unavailable",
+      warning: "process cwd could not be read for ownership verification",
+    };
+  }
+
+  if (processCommand === null) {
+    return {
+      verified: false,
+      failureKind: "unavailable",
+      warning: "process command could not be read for ownership verification",
+    };
+  }
+
+  if (
+    !(await directoriesReferToSameLocation(processCwd, input.workspacePath))
+  ) {
+    return {
+      verified: false,
+      failureKind: "mismatch",
+      warning: `process cwd ${processCwd} does not match workspace ${input.workspacePath}`,
+    };
+  }
+
+  if (!isCodexAppServerCommand(processCommand)) {
+    return {
+      verified: false,
+      failureKind: "mismatch",
+      warning: "process command does not look like a Codex app-server",
+    };
+  }
+
+  return { verified: true, failureKind: null, warning: null };
+}
+
+export function signalPid(
+  pid: number,
+  signal: NodeJS.Signals,
+  sendSignal: ProcessSignalSender = process.kill,
+): ProcessSignalDeliveryResult {
+  if (!Number.isInteger(pid) || pid <= 1 || pid === process.pid) {
+    return { status: "failed", processGroupId: null };
+  }
+
+  try {
+    sendSignal(pid, signal);
+    return { status: "delivered", processGroupId: null };
+  } catch (error) {
+    return {
+      status: isNoSuchProcess(error) ? "delivered" : "failed",
+      processGroupId: null,
+    };
+  }
+}
+
+async function readProcessCwd(pid: number): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      "lsof",
+      ["-a", "-p", String(pid), "-d", "cwd", "-Fn"],
+      { timeout: 5000 },
+    );
+    return parseLsofName(stdout);
+  } catch {
+    return null;
+  }
+}
+
+async function readProcessCommand(pid: number): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      "ps",
+      ["-p", String(pid), "-o", "command="],
+      { timeout: 5000 },
+    );
+    const command = stdout.trim();
+    return command.length === 0 ? null : command;
+  } catch {
+    return null;
+  }
+}
+
+function parseLsofName(stdout: string): string | null {
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("n") && line.length > 1) {
+      return line.slice(1);
+    }
+  }
+  return null;
+}
+
+async function directoriesReferToSameLocation(
+  firstPath: string,
+  secondPath: string,
+): Promise<boolean> {
+  const [first, second] = await Promise.all([
+    resolveDirectoryForOwnership(firstPath),
+    resolveDirectoryForOwnership(secondPath),
+  ]);
+  return first === second;
+}
+
+async function resolveDirectoryForOwnership(path: string): Promise<string> {
+  try {
+    return resolve(await realpath(path));
+  } catch {
+    return resolve(path);
+  }
+}
+
+function isCodexAppServerCommand(command: string): boolean {
+  const normalized = command.toLowerCase();
+  return normalized.includes("codex") && normalized.includes("app-server");
+}
+
+function parseProcessId(value: string | null | undefined): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const pid = Number(value);
+  return Number.isInteger(pid) && pid > 1 && pid !== process.pid ? pid : null;
+}
+
+function getStopSignalDeliveryStatus(
+  attempts: StopSignalDeliveryAttempt[],
+  failedAttempts: StopSignalDeliveryAttempt[],
+): StopSignalDelivery["status"] {
+  if (attempts.length === 0) {
+    return "not_attempted";
+  }
+  if (failedAttempts.length === 0) {
+    return "delivered";
+  }
+  return failedAttempts.length === attempts.length ? "failed" : "partial";
+}
+
+function isNoSuchProcess(error: unknown): boolean {
+  return (
+    error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    error.code === "ESRCH"
+  );
 }
 
 function formatWorkerErrorReason(error: unknown): string {

@@ -31,6 +31,7 @@ import {
   type StructuredLogEntry,
   StructuredLogger,
 } from "../../src/logging/structured-logger.js";
+import type { StopSignalDelivery } from "../../src/orchestrator/core.js";
 import type { PipelineNotificationEvent } from "../../src/orchestrator/pipeline-notifier.js";
 import {
   loadPersistedRateLimitSnapshot,
@@ -39,9 +40,11 @@ import {
 import {
   OrchestratorRuntimeHost,
   createWorkspaceHookLogger,
+  deliverTrackedWorkerStopSignal,
   extractProductName,
   readGitBaseRevision,
   readGitChangedFiles,
+  signalPid,
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
 import type { ProcessIdentitySnapshot } from "../../src/shared/process-tree.js";
@@ -930,6 +933,16 @@ describe("OrchestratorRuntimeHost", () => {
           fakeRunner.onEvent = onEvent;
           return fakeRunner;
         },
+        deliverWorkerStopSignal: async (
+          input,
+        ): Promise<StopSignalDelivery> => ({
+          status: "not_attempted",
+          reason: input.reason,
+          attemptedAt: input.attemptedAt.toISOString(),
+          workspacePath: input.workspacePath,
+          attempts: [],
+          warning: null,
+        }),
         now: () => new Date("2026-03-06T00:00:05.000Z"),
       });
 
@@ -945,6 +958,14 @@ describe("OrchestratorRuntimeHost", () => {
           issueIdentifier: "ISSUE-1",
           cleanupWorkspace: true,
           reason: "terminal_state",
+          signalDelivery: {
+            status: "not_attempted",
+            reason: "terminal_state",
+            attemptedAt: "2026-03-06T00:00:05.000Z",
+            workspacePath: join(workspaceRoot, "1"),
+            attempts: [],
+            warning: null,
+          },
         },
       ]);
       await host.waitForIdle();
@@ -5134,6 +5155,492 @@ describe("pipeline notifications", () => {
 
     const stillActive = await host.pollOnce();
     expect(stillActive.dispatchedIssueIds).toEqual([]);
+  });
+
+  it("aborts workers before awaiting stop-request telemetry logging", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    let resolveStopLog: (() => void) | undefined;
+    let observeStopLog: (() => void) | undefined;
+    const stopLogStarted = new Promise<void>((resolve) => {
+      observeStopLog = resolve;
+    });
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          if (entry.event !== "worker_stop_requested") {
+            return;
+          }
+          observeStopLog?.();
+          return new Promise<void>((resolve) => {
+            resolveStopLog = resolve;
+          });
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponsePromise = host.requestIssueStop("ISSUE-1");
+    await stopLogStarted;
+
+    expect(fakeRunner.abortReasons).toContain("Stopped due to manual_stop.");
+
+    resolveStopLog?.();
+    const stopResponse = await stopResponsePromise;
+    await host.waitForIdle();
+
+    expect(stopResponse).toMatchObject({
+      stopped: true,
+      reason: "manual_stop",
+    });
+  });
+
+  it("surfaces tracked process signal delivery failures without undoing the stop", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      deliverWorkerStopSignal: async (input): Promise<StopSignalDelivery> => ({
+        status: "failed",
+        reason: input.reason,
+        attemptedAt: input.attemptedAt.toISOString(),
+        workspacePath: input.workspacePath,
+        attempts: [
+          {
+            pid: 4242,
+            processGroupId: 4242,
+            sigterm: "failed",
+            sigkill: "failed",
+          },
+        ],
+        warning:
+          "SIGTERM and SIGKILL both failed for 1 tracked process target: pid=4242 process_group=4242",
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponse = await host.requestIssueStop("ISSUE-1");
+    await host.waitForIdle();
+
+    expect(stopResponse).toMatchObject({
+      stopped: true,
+      reason: "manual_stop",
+      signal_delivery: {
+        status: "failed",
+        reason: "manual_stop",
+        attempted_at: "2026-03-06T00:00:05.000Z",
+        workspace_path: "/tmp/workspaces/1",
+        attempts: [
+          {
+            pid: 4242,
+            process_group_id: 4242,
+            sigterm: "failed",
+            sigkill: "failed",
+          },
+        ],
+      },
+    });
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_stop_requested",
+        level: "info",
+        outcome: "requested",
+        reason: "manual_stop",
+        attempted_reason: "manual_stop",
+        issue_identifier: "ISSUE-1",
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_stop_signal_delivery_failed",
+        level: "warn",
+        outcome: "degraded",
+        reason: "manual_stop",
+        attempted_reason: "manual_stop",
+        issue_identifier: "ISSUE-1",
+        pids: [4242],
+        process_group_ids: [4242],
+        failed_pids: [4242],
+        failed_process_group_ids: [4242],
+      }),
+    );
+    expect(notifier.events).toEqual([
+      expect.objectContaining({ type: "issue_dispatched" }),
+    ]);
+
+    const stillActive = await host.pollOnce();
+    expect(stillActive.dispatchedIssueIds).toEqual([]);
+  });
+
+  it("targets the tracked app-server pid for stop signal delivery", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    let trackedProcessPid: number | null | undefined;
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      deliverWorkerStopSignal: async (input): Promise<StopSignalDelivery> => {
+        trackedProcessPid = input.trackedProcessPid;
+        return {
+          status: "delivered",
+          reason: input.reason,
+          attemptedAt: input.attemptedAt.toISOString(),
+          workspacePath: input.workspacePath,
+          attempts:
+            input.trackedProcessPid === null
+              ? []
+              : [
+                  {
+                    pid: input.trackedProcessPid,
+                    processGroupId: null,
+                    sigterm: "delivered",
+                    sigkill: "not_attempted",
+                  },
+                ],
+          warning: null,
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.emit("1", {
+      event: "session_started",
+      timestamp: "2026-03-06T00:00:02.000Z",
+      codexAppServerPid: "4242",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+    });
+    await host.flushEvents();
+
+    const stopResponse = await host.requestIssueStop("ISSUE-1");
+    await host.waitForIdle();
+
+    expect(trackedProcessPid).toBe(4242);
+    expect(stopResponse.signal_delivery).toMatchObject({
+      status: "delivered",
+      attempts: [
+        {
+          pid: 4242,
+          sigterm: "delivered",
+          sigkill: "not_attempted",
+        },
+      ],
+    });
+  });
+
+  it("logs successful signal delivery separately from stop acceptance", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      deliverWorkerStopSignal: async (input): Promise<StopSignalDelivery> => ({
+        status: "delivered",
+        reason: input.reason,
+        attemptedAt: input.attemptedAt.toISOString(),
+        workspacePath: input.workspacePath,
+        attempts: [
+          {
+            pid: 4242,
+            processGroupId: null,
+            sigterm: "delivered",
+            sigkill: "not_attempted",
+          },
+        ],
+        warning: null,
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponse = await host.requestIssueStop("ISSUE-1");
+    await host.waitForIdle();
+
+    expect(stopResponse.signal_delivery).toMatchObject({
+      status: "delivered",
+      reason: "manual_stop",
+      attempts: [
+        {
+          pid: 4242,
+          sigterm: "delivered",
+          sigkill: "not_attempted",
+        },
+      ],
+    });
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_stop_requested",
+        level: "info",
+        outcome: "requested",
+        issue_identifier: "ISSUE-1",
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_stop_signal_delivery",
+        level: "info",
+        outcome: "delivered",
+        signal_delivery_status: "delivered",
+        pids: [4242],
+        failed_pids: [],
+      }),
+    );
+  });
+
+  it("warns when signal delivery telemetry fails before attempts are recorded", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      deliverWorkerStopSignal: async () => {
+        throw new Error("lsof unavailable");
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponse = await host.requestIssueStop("ISSUE-1");
+    await host.waitForIdle();
+
+    expect(stopResponse.signal_delivery).toMatchObject({
+      status: "failed",
+      reason: "manual_stop",
+      attempted_at: "2026-03-06T00:00:05.000Z",
+      workspace_path: "/tmp/workspaces/1",
+      attempts: [],
+      warning:
+        "Tracked process signal delivery failed before attempts were recorded: lsof unavailable",
+    });
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_stop_signal_delivery_failed",
+        level: "warn",
+        outcome: "degraded",
+        signal_delivery_status: "failed",
+        issue_identifier: "ISSUE-1",
+        pids: [],
+        failed_pids: [],
+        warning:
+          "Tracked process signal delivery failed before attempts were recorded: lsof unavailable",
+      }),
+    );
+    expect(notifier.events).toEqual([
+      expect.objectContaining({ type: "issue_dispatched" }),
+    ]);
+  });
+
+  it("signals only the tracked pid", () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const result = signalPid(4242, "SIGTERM", (pid, signal) => {
+      calls.push([pid, signal]);
+    });
+
+    expect(result).toEqual({
+      status: "delivered",
+      processGroupId: null,
+    });
+    expect(calls).toEqual([[4242, "SIGTERM"]]);
+  });
+
+  it("does not signal unsafe tracked pids", () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+
+    expect(
+      signalPid(1, "SIGTERM", (pid, signal) => {
+        calls.push([pid, signal]);
+      }),
+    ).toEqual({ status: "failed", processGroupId: null });
+
+    expect(
+      signalPid(process.pid, "SIGTERM", (pid, signal) => {
+        calls.push([pid, signal]);
+      }),
+    ).toEqual({ status: "failed", processGroupId: null });
+    expect(calls).toEqual([]);
+  });
+
+  it("signals the tracked pid only after process ownership verification", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "manual_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        readProcessCwd: async () => "/tmp/workspaces/1",
+        readProcessCommand: async () => "bash -lc codex app-server",
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "delivered",
+      warning: null,
+      attempts: [
+        {
+          pid: 4242,
+          processGroupId: null,
+          sigterm: "delivered",
+          sigkill: "not_attempted",
+        },
+      ],
+    });
+    expect(calls).toEqual([[4242, "SIGTERM"]]);
+  });
+
+  it("does not signal a tracked pid whose cwd no longer matches the workspace", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "manual_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        readProcessCwd: async () => "/tmp/workspaces/10",
+        readProcessCommand: async () => "bash -lc codex app-server",
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "failed",
+      attempts: [],
+      warning:
+        "Tracked process PID 4242 was not signaled: process cwd /tmp/workspaces/10 does not match workspace /tmp/workspaces/1",
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("does not report failed signal delivery when the tracked pid is already gone", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "manual_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        readProcessCwd: async () => null,
+        readProcessCommand: async () => null,
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "not_attempted",
+      attempts: [],
+      warning:
+        "Tracked process PID 4242 was not signaled: process cwd could not be read for ownership verification",
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("does not signal a tracked pid whose command is not a Codex app-server", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "manual_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        readProcessCwd: async () => "/tmp/workspaces/1",
+        readProcessCommand: async () => "sleep 600",
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "failed",
+      attempts: [],
+      warning:
+        "Tracked process PID 4242 was not signaled: process command does not look like a Codex app-server",
+    });
+    expect(calls).toEqual([]);
   });
 
   it("does not emit issue_failed for a budget hard stop pause", async () => {

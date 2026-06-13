@@ -177,6 +177,21 @@ export interface StopIssueResponse {
   issue_identifier: string;
   stopped: boolean;
   reason: string;
+  signal_delivery?: StopSignalDeliveryResponse | null;
+}
+
+export interface StopSignalDeliveryResponse {
+  status: "not_attempted" | "delivered" | "partial" | "failed";
+  reason: string;
+  attempted_at: string;
+  workspace_path: string | null;
+  attempts: Array<{
+    pid: number;
+    process_group_id?: number;
+    sigterm: "delivered" | "failed";
+    sigkill: "delivered" | "failed" | "not_attempted";
+  }>;
+  warning: string | null;
 }
 
 export type PipelineRestartSafetyReason =
