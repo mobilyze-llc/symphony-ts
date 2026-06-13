@@ -98,7 +98,13 @@ describe("ticket feature extractor", () => {
         operatorAllowlist: ["operator@mobilyze.com"],
         serviceAccounts: ["agent@mobilyze.com"],
       },
-      runJournal: [acGateEntry({ issueId: "issue-483", sequence: 7 })],
+      runJournal: [
+        acGateEntry({
+          issueId: "issue-483",
+          issueIdentifier: "SYMPH-483",
+          sequence: 7,
+        }),
+      ],
     });
 
     expect(feature).toMatchObject({
@@ -119,6 +125,11 @@ describe("ticket feature extractor", () => {
         advisoryEdges: 0,
         missingAuthorEdges: 0,
         serviceAccountEdges: 0,
+        historyTruncatedEdges: 0,
+      },
+      sourceVisibility: {
+        relationPageTruncated: false,
+        relationHistoryTruncated: false,
       },
       components: {
         labels: ["area:review-tooling", "company:mobilyze"],
@@ -192,6 +203,64 @@ describe("ticket feature extractor", () => {
       advisoryEdges: 1,
       missingAuthorEdges: 1,
       operatorConfirmedEdges: 0,
+      historyTruncatedEdges: 0,
+    });
+  });
+
+  it("marks unmatched lineage as history-truncated when visible history is capped", () => {
+    const feature = extractTicketFeature({
+      issue: normalizeLinearTicketFeatureIssue({
+        id: "issue-483",
+        identifier: "SYMPH-483",
+        title: "TicketFeature extractor",
+        state: { name: "Backlog" },
+        parent: {
+          id: "issue-481",
+          identifier: "SYMPH-481",
+          title: "Queue triage epic",
+        },
+        inverseRelations: {
+          nodes: [
+            {
+              id: "rel-480",
+              type: "blocks",
+              issue: {
+                id: "issue-480",
+                identifier: "SYMPH-480",
+                state: { name: "Done" },
+              },
+            },
+          ],
+        },
+        history: {
+          nodes: [],
+          pageInfo: { hasNextPage: true, endCursor: "history-cursor" },
+        },
+      }),
+      operatorConfig: {
+        operatorAllowlist: ["operator@mobilyze.com"],
+        serviceAccounts: [],
+      },
+    });
+
+    expect(feature.sourceVisibility).toEqual({
+      relationPageTruncated: false,
+      relationHistoryTruncated: true,
+    });
+    expect(feature.specLineage.parent).toMatchObject({
+      trust: "advisory",
+      advisoryReason: "history_truncated",
+      attributionSource: "history_truncated",
+    });
+    expect(feature.specLineage.blockedBy[0]).toMatchObject({
+      trust: "advisory",
+      advisoryReason: "history_truncated",
+      attributionSource: "history_truncated",
+    });
+    expect(feature.relationSummary).toMatchObject({
+      advisoryEdges: 2,
+      missingAuthorEdges: 0,
+      historyTruncatedEdges: 2,
     });
   });
 
@@ -256,7 +325,13 @@ describe("ticket feature extractor", () => {
         description: "Investigate the queue model.",
         state: { name: "Backlog" },
       }),
-      runJournal: [acGateEntry({ issueId: "issue-483", sequence: 9 })],
+      runJournal: [
+        acGateEntry({
+          issueId: "issue-483",
+          issueIdentifier: "SYMPH-483",
+          sequence: 9,
+        }),
+      ],
     });
     const neitherFeature = extractTicketFeature({
       issue: normalizeLinearTicketFeatureIssue({
@@ -266,7 +341,13 @@ describe("ticket feature extractor", () => {
         description: "Do the thing.",
         state: { name: "Backlog" },
       }),
-      runJournal: [acGateEntry({ issueId: "issue-483", sequence: 9 })],
+      runJournal: [
+        acGateEntry({
+          issueId: "issue-483",
+          issueIdentifier: "SYMPH-483",
+          sequence: 9,
+        }),
+      ],
     });
 
     expect(snapshotFeature.acPosture).toMatchObject({
@@ -302,6 +383,7 @@ describe("ticket feature extractor", () => {
 
 function acGateEntry(input: {
   issueId: string;
+  issueIdentifier: string;
   sequence: number;
 }): DispatcherRunJournalEntry {
   return {
@@ -310,7 +392,7 @@ function acGateEntry(input: {
     timestamp: "2026-06-13T00:30:00.000Z",
     kind: "ac_gate",
     issueId: input.issueId,
-    issueIdentifier: "SYMPH-483",
+    issueIdentifier: input.issueIdentifier,
     operation: "dispatcher",
     stage: "investigate",
     attempt: null,

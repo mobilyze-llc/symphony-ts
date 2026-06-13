@@ -148,6 +148,7 @@ describe("LinearTrackerClient", () => {
     const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
     expect(request.query).toBe(LINEAR_TICKET_FEATURE_ISSUES_QUERY);
     expect(request.query).toContain("history(first: $historyFirst)");
+    expect(request.query).toContain("pageInfo");
     expect(request.query).toContain("relationChanges");
     expect(request.query).toContain("creator");
     expect(request.variables).toEqual({
@@ -158,6 +159,93 @@ describe("LinearTrackerClient", () => {
       historyFirst: 50,
       after: null,
     });
+  });
+
+  it("paginates ticket feature issues by states", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issues: {
+              nodes: [
+                ticketFeatureIssueNode({
+                  id: "issue-483",
+                  identifier: "SYMPH-483",
+                  title: "TicketFeature extractor",
+                }),
+              ],
+              pageInfo: {
+                hasNextPage: true,
+                endCursor: "cursor-1",
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issues: {
+              nodes: [
+                ticketFeatureIssueNode({
+                  id: "issue-484",
+                  identifier: "SYMPH-484",
+                  title: "Next TicketFeature extractor",
+                }),
+              ],
+              pageInfo: {
+                hasNextPage: false,
+                endCursor: null,
+              },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    const issues = await client.fetchTicketFeatureIssuesByStates(["Backlog"]);
+
+    expect(issues.map((issue) => issue.identifier)).toEqual([
+      "SYMPH-483",
+      "SYMPH-484",
+    ]);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(
+      parseRequestBody(fetchFn.mock.calls[0]?.[1]).variables,
+    ).toMatchObject({
+      after: null,
+    });
+    expect(
+      parseRequestBody(fetchFn.mock.calls[1]?.[1]).variables,
+    ).toMatchObject({
+      after: "cursor-1",
+    });
+  });
+
+  it("fails closed when ticket feature pagination has no end cursor", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [],
+            pageInfo: {
+              hasNextPage: true,
+              endCursor: "",
+            },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+
+    await expect(
+      client.fetchTicketFeatureIssuesByStates(["Backlog"]),
+    ).rejects.toThrow(
+      expect.objectContaining<Partial<TrackerError>>({
+        code: ERROR_CODES.linearMissingEndCursor,
+      }),
+    );
   });
 
   it("fetches minimal issue states by GraphQL ID list", async () => {

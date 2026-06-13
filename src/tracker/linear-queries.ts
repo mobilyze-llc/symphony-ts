@@ -84,6 +84,10 @@ const TICKET_FEATURE_ISSUE_FIELDS = `
         }
       }
     }
+    pageInfo {
+      hasNextPage
+      endCursor
+    }
   }
   history(first: $historyFirst) {
     nodes {
@@ -113,6 +117,10 @@ const TICKET_FEATURE_ISSUE_FIELDS = `
           name
         }
       }
+    }
+    pageInfo {
+      hasNextPage
+      endCursor
     }
   }
 `;

@@ -25,6 +25,7 @@ export type TicketFeatureEdgeTrust = "operator_confirmed" | "advisory";
 export type TicketFeatureAdvisoryReason =
   | "missing_author"
   | "missing_email"
+  | "history_truncated"
   | "service_account"
   | "bot_actor"
   | "not_allowlisted";
@@ -53,7 +54,7 @@ export interface TicketFeatureSourceEdge {
   issue: TicketFeatureIssueRef;
   author: TicketFeatureActor | null;
   authoredAt: string | null;
-  attributionSource: "issue_history" | "missing";
+  attributionSource: "issue_history" | "missing" | "history_truncated";
 }
 
 export interface TicketFeatureSourceIssue {
@@ -69,6 +70,10 @@ export interface TicketFeatureSourceIssue {
   creator: TicketFeatureActor | null;
   parent: TicketFeatureSourceEdge | null;
   blockedBy: TicketFeatureSourceEdge[];
+  sourceVisibility: {
+    relationPageTruncated: boolean;
+    relationHistoryTruncated: boolean;
+  };
   createdAt: string | null;
   updatedAt: string | null;
 }
@@ -131,6 +136,11 @@ export interface TicketFeature {
     advisoryEdges: number;
     missingAuthorEdges: number;
     serviceAccountEdges: number;
+    historyTruncatedEdges: number;
+  };
+  sourceVisibility: {
+    relationPageTruncated: boolean;
+    relationHistoryTruncated: boolean;
   };
   components: {
     labels: string[];
@@ -230,6 +240,13 @@ const linearConnectionSchema = <T extends z.ZodType>(nodeSchema: T) =>
   z
     .object({
       nodes: z.array(nodeSchema).optional(),
+      pageInfo: z
+        .object({
+          hasNextPage: z.boolean().optional(),
+          endCursor: z.string().nullable().optional(),
+        })
+        .passthrough()
+        .optional(),
     })
     .passthrough()
     .nullable()
@@ -288,6 +305,10 @@ export function normalizeLinearTicketFeatureIssue(
 
   const issue = parsed.data;
   const historyNodes = issue.history?.nodes ?? [];
+  const relationPageTruncated =
+    issue.inverseRelations?.pageInfo?.hasNextPage === true;
+  const relationHistoryTruncated =
+    issue.history?.pageInfo?.hasNextPage === true;
   const parentRef = normalizeIssueRef(issue.parent);
 
   return {
@@ -313,9 +334,21 @@ export function normalizeLinearTicketFeatureIssue(
             relationId: null,
             relationType: "parent",
             issue: parentRef,
-            ...resolveParentAttribution(parentRef, historyNodes),
+            ...resolveParentAttribution(
+              parentRef,
+              historyNodes,
+              relationHistoryTruncated,
+            ),
           },
-    blockedBy: normalizeBlockedByEdges(issue, historyNodes),
+    blockedBy: normalizeBlockedByEdges(
+      issue,
+      historyNodes,
+      relationHistoryTruncated,
+    ),
+    sourceVisibility: {
+      relationPageTruncated,
+      relationHistoryTruncated,
+    },
     createdAt: normalizeTimestamp(issue.createdAt),
     updatedAt: normalizeTimestamp(issue.updatedAt),
   };
@@ -382,6 +415,7 @@ export function extractTicketFeatures(
         blockedBy,
       },
       relationSummary: summarizeRelations(allEdges),
+      sourceVisibility: issue.sourceVisibility,
       components: {
         labels: componentLabels,
         overlappingIssueIdentifiers: [
@@ -402,6 +436,7 @@ export function extractTicketFeatures(
 function normalizeBlockedByEdges(
   issue: LinearTicketFeatureIssue,
   historyNodes: LinearHistory[],
+  historyTruncated: boolean,
 ): TicketFeatureSourceEdge[] {
   const relations = issue.inverseRelations?.nodes ?? [];
 
@@ -419,6 +454,7 @@ function normalizeBlockedByEdges(
       relation,
       relatedIssue,
       historyNodes,
+      historyTruncated,
     );
 
     return [
@@ -437,6 +473,7 @@ function resolveRelationAttribution(
   relation: LinearRelation,
   relatedIssue: TicketFeatureIssueRef,
   historyNodes: LinearHistory[],
+  historyTruncated: boolean,
 ): Pick<
   TicketFeatureSourceEdge,
   "author" | "authoredAt" | "attributionSource"
@@ -455,12 +492,15 @@ function resolveRelationAttribution(
     ),
   );
 
-  return match === null ? missingAttribution() : historyAttribution(match);
+  return match === null
+    ? missingAttribution(historyTruncated)
+    : historyAttribution(match);
 }
 
 function resolveParentAttribution(
   parent: TicketFeatureIssueRef,
   historyNodes: LinearHistory[],
+  historyTruncated: boolean,
 ): Pick<
   TicketFeatureSourceEdge,
   "author" | "authoredAt" | "attributionSource"
@@ -475,10 +515,15 @@ function resolveParentAttribution(
     if (parentId !== null && toParent.id === parentId) {
       return true;
     }
-    return normalizeIdentifier(toParent.identifier) === parentIdentifier;
+    return (
+      parentIdentifier !== null &&
+      normalizeIdentifier(toParent.identifier) === parentIdentifier
+    );
   });
 
-  return match === null ? missingAttribution() : historyAttribution(match);
+  return match === null
+    ? missingAttribution(historyTruncated)
+    : historyAttribution(match);
 }
 
 function latestHistoryMatch(
@@ -514,14 +559,16 @@ function historyAttribution(
   };
 }
 
-function missingAttribution(): Pick<
+function missingAttribution(
+  historyTruncated = false,
+): Pick<
   TicketFeatureSourceEdge,
   "author" | "authoredAt" | "attributionSource"
 > {
   return {
     author: null,
     authoredAt: null,
-    attributionSource: "missing",
+    attributionSource: historyTruncated ? "history_truncated" : "missing",
   };
 }
 
@@ -660,7 +707,7 @@ function attributeEdge(
   },
 ): TicketFeatureTrustedEdge {
   const authorClass = classifyActor(edge.author, accountSets);
-  const advisoryReason = getAdvisoryReason(edge.author, authorClass);
+  const advisoryReason = getAdvisoryReason(edge, authorClass);
   return {
     ...edge,
     authorClass,
@@ -695,12 +742,16 @@ function classifyActor(
 }
 
 function getAdvisoryReason(
-  actor: TicketFeatureActor | null,
+  edge: TicketFeatureSourceEdge,
   actorClass: TicketFeatureActorClass,
 ): TicketFeatureAdvisoryReason | null {
   if (actorClass === "operator") {
     return null;
   }
+  if (edge.attributionSource === "history_truncated") {
+    return "history_truncated";
+  }
+  const actor = edge.author;
   if (actor === null) {
     return "missing_author";
   }
@@ -733,6 +784,7 @@ function summarizeRelations(edges: readonly TicketFeatureTrustedEdge[]): {
   advisoryEdges: number;
   missingAuthorEdges: number;
   serviceAccountEdges: number;
+  historyTruncatedEdges: number;
 } {
   return {
     totalEdges: edges.length,
@@ -745,6 +797,9 @@ function summarizeRelations(edges: readonly TicketFeatureTrustedEdge[]): {
     ).length,
     serviceAccountEdges: edges.filter(
       (edge) => edge.authorClass === "service_account",
+    ).length,
+    historyTruncatedEdges: edges.filter(
+      (edge) => edge.attributionSource === "history_truncated",
     ).length,
   };
 }
