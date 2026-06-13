@@ -8,9 +8,15 @@ import { resolveWorkflowConfig } from "../config/config-resolver.js";
 import { loadWorkflowDefinition } from "../config/workflow-loader.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
 import {
+  DEFAULT_BACKLOG_AUDIT_CHUNK_SIZE,
+  DEFAULT_BACKLOG_AUDIT_MAX_ISSUE_DESCRIPTION_CHARS,
+  DEFAULT_BACKLOG_AUDIT_MAX_STATE_BYTES,
+  DEFAULT_BACKLOG_AUDIT_MAX_STATE_DELTA_BYTES,
+  DEFAULT_BACKLOG_AUDIT_MAX_STATE_DELTA_ENTRIES,
+  createBacklogAuditModelFetch,
   fetchBacklogAuditRuntimeEvidence,
   renderBacklogAuditReport,
-  runBacklogAudit,
+  runBacklogAuditChunked,
 } from "./backlog-audit.js";
 
 interface ParsedArgs {
@@ -22,6 +28,11 @@ interface ParsedArgs {
   apiKey: string | null;
   timeoutMs: number | null;
   states: string[] | null;
+  maxStateBytes: number | null;
+  maxStateDeltaEntries: number | null;
+  maxStateDeltaBytes: number | null;
+  maxIssueDescriptionChars: number | null;
+  chunkSize: number | null;
   help: boolean;
 }
 
@@ -47,6 +58,11 @@ function usage(): string {
     "  --api-key <key>           Optional local endpoint API key, or SYMPHONY_QUEUE_AUDIT_API_KEY",
     "  --timeout-ms <ms>         Runtime read-model and local judge timeout (default: 600000)",
     "  --states <csv>            Linear states to audit (default: workflow active_states)",
+    `  --max-state-bytes <n>          Approx max /state JSON bytes in the judge prompt (default: ${DEFAULT_BACKLOG_AUDIT_MAX_STATE_BYTES}, or SYMPHONY_QUEUE_AUDIT_MAX_STATE_BYTES)`,
+    `  --max-state-delta-entries <n>  Max /state/delta entries in the judge prompt (default: ${DEFAULT_BACKLOG_AUDIT_MAX_STATE_DELTA_ENTRIES}, or SYMPHONY_QUEUE_AUDIT_MAX_STATE_DELTA_ENTRIES)`,
+    `  --max-state-delta-bytes <n>    Approx max /state/delta JSON bytes in the judge prompt (default: ${DEFAULT_BACKLOG_AUDIT_MAX_STATE_DELTA_BYTES}, or SYMPHONY_QUEUE_AUDIT_MAX_STATE_DELTA_BYTES)`,
+    `  --max-issue-description-chars <n>  Max ticket description chars in the judge prompt (default: ${DEFAULT_BACKLOG_AUDIT_MAX_ISSUE_DESCRIPTION_CHARS}, or SYMPHONY_QUEUE_AUDIT_MAX_ISSUE_DESCRIPTION_CHARS)`,
+    `  --chunk-size <n>          Issues per local-model call (default: ${DEFAULT_BACKLOG_AUDIT_CHUNK_SIZE}, or SYMPHONY_QUEUE_AUDIT_CHUNK_SIZE)`,
   ].join("\n");
 }
 
@@ -55,6 +71,25 @@ export function parseBacklogAuditArgs(
   env: NodeJS.ProcessEnv = process.env,
   cwd = process.cwd(),
 ): ParsedArgs {
+  if (argv.includes("--help") || argv.includes("-h")) {
+    return {
+      workflowPath: null,
+      outPath: null,
+      stateBaseUrl: "",
+      modelBaseUrl: env.SYMPHONY_QUEUE_AUDIT_BASE_URL ?? null,
+      model: env.SYMPHONY_QUEUE_AUDIT_MODEL ?? null,
+      apiKey: env.SYMPHONY_QUEUE_AUDIT_API_KEY ?? null,
+      timeoutMs: null,
+      states: null,
+      maxStateBytes: null,
+      maxStateDeltaEntries: null,
+      maxStateDeltaBytes: null,
+      maxIssueDescriptionChars: null,
+      chunkSize: null,
+      help: true,
+    };
+  }
+
   let workflowPath: string | null = null;
   let outPath: string | null = null;
   let stateBaseUrl: string | null = null;
@@ -63,16 +98,32 @@ export function parseBacklogAuditArgs(
   let apiKey: string | null = env.SYMPHONY_QUEUE_AUDIT_API_KEY ?? null;
   let timeoutMs: number | null = null;
   let states: string[] | null = null;
-  let help = false;
+  let maxStateBytes = parseOptionalPositiveIntegerEnv(
+    env.SYMPHONY_QUEUE_AUDIT_MAX_STATE_BYTES,
+    "SYMPHONY_QUEUE_AUDIT_MAX_STATE_BYTES",
+  );
+  let maxStateDeltaEntries = parseOptionalPositiveIntegerEnv(
+    env.SYMPHONY_QUEUE_AUDIT_MAX_STATE_DELTA_ENTRIES,
+    "SYMPHONY_QUEUE_AUDIT_MAX_STATE_DELTA_ENTRIES",
+  );
+  let maxStateDeltaBytes = parseOptionalPositiveIntegerEnv(
+    env.SYMPHONY_QUEUE_AUDIT_MAX_STATE_DELTA_BYTES,
+    "SYMPHONY_QUEUE_AUDIT_MAX_STATE_DELTA_BYTES",
+  );
+  let maxIssueDescriptionChars = parseOptionalPositiveIntegerEnv(
+    env.SYMPHONY_QUEUE_AUDIT_MAX_ISSUE_DESCRIPTION_CHARS,
+    "SYMPHONY_QUEUE_AUDIT_MAX_ISSUE_DESCRIPTION_CHARS",
+  );
+  let chunkSize = parseOptionalPositiveIntegerEnv(
+    env.SYMPHONY_QUEUE_AUDIT_CHUNK_SIZE,
+    "SYMPHONY_QUEUE_AUDIT_CHUNK_SIZE",
+  );
+  const help = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === undefined) {
       continue;
-    }
-    if (token === "--help" || token === "-h") {
-      help = true;
-      break;
     }
     if (token === "--out") {
       outPath = resolve(cwd, readValue(argv, ++index, "--out"));
@@ -104,6 +155,41 @@ export function parseBacklogAuditArgs(
       states = parseStates(readValue(argv, ++index, "--states"));
       continue;
     }
+    if (token === "--max-state-bytes") {
+      maxStateBytes = parsePositiveInteger(
+        readValue(argv, ++index, "--max-state-bytes"),
+        "--max-state-bytes",
+      );
+      continue;
+    }
+    if (token === "--max-state-delta-entries") {
+      maxStateDeltaEntries = parsePositiveInteger(
+        readValue(argv, ++index, "--max-state-delta-entries"),
+        "--max-state-delta-entries",
+      );
+      continue;
+    }
+    if (token === "--max-state-delta-bytes") {
+      maxStateDeltaBytes = parsePositiveInteger(
+        readValue(argv, ++index, "--max-state-delta-bytes"),
+        "--max-state-delta-bytes",
+      );
+      continue;
+    }
+    if (token === "--max-issue-description-chars") {
+      maxIssueDescriptionChars = parsePositiveInteger(
+        readValue(argv, ++index, "--max-issue-description-chars"),
+        "--max-issue-description-chars",
+      );
+      continue;
+    }
+    if (token === "--chunk-size") {
+      chunkSize = parsePositiveInteger(
+        readValue(argv, ++index, "--chunk-size"),
+        "--chunk-size",
+      );
+      continue;
+    }
     if (token.startsWith("--")) {
       throw new UsageError(`Unknown option: ${token}\n\n${usage()}`);
     }
@@ -123,6 +209,11 @@ export function parseBacklogAuditArgs(
       apiKey,
       timeoutMs,
       states,
+      maxStateBytes,
+      maxStateDeltaEntries,
+      maxStateDeltaBytes,
+      maxIssueDescriptionChars,
+      chunkSize,
       help,
     };
   }
@@ -149,6 +240,15 @@ export function parseBacklogAuditArgs(
     apiKey,
     timeoutMs,
     states,
+    maxStateBytes: maxStateBytes ?? DEFAULT_BACKLOG_AUDIT_MAX_STATE_BYTES,
+    maxStateDeltaEntries:
+      maxStateDeltaEntries ?? DEFAULT_BACKLOG_AUDIT_MAX_STATE_DELTA_ENTRIES,
+    maxStateDeltaBytes:
+      maxStateDeltaBytes ?? DEFAULT_BACKLOG_AUDIT_MAX_STATE_DELTA_BYTES,
+    maxIssueDescriptionChars:
+      maxIssueDescriptionChars ??
+      DEFAULT_BACKLOG_AUDIT_MAX_ISSUE_DESCRIPTION_CHARS,
+    chunkSize: chunkSize ?? DEFAULT_BACKLOG_AUDIT_CHUNK_SIZE,
     help,
   };
 }
@@ -190,7 +290,7 @@ export async function runBacklogAuditCli(
     baseUrl: args.stateBaseUrl,
     timeoutMs: args.timeoutMs,
   });
-  const report = await runBacklogAudit({
+  const report = await runBacklogAuditChunked({
     config: {
       baseUrl: args.modelBaseUrl as string,
       model: args.model as string,
@@ -199,6 +299,26 @@ export async function runBacklogAuditCli(
     },
     issues,
     runtimeEvidence,
+    evidenceLimits: {
+      maxStateBytes: args.maxStateBytes,
+      maxStateDeltaEntries: args.maxStateDeltaEntries,
+      maxStateDeltaBytes: args.maxStateDeltaBytes,
+      maxIssueDescriptionChars: args.maxIssueDescriptionChars,
+    },
+    fetchFn: createBacklogAuditModelFetch({ timeoutMs: args.timeoutMs }),
+    chunkSize: args.chunkSize,
+    onRelationshipPassStart: ({ issueCount }) => {
+      console.error(
+        `Running backlog audit relationship pass (${issueCount} issues)`,
+      );
+    },
+    onChunkStart: ({ chunkIndex, chunkCount, issueCount }) => {
+      if (chunkCount > 1) {
+        console.error(
+          `Running backlog audit chunk ${chunkIndex}/${chunkCount} (${issueCount} issues)`,
+        );
+      }
+    },
   });
   const outputPath =
     args.outPath ??
@@ -258,12 +378,22 @@ function readValue(
   return value;
 }
 
-function parsePositiveInteger(value: string): number {
+function parsePositiveInteger(value: string, flag = "--timeout-ms"): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
-    throw new UsageError("--timeout-ms must be a positive integer");
+    throw new UsageError(`${flag} must be a positive integer`);
   }
   return parsed;
+}
+
+function parseOptionalPositiveIntegerEnv(
+  value: string | undefined,
+  name: string,
+): number | null {
+  if (value === undefined || value.trim() === "") {
+    return null;
+  }
+  return parsePositiveInteger(value, name);
 }
 
 function parseStates(value: string): string[] {
