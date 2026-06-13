@@ -23,6 +23,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(
       defaultReviewerLanes({
         SYMPHONY_COUNCIL_CLAUDE_MODEL: "opus-test",
+        SYMPHONY_COUNCIL_CLAUDE_PROFILE: "artifact-contract",
         SYMPHONY_COUNCIL_PI_PROVIDER: "alt-provider",
         SYMPHONY_COUNCIL_PI_MODEL: "alt-model",
         SYMPHONY_COUNCIL_PI_THINKING: "medium",
@@ -32,6 +33,7 @@ describe("runHeadlessCouncilGate", () => {
       expect.objectContaining({
         laneId: "claude-opus",
         model: "opus-test",
+        profile: "artifact-contract",
       }),
       expect.objectContaining({
         laneId: "pi-deepseek",
@@ -111,6 +113,10 @@ describe("runHeadlessCouncilGate", () => {
             "claude",
             "--model",
             "opus",
+            "--profile",
+            "legacy",
+            "--allowed-tools",
+            `Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git status *),Bash(git ls-files *),Bash(gh pr view *),Bash(gh pr diff *),Write(${harness.artifactDir}/*)`,
           ]),
         }),
         expect.objectContaining({
@@ -302,6 +308,31 @@ describe("runHeadlessCouncilGate", () => {
     );
     expect(codexPrompt).toContain(
       `- Review bundle canonical hash: ${reviewBundle.bundleHash}`,
+    );
+  });
+
+  it("scopes Claude write access to the artifact directory", async () => {
+    const harness = await createHarness();
+
+    await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [{ ...opusLane(), allowedTools: "" }],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const claudeCommand = harness.commands.find(
+      (command) =>
+        command.args[0] === "run" &&
+        command.args[command.args.indexOf("--agent") + 1] === "claude",
+    );
+    expect(readFlag(claudeCommand?.args ?? [], "--allowed-tools")).toBe(
+      `Write(${harness.artifactDir}/*)`,
     );
   });
 
@@ -1168,6 +1199,60 @@ describe("runHeadlessCouncilGate", () => {
       message: "Reviewer verdict was FINDINGS.",
       degradedReason: null,
     });
+    const lane = result.lanes.find((lane) => lane.laneId === "claude-opus")!;
+    expect(lane.rawArtifactPath).toBe(
+      join(harness.artifactDir, "claude-opus.raw.md"),
+    );
+    const artifact = await readFile(lane.artifactPath!, "utf-8");
+    expect(artifact.replace(/^(?:\s|\uFEFF)+/u, "")).toMatch(/^## Verdict/);
+    expect(artifact).not.toContain("# Council Review of PR #288 (SYMPH-287)");
+    const rawArtifact = await readFile(lane.rawArtifactPath!, "utf-8");
+    expect(rawArtifact).toContain("# Council Review of PR #288 (SYMPH-287)");
+  });
+
+  it("fails closed when it cannot preserve the raw artifact before normalization", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "# Council Review SYMPH-287\n\n## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n\n## Track\nNone",
+        },
+      },
+    });
+    await mkdir(join(harness.artifactDir, "claude-opus.raw.md"), {
+      recursive: true,
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    const lane = result.lanes.find((lane) => lane.laneId === "claude-opus")!;
+    expect(lane).toMatchObject({
+      state: "error",
+      verdict: "error",
+      degradedReason: "artifact_persistence_failed",
+      rawArtifactPath: lane.artifactPath,
+      structuredArtifactPath: null,
+      structuredArtifact: null,
+    });
+    expect(lane.message).toMatch(
+      /^Reviewer artifact raw snapshot could not be written:/,
+    );
+    expect(result.degradedConditions).toContain(
+      "artifact_persistence_failed:claude-opus",
+    );
+    const artifact = await readFile(lane.artifactPath!, "utf-8");
+    expect(artifact).toContain("# Council Review SYMPH-287");
   });
 
   it("passes a PASS artifact behind a single leading H1 title line", async () => {

@@ -1,6 +1,14 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  open,
+  readFile,
+  rename,
+  stat,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -43,7 +51,10 @@ export type HeadlessLaneState =
   | "timed_out"
   | "stopped"
   | "error";
-export type LaneDegradedReason = "malformed_artifact" | "substrate_stall";
+export type LaneDegradedReason =
+  | "malformed_artifact"
+  | "substrate_stall"
+  | "artifact_persistence_failed";
 export type StructuredReviewFindingSeverity =
   | "P1"
   | "P2"
@@ -145,6 +156,7 @@ export interface HeadlessReviewerLaneConfig {
   agent: "claude" | "pi";
   role: string;
   model: string;
+  profile?: string;
   provider?: string;
   thinking?: "low" | "medium" | "high";
   tools?: string;
@@ -914,6 +926,7 @@ export function defaultReviewerLanes(
       agent: "claude",
       role: "opus-direct-reviewer",
       model: env.SYMPHONY_COUNCIL_CLAUDE_MODEL ?? "opus",
+      profile: env.SYMPHONY_COUNCIL_CLAUDE_PROFILE ?? "legacy",
       allowedTools:
         env.SYMPHONY_COUNCIL_CLAUDE_ALLOWED_TOOLS ??
         "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git status *),Bash(git ls-files *),Bash(gh pr view *),Bash(gh pr diff *)",
@@ -1424,7 +1437,7 @@ async function runReviewerLane(input: {
     phase,
     "--timeout-seconds",
     String(input.timeoutSeconds),
-    ...laneAgentArgs(input.lane),
+    ...laneAgentArgs(input.lane, input.artifactDir),
   ];
 
   const result = await input.runCommand(input.cmuxSpawnBin, args, {
@@ -1541,13 +1554,18 @@ async function runCodexLeadLane(input: {
   });
 }
 
-function laneAgentArgs(lane: HeadlessReviewerLaneConfig): string[] {
+function laneAgentArgs(
+  lane: HeadlessReviewerLaneConfig,
+  artifactDir: string,
+): string[] {
   if (lane.agent === "claude") {
     return [
       "--model",
       lane.model,
+      "--profile",
+      lane.profile ?? "legacy",
       "--allowed-tools",
-      lane.allowedTools ?? "Read,Grep,Glob,Bash(git diff *)",
+      claudeAllowedToolsForArtifact(lane.allowedTools, artifactDir),
     ];
   }
 
@@ -1561,6 +1579,24 @@ function laneAgentArgs(lane: HeadlessReviewerLaneConfig): string[] {
     "--tools",
     lane.tools ?? "read,grep,find,ls",
   ];
+}
+
+function claudeAllowedToolsForArtifact(
+  allowedTools: string | undefined,
+  artifactDir: string,
+): string {
+  const tools = allowedTools ?? "Read,Grep,Glob,Bash(git diff *)";
+  const artifactWriteTool = `Write(${artifactDir}/*)`;
+  if (tools.trim() === "") {
+    return artifactWriteTool;
+  }
+  if (tools.split(",").some((tool) => tool.trim() === "Write")) {
+    return tools;
+  }
+  if (tools.split(",").some((tool) => tool.trim() === artifactWriteTool)) {
+    return tools;
+  }
+  return `${tools},${artifactWriteTool}`;
 }
 
 function findDuplicateLaneIds(
@@ -1782,10 +1818,28 @@ async function parseLaneResult(input: {
 
   const artifact = await readFile(artifactPath, "utf-8");
   const parsedVerdict = parseArtifactVerdict(artifact);
+  const persistedArtifact = await persistContractArtifact({
+    artifactPath,
+    artifact,
+  });
+  if (persistedArtifact.error !== null) {
+    return {
+      ...laneIdentity,
+      state: "error",
+      verdict: "error",
+      artifactPath,
+      message: persistedArtifact.error,
+      degradedReason: "artifact_persistence_failed",
+      rawArtifactPath: persistedArtifact.rawArtifactPath,
+      structuredArtifactPath: null,
+      structuredArtifact: null,
+    };
+  }
   const structuredArtifact = buildStructuredReviewerArtifact({
     lane: laneIdentity,
-    artifact,
+    artifact: persistedArtifact.artifact,
     artifactPath,
+    rawArtifactPath: persistedArtifact.rawArtifactPath,
     parsedVerdict,
     context,
     mode,
@@ -1803,10 +1857,75 @@ async function parseLaneResult(input: {
     artifactPath,
     message: parsedVerdict.message,
     degradedReason: parsedVerdict.degradedReason,
-    rawArtifactPath: artifactPath,
+    rawArtifactPath: persistedArtifact.rawArtifactPath,
     structuredArtifactPath,
     structuredArtifact,
   };
+}
+
+async function persistContractArtifact(input: {
+  artifactPath: string;
+  artifact: string;
+}): Promise<{
+  artifact: string;
+  rawArtifactPath: string;
+  error: string | null;
+}> {
+  const normalizedArtifact = normalizeArtifactStart(input.artifact);
+  if (
+    normalizedArtifact === input.artifact ||
+    !artifactStartsWithVerdict(normalizedArtifact)
+  ) {
+    return {
+      artifact: input.artifact,
+      rawArtifactPath: input.artifactPath,
+      error: null,
+    };
+  }
+
+  const rawSnapshotPath = rawArtifactSnapshotPath(input.artifactPath);
+  const rawArtifactPath = rawSnapshotPath;
+  try {
+    await replaceFileAtomically(rawSnapshotPath, input.artifact);
+  } catch (error) {
+    return {
+      artifact: input.artifact,
+      rawArtifactPath: input.artifactPath,
+      error: `Reviewer artifact raw snapshot could not be written: ${formatError(error)}`,
+    };
+  }
+
+  try {
+    await replaceFileAtomically(input.artifactPath, normalizedArtifact);
+  } catch (error) {
+    return {
+      artifact: input.artifact,
+      rawArtifactPath,
+      error: `Reviewer artifact could not be normalized on disk: ${formatError(error)}`,
+    };
+  }
+  return { artifact: normalizedArtifact, rawArtifactPath, error: null };
+}
+
+function rawArtifactSnapshotPath(artifactPath: string): string {
+  if (artifactPath.endsWith(".md")) {
+    return `${artifactPath.slice(0, -".md".length)}.raw.md`;
+  }
+  return `${artifactPath}.raw`;
+}
+
+async function replaceFileAtomically(
+  path: string,
+  content: string,
+): Promise<void> {
+  const tmpPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmpPath, content);
+    await rename(tmpPath, path);
+  } catch (error) {
+    await unlink(tmpPath).catch(() => undefined);
+    throw error;
+  }
 }
 
 function structuredArtifactPathFor(
@@ -1830,6 +1949,7 @@ function buildStructuredReviewerArtifact(input: {
   >;
   artifact: string;
   artifactPath: string;
+  rawArtifactPath: string;
   parsedVerdict: ParsedArtifactVerdict;
   context: ReviewContext;
   mode: CouncilReviewMode;
@@ -1915,7 +2035,7 @@ function buildStructuredReviewerArtifact(input: {
       input.parsedVerdict.degradedReason === "malformed_artifact"
         ? "malformed"
         : "synthesized_from_markdown",
-    rawArtifactPath: input.artifactPath,
+    rawArtifactPath: input.rawArtifactPath,
     malformedReason:
       input.parsedVerdict.degradedReason === "malformed_artifact"
         ? input.parsedVerdict.message
@@ -3139,6 +3259,8 @@ function buildReviewerPrompt(
     `BEGIN_${diffBoundary}`,
     diffData,
     `END_${diffBoundary}`,
+    "",
+    "Final artifact reminder: the artifact content must start with `## Verdict` as its first non-whitespace line. Do not summarize the review session.",
   ].join("\n");
 }
 
