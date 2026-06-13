@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   signalPidOrProcessGroup,
   terminateChildProcessTree,
+  terminateDetachedPidTree,
 } from "../../src/shared/process-tree.js";
 
 describe("process tree termination", () => {
@@ -25,6 +26,68 @@ describe("process tree termination", () => {
     const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
 
     const pending = terminateChildProcessTree(child, {
+      graceMs: 1_000,
+      kill: ((pid: number, signal?: string | number) => {
+        calls.push({ pid, signal: signal as NodeJS.Signals });
+        return true;
+      }) as typeof process.kill,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_100);
+    const result = await pending;
+
+    expect(result).toEqual({
+      pid: 1234,
+      sigtermSent: true,
+      sigkillSent: true,
+    });
+    expect(calls).toEqual([
+      { pid: -1234, signal: "SIGTERM" },
+      { pid: -1234, signal: "SIGKILL" },
+    ]);
+  });
+
+  it("still escalates when the process-group leader exits during grace", async () => {
+    vi.useFakeTimers();
+    const child = new EventEmitter() as EventEmitter & {
+      pid: number;
+      exitCode: number | null;
+      signalCode: NodeJS.Signals | null;
+    };
+    child.pid = 1234;
+    child.exitCode = null;
+    child.signalCode = null;
+    const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+
+    const pending = terminateChildProcessTree(child, {
+      graceMs: 1_000,
+      kill: ((pid: number, signal?: string | number) => {
+        calls.push({ pid, signal: signal as NodeJS.Signals });
+        return true;
+      }) as typeof process.kill,
+    });
+
+    child.signalCode = "SIGTERM";
+    child.emit("exit");
+    await vi.advanceTimersByTimeAsync(1_100);
+    const result = await pending;
+
+    expect(result).toEqual({
+      pid: 1234,
+      sigtermSent: true,
+      sigkillSent: true,
+    });
+    expect(calls).toEqual([
+      { pid: -1234, signal: "SIGTERM" },
+      { pid: -1234, signal: "SIGKILL" },
+    ]);
+  });
+
+  it("escalates detached process groups without checking leader liveness", async () => {
+    vi.useFakeTimers();
+    const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+
+    const pending = terminateDetachedPidTree(1234, {
       graceMs: 1_000,
       kill: ((pid: number, signal?: string | number) => {
         calls.push({ pid, signal: signal as NodeJS.Signals });
