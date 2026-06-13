@@ -412,6 +412,119 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("does not infer Pi authorship from implementation metadata ending in pi", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-507",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [
+          {
+            role: "implementer",
+            agent: "api",
+            modelFamily: null,
+            model: "local-api",
+            reasoningEffort: null,
+            sourceStage: "implement",
+            commitRange: null,
+          },
+        ],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+    ]);
+    expect(result.review_routing).toMatchObject({
+      mode: "standard",
+      skippedLanes: [
+        expect.objectContaining({
+          laneId: "claude-opus",
+          reason: "standard_mode_routes_off_opus",
+        }),
+      ],
+      decorrelationBasis: {
+        authorFamilies: ["api"],
+        requiredReviewerLaneIds: ["pi-deepseek"],
+        mergeEligible: true,
+      },
+    });
+    expect(result.review_routing?.escalationPredicates).not.toContain(
+      "same_family_required_reviewer_recovery",
+    );
+  });
+
+  it("keeps Pi-authored disagreement routes anchored on Opus", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-507",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        routingMode: "disagreement",
+        provenance: [
+          {
+            role: "implementer",
+            agent: "pi",
+            modelFamily: "pi",
+            model: "deepseek-v4-pro",
+            reasoningEffort: "high",
+            sourceStage: "implement",
+            commitRange: null,
+          },
+        ],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.lanes.map((lane) => lane.laneId)).toEqual([
+      "claude-opus",
+      "pi-deepseek",
+      "codex-excavation",
+      "codex-high-lead",
+    ]);
+    expect(result.review_routing).toMatchObject({
+      mode: "disagreement",
+      selectedLanes: expect.arrayContaining([
+        expect.objectContaining({
+          laneId: "claude-opus",
+          required: true,
+          decorrelatedSignal: true,
+        }),
+        expect.objectContaining({
+          laneId: "pi-deepseek",
+          required: false,
+          decorrelatedSignal: false,
+          reason: "same_family_author_signal",
+        }),
+      ]),
+      decorrelationBasis: {
+        authorFamilies: ["pi"],
+        requiredReviewerLaneIds: ["claude-opus"],
+        decorrelatedReviewerArtifacts: [
+          {
+            laneId: "claude-opus",
+            agent: "claude",
+            modelFamily: "anthropic",
+          },
+        ],
+        mergeEligible: true,
+      },
+      escalationPredicates: expect.arrayContaining([
+        "operator_force",
+        "same_family_required_reviewer_recovery",
+      ]),
+    });
+  });
+
   it("fails closed when author family provenance is missing", async () => {
     const harness = await createHarness();
     const result = await runHeadlessCouncilGate(
