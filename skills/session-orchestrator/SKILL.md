@@ -1,13 +1,13 @@
 ---
-name: symphony-manual-manager
-description: Run temporary Codex-led manual manager sessions for Symphony bootstrap work. Use when planning or executing Symphony tickets outside the autonomous scheduler, especially queue-clearing waves, high-risk invariant tickets, review-loop discipline, worker delegation, Linear claim hygiene, cap-hit synthesis, or backlog normalization while Symphony reliability and review-substrate trust are still being restored.
+name: session-orchestrator
+description: Run temporary Codex-led session orchestration for Symphony bootstrap work. Use when planning or executing Symphony tickets outside the autonomous scheduler, especially queue-clearing waves, high-risk invariant tickets, review-loop discipline, worker delegation, Linear claim hygiene, cap-hit synthesis, or backlog normalization while Symphony reliability and review-substrate trust are still being restored.
 ---
 
-# Symphony Manual Manager
+# Symphony Session Orchestrator
 
 Use this skill when a Codex root session is acting as the temporary Symphony
-operator/manager instead of letting Symphony autonomously consume the backlog.
-The manager owns inspection, classification, assignment, monitoring, synthesis,
+operator/orchestrator instead of letting Symphony autonomously consume the
+backlog. The orchestrator owns inspection, classification, assignment, monitoring, synthesis,
 review decisions, Linear/GitHub closeout, and durable reporting. Implementation
 work belongs in bounded worker threads or in the current thread only when the
 scope is intentionally small.
@@ -50,11 +50,11 @@ Read these references only when needed:
    `linear-pp-cli issues SYMPH-123 --agent --data-source live --select identifier,title,description,state.name,url,project.name,parent.identifier,labels.name`.
 4. Classify each candidate with the risk taxonomy below before assigning work.
 5. Claim only the tickets you will actively run. Use visible Linear state and
-   a short comment that names the manager, branch or worker, scope, and stop
-   condition. Do not add operator-run tickets to the `Pipeline` project unless
+   a short comment that names the orchestrator, branch or worker, scope, and stop
+   condition. Do not add orchestrator-run tickets to the `Pipeline` project unless
    the intent is automated Symphony pickup.
-6. Decide whether to work in the manager thread or delegate. Keep the manager
-   lightweight by default.
+6. Decide whether to work in the orchestrator thread or delegate. Keep the
+   orchestrator lightweight by default.
 7. Write or update a compact persistent checkpoint after material decisions:
    current head, active tickets, active workers, PRs, review state, blocked
    decisions, and next poll time. Prefer Linear Docs for durable session docs;
@@ -85,7 +85,7 @@ For `high-risk invariant`, write this state contract before code:
 
 ## Delegation Rules
 
-- The root manager is the only control plane. It may create, assign, steer,
+- The root orchestrator is the only control plane. It may create, assign, steer,
   rename, archive, or stop workers. Workers must not spawn or steer workers.
 - Put the no-subdelegation rule in every worker prompt.
 - Assign one bounded issue or cluster per worker. Include source of truth,
@@ -164,7 +164,7 @@ When many Track issues exist, normalize before execution:
 Use this shape for Linear Docs or local handoffs:
 
 ```markdown
-# Symphony Manual Manager Checkpoint - YYYY-MM-DD HH:mm ET
+# Symphony Session Orchestrator Checkpoint - YYYY-MM-DD HH:mm ET
 
 ## Current Truth
 - `origin/main`: <sha>

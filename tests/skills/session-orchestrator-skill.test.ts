@@ -2,10 +2,10 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const SKILL_DIR = resolve(__dirname, "../../skills/symphony-manual-manager");
+const SKILL_DIR = resolve(__dirname, "../../skills/session-orchestrator");
 const DISCOVERY_DIR = resolve(
   __dirname,
-  "../../.agents/skills/symphony-manual-manager",
+  "../../.agents/skills/session-orchestrator",
 );
 const SKILL_PATH = resolve(SKILL_DIR, "SKILL.md");
 const workerPrompts = readFileSync(
@@ -18,10 +18,10 @@ const decisionBrief = readFileSync(
 );
 const skillContent = readFileSync(SKILL_PATH, "utf-8");
 
-describe("symphony-manual-manager skill", () => {
-  it("has trigger metadata for temporary Symphony manual manager work", () => {
-    expect(skillContent).toMatch(/^name: symphony-manual-manager$/m);
-    expect(skillContent).toMatch(/manual manager sessions/i);
+describe("session-orchestrator skill", () => {
+  it("has trigger metadata for temporary Symphony session orchestration work", () => {
+    expect(skillContent).toMatch(/^name: session-orchestrator$/m);
+    expect(skillContent).toMatch(/session orchestration/i);
     expect(skillContent).toMatch(/queue-clearing waves/i);
     expect(skillContent).toMatch(/cap-hit synthesis/i);
     expect(skillContent).toMatch(/backlog normalization/i);
@@ -104,6 +104,7 @@ describe("symphony-manual-manager skill", () => {
   it("includes an isolated dry-run prompt for forward testing", () => {
     expect(workerPrompts).toContain("Dry-Run Planning Prompt");
     expect(workerPrompts).toContain("This is a dry run");
+    expect(workerPrompts).toContain("Use $session-orchestrator");
     expect(workerPrompts).toContain(
       "do not edit files, call Linear, call GitHub",
     );

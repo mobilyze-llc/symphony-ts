@@ -1,4 +1,0 @@
-interface:
-  display_name: "Symphony Manual Manager"
-  short_description: "Manual Symphony operator runbook"
-  default_prompt: "Use $symphony-manual-manager to plan and run a bounded Symphony manual-manager ticket wave."
