@@ -353,6 +353,77 @@ describe("parseCouncilReviewGateArgs", () => {
     });
   });
 
+  it.each(["pipeline", "interactive"] as const)(
+    "fails closed when %s review result journaling fails",
+    async (journalSource) => {
+      const root = await mkdtemp(join(tmpdir(), "symphony-council-cli-"));
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+
+      const code = await runCouncilReviewGateCli(
+        [
+          "--issue-id",
+          "issue-symph-478",
+          "--artifact-dir",
+          join(root, "artifacts"),
+          "--workspace",
+          root,
+          "--journal-workspace-root",
+          root,
+          "--journal-source",
+          journalSource,
+          "--journal-stage",
+          "review",
+          "--journal-attempt",
+          "1",
+          "--journal-owner-id",
+          "worker-1",
+          "--journal-issue-identifier",
+          "SYMPH-478",
+        ],
+        {
+          stdout: (message) => {
+            stdout.push(message);
+            return true;
+          },
+          stderr: (message) => {
+            stderr.push(message);
+            return true;
+          },
+        },
+        {
+          runHeadlessCouncilGate: async () => ({
+            ...cliReviewResult(),
+            issueId: "issue-symph-478",
+          }),
+          appendReviewJournalEventsToDispatcherJournal: async () => {
+            throw new Error(
+              "EACCES: permission denied, append dispatcher.jsonl",
+            );
+          },
+        },
+      );
+
+      const errorOutput = stderr.join("");
+
+      expect(code).toBe(1);
+      expect(stdout).toEqual([]);
+      expect(errorOutput).toContain(
+        "Failed to append council review result to the dispatcher journal",
+      );
+      expect(errorOutput).toContain(
+        join(root, ".symphony", "run-journals", "dispatcher.jsonl"),
+      );
+      expect(errorOutput).toContain(`Source: ${journalSource}`);
+      expect(errorOutput).toContain(
+        "SPEC.mobilyze.md's Dispatcher Resume Contract",
+      );
+      expect(errorOutput).toContain("source of truth for gate replay");
+      expect(errorOutput).toContain("Pipeline expectation:");
+      expect(errorOutput).toContain("Interactive expectation:");
+    },
+  );
+
   it("requires a repo when PR mode is used", () => {
     expect(() =>
       parseCouncilReviewGateArgs(
@@ -402,6 +473,9 @@ describe("parseCouncilReviewGateArgs", () => {
     );
     expect(() => parseCouncilReviewGateArgs(["--help"], "/cwd")).toThrow(
       /\*\* crosses \/[\s\S]*\* and \? do not/,
+    );
+    expect(() => parseCouncilReviewGateArgs(["--help"], "/cwd")).toThrow(
+      /--journal-workspace-root DIR[\s\S]*fail closed on append errors/,
     );
   });
 

@@ -3,6 +3,7 @@
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+import { getDispatcherRunJournalPath } from "../logging/run-journal.js";
 import {
   type CouncilReviewMode,
   assertFreshCouncilReview as assertFreshCouncilReviewImpl,
@@ -278,17 +279,28 @@ export async function runCouncilReviewGateCli(
   if (parsed.assertFreshReview === undefined) {
     const result = await runHeadlessCouncilGate(parsed);
     if (parsed.journalWorkspaceRoot !== undefined) {
-      await appendReviewJournalEventsToDispatcherJournal({
-        workspaceRoot: parsed.journalWorkspaceRoot,
-        result,
-        options: {
-          issueIdentifier: parsed.journalIssueIdentifier ?? parsed.issueId,
-          ownerId: parsed.journalOwnerId ?? null,
-          stage: parsed.journalStage ?? "review",
-          attempt: parsed.journalAttempt ?? null,
-          source: parsed.journalSource ?? "pipeline",
-        },
-      });
+      try {
+        await appendReviewJournalEventsToDispatcherJournal({
+          workspaceRoot: parsed.journalWorkspaceRoot,
+          result,
+          options: {
+            issueIdentifier: parsed.journalIssueIdentifier ?? parsed.issueId,
+            ownerId: parsed.journalOwnerId ?? null,
+            stage: parsed.journalStage ?? "review",
+            attempt: parsed.journalAttempt ?? null,
+            source: parsed.journalSource ?? "pipeline",
+          },
+        });
+      } catch (error) {
+        io.stderr(
+          formatJournalAppendFailure({
+            error,
+            workspaceRoot: parsed.journalWorkspaceRoot,
+            source: parsed.journalSource ?? "pipeline",
+          }),
+        );
+        return 1;
+      }
     }
     io.stdout(`${JSON.stringify(result, null, 2)}\n`);
     return result.verdict === "pass" ? 0 : 1;
@@ -384,7 +396,7 @@ function renderUsage(): string {
     "  --risk-contract-artifact PATH Bounded risk-predicate state contract artifact path; repeatable",
     "  --assert-fresh-review PATH    Assert an existing clean review-result.json covers current HEAD",
     "  --allow-stale-path GLOB       Explicit freshness allowlist; repeatable; ** crosses /, * and ? do not",
-    "  --journal-workspace-root DIR  Append sanitized review events to DIR/.symphony/run-journals/dispatcher.jsonl",
+    "  --journal-workspace-root DIR  Append sanitized review events to DIR/.symphony/run-journals/dispatcher.jsonl; fail closed on append errors",
     "  --journal-source SOURCE       Journal source: pipeline, interactive, or replay (default: pipeline)",
     "  --journal-stage STAGE         Journal stage label (default: review)",
     "  --journal-attempt N           Journal pipeline attempt",
@@ -423,4 +435,20 @@ if (isDirectRun(import.meta.url, process.argv[1])) {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function formatJournalAppendFailure(input: {
+  error: unknown;
+  workspaceRoot: string;
+  source: ReviewJournalSource;
+}): string {
+  return [
+    `Failed to append council review result to the dispatcher journal: ${formatError(input.error)}`,
+    `Journal: ${getDispatcherRunJournalPath(input.workspaceRoot)}`,
+    `Source: ${input.source}`,
+    "Policy: --journal-workspace-root is fail-closed because SPEC.mobilyze.md's Dispatcher Resume Contract makes the dispatcher journal the source of truth for gate replay.",
+    "Pipeline expectation: do not consume a gate result until the journal append succeeds; fix the workspace journal path and rerun.",
+    "Interactive expectation: runs that pass --journal-workspace-root use the same fail-closed contract; omit the flag only for local dry runs outside dispatcher resume.",
+    "",
+  ].join("\n");
 }
