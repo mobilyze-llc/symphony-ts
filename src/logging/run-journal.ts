@@ -11,6 +11,7 @@ import {
 const DISPATCHER_RUN_JOURNAL_DIR = join(".symphony", "run-journals");
 const DISPATCHER_RUN_JOURNAL_FILENAME = "dispatcher.jsonl";
 const DISPATCHER_RUN_JOURNAL_LOCK_DIR = `${DISPATCHER_RUN_JOURNAL_FILENAME}.lock`;
+const DISPATCHER_RUN_JOURNAL_LOCK_OWNER_FILENAME = "owner.json";
 const DISPATCHER_RUN_JOURNAL_LOCK_TIMEOUT_MS = 30_000;
 const DISPATCHER_RUN_JOURNAL_LOCK_POLL_MS = 25;
 
@@ -183,10 +184,14 @@ async function acquireDispatcherRunJournalWriteLock(
   while (true) {
     try {
       await fs.mkdir(lockPath);
+      await writeDispatcherRunJournalLockOwner(lockPath);
       return;
     } catch (error) {
       if (!isAlreadyExistsPathError(error)) {
         throw error;
+      }
+      if (await removeAbandonedDispatcherRunJournalWriteLock(lockPath)) {
+        continue;
       }
       if (Date.now() - startedAt >= DISPATCHER_RUN_JOURNAL_LOCK_TIMEOUT_MS) {
         throw new Error(
@@ -195,6 +200,85 @@ async function acquireDispatcherRunJournalWriteLock(
       }
       await sleep(DISPATCHER_RUN_JOURNAL_LOCK_POLL_MS);
     }
+  }
+}
+
+async function writeDispatcherRunJournalLockOwner(
+  lockPath: string,
+): Promise<void> {
+  try {
+    await fs.writeFile(
+      join(lockPath, DISPATCHER_RUN_JOURNAL_LOCK_OWNER_FILENAME),
+      `${JSON.stringify({
+        pid: process.pid,
+        acquiredAt: new Date().toISOString(),
+      })}\n`,
+      "utf8",
+    );
+  } catch (error) {
+    await fs.rm(lockPath, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function removeAbandonedDispatcherRunJournalWriteLock(
+  lockPath: string,
+): Promise<boolean> {
+  const ownerPath = join(lockPath, DISPATCHER_RUN_JOURNAL_LOCK_OWNER_FILENAME);
+  try {
+    const owner = parseDispatcherRunJournalLockOwner(
+      await fs.readFile(ownerPath, "utf8"),
+    );
+    if (owner !== null && !isProcessRunning(owner.pid)) {
+      await fs.rm(lockPath, { recursive: true, force: true });
+      return true;
+    }
+    return false;
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      const stats = await fs.stat(lockPath).catch(() => null);
+      if (
+        stats === null ||
+        Date.now() - stats.mtimeMs >= DISPATCHER_RUN_JOURNAL_LOCK_TIMEOUT_MS
+      ) {
+        await fs.rm(lockPath, { recursive: true, force: true });
+        return true;
+      }
+    }
+    return false;
+  }
+}
+
+function parseDispatcherRunJournalLockOwner(
+  raw: string,
+): { pid: number } | null {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      isRecord(parsed) &&
+      typeof parsed.pid === "number" &&
+      Number.isInteger(parsed.pid) &&
+      parsed.pid > 0
+    ) {
+      return { pid: parsed.pid };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      (error as { code?: unknown }).code === "EPERM"
+    );
   }
 }
 

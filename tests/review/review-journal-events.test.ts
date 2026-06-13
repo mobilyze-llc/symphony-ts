@@ -1,10 +1,13 @@
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { readDispatcherRunJournal } from "../../src/logging/run-journal.js";
+import {
+  getDispatcherRunJournalLockPath,
+  readDispatcherRunJournal,
+} from "../../src/logging/run-journal.js";
 import { buildStateDelta } from "../../src/logging/runtime-snapshot.js";
 import type {
   HeadlessCouncilGateResult,
@@ -241,6 +244,63 @@ describe("review journal events", () => {
     expect(
       replayed.filter((entry) => entry.kind === "review_gate_result"),
     ).toHaveLength(appendCount);
+  });
+
+  it("skips duplicate concurrent standalone review appends under the write lock", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-concurrent-duplicates-"),
+    );
+
+    const results = await Promise.all(
+      Array.from({ length: 6 }, (_, index) =>
+        appendReviewJournalEventsToDispatcherJournal({
+          workspaceRoot,
+          result: reviewResult({ verdict: "pass" }),
+          options: {
+            issueIdentifier: "SYMPH-450",
+            ownerId: `worker-${index}`,
+            source: "pipeline",
+            idempotencyKeyPrefix: "review-concurrent-shared",
+          },
+        }),
+      ),
+    );
+
+    const replayed = await readDispatcherRunJournal(workspaceRoot);
+    const sequences = replayed.map((entry) => entry.sequence);
+
+    expect(replayed).toHaveLength(3);
+    expect(sequences).toEqual([1, 2, 3]);
+    expect(results.flatMap((result) => result.appendedEntries)).toHaveLength(3);
+    expect(results.flatMap((result) => result.skippedEntries)).toHaveLength(15);
+  });
+
+  it("recovers a standalone review append after a dead owner leaves a lock", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-stale-lock-"),
+    );
+    const lockPath = getDispatcherRunJournalLockPath(workspaceRoot);
+    await mkdir(lockPath, { recursive: true });
+    await writeFile(
+      join(lockPath, "owner.json"),
+      `${JSON.stringify({
+        pid: 999_999_999,
+        acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+      })}\n`,
+    );
+
+    const result = await appendReviewJournalEventsToDispatcherJournal({
+      workspaceRoot,
+      result: reviewResult({ verdict: "pass" }),
+      options: {
+        issueIdentifier: "SYMPH-450",
+        ownerId: "worker-1",
+        source: "pipeline",
+      },
+    });
+
+    expect(result.appendedEntries).toHaveLength(3);
+    expect(await readDispatcherRunJournal(workspaceRoot)).toHaveLength(3);
   });
 });
 
