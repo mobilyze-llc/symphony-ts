@@ -65,16 +65,13 @@ export function signalPidOrProcessGroup(
   try {
     kill(-pid, signal);
     return true;
-  } catch (error) {
-    if (isNoSuchProcess(error)) {
-      try {
-        kill(pid, signal);
-        return true;
-      } catch (innerError) {
-        return isNoSuchProcess(innerError);
-      }
+  } catch (groupError) {
+    try {
+      kill(pid, signal);
+      return true;
+    } catch (pidError) {
+      return isNoSuchProcess(groupError) && isNoSuchProcess(pidError);
     }
-    return false;
   }
 }
 

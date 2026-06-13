@@ -129,4 +129,41 @@ describe("process tree termination", () => {
       { pid: 55, signal: "SIGTERM" },
     ]);
   });
+
+  it("falls back to the child pid when group signaling is denied", () => {
+    const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const kill = ((pid: number, signal?: string | number) => {
+      calls.push({ pid, signal: signal as NodeJS.Signals });
+      if (pid < 0) {
+        const error = new Error("process group denied") as Error & {
+          code: string;
+        };
+        error.code = "EPERM";
+        throw error;
+      }
+      return true;
+    }) as typeof process.kill;
+
+    expect(signalPidOrProcessGroup(55, "SIGTERM", kill)).toBe(true);
+    expect(calls).toEqual([
+      { pid: -55, signal: "SIGTERM" },
+      { pid: 55, signal: "SIGTERM" },
+    ]);
+  });
+
+  it("reports failure when both process-group and direct-pid signaling fail", () => {
+    const calls: Array<{ pid: number; signal: NodeJS.Signals }> = [];
+    const kill = ((pid: number, signal?: string | number) => {
+      calls.push({ pid, signal: signal as NodeJS.Signals });
+      const error = new Error("signal denied") as Error & { code: string };
+      error.code = "EPERM";
+      throw error;
+    }) as typeof process.kill;
+
+    expect(signalPidOrProcessGroup(55, "SIGTERM", kill)).toBe(false);
+    expect(calls).toEqual([
+      { pid: -55, signal: "SIGTERM" },
+      { pid: 55, signal: "SIGTERM" },
+    ]);
+  });
 });

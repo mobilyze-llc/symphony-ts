@@ -1430,6 +1430,7 @@ export class OrchestratorCore {
     if (
       reason === "manual_stop" ||
       reason === "inactive_state" ||
+      reason === "emergency_stop" ||
       outcome !== null
     ) {
       const trigger = readMetadataString(entry.metadata, "trigger");
@@ -1441,7 +1442,9 @@ export class OrchestratorCore {
           reason:
             reason === "manual_stop" || reason === "inactive_state"
               ? reason
-              : `hard_stop:${trigger ?? outcome ?? "unknown"}`,
+              : reason === "emergency_stop"
+                ? "killed_mid_run"
+                : `hard_stop:${trigger ?? outcome ?? "unknown"}`,
           setBySequence: entry.sequence,
         },
       );

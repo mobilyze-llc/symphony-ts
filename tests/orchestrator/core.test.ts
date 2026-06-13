@@ -5109,6 +5109,94 @@ describe("dispatcher run journal restart recovery", () => {
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
   });
 
+  it("restart recovery preserves emergency-stop killed-mid-run pause after pipeline resume replay", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    let issueState = "Todo";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "hard_stop:1:investigate:initial:emergency_stop:1",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:investigate:initial:emergency_stop:1",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            reason: "emergency_stop",
+            issueState: "Todo",
+          },
+        }),
+        createJournalEntry({
+          sequence: 2,
+          idempotencyKey: "intent:pipeline:stop:2",
+          kind: "intent",
+          operation: "dispatcher",
+          leaseId: "intent:pipeline:stop:2",
+          leaseStatus: "completed",
+          metadata: {
+            status: "applied",
+            verb: "pipeline_stop",
+            actor: { kind: "operator", host: "pro14", session: null },
+            reason: { class: "operator_emergency_stop", human: "stop now" },
+            interruptedIssues: [
+              {
+                issueId: "1",
+                issueIdentifier: "ISSUE-1",
+                stage: "investigate",
+                attempt: null,
+              },
+            ],
+          },
+        }),
+        createJournalEntry({
+          sequence: 3,
+          idempotencyKey: "intent:pipeline:resume:3",
+          kind: "intent",
+          operation: "dispatcher",
+          leaseId: "intent:pipeline:resume:3",
+          leaseStatus: "completed",
+          metadata: {
+            status: "applied",
+            verb: "pipeline_resume",
+            actor: { kind: "operator", host: "pro14", session: null },
+            reason: { class: "operator_resume", human: "triaged" },
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().emergencyStop).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run",
+      setBySequence: 1,
+    });
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
   it("restart recovery consumes a pending hard-stop stage completion after explicit Resume", async () => {
     const spawnWorker = vi.fn(async () => ({
       workerHandle: { pid: 1001 },
