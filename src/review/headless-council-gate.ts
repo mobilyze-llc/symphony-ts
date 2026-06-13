@@ -403,6 +403,8 @@ interface CmuxRunJson {
   updatedAt?: unknown;
   completed_at?: unknown;
   completedAt?: unknown;
+  // Optional inline status payload; lane terminal state is `state`, not this
+  // field, because some cmux-spawn variants use `status` for structured data.
   status?: unknown;
 }
 
@@ -1828,8 +1830,8 @@ async function parseLaneResult(input: {
     };
   }
 
-  const telemetry = await laneTelemetryFromCmuxRun(parsed);
   const state = parseLaneState(parsed.state);
+  const telemetry = await laneTelemetryFromCmuxRun(parsed, state);
   if (commandResult.exitCode !== 0 || state !== "complete") {
     return {
       ...laneIdentity,
@@ -1914,10 +1916,11 @@ async function parseLaneResult(input: {
 
 async function laneTelemetryFromCmuxRun(
   parsed: CmuxRunJson,
+  state: HeadlessLaneResult["state"],
 ): Promise<LaneTelemetry> {
   const status = await readCmuxStatus(parsed.status_path);
   return {
-    wallTimeMs: wallTimeMsFromCmuxRun(parsed, status),
+    wallTimeMs: wallTimeMsFromCmuxRun(parsed, status, state),
     tokenUsage: tokenUsageFromCmuxRun(parsed.usage),
   };
 }
@@ -1939,6 +1942,7 @@ async function readCmuxStatus(
 function wallTimeMsFromCmuxRun(
   parsed: CmuxRunJson,
   status: Record<string, unknown> | null,
+  state: HeadlessLaneResult["state"],
 ): number | null {
   const direct =
     finiteNumberOrNull(parsed.wall_time_ms) ??
@@ -1948,7 +1952,7 @@ function wallTimeMsFromCmuxRun(
     finiteNumberOrNull(parsed.duration_ms) ??
     finiteNumberOrNull(parsed.durationMs);
   if (direct !== null) {
-    return Math.round(direct);
+    return Math.max(0, Math.round(direct));
   }
 
   const statusRecord = status ?? recordOrNull(parsed.status);
@@ -1960,12 +1964,14 @@ function wallTimeMsFromCmuxRun(
   const completedAt =
     stringOrNull(parsed.completed_at) ??
     stringOrNull(parsed.completedAt) ??
-    stringOrNull(parsed.updated_at) ??
-    stringOrNull(parsed.updatedAt) ??
     stringOrNull(statusRecord?.completed_at) ??
     stringOrNull(statusRecord?.completedAt) ??
-    stringOrNull(statusRecord?.updated_at) ??
-    stringOrNull(statusRecord?.updatedAt);
+    (state === "complete"
+      ? (stringOrNull(parsed.updated_at) ??
+        stringOrNull(parsed.updatedAt) ??
+        stringOrNull(statusRecord?.updated_at) ??
+        stringOrNull(statusRecord?.updatedAt))
+      : null);
   if (startedAt === null || completedAt === null) {
     return null;
   }
@@ -1986,6 +1992,9 @@ function tokenUsageFromCmuxRun(
 ): HeadlessLaneTokenUsage | null {
   const usage = recordOrNull(usageInput);
   if (usage === null) {
+    return null;
+  }
+  if (usage.available === false) {
     return null;
   }
 

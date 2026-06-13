@@ -317,7 +317,7 @@ describe("runHeadlessCouncilGate", () => {
         "claude-opus": {
           status: {
             started_at: "2026-06-12T10:00:00.000Z",
-            updated_at: "2026-06-12T10:00:02.500Z",
+            completed_at: "2026-06-12T10:00:02.500Z",
           },
           json: {
             usage: {
@@ -345,7 +345,7 @@ describe("runHeadlessCouncilGate", () => {
         },
         "codex-high-lead": {
           json: {
-            wall_time_ms: 1750,
+            wall_time_ms: -1750,
             usage: {
               available: true,
               model: "codex",
@@ -399,7 +399,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(
       result.lanes.find((lane) => lane.laneId === "codex-high-lead"),
     ).toMatchObject({
-      wallTimeMs: 1750,
+      wallTimeMs: 0,
       tokenUsage: {
         available: true,
         model: "codex",
@@ -1122,6 +1122,10 @@ describe("runHeadlessCouncilGate", () => {
       laneBehavior: {
         "pi-deepseek": {
           exitCode: 1,
+          status: {
+            started_at: "2026-06-12T10:00:00.000Z",
+            updated_at: "2026-06-12T10:00:30.000Z",
+          },
           json: { state: "timed_out", message: "timed out" },
         },
       },
@@ -1142,6 +1146,7 @@ describe("runHeadlessCouncilGate", () => {
     ).toMatchObject({
       state: "timed_out",
       verdict: "error",
+      wallTimeMs: null,
     });
     expect(
       result.degradedConditions.filter((condition) =>
