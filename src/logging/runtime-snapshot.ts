@@ -530,7 +530,7 @@ export interface RuntimeSnapshotCouncilReview {
  * is plumbing, not a second source of truth.
  */
 export interface RuntimeSnapshotEnrichment {
-  /** Authoritative journal cursor (accounts for burned sequences). */
+  /** Authoritative durable journal cursor exposed as as_of_sequence. */
   asOfSequence?: number;
   components?: Record<string, ComponentStatus>;
   deployDrift?: DeployDriftStatus | null;
