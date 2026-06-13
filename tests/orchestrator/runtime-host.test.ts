@@ -40,6 +40,7 @@ import {
 import {
   OrchestratorRuntimeHost,
   createWorkspaceHookLogger,
+  deliverTrackedWorkerStopSignal,
   extractProductName,
   readGitBaseRevision,
   readGitChangedFiles,
@@ -5523,6 +5524,99 @@ describe("pipeline notifications", () => {
         calls.push([pid, signal]);
       }),
     ).toEqual({ status: "failed", processGroupId: null });
+    expect(calls).toEqual([]);
+  });
+
+  it("signals the tracked pid only after process ownership verification", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "manual_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        readProcessCwd: async () => "/tmp/workspaces/1",
+        readProcessCommand: async () => "bash -lc codex app-server",
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "delivered",
+      warning: null,
+      attempts: [
+        {
+          pid: 4242,
+          processGroupId: null,
+          sigterm: "delivered",
+          sigkill: "not_attempted",
+        },
+      ],
+    });
+    expect(calls).toEqual([[4242, "SIGTERM"]]);
+  });
+
+  it("does not signal a tracked pid whose cwd no longer matches the workspace", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "manual_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        readProcessCwd: async () => "/tmp/workspaces/10",
+        readProcessCommand: async () => "bash -lc codex app-server",
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "failed",
+      attempts: [],
+      warning:
+        "Tracked process PID 4242 was not signaled: process cwd /tmp/workspaces/10 does not match workspace /tmp/workspaces/1",
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it("does not signal a tracked pid whose command is not a Codex app-server", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "manual_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        readProcessCwd: async () => "/tmp/workspaces/1",
+        readProcessCommand: async () => "sleep 600",
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "failed",
+      attempts: [],
+      warning:
+        "Tracked process PID 4242 was not signaled: process command does not look like a Codex app-server",
+    });
     expect(calls).toEqual([]);
   });
 

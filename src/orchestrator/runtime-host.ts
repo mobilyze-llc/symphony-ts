@@ -6,7 +6,7 @@ import {
   mkdirSync,
   openSync,
 } from "node:fs";
-import { access, lstat, mkdir, readdir } from "node:fs/promises";
+import { access, lstat, mkdir, readdir, realpath } from "node:fs/promises";
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type { Writable } from "node:stream";
@@ -216,6 +216,19 @@ export interface ProcessSignalDeliveryResult {
 }
 
 type ProcessSignalSender = (pid: number, signal: NodeJS.Signals) => void;
+type ProcessCwdReader = (pid: number) => Promise<string | null>;
+type ProcessCommandReader = (pid: number) => Promise<string | null>;
+
+interface TrackedWorkerStopSignalDeliveryOptions {
+  readProcessCwd?: ProcessCwdReader;
+  readProcessCommand?: ProcessCommandReader;
+  sendSignal?: ProcessSignalSender;
+}
+
+export interface TrackedProcessSignalTargetVerification {
+  verified: boolean;
+  warning: string | null;
+}
 
 interface StoredLoopTrace {
   issueId: string;
@@ -5296,8 +5309,9 @@ function toStopSignalDeliveryResponse(
   };
 }
 
-async function deliverTrackedWorkerStopSignal(
+export async function deliverTrackedWorkerStopSignal(
   input: WorkerStopSignalDeliveryInput,
+  options: TrackedWorkerStopSignalDeliveryOptions = {},
 ): Promise<StopSignalDelivery> {
   if (input.workspacePath === null) {
     return {
@@ -5323,11 +5337,30 @@ async function deliverTrackedWorkerStopSignal(
     };
   }
 
+  const ownership = await verifyTrackedProcessSignalTarget({
+    pid: input.trackedProcessPid,
+    workspacePath: input.workspacePath,
+    readProcessCwd: options.readProcessCwd ?? readProcessCwd,
+    readProcessCommand: options.readProcessCommand ?? readProcessCommand,
+  });
+  if (!ownership.verified) {
+    return {
+      status: "failed",
+      reason: input.reason,
+      attemptedAt: input.attemptedAt.toISOString(),
+      workspacePath: input.workspacePath,
+      attempts: [],
+      warning: `Tracked process PID ${input.trackedProcessPid} was not signaled: ${ownership.warning}`,
+    };
+  }
+
   const attempts = [input.trackedProcessPid].map(
     (pid): StopSignalDeliveryAttempt => {
-      const sigterm = signalPid(pid, "SIGTERM");
+      const sigterm = signalPid(pid, "SIGTERM", options.sendSignal);
       const sigkill =
-        sigterm.status === "failed" ? signalPid(pid, "SIGKILL") : null;
+        sigterm.status === "failed"
+          ? signalPid(pid, "SIGKILL", options.sendSignal)
+          : null;
       return {
         pid,
         processGroupId: null,
@@ -5356,6 +5389,52 @@ async function deliverTrackedWorkerStopSignal(
   };
 }
 
+export async function verifyTrackedProcessSignalTarget(input: {
+  pid: number;
+  workspacePath: string;
+  readProcessCwd?: ProcessCwdReader;
+  readProcessCommand?: ProcessCommandReader;
+}): Promise<TrackedProcessSignalTargetVerification> {
+  const readCwd = input.readProcessCwd ?? readProcessCwd;
+  const readCommand = input.readProcessCommand ?? readProcessCommand;
+  const [processCwd, processCommand] = await Promise.all([
+    readCwd(input.pid),
+    readCommand(input.pid),
+  ]);
+
+  if (processCwd === null) {
+    return {
+      verified: false,
+      warning: "process cwd could not be read for ownership verification",
+    };
+  }
+
+  if (processCommand === null) {
+    return {
+      verified: false,
+      warning: "process command could not be read for ownership verification",
+    };
+  }
+
+  if (
+    !(await directoriesReferToSameLocation(processCwd, input.workspacePath))
+  ) {
+    return {
+      verified: false,
+      warning: `process cwd ${processCwd} does not match workspace ${input.workspacePath}`,
+    };
+  }
+
+  if (!isCodexAppServerCommand(processCommand)) {
+    return {
+      verified: false,
+      warning: "process command does not look like a Codex app-server",
+    };
+  }
+
+  return { verified: true, warning: null };
+}
+
 export function signalPid(
   pid: number,
   signal: NodeJS.Signals,
@@ -5374,6 +5453,66 @@ export function signalPid(
       processGroupId: null,
     };
   }
+}
+
+async function readProcessCwd(pid: number): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      "lsof",
+      ["-a", "-p", String(pid), "-d", "cwd", "-Fn"],
+      { timeout: 5000 },
+    );
+    return parseLsofName(stdout);
+  } catch {
+    return null;
+  }
+}
+
+async function readProcessCommand(pid: number): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      "ps",
+      ["-p", String(pid), "-o", "command="],
+      { timeout: 5000 },
+    );
+    const command = stdout.trim();
+    return command.length === 0 ? null : command;
+  } catch {
+    return null;
+  }
+}
+
+function parseLsofName(stdout: string): string | null {
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("n") && line.length > 1) {
+      return line.slice(1);
+    }
+  }
+  return null;
+}
+
+async function directoriesReferToSameLocation(
+  firstPath: string,
+  secondPath: string,
+): Promise<boolean> {
+  const [first, second] = await Promise.all([
+    resolveDirectoryForOwnership(firstPath),
+    resolveDirectoryForOwnership(secondPath),
+  ]);
+  return first === second;
+}
+
+async function resolveDirectoryForOwnership(path: string): Promise<string> {
+  try {
+    return resolve(await realpath(path));
+  } catch {
+    return resolve(path);
+  }
+}
+
+function isCodexAppServerCommand(command: string): boolean {
+  const normalized = command.toLowerCase();
+  return normalized.includes("codex") && normalized.includes("app-server");
 }
 
 function parseProcessId(value: string | null | undefined): number | null {
