@@ -98,6 +98,40 @@ describe("parseCouncilReviewGateArgs", () => {
     });
   });
 
+  it("parses Codex excavation lane controls", () => {
+    expect(
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "SYMPH-444",
+          "--artifact-dir",
+          "/tmp/review",
+          "--no-codex-excavation",
+          "--codex-excavation-sweep",
+          "high-risk",
+          "--codex-excavation-timeout-seconds",
+          "3600",
+          "--codex-excavation-tool-output-token-limit",
+          "4000",
+          "--codex-excavation-model-auto-compact-token-limit",
+          "80000",
+        ],
+        "/cwd",
+      ),
+    ).toEqual({
+      issueId: "SYMPH-444",
+      artifactDir: "/tmp/review",
+      workspace: "/cwd",
+      codexExcavation: false,
+      codexExcavationSweep: "high-risk",
+      codexExcavationTimeoutSeconds: 3600,
+      codexExcavationToolOutputTokenLimit: 4000,
+      codexExcavationModelAutoCompactTokenLimit: 80000,
+      riskContractArtifactPaths: [],
+      allowedChangePatterns: [],
+    });
+  });
+
   it("parses journal append metadata", () => {
     expect(
       parseCouncilReviewGateArgs(
@@ -195,6 +229,22 @@ describe("parseCouncilReviewGateArgs", () => {
     ).toThrow('--mode must be "full" or "convergence"');
   });
 
+  it("rejects unknown Codex excavation sweeps", () => {
+    expect(() =>
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "SYMPH-444",
+          "--artifact-dir",
+          "/tmp/review",
+          "--codex-excavation-sweep",
+          "all-night",
+        ],
+        "/cwd",
+      ),
+    ).toThrow('--codex-excavation-sweep must be "standard" or "high-risk"');
+  });
+
   it("rejects review loop flags in freshness assertion mode", () => {
     expect(() =>
       parseCouncilReviewGateArgs(
@@ -229,6 +279,24 @@ describe("parseCouncilReviewGateArgs", () => {
         "/cwd",
       ),
     ).toThrow("--risk-contract-artifact is only valid");
+  });
+
+  it("rejects Codex lane flags in freshness assertion mode", () => {
+    expect(() =>
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "MOB-88",
+          "--artifact-dir",
+          "/tmp/review",
+          "--assert-fresh-review",
+          "/tmp/review-result.json",
+          "--codex-excavation-sweep",
+          "high-risk",
+        ],
+        "/cwd",
+      ),
+    ).toThrow("Codex lane flags are only valid");
   });
 
   it("rejects journal metadata without journal append root", () => {

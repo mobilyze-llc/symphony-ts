@@ -1379,10 +1379,15 @@ export interface StateDeltaEntryMetadata {
   lane_agent?: string;
   lane_role?: string;
   lane_model?: string;
+  lane_reasoning_effort?: string;
   lane_state?: string;
   lane_verdict?: string;
   independent_reviewer?: boolean;
   degraded_reason?: string;
+  artifact_path?: string;
+  structured_artifact_path?: string;
+  review_bundle_file_hash?: string;
+  review_bundle_hash?: string;
   parse_status?: string;
   finding_fingerprint?: string;
   finding_severity?: string;
@@ -1479,9 +1484,14 @@ const STATE_DELTA_METADATA_STRING_FIELDS = [
   "lane_agent",
   "lane_role",
   "lane_model",
+  "lane_reasoning_effort",
   "lane_state",
   "lane_verdict",
   "degraded_reason",
+  "artifact_path",
+  "structured_artifact_path",
+  "review_bundle_file_hash",
+  "review_bundle_hash",
   "parse_status",
   "finding_fingerprint",
   "finding_severity",
