@@ -2255,13 +2255,13 @@ function extractFindingEvidence(
     /(?:^|[\s([`])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+|[A-Za-z0-9_.-]+\.[A-Za-z0-9]+)(?::(\d+)(?:-(\d+))?)?/g;
   let match = pathPattern.exec(text);
   while (match !== null) {
-    const path = normalizeEvidencePath(match[1]);
+    const lineStart = parseOptionalLine(match[2]);
+    const lineEnd = parseOptionalLine(match[3]) ?? lineStart;
+    const path = normalizeEvidencePath(match[1], changedPaths, lineStart);
     if (path === null) {
       match = pathPattern.exec(text);
       continue;
     }
-    const lineStart = parseOptionalLine(match[2]);
-    const lineEnd = parseOptionalLine(match[3]) ?? lineStart;
     evidence.push({
       path,
       lineStart,
@@ -2273,7 +2273,59 @@ function extractFindingEvidence(
   return dedupeFindingEvidence(evidence);
 }
 
-function normalizeEvidencePath(value: string | undefined): string | null {
+const PROSE_DOTTED_TOKENS = new Set(["e.g", "i.e", "node.js"]);
+
+const RECOGNIZED_EVIDENCE_EXTENSIONS = new Set([
+  "bash",
+  "c",
+  "cjs",
+  "cpp",
+  "cs",
+  "css",
+  "cts",
+  "env",
+  "go",
+  "gql",
+  "graphql",
+  "h",
+  "hpp",
+  "html",
+  "java",
+  "js",
+  "json",
+  "jsonc",
+  "jsx",
+  "kt",
+  "lock",
+  "md",
+  "mdx",
+  "mjs",
+  "mts",
+  "php",
+  "py",
+  "rb",
+  "rs",
+  "sass",
+  "scss",
+  "sh",
+  "sql",
+  "svelte",
+  "swift",
+  "toml",
+  "ts",
+  "tsx",
+  "vue",
+  "xml",
+  "yaml",
+  "yml",
+  "zsh",
+]);
+
+function normalizeEvidencePath(
+  value: string | undefined,
+  changedPaths: ReadonlySet<string>,
+  lineStart: number | null,
+): string | null {
   const path = value?.replace(/^`|`$/g, "").trim();
   if (path === undefined || path === "" || path.startsWith("http")) {
     return null;
@@ -2281,7 +2333,39 @@ function normalizeEvidencePath(value: string | undefined): string | null {
   if (/^\d+\.\d+$/.test(path)) {
     return null;
   }
-  return path.replace(/^\.?\//, "");
+  const normalizedPath = path.replace(/^\.?\//, "");
+  if (changedPaths.has(normalizedPath)) {
+    return normalizedPath;
+  }
+  const normalizedToken = normalizedPath.toLowerCase();
+  if (PROSE_DOTTED_TOKENS.has(normalizedToken)) {
+    return null;
+  }
+  if (isRecognizedEvidencePath(normalizedPath, lineStart)) {
+    return normalizedPath;
+  }
+  return null;
+}
+
+function isRecognizedEvidencePath(
+  path: string,
+  lineStart: number | null,
+): boolean {
+  const extension = evidencePathExtension(path);
+  if (extension === null || !RECOGNIZED_EVIDENCE_EXTENSIONS.has(extension)) {
+    return false;
+  }
+  return path.includes("/") || lineStart !== null || isRecognizedBasename(path);
+}
+
+function evidencePathExtension(path: string): string | null {
+  const basename = path.split("/").pop() ?? "";
+  const extensionMatch = /\.([A-Za-z0-9]+)$/.exec(basename);
+  return extensionMatch?.[1]?.toLowerCase() ?? null;
+}
+
+function isRecognizedBasename(path: string): boolean {
+  return /^[A-Za-z0-9_.-]+\.[A-Za-z0-9]+$/.test(path);
 }
 
 function parseOptionalLine(value: string | undefined): number | null {
