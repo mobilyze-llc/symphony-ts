@@ -769,6 +769,8 @@ describe("SYMPH-293: dispatcher run-journal checkpoints bound replay", () => {
       checkpointDraft!,
       { tailEntryCount: 1, minEntryCount: 2 },
     );
+    expect(compaction.compacted).toBe(true);
+    expect(compaction.journal[0]?.kind).toBe("journal_checkpoint");
     const restartedAfterExpiry = createOrchestrator({
       runJournal: compaction.journal,
       now: () => new Date("2026-06-12T01:00:00.000Z"),
@@ -1141,6 +1143,18 @@ function createActiveLeaseJournal(): DispatcherRunJournal {
     }),
     createJournalEntry({
       sequence: 2,
+      kind: "supervision_finding",
+      issueId: "covered",
+      issueIdentifier: "SYMPH-COVERED",
+      summary: "Covered row forces checkpoint compaction.",
+      metadata: {
+        status: "completed",
+        findingKind: "ignored_setup_instruction_collision",
+        signature: "covered-signature",
+      },
+    }),
+    createJournalEntry({
+      sequence: 3,
       kind: "admission",
       issueId: "tail",
       issueIdentifier: "SYMPH-TAIL",

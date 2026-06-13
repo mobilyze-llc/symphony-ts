@@ -574,14 +574,13 @@ function parseCircuitBreakerEntry(value: unknown): CircuitBreakerEntry | null {
   return typeof value.stageName === "string" &&
     typeof value.signature === "string" &&
     typeof value.openedAt === "string" &&
-    Array.isArray(value.openedForIssueIds)
+    Array.isArray(value.openedForIssueIds) &&
+    value.openedForIssueIds.every((entry) => typeof entry === "string")
     ? {
         stageName: value.stageName,
         signature: value.signature,
         openedAt: value.openedAt,
-        openedForIssueIds: value.openedForIssueIds.filter(
-          (entry): entry is string => typeof entry === "string",
-        ),
+        openedForIssueIds: value.openedForIssueIds,
       }
     : null;
 }
