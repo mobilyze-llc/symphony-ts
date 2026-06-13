@@ -10,6 +10,21 @@ import {
 
 const DISPATCHER_RUN_JOURNAL_DIR = join(".symphony", "run-journals");
 const DISPATCHER_RUN_JOURNAL_FILENAME = "dispatcher.jsonl";
+const DISPATCHER_RUN_JOURNAL_LOCK_DIR = `${DISPATCHER_RUN_JOURNAL_FILENAME}.lock`;
+const DISPATCHER_RUN_JOURNAL_LOCK_TIMEOUT_MS = 30_000;
+const DISPATCHER_RUN_JOURNAL_LOCK_POLL_MS = 25;
+
+export type DispatcherRunJournalEntryDraft = Omit<
+  DispatcherRunJournalEntry,
+  "sequence"
+>;
+
+export interface AppendDispatcherRunJournalEntriesResult {
+  journal: DispatcherRunJournal;
+  entries: DispatcherRunJournalEntry[];
+  appendedEntries: DispatcherRunJournalEntry[];
+  skippedEntries: DispatcherRunJournalEntry[];
+}
 
 export function getDispatcherRunJournalPath(workspaceRoot: string): string {
   return join(
@@ -19,9 +34,17 @@ export function getDispatcherRunJournalPath(workspaceRoot: string): string {
   );
 }
 
+export function getDispatcherRunJournalLockPath(workspaceRoot: string): string {
+  return join(
+    workspaceRoot,
+    DISPATCHER_RUN_JOURNAL_DIR,
+    DISPATCHER_RUN_JOURNAL_LOCK_DIR,
+  );
+}
+
 export function appendDispatcherRunJournalEntry(
   journal: DispatcherRunJournal,
-  entry: Omit<DispatcherRunJournalEntry, "sequence">,
+  entry: DispatcherRunJournalEntryDraft,
   minSequence = 1,
 ): {
   journal: DispatcherRunJournal;
@@ -106,6 +129,75 @@ export async function appendDispatcherRunJournalEntryToDisk(
   await fs.appendFile(artifactPath, `${JSON.stringify(entry)}\n`, "utf8");
 }
 
+export async function appendDispatcherRunJournalEntriesWithLock(
+  workspaceRoot: string,
+  drafts: readonly DispatcherRunJournalEntryDraft[],
+): Promise<AppendDispatcherRunJournalEntriesResult> {
+  // Standalone writer boundary: hold the lock across read, sequence allocation,
+  // and disk append so independent gate/operator tools cannot allocate from
+  // the same stale snapshot.
+  return withDispatcherRunJournalWriteLock(workspaceRoot, async () => {
+    let journal = await readDispatcherRunJournal(workspaceRoot);
+    const entries: DispatcherRunJournalEntry[] = [];
+    const appendedEntries: DispatcherRunJournalEntry[] = [];
+    const skippedEntries: DispatcherRunJournalEntry[] = [];
+
+    for (const draft of drafts) {
+      const appended = appendDispatcherRunJournalEntry(journal, draft);
+      journal = appended.journal;
+      entries.push(appended.entry);
+      if (appended.appended) {
+        appendedEntries.push(appended.entry);
+        await appendDispatcherRunJournalEntryToDisk(
+          workspaceRoot,
+          appended.entry,
+        );
+      } else {
+        skippedEntries.push(appended.entry);
+      }
+    }
+
+    return { journal, entries, appendedEntries, skippedEntries };
+  });
+}
+
+async function withDispatcherRunJournalWriteLock<T>(
+  workspaceRoot: string,
+  write: () => Promise<T>,
+): Promise<T> {
+  const artifactDir = join(workspaceRoot, DISPATCHER_RUN_JOURNAL_DIR);
+  const lockPath = getDispatcherRunJournalLockPath(workspaceRoot);
+  await fs.mkdir(artifactDir, { recursive: true });
+  await acquireDispatcherRunJournalWriteLock(lockPath);
+  try {
+    return await write();
+  } finally {
+    await fs.rm(lockPath, { recursive: true, force: true });
+  }
+}
+
+async function acquireDispatcherRunJournalWriteLock(
+  lockPath: string,
+): Promise<void> {
+  const startedAt = Date.now();
+  while (true) {
+    try {
+      await fs.mkdir(lockPath);
+      return;
+    } catch (error) {
+      if (!isAlreadyExistsPathError(error)) {
+        throw error;
+      }
+      if (Date.now() - startedAt >= DISPATCHER_RUN_JOURNAL_LOCK_TIMEOUT_MS) {
+        throw new Error(
+          `Timed out waiting for dispatcher journal write lock at ${lockPath}`,
+        );
+      }
+      await sleep(DISPATCHER_RUN_JOURNAL_LOCK_POLL_MS);
+    }
+  }
+}
+
 function isDispatcherRunJournalEntry(
   value: unknown,
 ): value is DispatcherRunJournalEntry {
@@ -160,4 +252,17 @@ function isMissingPathError(error: unknown): boolean {
     "code" in error &&
     (error as { code?: unknown }).code === "ENOENT"
   );
+}
+
+function isAlreadyExistsPathError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "EEXIST"
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

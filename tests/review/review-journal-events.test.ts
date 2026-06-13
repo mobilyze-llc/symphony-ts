@@ -208,6 +208,40 @@ describe("review journal events", () => {
     expect(serializedDelta).not.toContain("related_paths");
     expect(serializedDelta).not.toContain("evidence_locations");
   });
+
+  it("serializes concurrent standalone review appends into one journal sequence stream", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-concurrent-"),
+    );
+    const appendCount = 8;
+
+    await Promise.all(
+      Array.from({ length: appendCount }, (_, index) =>
+        appendReviewJournalEventsToDispatcherJournal({
+          workspaceRoot,
+          result: reviewResult({ verdict: "pass" }),
+          options: {
+            issueIdentifier: "SYMPH-450",
+            ownerId: `worker-${index}`,
+            source: "pipeline",
+            idempotencyKeyPrefix: `review-concurrent-${index}`,
+          },
+        }),
+      ),
+    );
+
+    const replayed = await readDispatcherRunJournal(workspaceRoot);
+    const sequences = replayed.map((entry) => entry.sequence);
+
+    expect(replayed).toHaveLength(appendCount * 3);
+    expect(sequences).toEqual(
+      Array.from({ length: appendCount * 3 }, (_, index) => index + 1),
+    );
+    expect(new Set(sequences).size).toBe(sequences.length);
+    expect(
+      replayed.filter((entry) => entry.kind === "review_gate_result"),
+    ).toHaveLength(appendCount);
+  });
 });
 
 function reviewResult(input: {
