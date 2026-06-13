@@ -3800,6 +3800,54 @@ describe("runHeadlessCouncilGate", () => {
     expect(report).toContain("substrate_stall:claude-opus");
   });
 
+  it("aborts and sweeps cleanup for a lane abandoned by the stall deadline", async () => {
+    let aborted = false;
+    const progress: string[] = [];
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          hang: true,
+          onAbort: () => {
+            aborted = true;
+          },
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      {
+        runCommand: harness.runCommand,
+        laneStallDeadlineMs: 50,
+        progress: (message) => progress.push(message),
+      },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(aborted).toBe(true);
+    expect(
+      harness.commands.some(
+        (command) =>
+          command.args[0] === "cleanup" && command.args[1] === "--sweep",
+      ),
+    ).toBe(true);
+    expect(progress.some((line) => line.includes("lane_started"))).toBe(true);
+    expect(
+      progress.some((line) => line.includes("lane_stalled laneId=claude-opus")),
+    ).toBe(true);
+    expect(
+      progress.some((line) =>
+        line.includes("lane_cleanup_completed laneId=claude-opus"),
+      ),
+    ).toBe(true);
+  });
+
   it("ignores a non-positive lane stall deadline override and completes healthy lanes", async () => {
     const harness = await createHarness();
     const result = await runHeadlessCouncilGate(
@@ -3880,6 +3928,65 @@ describe("runHeadlessCouncilGate", () => {
     expect(report).toContain("substrate_stall:codex-high-lead");
     expect(report).toContain("claude-opus");
     expect(report).toContain("pi-deepseek");
+  });
+
+  it("derives Codex lead stall budget from remaining overall gate time", async () => {
+    let leadAborted = false;
+    const progress: string[] = [];
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": { delayMs: 35 },
+        "codex-high-lead": {
+          hang: true,
+          onAbort: () => {
+            leadAborted = true;
+          },
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        timeoutSeconds: 60,
+      },
+      {
+        runCommand: harness.runCommand,
+        laneStallDeadlineMs: 1_000,
+        overallLaneDeadlineMs: 75,
+        progress: (message) => progress.push(message),
+      },
+    );
+
+    expect(leadAborted).toBe(true);
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({ state: "complete", verdict: "pass" });
+    expect(
+      result.lanes.find((lane) => lane.laneId === "codex-high-lead"),
+    ).toMatchObject({
+      state: "timed_out",
+      verdict: "error",
+      degradedReason: "substrate_stall",
+    });
+    const codexLeadCommand = harness.commands.find(
+      (command) =>
+        command.args[0] === "run" &&
+        command.args.includes("--artifact-name") &&
+        command.args[command.args.indexOf("--artifact-name") + 1] ===
+          "codex-high-lead",
+    );
+    expect(readFlag(codexLeadCommand?.args ?? [], "--timeout-seconds")).toBe(
+      "1",
+    );
+    expect(
+      progress.some((line) =>
+        line.includes("lane_stalled laneId=codex-high-lead"),
+      ),
+    ).toBe(true);
   });
 
   it("instructs the Codex lead not to turn substrate stalls into code findings", async () => {
@@ -6271,7 +6378,9 @@ interface LaneBehavior {
   artifact?: string;
   afterArtifactWrite?: (artifactPath: string) => Promise<void>;
   reject?: Error;
+  delayMs?: number;
   hang?: boolean;
+  onAbort?: () => void;
 }
 
 async function createHarness(options?: {
@@ -6320,6 +6429,14 @@ async function createHarness(options?: {
     commands.push(commandRecord);
     if (args[0] === "preflight") {
       return options?.preflight ?? { exitCode: 0, stdout: "{}", stderr: "" };
+    }
+
+    if (args[0] === "cleanup" && args[1] === "--sweep") {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ ok: true, swept: [] }),
+        stderr: "",
+      };
     }
 
     if (command === "gh" && args[0] === "pr" && args[1] === "view") {
@@ -6424,7 +6541,23 @@ async function createHarness(options?: {
         throw behavior.reject;
       }
       if (behavior.hang === true) {
-        return await new Promise<CommandResult>(() => {});
+        return await new Promise<CommandResult>((resolve) => {
+          runOptions.signal?.addEventListener(
+            "abort",
+            () => {
+              behavior.onAbort?.();
+              resolve({
+                exitCode: 1,
+                stdout: "",
+                stderr: "aborted by test signal",
+              });
+            },
+            { once: true },
+          );
+        });
+      }
+      if (behavior.delayMs !== undefined) {
+        await new Promise((resolve) => setTimeout(resolve, behavior.delayMs));
       }
       if (behavior.stdout !== undefined) {
         return {
