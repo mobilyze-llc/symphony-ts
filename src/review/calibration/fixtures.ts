@@ -5,6 +5,8 @@ export const REVIEW_CALIBRATION_OWNER_ISSUE = "SYMPH-493";
 export const REVIEW_CALIBRATION_PARENT_ISSUE = "SYMPH-446";
 export const REVIEW_CALIBRATION_REPLAY_SOURCE = "replay";
 
+const RETROSPECTIVE_REPLAY_MIN_CASES = 10;
+
 export const REVIEW_CALIBRATION_BUG_CLASSES = [
   "security:path_traversal",
   "security:shell_injection",
@@ -895,21 +897,23 @@ function validateRetrospectiveReplay(
     addError,
     { allowEmpty: false },
   );
-  if (findForbiddenRuntimeField(value, value.forbiddenRuntimeFields) !== null) {
-    const forbiddenPath = findForbiddenRuntimeField(
-      value,
-      value.forbiddenRuntimeFields,
-    );
-    if (forbiddenPath !== null) {
-      addError(forbiddenPath, "must not include forbidden runtime field");
-    }
+  const forbiddenPath = findForbiddenRuntimeField(
+    value,
+    value.forbiddenRuntimeFields,
+    path,
+  );
+  if (forbiddenPath !== null) {
+    addError(forbiddenPath, "must not include forbidden runtime field");
   }
   if (!Array.isArray(value.cases)) {
     addError(`${path}.cases`, "must be an array");
     return;
   }
-  if (value.cases.length < 8) {
-    addError(`${path}.cases`, "must include roughly the last 10 replay cases");
+  if (value.cases.length < RETROSPECTIVE_REPLAY_MIN_CASES) {
+    addError(
+      `${path}.cases`,
+      `must include at least ${RETROSPECTIVE_REPLAY_MIN_CASES} replay cases`,
+    );
   }
   value.cases.forEach((replayCase, index) => {
     validateRetrospectiveReplayCase(
@@ -1195,9 +1199,10 @@ function findOwnKeyPathDeep(
 function findForbiddenRuntimeField(
   value: unknown,
   fields: unknown,
+  path: string,
 ): string | null {
   for (const field of stringArrayValues(fields)) {
-    const found = findOwnKeyPathDeep(value, field, "$.retrospectiveReplay");
+    const found = findOwnKeyPathDeep(value, field, path);
     if (found !== null) {
       return found;
     }
