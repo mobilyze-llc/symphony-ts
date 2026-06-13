@@ -575,6 +575,7 @@ export class AgentRunner {
         const prompt = await buildTurnPrompt({
           workflow: {
             promptTemplate: effectivePromptTemplate,
+            workflowPath: this.config.workflowPath,
           },
           issue,
           attempt: input.attempt,

@@ -1017,9 +1017,4 @@ curl -X PUT -H "Content-Type: <contentType>" \
 - If the markdown names durable follow-up work, search Linear first, then create or update the issue before mentioning it in the doc.
 - Do not update docs/generated/ files; those are auto-generated and will be overwritten.
 
-## Eligibility on Ticket Rewrite (SYMPH-515)
-
-- If you rewrite or rescope a Linear ticket, the edit is incomplete until you record an explicit eligibility decision in the ticket body, workpad, or edit note.
-- Recheck at least project, state, labels, owner, and dispatch eligibility before preserving or changing queue placement.
-- Treat a rewritten ticket that remains attached to the Pipeline project or another active dispatch surface without that explicit decision as a Council v2 review finding.
-- Incident source: the 2026-06-12 retro "Review Convergence Discipline for Journal Invariants" recorded SYMPH-321 retaining stale Pipeline attachment after its runbook rewrite changed the work semantics.
+{% render 'prompts/eligibility-on-ticket-rewrite.liquid' %}

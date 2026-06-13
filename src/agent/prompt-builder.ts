@@ -1,3 +1,4 @@
+import { dirname, normalize, resolve, sep } from "node:path";
 import { Liquid } from "liquidjs";
 
 import type { Issue, WorkflowDefinition } from "../domain/model.js";
@@ -8,11 +9,11 @@ import { withModePermissionEnvelope } from "../policy/hard-stops.js";
 export const DEFAULT_WORKFLOW_PROMPT =
   "You are working on an issue from Linear.";
 
-const liquidEngine = new Liquid({
-  strictVariables: true,
-  strictFilters: true,
-  ownPropertyOnly: true,
-});
+const DEFAULT_PARTIAL_ROOTS = [".", "pipeline-config"] as const;
+
+type RenderPromptWorkflow = Pick<WorkflowDefinition, "promptTemplate"> & {
+  workflowPath?: string;
+};
 
 export class PromptTemplateError extends Error {
   readonly code: string;
@@ -34,7 +35,7 @@ export class PromptTemplateError extends Error {
 }
 
 export interface RenderPromptInput {
-  workflow: Pick<WorkflowDefinition, "promptTemplate">;
+  workflow: RenderPromptWorkflow;
   issue: Issue;
   attempt: number | null;
   stageName?: string | null;
@@ -61,11 +62,12 @@ export function getEffectivePromptTemplate(promptTemplate: string): string {
 
 export async function renderPrompt(input: RenderPromptInput): Promise<string> {
   const template = getEffectivePromptTemplate(input.workflow.promptTemplate);
+  const engine = createLiquidEngine(input.workflow.workflowPath);
 
   try {
-    const parsedTemplate = liquidEngine.parse(template);
+    const parsedTemplate = engine.parse(template);
 
-    const rendered = await liquidEngine.render(parsedTemplate, {
+    const rendered = await engine.render(parsedTemplate, {
       issue: toTemplateIssue(input.issue),
       attempt: input.attempt,
       stageName: input.stageName ?? null,
@@ -80,6 +82,44 @@ export async function renderPrompt(input: RenderPromptInput): Promise<string> {
   } catch (error) {
     throw toPromptTemplateError(error);
   }
+}
+
+function createLiquidEngine(workflowPath?: string): Liquid {
+  return new Liquid({
+    partials: resolvePartialRoots(workflowPath),
+    strictVariables: true,
+    strictFilters: true,
+    ownPropertyOnly: true,
+  });
+}
+
+function resolvePartialRoots(workflowPath?: string): string[] {
+  if (workflowPath === undefined) {
+    return [...DEFAULT_PARTIAL_ROOTS];
+  }
+
+  const workflowDirectory = normalize(dirname(workflowPath));
+  const pipelineConfigDirectory =
+    resolvePipelineConfigDirectory(workflowDirectory);
+
+  return Array.from(
+    new Set([
+      workflowDirectory,
+      pipelineConfigDirectory,
+      resolve(pipelineConfigDirectory, ".."),
+      ...DEFAULT_PARTIAL_ROOTS,
+    ]),
+  );
+}
+
+function resolvePipelineConfigDirectory(workflowDirectory: string): string {
+  const marker = `${sep}pipeline-config`;
+  const markerIndex = workflowDirectory.lastIndexOf(marker);
+  if (markerIndex !== -1) {
+    return workflowDirectory.slice(0, markerIndex + marker.length);
+  }
+
+  return resolve(workflowDirectory, "pipeline-config");
 }
 
 export async function buildTurnPrompt(

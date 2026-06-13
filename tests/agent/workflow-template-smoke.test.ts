@@ -1,6 +1,14 @@
 import { execFileSync } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, extname, join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import packageJson from "../../package.json" with { type: "json" };
 import { renderPrompt } from "../../src/agent/prompt-builder.js";
@@ -36,15 +44,57 @@ const SHIPPED_PRODUCT_WORKFLOW_CONFIGS = [
   "../../pipeline-config/workflows/WORKFLOW-symphony.md",
   "../../pipeline-config/workflows/WORKFLOW-toys.md",
 ].map((path) => resolve(import.meta.dirname, path));
-const INLINE_ELIGIBILITY_ON_REWRITE_WORKFLOW_CONFIGS = [
+const ELIGIBILITY_ON_REWRITE_PARTIAL_PATH = resolve(
+  import.meta.dirname,
+  "../../pipeline-config/prompts/eligibility-on-ticket-rewrite.liquid",
+);
+const ELIGIBILITY_ON_REWRITE_INCLUDE =
+  "{% render 'prompts/eligibility-on-ticket-rewrite.liquid' %}";
+const EXPECTED_ELIGIBILITY_ON_REWRITE_DIRECTIVE = `## Eligibility on Ticket Rewrite (SYMPH-515)
+
+- If you rewrite or rescope a Linear ticket, the edit is incomplete until you record an explicit eligibility decision in the ticket body, workpad, or edit note.
+- Recheck at least project, state, labels, owner, and dispatch eligibility before preserving or changing queue placement.
+- Treat a rewritten ticket that remains attached to the Pipeline project or another active dispatch surface without that explicit decision as a Council v2 review finding.
+- Incident source: the 2026-06-12 retro "Review Convergence Discipline for Journal Invariants" recorded SYMPH-321 retaining stale Pipeline attachment after its runbook rewrite changed the work semantics.`;
+const ELIGIBILITY_ON_REWRITE_INCLUDE_SOURCE_PATHS = [
+  "../../pipeline-config/prompts/global.liquid",
+  "../../pipeline-config/prompts/investigate.liquid",
+  "../../pipeline-config/prompts/implement.liquid",
   "../../pipeline-config/WORKFLOW-staged.md",
   "../../pipeline-config/WORKFLOW-flat.md",
   "../../pipeline-config/WORKFLOW-instrumentation.md",
   "../../pipeline-config/templates/WORKFLOW-template.md",
+].map((path) => resolve(import.meta.dirname, path));
+const ELIGIBILITY_ON_REWRITE_WORKFLOW_CONFIGS = [
+  ...SHIPPED_CODEX_WORKFLOW_CONFIGS,
   ...SHIPPED_PRODUCT_WORKFLOW_CONFIGS,
-].map((path) =>
-  path.startsWith("../../") ? resolve(import.meta.dirname, path) : path,
-);
+];
+const ELIGIBILITY_ON_REWRITE_STAGES = [
+  "investigate",
+  "implement",
+  "review",
+  "merge",
+] as const;
+const ELIGIBILITY_ON_REWRITE_STANDALONE_PROMPTS = [
+  "prompts/global.liquid",
+  "prompts/investigate.liquid",
+  "prompts/implement.liquid",
+] as const;
+const PROMPT_TEXT_FILE_EXTENSIONS = new Set([".liquid", ".md"]);
+const ELIGIBILITY_ON_REWRITE_UNCOVERED_STANDALONE_SURFACES = [
+  {
+    stageName: "review",
+    prompt: null,
+    reason:
+      "review uses the workflow root to evaluate PR evidence and council artifacts; it has no standalone stage prompt that can rewrite or rescope tracker work",
+  },
+  {
+    stageName: "merge",
+    prompt: "prompts/merge.liquid",
+    reason:
+      "merge verifies and merges an existing PR; it must not rewrite or rescope tracker work",
+  },
+] as const;
 const INLINE_WORKER_PROMPT_CONFIGS = SHIPPED_CODEX_WORKFLOW_CONFIGS.filter(
   (path) => !path.endsWith("/pipeline-config/WORKFLOW.md"),
 );
@@ -676,45 +726,28 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain("Do not request sandbox, network");
   });
 
-  it("documents eligibility-on-rewrite for ticket rescopes", async () => {
-    const output = await renderPrompt({
-      workflow: { promptTemplate },
-      issue: ISSUE_FIXTURE,
-      attempt: null,
-      stageName: "implement",
-      reworkCount: 0,
-    });
+  it("keeps eligibility-on-rewrite in one inspectable prompt partial", async () => {
+    const directive = (
+      await readFile(ELIGIBILITY_ON_REWRITE_PARTIAL_PATH, "utf8")
+    ).trim();
+    expect(directive).toBe(EXPECTED_ELIGIBILITY_ON_REWRITE_DIRECTIVE);
 
-    expectEligibilityOnRewriteRule(output);
+    const filesWithDirective = await findFilesContaining(
+      resolve(REPO_ROOT, "pipeline-config"),
+      "If you rewrite or rescope a Linear ticket",
+    );
+    expect(filesWithDirective).toEqual([
+      "pipeline-config/prompts/eligibility-on-ticket-rewrite.liquid",
+    ]);
+
+    for (const sourcePath of ELIGIBILITY_ON_REWRITE_INCLUDE_SOURCE_PATHS) {
+      expect(await readFile(sourcePath, "utf8")).toContain(
+        ELIGIBILITY_ON_REWRITE_INCLUDE,
+      );
+    }
   });
 
-  it("documents eligibility-on-rewrite in the primary staged implement prompt", async () => {
-    const primaryWorkflow = await loadWorkflowDefinition(
-      PIPELINE_WORKFLOW_PATH,
-    );
-    const primaryConfig = resolveWorkflowConfig(primaryWorkflow, {
-      LINEAR_API_KEY: "test-token",
-      LINEAR_PROJECT_SLUG: "test-project",
-    });
-    const primaryImplementPrompt =
-      primaryConfig.stages?.stages.implement?.prompt;
-    expect(primaryImplementPrompt).toBe("prompts/implement.liquid");
-    const primaryImplementTemplate = await readFile(
-      resolve(dirname(PIPELINE_WORKFLOW_PATH), primaryImplementPrompt!),
-      "utf8",
-    );
-    const output = await renderPrompt({
-      workflow: { promptTemplate: primaryImplementTemplate },
-      issue: ISSUE_FIXTURE,
-      attempt: null,
-      stageName: "implement",
-      reworkCount: 0,
-    });
-
-    expectEligibilityOnRewriteRule(output);
-  });
-
-  it("documents eligibility-on-rewrite in primary file-backed rewrite prompt surfaces", async () => {
+  it("renders eligibility-on-rewrite in primary file-backed rewrite prompt surfaces", async () => {
     const primaryWorkflow = await loadWorkflowDefinition(
       PIPELINE_WORKFLOW_PATH,
     );
@@ -724,16 +757,16 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     });
 
     const promptFiles = [
-      "prompts/global.liquid",
+      ELIGIBILITY_ON_REWRITE_STANDALONE_PROMPTS[0],
       primaryConfig.stages?.stages.investigate?.prompt,
       primaryConfig.stages?.stages.implement?.prompt,
     ];
 
-    expect(promptFiles).toEqual([
-      "prompts/global.liquid",
-      "prompts/investigate.liquid",
-      "prompts/implement.liquid",
-    ]);
+    expect(promptFiles).toEqual([...ELIGIBILITY_ON_REWRITE_STANDALONE_PROMPTS]);
+
+    const directive = (
+      await readFile(ELIGIBILITY_ON_REWRITE_PARTIAL_PATH, "utf8")
+    ).trim();
 
     for (const promptFile of promptFiles) {
       expect(promptFile).toBeDefined();
@@ -751,17 +784,19 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
         reworkCount: 0,
       });
 
-      expectEligibilityOnRewriteRule(output);
+      expectEligibilityOnRewriteRule(output, directive);
     }
   });
 
-  it("checks every standalone shipped workflow config for eligibility-on-rewrite coverage", async () => {
-    // SYMPH-527: file-backed stage prompts render as standalone strings, so
-    // keep this explicit until a shared prompt partial has an inspectable root.
-    for (const configPath of INLINE_ELIGIBILITY_ON_REWRITE_WORKFLOW_CONFIGS) {
+  it("renders eligibility-on-rewrite through every shipped workflow root", async () => {
+    const directive = (
+      await readFile(ELIGIBILITY_ON_REWRITE_PARTIAL_PATH, "utf8")
+    ).trim();
+
+    for (const configPath of ELIGIBILITY_ON_REWRITE_WORKFLOW_CONFIGS) {
       const workflowConfig = await loadWorkflowDefinition(configPath);
 
-      for (const stageName of ["investigate", "implement"] as const) {
+      for (const stageName of ELIGIBILITY_ON_REWRITE_STAGES) {
         const output = await renderPrompt({
           workflow: { promptTemplate: workflowConfig.promptTemplate },
           issue: ISSUE_FIXTURE,
@@ -770,26 +805,134 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
           reworkCount: 0,
         });
 
-        expectEligibilityOnRewriteRule(output);
+        expectEligibilityOnRewriteRule(output, directive);
       }
     }
   });
+
+  it("resolves eligibility-on-rewrite partials from the explicit workflow path", async () => {
+    const alternateRoot = await mkdtemp(
+      join(tmpdir(), "symphony-prompt-root-"),
+    );
+    try {
+      const pipelineConfigDirectory = join(alternateRoot, "pipeline-config");
+      const promptsDirectory = join(pipelineConfigDirectory, "prompts");
+      const workflowPath = join(pipelineConfigDirectory, "WORKFLOW.md");
+      const directive = "Temp workflow-root eligibility directive";
+      await mkdir(promptsDirectory, { recursive: true });
+      await writeFile(
+        join(promptsDirectory, "eligibility-on-ticket-rewrite.liquid"),
+        directive,
+        "utf8",
+      );
+
+      const output = await renderPrompt({
+        workflow: {
+          promptTemplate:
+            "{% render 'prompts/eligibility-on-ticket-rewrite.liquid' %}",
+          workflowPath,
+        },
+        issue: ISSUE_FIXTURE,
+        attempt: null,
+        stageName: "implement",
+        reworkCount: 0,
+      });
+
+      expect(output.trim()).toBe(directive);
+    } finally {
+      await rm(alternateRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("documents intentionally uncovered standalone review and merge prompt surfaces", async () => {
+    const primaryWorkflow = await loadWorkflowDefinition(
+      PIPELINE_WORKFLOW_PATH,
+    );
+    const primaryConfig = resolveWorkflowConfig(primaryWorkflow, {
+      LINEAR_API_KEY: "test-token",
+      LINEAR_PROJECT_SLUG: "test-project",
+    });
+    const directive = (
+      await readFile(ELIGIBILITY_ON_REWRITE_PARTIAL_PATH, "utf8")
+    ).trim();
+
+    expect(primaryConfig.stages?.stages.review?.prompt ?? null).toBe(
+      ELIGIBILITY_ON_REWRITE_UNCOVERED_STANDALONE_SURFACES[0].prompt,
+    );
+    expect(
+      ELIGIBILITY_ON_REWRITE_UNCOVERED_STANDALONE_SURFACES[0].reason,
+    ).toContain("no standalone stage prompt");
+
+    const mergePrompt =
+      ELIGIBILITY_ON_REWRITE_UNCOVERED_STANDALONE_SURFACES[1].prompt;
+    expect(primaryConfig.stages?.stages.merge?.prompt).toBe(mergePrompt);
+    expect(
+      ELIGIBILITY_ON_REWRITE_UNCOVERED_STANDALONE_SURFACES[1].reason,
+    ).toContain("must not rewrite or rescope tracker work");
+    expect(mergePrompt).not.toBeNull();
+
+    const mergeTemplate = await readFile(
+      resolve(dirname(PIPELINE_WORKFLOW_PATH), mergePrompt!),
+      "utf8",
+    );
+    expect(mergeTemplate).not.toContain(ELIGIBILITY_ON_REWRITE_INCLUDE);
+    expect(mergeTemplate).not.toContain(directive);
+  });
 });
 
-function expectEligibilityOnRewriteRule(output: string): void {
-  expect(output).toContain("Eligibility on Ticket Rewrite (SYMPH-515)");
-  expect(output).toContain("rewrite or rescope a Linear ticket");
-  expect(output).toContain(
-    "project, state, labels, owner, and dispatch eligibility",
-  );
-  expect(output).toContain(
-    "Pipeline project or another active dispatch surface",
-  );
-  expect(output).toContain("Council v2 review finding");
-  expect(output).toContain(
-    '2026-06-12 retro "Review Convergence Discipline for Journal Invariants"',
-  );
-  expect(output).toContain("SYMPH-321");
+function expectEligibilityOnRewriteRule(
+  output: string,
+  directive: string,
+): void {
+  expect(output).toContain(directive);
+  expect(countOccurrences(output, directive)).toBe(1);
+}
+
+function countOccurrences(output: string, needle: string): number {
+  if (needle.length === 0) {
+    return 0;
+  }
+
+  let count = 0;
+  let index = output.indexOf(needle);
+  while (index !== -1) {
+    count += 1;
+    index = output.indexOf(needle, index + needle.length);
+  }
+  return count;
+}
+
+async function findFilesContaining(
+  directoryPath: string,
+  needle: string,
+): Promise<string[]> {
+  const matches: string[] = [];
+
+  async function visit(currentDirectoryPath: string): Promise<void> {
+    const entries = await readdir(currentDirectoryPath, {
+      withFileTypes: true,
+    });
+    for (const entry of entries) {
+      const entryPath = resolve(currentDirectoryPath, entry.name);
+      if (entry.isDirectory()) {
+        await visit(entryPath);
+        continue;
+      }
+      if (!entry.isFile()) {
+        continue;
+      }
+      if (!PROMPT_TEXT_FILE_EXTENSIONS.has(extname(entry.name))) {
+        continue;
+      }
+      const contents = await readFile(entryPath, "utf8");
+      if (contents.includes(needle)) {
+        matches.push(relative(REPO_ROOT, entryPath));
+      }
+    }
+  }
+
+  await visit(directoryPath);
+  return matches.sort();
 }
 
 function isGitIgnored(path: string): boolean {
