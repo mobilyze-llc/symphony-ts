@@ -176,6 +176,40 @@ describe("AgentRunner", () => {
     expect(prompts).toHaveLength(1);
   });
 
+  it("inserts model_reasoning_effort before app-server when the command has no existing effort config", async () => {
+    const root = await createRoot();
+    let observedCommand: string | null = null;
+    const tracker = createTracker({
+      refreshStates: [{ id: "issue-1", identifier: "ABC-123", state: "Done" }],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        codex: {
+          ...createConfig(root, "unused").codex,
+          command: "codex app-server",
+        },
+      },
+      tracker,
+      createCodexClient: (input) => {
+        observedCommand = input.command;
+        return createStubCodexClient([], input, {
+          statuses: ["completed"],
+        });
+      },
+    });
+
+    await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      reasoningEffort: "high",
+    });
+
+    expect(observedCommand).toBe(
+      "codex --config 'model_reasoning_effort=\"high\"' app-server",
+    );
+  });
+
   it("fetches the configured base ref before refreshing a reused workspace", async () => {
     const root = await createRoot();
     const source = join(root, "source");

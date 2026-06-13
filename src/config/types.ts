@@ -176,6 +176,10 @@ export interface WorkflowCodexConfig {
 }
 
 export interface WorkflowRiskPredicateReasoningConfig {
+  /**
+   * Reasoning effort applied only to eligible risk-predicate stages:
+   * `investigate` and `implement`. Other stage names keep the baseline command.
+   */
   effort: ReasoningEffort | null;
 }
 
