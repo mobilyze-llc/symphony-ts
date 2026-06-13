@@ -111,6 +111,10 @@ describe("runHeadlessCouncilGate", () => {
             "claude",
             "--model",
             "opus",
+            "--profile",
+            "legacy",
+            "--allowed-tools",
+            "Read,Grep,Glob,Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git status *),Bash(git ls-files *),Bash(gh pr view *),Bash(gh pr diff *),Write",
           ]),
         }),
         expect.objectContaining({
@@ -1168,6 +1172,15 @@ describe("runHeadlessCouncilGate", () => {
       message: "Reviewer verdict was FINDINGS.",
       degradedReason: null,
     });
+    const lane = result.lanes.find((lane) => lane.laneId === "claude-opus")!;
+    expect(lane.rawArtifactPath).toBe(
+      join(harness.artifactDir, "claude-opus.raw.md"),
+    );
+    const artifact = await readFile(lane.artifactPath!, "utf-8");
+    expect(artifact.replace(/^(?:\s|\uFEFF)+/u, "")).toMatch(/^## Verdict/);
+    expect(artifact).not.toContain("# Council Review of PR #288 (SYMPH-287)");
+    const rawArtifact = await readFile(lane.rawArtifactPath!, "utf-8");
+    expect(rawArtifact).toContain("# Council Review of PR #288 (SYMPH-287)");
   });
 
   it("passes a PASS artifact behind a single leading H1 title line", async () => {
