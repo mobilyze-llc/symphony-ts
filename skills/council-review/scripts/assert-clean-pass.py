@@ -23,12 +23,8 @@ REQUIRED_ARTIFACTS = (
 )
 
 
-def read_text(artifact_dir: Path, name: str, required: bool = True) -> str:
+def read_text(artifact_dir: Path, name: str) -> str:
     path = artifact_dir / name
-    if not path.exists():
-        if required:
-            raise FileNotFoundError(f"missing required artifact: {name}")
-        return ""
     return path.read_text(encoding="utf-8").strip()
 
 

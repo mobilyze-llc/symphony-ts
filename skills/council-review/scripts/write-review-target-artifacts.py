@@ -50,7 +50,13 @@ def write_no_pr(artifact_dir: Path) -> None:
 def equivalent_base_ref(pr_base_ref: str, resolved_base_ref: str) -> str:
     if pr_base_ref == resolved_base_ref:
         return "exact"
-    if pr_base_ref == resolved_base_ref.removeprefix("origin/"):
+    origin_prefix = "origin/"
+    resolved_without_origin = (
+        resolved_base_ref[len(origin_prefix) :]
+        if resolved_base_ref.startswith(origin_prefix)
+        else resolved_base_ref
+    )
+    if pr_base_ref == resolved_without_origin:
         return "origin-prefix-equivalent"
     return "mismatch"
 

@@ -49,6 +49,15 @@ function runPython(script: string, dir: string) {
   return spawnSync("python3", [script, dir], { encoding: "utf-8" });
 }
 
+function requiredArtifactsFromAssertScript(): string[] {
+  const source = readFileSync(ASSERT_CLEAN_PASS, "utf-8");
+  const match = /REQUIRED_ARTIFACTS = \(([\s\S]*?)\)/.exec(source);
+  expect(match).not.toBeNull();
+  return [...(match?.[1] ?? "").matchAll(/"([^"]+)"/g)]
+    .map((artifactMatch) => artifactMatch[1])
+    .filter((artifact): artifact is string => artifact !== undefined);
+}
+
 function writeBaseSetupFacts(dir: string): void {
   writeArtifact(dir, "pr-view-exit-code.txt", "0\n");
   writeArtifact(dir, "git-status-short.txt", "");
@@ -246,7 +255,7 @@ describe("council-review manual skill", () => {
   it("extracts setup provenance classification into a tested helper", () => {
     expect(skill).toContain("scripts/write-review-target-artifacts.py");
     expect(skill).toContain(
-      '"$COUNCIL_REVIEW_SKILL_DIR/scripts/write-review-target-artifacts.py" "$COUNCIL_DIR"',
+      '"$COUNCIL_REVIEW_SKILL_DIR/scripts/write-review-target-artifacts.py" "$COUNCIL_DIR" || exit 1',
     );
   });
 
@@ -344,21 +353,31 @@ describe("council-review manual skill", () => {
     }
   });
 
-  it("keeps missing-artifact diagnostics focused", () => {
-    const requiredArtifacts = [
-      "pr-mode.txt",
-      "pr-is-draft.txt",
-      "pr-view-exit-code.txt",
-      "git-status-short.txt",
-      "pr-diff-provenance.txt",
-      "pr-base-equivalence.txt",
-      "pr-head-sha.txt",
-      "local-head-sha.txt",
-      "pr-base-sha.txt",
-      "resolved-base-sha.txt",
-    ];
+  it("fails before classification when PR draft state is malformed", () => {
+    withArtifactDir((dir) => {
+      writeBaseSetupFacts(dir);
+      writeArtifact(
+        dir,
+        "pr.json",
+        JSON.stringify({
+          baseRefName: "main",
+          baseRefOid: "2222222222222222222222222222222222222222",
+          headRefOid: "1111111111111111111111111111111111111111",
+          isDraft: "true",
+        }),
+      );
 
-    for (const missingArtifact of requiredArtifacts) {
+      const classify = runPython(WRITE_REVIEW_TARGET, dir);
+      expect(classify.status).toBe(1);
+      expect(classify.stderr).toContain(
+        "Cannot mechanically assert PR draft state",
+      );
+      expect(() => readArtifact(dir, "pr-mode.txt")).toThrow();
+    });
+  });
+
+  it("keeps missing-artifact diagnostics focused", () => {
+    for (const missingArtifact of requiredArtifactsFromAssertScript()) {
       withArtifactDir((dir) => {
         writeCleanPassArtifacts(dir);
         rmSync(resolve(dir, missingArtifact));

@@ -175,7 +175,7 @@ if [ -n "$UNTRACKED" ]; then
   exit 1
 fi
 
-"$COUNCIL_REVIEW_SKILL_DIR/scripts/write-review-target-artifacts.py" "$COUNCIL_DIR"
+"$COUNCIL_REVIEW_SKILL_DIR/scripts/write-review-target-artifacts.py" "$COUNCIL_DIR" || exit 1
 
 CLEAN_PASS_ASSERTION_STATUS=0
 printf '%s\n' "$COUNCIL_REVIEW_SKILL_DIR/scripts/assert-clean-pass.py" \
