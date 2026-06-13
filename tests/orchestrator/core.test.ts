@@ -13,6 +13,7 @@ import {
   type SupervisionResteerRequest,
   classifyExitOutcome,
   computeFailureRetryDelayMs,
+  isStopSignalDelivery,
   sortIssuesForDispatch,
 } from "../../src/orchestrator/core.js";
 import type { TrackerIssueWriteRequest } from "../../src/orchestrator/tracker-write.js";
@@ -2021,6 +2022,128 @@ describe("orchestrator core", () => {
     expect(resumed.dispatchedIssueIds).toEqual(["1"]);
     expect(orchestrator.getState().failed.has("1")).toBe(false);
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("ignores malformed stop-signal telemetry returned by stopRunningIssue", async () => {
+    const orchestrator = createOrchestrator({
+      stopRunningIssue: async () => ({
+        status: "delivered",
+        reason: "manual_stop",
+        attemptedAt: "2026-03-06T00:00:05.000Z",
+        workspacePath: "/tmp/workspaces/1",
+        attempts: [
+          {
+            pid: 4242,
+            processGroupId: 0,
+            sigterm: "delivered",
+            sigkill: "not_attempted",
+          },
+        ],
+        warning: null,
+      }),
+    });
+
+    await orchestrator.pollTick();
+    const stopRequest = await orchestrator.requestStopByIdentifier("ISSUE-1");
+
+    expect(stopRequest).toMatchObject({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      reason: "manual_stop",
+    });
+    expect(stopRequest?.signalDelivery).toBeUndefined();
+  });
+
+  it("validates nested stop-signal delivery attempt contracts", () => {
+    expect(
+      isStopSignalDelivery({
+        status: "delivered",
+        reason: "manual_stop",
+        attemptedAt: "2026-03-06T00:00:05.000Z",
+        workspacePath: "/tmp/workspaces/1",
+        attempts: [
+          {
+            pid: 4242,
+            processGroupId: 4242,
+            sigterm: "delivered",
+            sigkill: "not_attempted",
+          },
+        ],
+        warning: null,
+      }),
+    ).toBe(true);
+
+    expect(
+      isStopSignalDelivery({
+        status: "delivered",
+        reason: "manual_stop",
+        attemptedAt: "2026-03-06T00:00:05.000Z",
+        workspacePath: "/tmp/workspaces/1",
+        attempts: [
+          {
+            pid: "4242",
+            processGroupId: null,
+            sigterm: "delivered",
+            sigkill: "not_attempted",
+          },
+        ],
+        warning: null,
+      }),
+    ).toBe(false);
+
+    expect(
+      isStopSignalDelivery({
+        status: "delivered",
+        reason: "manual_stop",
+        attemptedAt: "2026-03-06T00:00:05.000Z",
+        workspacePath: "/tmp/workspaces/1",
+        attempts: [
+          {
+            pid: 4242,
+            processGroupId: null,
+            sigterm: "failed",
+            sigkill: "delivered",
+          },
+        ],
+        warning: null,
+      }),
+    ).toBe(true);
+
+    expect(
+      isStopSignalDelivery({
+        status: "delivered",
+        reason: "manual_stop",
+        attemptedAt: "2026-03-06T00:00:05.000Z",
+        workspacePath: "/tmp/workspaces/1",
+        attempts: [
+          {
+            pid: 4242,
+            processGroupId: null,
+            sigterm: "failed",
+            sigkill: "not_attempted",
+          },
+        ],
+        warning: null,
+      }),
+    ).toBe(false);
+
+    expect(
+      isStopSignalDelivery({
+        status: "not_attempted",
+        reason: "manual_stop",
+        attemptedAt: "2026-03-06T00:00:05.000Z",
+        workspacePath: "/tmp/workspaces/1",
+        attempts: [
+          {
+            pid: 4242,
+            processGroupId: null,
+            sigterm: "delivered",
+            sigkill: "not_attempted",
+          },
+        ],
+        warning: null,
+      }),
+    ).toBe(false);
   });
 
   it("does not record a manual-stop resume guard when the stop lease is already active", async () => {

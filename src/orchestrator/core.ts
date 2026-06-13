@@ -10707,7 +10707,7 @@ function parseStoppedAfterReason(
   return isStopReason(rawReason) ? rawReason : null;
 }
 
-function isStopReason(value: string): value is StopReason {
+function isStopReason(value: unknown): value is StopReason {
   return (
     value === "terminal_state" ||
     value === "inactive_state" ||
@@ -11368,23 +11368,104 @@ function toClusterMembers(value: unknown): ClusterMember[] | null {
   return members;
 }
 
-function isStopSignalDelivery(value: unknown): value is StopSignalDelivery {
+export function isStopSignalDelivery(
+  value: unknown,
+): value is StopSignalDelivery {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
   const candidate = value as Partial<StopSignalDelivery>;
   return (
-    (candidate.status === "not_attempted" ||
-      candidate.status === "delivered" ||
-      candidate.status === "partial" ||
-      candidate.status === "failed") &&
-    typeof candidate.reason === "string" &&
-    typeof candidate.attemptedAt === "string" &&
+    isStopSignalDeliveryStatus(candidate.status) &&
+    isStopReason(candidate.reason) &&
+    isValidTimestamp(candidate.attemptedAt) &&
     (typeof candidate.workspacePath === "string" ||
       candidate.workspacePath === null) &&
     Array.isArray(candidate.attempts) &&
+    candidate.attempts.every(isStopSignalDeliveryAttempt) &&
+    isStopSignalDeliveryStatusConsistent(
+      candidate.status,
+      candidate.attempts,
+      candidate.warning,
+    ) &&
     (typeof candidate.warning === "string" || candidate.warning === null)
   );
+}
+
+function isStopSignalDeliveryStatus(
+  value: unknown,
+): value is StopSignalDeliveryStatus {
+  return (
+    value === "not_attempted" ||
+    value === "delivered" ||
+    value === "partial" ||
+    value === "failed"
+  );
+}
+
+function isValidTimestamp(value: unknown): value is string {
+  return typeof value === "string" && !Number.isNaN(Date.parse(value));
+}
+
+function isStopSignalDeliveryAttempt(
+  value: unknown,
+): value is StopSignalDeliveryAttempt {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const candidate = value as Partial<StopSignalDeliveryAttempt>;
+  if (
+    !isSignalTargetId(candidate.pid) ||
+    !(
+      candidate.processGroupId === null ||
+      isSignalTargetId(candidate.processGroupId)
+    ) ||
+    !isAttemptedStopSignalStatus(candidate.sigterm) ||
+    !isStopSignalStatus(candidate.sigkill)
+  ) {
+    return false;
+  }
+  return candidate.sigterm === "delivered"
+    ? candidate.sigkill === "not_attempted"
+    : candidate.sigkill !== "not_attempted";
+}
+
+function isSignalTargetId(value: unknown): value is number {
+  return Number.isInteger(value) && Number(value) > 1;
+}
+
+function isAttemptedStopSignalStatus(
+  value: unknown,
+): value is Exclude<StopSignalStatus, "not_attempted"> {
+  return value === "delivered" || value === "failed";
+}
+
+function isStopSignalStatus(value: unknown): value is StopSignalStatus {
+  return (
+    value === "delivered" || value === "failed" || value === "not_attempted"
+  );
+}
+
+function isStopSignalDeliveryStatusConsistent(
+  status: StopSignalDeliveryStatus,
+  attempts: StopSignalDeliveryAttempt[],
+  warning: StopSignalDelivery["warning"] | undefined,
+): boolean {
+  if (attempts.length === 0) {
+    return (
+      status === "not_attempted" ||
+      (status === "failed" && typeof warning === "string")
+    );
+  }
+  const failedAttempts = attempts.filter(
+    (attempt) => attempt.sigterm === "failed" && attempt.sigkill === "failed",
+  );
+  if (failedAttempts.length === 0) {
+    return status === "delivered";
+  }
+  return failedAttempts.length === attempts.length
+    ? status === "failed"
+    : status === "partial";
 }
 
 function isReviewSubstrateStallMessage(
