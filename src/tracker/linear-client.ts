@@ -27,8 +27,13 @@ import {
   LINEAR_OPEN_ISSUES_BY_LABELS_QUERY,
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
   LINEAR_SEARCH_ISSUES_BY_TITLE_AND_TEAM_QUERY,
+  LINEAR_TICKET_FEATURE_ISSUES_QUERY,
   LINEAR_WORKFLOW_STATES_QUERY,
 } from "./linear-queries.js";
+import {
+  type TicketFeatureSourceIssue,
+  normalizeLinearTicketFeatureIssue,
+} from "./ticket-feature.js";
 import type { IssueStateSnapshot, IssueTracker } from "./tracker.js";
 
 interface LinearGraphqlPageInfo {
@@ -270,6 +275,25 @@ export class LinearTrackerClient implements IssueTracker {
       first: this.pageSize,
       relationFirst: this.pageSize,
     });
+  }
+
+  async fetchTicketFeatureIssuesByStates(
+    stateNames: string[],
+  ): Promise<TicketFeatureSourceIssue[]> {
+    if (stateNames.length === 0) {
+      return [];
+    }
+
+    return this.fetchTicketFeatureIssuePages(
+      LINEAR_TICKET_FEATURE_ISSUES_QUERY,
+      {
+        projectSlug: this.requireProjectSlug(),
+        stateNames,
+        first: this.pageSize,
+        relationFirst: this.pageSize,
+        historyFirst: this.pageSize,
+      },
+    );
   }
 
   async fetchIssuesByLabels(labelNames: string[]): Promise<Issue[]> {
@@ -862,6 +886,70 @@ export class LinearTrackerClient implements IssueTracker {
         throw new TrackerError(
           ERROR_CODES.linearUnknownPayload,
           "Linear issues payload was missing pageInfo.",
+          { details: response },
+        );
+      }
+
+      if (pageInfo.hasNextPage !== true) {
+        break;
+      }
+
+      if (typeof pageInfo.endCursor !== "string" || pageInfo.endCursor === "") {
+        throw new TrackerError(
+          ERROR_CODES.linearMissingEndCursor,
+          "Linear pagination indicated more pages without an end cursor.",
+          { details: response },
+        );
+      }
+
+      after = pageInfo.endCursor;
+    }
+
+    return issues;
+  }
+
+  private async fetchTicketFeatureIssuePages(
+    query: string,
+    variables: Record<string, unknown>,
+  ): Promise<TicketFeatureSourceIssue[]> {
+    const issues: TicketFeatureSourceIssue[] = [];
+    let after: string | null = null;
+
+    while (true) {
+      const response: LinearCandidateData = await this.postGraphql(query, {
+        ...variables,
+        after,
+      });
+
+      const connection: LinearGraphqlConnection<unknown> | undefined =
+        response.issues;
+      if (!connection || typeof connection !== "object") {
+        throw new TrackerError(
+          ERROR_CODES.linearUnknownPayload,
+          "Linear ticket feature payload was missing the issues connection.",
+          { details: response },
+        );
+      }
+
+      const nodes = connection.nodes;
+      if (!Array.isArray(nodes)) {
+        throw new TrackerError(
+          ERROR_CODES.linearUnknownPayload,
+          "Linear ticket feature payload was missing issues.nodes.",
+          { details: response },
+        );
+      }
+
+      issues.push(
+        ...nodes.map((node) => normalizeLinearTicketFeatureIssue(node)),
+      );
+
+      const pageInfo: LinearGraphqlPageInfo | null | undefined =
+        connection.pageInfo;
+      if (!pageInfo || typeof pageInfo !== "object") {
+        throw new TrackerError(
+          ERROR_CODES.linearUnknownPayload,
+          "Linear ticket feature payload was missing pageInfo.",
           { details: response },
         );
       }
