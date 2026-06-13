@@ -245,6 +245,10 @@ describe("review journal events", () => {
       input_tokens: 200,
       output_tokens: 50,
       total_tokens: 250,
+      artifact_path: "/tmp/claude.md",
+      structured_artifact_path: "/tmp/claude.structured.json",
+      review_bundle_file_hash: "bundle-file-hash",
+      review_bundle_hash: "bundle-hash",
     });
     expect(
       entries.find((entry) => entry.kind === "review_lane")?.metadata,
@@ -273,6 +277,10 @@ describe("review journal events", () => {
       input_tokens: 200,
       output_tokens: 50,
       total_tokens: 250,
+      artifact_path: "/tmp/claude.md",
+      structured_artifact_path: "/tmp/claude.structured.json",
+      review_bundle_file_hash: "bundle-file-hash",
+      review_bundle_hash: "bundle-hash",
     });
     expect(JSON.stringify(delta)).not.toContain("totalCostUsd");
     expect(JSON.stringify(delta)).not.toContain("SECRET");
@@ -632,6 +640,7 @@ function reviewResult(input: {
         promptPath: "/tmp/claude.prompt.md",
         stderrPath: "/tmp/claude.stderr",
         cliJsonPath: "/tmp/claude.json",
+        reasoningEffort: null,
         independentReviewer: true,
         message: "SECRET lane message with diff --git data",
         degradedReason: null,

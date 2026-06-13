@@ -26,6 +26,11 @@ interface ParsedArgs {
   cmuxSpawnBin?: string;
   timeoutSeconds?: number;
   codexLead?: boolean;
+  codexExcavation?: boolean;
+  codexExcavationSweep?: "standard" | "high-risk";
+  codexExcavationTimeoutSeconds?: number;
+  codexExcavationToolOutputTokenLimit?: number;
+  codexExcavationModelAutoCompactTokenLimit?: number;
   round?: number;
   mode?: CouncilReviewMode;
   previousReviewedHeadSha?: string;
@@ -148,6 +153,38 @@ export function parseCouncilReviewGateArgs(
       parsed.codexLead = false;
       continue;
     }
+    if (token === "--no-codex-excavation") {
+      parsed.codexExcavation = false;
+      continue;
+    }
+    if (token === "--codex-excavation-sweep") {
+      parsed.codexExcavationSweep = readCodexExcavationSweep(
+        readValue(argv, ++index, token),
+        token,
+      );
+      continue;
+    }
+    if (token === "--codex-excavation-timeout-seconds") {
+      parsed.codexExcavationTimeoutSeconds = readPositiveInteger(
+        readValue(argv, ++index, token),
+        token,
+      );
+      continue;
+    }
+    if (token === "--codex-excavation-tool-output-token-limit") {
+      parsed.codexExcavationToolOutputTokenLimit = readPositiveInteger(
+        readValue(argv, ++index, token),
+        token,
+      );
+      continue;
+    }
+    if (token === "--codex-excavation-model-auto-compact-token-limit") {
+      parsed.codexExcavationModelAutoCompactTokenLimit = readPositiveInteger(
+        readValue(argv, ++index, token),
+        token,
+      );
+      continue;
+    }
     if (token === "--assert-fresh-review") {
       parsed.assertFreshReview = readValue(argv, ++index, token);
       continue;
@@ -221,6 +258,19 @@ export function parseCouncilReviewGateArgs(
   ) {
     throw new UsageError(
       "--risk-contract-artifact is only valid when running a council review, not with --assert-fresh-review.",
+    );
+  }
+  if (
+    parsed.assertFreshReview !== undefined &&
+    (parsed.codexLead !== undefined ||
+      parsed.codexExcavation !== undefined ||
+      parsed.codexExcavationSweep !== undefined ||
+      parsed.codexExcavationTimeoutSeconds !== undefined ||
+      parsed.codexExcavationToolOutputTokenLimit !== undefined ||
+      parsed.codexExcavationModelAutoCompactTokenLimit !== undefined)
+  ) {
+    throw new UsageError(
+      "Codex lane flags are only valid when running a council review, not with --assert-fresh-review.",
     );
   }
   if (
@@ -363,6 +413,16 @@ function readReviewJournalSource(
   );
 }
 
+function readCodexExcavationSweep(
+  value: string,
+  flag: string,
+): "standard" | "high-risk" {
+  if (value === "standard" || value === "high-risk") {
+    return value;
+  }
+  throw new UsageError(`${flag} must be "standard" or "high-risk".`);
+}
+
 function readGitSha(value: string, flag: string): string {
   if (/^[a-f0-9]{7,40}$/i.test(value)) {
     return value;
@@ -390,6 +450,11 @@ function renderUsage(): string {
     "  --cmux-spawn-bin PATH         cmux-spawn executable path",
     "  --timeout-seconds N           Per-lane timeout in seconds",
     "  --no-codex-lead               Skip Codex lead triage and mark degraded",
+    "  --no-codex-excavation         Skip the default Codex edge-case excavation reviewer lane",
+    "  --codex-excavation-sweep standard|high-risk  Codex excavation preset (default: standard; high-risk uses a longer bounded sweep)",
+    "  --codex-excavation-timeout-seconds N          Override Codex excavation lane timeout",
+    "  --codex-excavation-tool-output-token-limit N  Override Codex excavation per-tool output cap",
+    "  --codex-excavation-model-auto-compact-token-limit N  Override Codex excavation auto-compact cap",
     "  --round N                     Council loop round number (default: 1)",
     "  --mode full|convergence       Council loop mode (default: full)",
     "  --previous-reviewed-head SHA  Previous reviewed head SHA for convergence metadata",

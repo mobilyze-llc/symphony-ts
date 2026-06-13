@@ -365,10 +365,20 @@ function laneMetadata(lane: HeadlessLaneResult): Record<string, unknown> {
     lane_agent: lane.agent,
     lane_role: lane.role,
     lane_model: lane.model,
+    lane_reasoning_effort: lane.reasoningEffort ?? undefined,
     lane_state: lane.state,
     lane_verdict: lane.verdict,
     independent_reviewer: lane.independentReviewer,
     degraded_reason: lane.degradedReason ?? undefined,
+    artifact_path:
+      lane.artifactPath === null ? undefined : safeLabel(lane.artifactPath),
+    structured_artifact_path:
+      lane.structuredArtifactPath === undefined ||
+      lane.structuredArtifactPath === null
+        ? undefined
+        : safeLabel(lane.structuredArtifactPath),
+    review_bundle_file_hash: lane.reviewBundle?.hash,
+    review_bundle_hash: lane.reviewBundle?.bundleHash,
     parse_status: lane.structuredArtifact?.parseStatus,
     finding_count: lane.structuredArtifact?.findings.length,
     wall_time_ms: numberField(
