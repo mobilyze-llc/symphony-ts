@@ -574,14 +574,25 @@ function findIssueByRef(
 }
 
 function refsMatch(
-  left: { id: string | null; identifier: string | null },
-  right: { id: string | null; identifier: string | null },
+  left: { id?: string | null; identifier?: string | null },
+  right: { id?: string | null; identifier?: string | null },
 ): boolean {
   return (
-    (left.id !== null && right.id !== null && left.id === right.id) ||
-    (left.identifier !== null &&
-      right.identifier !== null &&
-      left.identifier === right.identifier)
+    refValueMatches(left.id, right.id) ||
+    refValueMatches(left.identifier, right.identifier)
+  );
+}
+
+function refValueMatches(
+  left: string | null | undefined,
+  right: string | null | undefined,
+): boolean {
+  return (
+    typeof left === "string" &&
+    left.trim() !== "" &&
+    typeof right === "string" &&
+    right.trim() !== "" &&
+    left === right
   );
 }
 

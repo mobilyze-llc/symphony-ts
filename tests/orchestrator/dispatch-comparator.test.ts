@@ -51,6 +51,24 @@ describe("dispatch comparator", () => {
     expect(order.advisory_warnings).toEqual([]);
   });
 
+  it("linearizes an empty candidate set", () => {
+    const order = computeDispatchOrder({
+      issues: [],
+      anchors: {},
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(order).toMatchObject({
+      status: "linearized",
+      positions: [],
+      exclusions: [],
+      advisory_warnings: [],
+      would_have_been_excluded_by_advisory_edges: [],
+      hard_cycle: null,
+    });
+  });
+
   it("refuses linearization when hard edges form a cycle", () => {
     const issues = [
       createIssue({
@@ -269,6 +287,43 @@ describe("dispatch comparator", () => {
     ).toEqual(["ISSUE-2", "ISSUE-1", "ISSUE-3"]);
   });
 
+  it("applies above anchors before their target issue", () => {
+    const issue1 = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      priority: 1,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    const issue2 = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+      priority: 1,
+      createdAt: "2026-06-02T00:00:00.000Z",
+    });
+    const issue3 = createIssue({
+      id: "3",
+      identifier: "ISSUE-3",
+      priority: 1,
+      createdAt: "2026-06-03T00:00:00.000Z",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [issue1, issue2, issue3],
+      anchors: {
+        "3": createAnchor(issue3, {
+          kind: "above",
+          issueIdentifier: "ISSUE-2",
+        }),
+      },
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-1", "ISSUE-3", "ISSUE-2"]);
+  });
+
   it("preserves natural order and warns when a relative anchor target is unavailable", () => {
     const excluded = createIssue({
       id: "1",
@@ -301,6 +356,53 @@ describe("dispatch comparator", () => {
       anchors: {
         "2": createAnchor(anchored, {
           kind: "above",
+          issueIdentifier: "ISSUE-1",
+        }),
+      },
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-2", "ISSUE-3"]);
+    expect(order.warnings).toContain(
+      "Operator anchor for ISSUE-2 references unavailable target ISSUE-1; preserved natural priority/FIFO position.",
+    );
+  });
+
+  it("preserves natural order and warns when a below anchor target is unavailable", () => {
+    const excluded = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      priority: 1,
+      createdAt: "2026-06-01T00:00:00.000Z",
+      blockedBy: [
+        {
+          id: "9",
+          identifier: "ISSUE-9",
+          state: "In Progress",
+        },
+      ],
+    });
+    const anchored = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+      priority: 1,
+      createdAt: "2026-06-02T00:00:00.000Z",
+    });
+    const later = createIssue({
+      id: "3",
+      identifier: "ISSUE-3",
+      priority: 1,
+      createdAt: "2026-06-03T00:00:00.000Z",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [excluded, anchored, later],
+      anchors: {
+        "2": createAnchor(anchored, {
+          kind: "below",
           issueIdentifier: "ISSUE-1",
         }),
       },

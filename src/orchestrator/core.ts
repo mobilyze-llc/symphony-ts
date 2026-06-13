@@ -2363,7 +2363,8 @@ export class OrchestratorCore {
         computed_order_issue_ids:
           input.computedOrder?.positions.map((position) => position.issue_id) ??
           input.consideredIssues.map((issue) => issue.id),
-        hard_exclusion_count: input.computedOrder?.exclusions.length ?? 0,
+        hard_exclusion_count:
+          countUniqueComputedOrderExclusionIssues(input.computedOrder) ?? 0,
         computed_order_issue_count:
           input.computedOrder?.positions.length ??
           input.consideredIssues.length,
@@ -11159,6 +11160,17 @@ function collectDeliveryOutcomes(
       },
     ];
   });
+}
+
+function countUniqueComputedOrderExclusionIssues(
+  computedOrder: ComputedDispatchOrderSnapshot | null | undefined,
+): number | null {
+  if (computedOrder === null || computedOrder === undefined) {
+    return null;
+  }
+  return new Set(
+    computedOrder.exclusions.map((exclusion) => exclusion.issue_id),
+  ).size;
 }
 
 function findLastQueueBaselineSequence(journal: DispatcherRunJournal): number {

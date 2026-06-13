@@ -114,6 +114,48 @@ describe("dispatcher decision event emission", () => {
     });
   });
 
+  it("counts hard exclusions by excluded issue, not blocker edge", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            priority: 1,
+            blockedBy: [
+              { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+              { id: "3", identifier: "ISSUE-3", state: "In Progress" },
+            ],
+          }),
+          createIssue({
+            id: "2",
+            identifier: "ISSUE-2",
+            priority: 2,
+          }),
+          createIssue({
+            id: "3",
+            identifier: "ISSUE-3",
+            priority: 3,
+          }),
+        ],
+      }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((entry) => entry.kind === "queue_baseline");
+
+    expect(baseline).toMatchObject({
+      kind: "queue_baseline",
+      metadata: expect.objectContaining({
+        hard_exclusion_count: 1,
+        dispatch_picks: ["2", "3"],
+      }),
+    });
+  });
+
   it("does not journal queue-baseline samples for empty idle polls", async () => {
     const orchestrator = createOrchestrator({
       tracker: createTracker({ candidates: [] }),
