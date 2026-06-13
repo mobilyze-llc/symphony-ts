@@ -5232,6 +5232,143 @@ describe("pipeline notifications", () => {
     expect(stillActive.dispatchedIssueIds).toEqual([]);
   });
 
+  it("logs successful signal delivery separately from stop acceptance", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      terminateWorkerProcessTree: async (
+        input,
+      ): Promise<StopSignalDelivery> => ({
+        status: "delivered",
+        reason: input.reason,
+        attemptedAt: input.attemptedAt.toISOString(),
+        workspacePath: input.workspacePath,
+        attempts: [
+          {
+            pid: 4242,
+            processGroupId: null,
+            sigterm: "delivered",
+            sigkill: "not_attempted",
+          },
+        ],
+        warning: null,
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponse = await host.requestIssueStop("ISSUE-1");
+    await host.waitForIdle();
+
+    expect(stopResponse.signal_delivery).toMatchObject({
+      status: "delivered",
+      reason: "manual_stop",
+      attempts: [
+        {
+          pid: 4242,
+          process_group_id: null,
+          sigterm: "delivered",
+          sigkill: "not_attempted",
+        },
+      ],
+    });
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_stop_requested",
+        level: "info",
+        outcome: "requested",
+        issue_identifier: "ISSUE-1",
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_stop_signal_delivery",
+        level: "info",
+        outcome: "delivered",
+        signal_delivery_status: "delivered",
+        pids: [4242],
+        process_group_ids: [],
+        failed_pids: [],
+        failed_process_group_ids: [],
+      }),
+    );
+  });
+
+  it("warns when signal delivery telemetry fails before attempts are recorded", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const notifier = createMockNotifier();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      notifier,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      terminateWorkerProcessTree: async () => {
+        throw new Error("lsof unavailable");
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    const stopResponse = await host.requestIssueStop("ISSUE-1");
+    await host.waitForIdle();
+
+    expect(stopResponse.signal_delivery).toMatchObject({
+      status: "failed",
+      reason: "manual_stop",
+      attempted_at: "2026-03-06T00:00:05.000Z",
+      workspace_path: "/tmp/workspaces/1",
+      attempts: [],
+      warning:
+        "Process-tree signal delivery failed before attempts were recorded: lsof unavailable",
+    });
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "worker_stop_signal_delivery_failed",
+        level: "warn",
+        outcome: "degraded",
+        signal_delivery_status: "failed",
+        issue_identifier: "ISSUE-1",
+        pids: [],
+        process_group_ids: [],
+        failed_pids: [],
+        failed_process_group_ids: [],
+        warning:
+          "Process-tree signal delivery failed before attempts were recorded: lsof unavailable",
+      }),
+    );
+    expect(notifier.events).toEqual([
+      expect.objectContaining({ type: "issue_dispatched" }),
+    ]);
+  });
+
   it("does not emit issue_failed for a budget hard stop pause", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
