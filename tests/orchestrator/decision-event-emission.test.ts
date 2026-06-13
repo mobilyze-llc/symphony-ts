@@ -67,6 +67,45 @@ describe("dispatcher decision event emission", () => {
     );
   });
 
+  it("journals queue-baseline control-arm fields after a dispatch poll", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            priority: 2,
+          }),
+          createIssue({
+            id: "2",
+            identifier: "ISSUE-2",
+            priority: 1,
+          }),
+        ],
+      }),
+    });
+
+    await orchestrator.pollTick();
+
+    const baseline = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((entry) => entry.kind === "queue_baseline");
+
+    expect(baseline).toMatchObject({
+      kind: "queue_baseline",
+      issueId: "__dispatch__",
+      metadata: expect.objectContaining({
+        comparator_version: "priority-fifo-control-v0",
+        considered_issue_ids: ["2", "1"],
+        dispatch_picks: ["2", "1"],
+        manual_jumps_reorders: [],
+        quiet_death_outcomes: [],
+        urgent_reopen_outcomes: [],
+        delivery_outcomes: [],
+      }),
+    });
+  });
+
   it("emits measurable pause and re-steer events when deterministic supervision blocks a co-run", async () => {
     const orchestrator = createOrchestrator({
       tracker: createTracker({

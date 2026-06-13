@@ -1713,6 +1713,10 @@ export class OrchestratorCore {
         details: { haltIssueTitle: haltIssue.title },
       });
       this.trackDispatchStarvation(issues.length, 0);
+      await this.recordQueueBaselineSample({
+        consideredIssues: sortIssuesForDispatch(issues),
+        dispatchPicks: [],
+      });
       return {
         validation,
         dispatchedIssueIds: [],
@@ -1743,6 +1747,10 @@ export class OrchestratorCore {
         details: gateVerdict.details,
       });
       this.trackDispatchStarvation(issues.length, 0);
+      await this.recordQueueBaselineSample({
+        consideredIssues: sortIssuesForDispatch(issues),
+        dispatchPicks: [],
+      });
       return {
         validation,
         dispatchedIssueIds: [],
@@ -1769,7 +1777,8 @@ export class OrchestratorCore {
     const modeDecisions: RightSizingDecision[] = [];
     let eligibleCount = 0;
     const admittedSnapshots = this.buildRunningAdmissionSnapshots();
-    for (const issue of sortIssuesForDispatch(issues)) {
+    const sortedIssues = sortIssuesForDispatch(issues);
+    for (const issue of sortedIssues) {
       if (this.availableSlots() <= 0) {
         break;
       }
@@ -1841,6 +1850,10 @@ export class OrchestratorCore {
     }
 
     this.trackDispatchStarvation(eligibleCount, dispatchedIssueIds.length);
+    await this.recordQueueBaselineSample({
+      consideredIssues: sortedIssues,
+      dispatchPicks: dispatchedIssueIds,
+    });
 
     return {
       validation,
@@ -1851,6 +1864,53 @@ export class OrchestratorCore {
       reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
       runningCount: Object.keys(this.state.running).length,
     };
+  }
+
+  private async recordQueueBaselineSample(input: {
+    consideredIssues: readonly Issue[];
+    dispatchPicks: readonly string[];
+  }): Promise<void> {
+    const timestamp = this.now().toISOString();
+    try {
+      await this.recordRunJournalEntry({
+        idempotencyKey: `queue_baseline:${timestamp}:${this.nextRunJournalSequence()}`,
+        timestamp,
+        kind: "queue_baseline",
+        issueId: PIPELINE_VERDICT_SCOPE_ID,
+        issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary: `Queue baseline sampled ${input.consideredIssues.length} considered issue(s) and ${input.dispatchPicks.length} dispatch pick(s).`,
+        metadata: {
+          schema_version: 1,
+          comparator_version: "priority-fifo-control-v0",
+          considered_issue_ids: input.consideredIssues.map((issue) => issue.id),
+          considered_issue_identifiers: input.consideredIssues.map(
+            (issue) => issue.identifier,
+          ),
+          dispatch_picks: [...input.dispatchPicks],
+          manual_jumps_reorders: collectOperatorIntentSamples(
+            this.state.dispatcherRunJournal,
+          ),
+          quiet_death_outcomes: collectQuietDeathOutcomes(
+            this.state.dispatcherRunJournal,
+          ),
+          urgent_reopen_outcomes: collectUrgentReopenOutcomes(
+            this.state.dispatcherRunJournal,
+          ),
+          delivery_outcomes: collectDeliveryOutcomes(
+            this.state.dispatcherRunJournal,
+          ),
+        },
+      });
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to journal queue baseline sample: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**
@@ -9350,6 +9410,144 @@ function readMetadataNumber(
 ): number | null {
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function collectOperatorIntentSamples(
+  journal: DispatcherRunJournal,
+): Array<Record<string, unknown>> {
+  return journal.flatMap((entry) => {
+    if (
+      entry.kind !== "intent" ||
+      readMetadataString(entry.metadata, "status") !== "applied"
+    ) {
+      return [];
+    }
+    const actor = entry.metadata.actor;
+    const actorKind =
+      typeof actor === "object" &&
+      actor !== null &&
+      !Array.isArray(actor) &&
+      typeof (actor as { kind?: unknown }).kind === "string"
+        ? (actor as { kind: string }).kind
+        : null;
+    if (actorKind !== "operator") {
+      return [];
+    }
+    return [
+      {
+        sequence: entry.sequence,
+        issue_id: entry.issueId,
+        issue_identifier: entry.issueIdentifier,
+        verb: readMetadataString(entry.metadata, "verb") ?? "unknown",
+        stage: entry.stage,
+      },
+    ];
+  });
+}
+
+function collectQuietDeathOutcomes(
+  journal: DispatcherRunJournal,
+): Array<Record<string, unknown>> {
+  return journal.flatMap((entry) =>
+    entry.kind === "failure_exhausted"
+      ? [
+          {
+            sequence: entry.sequence,
+            issue_id: entry.issueId,
+            issue_identifier: entry.issueIdentifier,
+            reason: readMetadataString(entry.metadata, "reason"),
+            failure_signature: readMetadataString(
+              entry.metadata,
+              "failure_signature",
+            ),
+            failure_class: readMetadataString(entry.metadata, "failure_class"),
+          },
+        ]
+      : [],
+  );
+}
+
+function collectUrgentReopenOutcomes(
+  journal: DispatcherRunJournal,
+): Array<Record<string, unknown>> {
+  const deathSequencesByIssue = new Map<string, number[]>();
+  for (const entry of journal) {
+    if (entry.kind !== "failure_exhausted") {
+      continue;
+    }
+    const sequences = deathSequencesByIssue.get(entry.issueId) ?? [];
+    sequences.push(entry.sequence);
+    deathSequencesByIssue.set(entry.issueId, sequences);
+  }
+
+  return collectOperatorIntentSamples(journal).flatMap((sample) => {
+    const issueId = typeof sample.issue_id === "string" ? sample.issue_id : "";
+    const sequence =
+      typeof sample.sequence === "number" ? sample.sequence : Number.NaN;
+    const verb = typeof sample.verb === "string" ? sample.verb : "";
+    if (
+      !["release", "retry_once", "rework_with_hint", "resume"].includes(verb)
+    ) {
+      return [];
+    }
+    const reopenedAfter = (deathSequencesByIssue.get(issueId) ?? [])
+      .filter((deathSequence) => deathSequence < sequence)
+      .at(-1);
+    return reopenedAfter === undefined
+      ? []
+      : [{ ...sample, reopened_after_sequence: reopenedAfter }];
+  });
+}
+
+function collectDeliveryOutcomes(
+  journal: DispatcherRunJournal,
+): Array<Record<string, unknown>> {
+  const historyByIssue = new Map<string, StageRecord[]>();
+  for (const entry of journal) {
+    if (entry.kind !== "stage_record") {
+      continue;
+    }
+    const stageRecord = toStageRecordFromMetadata(entry.metadata);
+    if (stageRecord === null) {
+      continue;
+    }
+    const history = historyByIssue.get(entry.issueId) ?? [];
+    history.push(stageRecord);
+    historyByIssue.set(entry.issueId, history);
+  }
+
+  return journal.flatMap((entry) => {
+    if (
+      entry.kind !== "tracker_write" ||
+      !entry.idempotencyKey.includes(":terminal:") ||
+      !entry.idempotencyKey.endsWith(":completed")
+    ) {
+      return [];
+    }
+    const history = historyByIssue.get(entry.issueId) ?? [];
+    const totalTokens = history.reduce(
+      (sum, stageRecord) => sum + stageRecord.totalTokens,
+      0,
+    );
+    const turns = history.reduce(
+      (sum, stageRecord) => sum + stageRecord.turns,
+      0,
+    );
+    return [
+      {
+        sequence: entry.sequence,
+        issue_id: entry.issueId,
+        issue_identifier: entry.issueIdentifier,
+        terminal_stage: entry.stage,
+        delivered_at: entry.timestamp,
+        spend: {
+          total_tokens: totalTokens,
+          turns,
+          stages: history.length,
+        },
+      },
+    ];
+  });
 }
 
 function createPendingStageSignal(

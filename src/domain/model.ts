@@ -253,6 +253,10 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "fix_round",
   "review_gate_result",
   "review_synthesis",
+  // Queue-triage week-zero baseline (SYMPH-482): disposable/read-model
+  // consumers use this to measure the FIFO control arm before hygiene lanes
+  // or comparators gain authority.
+  "queue_baseline",
 ] as const;
 
 // ---------------------------------------------------------------------------
