@@ -857,6 +857,53 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     );
   });
 
+  it("uses the nearest exact pipeline-config ancestor for nested workflow paths", () => {
+    const nestedPipelineConfigDirectory = resolve(
+      REPO_ROOT,
+      "scratch",
+      "pipeline-config",
+      "copies",
+      "pipeline-config",
+    );
+    const workflowDirectory = resolve(
+      nestedPipelineConfigDirectory,
+      "variants",
+      "deep",
+    );
+    const roots = resolvePromptPartialRoots(
+      join(workflowDirectory, "WORKFLOW.md"),
+    );
+
+    expect(roots).toEqual([
+      workflowDirectory,
+      nestedPipelineConfigDirectory,
+      dirname(nestedPipelineConfigDirectory),
+    ]);
+    expect(roots).not.toContain(resolve(REPO_ROOT, "pipeline-config"));
+  });
+
+  it("uses workflow-local partial roots for deeply nested paths without a pipeline-config ancestor", () => {
+    const workflowDirectory = resolve(
+      REPO_ROOT,
+      "scratch",
+      "workflow-copies",
+      "customers",
+      "example",
+      "staged",
+      "deep",
+    );
+    const roots = resolvePromptPartialRoots(
+      join(workflowDirectory, "WORKFLOW.md"),
+    );
+
+    expect(roots).toEqual([
+      workflowDirectory,
+      resolve(workflowDirectory, "pipeline-config"),
+    ]);
+    expect(roots).not.toContain(resolve(REPO_ROOT, "pipeline-config"));
+    expect(roots).not.toContain(REPO_ROOT);
+  });
+
   it("does not treat pipeline-config-prefixed directories as pipeline-config", () => {
     const roots = resolvePromptPartialRoots("pipeline-config-v2/WORKFLOW.md");
 

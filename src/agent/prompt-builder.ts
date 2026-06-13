@@ -93,6 +93,15 @@ function createLiquidEngine(workflowPath?: string): Liquid {
   });
 }
 
+/**
+ * Explicit workflow paths define the complete partial-root contract. Renderers
+ * that pass workflowPath resolve partials from that workflow's directory and
+ * nearest ancestor named exactly "pipeline-config"; they do not fall back to
+ * process-cwd roots such as "." or "./pipeline-config". The lookup is
+ * intentionally syntactic: callers that need symlink realpath handling should
+ * pass a realpath-normalized workflowPath, and POSIX-host rendering does not
+ * special-case Windows UNC path semantics.
+ */
 export function resolvePromptPartialRoots(workflowPath?: string): string[] {
   if (workflowPath === undefined) {
     return [...DEFAULT_PARTIAL_ROOTS];
