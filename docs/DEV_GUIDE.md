@@ -502,6 +502,20 @@ curl -s http://localhost:3000/api/v1/state | jq '{
   `sonnet`), and Pi/DeepSeek (`pi`, `deepseek`). Wrapper names and transport
   labels such as `myopenaiclient`, `claudewrapper`, or `local-api` remain their
   explicit provenance string instead of collapsing into a canonical family.
+  Underscore/snake_case separators are intentional token boundaries:
+  `my_codex_client` canonicalizes to `openai-codex`.
+- Council reviewer artifact preambles are normalized only when the text before
+  `## Verdict` is plain prose within the calibrated bounds of 3000 characters
+  and 12 non-empty lines. Treat those values as evidence-backed parser
+  calibration constants. Change them only with raw reviewer artifacts showing
+  safe Pi/DeepSeek prose rejected solely by the bound; keep the malformed,
+  diff-token, markdown-structure, and smuggled-heading rejection tests paired
+  with any bound change.
+- Artifact section headings normalize by replacing colons with spaces,
+  collapsing whitespace, and lowercasing. New `ARTIFACT_SECTION_HEADINGS`
+  entries must have unique normalized keys; module initialization fails on a
+  collision so aliases such as `P2: Should Fix` cannot silently change parser
+  policy.
 
 - `explicit_resume_required` lists every parked issue with the `reason`
   (e.g. `hard_stop:token_budget`, `operator_input_required`,

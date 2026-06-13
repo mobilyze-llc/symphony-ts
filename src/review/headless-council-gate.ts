@@ -45,8 +45,8 @@ const ARTIFACT_SECTION_HEADINGS = [
   "Triage",
   "Reviewer Artifacts",
 ] as const;
-const ARTIFACT_SECTION_HEADING_KEYS = new Set(
-  ARTIFACT_SECTION_HEADINGS.map(normalizeArtifactHeadingText),
+const ARTIFACT_SECTION_HEADING_KEYS = buildArtifactSectionHeadingKeys(
+  ARTIFACT_SECTION_HEADINGS,
 );
 // SYMPHONY_UNTRUSTED_DIFF matches as a substring (no word boundaries): the
 // real boundary token is `SYMPHONY_UNTRUSTED_DIFF_<uuid>` and `\b` fails on
@@ -4934,6 +4934,23 @@ function isArtifactSectionBoundary(candidate: ArtifactHeadingMatch): boolean {
 
 function normalizeArtifactHeadingText(heading: string): string {
   return heading.replace(/:/g, " ").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function buildArtifactSectionHeadingKeys(
+  headings: readonly string[],
+): ReadonlySet<string> {
+  const normalizedHeadings = new Map<string, string>();
+  for (const heading of headings) {
+    const normalizedHeading = normalizeArtifactHeadingText(heading);
+    const previousHeading = normalizedHeadings.get(normalizedHeading);
+    if (previousHeading !== undefined) {
+      throw new Error(
+        `Artifact section heading "${heading}" normalizes to "${normalizedHeading}", which is already used by "${previousHeading}". Rename the heading or make the parser collision policy explicit.`,
+      );
+    }
+    normalizedHeadings.set(normalizedHeading, heading);
+  }
+  return new Set(normalizedHeadings.keys());
 }
 
 function isEmptySectionMarker(line: string): boolean {

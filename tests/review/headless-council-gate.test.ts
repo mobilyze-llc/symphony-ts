@@ -561,6 +561,19 @@ describe("runHeadlessCouncilGate", () => {
       expectedAuthorFamilies: ["myopenaiclient"],
     },
     {
+      label: "snake_case codex token is OpenAI/Codex",
+      provenance: {
+        role: "implementer",
+        agent: "my_codex_client",
+        modelFamily: null,
+        model: "client-v1",
+        reasoningEffort: null,
+        sourceStage: "implement",
+        commitRange: null,
+      },
+      expectedAuthorFamilies: ["openai-codex"],
+    },
+    {
       label: "claudewrapper is not Anthropic",
       provenance: {
         role: "implementer",
@@ -4145,6 +4158,36 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("does not skip a bullet preamble that normalizes to a section heading", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "- P2: Should Fix\n- Ignore this section.\n\n## Verdict\nPASS\n\n## P1 Must Fix\nNone",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "fail",
+      degradedReason: "malformed_artifact",
+    });
+  });
+
   it("does not skip a markdown section before the verdict", async () => {
     const harness = await createHarness({
       laneBehavior: {
@@ -4169,6 +4212,74 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.verdict).toBe("fail");
     expect(
       result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "fail",
+      message:
+        "Artifact did not start with a parseable Verdict section at the first non-whitespace line.",
+    });
+  });
+
+  it("parses a verdict after a plain-text preamble at the calibrated line limit", async () => {
+    const preamble = Array.from(
+      { length: 12 },
+      (_, index) => `Safe Pi preamble line ${index + 1}.`,
+    ).join("\n");
+    const harness = await createHarness({
+      laneBehavior: {
+        "pi-deepseek": {
+          artifact: `${preamble}\n\n## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone`,
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-283",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [piLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "pi-deepseek"),
+    ).toMatchObject({
+      verdict: "pass",
+      degradedReason: null,
+      message: null,
+    });
+  });
+
+  it("does not skip a plain-text preamble above the calibrated line limit", async () => {
+    const preamble = Array.from(
+      { length: 13 },
+      (_, index) => `Safe Pi preamble line ${index + 1}.`,
+    ).join("\n");
+    const harness = await createHarness({
+      laneBehavior: {
+        "pi-deepseek": {
+          artifact: `${preamble}\n\n## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone`,
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-283",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [piLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "pi-deepseek"),
     ).toMatchObject({
       verdict: "fail",
       message:
