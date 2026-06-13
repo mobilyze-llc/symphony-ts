@@ -357,6 +357,61 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("recovers explicit Pi-authored routes with Opus instead of requiring same-family Pi", async () => {
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-501",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane(), piLane()],
+        provenance: [
+          {
+            role: "implementer",
+            agent: "pi",
+            modelFamily: "pi",
+            model: "deepseek-v4-pro",
+            reasoningEffort: "high",
+            sourceStage: "implement",
+            commitRange: null,
+          },
+        ],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.review_routing).toMatchObject({
+      selectedLanes: expect.arrayContaining([
+        expect.objectContaining({
+          laneId: "claude-opus",
+          required: true,
+          decorrelatedSignal: true,
+        }),
+        expect.objectContaining({
+          laneId: "pi-deepseek",
+          required: false,
+          decorrelatedSignal: false,
+          reason: "same_family_author_signal",
+        }),
+      ]),
+      decorrelationBasis: {
+        authorFamilies: ["pi"],
+        requiredReviewerLaneIds: ["claude-opus"],
+        decorrelatedReviewerArtifacts: [
+          {
+            laneId: "claude-opus",
+            agent: "claude",
+            modelFamily: "anthropic",
+          },
+        ],
+        mergeEligible: true,
+      },
+      escalationPredicates: ["same_family_required_reviewer_recovery"],
+    });
+  });
+
   it("fails closed when author family provenance is missing", async () => {
     const harness = await createHarness();
     const result = await runHeadlessCouncilGate(

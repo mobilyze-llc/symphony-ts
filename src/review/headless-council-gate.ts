@@ -1562,6 +1562,7 @@ function buildInitialCouncilRouting(args: {
       : explicitSelectedLanesForRouting({
           lanes: gateInput.reviewerLanes,
           codexLeadEnabled: args.codexLeadEnabled,
+          requiresPiAuthorRecovery: piAuthored,
         });
   if (
     piAuthored &&
@@ -1645,12 +1646,16 @@ function defaultSelectedLanesForRouting(input: {
 function explicitSelectedLanesForRouting(input: {
   lanes: readonly HeadlessReviewerLaneConfig[];
   codexLeadEnabled: boolean;
+  requiresPiAuthorRecovery: boolean;
 }): CouncilRoutingLaneSelection[] {
   const selections = input.lanes.map((lane) =>
     laneSelection(
       lane,
-      independentReviewerForLane(lane),
-      lane.agent !== "codex",
+      input.requiresPiAuthorRecovery && lane.agent === "pi"
+        ? false
+        : independentReviewerForLane(lane),
+      lane.agent !== "codex" &&
+        !(input.requiresPiAuthorRecovery && lane.agent === "pi"),
     ),
   );
   if (input.codexLeadEnabled) {
