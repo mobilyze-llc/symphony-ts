@@ -149,6 +149,7 @@ const CONTINUATION_RETRY_DELAY_MS = 1_000;
  * round N, and a third round against an unchanged criterion is futile.
  */
 const MAX_SAME_CRITERION_REVIEW_FAILURES = 3;
+const SAME_FAMILY_REASONING_TRIPWIRE_COUNT = 2;
 const MAX_REVIEW_SUBSTRATE_STALL_FAILURES = 2;
 const MAX_REVIEW_GATE_ERROR_FAILURES = 2;
 const SUBSTRATE_STALL_REGEX = /\bsubstrate_stall:/i;
@@ -7975,7 +7976,8 @@ export class OrchestratorCore {
       stageName,
       attempt,
       sameFamilyTripwire:
-        this.state.issueReviewFailureStreaks[issue.id] !== undefined,
+        (this.state.issueReviewFailureStreaks[issue.id]?.count ?? 0) >=
+        SAME_FAMILY_REASONING_TRIPWIRE_COUNT,
     });
     this.state.issueRightSizingDecisions[issue.id] = rightSizingDecision;
     const dispatchLeaseId = createDispatcherLeaseId({

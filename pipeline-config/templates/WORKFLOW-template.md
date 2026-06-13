@@ -98,8 +98,9 @@ spec_fidelity:
 admission_card:
   enabled: true
 
-# Escalate only journal-risk investigate/implement and same-family rework
-# turns; the primary app-server command below remains low effort by default.
+# Override reasoning effort only for journal-risk investigate/implement and
+# repeated same-family rework turns; the primary app-server command below
+# remains low effort by default.
 risk_predicate_reasoning_effort: high
 
 codex:

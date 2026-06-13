@@ -1357,7 +1357,7 @@ function toErrorMessage(error: unknown): string {
 }
 
 const MODEL_REASONING_EFFORT_CONFIG_PATTERN =
-  /--config\s+(?:"model_reasoning_effort=(?:\\"|")?(?:low|medium|high)(?:\\"|")?"|'model_reasoning_effort="(?:low|medium|high)"'|model_reasoning_effort=(?:"(?:low|medium|high)"|(?:low|medium|high)))/;
+  /--config\s+(?:"model_reasoning_effort=(?:\\"|["'])?(?:low|medium|high)(?:\\"|["'])?"|'model_reasoning_effort=(?:"|')?(?:low|medium|high)(?:"|')?'|model_reasoning_effort=(?:"(?:low|medium|high)"|'(?:low|medium|high)'|(?:low|medium|high)))/;
 
 function applyReasoningEffortToCodexCommand(
   command: string,

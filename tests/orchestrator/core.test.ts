@@ -241,7 +241,7 @@ describe("orchestrator core", () => {
     });
   });
 
-  it("escalates implement rework after a same-family trip-wire without making high effort global", async () => {
+  it("does not escalate implement rework after the first review failure", async () => {
     const spawned: Array<
       Parameters<OrchestratorCoreOptions["spawnWorker"]>[0]
     > = [];
@@ -308,6 +308,88 @@ describe("orchestrator core", () => {
     orchestrator.getState().issueReviewFailureStreaks["1"] = {
       signature: "same-criterion",
       count: 1,
+    };
+
+    await orchestrator.pollTick();
+
+    expect(spawned[0]?.rightSizingDecision.riskPredicate.triggerHits).toEqual(
+      [],
+    );
+    expect(spawned[0]?.rightSizingDecision.reasoningEffort).toMatchObject({
+      selectedEffort: null,
+      escalated: false,
+      reason: "no_risk_match",
+      sameFamilyTripwire: false,
+    });
+  });
+
+  it("escalates implement rework after a repeated same-family trip-wire without making high effort global", async () => {
+    const spawned: Array<
+      Parameters<OrchestratorCoreOptions["spawnWorker"]>[0]
+    > = [];
+    const config = createConfig({
+      riskPredicateReasoning: { effort: "high" },
+    });
+    config.stages = {
+      initialStage: "implement",
+      fastTrack: null,
+      stages: {
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "done",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: null,
+        },
+      },
+    };
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            description: "## Declared file scope\n- src/features/copy.ts\n",
+          }),
+        ],
+      }),
+      spawnWorker: async (input) => {
+        spawned.push(input);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+    });
+    orchestrator.getState().issueReviewFailureStreaks["1"] = {
+      signature: "same-criterion",
+      count: 2,
     };
 
     await orchestrator.pollTick();
