@@ -1212,6 +1212,7 @@ export interface PipelineEmergencyStopState {
     issueIdentifier: string;
     stage: string | null;
     attempt: number | null;
+    codexAppServerPid: string | null;
   }>;
 }
 

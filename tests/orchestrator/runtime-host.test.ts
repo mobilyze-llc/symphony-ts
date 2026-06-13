@@ -463,6 +463,258 @@ describe("OrchestratorRuntimeHost", () => {
     ]);
   });
 
+  it("cleans up unconfirmed emergency-stop process trees during journal hydration", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ state: "Resume" })],
+      stateSnapshots: [{ id: "1", identifier: "ISSUE-1", state: "Resume" }],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const terminateDetachedPidTree = vi.fn(async () => ({
+      pid: 1001,
+      sigtermSent: true,
+      sigkillSent: true,
+    }));
+    const writtenEntries: DispatcherRunJournalEntry[] = [];
+    const journal: DispatcherRunJournal = [
+      {
+        sequence: 1,
+        idempotencyKey: "hard_stop:1:implement:initial:emergency_stop:1",
+        timestamp: "2026-03-05T23:59:00.000Z",
+        kind: "hard_stop_trigger",
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        operation: "dispatcher",
+        stage: "implement",
+        attempt: null,
+        ownerId: "previous-runtime",
+        lease: null,
+        summary: "Prior emergency stop completed.",
+        metadata: {
+          status: "completed",
+          reason: "emergency_stop",
+          issueState: "Todo",
+        },
+      },
+      {
+        sequence: 2,
+        idempotencyKey: "intent:pipeline_stop:operator@pro14:seq-0",
+        timestamp: "2026-03-06T00:00:00.000Z",
+        kind: "intent",
+        issueId: "__pipeline__",
+        issueIdentifier: "PIPELINE",
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        ownerId: "previous-runtime",
+        lease: null,
+        summary: "Emergency stop applied.",
+        metadata: {
+          status: "applied",
+          verb: "pipeline_stop",
+          actor: { kind: "operator", host: "pro14", session: null },
+          reason: { class: "operator_emergency_stop", human: "stop now" },
+          interruptedIssues: [
+            {
+              issueId: "1",
+              issueIdentifier: "ISSUE-1",
+              stage: "implement",
+              attempt: null,
+              codexAppServerPid: "1001",
+            },
+          ],
+        },
+      },
+      {
+        sequence: 3,
+        idempotencyKey: "intent:pipeline_resume:operator@pro14:seq-1",
+        timestamp: "2026-03-06T00:01:00.000Z",
+        kind: "intent",
+        issueId: "__pipeline__",
+        issueIdentifier: "PIPELINE",
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        ownerId: "previous-runtime",
+        lease: null,
+        summary: "Emergency stop resumed.",
+        metadata: {
+          status: "applied",
+          verb: "pipeline_resume",
+          actor: { kind: "operator", host: "pro14", session: null },
+          reason: { class: "operator_resume", human: "triaged" },
+        },
+      },
+    ];
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => journal,
+      writeDispatcherRunJournalEntry: async (_workspaceRoot, entry) => {
+        writtenEntries.push(entry);
+      },
+      terminateDetachedPidTree,
+      now: () => new Date("2026-03-06T00:02:00.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+
+    expect(terminateDetachedPidTree).toHaveBeenCalledWith(1001, {
+      graceMs: 1_000,
+    });
+    expect(tick.dispatchedIssueIds).toEqual(["1"]);
+    expect(fakeRunner.runInputs).toHaveLength(1);
+    expect(host.getState().resumeRequired.has("1")).toBe(false);
+    expect(writtenEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "hard_stop_trigger",
+          issueId: "1",
+          metadata: expect.objectContaining({
+            status: "completed",
+            reason: "emergency_stop",
+            recovery: "journal_hydration",
+            sourceSequence: 2,
+            codexAppServerPid: "1001",
+          }),
+        }),
+      ]),
+    );
+
+    fakeRunner.resolve("1", createNormalResult());
+    await host.waitForIdle();
+  });
+
+  it("does not let later same-issue emergency-stop proof suppress older recovered cleanup", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ state: "Resume" })],
+      stateSnapshots: [{ id: "1", identifier: "ISSUE-1", state: "Resume" }],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const terminateDetachedPidTree = vi.fn(async (pid: number) => ({
+      pid,
+      sigtermSent: true,
+      sigkillSent: true,
+    }));
+    const writtenEntries: DispatcherRunJournalEntry[] = [];
+    const journal: DispatcherRunJournal = [
+      createPipelineStopJournalEntry(1, "1001"),
+      createPipelineResumeJournalEntry(2),
+      createPipelineStopJournalEntry(3, "2002"),
+      createEmergencyStopHardStopJournalEntry(4, {
+        codexAppServerPid: "2002",
+        sourceSequence: 3,
+      }),
+      createPipelineResumeJournalEntry(5),
+    ];
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => journal,
+      writeDispatcherRunJournalEntry: async (_workspaceRoot, entry) => {
+        writtenEntries.push(entry);
+      },
+      terminateDetachedPidTree,
+      now: () => new Date("2026-03-06T00:02:00.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+
+    expect(terminateDetachedPidTree).toHaveBeenCalledTimes(1);
+    expect(terminateDetachedPidTree).toHaveBeenCalledWith(1001, {
+      graceMs: 1_000,
+    });
+    expect(terminateDetachedPidTree).not.toHaveBeenCalledWith(2002, {
+      graceMs: 1_000,
+    });
+    expect(tick.dispatchedIssueIds).toEqual(["1"]);
+    expect(fakeRunner.runInputs).toHaveLength(1);
+    expect(host.getState().resumeRequired.has("1")).toBe(false);
+    expect(writtenEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "hard_stop_trigger",
+          issueId: "1",
+          metadata: expect.objectContaining({
+            status: "completed",
+            reason: "emergency_stop",
+            recovery: "journal_hydration",
+            sourceSequence: 1,
+            codexAppServerPid: "1001",
+          }),
+        }),
+      ]),
+    );
+
+    fakeRunner.resolve("1", createNormalResult());
+    await host.waitForIdle();
+  });
+
+  it.each([
+    { label: "missing", codexAppServerPid: null },
+    { label: "malformed", codexAppServerPid: "not-a-pid" },
+    { label: "self", codexAppServerPid: String(process.pid) },
+  ])(
+    "keeps recovered emergency-stop cleanup fail-closed for $label app-server PID",
+    async ({ codexAppServerPid }) => {
+      const tracker = createTracker({
+        candidates: [createIssue({ state: "Resume" })],
+        stateSnapshots: [{ id: "1", identifier: "ISSUE-1", state: "Resume" }],
+      });
+      const fakeRunner = new FakeAgentRunner();
+      const terminateDetachedPidTree = vi.fn(async (pid: number) => ({
+        pid,
+        sigtermSent: true,
+        sigkillSent: true,
+      }));
+      const writtenEntries: DispatcherRunJournalEntry[] = [];
+      const journal: DispatcherRunJournal = [
+        createPipelineStopJournalEntry(1, codexAppServerPid),
+        createPipelineResumeJournalEntry(2),
+      ];
+      const host = new OrchestratorRuntimeHost({
+        config: createConfig(),
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        readDispatcherRunJournal: async () => journal,
+        writeDispatcherRunJournalEntry: async (_workspaceRoot, entry) => {
+          writtenEntries.push(entry);
+        },
+        terminateDetachedPidTree,
+        now: () => new Date("2026-03-06T00:02:00.000Z"),
+      });
+
+      const tick = await host.pollOnce();
+
+      expect(terminateDetachedPidTree).not.toHaveBeenCalled();
+      expect(tick.dispatchedIssueIds).toEqual([]);
+      expect(fakeRunner.runInputs).toHaveLength(0);
+      expect(host.getState().resumeRequired.has("1")).toBe(true);
+      expect(host.getState().resumeRequiredMarks["1"]).toMatchObject({
+        reason: "killed_mid_run_unconfirmed",
+        setBySequence: 1,
+      });
+      expect(
+        writtenEntries.some(
+          (entry) =>
+            entry.kind === "hard_stop_trigger" &&
+            entry.metadata.reason === "emergency_stop" &&
+            entry.metadata.recovery === "journal_hydration",
+        ),
+      ).toBe(false);
+    },
+  );
+
   it.each([
     {
       events: 30,
@@ -5722,6 +5974,93 @@ function readDispatcherJournal(workspaceRoot: string): DispatcherRunJournal {
     .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line) as DispatcherRunJournal[number]);
+}
+
+function createPipelineStopJournalEntry(
+  sequence: number,
+  codexAppServerPid: string | null,
+): DispatcherRunJournalEntry {
+  return {
+    sequence,
+    idempotencyKey: `intent:pipeline_stop:operator@pro14:seq-${sequence}`,
+    timestamp: `2026-03-06T00:00:${String(sequence).padStart(2, "0")}.000Z`,
+    kind: "intent",
+    issueId: "__pipeline__",
+    issueIdentifier: "PIPELINE",
+    operation: "dispatcher",
+    stage: null,
+    attempt: null,
+    ownerId: "previous-runtime",
+    lease: null,
+    summary: "Emergency stop applied.",
+    metadata: {
+      status: "applied",
+      verb: "pipeline_stop",
+      actor: { kind: "operator", host: "pro14", session: null },
+      reason: { class: "operator_emergency_stop", human: "stop now" },
+      interruptedIssues: [
+        {
+          issueId: "1",
+          issueIdentifier: "ISSUE-1",
+          stage: "implement",
+          attempt: null,
+          codexAppServerPid,
+        },
+      ],
+    },
+  };
+}
+
+function createPipelineResumeJournalEntry(
+  sequence: number,
+): DispatcherRunJournalEntry {
+  return {
+    sequence,
+    idempotencyKey: `intent:pipeline_resume:operator@pro14:seq-${sequence}`,
+    timestamp: `2026-03-06T00:01:${String(sequence).padStart(2, "0")}.000Z`,
+    kind: "intent",
+    issueId: "__pipeline__",
+    issueIdentifier: "PIPELINE",
+    operation: "dispatcher",
+    stage: null,
+    attempt: null,
+    ownerId: "previous-runtime",
+    lease: null,
+    summary: "Emergency stop resumed.",
+    metadata: {
+      status: "applied",
+      verb: "pipeline_resume",
+      actor: { kind: "operator", host: "pro14", session: null },
+      reason: { class: "operator_resume", human: "triaged" },
+    },
+  };
+}
+
+function createEmergencyStopHardStopJournalEntry(
+  sequence: number,
+  input: { codexAppServerPid: string | null; sourceSequence: number },
+): DispatcherRunJournalEntry {
+  return {
+    sequence,
+    idempotencyKey: `hard_stop:1:implement:initial:emergency_stop:${sequence}`,
+    timestamp: `2026-03-06T00:02:${String(sequence).padStart(2, "0")}.000Z`,
+    kind: "hard_stop_trigger",
+    issueId: "1",
+    issueIdentifier: "ISSUE-1",
+    operation: "dispatcher",
+    stage: "implement",
+    attempt: null,
+    ownerId: "previous-runtime",
+    lease: null,
+    summary: "Emergency stop completed.",
+    metadata: {
+      status: "completed",
+      reason: "emergency_stop",
+      issueState: "Todo",
+      sourceSequence: input.sourceSequence,
+      codexAppServerPid: input.codexAppServerPid,
+    },
+  };
 }
 
 function createIssue(overrides?: Partial<Issue>): Issue {

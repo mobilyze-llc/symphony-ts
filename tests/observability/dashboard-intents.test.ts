@@ -433,6 +433,7 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
                 issue_identifier: "ISSUE-1",
                 stage: "implement",
                 attempt: null,
+                codex_app_server_pid: "1001",
               },
             ],
             stop_requests: [

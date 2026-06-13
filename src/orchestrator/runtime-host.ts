@@ -122,7 +122,7 @@ import {
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
-import { terminateDetachedPidTree } from "../shared/process-tree.js";
+import { terminateDetachedPidTree as terminateDetachedPidTreeDefault } from "../shared/process-tree.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
 import type { IssueTracker } from "../tracker/tracker.js";
@@ -222,6 +222,7 @@ export interface RuntimeHostOptions {
     workspaceRoot: string,
     entry: DispatcherRunJournalEntry,
   ) => Promise<void>;
+  terminateDetachedPidTree?: typeof terminateDetachedPidTreeDefault;
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
   /**
@@ -336,6 +337,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     entry: DispatcherRunJournalEntry,
   ) => Promise<void>;
 
+  private readonly terminateDetachedPidTree: typeof terminateDetachedPidTreeDefault;
+
   static readonly PRUNE_DEBOUNCE_MS = 300_000;
 
   #lastPruneAt = 0;
@@ -409,6 +412,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.writeDispatcherRunJournalEntry =
       options.writeDispatcherRunJournalEntry ??
       appendDispatcherRunJournalEntryToDisk;
+    this.terminateDetachedPidTree =
+      options.terminateDetachedPidTree ?? terminateDetachedPidTreeDefault;
     this.captureDeployDriftFn =
       options.captureDeployDrift ??
       (() => captureDeployDrift({ repoRoot: resolveRuntimeRepoRoot() }));
@@ -1600,6 +1605,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       try {
         const journal = await this.readDispatcherRunJournal(workspaceRoot);
         this.orchestrator.recoverFromRunJournal(journal);
+        await this.cleanupUnconfirmedEmergencyStopProcesses(journal);
         this.rememberDispatcherRunJournalRoot(workspaceRoot, journal);
       } catch (error) {
         await this.logger?.warn(
@@ -1621,6 +1627,108 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     } finally {
       if (this.dispatcherRunJournalHydrationTask === task) {
         this.dispatcherRunJournalHydrationTask = null;
+      }
+    }
+  }
+
+  private async cleanupUnconfirmedEmergencyStopProcesses(
+    journal: DispatcherRunJournal,
+  ): Promise<void> {
+    const cleanupPlans = collectUnconfirmedEmergencyStopCleanupPlans(journal);
+    const cleanupPlansByIssue = new Map<
+      string,
+      EmergencyStopRecoveryCleanupPlan[]
+    >();
+    for (const plan of cleanupPlans) {
+      const plans = cleanupPlansByIssue.get(plan.issueId) ?? [];
+      plans.push(plan);
+      cleanupPlansByIssue.set(plan.issueId, plans);
+    }
+
+    for (const [issueId, plans] of cleanupPlansByIssue) {
+      const sortedPlans = plans.sort(
+        (left, right) => left.setBySequence - right.setBySequence,
+      );
+      const latestPlan = sortedPlans.at(-1);
+      if (latestPlan === undefined) {
+        continue;
+      }
+      this.orchestrator.requireEmergencyStopProcessCleanup(issueId, {
+        setBySequence: latestPlan.setBySequence,
+        since: latestPlan.since,
+      });
+
+      const unconfirmedPlans: EmergencyStopRecoveryCleanupPlan[] = [];
+      for (const plan of sortedPlans) {
+        const parsedPid = parseProcessPid(plan.codexAppServerPid);
+        let targetedCleanupSucceeded = false;
+        try {
+          if (parsedPid !== null && parsedPid !== process.pid) {
+            await this.terminateDetachedPidTree(parsedPid, { graceMs: 1_000 });
+            targetedCleanupSucceeded = true;
+            await this.logger?.log(
+              "info",
+              "emergency_stop_recovery_process_tree_killed",
+              `Killed recovered emergency-stop process tree for ${plan.issueIdentifier}.`,
+              {
+                issue_id: issueId,
+                issue_identifier: plan.issueIdentifier,
+                codex_app_server_pid: plan.codexAppServerPid,
+                source_sequence: plan.setBySequence,
+              },
+            );
+          } else {
+            unconfirmedPlans.push(plan);
+            await this.logger?.warn(
+              "emergency_stop_recovery_missing_pid",
+              "Emergency-stop recovery found an interrupted issue without a usable Codex app-server PID.",
+              {
+                outcome: "degraded",
+                issue_id: issueId,
+                issue_identifier: plan.issueIdentifier,
+                codex_app_server_pid: plan.codexAppServerPid,
+                source_sequence: plan.setBySequence,
+              },
+            );
+          }
+
+          const { workspacePath } =
+            this.workspaceManager.resolveForIssue(issueId);
+          await this.killOrphanedProcesses(workspacePath, plan.issueIdentifier);
+          if (targetedCleanupSucceeded) {
+            const cleanupSequence =
+              await this.orchestrator.recordEmergencyStopRecoveryCleanup({
+                issueId,
+                issueIdentifier: plan.issueIdentifier,
+                codexAppServerPid: plan.codexAppServerPid,
+                sourceSequence: plan.setBySequence,
+              });
+            if (cleanupSequence === null) {
+              unconfirmedPlans.push(plan);
+            }
+          }
+        } catch (error) {
+          unconfirmedPlans.push(plan);
+          await this.logger?.warn(
+            "emergency_stop_recovery_cleanup_failed",
+            "Failed to clean up recovered emergency-stop process tree.",
+            {
+              outcome: "degraded",
+              issue_id: issueId,
+              issue_identifier: plan.issueIdentifier,
+              source_sequence: plan.setBySequence,
+              reason: toErrorMessage(error),
+            },
+          );
+        }
+      }
+
+      const latestUnconfirmedPlan = unconfirmedPlans.at(-1);
+      if (latestUnconfirmedPlan !== undefined) {
+        this.orchestrator.requireEmergencyStopProcessCleanup(issueId, {
+          setBySequence: latestUnconfirmedPlan.setBySequence,
+          since: latestUnconfirmedPlan.since,
+        });
       }
     }
   }
@@ -2301,6 +2409,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         issue_identifier: issue.issueIdentifier,
         stage: issue.stage,
         attempt: issue.attempt,
+        codex_app_server_pid: issue.codexAppServerPid,
       })),
     };
   }
@@ -2818,6 +2927,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           issue_identifier: issue.issueIdentifier,
           stage: issue.stage,
           attempt: issue.attempt,
+          codex_app_server_pid: issue.codexAppServerPid,
         })),
         stop_requests: result.stopRequests.map((request) => ({
           issue_identifier: request.issueIdentifier,
@@ -3334,7 +3444,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         await Promise.all(
           pidsToKill.map(async (pid) => {
             try {
-              await terminateDetachedPidTree(Number(pid), { graceMs: 1_000 });
+              await this.terminateDetachedPidTree(Number(pid), {
+                graceMs: 1_000,
+              });
             } catch {
               // Process may have already exited
             }
@@ -4839,6 +4951,143 @@ function resolveClosed(
   exitPromise: ReturnType<typeof createExitPromise>,
 ): void {
   exitPromise.resolveClosed();
+}
+
+interface EmergencyStopRecoveryCleanupPlan {
+  issueId: string;
+  issueIdentifier: string;
+  codexAppServerPid: string | null;
+  setBySequence: number;
+  since: string;
+}
+
+function collectUnconfirmedEmergencyStopCleanupPlans(
+  journal: DispatcherRunJournal,
+): EmergencyStopRecoveryCleanupPlan[] {
+  const pendingPlansByIssue = new Map<
+    string,
+    EmergencyStopRecoveryCleanupPlan[]
+  >();
+  const plansByKey = new Map<string, EmergencyStopRecoveryCleanupPlan>();
+  const provenPlanKeys = new Set<string>();
+
+  for (const entry of [...journal].sort((a, b) => a.sequence - b.sequence)) {
+    if (
+      entry.kind === "intent" &&
+      entry.metadata.status === "applied" &&
+      entry.metadata.verb === "pipeline_stop"
+    ) {
+      for (const issue of readEmergencyStopInterruptedIssues(entry.metadata)) {
+        const plan: EmergencyStopRecoveryCleanupPlan = {
+          issueId: issue.issueId,
+          issueIdentifier: issue.issueIdentifier,
+          codexAppServerPid: issue.codexAppServerPid,
+          setBySequence: entry.sequence,
+          since: entry.timestamp,
+        };
+        const plans = pendingPlansByIssue.get(issue.issueId) ?? [];
+        plans.push(plan);
+        pendingPlansByIssue.set(issue.issueId, plans);
+        plansByKey.set(
+          emergencyStopCleanupPlanKey(issue.issueId, entry.sequence),
+          plan,
+        );
+      }
+      continue;
+    }
+
+    if (
+      entry.kind !== "hard_stop_trigger" ||
+      entry.metadata.status !== "completed" ||
+      entry.metadata.reason !== "emergency_stop"
+    ) {
+      continue;
+    }
+
+    const sourceSequence = readEmergencyStopSourceSequence(entry.metadata);
+    if (sourceSequence !== null) {
+      provenPlanKeys.add(
+        emergencyStopCleanupPlanKey(entry.issueId, sourceSequence),
+      );
+      continue;
+    }
+
+    const pendingPlans = pendingPlansByIssue.get(entry.issueId) ?? [];
+    for (let index = pendingPlans.length - 1; index >= 0; index -= 1) {
+      const plan = pendingPlans[index];
+      if (plan === undefined) {
+        continue;
+      }
+      const key = emergencyStopCleanupPlanKey(plan.issueId, plan.setBySequence);
+      if (!provenPlanKeys.has(key)) {
+        provenPlanKeys.add(key);
+        break;
+      }
+    }
+  }
+
+  return [...plansByKey.entries()].flatMap(([key, plan]) =>
+    provenPlanKeys.has(key) ? [] : [plan],
+  );
+}
+
+function emergencyStopCleanupPlanKey(
+  issueId: string,
+  sourceSequence: number,
+): string {
+  return `${issueId}:${sourceSequence}`;
+}
+
+function readEmergencyStopInterruptedIssues(
+  metadata: Record<string, unknown>,
+): Array<{
+  issueId: string;
+  issueIdentifier: string;
+  codexAppServerPid: string | null;
+}> {
+  const value = metadata.interruptedIssues;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    if (!isRecord(item)) {
+      return [];
+    }
+    const issueId = item.issueId;
+    const issueIdentifier = item.issueIdentifier;
+    if (typeof issueId !== "string" || typeof issueIdentifier !== "string") {
+      return [];
+    }
+    const codexAppServerPid = item.codexAppServerPid;
+    return [
+      {
+        issueId,
+        issueIdentifier,
+        codexAppServerPid:
+          typeof codexAppServerPid === "string" &&
+          codexAppServerPid.trim() !== ""
+            ? codexAppServerPid
+            : null,
+      },
+    ];
+  });
+}
+
+function readEmergencyStopSourceSequence(
+  metadata: Record<string, unknown>,
+): number | null {
+  const value = metadata.sourceSequence;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : null;
+}
+
+function parseProcessPid(value: string | null): number | null {
+  if (value === null || !/^\d+$/.test(value)) {
+    return null;
+  }
+  const pid = Number(value);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 }
 
 function toErrorMessage(error: unknown): string {

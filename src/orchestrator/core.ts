@@ -176,6 +176,13 @@ const RESUME_EVIDENCE_MAX_LOOKUPS_PER_POLL = 5;
 interface ResumeRequiredGuard {
   pausedState: string | null;
   observedNonResumeState: boolean;
+  /**
+   * Pipeline emergency-stop replay found the interrupted issue but did not see
+   * a completed per-issue stop record. A normal Resume transition cannot prove
+   * the old detached process tree was killed, so runtime recovery must confirm
+   * cleanup before ordinary Resume can clear this fail-closed guard.
+   */
+  requiresConfirmedEmergencyStop?: boolean;
   /** When the pause was recorded — tracker resume evidence must be newer. */
   pausedAt: string | null;
   /** Last tracker evidence lookup (ms epoch) — throttles per-issue queries. */
@@ -291,6 +298,7 @@ export interface EmergencyStopResult {
     issueIdentifier: string;
     stage: string | null;
     attempt: number | null;
+    codexAppServerPid: string | null;
   }>;
   stopRequests: StopRequest[];
 }
@@ -898,6 +906,87 @@ export class OrchestratorCore {
     return this.nextRunJournalSequence() - 1;
   }
 
+  confirmEmergencyStopProcessCleanup(issueId: string): void {
+    const guard = this.resumeRequiredGuards.get(issueId);
+    if (guard?.requiresConfirmedEmergencyStop !== true) {
+      return;
+    }
+    this.resumeRequiredGuards.set(issueId, {
+      ...guard,
+      requiresConfirmedEmergencyStop: false,
+    });
+    const mark = this.state.resumeRequiredMarks[issueId];
+    if (mark?.reason === "killed_mid_run_unconfirmed") {
+      this.state.resumeRequiredMarks[issueId] = {
+        ...mark,
+        reason: "killed_mid_run",
+      };
+    }
+  }
+
+  requireEmergencyStopProcessCleanup(
+    issueId: string,
+    input: { setBySequence: number | null; since: string | null },
+  ): void {
+    const guard = this.resumeRequiredGuards.get(issueId);
+    if (guard === undefined) {
+      return;
+    }
+    this.resumeRequiredGuards.set(issueId, {
+      ...guard,
+      pausedAt: input.since ?? guard.pausedAt,
+      requiresConfirmedEmergencyStop: true,
+    });
+    const mark = this.state.resumeRequiredMarks[issueId];
+    if (mark !== undefined) {
+      this.state.resumeRequiredMarks[issueId] = {
+        ...mark,
+        reason: "killed_mid_run_unconfirmed",
+        setBySequence: input.setBySequence,
+        since: input.since ?? mark.since,
+      };
+    }
+  }
+
+  async recordEmergencyStopRecoveryCleanup(input: {
+    issueId: string;
+    issueIdentifier: string;
+    codexAppServerPid: string | null;
+    sourceSequence: number;
+  }): Promise<number | null> {
+    try {
+      const timestamp = this.now().toISOString();
+      const entry = await this.recordRunJournalEntry({
+        idempotencyKey: `hard_stop:${input.issueId}:recovery:emergency_stop:${input.sourceSequence}`,
+        timestamp,
+        kind: "hard_stop_trigger",
+        issueId: input.issueId,
+        issueIdentifier: input.issueIdentifier,
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary: `Emergency-stop recovery cleanup completed for ${input.issueIdentifier}.`,
+        metadata: {
+          status: "completed",
+          cleanupWorkspace: false,
+          reason: "emergency_stop",
+          recovery: "journal_hydration",
+          sourceSequence: input.sourceSequence,
+          codexAppServerPid: input.codexAppServerPid,
+        },
+      });
+      this.recoverHardStopTrigger(entry);
+      return entry.sequence;
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to journal emergency-stop recovery cleanup for ${input.issueIdentifier}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+  }
+
   /**
    * Serializable cluster/breaker summary for the /api/v1/state watchdog
    * section (SYMPH-407). Delegates to the same registry the dispatcher
@@ -1448,6 +1537,9 @@ export class OrchestratorCore {
           setBySequence: entry.sequence,
         },
       );
+      if (reason === "emergency_stop") {
+        this.confirmEmergencyStopProcessCleanup(entry.issueId);
+      }
       this.recoverPendingStageSignal(entry);
     }
   }
@@ -1677,15 +1769,20 @@ export class OrchestratorCore {
       if (this.canConsumeResumeRequirement(issue.id, normalizedState)) {
         this.clearResumedIssueLifecycleState(issue.id);
       } else {
+        const resumeBlock = this.resumeRequirementBlockVerdict(
+          issue.id,
+          issue.state,
+          normalizedState,
+        );
         // The 2026-06-11 invisible skip (SYMPH-405): a stop-like pause waits
         // for an explicit Resume, and Todo alone is silently skipped.
         this.recordDispatchVerdict({
           issueId: issue.id,
           issueIdentifier: issue.identifier,
           disposition: "skip",
-          reasonCode: "requires_explicit_resume",
-          remedy: "transition the issue into Resume (Todo alone is skipped)",
-          details: { issueState: issue.state },
+          reasonCode: resumeBlock.reasonCode,
+          remedy: resumeBlock.remedy,
+          details: resumeBlock.details,
         });
         return false;
       }
@@ -6726,7 +6823,44 @@ export class OrchestratorCore {
     }
 
     const guard = this.resumeRequiredGuards.get(issueId);
-    return guard === undefined || guard.observedNonResumeState;
+    return (
+      guard === undefined ||
+      (guard.observedNonResumeState &&
+        guard.requiresConfirmedEmergencyStop !== true)
+    );
+  }
+
+  private resumeRequirementBlockVerdict(
+    issueId: string,
+    issueState: string,
+    normalizedState: string,
+  ): {
+    reasonCode: string;
+    remedy: string;
+    details: Record<string, unknown>;
+  } {
+    const guard = this.resumeRequiredGuards.get(issueId);
+    if (
+      normalizedState === EXPLICIT_RESUME_STATE &&
+      guard?.requiresConfirmedEmergencyStop === true
+    ) {
+      return {
+        reasonCode: "emergency_stop_unconfirmed_kill",
+        remedy:
+          "confirm no interrupted process remains, then clear the park with an explicit release intent",
+        details: {
+          issueState,
+          pausedAt: guard.pausedAt,
+          parkSeq: guard.parkSeq,
+          requiresConfirmedEmergencyStop: true,
+        },
+      };
+    }
+    return {
+      reasonCode: "requires_explicit_resume",
+      remedy: "transition the issue into Resume (Todo alone is skipped)",
+      details: { issueState },
+    };
   }
 
   private resolveDecorrelatedGateContext(
@@ -7113,18 +7247,21 @@ export class OrchestratorCore {
       interruptedIssues,
     };
     for (const issue of interruptedIssues) {
-      if (this.state.resumeRequired.has(issue.issueId)) {
-        continue;
+      if (!this.state.resumeRequired.has(issue.issueId)) {
+        this.markIssueRequiresExplicitResume(
+          issue.issueId,
+          null,
+          entry.timestamp,
+          {
+            reason: "killed_mid_run_unconfirmed",
+            setBySequence: entry.sequence,
+          },
+        );
       }
-      this.markIssueRequiresExplicitResume(
-        issue.issueId,
-        null,
-        entry.timestamp,
-        {
-          reason: "killed_mid_run",
-          setBySequence: entry.sequence,
-        },
-      );
+      this.requireEmergencyStopProcessCleanup(issue.issueId, {
+        setBySequence: entry.sequence,
+        since: entry.timestamp,
+      });
     }
   }
 
@@ -7136,6 +7273,7 @@ export class OrchestratorCore {
       issueIdentifier: runningEntry.identifier,
       stage: this.state.issueStages[runningEntry.issue.id] ?? null,
       attempt: runningEntry.retryAttempt,
+      codexAppServerPid: runningEntry.codexAppServerPid,
     };
   }
 
@@ -7196,7 +7334,9 @@ export class OrchestratorCore {
     const stopRequests: StopRequest[] = [];
     for (const runningEntry of Object.values(this.state.running)) {
       stopRequests.push(
-        await this.requestStop(runningEntry, false, "emergency_stop"),
+        await this.requestStop(runningEntry, false, "emergency_stop", {
+          emergencyStopSourceSequence: sequence,
+        }),
       );
     }
 
@@ -9344,6 +9484,7 @@ export class OrchestratorCore {
     runningEntry: RunningEntry,
     cleanupWorkspace: boolean,
     reason: StopReason,
+    options: { emergencyStopSourceSequence?: number | null } = {},
   ): Promise<StopRequest> {
     const stopRequest: StopRequest = {
       issueId: runningEntry.issue.id,
@@ -9372,6 +9513,12 @@ export class OrchestratorCore {
         cleanupWorkspace,
         reason,
         issueState: runningEntry.issue.state,
+        ...(reason === "emergency_stop"
+          ? {
+              sourceSequence: options.emergencyStopSourceSequence ?? null,
+              codexAppServerPid: runningEntry.codexAppServerPid,
+            }
+          : {}),
       },
     });
 
@@ -9411,6 +9558,12 @@ export class OrchestratorCore {
           cleanupWorkspace,
           reason,
           issueState: runningEntry.issue.state,
+          ...(reason === "emergency_stop"
+            ? {
+                sourceSequence: options.emergencyStopSourceSequence ?? null,
+                codexAppServerPid: runningEntry.codexAppServerPid,
+              }
+            : {}),
         },
       });
     }
@@ -10526,7 +10679,8 @@ function isStopReason(value: string): value is StopReason {
     value === "terminal_state" ||
     value === "inactive_state" ||
     value === "stall_timeout" ||
-    value === "manual_stop"
+    value === "manual_stop" ||
+    value === "emergency_stop"
   );
 }
 
@@ -10629,6 +10783,7 @@ function readInterruptedIssues(
     }
     const stage = record.stage;
     const attempt = record.attempt;
+    const codexAppServerPid = record.codexAppServerPid;
     return [
       {
         issueId,
@@ -10637,6 +10792,11 @@ function readInterruptedIssues(
         attempt:
           typeof attempt === "number" && Number.isFinite(attempt)
             ? attempt
+            : null,
+        codexAppServerPid:
+          typeof codexAppServerPid === "string" &&
+          codexAppServerPid.trim() !== ""
+            ? codexAppServerPid
             : null,
       },
     ];

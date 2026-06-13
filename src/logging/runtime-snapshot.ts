@@ -314,6 +314,7 @@ export interface RuntimeSnapshot {
       issue_identifier: string;
       stage: string | null;
       attempt: number | null;
+      codex_app_server_pid: string | null;
     }>;
   } | null;
   /**
@@ -758,6 +759,7 @@ export function buildRuntimeSnapshot(
                 issue_identifier: issue.issueIdentifier,
                 stage: issue.stage,
                 attempt: issue.attempt,
+                codex_app_server_pid: issue.codexAppServerPid,
               }),
             ),
           },

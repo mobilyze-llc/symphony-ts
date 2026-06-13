@@ -218,6 +218,7 @@ export interface EmergencyStopStateResponse {
     issue_identifier: string;
     stage: string | null;
     attempt: number | null;
+    codex_app_server_pid: string | null;
   }>;
 }
 
