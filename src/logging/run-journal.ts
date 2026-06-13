@@ -173,11 +173,26 @@ async function withDispatcherRunJournalWriteLock<T>(
   const lockPath = getDispatcherRunJournalLockPath(workspaceRoot);
   await fs.mkdir(artifactDir, { recursive: true });
   const ownerToken = await acquireDispatcherRunJournalWriteLock(lockPath);
+  let result: T | undefined;
+  let writeError: unknown;
   try {
-    return await write();
-  } finally {
-    await releaseDispatcherRunJournalWriteLock(lockPath, ownerToken);
+    result = await write();
+  } catch (error) {
+    writeError = error;
   }
+
+  try {
+    await releaseDispatcherRunJournalWriteLock(lockPath, ownerToken);
+  } catch (error) {
+    if (writeError === undefined) {
+      throw error;
+    }
+  }
+
+  if (writeError !== undefined) {
+    throw writeError;
+  }
+  return result as T;
 }
 
 async function acquireDispatcherRunJournalWriteLock(
@@ -254,6 +269,12 @@ async function removeAbandonedDispatcherRunJournalWriteLock(
     if (isMissingPathError(error)) {
       return true;
     }
+    if (
+      isAlreadyExistsPathError(error) &&
+      (await removeStaleDispatcherRunJournalRecoveryLock(recoveryPath))
+    ) {
+      return true;
+    }
     return false;
   }
 
@@ -283,6 +304,17 @@ async function removeAbandonedDispatcherRunJournalWriteLock(
       await fs.rm(recoveryPath, { recursive: true, force: true });
     }
   }
+}
+
+async function removeStaleDispatcherRunJournalRecoveryLock(
+  recoveryPath: string,
+): Promise<boolean> {
+  const stats = await fs.stat(recoveryPath).catch(() => null);
+  if (!isStaleDispatcherRunJournalLock(stats)) {
+    return false;
+  }
+  await fs.rm(recoveryPath, { recursive: true, force: true });
+  return true;
 }
 
 async function getDispatcherRunJournalLockRecoveryCandidate(

@@ -369,6 +369,37 @@ describe("review journal events", () => {
     expect(result.appendedEntries).toHaveLength(3);
     expect(await readDispatcherRunJournal(workspaceRoot)).toHaveLength(3);
   });
+
+  it("recovers when a stale recovery claim is abandoned", async () => {
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "symphony-review-journal-stale-recovery-claim-"),
+    );
+    const lockPath = getDispatcherRunJournalLockPath(workspaceRoot);
+    const recoveryPath = join(lockPath, "recovery.lock");
+    const staleTimestamp = new Date(Date.now() - 60_000);
+    await mkdir(recoveryPath, { recursive: true });
+    await writeFile(
+      join(lockPath, "owner.json"),
+      `${JSON.stringify({
+        pid: 999_999_999,
+        acquiredAt: staleTimestamp.toISOString(),
+      })}\n`,
+    );
+    await utimes(recoveryPath, staleTimestamp, staleTimestamp);
+
+    const result = await appendReviewJournalEventsToDispatcherJournal({
+      workspaceRoot,
+      result: reviewResult({ verdict: "pass" }),
+      options: {
+        issueIdentifier: "SYMPH-450",
+        ownerId: "worker-1",
+        source: "pipeline",
+      },
+    });
+
+    expect(result.appendedEntries).toHaveLength(3);
+    expect(await readDispatcherRunJournal(workspaceRoot)).toHaveLength(3);
+  });
 });
 
 function reviewResult(input: {
