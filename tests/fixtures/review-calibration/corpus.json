@@ -400,6 +400,7 @@
       "replay": {
         "kind": "historical_symphony_placeholder",
         "status": "metadata_only",
+        "requiredSourceRefIds": ["SYMPH-440", "PR #392"],
         "expectedEventShape": {
           "eventName": "review_calibration_replay_case",
           "requiredFields": [
