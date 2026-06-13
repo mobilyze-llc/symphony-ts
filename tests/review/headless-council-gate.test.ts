@@ -4190,6 +4190,15 @@ describe("runHeadlessCouncilGate", () => {
 
   it.each([
     ["emphasized", "- **P2: Should Fix**"],
+    ["inline finding", "- P2: Should Fix: src/foo.ts:12 drops failures"],
+    [
+      "emphasized inline finding",
+      "- **P2: Should Fix**: src/foo.ts:12 drops failures",
+    ],
+    [
+      "period-delimited inline finding",
+      "- P2 Should Fix. src/foo.ts:12 drops failures",
+    ],
     ["punctuated", "- P2 Should Fix."],
   ])(
     "does not skip a %s bullet preamble that labels a section heading",
