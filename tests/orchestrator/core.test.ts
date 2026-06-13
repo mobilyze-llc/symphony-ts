@@ -17,6 +17,7 @@ import {
   sortIssuesForDispatch,
 } from "../../src/orchestrator/core.js";
 import type { TrackerIssueWriteRequest } from "../../src/orchestrator/tracker-write.js";
+import type { TicketFeatureSourceIssue } from "../../src/tracker/ticket-feature.js";
 import type {
   IssueStateSnapshot,
   IssueTracker,
@@ -46,6 +47,253 @@ describe("orchestrator core", () => {
     ]);
 
     expect(issues.map((issue) => issue.id)).toEqual(["1", "2", "3"]);
+  });
+
+  it("dispatches unrelated candidates when hard dependency cycles are excluded", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            blockedBy: [
+              { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+            ],
+          }),
+          createIssue({
+            id: "2",
+            identifier: "ISSUE-2",
+            blockedBy: [
+              { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+            ],
+          }),
+          createIssue({
+            id: "3",
+            identifier: "ISSUE-3",
+            priority: 1,
+            createdAt: "2026-03-03T00:00:00.000Z",
+          }),
+        ],
+      }),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["3"]);
+    expect(orchestrator.getState().computedDispatchOrder).toMatchObject({
+      status: "linearized",
+      positions: [
+        expect.objectContaining({
+          issue_identifier: "ISSUE-3",
+        }),
+      ],
+      hard_cycle: {
+        edge_trust: "legacy_hard",
+        issue_identifiers: ["ISSUE-1", "ISSUE-2"],
+      },
+    });
+    expect(orchestrator.getState().dispatcherRunJournal).not.toContainEqual(
+      expect.objectContaining({
+        kind: "dispatch_verdict",
+        metadata: expect.objectContaining({
+          disposition: "gate",
+        }),
+      }),
+    );
+  });
+
+  it("does not journal ordering disagreement when the computed head is skipped by eligibility", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            priority: 1,
+            createdAt: "2026-03-01T00:00:00.000Z",
+          }),
+          createIssue({
+            id: "2",
+            identifier: "ISSUE-2",
+            priority: 1,
+            createdAt: "2026-03-02T00:00:00.000Z",
+          }),
+        ],
+      }),
+    });
+    orchestrator.getState().claimed.add("1");
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(orchestrator.getState().dispatcherRunJournal).not.toContainEqual(
+      expect.objectContaining({ kind: "ordering_disagreement" }),
+    );
+  });
+
+  it("does not dispatch issues excluded by legacy hard blockers through pollTick", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            blockedBy: [
+              {
+                id: "2",
+                identifier: "ISSUE-2",
+                state: "In Progress",
+              },
+            ],
+          }),
+        ],
+      }),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().computedDispatchOrder).toMatchObject({
+      status: "linearized",
+      exclusions: [
+        expect.objectContaining({
+          issue_identifier: "ISSUE-1",
+          blocker_issue_identifier: "ISSUE-2",
+          edge_trust: "legacy_hard",
+        }),
+      ],
+    });
+  });
+
+  it("fetches TicketFeature blockers even when sampled candidate blockers are empty", async () => {
+    const blocker = createIssue({ id: "2", identifier: "ISSUE-2" });
+    const dependent = createIssue({ id: "1", identifier: "ISSUE-1" });
+    const fetchTicketFeatureIssuesByStates = vi.fn(async () => [
+      createTicketFeatureSourceIssue(dependent, {
+        blockedBy: [createTicketFeatureBlockedByEdge(blocker)],
+      }),
+      createTicketFeatureSourceIssue(blocker),
+    ]);
+    const orchestrator = createOrchestrator({
+      config: createConfig({
+        operatorAnchors: {
+          operatorAllowlist: ["operator@example.com"],
+          serviceAccounts: [],
+          fieldName: null,
+          ingestSecret: null,
+        },
+      }),
+      tracker: createTracker({
+        candidates: [dependent, blocker],
+        fetchTicketFeatureIssuesByStates,
+      }),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(fetchTicketFeatureIssuesByStates).toHaveBeenCalledWith([
+      "Todo",
+      "In Progress",
+      "In Review",
+      "Resume",
+    ]);
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(orchestrator.getState().computedDispatchOrder).toMatchObject({
+      status: "linearized",
+      exclusions: [
+        expect.objectContaining({
+          issue_identifier: "ISSUE-1",
+          blocker_issue_identifier: "ISSUE-2",
+          edge_trust: "operator_confirmed",
+        }),
+      ],
+    });
+  });
+
+  it("preserves native hard blockers when TicketFeature blocker trust is not allowlisted", async () => {
+    const blocker = createIssue({ id: "2", identifier: "ISSUE-2" });
+    const dependent = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      blockedBy: [
+        {
+          id: "2",
+          identifier: "ISSUE-2",
+          state: "In Progress",
+        },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [dependent, blocker],
+        fetchTicketFeatureIssuesByStates: async () => [
+          createTicketFeatureSourceIssue(dependent, {
+            blockedBy: [createTicketFeatureBlockedByEdge(blocker)],
+          }),
+          createTicketFeatureSourceIssue(blocker),
+        ],
+      }),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(orchestrator.getState().computedDispatchOrder).toMatchObject({
+      status: "linearized",
+      exclusions: [
+        expect.objectContaining({
+          issue_identifier: "ISSUE-1",
+          blocker_issue_identifier: "ISSUE-2",
+          edge_trust: "legacy_hard",
+        }),
+      ],
+    });
+  });
+
+  it("journals ordering disagreement when the computed head reaches dispatch but another issue is admitted", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            priority: 1,
+            createdAt: "2026-03-01T00:00:00.000Z",
+          }),
+          createIssue({
+            id: "2",
+            identifier: "ISSUE-2",
+            priority: 1,
+            createdAt: "2026-03-02T00:00:00.000Z",
+          }),
+        ],
+      }),
+    });
+    orchestrator.getState().issuePendingStageSignals["1"] = {
+      signal: "complete",
+      stageName: null,
+      attempt: null,
+      agentMessage: "Previous worker completed while paused.\n[STAGE_COMPLETE]",
+      failureClass: null,
+      setBySequence: 42,
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(orchestrator.getState().dispatcherRunJournal).toContainEqual(
+      expect.objectContaining({
+        kind: "ordering_disagreement",
+        issueId: "2",
+        issueIdentifier: "ISSUE-2",
+        metadata: expect.objectContaining({
+          comparator_version: "dispatch-comparator-v1",
+          computed_top_issue_id: "1",
+          expected_issue_id: "1",
+          actual_issue_id: "2",
+        }),
+      }),
+    );
   });
 
   it("rejects Todo issues with non-terminal blockers and allows terminal blockers", () => {
@@ -10258,6 +10506,7 @@ function createTracker(input?: {
   candidatesFn?: () => Issue[];
   statesById?: IssueStateSnapshot[];
   fetchOpenIssuesByLabels?: IssueTracker["fetchOpenIssuesByLabels"];
+  fetchTicketFeatureIssuesByStates?: IssueTracker["fetchTicketFeatureIssuesByStates"];
   latestStateTransitionAt?: (
     issueId: string,
     stateName: string,
@@ -10283,6 +10532,10 @@ function createTracker(input?: {
   if (input?.fetchOpenIssuesByLabels !== undefined) {
     tracker.fetchOpenIssuesByLabels = input.fetchOpenIssuesByLabels;
   }
+  if (input?.fetchTicketFeatureIssuesByStates !== undefined) {
+    tracker.fetchTicketFeatureIssuesByStates =
+      input.fetchTicketFeatureIssuesByStates;
+  }
   return tracker;
 }
 
@@ -10299,6 +10552,7 @@ function createConfig(overrides?: {
   admissionCard?: ResolvedWorkflowConfig["admissionCard"];
   watchdog?: ResolvedWorkflowConfig["watchdog"];
   riskPredicateReasoning?: ResolvedWorkflowConfig["riskPredicateReasoning"];
+  operatorAnchors?: ResolvedWorkflowConfig["operatorAnchors"];
 }): ResolvedWorkflowConfig {
   return {
     workflowPath: "/tmp/WORKFLOW.md",
@@ -10395,6 +10649,71 @@ function createConfig(overrides?: {
     },
     stages: null,
     escalationState: null,
+    ...(overrides?.operatorAnchors !== undefined
+      ? { operatorAnchors: overrides.operatorAnchors }
+      : {}),
+  };
+}
+
+function createTicketFeatureSourceIssue(
+  issue: Issue,
+  overrides?: Partial<TicketFeatureSourceIssue>,
+): TicketFeatureSourceIssue {
+  return {
+    id: issue.id,
+    identifier: issue.identifier,
+    title: issue.title,
+    description: issue.description,
+    priority: issue.priority,
+    state: issue.state,
+    branchName: issue.branchName,
+    url: issue.url,
+    labels: issue.labels,
+    creator: {
+      id: "operator",
+      name: "Operator",
+      displayName: "Operator",
+      email: "operator@example.com",
+      botType: null,
+      botSubType: null,
+      kind: "user",
+    },
+    parent: null,
+    blockedBy: [],
+    sourceVisibility: {
+      relationPageTruncated: false,
+      relationHistoryTruncated: false,
+    },
+    createdAt: issue.createdAt,
+    updatedAt: issue.updatedAt,
+    ...overrides,
+  };
+}
+
+function createTicketFeatureBlockedByEdge(
+  issue: Issue,
+): TicketFeatureSourceIssue["blockedBy"][number] {
+  return {
+    kind: "blocked_by",
+    relationId: `relation-${issue.id}`,
+    relationType: "blocks",
+    issue: {
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      state: issue.state,
+    },
+    author: {
+      id: "operator",
+      name: "Operator",
+      displayName: "Operator",
+      email: "operator@example.com",
+      botType: null,
+      botSubType: null,
+      kind: "user",
+    },
+    authoredAt: "2026-03-05T00:00:00.000Z",
+    attributionSource: "issue_history",
   };
 }
 

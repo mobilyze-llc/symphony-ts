@@ -747,7 +747,7 @@ ${DASHBOARD_STYLES}
           <div class="section-header">
             <div>
               <h2 class="section-title">Anchors</h2>
-              <p class="section-copy">Operator queue anchors with provenance and expiry. Current dispatch ordering remains priority/FIFO until comparator support lands.</p>
+              <p class="section-copy">Operator queue anchors with provenance and expiry.</p>
             </div>
           </div>
 
@@ -765,6 +765,17 @@ ${DASHBOARD_STYLES}
               <tbody id="anchor-rows">${renderAnchorRows(snapshot)}</tbody>
             </table>
           </div>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Computed dispatch order</h2>
+              <p class="section-copy">Deterministic comparator read-model with hard exclusions and advisory-edge visibility.</p>
+            </div>
+          </div>
+
+          <div id="computed-order">${renderComputedOrder(snapshot)}</div>
         </section>
 
         <section class="section-card">
@@ -1249,6 +1260,60 @@ function renderDashboardClientScript(
           return parts.join(' · ');
         }
 
+        // Keep the computed-order summary labels in sync with the server-side
+        // renderComputedOrder implementation below; this copy powers live updates.
+        function renderComputedOrder(next) {
+          var order = next.computed_order;
+          if (!order) {
+            return '<p class="empty-state">No computed dispatch order has been sampled yet.</p>';
+          }
+          var statusClass = order.hard_cycle ? 'state-badge state-badge-danger' : 'state-badge state-badge-active';
+          var status = '<p class="section-copy"><span class="' + statusClass + '">' + escapeHtml(order.status) + '</span> <span class="mono muted">' + escapeHtml(order.comparator_version || 'unknown') + '</span></p>';
+          var cycle = order.hard_cycle
+            ? '<p class="section-copy"><strong>Hard cycle:</strong> ' + escapeHtml((order.hard_cycle.issue_identifiers || []).join(' → ') || order.hard_cycle.reason || 'cycle detected') + '</p>'
+            : '';
+          var rows = Array.isArray(order.positions) && order.positions.length > 0
+            ? order.positions.map(function (position) {
+                var rationale = Array.isArray(position.rationale) ? position.rationale.join(' · ') : '';
+                return '<tr>' +
+                  '<td class="numeric">' + formatInteger(position.position) + '</td>' +
+                  '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(position.issue_identifier || position.issue_id) + '</span></div></td>' +
+                  '<td>' + escapeHtml(rationale) + '</td>' +
+                  '</tr>';
+              }).join('')
+            : '<tr><td colspan="3"><p class="empty-state">No linearized positions.</p></td></tr>';
+          var exclusionRows = Array.isArray(order.exclusions) ? order.exclusions : [];
+          var exclusions = exclusionRows.length;
+          var hardExcludedIssueIds = {};
+          var hardExcludedIssueCount = 0;
+          exclusionRows.forEach(function (exclusion) {
+            var issueId = String(exclusion.issue_id || exclusion.issue_identifier || '');
+            if (issueId && !hardExcludedIssueIds[issueId]) {
+              hardExcludedIssueIds[issueId] = true;
+              hardExcludedIssueCount += 1;
+            }
+          });
+          var advisory = Array.isArray(order.advisory_warnings) ? order.advisory_warnings.length : 0;
+          var wouldExclude = Array.isArray(order.would_have_been_excluded_by_advisory_edges) ? order.would_have_been_excluded_by_advisory_edges.length : 0;
+          var summary = '<p class="section-copy">Hard-excluded issues: ' + formatInteger(hardExcludedIssueCount) + ' · Hard exclusion edges: ' + formatInteger(exclusions) + ' · Advisory warnings: ' + formatInteger(advisory) + ' · Would-have-been advisory exclusions: ' + formatInteger(wouldExclude) + '</p>';
+          var exclusionPanel = exclusions === 0
+            ? ''
+            : '<p class="detail-section-title">Hard exclusions</p><div class="table-wrap"><table class="data-table" style="min-width: 720px;"><thead><tr><th>Issue</th><th>Blocked by</th><th>Reason</th></tr></thead><tbody>' +
+              exclusionRows.map(function (exclusion) {
+                return '<tr><td>' + escapeHtml(exclusion.issue_identifier || exclusion.issue_id) + '</td><td>' + escapeHtml(exclusion.blocker_issue_identifier || exclusion.blocker_issue_id || 'unknown') + '</td><td>' + escapeHtml(exclusion.reason || '') + '</td></tr>';
+              }).join('') +
+              '</tbody></table></div>';
+          var advisoryPanel = advisory === 0
+            ? ''
+            : '<p class="detail-section-title">Advisory warnings</p><div class="table-wrap"><table class="data-table" style="min-width: 720px;"><thead><tr><th>Issue</th><th>Advisory blocker</th><th>Reason</th></tr></thead><tbody>' +
+              order.advisory_warnings.map(function (warning) {
+                return '<tr><td>' + escapeHtml(warning.issue_identifier || warning.issue_id) + '</td><td>' + escapeHtml(warning.blocker_issue_identifier || warning.blocker_issue_id || 'unknown') + '</td><td>' + escapeHtml(warning.reason || '') + '</td></tr>';
+              }).join('') +
+              '</tbody></table></div>';
+          return status + cycle + summary + exclusionPanel + advisoryPanel +
+            '<div class="table-wrap"><table class="data-table" style="min-width: 720px;"><thead><tr><th>Position</th><th>Issue</th><th>Rationale</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
+        }
+
         function renderAnchorRows(next) {
           var anchors = Array.isArray(next.anchors) ? next.anchors : [];
           if (anchors.length === 0) {
@@ -1286,6 +1351,7 @@ function renderDashboardClientScript(
           document.getElementById('metric-runtime').textContent = formatRuntimeSeconds(next.codex_totals.seconds_running);
           document.getElementById('decision-quality').innerHTML = renderDecisionQuality(next);
           document.getElementById('manager-runs').innerHTML = renderManagerRuns(next);
+          document.getElementById('computed-order').innerHTML = renderComputedOrder(next);
           document.getElementById('anchor-rows').innerHTML = renderAnchorRows(next);
           // Preserve expand/collapse state before DOM replacement (SYMPH-37)
           var expandedIds = new Set();
@@ -1907,6 +1973,138 @@ function renderRetryRows(snapshot: RuntimeSnapshot): string {
             </tr>`,
         )
         .join("");
+}
+
+// Keep the computed-order summary labels in sync with the client-side
+// renderComputedOrder copy embedded in renderDashboardClientScript.
+function renderComputedOrder(snapshot: RuntimeSnapshot): string {
+  const order = snapshot.computed_order;
+  if (order === null || order === undefined) {
+    return '<p class="empty-state">No computed dispatch order has been sampled yet.</p>';
+  }
+  const statusClass =
+    order.hard_cycle !== null
+      ? "state-badge state-badge-danger"
+      : "state-badge state-badge-active";
+  const status = `<p class="section-copy"><span class="${statusClass}">${escapeHtml(
+    order.status,
+  )}</span> <span class="mono muted">${escapeHtml(
+    order.comparator_version,
+  )}</span></p>`;
+  const cycle =
+    order.hard_cycle === null
+      ? ""
+      : `<p class="section-copy"><strong>Hard cycle:</strong> ${escapeHtml(
+          order.hard_cycle.issue_identifiers.join(" → ") ||
+            order.hard_cycle.reason ||
+            "cycle detected",
+        )}</p>`;
+  const hardExcludedIssueCount = new Set(
+    order.exclusions.map((exclusion) => exclusion.issue_id),
+  ).size;
+  const summary = `<p class="section-copy">Hard-excluded issues: ${formatInteger(
+    hardExcludedIssueCount,
+  )} · Hard exclusion edges: ${formatInteger(
+    order.exclusions.length,
+  )} · Advisory warnings: ${formatInteger(
+    order.advisory_warnings.length,
+  )} · Would-have-been advisory exclusions: ${formatInteger(
+    order.would_have_been_excluded_by_advisory_edges.length,
+  )}</p>`;
+  const exclusionPanel =
+    order.exclusions.length === 0
+      ? ""
+      : `<p class="detail-section-title">Hard exclusions</p>
+          <div class="table-wrap">
+            <table class="data-table" style="min-width: 720px;">
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>Blocked by</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody>${order.exclusions
+                .map(
+                  (exclusion) => `
+                  <tr>
+                    <td>${escapeHtml(
+                      exclusion.issue_identifier || exclusion.issue_id,
+                    )}</td>
+                    <td>${escapeHtml(
+                      exclusion.blocker_issue_identifier ??
+                        exclusion.blocker_issue_id ??
+                        "unknown",
+                    )}</td>
+                    <td>${escapeHtml(exclusion.reason)}</td>
+                  </tr>`,
+                )
+                .join("")}</tbody>
+            </table>
+          </div>`;
+  const advisoryPanel =
+    order.advisory_warnings.length === 0
+      ? ""
+      : `<p class="detail-section-title">Advisory warnings</p>
+          <div class="table-wrap">
+            <table class="data-table" style="min-width: 720px;">
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>Advisory blocker</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody>${order.advisory_warnings
+                .map(
+                  (warning) => `
+                  <tr>
+                    <td>${escapeHtml(
+                      warning.issue_identifier || warning.issue_id,
+                    )}</td>
+                    <td>${escapeHtml(
+                      warning.blocker_issue_identifier ??
+                        warning.blocker_issue_id ??
+                        "unknown",
+                    )}</td>
+                    <td>${escapeHtml(warning.reason)}</td>
+                  </tr>`,
+                )
+                .join("")}</tbody>
+            </table>
+          </div>`;
+  const rows =
+    order.positions.length === 0
+      ? '<tr><td colspan="3"><p class="empty-state">No linearized positions.</p></td></tr>'
+      : order.positions
+          .map(
+            (position) => `
+            <tr>
+              <td class="numeric">${formatInteger(position.position)}</td>
+              <td>
+                <div class="issue-stack">
+                  <span class="issue-id">${escapeHtml(
+                    position.issue_identifier || position.issue_id,
+                  )}</span>
+                </div>
+              </td>
+              <td>${escapeHtml(position.rationale.join(" · "))}</td>
+            </tr>`,
+          )
+          .join("");
+  return `${status}${cycle}${summary}${exclusionPanel}${advisoryPanel}
+          <div class="table-wrap">
+            <table class="data-table" style="min-width: 720px;">
+              <thead>
+                <tr>
+                  <th>Position</th>
+                  <th>Issue</th>
+                  <th>Rationale</th>
+                </tr>
+              </thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>`;
 }
 
 function renderAnchorRows(snapshot: RuntimeSnapshot): string {

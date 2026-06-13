@@ -258,6 +258,9 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   // consumers use this to measure the FIFO control arm before hygiene lanes
   // or comparators gain authority.
   "queue_baseline",
+  // Deterministic dispatch comparator disagreement (SYMPH-485): emitted when
+  // the actual dispatch pick differs from the computed-order head.
+  "ordering_disagreement",
 ] as const;
 
 // ---------------------------------------------------------------------------
@@ -1080,6 +1083,61 @@ export interface IssueAnchorRecord {
   setBySequence: number | null;
 }
 
+export type ComputedDispatchOrderStatus = "linearized";
+
+export type ComputedDispatchEdgeTrust =
+  | "operator_confirmed"
+  | "advisory"
+  | "legacy_hard";
+
+export interface ComputedDispatchOrderPosition {
+  position: number;
+  issue_id: string;
+  issue_identifier: string;
+  priority: number | null;
+  created_at: string | null;
+  rationale: string[];
+}
+
+export interface ComputedDispatchOrderExclusion {
+  issue_id: string;
+  issue_identifier: string;
+  blocker_issue_id: string | null;
+  blocker_issue_identifier: string | null;
+  blocker_state: string | null;
+  edge_trust: Exclude<ComputedDispatchEdgeTrust, "advisory">;
+  source: "ticket_feature" | "issue_blocked_by";
+  reason: string;
+}
+
+export interface ComputedDispatchOrderAdvisoryWarning {
+  issue_id: string;
+  issue_identifier: string;
+  blocker_issue_id: string | null;
+  blocker_issue_identifier: string | null;
+  blocker_state: string | null;
+  reason: string;
+}
+
+export interface ComputedDispatchOrderCycle {
+  issue_ids: string[];
+  issue_identifiers: string[];
+  edge_trust: Exclude<ComputedDispatchEdgeTrust, "advisory">;
+  reason: string;
+}
+
+export interface ComputedDispatchOrderSnapshot {
+  comparator_version: string;
+  generated_at: string;
+  status: ComputedDispatchOrderStatus;
+  positions: ComputedDispatchOrderPosition[];
+  exclusions: ComputedDispatchOrderExclusion[];
+  advisory_warnings: ComputedDispatchOrderAdvisoryWarning[];
+  would_have_been_excluded_by_advisory_edges: ComputedDispatchOrderAdvisoryWarning[];
+  hard_cycle: ComputedDispatchOrderCycle | null;
+  warnings: string[];
+}
+
 interface PendingStageSignalBase {
   stageName: string | null;
   attempt: number | null;
@@ -1120,10 +1178,16 @@ export interface OrchestratorState {
   resumeRequiredMarks: Record<string, ResumeRequiredMark>;
   /**
    * Active operator anchors reduced from intent journal events (SYMPH-486).
-   * This is a read-model only in this slice; dispatch order remains the
-   * upstream priority/FIFO comparator until the comparator ticket consumes it.
+   * The dispatch comparator consumes this read-model without writing any
+   * computed order back to Linear.
    */
   issueAnchors: Record<string, IssueAnchorRecord>;
+  /**
+   * Latest deterministic queue order read-model (SYMPH-485). Recomputed from
+   * tracker candidates, operator anchors, and ticket-feature dependency edges;
+   * never persisted outside runtime state or written back to Linear.
+   */
+  computedDispatchOrder: ComputedDispatchOrderSnapshot | null;
   emergencyStop: PipelineEmergencyStopState | null;
   codexTotals: CodexTotals;
   codexRateLimits: CodexRateLimits;
@@ -1345,6 +1409,7 @@ export function createInitialOrchestratorState(input: {
     resumeRequired: new Set<string>(),
     resumeRequiredMarks: {},
     issueAnchors: {},
+    computedDispatchOrder: null,
     emergencyStop: null,
     codexTotals: {
       inputTokens: 0,
