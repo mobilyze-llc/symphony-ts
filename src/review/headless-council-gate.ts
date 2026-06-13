@@ -1868,7 +1868,6 @@ function escalateRoutingForDisagreement(
     : [...routing.selectedLanes, opusSelection];
   return {
     ...addEscalationPredicates(routing, predicates),
-    mode: "disagreement",
     selectedLanes,
     skippedLanes: routing.skippedLanes.filter(
       (lane) => lane.laneId !== opusSelection.laneId,

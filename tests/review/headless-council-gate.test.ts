@@ -435,7 +435,7 @@ describe("runHeadlessCouncilGate", () => {
       "claude-opus",
     ]);
     expect(result.review_routing).toMatchObject({
-      mode: "disagreement",
+      mode: "standard",
       escalationPredicates: expect.arrayContaining([
         "p1_verdict_disagreement",
         "absent_decorrelated_reviewer_artifact",
@@ -444,6 +444,10 @@ describe("runHeadlessCouncilGate", () => {
         expect.objectContaining({ laneId: "claude-opus", required: true }),
       ]),
     });
+    const bundle = JSON.parse(
+      await readFile(result.artifactPaths.reviewBundle!, "utf-8"),
+    ) as { target: { routingMode: string | null } };
+    expect(bundle.target.routingMode).toBe(result.review_routing?.mode);
     expect(result.termination).toMatchObject({
       status: "continue",
       reason: "blocking_findings",
