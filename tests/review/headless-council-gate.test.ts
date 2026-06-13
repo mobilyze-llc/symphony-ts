@@ -3660,6 +3660,253 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("narrows convergence prompts around a shared invariant without suppressing fix-delta regressions", async () => {
+    const familyArtifact = [
+      "## Verdict",
+      "FINDINGS",
+      "",
+      "## P1 Must Fix",
+      "None",
+      "",
+      "## P2 Should Fix",
+      "- src/review/headless-council-gate.ts:10 loses reviewer targeting. | family: review-state contract; safety_claim: review state must falsify named invariants before continuing; next_round_question: did every producer and consumer honor the targeted contract?; remaining_symptoms: prompt narrowing gap",
+      "- tests/review/headless-council-gate.test.ts:20 misses prompt matrix coverage. | family: review-state contract; fixed_symptoms: stale-head guard",
+      "",
+      "## Track",
+      "None",
+      "",
+      "## Dismissed Or Theoretical",
+      "None",
+    ].join("\n");
+    const firstHarness = await createHarness({
+      laneBehavior: {
+        "codex-high-lead": { artifact: familyArtifact },
+      },
+    });
+    const firstResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-468",
+        workspace: firstHarness.workspace,
+        artifactDir: firstHarness.artifactDir,
+        diffPath: firstHarness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        reviewerLanes: [opusLane()],
+      },
+      { runCommand: firstHarness.runCommand },
+    );
+    const prior = firstResult.lanes.find(
+      (lane) => lane.laneId === "codex-high-lead",
+    )!.structuredArtifact!;
+
+    const secondHarness = await createHarness({
+      gitDiff: {
+        exitCode: 0,
+        stdout: [
+          "diff --git a/src/review/headless-council-gate.ts b/src/review/headless-council-gate.ts",
+          "+targeted convergence fix",
+          "diff --git a/src/unrelated-regression.ts b/src/unrelated-regression.ts",
+          "+const regression = true;",
+          "",
+        ].join("\n"),
+        stderr: "",
+      },
+      gitDiffNameOnlyByRange: {
+        "old-head-sha..head-sha": {
+          exitCode: 0,
+          stdout:
+            "src/review/headless-council-gate.ts\nsrc/unrelated-regression.ts\n",
+          stderr: "",
+        },
+        "merge-base-sha..head-sha": {
+          exitCode: 0,
+          stdout:
+            "src/review/headless-council-gate.ts\ntests/review/headless-council-gate.test.ts\nsrc/unrelated-regression.ts\n",
+          stderr: "",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-468",
+        workspace: secondHarness.workspace,
+        artifactDir: secondHarness.artifactDir,
+        baseRef: "origin/main",
+        headRef: "HEAD",
+        previousReviewedHeadSha: "old-head-sha",
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        reviewerLanes: [opusLane(), piLane(), codexExcavationLane()],
+        mode: "convergence",
+        round: 2,
+        priorStructuredArtifacts: [prior],
+      },
+      { runCommand: secondHarness.runCommand },
+    );
+
+    expect(result.targeted_convergence).toMatchObject({
+      hypothesisVersion: "targeted_convergence_v1",
+      trigger: "shared_asserted_family",
+      family: "review-state contract",
+      namedInvariant:
+        "review state must falsify named invariants before continuing",
+      roleTargets: {
+        codex: "hunt_same_family_variants",
+        pi: "validate_matrix_completeness",
+      },
+      scope: {
+        previousReviewedHeadSha: "old-head-sha",
+        currentHeadSha: "head-sha",
+        mergeBaseSha: "merge-base-sha",
+        fixDeltaRange: "old-head-sha..head-sha",
+        fixDeltaPaths: [
+          "src/review/headless-council-gate.ts",
+          "src/unrelated-regression.ts",
+        ],
+        semanticNeighborhoodPaths: [
+          "src/review/headless-council-gate.ts",
+          "src/unrelated-regression.ts",
+          "tests/review/headless-council-gate.test.ts",
+        ],
+        producerPaths: [
+          "src/review/headless-council-gate.ts",
+          "src/unrelated-regression.ts",
+        ],
+        consumerPaths: ["tests/review/headless-council-gate.test.ts"],
+        skipUnchangedRemainder: true,
+      },
+    });
+
+    const bundle = JSON.parse(
+      await readFile(result.artifactPaths.reviewBundle!, "utf-8"),
+    ) as { targetedConvergence: Record<string, unknown> };
+    expect(bundle.targetedConvergence).toMatchObject({
+      hypothesisVersion: "targeted_convergence_v1",
+      family: "review-state contract",
+    });
+
+    const codexPrompt = await readFile(
+      join(secondHarness.artifactDir, "codex-excavation.prompt.md"),
+      "utf-8",
+    );
+    const piPrompt = await readFile(
+      join(secondHarness.artifactDir, "pi-deepseek.prompt.md"),
+      "utf-8",
+    );
+    for (const prompt of [codexPrompt, piPrompt]) {
+      expect(prompt).toContain(
+        "Targeted convergence hypothesis (schema targeted_convergence_v1)",
+      );
+      expect(prompt).toContain(
+        "Named invariant to falsify: review state must falsify named invariants before continuing",
+      );
+      expect(prompt).toContain(
+        "broad-review only the fix delta `previous_reviewed_head..HEAD` plus the semantic neighborhood/consumers/producers computed against merge-base",
+      );
+      expect(prompt).toContain("Skip unchanged remainder");
+      expect(prompt).toContain(
+        "Do not suppress fix-delta regressions outside the named family",
+      );
+      expect(prompt).toContain("src/unrelated-regression.ts");
+    }
+    expect(codexPrompt).toContain(
+      "Codex hunts same-family variants of the named invariant",
+    );
+    expect(piPrompt).toContain("Pi validates matrix completeness");
+
+    expect(
+      secondHarness.commands.some(
+        (command) =>
+          command.command === "git" &&
+          command.args.join(" ") === "merge-base base-sha head-sha",
+      ),
+    ).toBe(true);
+    expect(
+      secondHarness.commands.some(
+        (command) =>
+          command.command === "git" &&
+          command.args.join(" ") === "diff --name-only old-head-sha head-sha",
+      ),
+    ).toBe(true);
+  });
+
+  it("builds a targeted hypothesis when a same-family finding reopens", async () => {
+    const artifact = [
+      "## Verdict",
+      "FINDINGS",
+      "",
+      "## P1 Must Fix",
+      "None",
+      "",
+      "## P2 Should Fix",
+      "- src/review/headless-council-gate.ts:10 still violates the review-state contract. | family: review-state contract; safety_claim: review state must stop procedural patching after repeated invariant reopen; next_round_question: did the fix restructure against the named contract?; remaining_symptoms: projection can still loop",
+      "",
+      "## Track",
+      "None",
+      "",
+      "## Dismissed Or Theoretical",
+      "None",
+    ].join("\n");
+    const firstHarness = await createHarness({
+      laneBehavior: { "claude-opus": { artifact } },
+    });
+    const firstResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-468",
+        workspace: firstHarness.workspace,
+        artifactDir: firstHarness.artifactDir,
+        diffPath: firstHarness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: firstHarness.runCommand },
+    );
+    const secondHarness = await createHarness({
+      laneBehavior: { "claude-opus": { artifact } },
+    });
+    const secondResult = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-468",
+        workspace: secondHarness.workspace,
+        artifactDir: secondHarness.artifactDir,
+        diffPath: secondHarness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        mode: "convergence",
+        round: 2,
+        priorStructuredArtifacts: [firstResult.lanes[0]!.structuredArtifact!],
+      },
+      { runCommand: secondHarness.runCommand },
+    );
+
+    const thirdHarness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-468",
+        workspace: thirdHarness.workspace,
+        artifactDir: thirdHarness.artifactDir,
+        baseRef: "origin/main",
+        headRef: "HEAD",
+        previousReviewedHeadSha: "round-2-head-sha",
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        mode: "convergence",
+        round: 3,
+        priorStructuredArtifacts: [
+          firstResult.lanes[0]!.structuredArtifact!,
+          secondResult.lanes[0]!.structuredArtifact!,
+        ],
+      },
+      { runCommand: thirdHarness.runCommand },
+    );
+
+    expect(result.targeted_convergence).toMatchObject({
+      trigger: "same_family_reopen",
+      family: "review-state contract",
+      sourceRounds: [1, 2],
+      narrowingRationale:
+        "same-family finding reopened across round(s) 1, 2; next round narrows to falsifying review state must stop procedural patching after repeated invariant reopen while still reviewing the fix delta",
+    });
+  });
+
   it("carries prior adjudicated finding fingerprints into convergence prompts", async () => {
     const firstHarness = await createHarness({
       laneBehavior: {
@@ -3768,6 +4015,8 @@ async function createHarness(options?: {
   ghPrDiff?: CommandResult;
   gitDiff?: CommandResult;
   gitDiffNameOnly?: CommandResult;
+  gitDiffNameOnlyByRange?: Record<string, CommandResult>;
+  gitMergeBase?: CommandResult;
   gitRevParse?: Record<string, CommandResult>;
   gitStatus?: CommandResult;
   gitStatusReject?: Error;
@@ -3856,10 +4105,24 @@ async function createHarness(options?: {
     }
 
     if (command === "git" && args[0] === "diff" && args[1] === "--name-only") {
+      const rangeKey = `${args[2] ?? ""}..${args[3] ?? ""}`;
+      if (options?.gitDiffNameOnlyByRange?.[rangeKey] !== undefined) {
+        return options.gitDiffNameOnlyByRange[rangeKey];
+      }
       return (
         options?.gitDiffNameOnly ?? {
           exitCode: 0,
           stdout: "",
+          stderr: "",
+        }
+      );
+    }
+
+    if (command === "git" && args[0] === "merge-base") {
+      return (
+        options?.gitMergeBase ?? {
+          exitCode: 0,
+          stdout: "merge-base-sha\n",
           stderr: "",
         }
       );
@@ -3957,6 +4220,16 @@ function piLane(): HeadlessReviewerLaneConfig {
   };
 }
 
+function codexExcavationLane(): HeadlessReviewerLaneConfig {
+  return {
+    laneId: "codex-excavation",
+    agent: "codex",
+    role: "codex-edge-case-excavation",
+    model: "gpt-5.5",
+    reasoningEffort: "high",
+  };
+}
+
 function readFlag(args: readonly string[], flag: string): string | undefined {
   const index = args.indexOf(flag);
   return index === -1 ? undefined : args[index + 1];
@@ -3994,6 +4267,7 @@ function cleanReviewResult(options: {
       bundleHash: "1".repeat(64),
       hashAlgorithm: "sha256",
     },
+    targeted_convergence: null,
     lanes: [],
     degradedConditions: [],
     artifactPaths: {

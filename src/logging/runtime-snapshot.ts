@@ -1399,6 +1399,12 @@ export interface StateDeltaEntryMetadata {
   category?: string;
   narrowing_status?: string;
   narrowing_rationale?: string;
+  targeting_hypothesis_version?: string;
+  targeting_trigger?: string;
+  targeting_family?: string;
+  targeting_invariant?: string;
+  targeting_fix_delta_range?: string;
+  targeting_merge_base_sha?: string;
   termination_status?: string;
   termination_reason?: string;
   termination_action?: string;
@@ -1417,6 +1423,10 @@ export interface StateDeltaEntryMetadata {
   fixed_symptom_count?: number;
   remaining_symptom_count?: number;
   rework_finding_count?: number;
+  fix_delta_path_count?: number;
+  semantic_neighborhood_path_count?: number;
+  producer_path_count?: number;
+  consumer_path_count?: number;
   fix_round?: number;
   rounds_per_cycle?: number;
   round_warning_threshold?: number;
@@ -1425,6 +1435,7 @@ export interface StateDeltaEntryMetadata {
   synthesis_count?: number;
   non_blocking_finding_count?: number;
   track_finding_count?: number;
+  skip_unchanged_remainder?: boolean;
 }
 
 /**
@@ -1503,6 +1514,12 @@ const STATE_DELTA_METADATA_STRING_FIELDS = [
   "category",
   "narrowing_status",
   "narrowing_rationale",
+  "targeting_hypothesis_version",
+  "targeting_trigger",
+  "targeting_family",
+  "targeting_invariant",
+  "targeting_fix_delta_range",
+  "targeting_merge_base_sha",
   "termination_status",
   "termination_reason",
   "termination_action",
@@ -1527,6 +1544,10 @@ const STATE_DELTA_METADATA_NUMBER_FIELDS = [
   "fixed_symptom_count",
   "remaining_symptom_count",
   "rework_finding_count",
+  "fix_delta_path_count",
+  "semantic_neighborhood_path_count",
+  "producer_path_count",
+  "consumer_path_count",
   "fix_round",
   "rounds_per_cycle",
   "round_warning_threshold",
@@ -1537,7 +1558,10 @@ const STATE_DELTA_METADATA_NUMBER_FIELDS = [
   "track_finding_count",
 ] as const;
 
-const STATE_DELTA_METADATA_BOOLEAN_FIELDS = ["independent_reviewer"] as const;
+const STATE_DELTA_METADATA_BOOLEAN_FIELDS = [
+  "independent_reviewer",
+  "skip_unchanged_remainder",
+] as const;
 
 function projectStateDeltaMetadata(
   metadata: Record<string, unknown>,
