@@ -136,6 +136,19 @@ describe("review journal events", () => {
       previous_head_sha: "previous-head-sha",
       fix_round: 2,
     });
+    const reworkDelta = delta.entries.find(
+      (entry) => entry.kind === "review_rework",
+    );
+    expect(reworkDelta?.metadata).toMatchObject({
+      actor_kind: "interactive-agent",
+      actor_id: "worker-1",
+      source: "interactive",
+      contract_version: "structured_v1",
+      routing_mode: "convergence",
+      round: 2,
+      rework_finding_count: 1,
+    });
+    expect(reworkDelta?.metadata).not.toHaveProperty("introduced_in");
     expect(
       delta.entries.find((entry) => entry.kind === "review_finding")?.metadata,
     ).toEqual({
@@ -173,6 +186,22 @@ describe("review journal events", () => {
       fixed_symptom_count: 1,
       remaining_symptom_count: 1,
     });
+    const escalationDelta = delta.entries.find(
+      (entry) => entry.kind === "review_escalation",
+    );
+    expect(escalationDelta?.metadata).toMatchObject({
+      actor_kind: "interactive-agent",
+      actor_id: "worker-1",
+      source: "interactive",
+      contract_version: "structured_v1",
+      routing_mode: "convergence",
+      round: 2,
+      gate_verdict: "fail",
+      escalation_reason: "blocking_findings",
+      blocking_finding_count: 1,
+      degraded_condition_count: 0,
+    });
+    expect(escalationDelta?.metadata).not.toHaveProperty("degraded_conditions");
 
     const serializedDelta = JSON.stringify(delta);
     expect(serializedDelta).not.toContain("SECRET");

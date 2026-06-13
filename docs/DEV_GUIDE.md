@@ -477,6 +477,13 @@ curl -s http://localhost:3000/api/v1/state | jq '{
   page; `truncated: true` means page again from the last entry's sequence).
   Slack gate/halt alerts and watchdog tickets carry the matching
   `(issue, seq)` cursor.
+  `/state/delta` is a projection, not a raw journal passthrough: metadata is
+  limited to bounded scalar and count fields. Array-valued review metadata such
+  as rework origins, synthesis fingerprints, degraded condition labels, related
+  paths, and evidence locations stays in `.symphony/run-journals/dispatcher.jsonl`;
+  dashboard/control surfaces should use `rework_finding_count`,
+  `blocking_finding_count`, and `degraded_condition_count` plus the projected
+  scalar reason/verdict fields.
 
 - `explicit_resume_required` lists every parked issue with the `reason`
   (e.g. `hard_stop:token_budget`, `operator_input_required`,
