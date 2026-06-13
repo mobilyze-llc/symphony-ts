@@ -3401,12 +3401,19 @@ function isReviewSubstrateDegradedCondition(condition: string): boolean {
   if (condition === "codex-lead-disabled") {
     return false;
   }
+  if (
+    condition === "zero-reviewer-lanes" ||
+    condition === "empty-diff" ||
+    condition === "review-context-failed" ||
+    condition === "cmux-preflight-failed" ||
+    /^(duplicate|reserved)-reviewer-lane-id:/.test(condition)
+  ) {
+    return false;
+  }
   if (/^[^:]+:complete:Reviewer verdict was FINDINGS\./.test(condition)) {
     return false;
   }
-  return /(?:failed|error|stall|malformed|degraded|empty|duplicate|reserved|zero-reviewer|review-context)/i.test(
-    condition,
-  );
+  return /(?:failed|error|stall|malformed|degraded|empty)/i.test(condition);
 }
 
 function sameFamilyReopenNames(
@@ -3416,11 +3423,14 @@ function sameFamilyReopenNames(
 ): string[] {
   const priorFamilyCounts = new Map<string, number>();
   for (const artifact of priorStructuredArtifacts) {
+    const artifactFamilyKeys = new Set<string>();
     for (const finding of artifact.findings) {
       if (!isOpenBlockingFinding(finding) || finding.family === null) {
         continue;
       }
-      const key = normalizeFamilyKey(finding.family.name);
+      artifactFamilyKeys.add(normalizeFamilyKey(finding.family.name));
+    }
+    for (const key of artifactFamilyKeys) {
       priorFamilyCounts.set(key, (priorFamilyCounts.get(key) ?? 0) + 1);
     }
   }

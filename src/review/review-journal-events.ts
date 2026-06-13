@@ -447,6 +447,7 @@ function shouldEscalate(
   findings: readonly StructuredReviewFinding[],
 ): boolean {
   return (
+    isEscalatingTermination(result.termination) ||
     result.verdict !== "pass" ||
     result.degradedConditions.length > 0 ||
     blockingFindingCount(findings) > 0
@@ -457,10 +458,7 @@ function escalationReasonFor(
   result: HeadlessCouncilGateResult,
   findings: readonly StructuredReviewFinding[],
 ): string {
-  if (
-    result.termination?.reason === "same_family_reopen" ||
-    result.termination?.reason === "round_cap_hit"
-  ) {
+  if (isEscalatingTermination(result.termination)) {
     return result.termination.reason;
   }
   if (blockingFindingCount(findings) > 0) {
@@ -470,6 +468,17 @@ function escalationReasonFor(
     return "degraded_review_substrate";
   }
   return result.verdict === "error" ? "gate_error" : "gate_failed";
+}
+
+function isEscalatingTermination(
+  termination: CouncilTerminationAssessment | undefined,
+): termination is CouncilTerminationAssessment & {
+  reason: "same_family_reopen" | "round_cap_hit";
+} {
+  return (
+    termination?.reason === "same_family_reopen" ||
+    termination?.reason === "round_cap_hit"
+  );
 }
 
 function terminationTelemetryMetadata(

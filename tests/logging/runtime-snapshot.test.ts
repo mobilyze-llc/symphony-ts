@@ -2185,6 +2185,54 @@ describe("state-document enrichment (SYMPH-407)", () => {
     });
   });
 
+  it("projects Council termination continue action instead of generic rework", () => {
+    const state = makeState();
+    const continueMetadata = (metadata: Record<string, unknown>) =>
+      reviewMetadata({
+        round: 2,
+        routing_mode: "convergence",
+        bundle_hash: "bundle-continue",
+        head_sha: "head-continue",
+        rounds_per_cycle: 2,
+        round_warning_threshold: 2,
+        round_cap: 3,
+        termination_alert_level: "warning",
+        ...metadata,
+      });
+    state.dispatcherRunJournal = [
+      makeJournalEntry({
+        sequence: 16,
+        kind: "review_round",
+        metadata: continueMetadata({}),
+      }),
+      makeJournalEntry({
+        sequence: 17,
+        kind: "review_gate_result",
+        metadata: continueMetadata({
+          gate_verdict: "fail",
+          termination_status: "continue",
+          termination_reason: "blocking_findings",
+          termination_action: "continue_fix_loop",
+          blocking_finding_count: 1,
+          non_blocking_finding_count: 0,
+          track_finding_count: 0,
+        }),
+      }),
+    ];
+
+    const review = buildRuntimeSnapshot(state).council_reviews!["issue-1"]!;
+
+    expect(review.status).toBe("failed");
+    expect(review.next_action).toBe("continue_fix_loop");
+    expect(review.termination).toMatchObject({
+      status: "continue",
+      reason: "blocking_findings",
+      action: "continue_fix_loop",
+      alert_level: "warning",
+      blocking_finding_count: 1,
+    });
+  });
+
   it("projects Council findings and fix-round rework without reviewer prose", () => {
     const state = makeState();
     const reworkMetadata = (metadata: Record<string, unknown>) =>

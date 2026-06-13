@@ -1127,6 +1127,12 @@ function councilReviewNextAction(
   if (termination?.status === "converged") {
     return "continue_pipeline";
   }
+  if (termination?.status === "degraded") {
+    return "inspect_review_substrate";
+  }
+  if (termination?.status === "continue") {
+    return "continue_fix_loop";
+  }
   if (status === "passed") {
     return "continue_pipeline";
   }

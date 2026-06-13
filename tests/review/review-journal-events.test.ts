@@ -345,6 +345,54 @@ describe("review journal events", () => {
     });
   });
 
+  it("emits escalation when termination reason requires operator attention", () => {
+    const result = reviewResult({
+      verdict: "pass",
+      termination: {
+        status: "operator_decision",
+        reason: "round_cap_hit",
+        action: "operator_decision_required_with_synthesis",
+        roundsPerCycle: 3,
+        thresholds: {
+          sameFamilyReopenLimit: 2,
+          roundWarning: 2,
+          roundCap: 3,
+        },
+        alertLevel: "operator",
+        blockingFindingCount: 0,
+        nonBlockingFindingCount: 0,
+        trackFindingCount: 0,
+        familySynthesisCount: 1,
+        synthesisAttached: true,
+        tripwireFamilyNames: [],
+        synthesisFamilyNames: ["termination ladder"],
+      },
+    });
+
+    const entries = buildReviewJournalEntries(result, {
+      issueIdentifier: "SYMPH-469",
+      ownerId: "worker-1",
+      source: "interactive",
+    });
+
+    expect(entries.map((entry) => entry.kind)).toEqual([
+      "review_round",
+      "review_lane",
+      "review_escalation",
+      "review_gate_result",
+    ]);
+    expect(
+      entries.find((entry) => entry.kind === "review_escalation")?.metadata,
+    ).toMatchObject({
+      escalation_reason: "round_cap_hit",
+      termination_status: "operator_decision",
+      termination_reason: "round_cap_hit",
+      termination_action: "operator_decision_required_with_synthesis",
+      gate_verdict: "pass",
+      blocking_finding_count: 0,
+    });
+  });
+
   it("serializes concurrent standalone review appends into one journal sequence stream", async () => {
     const workspaceRoot = await mkdtemp(
       join(tmpdir(), "symphony-review-journal-concurrent-"),
