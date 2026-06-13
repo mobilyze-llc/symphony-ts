@@ -1225,11 +1225,19 @@ export const STATE_DELTA_DEFAULT_LIMIT = 100;
 export const STATE_DELTA_MAX_LIMIT = 500;
 
 /**
- * Whitelisted scalar metadata projected onto delta entries. Raw journal
+ * Whitelisted scalar/count metadata projected onto delta entries. Raw journal
  * metadata is an untyped bag that can carry suppressed egress content
  * (cluster_transition `details.normalizedText`/`members` hold raw agent
  * output the notifier and watchdog filer deliberately redact) — only these
  * known-safe scalar fields ever cross the delta endpoint.
+ *
+ * Review metadata follows the same contract: array-valued fields such as
+ * `review_rework.metadata.introduced_in`,
+ * `review_synthesis.metadata.finding_fingerprints`,
+ * `review_escalation.metadata.degraded_conditions`, `related_paths`, and
+ * `evidence_locations` remain raw-journal-only. Operator surfaces use bounded
+ * scalar/count projections like `rework_finding_count`,
+ * `blocking_finding_count`, and `degraded_condition_count`.
  */
 export interface StateDeltaEntryMetadata {
   status?: string;

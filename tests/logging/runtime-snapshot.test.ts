@@ -2830,4 +2830,68 @@ describe("buildStateDelta (SYMPH-407)", () => {
     expect(serialized).not.toContain("members");
     expect(serialized).not.toContain("issue-9");
   });
+
+  it("keeps array-valued review metadata raw-journal-only in /state deltas", () => {
+    const reworkEntry: DispatcherRunJournalEntry = {
+      ...entryAt(1),
+      kind: "review_rework",
+      metadata: {
+        round: 2,
+        routing_mode: "convergence",
+        rework_finding_count: 2,
+        introduced_in: ["fix_round_2", "SECRET-review-label"],
+      },
+    };
+    const escalationEntry: DispatcherRunJournalEntry = {
+      ...entryAt(2),
+      kind: "review_escalation",
+      metadata: {
+        round: 2,
+        escalation_reason: "degraded_review_substrate",
+        gate_verdict: "error",
+        blocking_finding_count: 1,
+        degraded_condition_count: 2,
+        degraded_conditions: ["artifact_parse_failed", "SECRET-condition"],
+        finding_fingerprints: ["fp-private"],
+        related_paths: ["src/private.ts"],
+        evidence_locations: [{ path: "src/private.ts", line_start: 1 }],
+      },
+    };
+
+    const delta = buildStateDelta([reworkEntry, escalationEntry], {
+      sinceSeq: 0,
+    });
+
+    expect(delta.entries[0]).toMatchObject({
+      kind: "review_rework",
+      metadata: {
+        round: 2,
+        routing_mode: "convergence",
+        rework_finding_count: 2,
+      },
+    });
+    expect(delta.entries[0]!.metadata).not.toHaveProperty("introduced_in");
+    expect(delta.entries[1]).toMatchObject({
+      kind: "review_escalation",
+      metadata: {
+        round: 2,
+        escalation_reason: "degraded_review_substrate",
+        gate_verdict: "error",
+        blocking_finding_count: 1,
+        degraded_condition_count: 2,
+      },
+    });
+    expect(delta.entries[1]!.metadata).not.toHaveProperty(
+      "degraded_conditions",
+    );
+    expect(delta.entries[1]!.metadata).not.toHaveProperty(
+      "finding_fingerprints",
+    );
+
+    const serialized = JSON.stringify(delta);
+    expect(serialized).not.toContain("SECRET-review-label");
+    expect(serialized).not.toContain("SECRET-condition");
+    expect(serialized).not.toContain("src/private.ts");
+    expect(serialized).not.toContain("fp-private");
+  });
 });
