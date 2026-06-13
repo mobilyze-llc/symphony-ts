@@ -98,7 +98,8 @@ describe("dispatcher decision event emission", () => {
       kind: "queue_baseline",
       issueId: "__dispatch__",
       metadata: expect.objectContaining({
-        comparator_version: "priority-fifo-control-v0",
+        comparator_version: "dispatch-comparator-v1",
+        computed_order_status: "linearized",
         outcome_since_sequence: 0,
         outcome_window_semantics: expect.stringContaining(
           "urgent_reopen_outcomes may reference the earlier failure",

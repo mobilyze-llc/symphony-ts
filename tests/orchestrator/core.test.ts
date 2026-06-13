@@ -48,6 +48,48 @@ describe("orchestrator core", () => {
     expect(issues.map((issue) => issue.id)).toEqual(["1", "2", "3"]);
   });
 
+  it("gates dispatch when the computed order has a hard dependency cycle", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            blockedBy: [
+              { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+            ],
+          }),
+          createIssue({
+            id: "2",
+            identifier: "ISSUE-2",
+            blockedBy: [
+              { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+            ],
+          }),
+        ],
+      }),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().computedDispatchOrder).toMatchObject({
+      status: "hard_cycle",
+      hard_cycle: {
+        issue_identifiers: ["ISSUE-1", "ISSUE-2"],
+      },
+    });
+    expect(orchestrator.getState().dispatcherRunJournal).toContainEqual(
+      expect.objectContaining({
+        kind: "dispatch_verdict",
+        metadata: expect.objectContaining({
+          disposition: "gate",
+          reason_code: "computed_order_hard_cycle",
+        }),
+      }),
+    );
+  });
+
   it("rejects Todo issues with non-terminal blockers and allows terminal blockers", () => {
     const orchestrator = createOrchestrator();
 

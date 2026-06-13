@@ -18,6 +18,39 @@ import {
 import { reduceManagerRunJournal } from "../../src/orchestrator/manager-run.js";
 
 describe("runtime snapshot", () => {
+  it("projects the computed dispatch order read-model", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    state.computedDispatchOrder = {
+      comparator_version: "dispatch-comparator-v1",
+      generated_at: "2026-06-13T12:00:00.000Z",
+      status: "linearized",
+      positions: [
+        {
+          position: 1,
+          issue_id: "issue-1",
+          issue_identifier: "SYMPH-485",
+          priority: 1,
+          created_at: "2026-06-13T00:00:00.000Z",
+          rationale: ["priority 1", "fifo 2026-06-13T00:00:00.000Z"],
+        },
+      ],
+      exclusions: [],
+      advisory_warnings: [],
+      would_have_been_excluded_by_advisory_edges: [],
+      hard_cycle: null,
+      warnings: [],
+    };
+
+    const snapshot = buildRuntimeSnapshot(state, {
+      now: new Date("2026-06-13T12:00:01.000Z"),
+    });
+
+    expect(snapshot.computed_order).toEqual(state.computedDispatchOrder);
+  });
+
   it("projects manager-run aggregates for dashboard inspection", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,

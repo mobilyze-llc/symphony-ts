@@ -32,6 +32,8 @@ import type {
   StageDefinition,
 } from "../config/types.js";
 import {
+  type BlockerRef,
+  type ComputedDispatchOrderSnapshot,
   type ContinuousFeedbackEvent,
   type ContinuousFeedbackLane,
   type DecorrelatedGateLane,
@@ -94,6 +96,10 @@ import type {
 import { normalizeAccountEmail } from "../shared/account-email.js";
 import { sanitizeForLinear } from "../shared/egress.js";
 import { readProcessIdentityMetadata } from "../shared/process-tree.js";
+import {
+  type TicketFeature,
+  extractTicketFeatures,
+} from "../tracker/ticket-feature.js";
 import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 import { formatAdmissionCard } from "./admission-card.js";
 import { parseAnchorUntilTimestamp } from "./anchor-date.js";
@@ -105,6 +111,10 @@ import {
   markContinuousFeedbackFindingsBounced,
   mergeContinuousFeedbackCheckpoint,
 } from "./continuous-feedback.js";
+import {
+  computeDispatchOrder,
+  sortIssuesForDispatch as sortIssuesForDispatchByPriorityFifo,
+} from "./dispatch-comparator.js";
 import {
   type EnsembleGateResult,
   formatExecutionReport,
@@ -1760,6 +1770,7 @@ export class OrchestratorCore {
     issue: Issue,
     options?: {
       allowClaimedIssueId?: string;
+      blockers?: readonly BlockerRef[];
     },
   ): boolean {
     if (
@@ -1866,11 +1877,13 @@ export class OrchestratorCore {
       return false;
     }
 
-    const openBlockers = issue.blockedBy.filter((blocker) => {
-      const blockerState =
-        blocker.state === null ? null : normalizeIssueState(blocker.state);
-      return blockerState === null || !terminalStates.has(blockerState);
-    });
+    const openBlockers = (options?.blockers ?? issue.blockedBy).filter(
+      (blocker) => {
+        const blockerState =
+          blocker.state === null ? null : normalizeIssueState(blocker.state);
+        return blockerState === null || !terminalStates.has(blockerState);
+      },
+    );
     if (openBlockers.length > 0) {
       this.recordDispatchVerdict({
         issueId: issue.id,
@@ -1943,6 +1956,9 @@ export class OrchestratorCore {
       };
     }
 
+    const computedDispatchOrder =
+      await this.computeDispatchOrderForPoll(issues);
+
     // Check for pipeline-halt before dispatching
     const haltIssue = await this.checkPipelineHalt();
     if (haltIssue !== null) {
@@ -1961,8 +1977,12 @@ export class OrchestratorCore {
       });
       this.trackDispatchStarvation(issues.length, 0);
       await this.recordQueueBaselineSample({
-        consideredIssues: sortIssuesForDispatch(issues),
+        consideredIssues: this.issuesFromComputedOrder(
+          computedDispatchOrder,
+          issues,
+        ),
         dispatchPicks: [],
+        computedOrder: computedDispatchOrder,
         force: true,
       });
       return {
@@ -1996,8 +2016,12 @@ export class OrchestratorCore {
       });
       this.trackDispatchStarvation(issues.length, 0);
       await this.recordQueueBaselineSample({
-        consideredIssues: sortIssuesForDispatch(issues),
+        consideredIssues: this.issuesFromComputedOrder(
+          computedDispatchOrder,
+          issues,
+        ),
         dispatchPicks: [],
+        computedOrder: computedDispatchOrder,
         force: true,
       });
       return {
@@ -2022,17 +2046,54 @@ export class OrchestratorCore {
       });
     }
 
+    if (computedDispatchOrder.status === "hard_cycle") {
+      console.warn(
+        `[orchestrator] Dispatch comparator refused linearization: ${computedDispatchOrder.hard_cycle?.reason ?? "hard-edge cycle"}`,
+      );
+      this.recordDispatchVerdict({
+        issueId: PIPELINE_VERDICT_SCOPE_ID,
+        issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
+        disposition: "gate",
+        reasonCode: "computed_order_hard_cycle",
+        remedy:
+          "Resolve the operator-confirmed blocked-by cycle before dispatch can linearize the queue.",
+        details: {
+          comparatorVersion: computedDispatchOrder.comparator_version,
+          cycle: computedDispatchOrder.hard_cycle,
+        },
+      });
+      this.trackDispatchStarvation(issues.length, 0);
+      await this.recordQueueBaselineSample({
+        consideredIssues: [],
+        dispatchPicks: [],
+        computedOrder: computedDispatchOrder,
+        force: true,
+      });
+      return {
+        validation,
+        dispatchedIssueIds: [],
+        modeDecisions: [],
+        stopRequests: reconcileResult.stopRequests,
+        trackerFetchFailed: false,
+        reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
+        runningCount: Object.keys(this.state.running).length,
+      };
+    }
+
     const dispatchedIssueIds: string[] = [];
     const modeDecisions: RightSizingDecision[] = [];
     let eligibleCount = 0;
     const admittedSnapshots = this.buildRunningAdmissionSnapshots();
-    const sortedIssues = sortIssuesForDispatch(issues);
+    const sortedIssues = this.issuesFromComputedOrder(
+      computedDispatchOrder,
+      issues,
+    );
     for (const issue of sortedIssues) {
       if (this.availableSlots() <= 0) {
         break;
       }
 
-      if (!this.isDispatchEligible(issue)) {
+      if (!this.isDispatchEligible(issue, { blockers: [] })) {
         continue;
       }
 
@@ -2099,9 +2160,15 @@ export class OrchestratorCore {
     }
 
     this.trackDispatchStarvation(eligibleCount, dispatchedIssueIds.length);
+    await this.recordOrderingDisagreementIfNeeded({
+      computedOrder: computedDispatchOrder,
+      issues,
+      dispatchPicks: dispatchedIssueIds,
+    });
     await this.recordQueueBaselineSample({
       consideredIssues: sortedIssues,
       dispatchPicks: dispatchedIssueIds,
+      computedOrder: computedDispatchOrder,
     });
 
     return {
@@ -2115,9 +2182,127 @@ export class OrchestratorCore {
     };
   }
 
+  private async computeDispatchOrderForPoll(
+    issues: readonly Issue[],
+  ): Promise<ComputedDispatchOrderSnapshot> {
+    let ticketFeatures: TicketFeature[] | undefined;
+    let ticketFeatureUnavailableReason: string | null = null;
+    const hasDependencyEdges = issues.some(
+      (issue) => issue.blockedBy.length > 0,
+    );
+    if (!hasDependencyEdges) {
+      ticketFeatures = [];
+    } else if (this.tracker.fetchTicketFeatureIssuesByStates === undefined) {
+      ticketFeatureUnavailableReason =
+        "TicketFeature feed unavailable; preserving current blockedBy eligibility semantics.";
+    } else {
+      try {
+        const sourceIssues =
+          await this.tracker.fetchTicketFeatureIssuesByStates(
+            this.config.tracker.activeStates,
+          );
+        ticketFeatures = extractTicketFeatures({
+          issues: sourceIssues,
+          operatorConfig: this.config.operatorAnchors ?? {
+            operatorAllowlist: [],
+            serviceAccounts: [],
+          },
+          runJournal: this.state.dispatcherRunJournal,
+        });
+      } catch (error) {
+        console.warn(
+          `[orchestrator] failed to fetch TicketFeature dispatch edges: ${formatWarningError(error)}`,
+        );
+        ticketFeatureUnavailableReason =
+          "TicketFeature fetch failed; preserving current blockedBy eligibility semantics.";
+      }
+    }
+
+    const computedOrder = computeDispatchOrder({
+      issues,
+      anchors: this.state.issueAnchors,
+      ticketFeatures,
+      ticketFeatureUnavailableReason,
+      terminalStates: this.config.tracker.terminalStates,
+      completedIssueIds: this.state.completed,
+      now: this.now(),
+    });
+    this.state.computedDispatchOrder = computedOrder;
+    return computedOrder;
+  }
+
+  private issuesFromComputedOrder(
+    computedOrder: ComputedDispatchOrderSnapshot,
+    issues: readonly Issue[],
+  ): Issue[] {
+    if (computedOrder.status !== "linearized") {
+      return [];
+    }
+    const issueById = new Map(issues.map((issue) => [issue.id, issue]));
+    return computedOrder.positions
+      .map((position) => issueById.get(position.issue_id) ?? null)
+      .filter((issue): issue is Issue => issue !== null);
+  }
+
+  private async recordOrderingDisagreementIfNeeded(input: {
+    computedOrder: ComputedDispatchOrderSnapshot;
+    issues: readonly Issue[];
+    dispatchPicks: readonly string[];
+  }): Promise<void> {
+    if (
+      input.computedOrder.status !== "linearized" ||
+      input.dispatchPicks.length === 0
+    ) {
+      return;
+    }
+    const computedTop = input.computedOrder.positions[0];
+    if (
+      computedTop === undefined ||
+      computedTop.issue_id === input.dispatchPicks[0]
+    ) {
+      return;
+    }
+    const actualIssue = input.issues.find(
+      (issue) => issue.id === input.dispatchPicks[0],
+    );
+    if (actualIssue === undefined) {
+      return;
+    }
+    const timestamp = this.now().toISOString();
+    try {
+      await this.recordRunJournalEntry({
+        idempotencyKey: `ordering_disagreement:${input.computedOrder.generated_at}:${computedTop.issue_id}:${actualIssue.id}`,
+        timestamp,
+        kind: "ordering_disagreement",
+        issueId: actualIssue.id,
+        issueIdentifier: actualIssue.identifier,
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary: `Dispatch admitted ${actualIssue.identifier} while computed order led with ${computedTop.issue_identifier}.`,
+        metadata: {
+          status: "observed",
+          comparator_version: input.computedOrder.comparator_version,
+          computed_order_status: input.computedOrder.status,
+          computed_top_issue_id: computedTop.issue_id,
+          computed_top_issue_identifier: computedTop.issue_identifier,
+          actual_issue_id: actualIssue.id,
+          actual_issue_identifier: actualIssue.identifier,
+        },
+      });
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to journal ordering disagreement: ${formatWarningError(error)}`,
+      );
+    }
+  }
+
   private async recordQueueBaselineSample(input: {
     consideredIssues: readonly Issue[];
     dispatchPicks: readonly string[];
+    computedOrder?: ComputedDispatchOrderSnapshot | null;
     force?: boolean;
   }): Promise<void> {
     const timestamp = this.now().toISOString();
@@ -2156,7 +2341,19 @@ export class OrchestratorCore {
       }
       metadata = {
         schema_version: 1,
-        comparator_version: "priority-fifo-control-v0",
+        comparator_version:
+          input.computedOrder?.comparator_version ?? "priority-fifo-control-v0",
+        computed_order_status: input.computedOrder?.status ?? "legacy_control",
+        computed_order_issue_ids:
+          input.computedOrder?.positions.map((position) => position.issue_id) ??
+          input.consideredIssues.map((issue) => issue.id),
+        hard_exclusion_count: input.computedOrder?.exclusions.length ?? 0,
+        advisory_warning_count:
+          input.computedOrder?.advisory_warnings.length ?? 0,
+        would_have_been_advisory_exclusion_count:
+          input.computedOrder?.would_have_been_excluded_by_advisory_edges
+            .length ?? 0,
+        hard_cycle_issue_ids: input.computedOrder?.hard_cycle?.issue_ids ?? [],
         outcome_since_sequence: outcomeSinceSequence,
         outcome_window_semantics:
           "Outcome arrays contain events observed after outcome_since_sequence. urgent_reopen_outcomes may reference the earlier failure it reopened. delivery_outcomes.spend is resource consumption inside the baseline window, not lifetime ticket total.",
@@ -10150,21 +10347,7 @@ export class OrchestratorCore {
 }
 
 export function sortIssuesForDispatch(issues: readonly Issue[]): Issue[] {
-  return issues.slice().sort((left, right) => {
-    const priorityDelta =
-      toSortablePriority(left.priority) - toSortablePriority(right.priority);
-    if (priorityDelta !== 0) {
-      return priorityDelta;
-    }
-
-    const createdAtDelta =
-      toSortableDate(left.createdAt) - toSortableDate(right.createdAt);
-    if (createdAtDelta !== 0) {
-      return createdAtDelta;
-    }
-
-    return left.identifier.localeCompare(right.identifier, "en");
-  });
+  return sortIssuesForDispatchByPriorityFifo(issues);
 }
 
 export function computeFailureRetryDelayMs(
@@ -10248,19 +10431,6 @@ function formatWorkerExitReason(reason: string | undefined): string {
   return normalized && normalized.length > 0
     ? `worker exited: ${normalized}`
     : "worker exited: abnormal";
-}
-
-function toSortablePriority(priority: number | null): number {
-  return priority === null ? Number.POSITIVE_INFINITY : priority;
-}
-
-function toSortableDate(timestamp: string | null): number {
-  if (timestamp === null) {
-    return Number.POSITIVE_INFINITY;
-  }
-
-  const parsed = Date.parse(timestamp);
-  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
 }
 
 function parseEventTimestamp(
@@ -11098,6 +11268,7 @@ function cloneOrchestratorState(state: OrchestratorState): OrchestratorState {
     resumeRequired: new Set(state.resumeRequired),
     resumeRequiredMarks: clonePlain(state.resumeRequiredMarks),
     issueAnchors: clonePlain(state.issueAnchors),
+    computedDispatchOrder: clonePlain(state.computedDispatchOrder),
     emergencyStop: clonePlain(state.emergencyStop),
     codexTotals: clonePlain(state.codexTotals),
     codexRateLimits: clonePlain(state.codexRateLimits),
@@ -11143,6 +11314,7 @@ function restoreOrchestratorState(
   target.resumeRequired = snapshot.resumeRequired;
   target.resumeRequiredMarks = snapshot.resumeRequiredMarks;
   target.issueAnchors = snapshot.issueAnchors;
+  target.computedDispatchOrder = snapshot.computedDispatchOrder;
   target.emergencyStop = snapshot.emergencyStop;
   target.codexTotals = snapshot.codexTotals;
   target.codexRateLimits = snapshot.codexRateLimits;

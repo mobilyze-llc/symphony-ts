@@ -7,6 +7,7 @@ import {
 import type {
   CodexRateLimits,
   CodexTotals,
+  ComputedDispatchOrderSnapshot,
   ContinuousFeedbackIssueState,
   DecorrelatedGateOutcome,
   DispatcherDecisionQualitySummary,
@@ -271,10 +272,15 @@ export interface RuntimeSnapshot {
   running: RuntimeSnapshotRunningRow[];
   retrying: RuntimeSnapshotRetryRow[];
   /**
-   * Active SYMPH-486 anchors. This read-model is visible provenance only;
-   * dispatch order remains priority/FIFO until the comparator consumes it.
+   * Active SYMPH-486 anchors consumed by the deterministic dispatch
+   * comparator without writing computed order back to Linear.
    */
   anchors?: RuntimeSnapshotAnchorRow[];
+  /**
+   * Latest SYMPH-485 deterministic dispatch read-model, including rationale,
+   * hard exclusions, advisory-edge warnings, and hard-cycle refusal status.
+   */
+  computed_order?: ComputedDispatchOrderSnapshot | null;
   codex_totals: {
     input_tokens: number;
     output_tokens: number;
@@ -723,6 +729,10 @@ export function buildRuntimeSnapshot(
     running,
     retrying,
     anchors: buildAnchorSnapshots(state, now),
+    computed_order:
+      state.computedDispatchOrder === null
+        ? null
+        : structuredClone(state.computedDispatchOrder),
     codex_totals: toSnapshotCodexTotals(
       state.codexTotals,
       getAggregateSecondsRunning(state, now),
@@ -1470,6 +1480,15 @@ export const STATE_DELTA_MAX_LIMIT = 500;
  */
 export interface StateDeltaEntryMetadata {
   status?: string;
+  comparator_version?: string;
+  computed_order_status?: string;
+  computed_top_issue_id?: string;
+  computed_top_issue_identifier?: string;
+  actual_issue_id?: string;
+  actual_issue_identifier?: string;
+  hard_exclusion_count?: number;
+  advisory_warning_count?: number;
+  would_have_been_advisory_exclusion_count?: number;
   verb?: string;
   disposition?: string;
   signature?: string;
@@ -1589,6 +1608,12 @@ export interface StateDeltaResponse {
 
 const STATE_DELTA_METADATA_STRING_FIELDS = [
   "status",
+  "comparator_version",
+  "computed_order_status",
+  "computed_top_issue_id",
+  "computed_top_issue_identifier",
+  "actual_issue_id",
+  "actual_issue_identifier",
   "verb",
   "disposition",
   "signature",
@@ -1676,6 +1701,9 @@ const STATE_DELTA_METADATA_NUMBER_FIELDS = [
   "synthesis_count",
   "non_blocking_finding_count",
   "track_finding_count",
+  "hard_exclusion_count",
+  "advisory_warning_count",
+  "would_have_been_advisory_exclusion_count",
 ] as const;
 
 const STATE_DELTA_METADATA_BOOLEAN_FIELDS = [

@@ -129,6 +129,65 @@ describe("Dashboard Pipeline column", () => {
     const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: true });
     expect(html).toContain("formatPipelineTime");
   });
+
+  it("renders computed dispatch order status and rationale", () => {
+    const snapshot: RuntimeSnapshot = {
+      ...buildSnapshot({}),
+      computed_order: {
+        comparator_version: "dispatch-comparator-v1",
+        generated_at: "2026-06-13T12:00:00.000Z",
+        status: "linearized",
+        positions: [
+          {
+            position: 1,
+            issue_id: "issue-1",
+            issue_identifier: "SYMPH-485",
+            priority: 1,
+            created_at: "2026-06-13T00:00:00.000Z",
+            rationale: ["priority 1", "operator_anchor top"],
+          },
+        ],
+        exclusions: [
+          {
+            issue_id: "issue-2",
+            issue_identifier: "SYMPH-486",
+            blocker_issue_id: "issue-1",
+            blocker_issue_identifier: "SYMPH-485",
+            blocker_state: "In Progress",
+            edge_trust: "operator_confirmed",
+            source: "ticket_feature",
+            reason: "Operator-confirmed blocked-by edge.",
+          },
+        ],
+        advisory_warnings: [
+          {
+            issue_id: "issue-3",
+            issue_identifier: "SYMPH-487",
+            blocker_issue_id: "issue-1",
+            blocker_issue_identifier: "SYMPH-485",
+            blocker_state: "In Progress",
+            reason: "Advisory blocked-by edge.",
+          },
+        ],
+        would_have_been_excluded_by_advisory_edges: [],
+        hard_cycle: null,
+        warnings: [],
+      },
+    };
+
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: true });
+
+    expect(html).toContain("Computed dispatch order");
+    expect(html).toContain("dispatch-comparator-v1");
+    expect(html).toContain("SYMPH-485");
+    expect(html).toContain("SYMPH-486");
+    expect(html).toContain("Operator-confirmed blocked-by edge.");
+    expect(html).toContain("SYMPH-487");
+    expect(html).toContain("Advisory blocked-by edge.");
+    expect(html).toContain("operator_anchor top");
+    expect(html).toContain("renderComputedOrder");
+  });
+
   it("dashboard shows version in hero header", () => {
     const snapshot = buildSnapshot({});
     const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
