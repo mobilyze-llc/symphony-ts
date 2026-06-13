@@ -61,6 +61,9 @@ export function applyCodexEventToSession(
     session.turnId = event.turnId;
   }
   session.codexAppServerPid = event.codexAppServerPid;
+  if ("codexAppServerIdentity" in event) {
+    session.codexAppServerIdentity = event.codexAppServerIdentity ?? null;
+  }
   session.lastCodexEvent = event.event;
   session.lastCodexTimestamp = event.timestamp;
   session.lastCodexMessage = summarizeCodexEvent(event);

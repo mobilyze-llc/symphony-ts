@@ -2116,6 +2116,93 @@ describe("orchestrator core", () => {
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
   });
 
+  it("emergency stop halts dispatch, marks in-flight work killed-mid-run, and defers retries", async () => {
+    const timers = createFakeTimerScheduler();
+    const stopRunningIssue = vi.fn();
+    let issueState = "Todo";
+    let haltActive = false;
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    const orchestrator = createOrchestrator({
+      config,
+      timerScheduler: timers,
+      stopRunningIssue,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "Todo" }],
+        fetchOpenIssuesByLabels: async () =>
+          haltActive
+            ? [
+                createIssue({
+                  id: "halt",
+                  identifier: "SYMPH-HALT",
+                  title: "Graceful pipeline pause",
+                }),
+              ]
+            : [],
+      }),
+    });
+
+    await orchestrator.pollTick();
+    haltActive = true;
+    const gracefullyPaused = await orchestrator.pollTick();
+    expect(gracefullyPaused.dispatchedIssueIds).toEqual([]);
+    expect(stopRunningIssue).not.toHaveBeenCalled();
+
+    const stop = await orchestrator.requestEmergencyStop({
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      reason: { class: "operator_emergency_stop", human: "runaway spend" },
+    });
+
+    expect(stop.status).toBe("applied");
+    expect(stop.interruptedIssues).toEqual([
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        stage: null,
+        attempt: null,
+        codexAppServerPid: null,
+        codexAppServerIdentity: null,
+      },
+    ]);
+    expect(stopRunningIssue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        issueId: "1",
+        reason: "emergency_stop",
+        cleanupWorkspace: false,
+      }),
+    );
+    expect(orchestrator.getState().emergencyStop).toMatchObject({
+      reason: "runaway spend",
+      setBySequence: expect.any(Number),
+    });
+    expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run",
+      setBySequence: expect.any(Number),
+    });
+
+    const blocked = await orchestrator.pollTick();
+    expect(blocked.dispatchedIssueIds).toEqual([]);
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason: "stopped after emergency_stop",
+    });
+    issueState = "Resume";
+    const stillBlocked = await orchestrator.pollTick();
+    expect(stillBlocked.dispatchedIssueIds).toEqual([]);
+
+    const retryEntry = orchestrator.getState().retryAttempts["1"];
+    if (retryEntry !== undefined) {
+      const retry = await orchestrator.onRetryTimer("1");
+      expect(retry.dispatched).toBe(false);
+      expect(retry.retryEntry?.error).toBe("emergency stop active");
+    }
+  });
+
   it("applies codex session events to the running entry and aggregate counters", async () => {
     const orchestrator = createOrchestrator();
 
@@ -5022,6 +5109,266 @@ describe("dispatcher run journal restart recovery", () => {
     expect(resumed.dispatchedIssueIds).toEqual(["1"]);
     expect(spawnWorker).toHaveBeenCalledTimes(1);
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("restart recovery does not let prior hard-stop proof confirm a later emergency stop", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    let issueState = "Todo";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "hard_stop:1:investigate:initial:emergency_stop:1",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:investigate:initial:emergency_stop:1",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            reason: "emergency_stop",
+            issueState: "Todo",
+          },
+        }),
+        createJournalEntry({
+          sequence: 2,
+          idempotencyKey: "intent:pipeline:stop:2",
+          kind: "intent",
+          operation: "dispatcher",
+          leaseId: "intent:pipeline:stop:2",
+          leaseStatus: "completed",
+          metadata: {
+            status: "applied",
+            verb: "pipeline_stop",
+            actor: { kind: "operator", host: "pro14", session: null },
+            reason: { class: "operator_emergency_stop", human: "stop now" },
+            interruptedIssues: [
+              {
+                issueId: "1",
+                issueIdentifier: "ISSUE-1",
+                stage: "investigate",
+                attempt: null,
+              },
+            ],
+          },
+        }),
+        createJournalEntry({
+          sequence: 3,
+          idempotencyKey: "intent:pipeline:resume:3",
+          kind: "intent",
+          operation: "dispatcher",
+          leaseId: "intent:pipeline:resume:3",
+          leaseStatus: "completed",
+          metadata: {
+            status: "applied",
+            verb: "pipeline_resume",
+            actor: { kind: "operator", host: "pro14", session: null },
+            reason: { class: "operator_resume", human: "triaged" },
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().emergencyStop).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run_unconfirmed",
+      setBySequence: 2,
+    });
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+
+    issueState = "Resume";
+    const stillParked = await orchestrator.pollTick();
+    expect(stillParked.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+  });
+
+  it("restart recovery lets completed emergency-stop hard-stop proof clear after pipeline resume replay", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    let issueState = "Todo";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "intent:pipeline:stop:1",
+          kind: "intent",
+          operation: "dispatcher",
+          leaseId: "intent:pipeline:stop:1",
+          leaseStatus: "completed",
+          metadata: {
+            status: "applied",
+            verb: "pipeline_stop",
+            actor: { kind: "operator", host: "pro14", session: null },
+            reason: { class: "operator_emergency_stop", human: "stop now" },
+            interruptedIssues: [
+              {
+                issueId: "1",
+                issueIdentifier: "ISSUE-1",
+                stage: "investigate",
+                attempt: null,
+              },
+            ],
+          },
+        }),
+        createJournalEntry({
+          sequence: 2,
+          idempotencyKey: "hard_stop:1:investigate:initial:emergency_stop:2",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:investigate:initial:emergency_stop:2",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            reason: "emergency_stop",
+            issueState: "Todo",
+          },
+        }),
+        createJournalEntry({
+          sequence: 3,
+          idempotencyKey: "intent:pipeline:resume:3",
+          kind: "intent",
+          operation: "dispatcher",
+          leaseId: "intent:pipeline:resume:3",
+          leaseStatus: "completed",
+          metadata: {
+            status: "applied",
+            verb: "pipeline_resume",
+            actor: { kind: "operator", host: "pro14", session: null },
+            reason: { class: "operator_resume", human: "triaged" },
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().emergencyStop).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run",
+      setBySequence: 2,
+    });
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("restart recovery keeps pipeline-only emergency-stop interruptions parked after resume replay", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    let issueState = "Todo";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "intent:pipeline:stop:1",
+          kind: "intent",
+          operation: "dispatcher",
+          leaseId: "intent:pipeline:stop:1",
+          leaseStatus: "completed",
+          metadata: {
+            status: "applied",
+            verb: "pipeline_stop",
+            actor: { kind: "operator", host: "pro14", session: null },
+            reason: { class: "operator_emergency_stop", human: "stop now" },
+            interruptedIssues: [
+              {
+                issueId: "1",
+                issueIdentifier: "ISSUE-1",
+                stage: "investigate",
+                attempt: null,
+              },
+            ],
+          },
+        }),
+        createJournalEntry({
+          sequence: 2,
+          idempotencyKey: "intent:pipeline:resume:2",
+          kind: "intent",
+          operation: "dispatcher",
+          leaseId: "intent:pipeline:resume:2",
+          leaseStatus: "completed",
+          metadata: {
+            status: "applied",
+            verb: "pipeline_resume",
+            actor: { kind: "operator", host: "pro14", session: null },
+            reason: { class: "operator_resume", human: "triaged" },
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().emergencyStop).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run_unconfirmed",
+      setBySequence: 1,
+    });
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+
+    issueState = "Resume";
+    const stillParked = await orchestrator.pollTick();
+    expect(stillParked.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "dispatch_verdict" &&
+            entry.issueId === "1" &&
+            entry.metadata.reason_code === "emergency_stop_unconfirmed_kill",
+        ),
+    ).toBe(true);
   });
 
   it("restart recovery consumes a pending hard-stop stage completion after explicit Resume", async () => {
@@ -9787,6 +10134,7 @@ function createTracker(input?: {
   candidates?: Issue[];
   candidatesFn?: () => Issue[];
   statesById?: IssueStateSnapshot[];
+  fetchOpenIssuesByLabels?: IssueTracker["fetchOpenIssuesByLabels"];
   latestStateTransitionAt?: (
     issueId: string,
     stateName: string,
@@ -9808,6 +10156,9 @@ function createTracker(input?: {
   };
   if (input?.latestStateTransitionAt !== undefined) {
     tracker.fetchLatestStateTransitionAt = input.latestStateTransitionAt;
+  }
+  if (input?.fetchOpenIssuesByLabels !== undefined) {
+    tracker.fetchOpenIssuesByLabels = input.fetchOpenIssuesByLabels;
   }
   return tracker;
 }

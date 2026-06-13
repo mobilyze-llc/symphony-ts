@@ -1,4 +1,5 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { constants, statSync } from "node:fs";
 import {
   access,
@@ -28,6 +29,12 @@ import {
   evaluateModePermission,
 } from "../policy/hard-stops.js";
 import { getDefaultCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
+import {
+  CODEX_APP_SERVER_LAUNCH_TOKEN_ENV,
+  type ProcessIdentitySnapshot,
+  readProcessIdentity,
+  terminateChildProcessTree,
+} from "../shared/process-tree.js";
 import { VERSION } from "../version.js";
 import {
   gitIsolationEnv,
@@ -114,6 +121,7 @@ export interface CodexClientEvent {
     | "activity_heartbeat";
   timestamp: string;
   codexAppServerPid: string | null;
+  codexAppServerIdentity?: ProcessIdentitySnapshot | null;
   sessionId?: string | null;
   threadId?: string | null;
   turnId?: string | null;
@@ -217,6 +225,7 @@ export class CodexAppServerClient {
   private readonly options: CodexAppServerClientOptions;
 
   private child: ChildProcessWithoutNullStreams | null = null;
+  private childIdentity: ProcessIdentitySnapshot | null = null;
   private nextRequestId = 1;
   private stdoutBuffer = "";
   private threadId: string | null = null;
@@ -299,17 +308,13 @@ export class CodexAppServerClient {
 
     const child = this.child;
     this.child = null;
+    this.childIdentity = null;
     if (child === null) {
       await this.cleanupEphemeralCodexHome();
       return;
     }
 
-    const childExited = child.exitCode !== null || child.signalCode !== null;
-    if (!childExited) {
-      child.kill("SIGTERM");
-    }
-
-    await waitForChildExit(child);
+    await terminateChildProcessTree(child, { forceKillAfterGrace: false });
     await this.cleanupEphemeralCodexHome();
   }
 
@@ -332,11 +337,13 @@ export class CodexAppServerClient {
   }
 
   private async spawnAndInitialize(): Promise<void> {
+    const launchToken = randomUUID();
     try {
-      const env = await this.createSpawnEnvironment();
+      const env = await this.createSpawnEnvironment(launchToken);
       this.child = spawn("bash", ["-lc", this.renderSpawnCommand(env)], {
         cwd: this.options.cwd,
         env,
+        detached: true,
         stdio: "pipe",
       });
     } catch (error) {
@@ -410,6 +417,7 @@ export class CodexAppServerClient {
         });
       }
       this.child = null;
+      this.childIdentity = null;
       void this.cleanupEphemeralCodexHome().catch((cleanupError) => {
         this.emit({
           event: "other_message",
@@ -417,6 +425,11 @@ export class CodexAppServerClient {
         });
       });
     });
+
+    const childIdentity = await this.captureChildIdentity(child, launchToken);
+    if (this.child === child) {
+      this.childIdentity = childIdentity;
+    }
 
     try {
       await this.request("initialize", {
@@ -469,7 +482,9 @@ export class CodexAppServerClient {
     }
   }
 
-  private async createSpawnEnvironment(): Promise<NodeJS.ProcessEnv> {
+  private async createSpawnEnvironment(
+    launchToken: string,
+  ): Promise<NodeJS.ProcessEnv> {
     if (this.options.ephemeralHome !== true) {
       if (this.options.disableSkills === true) {
         throw new CodexAppServerClientError(
@@ -479,6 +494,7 @@ export class CodexAppServerClient {
       }
       return scrubGitPointerEnv({
         ...process.env,
+        [CODEX_APP_SERVER_LAUNCH_TOKEN_ENV]: launchToken,
         ...gitIsolationEnv(this.options.cwd),
       });
     }
@@ -527,7 +543,25 @@ export class CodexAppServerClient {
       ...process.env,
       ...gitIsolationEnv(this.options.cwd),
       CODEX_HOME: codexHome,
+      [CODEX_APP_SERVER_LAUNCH_TOKEN_ENV]: launchToken,
     });
+  }
+
+  private async captureChildIdentity(
+    child: ChildProcessWithoutNullStreams,
+    launchToken: string,
+  ): Promise<ProcessIdentitySnapshot | null> {
+    const pid = child.pid;
+    if (pid === undefined) {
+      return null;
+    }
+    const identity = await readProcessIdentity(pid);
+    if (identity === null || identity.processGroupId !== pid) {
+      return null;
+    }
+    return identity.launchToken === null || identity.launchToken === launchToken
+      ? identity
+      : null;
   }
 
   private sweepStaleEphemeralCodexHomesOnce(): void {
@@ -1213,13 +1247,17 @@ export class CodexAppServerClient {
   }
 
   private emit(
-    input: Omit<CodexClientEvent, "timestamp" | "codexAppServerPid">,
+    input: Omit<
+      CodexClientEvent,
+      "timestamp" | "codexAppServerPid" | "codexAppServerIdentity"
+    >,
   ): void {
     this.options.onEvent?.({
       ...input,
       timestamp: formatEasternTimestamp(new Date()),
       codexAppServerPid:
         this.child?.pid === undefined ? null : String(this.child.pid),
+      codexAppServerIdentity: this.childIdentity,
     });
   }
 
@@ -2399,20 +2437,6 @@ function clearTimeoutIfPresent(timer: NodeJS.Timeout | null): void {
   if (timer !== null) {
     clearTimeout(timer);
   }
-}
-
-async function waitForChildExit(
-  child: ChildProcessWithoutNullStreams,
-): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-
-  await new Promise<void>((resolve) => {
-    child.once("exit", () => {
-      resolve();
-    });
-  });
 }
 
 function toErrorMessage(error: unknown): string {

@@ -99,6 +99,8 @@ import {
   type AnchorFieldEditResult,
   type DashboardServerHost,
   type DashboardServerInstance,
+  type EmergencyStopResponse,
+  type EmergencyStopStateResponse,
   type IntentRequest,
   type IntentRequestResult,
   type IssueDetailResponse,
@@ -120,6 +122,11 @@ import {
 import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
+import {
+  readProcessIdentityMetadata,
+  terminateDetachedPidTree as terminateDetachedPidTreeDefault,
+} from "../shared/process-tree.js";
+import type { ProcessIdentitySnapshot } from "../shared/process-tree.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
 import type { IssueTracker } from "../tracker/tracker.js";
@@ -219,6 +226,7 @@ export interface RuntimeHostOptions {
     workspaceRoot: string,
     entry: DispatcherRunJournalEntry,
   ) => Promise<void>;
+  terminateDetachedPidTree?: typeof terminateDetachedPidTreeDefault;
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
   /**
@@ -333,6 +341,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     entry: DispatcherRunJournalEntry,
   ) => Promise<void>;
 
+  private readonly terminateDetachedPidTree: typeof terminateDetachedPidTreeDefault;
+
   static readonly PRUNE_DEBOUNCE_MS = 300_000;
 
   #lastPruneAt = 0;
@@ -406,6 +416,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.writeDispatcherRunJournalEntry =
       options.writeDispatcherRunJournalEntry ??
       appendDispatcherRunJournalEntryToDisk;
+    this.terminateDetachedPidTree =
+      options.terminateDetachedPidTree ?? terminateDetachedPidTreeDefault;
     this.captureDeployDriftFn =
       options.captureDeployDrift ??
       (() => captureDeployDrift({ repoRoot: resolveRuntimeRepoRoot() }));
@@ -1597,6 +1609,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       try {
         const journal = await this.readDispatcherRunJournal(workspaceRoot);
         this.orchestrator.recoverFromRunJournal(journal);
+        await this.cleanupUnconfirmedEmergencyStopProcesses(journal);
         this.rememberDispatcherRunJournalRoot(workspaceRoot, journal);
       } catch (error) {
         await this.logger?.warn(
@@ -1618,6 +1631,133 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     } finally {
       if (this.dispatcherRunJournalHydrationTask === task) {
         this.dispatcherRunJournalHydrationTask = null;
+      }
+    }
+  }
+
+  private async cleanupUnconfirmedEmergencyStopProcesses(
+    journal: DispatcherRunJournal,
+  ): Promise<void> {
+    const cleanupPlans = collectUnconfirmedEmergencyStopCleanupPlans(journal);
+    const cleanupPlansByIssue = new Map<
+      string,
+      EmergencyStopRecoveryCleanupPlan[]
+    >();
+    for (const plan of cleanupPlans) {
+      const plans = cleanupPlansByIssue.get(plan.issueId) ?? [];
+      plans.push(plan);
+      cleanupPlansByIssue.set(plan.issueId, plans);
+    }
+
+    for (const [issueId, plans] of cleanupPlansByIssue) {
+      const sortedPlans = plans.sort(
+        (left, right) => left.setBySequence - right.setBySequence,
+      );
+      const latestPlan = sortedPlans.at(-1);
+      if (latestPlan === undefined) {
+        continue;
+      }
+      this.orchestrator.requireEmergencyStopProcessCleanup(issueId, {
+        setBySequence: latestPlan.setBySequence,
+        since: latestPlan.since,
+      });
+
+      const unconfirmedPlans: EmergencyStopRecoveryCleanupPlan[] = [];
+      for (const plan of sortedPlans) {
+        const parsedPid = parseProcessPid(plan.codexAppServerPid);
+        let targetedCleanupSucceeded = false;
+        try {
+          if (
+            parsedPid !== null &&
+            parsedPid !== process.pid &&
+            plan.codexAppServerIdentity !== null &&
+            plan.codexAppServerIdentity.pid === parsedPid &&
+            plan.codexAppServerIdentity.processGroupId === parsedPid
+          ) {
+            const termination = await this.terminateDetachedPidTree(parsedPid, {
+              graceMs: 1_000,
+              expectedIdentity: plan.codexAppServerIdentity,
+            });
+            if (termination.sigkillSent) {
+              targetedCleanupSucceeded = true;
+              await this.logger?.log(
+                "info",
+                "emergency_stop_recovery_process_tree_killed",
+                `Killed recovered emergency-stop process tree for ${plan.issueIdentifier}.`,
+                {
+                  issue_id: issueId,
+                  issue_identifier: plan.issueIdentifier,
+                  codex_app_server_pid: plan.codexAppServerPid,
+                  source_sequence: plan.setBySequence,
+                },
+              );
+            } else {
+              unconfirmedPlans.push(plan);
+              await this.logger?.warn(
+                "emergency_stop_recovery_identity_mismatch",
+                "Emergency-stop recovery found a Codex app-server PID whose process identity could not be confirmed.",
+                {
+                  outcome: "degraded",
+                  issue_id: issueId,
+                  issue_identifier: plan.issueIdentifier,
+                  codex_app_server_pid: plan.codexAppServerPid,
+                  source_sequence: plan.setBySequence,
+                },
+              );
+            }
+          } else {
+            unconfirmedPlans.push(plan);
+            await this.logger?.warn(
+              "emergency_stop_recovery_missing_pid",
+              "Emergency-stop recovery found an interrupted issue without a usable Codex app-server PID and process identity.",
+              {
+                outcome: "degraded",
+                issue_id: issueId,
+                issue_identifier: plan.issueIdentifier,
+                codex_app_server_pid: plan.codexAppServerPid,
+                source_sequence: plan.setBySequence,
+              },
+            );
+          }
+
+          const { workspacePath } =
+            this.workspaceManager.resolveForIssue(issueId);
+          await this.killOrphanedProcesses(workspacePath, plan.issueIdentifier);
+          if (targetedCleanupSucceeded) {
+            const cleanupSequence =
+              await this.orchestrator.recordEmergencyStopRecoveryCleanup({
+                issueId,
+                issueIdentifier: plan.issueIdentifier,
+                codexAppServerPid: plan.codexAppServerPid,
+                codexAppServerIdentity: plan.codexAppServerIdentity,
+                sourceSequence: plan.setBySequence,
+              });
+            if (cleanupSequence === null) {
+              unconfirmedPlans.push(plan);
+            }
+          }
+        } catch (error) {
+          unconfirmedPlans.push(plan);
+          await this.logger?.warn(
+            "emergency_stop_recovery_cleanup_failed",
+            "Failed to clean up recovered emergency-stop process tree.",
+            {
+              outcome: "degraded",
+              issue_id: issueId,
+              issue_identifier: plan.issueIdentifier,
+              source_sequence: plan.setBySequence,
+              reason: toErrorMessage(error),
+            },
+          );
+        }
+      }
+
+      const latestUnconfirmedPlan = unconfirmedPlans.at(-1);
+      if (latestUnconfirmedPlan !== undefined) {
+        this.orchestrator.requireEmergencyStopProcessCleanup(issueId, {
+          setBySequence: latestUnconfirmedPlan.setBySequence,
+          since: latestUnconfirmedPlan.since,
+        });
       }
     }
   }
@@ -2246,14 +2386,25 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   async getPipelineStatus(): Promise<PipelineStatusResponse> {
     const restartSafety = await this.getPipelineRestartSafety();
+    const emergencyStop = this.getEmergencyStopStatus();
 
     if (!(this.tracker instanceof LinearTrackerClient)) {
-      return { paused: false, issues: [], restart_safety: restartSafety };
+      return {
+        paused: false,
+        issues: [],
+        restart_safety: restartSafety,
+        emergency_stop: emergencyStop,
+      };
     }
 
     const tracker = this.tracker as LinearTrackerClient;
     if (tracker.fetchOpenIssuesByLabels === undefined) {
-      return { paused: false, issues: [], restart_safety: restartSafety };
+      return {
+        paused: false,
+        issues: [],
+        restart_safety: restartSafety,
+        emergency_stop: emergencyStop,
+      };
     }
 
     const haltIssues = await tracker.fetchOpenIssuesByLabels(
@@ -2268,6 +2419,27 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         title: issue.title,
       })),
       restart_safety: restartSafety,
+      emergency_stop: emergencyStop,
+    };
+  }
+
+  private getEmergencyStopStatus(): EmergencyStopStateResponse | null {
+    const emergencyStop = this.orchestrator.getState().emergencyStop;
+    if (emergencyStop === null) {
+      return null;
+    }
+    return {
+      active: true,
+      since: emergencyStop.since,
+      reason: emergencyStop.reason,
+      set_by_sequence: emergencyStop.setBySequence,
+      interrupted_issues: emergencyStop.interruptedIssues.map((issue) => ({
+        issue_id: issue.issueId,
+        issue_identifier: issue.issueIdentifier,
+        stage: issue.stage,
+        attempt: issue.attempt,
+        codex_app_server_pid: issue.codexAppServerPid,
+      })),
     };
   }
 
@@ -2577,6 +2749,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   async requestPipelinePause(
     context?: PipelineControlContext,
   ): Promise<PipelineStatusResponse> {
+    return await this.enqueue(async () => {
+      return await this.requestPipelinePauseUnqueued(context);
+    });
+  }
+
+  private async requestPipelinePauseUnqueued(
+    context?: PipelineControlContext,
+  ): Promise<PipelineStatusResponse> {
     await this.ensureDispatcherRunJournalLoaded();
     const actor = context?.actor ?? this.defaultPipelineControlActor();
     const reason: IntentReason = {
@@ -2653,6 +2833,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   async requestPipelineResume(
     context?: PipelineControlContext,
   ): Promise<PipelineStatusResponse> {
+    return await this.enqueue(async () => {
+      return await this.requestPipelineResumeUnqueued(context);
+    });
+  }
+
+  private async requestPipelineResumeUnqueued(
+    context?: PipelineControlContext,
+  ): Promise<PipelineStatusResponse> {
     await this.ensureDispatcherRunJournalLoaded();
     const actor = context?.actor ?? this.defaultPipelineControlActor();
     const reason: IntentReason = {
@@ -2662,6 +2850,16 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     const priorStatus = await this.getPipelineStatus();
     if (!priorStatus.paused) {
+      if (this.orchestrator.getState().emergencyStop !== null) {
+        await this.journalPipelineIntentDegradedOk({
+          action: "resume",
+          status: "applied",
+          actor,
+          reason,
+          detail: "pipeline resume applied; emergency stop cleared",
+        });
+        return await this.getPipelineStatus();
+      }
       await this.journalPipelineIntentDegradedOk({
         action: "resume",
         status: "no_op",
@@ -2731,7 +2929,57 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       ...(status.restart_safety !== undefined
         ? { restart_safety: status.restart_safety }
         : {}),
+      emergency_stop: status.emergency_stop ?? null,
     };
+  }
+
+  async requestEmergencyStop(
+    context?: PipelineControlContext,
+  ): Promise<EmergencyStopResponse> {
+    const actor = context?.actor ?? this.defaultPipelineControlActor();
+    return await this.enqueue(async () => {
+      await this.ensureDispatcherRunJournalLoaded();
+      const result = await this.orchestrator.requestEmergencyStop({
+        actor,
+        reason: {
+          class: "operator_emergency_stop",
+          human: context?.reason ?? "emergency stop requested",
+        },
+      });
+
+      const response = {
+        status: result.status,
+        detail: result.detail,
+        sequence: result.sequence,
+        interrupted_issues: result.interruptedIssues.map((issue) => ({
+          issue_id: issue.issueId,
+          issue_identifier: issue.issueIdentifier,
+          stage: issue.stage,
+          attempt: issue.attempt,
+          codex_app_server_pid: issue.codexAppServerPid,
+        })),
+        stop_requests: result.stopRequests.map((request) => ({
+          issue_identifier: request.issueIdentifier,
+          stopped: true,
+          reason: request.reason,
+        })),
+      };
+
+      try {
+        await this.requestPipelinePauseUnqueued({
+          actor,
+          reason: "emergency stop asserted runtime halt condition",
+        });
+      } catch (error) {
+        await this.logger?.warn(
+          "emergency_stop_halt_view_failed",
+          "Emergency stop applied, but asserting the pipeline-halt Linear view failed.",
+          { error: toErrorMessage(error) },
+        );
+      }
+
+      return response;
+    });
   }
 
   private async getPipelineRestartSafety(): Promise<PipelineRestartSafetyResponse> {
@@ -3222,13 +3470,17 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       ];
 
       if (pidsToKill.length > 0) {
-        for (const pid of pidsToKill) {
-          try {
-            process.kill(Number(pid), "SIGTERM");
-          } catch {
-            // Process may have already exited
-          }
-        }
+        await Promise.all(
+          pidsToKill.map(async (pid) => {
+            try {
+              await this.terminateDetachedPidTree(Number(pid), {
+                graceMs: 1_000,
+              });
+            } catch {
+              // Process may have already exited
+            }
+          }),
+        );
         await this.logger?.log(
           "info",
           "orphaned_processes_killed",
@@ -4728,6 +4980,152 @@ function resolveClosed(
   exitPromise: ReturnType<typeof createExitPromise>,
 ): void {
   exitPromise.resolveClosed();
+}
+
+interface EmergencyStopRecoveryCleanupPlan {
+  issueId: string;
+  issueIdentifier: string;
+  codexAppServerPid: string | null;
+  codexAppServerIdentity: ProcessIdentitySnapshot | null;
+  setBySequence: number;
+  since: string;
+}
+
+function collectUnconfirmedEmergencyStopCleanupPlans(
+  journal: DispatcherRunJournal,
+): EmergencyStopRecoveryCleanupPlan[] {
+  const pendingPlansByIssue = new Map<
+    string,
+    EmergencyStopRecoveryCleanupPlan[]
+  >();
+  const plansByKey = new Map<string, EmergencyStopRecoveryCleanupPlan>();
+  const provenPlanKeys = new Set<string>();
+
+  for (const entry of [...journal].sort((a, b) => a.sequence - b.sequence)) {
+    if (
+      entry.kind === "intent" &&
+      entry.metadata.status === "applied" &&
+      entry.metadata.verb === "pipeline_stop"
+    ) {
+      for (const issue of readEmergencyStopInterruptedIssues(entry.metadata)) {
+        const plan: EmergencyStopRecoveryCleanupPlan = {
+          issueId: issue.issueId,
+          issueIdentifier: issue.issueIdentifier,
+          codexAppServerPid: issue.codexAppServerPid,
+          codexAppServerIdentity: issue.codexAppServerIdentity,
+          setBySequence: entry.sequence,
+          since: entry.timestamp,
+        };
+        const plans = pendingPlansByIssue.get(issue.issueId) ?? [];
+        plans.push(plan);
+        pendingPlansByIssue.set(issue.issueId, plans);
+        plansByKey.set(
+          emergencyStopCleanupPlanKey(issue.issueId, entry.sequence),
+          plan,
+        );
+      }
+      continue;
+    }
+
+    if (
+      entry.kind !== "hard_stop_trigger" ||
+      entry.metadata.status !== "completed" ||
+      entry.metadata.reason !== "emergency_stop"
+    ) {
+      continue;
+    }
+
+    const sourceSequence = readEmergencyStopSourceSequence(entry.metadata);
+    if (sourceSequence !== null) {
+      provenPlanKeys.add(
+        emergencyStopCleanupPlanKey(entry.issueId, sourceSequence),
+      );
+      continue;
+    }
+
+    // Legacy completion entries predate sourceSequence. Pair them with the
+    // latest unproven same-issue stop; current entries use the precise key.
+    const pendingPlans = pendingPlansByIssue.get(entry.issueId) ?? [];
+    for (let index = pendingPlans.length - 1; index >= 0; index -= 1) {
+      const plan = pendingPlans[index];
+      if (plan === undefined) {
+        continue;
+      }
+      const key = emergencyStopCleanupPlanKey(plan.issueId, plan.setBySequence);
+      if (!provenPlanKeys.has(key)) {
+        provenPlanKeys.add(key);
+        break;
+      }
+    }
+  }
+
+  return [...plansByKey.entries()].flatMap(([key, plan]) =>
+    provenPlanKeys.has(key) ? [] : [plan],
+  );
+}
+
+function emergencyStopCleanupPlanKey(
+  issueId: string,
+  sourceSequence: number,
+): string {
+  return `${issueId}:${sourceSequence}`;
+}
+
+function readEmergencyStopInterruptedIssues(
+  metadata: Record<string, unknown>,
+): Array<{
+  issueId: string;
+  issueIdentifier: string;
+  codexAppServerPid: string | null;
+  codexAppServerIdentity: ProcessIdentitySnapshot | null;
+}> {
+  const value = metadata.interruptedIssues;
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    if (!isRecord(item)) {
+      return [];
+    }
+    const issueId = item.issueId;
+    const issueIdentifier = item.issueIdentifier;
+    if (typeof issueId !== "string" || typeof issueIdentifier !== "string") {
+      return [];
+    }
+    const codexAppServerPid = item.codexAppServerPid;
+    const codexAppServerIdentity = readProcessIdentityMetadata(
+      item.codexAppServerIdentity,
+    );
+    return [
+      {
+        issueId,
+        issueIdentifier,
+        codexAppServerPid:
+          typeof codexAppServerPid === "string" &&
+          codexAppServerPid.trim() !== ""
+            ? codexAppServerPid
+            : null,
+        codexAppServerIdentity,
+      },
+    ];
+  });
+}
+
+function readEmergencyStopSourceSequence(
+  metadata: Record<string, unknown>,
+): number | null {
+  const value = metadata.sourceSequence;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : null;
+}
+
+function parseProcessPid(value: string | null): number | null {
+  if (value === null || !/^\d+$/.test(value)) {
+    return null;
+  }
+  const pid = Number(value);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
 }
 
 function toErrorMessage(error: unknown): string {

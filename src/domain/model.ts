@@ -1,4 +1,5 @@
 import type { ErrorSignatureClass } from "../errors/signature.js";
+import type { ProcessIdentitySnapshot } from "../shared/process-tree.js";
 
 export const ORCHESTRATOR_ISSUE_STATUSES = [
   "unclaimed",
@@ -757,6 +758,7 @@ export interface LiveSession {
   threadId: string | null;
   turnId: string | null;
   codexAppServerPid: string | null;
+  codexAppServerIdentity: ProcessIdentitySnapshot | null;
   lastCodexEvent: string | null;
   lastCodexTimestamp: string | null;
   lastCodexMessage: string | null;
@@ -1122,6 +1124,7 @@ export interface OrchestratorState {
    * upstream priority/FIFO comparator until the comparator ticket consumes it.
    */
   issueAnchors: Record<string, IssueAnchorRecord>;
+  emergencyStop: PipelineEmergencyStopState | null;
   codexTotals: CodexTotals;
   codexRateLimits: CodexRateLimits;
   rateLimitAdmission: RateLimitAdmissionState | null;
@@ -1196,6 +1199,26 @@ export interface OrchestratorState {
   failureExhaustedIds: Set<string>;
 }
 
+export interface PipelineEmergencyStopState {
+  active: true;
+  since: string;
+  reason: string;
+  actor: {
+    kind: string;
+    host: string;
+    session: string | null;
+  };
+  setBySequence: number | null;
+  interruptedIssues: Array<{
+    issueId: string;
+    issueIdentifier: string;
+    stage: string | null;
+    attempt: number | null;
+    codexAppServerPid: string | null;
+    codexAppServerIdentity: ProcessIdentitySnapshot | null;
+  }>;
+}
+
 export const FAILURE_CLASSES = [
   "verify",
   "review",
@@ -1268,6 +1291,7 @@ export function createEmptyLiveSession(): LiveSession {
     threadId: null,
     turnId: null,
     codexAppServerPid: null,
+    codexAppServerIdentity: null,
     lastCodexEvent: null,
     lastCodexTimestamp: null,
     lastCodexMessage: null,
@@ -1321,6 +1345,7 @@ export function createInitialOrchestratorState(input: {
     resumeRequired: new Set<string>(),
     resumeRequiredMarks: {},
     issueAnchors: {},
+    emergencyStop: null,
     codexTotals: {
       inputTokens: 0,
       outputTokens: 0,
