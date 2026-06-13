@@ -69,7 +69,7 @@ describe("dispatch comparator", () => {
     });
   });
 
-  it("refuses linearization when hard edges form a cycle", () => {
+  it("surfaces hard cycles while linearizing unrelated candidates", () => {
     const issues = [
       createIssue({
         id: "1",
@@ -81,6 +81,12 @@ describe("dispatch comparator", () => {
         identifier: "ISSUE-2",
         blockedBy: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
       }),
+      createIssue({
+        id: "3",
+        identifier: "ISSUE-3",
+        priority: 1,
+        createdAt: "2026-06-03T00:00:00.000Z",
+      }),
     ];
 
     const order = computeDispatchOrder({
@@ -90,8 +96,13 @@ describe("dispatch comparator", () => {
       now: NOW,
     });
 
-    expect(order.status).toBe("hard_cycle");
-    expect(order.positions).toEqual([]);
+    expect(order.status).toBe("linearized");
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-3"]);
+    expect(
+      order.exclusions.map((exclusion) => exclusion.issue_identifier),
+    ).toEqual(["ISSUE-1", "ISSUE-2"]);
     expect(order.hard_cycle?.issue_identifiers).toEqual(["ISSUE-1", "ISSUE-2"]);
   });
 
@@ -239,6 +250,45 @@ describe("dispatch comparator", () => {
     expect(
       order.positions.map((position) => position.issue_identifier),
     ).toEqual(["ISSUE-1", "ISSUE-2"]);
+  });
+
+  it("preserves native hard blockers when TicketFeature trust is not allowlisted", () => {
+    const blocker = createIssue({ id: "2", identifier: "ISSUE-2" });
+    const dependent = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      blockedBy: [
+        {
+          id: "2",
+          identifier: "ISSUE-2",
+          state: "In Progress",
+        },
+      ],
+    });
+
+    const order = computeDispatchOrder({
+      issues: [dependent, blocker],
+      anchors: {},
+      ticketFeatures: [
+        createFeature(dependent, [
+          createEdge(blocker, "advisory", "not_allowlisted"),
+        ]),
+        createFeature(blocker),
+      ],
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(order.exclusions).toMatchObject([
+      {
+        issue_identifier: "ISSUE-1",
+        blocker_issue_identifier: "ISSUE-2",
+        edge_trust: "legacy_hard",
+      },
+    ]);
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-2"]);
   });
 
   it("warns and skips identifier-only ordering refs when candidate identifiers collide", () => {

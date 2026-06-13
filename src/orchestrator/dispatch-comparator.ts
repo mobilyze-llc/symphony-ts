@@ -93,25 +93,6 @@ export function computeDispatchOrder(
       !excludedIssueIds.has(blockerIssue.id)
     );
   });
-  if (hardCycle !== null) {
-    return {
-      comparator_version: DISPATCH_COMPARATOR_VERSION,
-      generated_at: input.now.toISOString(),
-      status: "hard_cycle",
-      positions: [],
-      exclusions,
-      advisory_warnings: buildAdvisoryWarnings(
-        edges,
-        issueById,
-        issueByIdentifier,
-        terminalStates,
-      ),
-      would_have_been_excluded_by_advisory_edges: advisoryOpenEdges,
-      hard_cycle: hardCycle,
-      warnings,
-    };
-  }
-
   const linearized = topologicallySortIssues(
     included,
     hardOrderingEdges,
@@ -145,8 +126,17 @@ export function computeDispatchOrder(
       terminalStates,
     ),
     would_have_been_excluded_by_advisory_edges: advisoryOpenEdges,
-    hard_cycle: null,
-    warnings: [...warnings, ...linearized.warnings, ...anchored.warnings],
+    hard_cycle: hardCycle,
+    warnings: [
+      ...warnings,
+      ...(hardCycle === null
+        ? []
+        : [
+            `${hardCycle.reason} Cyclic issues were hard-excluded while unrelated candidates remained eligible.`,
+          ]),
+      ...linearized.warnings,
+      ...anchored.warnings,
+    ],
   };
 }
 
@@ -209,9 +199,9 @@ function collectDependencyEdges(
       });
     }
 
-    const featureBlockers = feature.specLineage.blockedBy.map(
-      (edge) => edge.issue,
-    );
+    const featureBlockers = feature.specLineage.blockedBy
+      .filter(ticketFeatureEdgeSupersedesNativeBlocker)
+      .map((edge) => edge.issue);
     for (const blocker of issue.blockedBy) {
       if (
         !featureBlockers.some((featureBlocker) =>
@@ -234,6 +224,16 @@ function collectDependencyEdges(
     (edge) =>
       edge.issue.id !==
       findIssueByRef(edge.blocker, issueById, issueByIdentifier)?.id,
+  );
+}
+
+function ticketFeatureEdgeSupersedesNativeBlocker(
+  edge: TicketFeature["specLineage"]["blockedBy"][number],
+): boolean {
+  return (
+    edge.trust === "operator_confirmed" ||
+    edge.advisoryReason === "service_account" ||
+    edge.advisoryReason === "bot_actor"
   );
 }
 

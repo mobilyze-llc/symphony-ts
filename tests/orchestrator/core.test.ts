@@ -49,7 +49,7 @@ describe("orchestrator core", () => {
     expect(issues.map((issue) => issue.id)).toEqual(["1", "2", "3"]);
   });
 
-  it("gates dispatch when the computed order has a hard dependency cycle", async () => {
+  it("dispatches unrelated candidates when hard dependency cycles are excluded", async () => {
     const orchestrator = createOrchestrator({
       tracker: createTracker({
         candidates: [
@@ -67,25 +67,35 @@ describe("orchestrator core", () => {
               { id: "1", identifier: "ISSUE-1", state: "In Progress" },
             ],
           }),
+          createIssue({
+            id: "3",
+            identifier: "ISSUE-3",
+            priority: 1,
+            createdAt: "2026-03-03T00:00:00.000Z",
+          }),
         ],
       }),
     });
 
     const result = await orchestrator.pollTick();
 
-    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(result.dispatchedIssueIds).toEqual(["3"]);
     expect(orchestrator.getState().computedDispatchOrder).toMatchObject({
-      status: "hard_cycle",
+      status: "linearized",
+      positions: [
+        expect.objectContaining({
+          issue_identifier: "ISSUE-3",
+        }),
+      ],
       hard_cycle: {
         edge_trust: "legacy_hard",
         issue_identifiers: ["ISSUE-1", "ISSUE-2"],
       },
     });
-    expect(orchestrator.getState().dispatcherRunJournal).toContainEqual(
+    expect(orchestrator.getState().dispatcherRunJournal).not.toContainEqual(
       expect.objectContaining({
         kind: "dispatch_verdict",
         metadata: expect.objectContaining({
-          disposition: "gate",
           reason_code: "computed_order_hard_cycle",
         }),
       }),
@@ -195,6 +205,46 @@ describe("orchestrator core", () => {
           issue_identifier: "ISSUE-1",
           blocker_issue_identifier: "ISSUE-2",
           edge_trust: "operator_confirmed",
+        }),
+      ],
+    });
+  });
+
+  it("preserves native hard blockers when TicketFeature blocker trust is not allowlisted", async () => {
+    const blocker = createIssue({ id: "2", identifier: "ISSUE-2" });
+    const dependent = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      blockedBy: [
+        {
+          id: "2",
+          identifier: "ISSUE-2",
+          state: "In Progress",
+        },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [dependent, blocker],
+        fetchTicketFeatureIssuesByStates: async () => [
+          createTicketFeatureSourceIssue(dependent, {
+            blockedBy: [createTicketFeatureBlockedByEdge(blocker)],
+          }),
+          createTicketFeatureSourceIssue(blocker),
+        ],
+      }),
+    });
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(orchestrator.getState().computedDispatchOrder).toMatchObject({
+      status: "linearized",
+      exclusions: [
+        expect.objectContaining({
+          issue_identifier: "ISSUE-1",
+          blocker_issue_identifier: "ISSUE-2",
+          edge_trust: "legacy_hard",
         }),
       ],
     });
