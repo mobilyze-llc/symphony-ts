@@ -3857,6 +3857,49 @@ describe("runHeadlessCouncilGate", () => {
     ).toBe(true);
   });
 
+  it("coalesces cleanup sweeps when multiple lanes hit the stall deadline together", async () => {
+    const progress: string[] = [];
+    const harness = await createHarness({
+      cleanupDelayMs: 25,
+      laneBehavior: {
+        "claude-opus": { hang: true },
+        "pi-deepseek": { hang: true },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane(), piLane()],
+        codexLead: false,
+      },
+      {
+        runCommand: harness.runCommand,
+        laneStallDeadlineMs: 50,
+        progress: (message) => progress.push(message),
+      },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toEqual(
+      expect.arrayContaining([
+        "substrate_stall:claude-opus",
+        "substrate_stall:pi-deepseek",
+      ]),
+    );
+    expect(
+      harness.commands.filter(
+        (command) =>
+          command.args[0] === "cleanup" && command.args[1] === "--sweep",
+      ),
+    ).toHaveLength(1);
+    expect(progress.some((line) => line.includes("lane_cleanup_joined"))).toBe(
+      true,
+    );
+  });
+
   it("ignores a non-positive lane stall deadline override and completes healthy lanes", async () => {
     const harness = await createHarness();
     const result = await runHeadlessCouncilGate(
@@ -3965,7 +4008,7 @@ describe("runHeadlessCouncilGate", () => {
       {
         runCommand: harness.runCommand,
         laneStallDeadlineMs: 1_000,
-        overallLaneDeadlineMs: 75,
+        overallLaneDeadlineMs: 500,
         progress: (message) => progress.push(message),
       },
     );
@@ -6404,6 +6447,7 @@ async function createHarness(options?: {
   gitRevParse?: Record<string, CommandResult>;
   gitStatus?: CommandResult;
   gitStatusReject?: Error;
+  cleanupDelayMs?: number;
   laneBehavior?: Record<string, LaneBehavior>;
 }) {
   const root = await mkdtemp(join(tmpdir(), "symphony-headless-gate-"));
@@ -6441,6 +6485,11 @@ async function createHarness(options?: {
     }
 
     if (args[0] === "cleanup" && args[1] === "--sweep") {
+      if (options?.cleanupDelayMs !== undefined) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, options.cleanupDelayMs),
+        );
+      }
       return {
         exitCode: 0,
         stdout: JSON.stringify({ ok: true, swept: [] }),

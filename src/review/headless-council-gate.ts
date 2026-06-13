@@ -940,6 +940,25 @@ export async function runHeadlessCouncilGate(
       remainingOverallMs: remainingMs,
     };
   };
+  let inFlightStalledLaneCleanup: Promise<void> | null = null;
+  const cleanupStalledLaneCoalesced = (
+    cleanupInput: Parameters<typeof cleanupStalledLane>[0],
+  ) => {
+    if (inFlightStalledLaneCleanup !== null) {
+      cleanupInput.progress(
+        formatLaneProgress("cleanup_joined", {
+          laneId: cleanupInput.laneId,
+        }),
+      );
+      return inFlightStalledLaneCleanup;
+    }
+    inFlightStalledLaneCleanup = cleanupStalledLane(cleanupInput).finally(
+      () => {
+        inFlightStalledLaneCleanup = null;
+      },
+    );
+    return inFlightStalledLaneCleanup;
+  };
 
   const runReviewerLaneWithDeadline = (lane: HeadlessReviewerLaneConfig) => {
     const laneTimeoutSeconds = timeoutSecondsForLane(lane, timeoutSeconds);
@@ -1028,7 +1047,7 @@ export async function runHeadlessCouncilGate(
               deadlineMs: budget.stallDeadlineMs,
             }),
           );
-          await cleanupStalledLane({
+          await cleanupStalledLaneCoalesced({
             cmuxSpawnBin,
             workspace,
             env,
@@ -1143,7 +1162,7 @@ export async function runHeadlessCouncilGate(
                 deadlineMs: codexLeadBudget.stallDeadlineMs,
               }),
             );
-            await cleanupStalledLane({
+            await cleanupStalledLaneCoalesced({
               cmuxSpawnBin,
               workspace,
               env,
