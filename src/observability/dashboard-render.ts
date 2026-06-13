@@ -1280,14 +1280,24 @@ function renderDashboardClientScript(
                   '</tr>';
               }).join('')
             : '<tr><td colspan="3"><p class="empty-state">No linearized positions.</p></td></tr>';
-          var exclusions = Array.isArray(order.exclusions) ? order.exclusions.length : 0;
+          var exclusionRows = Array.isArray(order.exclusions) ? order.exclusions : [];
+          var exclusions = exclusionRows.length;
+          var hardExcludedIssueIds = {};
+          var hardExcludedIssueCount = 0;
+          exclusionRows.forEach(function (exclusion) {
+            var issueId = String(exclusion.issue_id || exclusion.issue_identifier || '');
+            if (issueId && !hardExcludedIssueIds[issueId]) {
+              hardExcludedIssueIds[issueId] = true;
+              hardExcludedIssueCount += 1;
+            }
+          });
           var advisory = Array.isArray(order.advisory_warnings) ? order.advisory_warnings.length : 0;
           var wouldExclude = Array.isArray(order.would_have_been_excluded_by_advisory_edges) ? order.would_have_been_excluded_by_advisory_edges.length : 0;
-          var summary = '<p class="section-copy">Hard exclusions: ' + formatInteger(exclusions) + ' · Advisory warnings: ' + formatInteger(advisory) + ' · Would-have-been advisory exclusions: ' + formatInteger(wouldExclude) + '</p>';
+          var summary = '<p class="section-copy">Hard-excluded issues: ' + formatInteger(hardExcludedIssueCount) + ' · Hard exclusion edges: ' + formatInteger(exclusions) + ' · Advisory warnings: ' + formatInteger(advisory) + ' · Would-have-been advisory exclusions: ' + formatInteger(wouldExclude) + '</p>';
           var exclusionPanel = exclusions === 0
             ? ''
             : '<p class="detail-section-title">Hard exclusions</p><div class="table-wrap"><table class="data-table" style="min-width: 720px;"><thead><tr><th>Issue</th><th>Blocked by</th><th>Reason</th></tr></thead><tbody>' +
-              order.exclusions.map(function (exclusion) {
+              exclusionRows.map(function (exclusion) {
                 return '<tr><td>' + escapeHtml(exclusion.issue_identifier || exclusion.issue_id) + '</td><td>' + escapeHtml(exclusion.blocker_issue_identifier || exclusion.blocker_issue_id || 'unknown') + '</td><td>' + escapeHtml(exclusion.reason || '') + '</td></tr>';
               }).join('') +
               '</tbody></table></div>';
