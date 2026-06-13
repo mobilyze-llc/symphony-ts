@@ -303,6 +303,7 @@ export interface CouncilRoutingLaneSelection {
   required: boolean;
   decorrelatedSignal: boolean;
   reason: string;
+  codexExcavationSweep?: CodexExcavationSweep;
 }
 
 export interface CouncilRoutingSkippedLane {
@@ -1556,6 +1557,7 @@ function buildInitialCouncilRouting(args: {
           mode,
           codexLeadEnabled: args.codexLeadEnabled,
           codexExcavation: gateInput.codexExcavation,
+          codexExcavationSweep: gateInput.codexExcavationSweep,
           acceptsNarrowerRisk: acceptsNarrowerRiskForHighRisk,
           requiresPiAuthorRecovery: piAuthored,
         })
@@ -1564,10 +1566,7 @@ function buildInitialCouncilRouting(args: {
           codexLeadEnabled: args.codexLeadEnabled,
           requiresPiAuthorRecovery: piAuthored,
         });
-  if (
-    piAuthored &&
-    selectedLanes.some((lane) => lane.laneId === "claude-opus")
-  ) {
+  if (piAuthored && hasRequiredNonPiReviewerLane(selectedLanes)) {
     escalationPredicates.push("same_family_required_reviewer_recovery");
   }
   const skippedLanes = skippedLanesForRouting({
@@ -1600,6 +1599,7 @@ function defaultSelectedLanesForRouting(input: {
   mode: CouncilRoutingMode;
   codexLeadEnabled: boolean;
   codexExcavation: boolean | undefined;
+  codexExcavationSweep: CodexExcavationSweep | undefined;
   acceptsNarrowerRisk: boolean;
   requiresPiAuthorRecovery: boolean;
 }): CouncilRoutingLaneSelection[] {
@@ -1620,13 +1620,16 @@ function defaultSelectedLanesForRouting(input: {
     ),
   );
   if (codexExcavationEnabled(input.env, input.codexExcavation)) {
+    const codexExcavationSweep =
+      input.codexExcavationSweep ?? routingCodexSweep(input.mode);
     selections.push(
       laneSelection(
         codexExcavationLane(input.env, {
-          codexExcavationSweep: routingCodexSweep(input.mode),
+          codexExcavationSweep,
         }),
         false,
         false,
+        { codexExcavationSweep },
       ),
     );
   }
@@ -1675,6 +1678,7 @@ function laneSelection(
   lane: HeadlessReviewerLaneConfig,
   required: boolean,
   decorrelatedSignal: boolean,
+  metadata: Pick<CouncilRoutingLaneSelection, "codexExcavationSweep"> = {},
 ): CouncilRoutingLaneSelection {
   return {
     laneId: lane.laneId,
@@ -1682,6 +1686,7 @@ function laneSelection(
     role: lane.role,
     required,
     decorrelatedSignal,
+    ...metadata,
     reason:
       lane.agent === "codex"
         ? "direct_codex_excavation_signal"
@@ -1689,6 +1694,14 @@ function laneSelection(
           ? "same_family_author_signal"
           : "non_author_family_reviewer_artifact",
   };
+}
+
+function hasRequiredNonPiReviewerLane(
+  selectedLanes: readonly CouncilRoutingLaneSelection[],
+): boolean {
+  return selectedLanes.some(
+    (lane) => lane.required && lane.decorrelatedSignal && lane.agent !== "pi",
+  );
 }
 
 function skippedLanesForRouting(input: {
@@ -5425,7 +5438,12 @@ function formatSelectedRoutingLanes(
           lane.required ? "required" : "optional",
           lane.decorrelatedSignal ? "decorrelated" : "direct",
           lane.reason,
-        ].join(":"),
+          lane.codexExcavationSweep === undefined
+            ? null
+            : `sweep=${lane.codexExcavationSweep}`,
+        ]
+          .filter((part): part is string => part !== null)
+          .join(":"),
       )
       .join(", ") || "none"
   );

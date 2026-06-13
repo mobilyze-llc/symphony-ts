@@ -484,6 +484,17 @@ curl -s http://localhost:3000/api/v1/state | jq '{
   dashboard/control surfaces should use `rework_finding_count`,
   `blocking_finding_count`, and `degraded_condition_count` plus the projected
   scalar reason/verdict fields.
+- Council review artifacts carry the fuller `review_routing` object. Treat
+  `selectedLanes[].reason` as a machine-readable contract:
+  `non_author_family_reviewer_artifact` means the lane can satisfy the required
+  decorrelated reviewer gate, `same_family_author_signal` means the lane ran as
+  useful auxiliary signal but cannot satisfy decorrelation for the current
+  author family, `direct_codex_excavation_signal` means a Codex excavation lane
+  ran as direct edge-case search, and `codex_lead_triage` means in-session Codex
+  adjudication. For `codex-excavation`, `selectedLanes[].codexExcavationSweep`
+  records the selected execution preset (`standard` or `high-risk`) so reports,
+  dashboards, and replay tooling can distinguish the selected metadata from the
+  actual lane command budget.
 
 - `explicit_resume_required` lists every parked issue with the `reason`
   (e.g. `hard_stop:token_budget`, `operator_input_required`,
