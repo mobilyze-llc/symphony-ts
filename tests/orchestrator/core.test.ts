@@ -6017,6 +6017,259 @@ describe("decorrelated terminal gates", () => {
     ]);
   });
 
+  it("retries all-reviewer gate errors once without spending rework, then parks", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runJournal: DispatcherRunJournal = [];
+    const comments: string[] = [];
+    const gateFailures: Array<
+      Parameters<NonNullable<OrchestratorCoreOptions["onGateFailed"]>>[0]
+    > = [];
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "error" as const,
+      results: [],
+      comment: "all reviewer lanes errored",
+    }));
+    const orchestrator = createOrchestrator({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["mode:full"],
+          }),
+        ],
+      }),
+      runEnsembleGate,
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+      writeRunJournalEntry: async (entry) => {
+        runJournal.push(entry);
+      },
+      onGateFailed: (input) => {
+        gateFailures.push(input);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await orchestrator.onRetryTimer("1");
+    await waitForGateOutcomeCount(orchestrator, "1", 1);
+    await waitForCondition(
+      () =>
+        runJournal.filter(
+          (entry) => entry.kind === "gate_result" && entry.operation === "gate",
+        ).length >= 1,
+    );
+
+    expect(runEnsembleGate).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().issueStages["1"]).toBe("review_gate");
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
+    expect(orchestrator.getState().retryAttempts["1"]).toMatchObject({
+      attempt: 2,
+      delayType: "continuation",
+    });
+    expect(gateFailures).toEqual([]);
+    expect(orchestrator.getState().decorrelatedGateOutcomes["1"]).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        aggregate: "error",
+        reworkTarget: null,
+      }),
+    ]);
+
+    await orchestrator.onRetryTimer("1");
+    await waitForGateOutcomeCount(orchestrator, "1", 2);
+    await waitForCondition(
+      () =>
+        runJournal.filter(
+          (entry) => entry.kind === "gate_result" && entry.operation === "gate",
+        ).length >= 2,
+    );
+    await waitForCondition(() => orchestrator.getState().failed.has("1"));
+
+    expect(runEnsembleGate).toHaveBeenCalledTimes(2);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(orchestrator.getState().issueStages["1"]).toBeUndefined();
+    expect(orchestrator.getState().issueReworkCounts["1"]).toBeUndefined();
+    expect(gateFailures).toEqual([
+      expect.objectContaining({
+        issueIdentifier: "ISSUE-1",
+        stageName: "review_gate",
+      }),
+    ]);
+    expect(comments.at(-1)).toContain(
+      "Parked: review gate infrastructure blocked (SYMPH-366)",
+    );
+
+    const gateResults = runJournal.filter(
+      (entry) => entry.kind === "gate_result" && entry.operation === "gate",
+    );
+    expect(gateResults).toHaveLength(2);
+    expect(gateResults[0]).toMatchObject({
+      metadata: expect.objectContaining({
+        aggregate: "error",
+        consecutiveGateErrors: 1,
+        terminal: false,
+        reworkCount: 0,
+        reworkTarget: null,
+      }),
+    });
+    expect(gateResults[1]).toMatchObject({
+      metadata: expect.objectContaining({
+        aggregate: "error",
+        consecutiveGateErrors: 2,
+        terminal: true,
+        terminalReason: "review_gate_error_cap",
+        reworkCount: 0,
+        reworkTarget: null,
+      }),
+    });
+  });
+
+  it("replays terminal all-reviewer gate errors as parked after restart", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runJournal: DispatcherRunJournal = [];
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "error" as const,
+      results: [],
+      comment: "all reviewer lanes errored",
+    }));
+    const tracker = createTracker({
+      candidates: [
+        createIssue({
+          id: "1",
+          identifier: "ISSUE-1",
+          labels: ["mode:full"],
+          state: "In Progress",
+        }),
+      ],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const firstOrchestrator = createOrchestrator({
+      config,
+      tracker,
+      runEnsembleGate,
+      writeRunJournalEntry: async (entry) => {
+        runJournal.push(entry);
+      },
+    });
+
+    await firstOrchestrator.pollTick();
+    await firstOrchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await firstOrchestrator.onRetryTimer("1");
+    await waitForGateOutcomeCount(firstOrchestrator, "1", 1);
+    await waitForCondition(
+      () =>
+        runJournal.filter(
+          (entry) => entry.kind === "gate_result" && entry.operation === "gate",
+        ).length >= 1,
+    );
+    await firstOrchestrator.onRetryTimer("1");
+    await waitForGateOutcomeCount(firstOrchestrator, "1", 2);
+    await waitForCondition(
+      () =>
+        runJournal.filter(
+          (entry) => entry.kind === "gate_result" && entry.operation === "gate",
+        ).length >= 2,
+    );
+
+    const restartedOrchestrator = createOrchestrator({
+      config,
+      tracker,
+      runJournal,
+      runEnsembleGate,
+    });
+
+    expect(restartedOrchestrator.getState().failed.has("1")).toBe(true);
+    expect(restartedOrchestrator.getState().issueStages["1"]).toBeUndefined();
+    expect(
+      restartedOrchestrator.getState().decorrelatedGateOutcomes["1"],
+    ).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        aggregate: "error",
+        reworkTarget: null,
+      }),
+      expect.objectContaining({
+        status: "failed",
+        aggregate: "error",
+        reworkTarget: null,
+      }),
+    ]);
+
+    const result = await restartedOrchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(runEnsembleGate).toHaveBeenCalledTimes(2);
+  });
+
+  it("replays a single all-reviewer gate error at the gate instead of rework", async () => {
+    const config = createImplementThenGateConfigWithReviewers();
+    const runJournal: DispatcherRunJournal = [];
+    const runEnsembleGate = vi.fn(async () => ({
+      aggregate: "error" as const,
+      results: [],
+      comment: "all reviewer lanes errored",
+    }));
+    const tracker = createTracker({
+      candidates: [
+        createIssue({
+          id: "1",
+          identifier: "ISSUE-1",
+          labels: ["mode:full"],
+          state: "In Progress",
+        }),
+      ],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const firstOrchestrator = createOrchestrator({
+      config,
+      tracker,
+      runEnsembleGate,
+      writeRunJournalEntry: async (entry) => {
+        runJournal.push(entry);
+      },
+    });
+
+    await firstOrchestrator.pollTick();
+    await firstOrchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    await firstOrchestrator.onRetryTimer("1");
+    await waitForGateOutcomeCount(firstOrchestrator, "1", 1);
+    await waitForCondition(
+      () =>
+        runJournal.filter(
+          (entry) => entry.kind === "gate_result" && entry.operation === "gate",
+        ).length >= 1,
+    );
+
+    const replayGate = vi.fn(async () => ({
+      aggregate: "pass" as const,
+      results: [],
+      comment: "gate recovered",
+    }));
+    const restartedOrchestrator = createOrchestrator({
+      config,
+      tracker,
+      runJournal,
+      runEnsembleGate: replayGate,
+    });
+
+    expect(restartedOrchestrator.getState().issueStages["1"]).toBe(
+      "review_gate",
+    );
+    expect(restartedOrchestrator.getState().issueReworkCounts["1"]).toBe(
+      undefined,
+    );
+
+    await restartedOrchestrator.pollTick();
+    await waitForGateOutcomeCount(restartedOrchestrator, "1", 2);
+
+    expect(replayGate).toHaveBeenCalledTimes(1);
+    expect(restartedOrchestrator.getState().issueStages["1"]).toBe("done");
+  });
+
   it("replays max-rework production gate failure as terminal after restart", async () => {
     const config = createImplementThenGateConfigWithReviewers();
     const runJournal: DispatcherRunJournal = [];
@@ -9198,6 +9451,7 @@ function createOrchestrator(overrides?: {
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   postComment?: OrchestratorCoreOptions["postComment"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
+  onGateFailed?: OrchestratorCoreOptions["onGateFailed"];
   onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
   now?: () => Date;
   runJournal?: DispatcherRunJournal;
@@ -9259,6 +9513,10 @@ function createOrchestrator(overrides?: {
     options.postComment = overrides.postComment;
   }
 
+  if (overrides?.onGateFailed !== undefined) {
+    options.onGateFailed = overrides.onGateFailed;
+  }
+
   if (overrides?.onSystemicCluster !== undefined) {
     options.onSystemicCluster = overrides.onSystemicCluster;
   }
@@ -9291,6 +9549,19 @@ async function waitForGateOutcomeCount(
     }
     await Promise.resolve();
   }
+}
+
+async function waitForCondition(
+  predicate: () => boolean,
+  attempts = 20,
+): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  expect(predicate()).toBe(true);
 }
 
 function createTracker(input?: {

@@ -60,6 +60,22 @@ describe("parseRateLimitSnapshot", () => {
     expect(snapshot?.secondary).toBeNull();
   });
 
+  it("parses Codex windowDurationMins aliases", () => {
+    const snapshot = parseRateLimitSnapshot({
+      primary: {
+        usedPercent: 12.5,
+        windowDurationMins: 300,
+        resetsAt: 1781093929,
+      },
+    });
+
+    expect(snapshot?.primary).toEqual({
+      usedPercent: 12.5,
+      windowMinutes: 300,
+      resetsAt: 1781093929,
+    });
+  });
+
   it("normalizes epoch-millisecond resets_at to seconds", () => {
     const snapshot = parseRateLimitSnapshot({
       primary: { used_percent: 10, resets_at: 1781093929000 },

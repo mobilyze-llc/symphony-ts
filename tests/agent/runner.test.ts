@@ -989,6 +989,11 @@ describe("AgentRunner", () => {
       outcome: "PAUSED-budget",
       trigger: "rate_limit_budget",
     });
+    expect(result.liveSession.rateLimitWindows.primary).toMatchObject({
+      startPercent: 40,
+      latestPercent: 46,
+      lastResetsAt: 1781093929,
+    });
     expect(result.hardStop?.reason).toContain("primary window burned 6.0%");
     expect(result.hardStop?.reason).toContain("Live token telemetry");
   });

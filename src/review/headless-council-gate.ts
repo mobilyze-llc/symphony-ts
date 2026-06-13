@@ -532,6 +532,10 @@ export async function runHeadlessCouncilGate(
   );
   await writeFile(`${artifactDir}/cmux-preflight.stdout`, preflight.stdout);
   await writeFile(`${artifactDir}/cmux-preflight.stderr`, preflight.stderr);
+  // Compatibility aliases: reviewer lanes persist cmux-spawn stdout/stderr as
+  // .cli.json/.cli.stderr, and preflight diagnostics should be grep-compatible.
+  await writeFile(`${artifactDir}/cmux-preflight.cli.json`, preflight.stdout);
+  await writeFile(`${artifactDir}/cmux-preflight.cli.stderr`, preflight.stderr);
   if (preflight.exitCode !== 0) {
     return await fail(
       "error",

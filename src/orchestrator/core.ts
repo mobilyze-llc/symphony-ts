@@ -150,6 +150,7 @@ const CONTINUATION_RETRY_DELAY_MS = 1_000;
  */
 const MAX_SAME_CRITERION_REVIEW_FAILURES = 3;
 const MAX_REVIEW_SUBSTRATE_STALL_FAILURES = 2;
+const MAX_REVIEW_GATE_ERROR_FAILURES = 2;
 const SUBSTRATE_STALL_REGEX = /\bsubstrate_stall:/i;
 const SUBSTRATE_STALL_PREFIXES = ["substrate_stall:"];
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
@@ -468,7 +469,8 @@ export interface OrchestratorCoreOptions {
     trigger: string;
   }) => void;
   /**
-   * Called when an ensemble gate returns a non-pass aggregate (SYMPH-397).
+   * Called when an ensemble gate returns code-review failures, or when repeated
+   * reviewer infrastructure errors park the issue (SYMPH-397/SYMPH-366).
    * Fire-and-forget.
    */
   onGateFailed?: (input: {
@@ -1448,6 +1450,11 @@ export class OrchestratorCore {
       this.state.failed.add(entry.issueId);
       this.releaseClaim(entry.issueId);
       this.clearTerminalIssueRuntimeState(entry.issueId);
+      return;
+    }
+
+    if (outcome.aggregate === "error") {
+      this.state.issueStages[entry.issueId] = entry.stage;
       return;
     }
 
@@ -4872,6 +4879,10 @@ export class OrchestratorCore {
       const result = await this.runEnsembleGate!({ issue, stage });
       let reworkTarget: string | null = null;
       const reworkCountBeforeGate = this.state.issueReworkCounts[issue.id] ?? 0;
+      let terminal = false;
+      let terminalReason: string | null = null;
+      let consecutiveGateErrors: number | null = null;
+      let gateErrorPark: { count: number; comment: string } | null = null;
 
       if (result.aggregate === "pass") {
         const nextStage = this.approveGate(issue.id);
@@ -4879,6 +4890,27 @@ export class OrchestratorCore {
           this.scheduleRetry(issue.id, 1, {
             identifier: issue.identifier,
             error: null,
+            delayType: "continuation",
+          });
+        }
+      } else if (result.aggregate === "error") {
+        consecutiveGateErrors =
+          this.countConsecutiveReviewGateErrors(issue.id, stageName) + 1;
+        if (consecutiveGateErrors >= MAX_REVIEW_GATE_ERROR_FAILURES) {
+          terminal = true;
+          terminalReason = "review_gate_error_cap";
+          gateErrorPark = {
+            count: consecutiveGateErrors,
+            comment: result.comment,
+          };
+        } else {
+          // Gate infrastructure errors are bounded by the consecutive
+          // aggregate-error cap below. Use a continuation retry so the
+          // generic worker-failure retry ladder does not spend implement
+          // retry budget before the gate-specific cap decides whether to park.
+          this.scheduleRetry(issue.id, nextRetryAttempt(attempt), {
+            identifier: issue.identifier,
+            error: `Ensemble review infrastructure error: ${result.comment.slice(0, 200)}`,
             delayType: "continuation",
           });
         }
@@ -4927,6 +4959,12 @@ export class OrchestratorCore {
         }
       }
       if (gateContext !== null) {
+        const outcomeVerb =
+          result.aggregate === "pass"
+            ? "passed"
+            : result.aggregate === "error"
+              ? "errored"
+              : "failed";
         this.recordDecorrelatedGateOutcome({
           issue,
           stageName,
@@ -4934,7 +4972,7 @@ export class OrchestratorCore {
           status: result.aggregate === "pass" ? "passed" : "failed",
           aggregate: result.aggregate,
           reworkTarget: reworkTarget === "escalated" ? null : reworkTarget,
-          summary: `Decorrelated gate ${stageName ?? "unnamed"} ${result.aggregate === "pass" ? "passed" : "failed"} for ${issue.identifier}.`,
+          summary: `Decorrelated gate ${stageName ?? "unnamed"} ${outcomeVerb} for ${issue.identifier}.`,
         });
       }
       await this.completeDispatcherLease({
@@ -4957,17 +4995,24 @@ export class OrchestratorCore {
             gateContext === null ? null : gateContext.mode !== "prototype",
           reworkTarget: reworkTarget === "escalated" ? null : reworkTarget,
           reworkCount:
+            result.aggregate === "error" ||
+            terminal ||
             reworkTarget === "escalated"
               ? reworkCountBeforeGate
               : (this.state.issueReworkCounts[issue.id] ?? null),
-          terminal: reworkTarget === "escalated",
+          consecutiveGateErrors,
+          terminal: terminal || reworkTarget === "escalated",
           terminalReason:
-            reworkTarget === "escalated" ? "max_rework_exceeded" : null,
+            terminalReason ??
+            (reworkTarget === "escalated" ? "max_rework_exceeded" : null),
         },
       });
+      if (gateErrorPark !== null) {
+        this.parkRepeatedReviewGateError(issue, stageName, gateErrorPark);
+      }
       // Fire gate failure notification after the lease is durably completed so
       // the alert reflects a fully-journalled outcome (ordering hardening).
-      if (result.aggregate !== "pass") {
+      if (result.aggregate === "fail" || terminal) {
         try {
           this.onGateFailed?.({
             issueId: issue.id,
@@ -5031,6 +5076,120 @@ export class OrchestratorCore {
         // Notification failures are always swallowed
       }
     }
+  }
+
+  private countConsecutiveReviewGateErrors(
+    issueId: string,
+    stageName: string | null,
+  ): number {
+    let count = 0;
+    for (let i = this.state.dispatcherRunJournal.length - 1; i >= 0; i -= 1) {
+      const entry = this.state.dispatcherRunJournal[i];
+      if (
+        entry === undefined ||
+        entry.issueId !== issueId ||
+        entry.stage !== stageName
+      ) {
+        continue;
+      }
+
+      if (entry.kind === "gate_started") {
+        continue;
+      }
+      // Completed gate results are the only durable verdict boundary. Other
+      // same-issue/stage entries break the streak because replay cannot prove
+      // they belong to the same uninterrupted gate-error sequence.
+      if (
+        entry.kind !== "gate_result" ||
+        entry.operation !== "gate" ||
+        entry.lease?.status !== "completed"
+      ) {
+        return count;
+      }
+
+      if (entry.metadata.aggregate === "error") {
+        count += 1;
+        continue;
+      }
+      return count;
+    }
+    return count;
+  }
+
+  private parkRepeatedReviewGateError(
+    issue: Issue,
+    stageName: string | null,
+    input: {
+      count: number;
+      comment: string;
+    },
+  ): void {
+    const signature = hashReviewInfrastructureSignature(
+      `review_gate_error:${stageName ?? "unnamed"}`,
+    );
+    const reworkCount = this.state.issueReworkCounts[issue.id] ?? 0;
+    const stageHistory = this.state.issueExecutionHistory[issue.id] ?? [];
+    const parkReason = `review gate infrastructure blocked: ${input.count} consecutive all-reviewer error aggregates (signature ${signature}); parked instead of reworking code (SYMPH-366)`;
+
+    this.state.failed.add(issue.id);
+    this.releaseClaim(issue.id);
+    this.clearTerminalIssueRuntimeState(issue.id);
+    this.recordFailureInCluster(
+      issue.id,
+      issue.identifier,
+      {
+        signature,
+        normalizedText: parkReason,
+        class: "transient",
+      },
+      stageName,
+    );
+
+    void this.fireEscalationSideEffects(
+      issue.id,
+      issue.identifier,
+      [
+        "## Parked: review gate infrastructure blocked (SYMPH-366)",
+        "",
+        `The ensemble review gate produced ${input.count} consecutive all-reviewer error aggregates.`,
+        "",
+        "This is not a council FAIL with code findings, and the orchestrator did not dispatch implement rework. Requeue after reviewer infrastructure is healthy.",
+        "",
+        "Last gate comment:",
+        sanitizeForLinear(input.comment, { maxLen: 2000 }),
+      ].join("\n"),
+    ).catch((err) => {
+      console.warn(
+        "[orchestrator] Failed to post review gate error park side effects",
+        issue.identifier,
+        err,
+      );
+    });
+    void this.recordFailureExhausted(
+      issue.id,
+      issue.identifier,
+      issue.title,
+      parkReason,
+      {
+        failure_signature: signature,
+        failure_class: "transient",
+      },
+      {
+        issueDescription: issue.description ?? "",
+        stageName,
+        parkKind: "retry_exhausted",
+        attemptCount: input.count,
+        reworkCount,
+        failureRecords: [],
+        stageHistory,
+      },
+    ).catch((err) => {
+      console.warn(
+        "[orchestrator] Failed to record review gate error park",
+        issue.identifier,
+        err,
+      );
+    });
   }
 
   private async handlePrototypeGateBoundary(input: {
@@ -5224,7 +5383,7 @@ export class OrchestratorCore {
     stageName: string | null;
     gateContext: DecorrelatedGateContext;
     status: "passed" | "failed" | "blocked" | "skipped_prototype";
-    aggregate: "pass" | "fail" | null;
+    aggregate: "pass" | "fail" | "error" | null;
     reworkTarget: string | null;
     summary: string;
   }): void {
@@ -9253,11 +9412,16 @@ function toDecorrelatedGateStatus(
   if (metadata.aggregate === "fail") {
     return "failed";
   }
+  if (metadata.aggregate === "error") {
+    return "failed";
+  }
   return null;
 }
 
-function toGateAggregate(value: unknown): "pass" | "fail" | null {
-  return value === "pass" || value === "fail" ? value : null;
+function toGateAggregate(value: unknown): "pass" | "fail" | "error" | null {
+  return value === "pass" || value === "fail" || value === "error"
+    ? value
+    : null;
 }
 
 function toRightSizingMode(value: unknown): RightSizingMode | null {
