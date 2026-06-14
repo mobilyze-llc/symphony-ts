@@ -84,8 +84,15 @@ run_or_dry() {
 run_review_runtime_preflight() {
   local env_file="$1"
   local workspace node_bin
+  node_bin="${SYMPHONY_NODE:-}"
+  if [[ -z "$node_bin" ]]; then
+    node_bin="$(command -v node 2>/dev/null || true)"
+  fi
+  if [[ -z "$node_bin" ]]; then
+    die "node not found. Install Node.js on PATH or set SYMPHONY_NODE to the Node.js executable used for review runtime preflight."
+  fi
+
   workspace="$(mktemp -d "${TMPDIR:-/tmp}/symphony-review-runtime-preflight.XXXXXX")"
-  node_bin="${SYMPHONY_NODE:-$(command -v node 2>/dev/null || echo /opt/homebrew/bin/node)}"
   printf '{"name":"symphony-review-runtime-preflight-smoke","private":true}\n' > "$workspace/package.json"
 
   if $DRY_RUN; then
@@ -310,11 +317,16 @@ if $DO_SYMPHONY; then
   if [[ -f "$local_env" ]]; then
     info "Checking review runtime preflight..."
     REVIEW_RUNTIME_PREFLIGHT_FAILED=false
-    run_review_runtime_preflight "$local_env"
-    if ! $NO_RESTART && service_installed; then
-      NEED_SERVICE_REINSTALL=true
+    if run_review_runtime_preflight "$local_env"; then
+      if ! $NO_RESTART && service_installed; then
+        NEED_SERVICE_REINSTALL=true
+      fi
+      ok "Review runtime preflight passed"
+    else
+      preflight_status=$?
+      restart_stopped_services_after_error
+      exit "$preflight_status"
     fi
-    ok "Review runtime preflight passed"
   else
     warn ".env not found — skipping review runtime preflight"
   fi
