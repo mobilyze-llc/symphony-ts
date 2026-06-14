@@ -653,6 +653,106 @@ describe("dispatch comparator", () => {
     );
   });
 
+  it("preserves natural order and warns when a relative anchor targets itself", () => {
+    const issue1 = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      priority: 1,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    const issue2 = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+      priority: 1,
+      createdAt: "2026-06-02T00:00:00.000Z",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [issue1, issue2],
+      anchors: {
+        "2": createAnchor(issue2, {
+          kind: "above",
+          issueIdentifier: "issue-2",
+        }),
+      },
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-1", "ISSUE-2"]);
+    expect(order.warnings).toContain(
+      "Operator anchor for ISSUE-2 references invalid target issue-2: anchor target issue-2 references ISSUE-2 itself; preserved natural priority/FIFO position.",
+    );
+  });
+
+  it("preserves natural order and warns when a relative anchor targets the pipeline sentinel", () => {
+    const issue1 = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      priority: 1,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    const issue2 = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+      priority: 1,
+      createdAt: "2026-06-02T00:00:00.000Z",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [issue1, issue2],
+      anchors: {
+        "2": createAnchor(issue2, {
+          kind: "below",
+          issueIdentifier: "PIPELINE",
+        }),
+      },
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-1", "ISSUE-2"]);
+    expect(order.warnings).toContain(
+      "Operator anchor for ISSUE-2 references invalid target PIPELINE: anchor target PIPELINE is the pipeline sentinel, not an issue; preserved natural priority/FIFO position.",
+    );
+  });
+
+  it("resolves relative anchor targets case-insensitively", () => {
+    const issue1 = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      priority: 1,
+      createdAt: "2026-06-01T00:00:00.000Z",
+    });
+    const issue2 = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+      priority: 1,
+      createdAt: "2026-06-02T00:00:00.000Z",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [issue1, issue2],
+      anchors: {
+        "1": createAnchor(issue1, {
+          kind: "below",
+          issueIdentifier: "issue-2",
+        }),
+      },
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-2", "ISSUE-1"]);
+    expect(order.warnings).toEqual([]);
+  });
+
   it("ignores anchors after until-merged expiry", () => {
     const older = createIssue({
       id: "1",

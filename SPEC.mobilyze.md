@@ -29,6 +29,35 @@ Required local behavior:
 - Decorrelated gates review agent work with independent tools or models. The agent that produced the work does not grade its own completion.
 - Work units stay reviewable. Right-sizing, agent-authored tracker work, supervision, and gate decorrelation ship as focused increments rather than one broad organ graft.
 
+## Anchor Comparator Trust Contract
+
+Operator anchors can influence deterministic dispatch order only after they
+survive the intent journal and comparator validation. The generic
+`/api/v1/intents` route is an operator-authenticated transport, but it cannot
+mint Linear field-edit provenance: `source: "linear_field_edit"`,
+`fieldName`, and `editorEmail` are accepted only through the dedicated
+field-edit ingestion route and its allowlist/secret checks.
+
+Relative anchors (`above`/`below`) never dispatch by assumption. New writes
+reject self-references and the pipeline sentinel. Existing or replayed anchors
+whose target is missing from the current comparator candidate set, hard
+excluded, or otherwise unavailable are preserved in the anchor read model but
+degrade to no-op for ordering with a computed-order warning. `top` anchors are
+bounded to the issue's priority band and do not jump ahead of higher-priority
+work.
+
+Anchor expiry has one semantic source: `until_merged` expires when the anchored
+issue has terminal completion evidence, and `until_date` expires when the
+configured instant is at or before the evaluation clock. Core replay,
+comparator ordering, and `/api/v1/state` snapshots must use the same evaluator.
+
+Linear field-edit ingestion resolves only issues visible to the runtime issue
+resolver; non-active/pre-pin edits return `issue_not_found` until the resolver
+is deliberately widened. Field-edit cursors are strict: any delivery whose
+`editedAt` is equal to or older than the current anchor cursor is
+`rejected_stale`, even when the payload is a duplicate. This prevents
+equal-timestamp conflicting payloads from overwriting newer state.
+
 ## Dispatcher Resume Contract
 
 Dispatcher organs must write an append-only run journal before starting side effects that can duplicate work. The durable journal lives under `.symphony/run-journals/dispatcher.jsonl` in the configured workspace root and records admission, right-sizing, supervision findings, re-steer requests, gate starts/results, tracker writes, and hard-stop triggers.
