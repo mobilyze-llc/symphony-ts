@@ -114,6 +114,13 @@ export function rewriteFullSuiteCheckCriteria(section: string): string {
  *
  * The section runs from the AC heading to the next heading of the same or
  * higher level. Returns null when no heading or no content is found.
+ *
+ * This parser is intentionally distinct from the spec-review source-intent
+ * parser: completion messages follow a narrower worker contract (`##`-`####`
+ * AC headings) and strip orchestration stage markers before freezing the
+ * canonical rubric. If completion-message AC ever needs full Linear Markdown
+ * handling, share the fence-aware source-intent scanner instead of widening
+ * this gate implicitly.
  */
 export function extractAcceptanceCriteria(
   message: string | null,
