@@ -5,6 +5,9 @@ import type { IssueStateSnapshot } from "./tracker.js";
 
 interface LinearConnection<TNode> {
   nodes?: TNode[];
+  pageInfo?: {
+    hasNextPage?: unknown;
+  } | null;
 }
 
 interface LinearIssueNode {
@@ -68,6 +71,9 @@ export function normalizeLinearIssue(node: unknown): Issue {
     url: optionalString(issue.url),
     labels: normalizeLabels(issue.labels),
     blockedBy: normalizeBlockedBy(issue.inverseRelations),
+    ...(hasNextPage(issue.inverseRelations)
+      ? { blockedByRelationTruncated: true }
+      : {}),
     createdAt: normalizeTimestamp(issue.createdAt),
     updatedAt: normalizeTimestamp(issue.updatedAt),
   };
@@ -137,6 +143,12 @@ function normalizeLabels(labels: LinearIssueNode["labels"]): string[] {
     .map((entry) => (typeof entry?.name === "string" ? entry.name : null))
     .filter((entry): entry is string => entry !== null)
     .map((entry) => entry.toLowerCase());
+}
+
+function hasNextPage(
+  connection: LinearConnection<unknown> | null | undefined,
+): boolean {
+  return connection?.pageInfo?.hasNextPage === true;
 }
 
 function normalizeBlockedBy(

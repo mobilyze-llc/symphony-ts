@@ -75,6 +75,9 @@ describe("LinearTrackerClient", () => {
     const firstRequest = parseRequestBody(firstCall?.[1]);
     expect(firstRequest.query).toContain("slugId");
     expect(firstRequest.query).toBe(LINEAR_CANDIDATE_ISSUES_QUERY);
+    expect(firstRequest.query).toMatch(
+      /inverseRelations\(first: \$relationFirst\)[\s\S]*pageInfo[\s\S]*hasNextPage/,
+    );
     expect(firstRequest.variables).toEqual({
       projectSlug: "ENG",
       activeStates: ["Todo", "In Progress"],

@@ -556,6 +556,71 @@ describe("dispatch comparator", () => {
     ).toEqual(["ISSUE-2"]);
   });
 
+  it("fails closed when native blockedBy relations are truncated without TicketFeature trust", () => {
+    const candidate = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      blockedByRelationTruncated: true,
+    });
+    const other = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [candidate, other],
+      anchors: {},
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(order.exclusions).toMatchObject([
+      {
+        issue_identifier: "ISSUE-1",
+        blocker_issue_id: null,
+        blocker_issue_identifier: null,
+        edge_trust: "legacy_hard",
+        source: "issue_blocked_by",
+        reason:
+          "Native blockedBy relation window was truncated before TicketFeature hard-blocker trust was available; treating candidate as possibly blocked.",
+      },
+    ]);
+    expect(order.warnings).toContain(
+      "Dispatch comparator detected truncated native blockedBy relation window for ISSUE-1; held candidate as possibly blocked.",
+    );
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-2"]);
+  });
+
+  it("preserves TicketFeature-supported hard-blocker discovery when native relations are truncated", () => {
+    const candidate = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      blockedByRelationTruncated: true,
+    });
+    const other = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [candidate, other],
+      anchors: {},
+      ticketFeatures: [createFeature(candidate), createFeature(other)],
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(order.exclusions).toEqual([]);
+    expect(order.warnings).not.toContain(
+      "Dispatch comparator detected truncated native blockedBy relation window for ISSUE-1; held candidate as possibly blocked.",
+    );
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-1", "ISSUE-2"]);
+  });
+
   it("warns and skips identifier-only ordering refs when candidate identifiers collide", () => {
     const duplicateA = createIssue({
       id: "a",
@@ -1016,6 +1081,9 @@ function createIssue(overrides: Partial<Issue>): Issue {
     url: overrides.url ?? null,
     labels: overrides.labels ?? [],
     blockedBy: overrides.blockedBy ?? [],
+    ...(overrides.blockedByRelationTruncated === undefined
+      ? {}
+      : { blockedByRelationTruncated: overrides.blockedByRelationTruncated }),
     createdAt: overrides.createdAt ?? "2026-06-01T00:00:00.000Z",
     updatedAt: overrides.updatedAt ?? "2026-06-01T00:00:00.000Z",
   };

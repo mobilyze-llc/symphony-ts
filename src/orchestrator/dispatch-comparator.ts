@@ -41,6 +41,7 @@ interface DispatchEdge {
 interface DependencyEdgeCollection {
   edges: DispatchEdge[];
   supersededNativeHardBlockers: ComputedDispatchOrderSupersededNativeHardBlocker[];
+  warnings: string[];
 }
 
 interface HardCycleDiagnostics {
@@ -104,6 +105,7 @@ export function computeDispatchOrder(
       input.ticketFeatureUnavailableReason === undefined
         ? []
         : [input.ticketFeatureUnavailableReason]),
+      ...edgeCollection.warnings,
       ...buildIssueIdentifierCollisionWarnings(issueByIdentifier),
     ]),
   ];
@@ -203,6 +205,7 @@ function collectDependencyEdges(
   const edges: DispatchEdge[] = [];
   const supersededNativeHardBlockers: ComputedDispatchOrderSupersededNativeHardBlocker[] =
     [];
+  const warnings: string[] = [];
   for (const issue of input.issues) {
     const feature =
       featureByIssueId.get(issue.id) ??
@@ -210,6 +213,26 @@ function collectDependencyEdges(
         ? undefined
         : featureByIdentifier.get(issue.identifier));
     if (feature === undefined) {
+      if (issue.blockedByRelationTruncated === true) {
+        const reason =
+          input.ticketFeatures === undefined
+            ? "Native blockedBy relation window was truncated before TicketFeature hard-blocker trust was available; treating candidate as possibly blocked."
+            : "Native blockedBy relation window was truncated and this candidate was missing from TicketFeature extraction; treating candidate as possibly blocked.";
+        edges.push({
+          issue,
+          blocker: {
+            id: null,
+            identifier: null,
+            state: null,
+          },
+          trust: "legacy_hard",
+          source: "issue_blocked_by",
+          reason,
+        });
+        warnings.push(
+          `Dispatch comparator detected truncated native blockedBy relation window for ${issue.identifier}; held candidate as possibly blocked.`,
+        );
+      }
       for (const blocker of issue.blockedBy) {
         edges.push({
           issue,
@@ -286,6 +309,7 @@ function collectDependencyEdges(
         findIssueByRef(edge.blocker, issueById, issueByIdentifier)?.id,
     ),
     supersededNativeHardBlockers,
+    warnings,
   };
 }
 

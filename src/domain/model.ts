@@ -61,6 +61,7 @@ export interface Issue {
   url: string | null;
   labels: string[];
   blockedBy: BlockerRef[];
+  blockedByRelationTruncated?: boolean;
   createdAt: string | null;
   updatedAt: string | null;
 }
