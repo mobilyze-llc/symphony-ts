@@ -3,6 +3,7 @@ import { generateObject } from "ai";
 import { z } from "zod";
 
 import type { WorkflowPauseTriageConfig } from "../config/types.js";
+import { fenceJudgeBoundaryTags } from "./prompt-fence.js";
 
 /**
  * AC falsifiability gate (SYMPH-354).
@@ -194,10 +195,6 @@ export interface AcGateRunInput {
 
 const DEFAULT_AC_GATE_TIMEOUT_MS = 600_000;
 
-function fenceWorkerText(text: string): string {
-  return text.replace(/<\/?(?:worker_|ticket_)[a-z_]*>/gi, "");
-}
-
 /**
  * Render a gate verdict, or null when unconfigured or anything fails —
  * callers must treat null as "advance with a warning" (fail open).
@@ -256,16 +253,19 @@ function buildAcGatePrompt(evidence: AcGateEvidence): string {
     '- "judge:" states a falsifiable claim plus the evidence that would prove it',
     "It needs REWORK when criteria merely restate the title, are untestable opinions, lack verification modes, or when the ticket states intent that no criterion covers (flag the gap — do NOT write the missing criterion yourself; describe what is uncovered).",
     "",
-    `Issue: ${evidence.issueIdentifier} — <ticket_title>${fenceWorkerText(evidence.issueTitle)}</ticket_title>`,
+    `Issue: ${evidence.issueIdentifier} — <ticket_title>${fenceJudgeBoundaryTags(evidence.issueTitle)}</ticket_title>`,
     "<ticket_description>",
     evidence.issueDescription === null
       ? "(none)"
-      : fenceWorkerText(evidence.issueDescription).slice(0, 6000),
+      : fenceJudgeBoundaryTags(evidence.issueDescription).slice(0, 6000),
     "</ticket_description>",
     "",
     "Worker completion message (should contain the final Acceptance Criteria section):",
     "<worker_message>",
-    fenceWorkerText(evidence.completionMessage ?? "(none)").slice(0, 8000),
+    fenceJudgeBoundaryTags(evidence.completionMessage ?? "(none)").slice(
+      0,
+      8000,
+    ),
     "</worker_message>",
     "",
     "If the completion message contains no recognizable Acceptance Criteria section at all, that is a rework with feedback asking for the echoed AC section.",
