@@ -1303,11 +1303,67 @@ function titleMatchesConfiguredPattern(
   return literal !== "" && title.includes(literal);
 }
 
-function extractAcceptanceCriteria(description: string): string | null {
-  const match = /^#{1,6}\s+Acceptance Criteria\b[^\n]*\n([\s\S]*)$/im.exec(
-    stripSpecReviewMarker(description),
+/**
+ * Extracts the source-intent acceptance criteria projection from a Linear issue
+ * description. Unlike the investigate-stage AC gate parser, this hashes
+ * operator-authored issue Markdown after stripping generated spec-review
+ * markers, accepts ATX headings at any level, and ignores heading-looking lines
+ * inside fenced code blocks.
+ */
+export function extractAcceptanceCriteria(description: string): string | null {
+  const stripped = stripSpecReviewMarker(description);
+  const heading =
+    /^ {0,3}(#{1,6})\s+Acceptance Criteria\b[^\n]*(?:\n|$)/im.exec(stripped);
+  if (heading?.[1] === undefined) {
+    return null;
+  }
+  const headingLevel = heading[1].length;
+  const contentStart = heading.index + heading[0].length;
+  const remainder = stripped.slice(contentStart);
+  const nextPeerOrParentHeadingIndex = findNextPeerOrParentHeadingIndex(
+    remainder,
+    headingLevel,
   );
-  return match?.[1]?.trim() ?? null;
+  const section =
+    nextPeerOrParentHeadingIndex === null
+      ? remainder
+      : remainder.slice(0, nextPeerOrParentHeadingIndex);
+  return section.trim() === "" ? null : section.trim();
+}
+
+function findNextPeerOrParentHeadingIndex(
+  markdown: string,
+  headingLevel: number,
+): number | null {
+  let offset = 0;
+  let fence: { marker: "`" | "~"; length: number } | null = null;
+  while (offset < markdown.length) {
+    const nextNewline = markdown.indexOf("\n", offset);
+    const lineEnd = nextNewline === -1 ? markdown.length : nextNewline;
+    const line = markdown.slice(offset, lineEnd);
+    const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch?.[1] !== undefined) {
+      const marker = fenceMatch[1][0] as "`" | "~";
+      if (fence === null) {
+        fence = { marker, length: fenceMatch[1].length };
+      } else if (
+        fence.marker === marker &&
+        fenceMatch[1].length >= fence.length
+      ) {
+        fence = null;
+      }
+    } else if (fence === null) {
+      const nextHeading = /^ {0,3}(#{1,6})\s+\S/.exec(line);
+      if (
+        nextHeading?.[1] !== undefined &&
+        nextHeading[1].length <= headingLevel
+      ) {
+        return offset;
+      }
+    }
+    offset = nextNewline === -1 ? markdown.length : nextNewline + 1;
+  }
+  return null;
 }
 
 function extractSpecReviewVerdict(text: string): SpecReviewVerdict | null {

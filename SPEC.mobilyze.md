@@ -88,6 +88,13 @@ description still contains an older `readiness-state:valid` marker. Journal rows
 for a different source intent hash do not invalidate the current source intent;
 normal source-hash mismatch handling covers edited tickets.
 
+The source intent hash includes the full Linear issue description after
+generated spec-review markers are stripped, plus a structured projection of
+the `Acceptance Criteria` Markdown section. That projection is deliberately
+section-scoped: it starts at an `Acceptance Criteria` heading and ends at the
+next same-or-higher-level ATX-style Markdown heading, so later sections remain
+part of the issue-body hash but are not double-counted as acceptance criteria.
+
 ## Reviewable Increment Boundaries
 
 Keep the full orchestration graft split into small PRs:

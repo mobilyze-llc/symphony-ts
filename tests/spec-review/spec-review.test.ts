@@ -22,6 +22,7 @@ import {
   buildSpecReviewStatusDescription,
   computeSourceIntentHash,
   evaluateSpecReviewAdmission,
+  extractAcceptanceCriteria,
   parseSpecReviewArtifact,
   runSpecReviewForIssue,
   selectSpecReviewCandidates,
@@ -202,6 +203,123 @@ describe("spec review", () => {
 
     expect(() => computeSourceIntentHash(issue)).toThrow(
       "Cannot stable-stringify circular value for spec-review source-intent hash.",
+    );
+  });
+
+  it("extracts only the acceptance criteria section for source intent", () => {
+    const description = [
+      "Intro.",
+      "",
+      "## Acceptance Criteria",
+      "- Works",
+      "",
+      "### Scenario",
+      "- Stays in AC",
+      "",
+      "## Non-Goals",
+      "- Does not belong to AC",
+    ].join("\n");
+
+    expect(extractAcceptanceCriteria(description)).toBe(
+      ["- Works", "", "### Scenario", "- Stays in AC"].join("\n"),
+    );
+  });
+
+  it.each([
+    {
+      name: "level-1 peer heading",
+      description: "# Acceptance Criteria\n- X\n\n# Next\n- Y",
+      expected: "- X",
+    },
+    {
+      name: "parent heading after level-3 AC",
+      description: "### Acceptance Criteria\n- X\n\n## Parent\n- Y",
+      expected: "- X",
+    },
+    {
+      name: "trailing closing hashes",
+      description: "## Acceptance Criteria ##\n- X\n\n## Next\n- Y",
+      expected: "- X",
+    },
+    {
+      name: "no following heading",
+      description: "## Acceptance Criteria\n- X\n- Y",
+      expected: "- X\n- Y",
+    },
+    {
+      name: "leading spaces",
+      description: "   ## Acceptance Criteria\n- X\n\n   ## Next\n- Y",
+      expected: "- X",
+    },
+    {
+      name: "first AC heading wins",
+      description:
+        "## Acceptance Criteria\n- First\n\n## Acceptance Criteria\n- Second",
+      expected: "- First",
+    },
+    {
+      name: "heading inside fenced code",
+      description:
+        "## Acceptance Criteria\n```md\n## Not a boundary\n```\n- X\n\n## Next\n- Y",
+      expected: "```md\n## Not a boundary\n```\n- X",
+    },
+    {
+      name: "heading inside tilde fenced code",
+      description:
+        "## Acceptance Criteria\n~~~md\n## Not a boundary\n~~~\n- X\n\n## Next\n- Y",
+      expected: "~~~md\n## Not a boundary\n~~~\n- X",
+    },
+  ])("extracts AC boundary edge case: $name", ({ description, expected }) => {
+    expect(extractAcceptanceCriteria(description)).toBe(expected);
+  });
+
+  it("returns null for an empty acceptance criteria section", () => {
+    expect(
+      extractAcceptanceCriteria("## Acceptance Criteria\n   \n\n## Next\n- Y"),
+    ).toBeNull();
+  });
+
+  it("strips generated review markers before extracting acceptance criteria", () => {
+    const originalDescription = [
+      "Intro.",
+      "",
+      "## Acceptance Criteria",
+      "- Works",
+      "",
+      "## Operator Notes",
+      "- Preserve as source intent, but not as AC.",
+    ].join("\n");
+    const reviewed = buildReviewedIssueDescription({
+      originalDescription,
+      sourceIntentHash: "hash",
+      artifactHash: "artifact",
+      artifactPath: "/tmp/artifact.md",
+      mode: "observe",
+      readinessState: "valid",
+      verdict: "ready_as_written",
+      linearDocUrl: null,
+      generatedAt: "2026-06-14T00:00:00.000Z",
+      reconciliation: {
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "Looks good.",
+        issueBodyAppend: null,
+        acceptanceCriteria: ["Works"],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      },
+    });
+
+    expect(extractAcceptanceCriteria(reviewed)).toBe("- Works");
+    expect(
+      computeSourceIntentHash({ ...makeIssue(), description: reviewed }),
+    ).toBe(
+      computeSourceIntentHash({
+        ...makeIssue(),
+        description: originalDescription,
+      }),
     );
   });
 
