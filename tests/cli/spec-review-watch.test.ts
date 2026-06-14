@@ -10,6 +10,7 @@ import {
   parseDocumentCreateOutput,
   parseDocumentListOutput,
   parseSpecReviewWatchArgs,
+  preflightLinearDocumentPublisher,
   runSpecReviewWatchCli,
 } from "../../src/cli/spec-review-watch.js";
 import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
@@ -361,6 +362,7 @@ describe("symphony-spec-review-watch CLI", () => {
         }),
         runSpecReviewForIssue: runReview,
         appendSpecReviewResultJournal: appendJournal,
+        preflightDocumentPublisher: async () => undefined,
       },
     );
 
@@ -423,6 +425,7 @@ describe("symphony-spec-review-watch CLI", () => {
             postComment: async () => undefined,
           }),
           runSpecReviewForIssue: runReview,
+          preflightDocumentPublisher: async () => undefined,
         },
       );
 
@@ -439,6 +442,119 @@ describe("symphony-spec-review-watch CLI", () => {
       ]);
     },
   );
+
+  it("fails selected candidates before invoking Claude when Linear Docs CLI preflight fails", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    const artifactRoot = join(workspace, "artifacts");
+    const stdout = vi.fn();
+    const stderr = vi.fn();
+    const issue = makeIssue({
+      id: "selected",
+      identifier: "SYMPH-1",
+      labels: ["needs:spec-review"],
+    });
+    const appendJournal = vi.fn(async (_workspaceRoot, input) => [
+      makeJournalEntry(input.issue, input.readinessState),
+    ]);
+    const runReview = vi.fn(async ({ issue }) => makeRunResult(issue, "valid"));
+
+    const exitCode = await runSpecReviewWatchCli(
+      [
+        "WORKFLOW.md",
+        "--workspace",
+        workspace,
+        "--artifact-root",
+        artifactRoot,
+      ],
+      {
+        stdout,
+        stderr,
+        now: () => new Date("2026-06-14T00:00:00.000Z"),
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () => fakeConfig(),
+        createTracker: () => ({
+          fetchIssuesByStates: async () => [issue],
+          fetchIssueReferencesByIds: async () => [],
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+        runSpecReviewForIssue: runReview,
+        appendSpecReviewResultJournal: appendJournal,
+        preflightDocumentPublisher: async () => {
+          throw new Error(
+            "Linear Docs publisher preflight failed: linear-pp-cli unavailable",
+          );
+        },
+      },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(runReview).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining("linear-pp-cli unavailable"),
+    );
+    expect(appendJournal).toHaveBeenCalledWith(
+      workspace,
+      expect.objectContaining({
+        issue,
+        readinessState: "failed",
+        artifactPath: expect.stringContaining("selection-2026-06-14T00-00-00"),
+        summary: expect.stringContaining("linear-pp-cli unavailable"),
+      }),
+    );
+    const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
+      selectionArtifactPath: string;
+      selectedCount: number;
+      results: Array<{
+        issueIdentifier: string;
+        readinessState: string;
+        runnerStatus: string;
+        artifactPath: string;
+      }>;
+    };
+    expect(output.selectedCount).toBe(1);
+    expect(output.results).toEqual([
+      expect.objectContaining({
+        issueIdentifier: "SYMPH-1",
+        readinessState: "failed",
+        runnerStatus: "failed",
+        artifactPath: output.selectionArtifactPath,
+      }),
+    ]);
+  });
+
+  it("checks the Linear Docs CLI command surface during default publisher preflight", async () => {
+    const execFile = vi.fn(async () => ({ stdout: "", stderr: "" }));
+
+    await expect(preflightLinearDocumentPublisher(execFile)).resolves.toBe(
+      undefined,
+    );
+
+    expect(execFile).toHaveBeenCalledWith(
+      "linear-pp-cli",
+      ["documents", "--help"],
+      { maxBuffer: 512 * 1024, timeout: 10_000 },
+    );
+  });
+
+  it("reports a clear diagnostic when default publisher preflight cannot run", async () => {
+    const execFile = vi.fn(async () => {
+      throw new Error("spawn ENOENT");
+    });
+
+    await expect(preflightLinearDocumentPublisher(execFile)).rejects.toThrow(
+      "Linear Docs publisher preflight failed: linear-pp-cli is unavailable or not executable",
+    );
+  });
 
   it("parses known Linear document create output envelopes", () => {
     expect(
