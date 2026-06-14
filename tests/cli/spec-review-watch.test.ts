@@ -542,7 +542,7 @@ describe("symphony-spec-review-watch CLI", () => {
     expect(execFile).toHaveBeenCalledWith(
       "linear-pp-cli",
       ["documents", "--help"],
-      { maxBuffer: 512 * 1024 },
+      { maxBuffer: 512 * 1024, timeout: 10_000 },
     );
   });
 

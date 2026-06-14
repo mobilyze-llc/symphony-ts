@@ -46,7 +46,7 @@ type SpecReviewWatchTracker = Pick<
 type ExecFileAsync = (
   file: string,
   args: readonly string[],
-  options?: { maxBuffer?: number },
+  options?: { maxBuffer?: number; timeout?: number },
 ) => Promise<{ stdout: string; stderr: string }>;
 
 export interface SpecReviewWatchCliDependencies {
@@ -663,6 +663,7 @@ export async function preflightLinearDocumentPublisher(
   try {
     await run("linear-pp-cli", ["documents", "--help"], {
       maxBuffer: 512 * 1024,
+      timeout: 10_000,
     });
   } catch (error) {
     throw new Error(
