@@ -136,6 +136,76 @@ describe("orchestrator core", () => {
     );
   });
 
+  it("does not journal ordering disagreement when the computed head dispatch fails before a lower issue is admitted", async () => {
+    const warnings: unknown[][] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warnings.push(args);
+    };
+    try {
+      const orchestrator = createOrchestrator({
+        tracker: createTracker({
+          candidates: [
+            createIssue({
+              id: "1",
+              identifier: "ISSUE-1",
+              priority: 1,
+              createdAt: "2026-03-01T00:00:00.000Z",
+            }),
+            createIssue({
+              id: "2",
+              identifier: "ISSUE-2",
+              priority: 1,
+              createdAt: "2026-03-02T00:00:00.000Z",
+            }),
+          ],
+        }),
+        spawnWorker: async ({ issue }) => {
+          if (issue.id === "1") {
+            throw new Error("workspace init failed");
+          }
+          return {
+            workerHandle: { pid: 1002 },
+            monitorHandle: { ref: "monitor-2" },
+          };
+        },
+      });
+
+      const result = await orchestrator.pollTick();
+
+      expect(result.dispatchedIssueIds).toEqual(["2"]);
+      expect(warnings.some((args) => String(args[0]).includes("ISSUE-1"))).toBe(
+        true,
+      );
+      expect(orchestrator.getState().dispatcherRunJournal).not.toContainEqual(
+        expect.objectContaining({ kind: "ordering_disagreement" }),
+      );
+      expect(orchestrator.getState().dispatcherRunJournal).toContainEqual(
+        expect.objectContaining({
+          kind: "queue_baseline",
+          metadata: expect.objectContaining({
+            dispatch_attempts: [
+              {
+                issue_id: "1",
+                issue_identifier: "ISSUE-1",
+                disposition: "spawn_failed",
+                reason_code: "spawn_failed",
+              },
+              {
+                issue_id: "2",
+                issue_identifier: "ISSUE-2",
+                disposition: "dispatched",
+                reason_code: "dispatched",
+              },
+            ],
+          }),
+        }),
+      );
+    } finally {
+      console.warn = origWarn;
+    }
+  });
+
   it("does not dispatch issues excluded by legacy hard blockers through pollTick", async () => {
     const orchestrator = createOrchestrator({
       tracker: createTracker({
@@ -447,6 +517,8 @@ describe("orchestrator core", () => {
           comparator_version: "dispatch-comparator-v1",
           computed_top_issue_id: "1",
           expected_issue_id: "1",
+          computed_top_dispatch_disposition: "pending_stage_signal",
+          computed_top_dispatch_reason_code: "pending_stage_signal",
           actual_issue_id: "2",
         }),
       }),

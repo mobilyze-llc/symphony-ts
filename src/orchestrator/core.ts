@@ -339,6 +339,39 @@ export interface RetryTimerResult {
   retryEntry: RetryEntry | null;
 }
 
+type DispatchIssueDisposition =
+  | "dispatched"
+  | "pending_stage_signal"
+  | "terminal_stage"
+  | "gate_lease_unavailable"
+  | "prototype_gate"
+  | "undecorrelated_gate"
+  | "gate_started"
+  | "circuit_breaker_open"
+  | "lease_unavailable"
+  | "spawn_failed";
+
+type DispatchIssueResult =
+  | {
+      dispatched: true;
+      rightSizingDecision: RightSizingDecision;
+      disposition: "dispatched";
+      reasonCode: "dispatched";
+    }
+  | {
+      dispatched: false;
+      rightSizingDecision: null;
+      disposition: Exclude<DispatchIssueDisposition, "dispatched">;
+      reasonCode: string;
+    };
+
+interface DispatchAttemptObservation {
+  issueId: string;
+  issueIdentifier: string;
+  disposition: DispatchIssueDisposition;
+  reasonCode: string;
+}
+
 export interface EmergencyStopResult {
   status: "applied" | "no_op";
   detail: string;
@@ -2396,6 +2429,7 @@ export class OrchestratorCore {
     const computedDispatchOrder =
       await this.computeDispatchOrderForPoll(issues);
     const dispatchedIssueIds: string[] = [];
+    const dispatchAttempts: DispatchAttemptObservation[] = [];
     const modeDecisions: RightSizingDecision[] = [];
     let eligibleCount = 0;
     const admittedSnapshots = this.buildRunningAdmissionSnapshots();
@@ -2495,6 +2529,12 @@ export class OrchestratorCore {
         computedHeadReachedDispatchBoundary = true;
       }
       const dispatchResult = await this.dispatchIssue(issue, null);
+      dispatchAttempts.push({
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        disposition: dispatchResult.disposition,
+        reasonCode: dispatchResult.reasonCode,
+      });
       if (dispatchResult.dispatched) {
         dispatchedIssueIds.push(issue.id);
         modeDecisions.push(dispatchResult.rightSizingDecision);
@@ -2510,11 +2550,13 @@ export class OrchestratorCore {
         : null,
       issues,
       dispatchPicks: dispatchedIssueIds,
+      dispatchAttempts,
     });
     await this.recordQueueBaselineSample({
       consideredIssues: sortedIssues,
       dispatchPicks: dispatchedIssueIds,
       computedOrder: computedDispatchOrder,
+      dispatchAttempts,
     });
 
     return {
@@ -2666,6 +2708,7 @@ export class OrchestratorCore {
     expectedIssue: Issue | null;
     issues: readonly Issue[];
     dispatchPicks: readonly string[];
+    dispatchAttempts: readonly DispatchAttemptObservation[];
   }): Promise<void> {
     if (input.expectedIssue === null || input.dispatchPicks.length === 0) {
       return;
@@ -2681,6 +2724,12 @@ export class OrchestratorCore {
       (issue) => issue.id === input.dispatchPicks[0],
     );
     if (actualIssue === undefined) {
+      return;
+    }
+    const computedTopDispatchAttempt = input.dispatchAttempts.find(
+      (attempt) => attempt.issueId === input.expectedIssue?.id,
+    );
+    if (computedTopDispatchAttempt?.disposition === "spawn_failed") {
       return;
     }
     const timestamp = this.now().toISOString();
@@ -2705,6 +2754,10 @@ export class OrchestratorCore {
           computed_top_issue_identifier: computedTop.issue_identifier,
           expected_issue_id: input.expectedIssue.id,
           expected_issue_identifier: input.expectedIssue.identifier,
+          computed_top_dispatch_disposition:
+            computedTopDispatchAttempt?.disposition ?? "not_attempted",
+          computed_top_dispatch_reason_code:
+            computedTopDispatchAttempt?.reasonCode ?? null,
           actual_issue_id: actualIssue.id,
           actual_issue_identifier: actualIssue.identifier,
         },
@@ -2719,6 +2772,7 @@ export class OrchestratorCore {
   private async recordQueueBaselineSample(input: {
     consideredIssues: readonly Issue[];
     dispatchPicks: readonly string[];
+    dispatchAttempts?: readonly DispatchAttemptObservation[];
     computedOrder?: ComputedDispatchOrderSnapshot | null;
     force?: boolean;
   }): Promise<void> {
@@ -2771,12 +2825,22 @@ export class OrchestratorCore {
           input.consideredIssues.length,
         hard_cycle_issue_count:
           input.computedOrder?.hard_cycle?.issue_ids.length ?? 0,
+        hard_cycle_count: input.computedOrder?.hard_cycles.length ?? 0,
+        hard_cycle_omitted_count:
+          input.computedOrder?.hard_cycle_omitted_count ?? 0,
         advisory_warning_count:
           input.computedOrder?.advisory_warnings.length ?? 0,
         would_have_been_advisory_exclusion_count:
           input.computedOrder?.would_have_been_excluded_by_advisory_edges
             .length ?? 0,
+        superseded_native_hard_blocker_count:
+          input.computedOrder?.superseded_native_hard_blockers.length ?? 0,
         hard_cycle_issue_ids: input.computedOrder?.hard_cycle?.issue_ids ?? [],
+        hard_cycle_issue_id_groups:
+          input.computedOrder?.hard_cycles.map((cycle) => cycle.issue_ids) ??
+          [],
+        superseded_native_hard_blockers:
+          input.computedOrder?.superseded_native_hard_blockers ?? [],
         outcome_since_sequence: outcomeSinceSequence,
         outcome_window_semantics:
           "Outcome arrays contain events observed after outcome_since_sequence. urgent_reopen_outcomes may reference the earlier failure it reopened. delivery_outcomes.spend is resource consumption inside the baseline window, not lifetime ticket total.",
@@ -2785,6 +2849,12 @@ export class OrchestratorCore {
           (issue) => issue.identifier,
         ),
         dispatch_picks: [...input.dispatchPicks],
+        dispatch_attempts: (input.dispatchAttempts ?? []).map((attempt) => ({
+          issue_id: attempt.issueId,
+          issue_identifier: attempt.issueIdentifier,
+          disposition: attempt.disposition,
+          reason_code: attempt.reasonCode,
+        })),
         manual_jumps_reorders: manualJumpsReorders,
         quiet_death_outcomes: quietDeathOutcomes,
         urgent_reopen_outcomes: urgentReopenOutcomes,
@@ -9086,16 +9156,7 @@ export class OrchestratorCore {
   private async dispatchIssue(
     issue: Issue,
     attempt: number | null,
-  ): Promise<
-    | {
-        dispatched: boolean;
-        rightSizingDecision: RightSizingDecision;
-      }
-    | {
-        dispatched: false;
-        rightSizingDecision: RightSizingDecision | null;
-      }
-  > {
+  ): Promise<DispatchIssueResult> {
     const stagesConfig = this.config.stages;
     let stage: StageDefinition | null = null;
     let stageName: string | null = null;
@@ -9122,6 +9183,8 @@ export class OrchestratorCore {
       return {
         dispatched: false,
         rightSizingDecision: null,
+        disposition: "pending_stage_signal",
+        reasonCode: "pending_stage_signal",
       };
     }
 
@@ -9192,6 +9255,8 @@ export class OrchestratorCore {
         return {
           dispatched: false,
           rightSizingDecision: null,
+          disposition: "terminal_stage",
+          reasonCode: "terminal_stage",
         };
       }
 
@@ -9234,6 +9299,8 @@ export class OrchestratorCore {
           return {
             dispatched: false,
             rightSizingDecision: null,
+            disposition: "gate_lease_unavailable",
+            reasonCode: "gate_lease_unavailable",
           };
         }
         this.state.issueStages[issue.id] = stageName;
@@ -9250,6 +9317,8 @@ export class OrchestratorCore {
           return {
             dispatched: false,
             rightSizingDecision: null,
+            disposition: "prototype_gate",
+            reasonCode: "prototype_gate",
           };
         }
 
@@ -9270,6 +9339,8 @@ export class OrchestratorCore {
           return {
             dispatched: false,
             rightSizingDecision: null,
+            disposition: "undecorrelated_gate",
+            reasonCode: "undecorrelated_gate",
           };
         }
 
@@ -9317,6 +9388,8 @@ export class OrchestratorCore {
         return {
           dispatched: false,
           rightSizingDecision: null,
+          disposition: "gate_started",
+          reasonCode: "gate_started",
         };
       }
 
@@ -9375,6 +9448,8 @@ export class OrchestratorCore {
         return {
           dispatched: false,
           rightSizingDecision: null,
+          disposition: "circuit_breaker_open",
+          reasonCode: "circuit_breaker_open",
         };
       }
     }
@@ -9427,6 +9502,8 @@ export class OrchestratorCore {
       return {
         dispatched: false,
         rightSizingDecision: null,
+        disposition: "lease_unavailable",
+        reasonCode: "lease_unavailable",
       };
     }
     await this.recordDispatcherDecisionEvent({
@@ -9685,6 +9762,8 @@ export class OrchestratorCore {
       return {
         dispatched: true,
         rightSizingDecision,
+        disposition: "dispatched",
+        reasonCode: "dispatched",
       };
     } catch (error) {
       const errorMessage =
@@ -9732,6 +9811,8 @@ export class OrchestratorCore {
       return {
         dispatched: false,
         rightSizingDecision: null,
+        disposition: "spawn_failed",
+        reasonCode: "spawn_failed",
       };
     }
   }
@@ -11769,6 +11850,9 @@ function createDispatchComparatorFailureSnapshot(input: {
     advisory_warnings: [],
     would_have_been_excluded_by_advisory_edges: [],
     hard_cycle: null,
+    hard_cycles: [],
+    hard_cycle_omitted_count: 0,
+    superseded_native_hard_blockers: [],
     warnings: [input.warning],
   };
 }

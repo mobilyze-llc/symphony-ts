@@ -1130,6 +1130,17 @@ export interface ComputedDispatchOrderCycle {
   reason: string;
 }
 
+export interface ComputedDispatchOrderSupersededNativeHardBlocker {
+  issue_id: string;
+  issue_identifier: string;
+  blocker_issue_id: string | null;
+  blocker_issue_identifier: string | null;
+  blocker_state: string | null;
+  superseding_edge_trust: ComputedDispatchEdgeTrust;
+  advisory_reason: string | null;
+  reason: string;
+}
+
 export interface ComputedDispatchOrderSnapshot {
   comparator_version: string;
   generated_at: string;
@@ -1139,6 +1150,9 @@ export interface ComputedDispatchOrderSnapshot {
   advisory_warnings: ComputedDispatchOrderAdvisoryWarning[];
   would_have_been_excluded_by_advisory_edges: ComputedDispatchOrderAdvisoryWarning[];
   hard_cycle: ComputedDispatchOrderCycle | null;
+  hard_cycles: ComputedDispatchOrderCycle[];
+  hard_cycle_omitted_count: number;
+  superseded_native_hard_blockers: ComputedDispatchOrderSupersededNativeHardBlocker[];
   warnings: string[];
 }
 

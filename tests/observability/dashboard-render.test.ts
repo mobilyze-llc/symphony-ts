@@ -181,6 +181,21 @@ describe("Dashboard Pipeline column", () => {
         ],
         would_have_been_excluded_by_advisory_edges: [],
         hard_cycle: null,
+        hard_cycles: [],
+        hard_cycle_omitted_count: 0,
+        superseded_native_hard_blockers: [
+          {
+            issue_id: "issue-3",
+            issue_identifier: "SYMPH-487",
+            blocker_issue_id: "issue-1",
+            blocker_issue_identifier: "SYMPH-485",
+            blocker_state: "In Progress",
+            superseding_edge_trust: "advisory",
+            advisory_reason: "service_account",
+            reason:
+              "Native blockedBy hard edge superseded by trusted automation advisory edge (service_account).",
+          },
+        ],
         warnings: [],
       },
     };
@@ -190,6 +205,8 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain("Computed dispatch order");
     expect(html).toContain("Hard-excluded issues: 1");
     expect(html).toContain("Hard exclusion edges: 2");
+    expect(html).toContain("Hard cycles: 0");
+    expect(html).toContain("Superseded native hard blockers: 1");
     expect(html.match(/Hard-excluded issues:/g)).toHaveLength(2);
     expect(html.match(/Hard exclusion edges:/g)).toHaveLength(2);
     expect(html).toContain("dispatch-comparator-v1");
@@ -198,6 +215,10 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain("Operator-confirmed blocked-by edge.");
     expect(html).toContain("SYMPH-487");
     expect(html).toContain("Advisory blocked-by edge.");
+    expect(html).toContain("Superseded native hard blockers");
+    expect(html).toContain(
+      "Native blockedBy hard edge superseded by trusted automation advisory edge (service_account).",
+    );
     expect(html).toContain("operator_anchor top");
   });
 
@@ -218,6 +239,22 @@ describe("Dashboard Pipeline column", () => {
           edge_trust: "operator_confirmed",
           reason: "Hard-edge cycle detected.",
         },
+        hard_cycles: [
+          {
+            issue_ids: ["issue-1", "issue-2"],
+            issue_identifiers: ["SYMPH-485", "SYMPH-486"],
+            edge_trust: "operator_confirmed",
+            reason: "Hard-edge cycle detected.",
+          },
+          {
+            issue_ids: ["issue-3", "issue-4"],
+            issue_identifiers: ["SYMPH-487", "SYMPH-488"],
+            edge_trust: "legacy_hard",
+            reason: "Second hard-edge cycle detected.",
+          },
+        ],
+        hard_cycle_omitted_count: 0,
+        superseded_native_hard_blockers: [],
         warnings: [],
       },
     };
@@ -227,9 +264,13 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain(
       '<span class="state-badge state-badge-danger">linearized</span>',
     );
-    expect(html).toContain("Hard cycle:");
+    expect(html).toContain("Hard cycles:");
+    expect(html).toContain("Hard cycles: 2");
     expect(html).toContain("SYMPH-485");
     expect(html).toContain("SYMPH-486");
+    expect(html).toContain("SYMPH-487");
+    expect(html).toContain("SYMPH-488");
+    expect(html).toContain("SYMPH-485 → SYMPH-486 · SYMPH-487 → SYMPH-488");
   });
 
   it("dashboard shows version in hero header", () => {

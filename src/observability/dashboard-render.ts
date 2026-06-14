@@ -1267,10 +1267,14 @@ function renderDashboardClientScript(
           if (!order) {
             return '<p class="empty-state">No computed dispatch order has been sampled yet.</p>';
           }
-          var statusClass = order.hard_cycle ? 'state-badge state-badge-danger' : 'state-badge state-badge-active';
+          var hardCycles = Array.isArray(order.hard_cycles) ? order.hard_cycles : (order.hard_cycle ? [order.hard_cycle] : []);
+          var hardCycleCount = hardCycles.length;
+          var omittedHardCycles = typeof order.hard_cycle_omitted_count === 'number' ? order.hard_cycle_omitted_count : 0;
+          var supersededNativeHardBlockers = Array.isArray(order.superseded_native_hard_blockers) ? order.superseded_native_hard_blockers : [];
+          var statusClass = hardCycleCount > 0 ? 'state-badge state-badge-danger' : 'state-badge state-badge-active';
           var status = '<p class="section-copy"><span class="' + statusClass + '">' + escapeHtml(order.status) + '</span> <span class="mono muted">' + escapeHtml(order.comparator_version || 'unknown') + '</span></p>';
-          var cycle = order.hard_cycle
-            ? '<p class="section-copy"><strong>Hard cycle:</strong> ' + escapeHtml((order.hard_cycle.issue_identifiers || []).join(' → ') || order.hard_cycle.reason || 'cycle detected') + '</p>'
+          var cycle = hardCycleCount > 0
+            ? '<p class="section-copy"><strong>Hard cycles:</strong> ' + escapeHtml(hardCycles.map(function (hardCycle) { return (hardCycle.issue_identifiers || []).join(' → ') || hardCycle.reason || 'cycle detected'; }).join(' · ')) + '</p>'
             : '';
           var rows = Array.isArray(order.positions) && order.positions.length > 0
             ? order.positions.map(function (position) {
@@ -1295,7 +1299,7 @@ function renderDashboardClientScript(
           });
           var advisory = Array.isArray(order.advisory_warnings) ? order.advisory_warnings.length : 0;
           var wouldExclude = Array.isArray(order.would_have_been_excluded_by_advisory_edges) ? order.would_have_been_excluded_by_advisory_edges.length : 0;
-          var summary = '<p class="section-copy">Hard-excluded issues: ' + formatInteger(hardExcludedIssueCount) + ' · Hard exclusion edges: ' + formatInteger(exclusions) + ' · Advisory warnings: ' + formatInteger(advisory) + ' · Would-have-been advisory exclusions: ' + formatInteger(wouldExclude) + '</p>';
+          var summary = '<p class="section-copy">Hard-excluded issues: ' + formatInteger(hardExcludedIssueCount) + ' · Hard exclusion edges: ' + formatInteger(exclusions) + ' · Hard cycles: ' + formatInteger(hardCycleCount) + ' · Omitted hard cycles: ' + formatInteger(omittedHardCycles) + ' · Advisory warnings: ' + formatInteger(advisory) + ' · Would-have-been advisory exclusions: ' + formatInteger(wouldExclude) + ' · Superseded native hard blockers: ' + formatInteger(supersededNativeHardBlockers.length) + '</p>';
           var exclusionPanel = exclusions === 0
             ? ''
             : '<p class="detail-section-title">Hard exclusions</p><div class="table-wrap"><table class="data-table" style="min-width: 720px;"><thead><tr><th>Issue</th><th>Blocked by</th><th>Reason</th></tr></thead><tbody>' +
@@ -1310,7 +1314,14 @@ function renderDashboardClientScript(
                 return '<tr><td>' + escapeHtml(warning.issue_identifier || warning.issue_id) + '</td><td>' + escapeHtml(warning.blocker_issue_identifier || warning.blocker_issue_id || 'unknown') + '</td><td>' + escapeHtml(warning.reason || '') + '</td></tr>';
               }).join('') +
               '</tbody></table></div>';
-          return status + cycle + summary + exclusionPanel + advisoryPanel +
+          var supersededPanel = supersededNativeHardBlockers.length === 0
+            ? ''
+            : '<p class="detail-section-title">Superseded native hard blockers</p><div class="table-wrap"><table class="data-table" style="min-width: 720px;"><thead><tr><th>Issue</th><th>Native blocker</th><th>Reason</th></tr></thead><tbody>' +
+              supersededNativeHardBlockers.map(function (blocker) {
+                return '<tr><td>' + escapeHtml(blocker.issue_identifier || blocker.issue_id) + '</td><td>' + escapeHtml(blocker.blocker_issue_identifier || blocker.blocker_issue_id || 'unknown') + '</td><td>' + escapeHtml(blocker.reason || '') + '</td></tr>';
+              }).join('') +
+              '</tbody></table></div>';
+          return status + cycle + summary + exclusionPanel + advisoryPanel + supersededPanel +
             '<div class="table-wrap"><table class="data-table" style="min-width: 720px;"><thead><tr><th>Position</th><th>Issue</th><th>Rationale</th></tr></thead><tbody>' + rows + '</tbody></table></div>';
         }
 
@@ -1982,8 +1993,22 @@ function renderComputedOrder(snapshot: RuntimeSnapshot): string {
   if (order === null || order === undefined) {
     return '<p class="empty-state">No computed dispatch order has been sampled yet.</p>';
   }
+  const hardCycles = Array.isArray(order.hard_cycles)
+    ? order.hard_cycles
+    : order.hard_cycle == null
+      ? []
+      : [order.hard_cycle];
+  const omittedHardCycles =
+    typeof order.hard_cycle_omitted_count === "number"
+      ? order.hard_cycle_omitted_count
+      : 0;
+  const supersededNativeHardBlockers = Array.isArray(
+    order.superseded_native_hard_blockers,
+  )
+    ? order.superseded_native_hard_blockers
+    : [];
   const statusClass =
-    order.hard_cycle !== null
+    hardCycles.length > 0
       ? "state-badge state-badge-danger"
       : "state-badge state-badge-active";
   const status = `<p class="section-copy"><span class="${statusClass}">${escapeHtml(
@@ -1992,12 +2017,17 @@ function renderComputedOrder(snapshot: RuntimeSnapshot): string {
     order.comparator_version,
   )}</span></p>`;
   const cycle =
-    order.hard_cycle === null
+    hardCycles.length === 0
       ? ""
-      : `<p class="section-copy"><strong>Hard cycle:</strong> ${escapeHtml(
-          order.hard_cycle.issue_identifiers.join(" → ") ||
-            order.hard_cycle.reason ||
-            "cycle detected",
+      : `<p class="section-copy"><strong>Hard cycles:</strong> ${escapeHtml(
+          hardCycles
+            .map(
+              (hardCycle) =>
+                hardCycle.issue_identifiers.join(" → ") ||
+                hardCycle.reason ||
+                "cycle detected",
+            )
+            .join(" · "),
         )}</p>`;
   const hardExcludedIssueCount = new Set(
     order.exclusions.map((exclusion) => exclusion.issue_id),
@@ -2006,10 +2036,16 @@ function renderComputedOrder(snapshot: RuntimeSnapshot): string {
     hardExcludedIssueCount,
   )} · Hard exclusion edges: ${formatInteger(
     order.exclusions.length,
+  )} · Hard cycles: ${formatInteger(
+    hardCycles.length,
+  )} · Omitted hard cycles: ${formatInteger(
+    omittedHardCycles,
   )} · Advisory warnings: ${formatInteger(
     order.advisory_warnings.length,
   )} · Would-have-been advisory exclusions: ${formatInteger(
     order.would_have_been_excluded_by_advisory_edges.length,
+  )} · Superseded native hard blockers: ${formatInteger(
+    supersededNativeHardBlockers.length,
   )}</p>`;
   const exclusionPanel =
     order.exclusions.length === 0
@@ -2073,6 +2109,37 @@ function renderComputedOrder(snapshot: RuntimeSnapshot): string {
                 .join("")}</tbody>
             </table>
           </div>`;
+  const supersededPanel =
+    supersededNativeHardBlockers.length === 0
+      ? ""
+      : `<p class="detail-section-title">Superseded native hard blockers</p>
+          <div class="table-wrap">
+            <table class="data-table" style="min-width: 720px;">
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>Native blocker</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody>${supersededNativeHardBlockers
+                .map(
+                  (blocker) => `
+                  <tr>
+                    <td>${escapeHtml(
+                      blocker.issue_identifier || blocker.issue_id,
+                    )}</td>
+                    <td>${escapeHtml(
+                      blocker.blocker_issue_identifier ??
+                        blocker.blocker_issue_id ??
+                        "unknown",
+                    )}</td>
+                    <td>${escapeHtml(blocker.reason)}</td>
+                  </tr>`,
+                )
+                .join("")}</tbody>
+            </table>
+          </div>`;
   const rows =
     order.positions.length === 0
       ? '<tr><td colspan="3"><p class="empty-state">No linearized positions.</p></td></tr>'
@@ -2092,8 +2159,8 @@ function renderComputedOrder(snapshot: RuntimeSnapshot): string {
             </tr>`,
           )
           .join("");
-  return `${status}${cycle}${summary}${exclusionPanel}${advisoryPanel}
-          <div class="table-wrap">
+  return `${status}${cycle}${summary}${exclusionPanel}${advisoryPanel}${supersededPanel}
+    <div class="table-wrap">
             <table class="data-table" style="min-width: 720px;">
               <thead>
                 <tr>

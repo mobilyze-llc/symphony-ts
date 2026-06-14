@@ -106,6 +106,148 @@ describe("dispatch comparator", () => {
     expect(order.hard_cycle?.issue_identifiers).toEqual(["ISSUE-1", "ISSUE-2"]);
   });
 
+  it("surfaces multiple disjoint hard cycles with bounded diagnostics", () => {
+    const issues = [
+      createIssue({
+        id: "1",
+        identifier: "ISSUE-1",
+        blockedBy: [{ id: "2", identifier: "ISSUE-2", state: "In Progress" }],
+      }),
+      createIssue({
+        id: "2",
+        identifier: "ISSUE-2",
+        blockedBy: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      createIssue({
+        id: "3",
+        identifier: "ISSUE-3",
+        blockedBy: [{ id: "4", identifier: "ISSUE-4", state: "In Progress" }],
+      }),
+      createIssue({
+        id: "4",
+        identifier: "ISSUE-4",
+        blockedBy: [{ id: "3", identifier: "ISSUE-3", state: "In Progress" }],
+      }),
+      createIssue({ id: "5", identifier: "ISSUE-5" }),
+    ];
+
+    const order = computeDispatchOrder({
+      issues,
+      anchors: {},
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-5"]);
+    expect(order.hard_cycles).toHaveLength(2);
+    expect(order.hard_cycle_omitted_count).toBe(0);
+    expect(
+      order.hard_cycles.map((cycle) => [...cycle.issue_identifiers].sort()),
+    ).toEqual([
+      ["ISSUE-1", "ISSUE-2"],
+      ["ISSUE-3", "ISSUE-4"],
+    ]);
+    expect(order.hard_cycle?.issue_identifiers).toEqual(["ISSUE-1", "ISSUE-2"]);
+    expect(order.warnings).toContain(
+      "Dispatch comparator detected 2 hard dependency cycle(s); 0 additional cycle(s) omitted by diagnostic cap 5.",
+    );
+    expect(order.warnings).toContain(
+      "Hard-cycle diagnostics report a bounded disjoint-cycle sample; overlapping cycles that share a reported issue are represented by that reported cycle, and hard_cycle_omitted_count counts only cycles omitted by the diagnostic cap.",
+    );
+  });
+
+  it("counts hard cycles omitted by the diagnostic cap", () => {
+    const cycleIssues = Array.from({ length: 6 }, (_, index) => {
+      const leftId = String(index * 2 + 1);
+      const rightId = String(index * 2 + 2);
+      return [
+        createIssue({
+          id: leftId,
+          identifier: `ISSUE-${leftId}`,
+          blockedBy: [
+            {
+              id: rightId,
+              identifier: `ISSUE-${rightId}`,
+              state: "In Progress",
+            },
+          ],
+        }),
+        createIssue({
+          id: rightId,
+          identifier: `ISSUE-${rightId}`,
+          blockedBy: [
+            { id: leftId, identifier: `ISSUE-${leftId}`, state: "In Progress" },
+          ],
+        }),
+      ];
+    }).flat();
+    const unrelated = createIssue({ id: "99", identifier: "ISSUE-99" });
+
+    const order = computeDispatchOrder({
+      issues: [...cycleIssues, unrelated],
+      anchors: {},
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-99"]);
+    expect(order.hard_cycles).toHaveLength(5);
+    expect(order.hard_cycle_omitted_count).toBe(1);
+    expect(order.warnings).toContain(
+      "Dispatch comparator detected 5 hard dependency cycle(s); 1 additional cycle(s) omitted by diagnostic cap 5.",
+    );
+  });
+
+  it("documents overlapping hard cycles as a disjoint diagnostic sample", () => {
+    const issues = [
+      createIssue({
+        id: "1",
+        identifier: "ISSUE-1",
+        blockedBy: [{ id: "2", identifier: "ISSUE-2", state: "In Progress" }],
+      }),
+      createIssue({
+        id: "2",
+        identifier: "ISSUE-2",
+        blockedBy: [
+          { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+          { id: "3", identifier: "ISSUE-3", state: "In Progress" },
+        ],
+      }),
+      createIssue({
+        id: "3",
+        identifier: "ISSUE-3",
+        blockedBy: [{ id: "2", identifier: "ISSUE-2", state: "In Progress" }],
+      }),
+      createIssue({ id: "4", identifier: "ISSUE-4" }),
+    ];
+
+    const order = computeDispatchOrder({
+      issues,
+      anchors: {},
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-4"]);
+    expect(order.hard_cycles).toHaveLength(1);
+    expect(order.hard_cycle_omitted_count).toBe(0);
+    expect([...(order.hard_cycles[0]?.issue_identifiers ?? [])].sort()).toEqual(
+      ["ISSUE-1", "ISSUE-2"],
+    );
+    expect(
+      order.exclusions.map((exclusion) => exclusion.issue_identifier),
+    ).toEqual(["ISSUE-1", "ISSUE-2", "ISSUE-2", "ISSUE-3"]);
+    expect(order.warnings).toContain(
+      "Hard-cycle diagnostics report a bounded disjoint-cycle sample; overlapping cycles that share a reported issue are represented by that reported cycle, and hard_cycle_omitted_count counts only cycles omitted by the diagnostic cap.",
+    );
+  });
+
   it("warns for advisory cycles without excluding the subgraph", () => {
     const issue1 = createIssue({ id: "1", identifier: "ISSUE-1" });
     const issue2 = createIssue({ id: "2", identifier: "ISSUE-2" });
@@ -179,6 +321,43 @@ describe("dispatch comparator", () => {
     expect(order.exclusions).toHaveLength(1);
     expect(order.advisory_warnings).toHaveLength(1);
     expect(order.would_have_been_excluded_by_advisory_edges).toEqual([]);
+  });
+
+  it("suppresses advisory warnings for the same pair as a preserved native hard blocker", () => {
+    const blocker = createIssue({ id: "2", identifier: "ISSUE-2" });
+    const dependent = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+      blockedBy: [
+        {
+          id: null,
+          identifier: "ISSUE-2",
+          state: "In Progress",
+        },
+      ],
+    });
+
+    const order = computeDispatchOrder({
+      issues: [dependent, blocker],
+      anchors: {},
+      ticketFeatures: [
+        createFeature(dependent, [
+          createEdge(blocker, "advisory", "not_allowlisted"),
+        ]),
+        createFeature(blocker),
+      ],
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(order.exclusions).toMatchObject([
+      {
+        issue_identifier: "ISSUE-1",
+        blocker_issue_identifier: "ISSUE-2",
+        edge_trust: "legacy_hard",
+      },
+    ]);
+    expect(order.advisory_warnings).toEqual([]);
   });
 
   it("excludes issues blocked by open operator-confirmed hard edges", () => {
@@ -326,6 +505,13 @@ describe("dispatch comparator", () => {
 
     expect(order.exclusions).toEqual([]);
     expect(order.advisory_warnings).toHaveLength(1);
+    expect(order.superseded_native_hard_blockers).toMatchObject([
+      {
+        issue_identifier: "ISSUE-1",
+        blocker_issue_identifier: "ISSUE-2",
+        advisory_reason: "service_account",
+      },
+    ]);
     expect(
       order.positions.map((position) => position.issue_identifier),
     ).toEqual(["ISSUE-1", "ISSUE-2"]);
