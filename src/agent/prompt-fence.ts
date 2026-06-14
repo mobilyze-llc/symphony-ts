@@ -12,11 +12,17 @@ const STUCK_TRIAGE_BOUNDARY_FAMILIES = [
   "tracker",
   "failure",
 ] as const;
+const BACKLOG_AUDIT_BOUNDARY_FAMILIES = [
+  "tracker",
+  "runtime",
+  "audit",
+] as const;
 
 type BoundaryFamily =
   | (typeof JUDGE_BOUNDARY_FAMILIES)[number]
   | (typeof PAUSE_TRIAGE_BOUNDARY_FAMILIES)[number]
-  | (typeof STUCK_TRIAGE_BOUNDARY_FAMILIES)[number];
+  | (typeof STUCK_TRIAGE_BOUNDARY_FAMILIES)[number]
+  | (typeof BACKLOG_AUDIT_BOUNDARY_FAMILIES)[number];
 
 function fenceBoundaryTags(
   text: string,
@@ -78,9 +84,6 @@ function isBoundaryTag(
 }
 
 function isBoundaryName(name: string, family: BoundaryFamily): boolean {
-  if (family === "diff") {
-    return /^diff[a-z0-9_-]*$/.test(name);
-  }
   if (name === family) {
     return true;
   }
@@ -104,4 +107,8 @@ export function fencePauseTriageBoundaryTags(text: string): string {
 
 export function fenceStuckTriageBoundaryTags(text: string): string {
   return fenceBoundaryTags(text, STUCK_TRIAGE_BOUNDARY_FAMILIES);
+}
+
+export function fenceBacklogAuditBoundaryTags(text: string): string {
+  return fenceBoundaryTags(text, BACKLOG_AUDIT_BOUNDARY_FAMILIES);
 }

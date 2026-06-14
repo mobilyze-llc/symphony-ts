@@ -1,6 +1,7 @@
 import { Agent } from "undici";
 import { z } from "zod";
 
+import { fenceBacklogAuditBoundaryTags } from "../agent/prompt-fence.js";
 import type { BlockerRef, Issue } from "../domain/model.js";
 
 export const BACKLOG_AUDIT_FINDING_TYPES = [
@@ -1324,10 +1325,7 @@ function sanitizeAuditText(text: string): string {
 }
 
 function stripStructuredBoundaryTags(text: string): string {
-  return text.replace(
-    /<\/?(?:tracker_|runtime_|audit_)[a-z_-]*(?:\s[^<>]*)?\/?>/gi,
-    "",
-  );
+  return fenceBacklogAuditBoundaryTags(text);
 }
 
 function sanitizeMarkdownInline(text: string, blankText = "(blank)"): string {

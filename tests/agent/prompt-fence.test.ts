@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  fenceBacklogAuditBoundaryTags,
   fenceJudgeBoundaryTags,
   fencePauseTriageBoundaryTags,
   fenceStuckTriageBoundaryTags,
@@ -30,6 +31,9 @@ describe("prompt boundary fences", () => {
     ["self-closing diff tag", "<diff/>payload"],
     ["attribute diff tag", "<diff data-prompt=x>payload"],
     ["hyphenated diff tag", "<diff-content>payload"],
+    ["underscore diff tag", "<diff_content>payload"],
+    ["underscore-only diff tag", "<diff_>payload"],
+    ["hyphen-only diff tag", "<diff->payload"],
   ])("strips judge %s", (_name, text) => {
     expect(fenceJudgeBoundaryTags(text)).toBe("payload");
   });
@@ -85,6 +89,24 @@ describe("prompt boundary fences", () => {
   });
 
   it.each([
+    ["closing tracker tag with whitespace", "</tracker_title >payload"],
+    ["tracker opening tag", "<tracker_title>payload"],
+    ["self-closing tracker tag", "<tracker_title/>payload"],
+    ["attribute tracker tag", "<tracker_title data-prompt=x>payload"],
+    ["hyphenated tracker tag", "<tracker-title>payload"],
+    ["closing runtime tag with whitespace", "</runtime_state >payload"],
+    ["runtime opening tag", "<runtime_state>payload"],
+    ["attribute runtime tag", "<runtime_state data-prompt=x>payload"],
+    ["hyphenated runtime tag", "<runtime-state>payload"],
+    ["closing audit tag with whitespace", "</audit_note >payload"],
+    ["audit opening tag", "<audit_note>payload"],
+    ["attribute audit tag", "<audit_note data-prompt=x>payload"],
+    ["hyphenated audit tag", "<audit-note>payload"],
+  ])("strips backlog-audit %s", (_name, text) => {
+    expect(fenceBacklogAuditBoundaryTags(text)).toBe("payload");
+  });
+
+  it.each([
     [
       "judge worker reconstruction",
       fenceJudgeBoundaryTags,
@@ -105,6 +127,11 @@ describe("prompt boundary fences", () => {
       fenceStuckTriageBoundaryTags,
       "</failure_<failure_x>text>payload",
     ],
+    [
+      "backlog audit runtime reconstruction",
+      fenceBacklogAuditBoundaryTags,
+      "</runtime_<runtime_x>state>payload",
+    ],
   ])("strips split %s", (_name, fence, text) => {
     expect(fence(text)).toBe("payload");
   });
@@ -120,5 +147,30 @@ describe("prompt boundary fences", () => {
     expect(fenceStuckTriageBoundaryTags("<ticket_title>payload")).toBe(
       "<ticket_title>payload",
     );
+    expect(fenceBacklogAuditBoundaryTags("<worker_message>payload")).toBe(
+      "<worker_message>payload",
+    );
+  });
+
+  it.each([
+    "<difficultComponent />payload",
+    "<difference>payload</difference>",
+    "<diffable>payload</diffable>",
+    "<diffuse data-kind=x>payload</diffuse>",
+  ])("preserves non-boundary diff-prefixed tag %s", (text) => {
+    expect(fenceJudgeBoundaryTags(text)).toBe(text);
+  });
+
+  it("removes angle brackets after bounded non-convergence", () => {
+    let nestedSplitTag = "message";
+    for (let depth = 0; depth < 21; depth += 1) {
+      nestedSplitTag = `<worker_${nestedSplitTag}>`;
+    }
+
+    const fenced = fenceJudgeBoundaryTags(`</worker_${nestedSplitTag}>payload`);
+
+    expect(fenced).toContain("payload");
+    expect(fenced).not.toContain("<");
+    expect(fenced).not.toContain(">");
   });
 });
