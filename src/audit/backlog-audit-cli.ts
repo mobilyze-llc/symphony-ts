@@ -14,6 +14,7 @@ import {
   DEFAULT_BACKLOG_AUDIT_MAX_STATE_BYTES,
   DEFAULT_BACKLOG_AUDIT_MAX_STATE_DELTA_BYTES,
   DEFAULT_BACKLOG_AUDIT_MAX_STATE_DELTA_ENTRIES,
+  DEFAULT_BACKLOG_AUDIT_RELATIONSHIP_CONTEXT_WINDOW_SIZE,
   createBacklogAuditModelFetch,
   fetchBacklogAuditRuntimeEvidence,
   renderBacklogAuditReport,
@@ -34,6 +35,7 @@ interface ParsedArgs {
   maxStateDeltaBytes: number | null;
   maxIssueDescriptionChars: number | null;
   chunkSize: number | null;
+  relationshipContextWindowSize: number | null;
   help: boolean;
 }
 
@@ -65,6 +67,7 @@ function usage(): string {
     `  --max-state-delta-bytes <n>    Approx max /state/delta JSON bytes in the judge prompt (default: ${DEFAULT_BACKLOG_AUDIT_MAX_STATE_DELTA_BYTES}, or SYMPHONY_QUEUE_AUDIT_MAX_STATE_DELTA_BYTES)`,
     `  --max-issue-description-chars <n>  Max ticket description chars in the judge prompt (default: ${DEFAULT_BACKLOG_AUDIT_MAX_ISSUE_DESCRIPTION_CHARS}, or SYMPHONY_QUEUE_AUDIT_MAX_ISSUE_DESCRIPTION_CHARS)`,
     `  --chunk-size <n>          Issues per local-model call (default: ${DEFAULT_BACKLOG_AUDIT_CHUNK_SIZE}, or SYMPHONY_QUEUE_AUDIT_CHUNK_SIZE)`,
+    `  --relationship-context-window-size <n>  Max tickets per relationship context window before pairwise bounded passes (default: ${DEFAULT_BACKLOG_AUDIT_RELATIONSHIP_CONTEXT_WINDOW_SIZE}, or SYMPHONY_QUEUE_AUDIT_RELATIONSHIP_CONTEXT_WINDOW_SIZE)`,
   ].join("\n");
 }
 
@@ -88,6 +91,7 @@ export function parseBacklogAuditArgs(
       maxStateDeltaBytes: null,
       maxIssueDescriptionChars: null,
       chunkSize: null,
+      relationshipContextWindowSize: null,
       help: true,
     };
   }
@@ -119,6 +123,10 @@ export function parseBacklogAuditArgs(
   let chunkSize = parseOptionalPositiveIntegerEnv(
     env.SYMPHONY_QUEUE_AUDIT_CHUNK_SIZE,
     "SYMPHONY_QUEUE_AUDIT_CHUNK_SIZE",
+  );
+  let relationshipContextWindowSize = parseOptionalPositiveIntegerEnv(
+    env.SYMPHONY_QUEUE_AUDIT_RELATIONSHIP_CONTEXT_WINDOW_SIZE,
+    "SYMPHONY_QUEUE_AUDIT_RELATIONSHIP_CONTEXT_WINDOW_SIZE",
   );
   const help = false;
 
@@ -192,6 +200,13 @@ export function parseBacklogAuditArgs(
       );
       continue;
     }
+    if (token === "--relationship-context-window-size") {
+      relationshipContextWindowSize = parsePositiveInteger(
+        readValue(argv, ++index, "--relationship-context-window-size"),
+        "--relationship-context-window-size",
+      );
+      continue;
+    }
     if (token.startsWith("--")) {
       throw new UsageError(`Unknown option: ${token}\n\n${usage()}`);
     }
@@ -216,6 +231,7 @@ export function parseBacklogAuditArgs(
       maxStateDeltaBytes,
       maxIssueDescriptionChars,
       chunkSize,
+      relationshipContextWindowSize,
       help,
     };
   }
@@ -251,6 +267,9 @@ export function parseBacklogAuditArgs(
       maxIssueDescriptionChars ??
       DEFAULT_BACKLOG_AUDIT_MAX_ISSUE_DESCRIPTION_CHARS,
     chunkSize: chunkSize ?? DEFAULT_BACKLOG_AUDIT_CHUNK_SIZE,
+    relationshipContextWindowSize:
+      relationshipContextWindowSize ??
+      DEFAULT_BACKLOG_AUDIT_RELATIONSHIP_CONTEXT_WINDOW_SIZE,
     help,
   };
 }
@@ -334,9 +353,20 @@ export async function runBacklogAuditCli(
     },
     fetchFn: createBacklogAuditModelFetch({ timeoutMs: args.timeoutMs }),
     chunkSize: args.chunkSize,
-    onRelationshipPassStart: ({ issueCount }) => {
+    relationshipContextWindowSize: args.relationshipContextWindowSize,
+    onRelationshipPassStart: ({
+      issueCount,
+      passIndex,
+      passCount,
+      contextIssueCount,
+      windowSize,
+    }) => {
+      const windowDescription =
+        windowSize === null ? "unbounded" : `${windowSize} ticket window`;
       console.error(
-        `Running backlog audit relationship pass (${issueCount} issues)`,
+        passCount === 1
+          ? `Running backlog audit relationship pass (${issueCount} issues, ${windowDescription})`
+          : `Running backlog audit relationship pass ${passIndex}/${passCount} (${contextIssueCount}/${issueCount} context issues, ${windowDescription})`,
       );
     },
     onChunkStart: ({ chunkIndex, chunkCount, issueCount }) => {
