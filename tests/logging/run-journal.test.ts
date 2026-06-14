@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { promises as fs, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type {
   DispatcherRunJournal,
@@ -67,6 +67,31 @@ describe("dispatcher run-journal compaction", () => {
       expect(persisted[1]?.summary).toBe("entry 5");
       expect(persisted[2]?.summary).toBe("entry 6");
     } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recreates the journal directory when it disappears before append", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-run-journal-"));
+    const appendFileSpy = vi.spyOn(fs, "appendFile");
+    try {
+      appendFileSpy.mockImplementationOnce(async () => {
+        rmSync(join(root, ".symphony", "run-journals"), {
+          recursive: true,
+          force: true,
+        });
+        const error = new Error("journal directory removed");
+        Object.assign(error, { code: "ENOENT" });
+        throw error;
+      });
+
+      const entry = createEntry(1);
+      await appendDispatcherRunJournalEntryToDisk(root, entry);
+
+      await expect(readDispatcherRunJournal(root)).resolves.toEqual([entry]);
+      expect(appendFileSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      appendFileSpy.mockRestore();
       rmSync(root, { recursive: true, force: true });
     }
   });

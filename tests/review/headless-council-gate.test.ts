@@ -4603,9 +4603,9 @@ describe("runHeadlessCouncilGate", () => {
       {
         runCommand: harness.runCommand,
         laneStallDeadlineMs: 1_000,
-        overallLaneDeadlineMs: 10,
+        overallLaneDeadlineMs: 1_000,
         progress: (message) => progress.push(message),
-        now: sequencedClock([0, 0, 0, 0, 15, 15, 15, 15]),
+        now: sequencedClock([0, 0, 0, 0, 1_001, 1_001, 1_001, 1_001]),
       },
     );
 
@@ -7505,7 +7505,12 @@ function sequencedClock(offsetsMs: readonly number[]): () => Date {
   const epochMs = Date.UTC(2026, 0, 1);
   let index = 0;
   return () => {
-    const offsetMs = offsetsMs[Math.min(index, offsetsMs.length - 1)] ?? 0;
+    if (index >= offsetsMs.length) {
+      throw new Error(
+        `sequencedClock exhausted after ${offsetsMs.length} calls`,
+      );
+    }
+    const offsetMs = offsetsMs[index] ?? 0;
     index += 1;
     return new Date(epochMs + offsetMs);
   };
