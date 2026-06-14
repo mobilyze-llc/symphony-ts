@@ -41,6 +41,9 @@ describe("runtime snapshot", () => {
       advisory_warnings: [],
       would_have_been_excluded_by_advisory_edges: [],
       hard_cycle: null,
+      hard_cycles: [],
+      hard_cycle_omitted_count: 0,
+      superseded_native_hard_blockers: [],
       warnings: [],
     };
 

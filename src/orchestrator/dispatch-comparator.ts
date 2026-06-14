@@ -1,8 +1,10 @@
 import type {
   BlockerRef,
   ComputedDispatchOrderAdvisoryWarning,
+  ComputedDispatchOrderCycle,
   ComputedDispatchOrderExclusion,
   ComputedDispatchOrderSnapshot,
+  ComputedDispatchOrderSupersededNativeHardBlocker,
   Issue,
   IssueAnchorRecord,
 } from "../domain/model.js";
@@ -16,6 +18,7 @@ import {
 } from "./anchor-policy.js";
 
 export const DISPATCH_COMPARATOR_VERSION = "dispatch-comparator-v1";
+const HARD_CYCLE_DIAGNOSTIC_LIMIT = 5;
 
 export interface ComputeDispatchOrderInput {
   issues: readonly Issue[];
@@ -33,6 +36,16 @@ interface DispatchEdge {
   trust: "operator_confirmed" | "advisory" | "legacy_hard";
   source: "ticket_feature" | "issue_blocked_by";
   reason: string;
+}
+
+interface DependencyEdgeCollection {
+  edges: DispatchEdge[];
+  supersededNativeHardBlockers: ComputedDispatchOrderSupersededNativeHardBlocker[];
+}
+
+interface HardCycleDiagnostics {
+  cycles: ComputedDispatchOrderCycle[];
+  omittedCount: number;
 }
 
 interface IssueIdentifierIndex {
@@ -55,17 +68,24 @@ export function computeDispatchOrder(
   const issueById = new Map(baseOrder.map((issue) => [issue.id, issue]));
   const issueByIdentifier = buildIssueIdentifierIndex(baseOrder);
   const terminalStates = new Set(input.terminalStates.map(normalizeIssueState));
-  const edges = collectDependencyEdges(input, issueById, issueByIdentifier);
+  const edgeCollection = collectDependencyEdges(
+    input,
+    issueById,
+    issueByIdentifier,
+  );
+  const edges = edgeCollection.edges;
   const hardEdges = edges.filter(isHardEdge);
-  const hardCycle = findHardCycle(
+  const hardCycleDiagnostics = findHardCycles(
     baseOrder,
     hardEdges.filter((edge) => isOpenBlocker(edge.blocker, terminalStates)),
     issueById,
     issueByIdentifier,
   );
+  const hardCycle = hardCycleDiagnostics.cycles[0] ?? null;
   const exclusions = hardEdges
     .filter((edge) => isOpenBlocker(edge.blocker, terminalStates))
     .map(toExclusion);
+  const hardExclusionPairs = buildExclusionPairKeys(exclusions);
   const excludedIssueIds = new Set(
     exclusions.map((exclusion) => exclusion.issue_id),
   );
@@ -133,16 +153,28 @@ export function computeDispatchOrder(
       issueById,
       issueByIdentifier,
       terminalStates,
+      hardExclusionPairs,
     ),
     would_have_been_excluded_by_advisory_edges: advisoryWouldExclude,
     hard_cycle: hardCycle,
+    hard_cycles: hardCycleDiagnostics.cycles,
+    hard_cycle_omitted_count: hardCycleDiagnostics.omittedCount,
+    superseded_native_hard_blockers:
+      edgeCollection.supersededNativeHardBlockers,
     warnings: [
       ...warnings,
       ...(hardCycle === null
         ? []
         : [
             `${hardCycle.reason} Cyclic issues were hard-excluded while unrelated candidates remained eligible.`,
+            "Hard-cycle diagnostics report a bounded disjoint-cycle sample; overlapping cycles that share a reported issue are represented by that reported cycle, and hard_cycle_omitted_count counts only cycles omitted by the diagnostic cap.",
           ]),
+      ...(hardCycleDiagnostics.cycles.length > 1 ||
+      hardCycleDiagnostics.omittedCount > 0
+        ? [
+            `Dispatch comparator detected ${hardCycleDiagnostics.cycles.length} hard dependency cycle(s); ${hardCycleDiagnostics.omittedCount} additional cycle(s) omitted by diagnostic cap ${HARD_CYCLE_DIAGNOSTIC_LIMIT}.`,
+          ]
+        : []),
       ...linearized.warnings,
       ...anchored.warnings,
     ],
@@ -153,7 +185,7 @@ function collectDependencyEdges(
   input: ComputeDispatchOrderInput,
   issueById: ReadonlyMap<string, Issue>,
   issueByIdentifier: IssueIdentifierIndex,
-): DispatchEdge[] {
+): DependencyEdgeCollection {
   const featureByIssueId = new Map<string, TicketFeature>();
   const featureByIdentifier = new Map<string, TicketFeature>();
   const ambiguousFeatureIdentifiers = new Set<string>();
@@ -169,6 +201,8 @@ function collectDependencyEdges(
   }
 
   const edges: DispatchEdge[] = [];
+  const supersededNativeHardBlockers: ComputedDispatchOrderSupersededNativeHardBlocker[] =
+    [];
   for (const issue of input.issues) {
     const feature =
       featureByIssueId.get(issue.id) ??
@@ -208,15 +242,13 @@ function collectDependencyEdges(
       });
     }
 
-    const featureBlockers = feature.specLineage.blockedBy
-      .filter(ticketFeatureEdgeSupersedesNativeBlocker)
-      .map((edge) => edge.issue);
     for (const blocker of issue.blockedBy) {
-      if (
-        !featureBlockers.some((featureBlocker) =>
-          refsMatch(featureBlocker, blocker),
-        )
-      ) {
+      const supersedingEdge = feature.specLineage.blockedBy.find(
+        (edge) =>
+          ticketFeatureEdgeSupersedesNativeBlocker(edge) &&
+          refsMatch(edge.issue, blocker),
+      );
+      if (supersedingEdge === undefined) {
         edges.push({
           issue,
           blocker,
@@ -225,15 +257,36 @@ function collectDependencyEdges(
           reason:
             "Candidate blockedBy edge missing from TicketFeature extraction; preserving legacy hard-block behavior.",
         });
+      } else if (supersedingEdge.trust === "advisory") {
+        const blockerIssue = findIssueByRef(
+          blocker,
+          issueById,
+          issueByIdentifier,
+        );
+        if (blockerIssue?.id !== issue.id) {
+          supersededNativeHardBlockers.push({
+            issue_id: issue.id,
+            issue_identifier: issue.identifier,
+            blocker_issue_id: blocker.id,
+            blocker_issue_identifier: blocker.identifier,
+            blocker_state: blocker.state,
+            superseding_edge_trust: supersedingEdge.trust,
+            advisory_reason: supersedingEdge.advisoryReason,
+            reason: `Native blockedBy hard edge superseded by trusted automation advisory edge (${supersedingEdge.advisoryReason ?? "unknown"}).`,
+          });
+        }
       }
     }
   }
 
-  return edges.filter(
-    (edge) =>
-      edge.issue.id !==
-      findIssueByRef(edge.blocker, issueById, issueByIdentifier)?.id,
-  );
+  return {
+    edges: edges.filter(
+      (edge) =>
+        edge.issue.id !==
+        findIssueByRef(edge.blocker, issueById, issueByIdentifier)?.id,
+    ),
+    supersededNativeHardBlockers,
+  };
 }
 
 function ticketFeatureEdgeSupersedesNativeBlocker(
@@ -281,12 +334,14 @@ function buildAdvisoryWarnings(
   issueById: ReadonlyMap<string, Issue>,
   issueByIdentifier: IssueIdentifierIndex,
   terminalStates: ReadonlySet<string>,
+  hardExclusionPairs: ReadonlySet<string>,
 ): ComputedDispatchOrderAdvisoryWarning[] {
   const warnings = edges
     .filter(
       (edge) =>
         edge.trust === "advisory" &&
-        isOpenBlocker(edge.blocker, terminalStates),
+        isOpenBlocker(edge.blocker, terminalStates) &&
+        !hasDependencyPairKey(hardExclusionPairs, edge.issue, edge.blocker),
     )
     .map((edge) => {
       const blockerIssue = findIssueByRef(
@@ -303,6 +358,68 @@ function buildAdvisoryWarnings(
       };
     });
   return dedupeAdvisoryWarnings(warnings);
+}
+
+function buildExclusionPairKeys(
+  exclusions: readonly ComputedDispatchOrderExclusion[],
+): Set<string> {
+  const keys = new Set<string>();
+  for (const exclusion of exclusions) {
+    addDependencyPairKeys(keys, {
+      issue: {
+        id: exclusion.issue_id,
+        identifier: exclusion.issue_identifier,
+      },
+      blocker: {
+        id: exclusion.blocker_issue_id,
+        identifier: exclusion.blocker_issue_identifier,
+      },
+    });
+  }
+  return keys;
+}
+
+function hasDependencyPairKey(
+  keys: ReadonlySet<string>,
+  issue: Pick<Issue, "id" | "identifier">,
+  blocker: Pick<BlockerRef, "id" | "identifier">,
+): boolean {
+  return dependencyPairKeys({ issue, blocker }).some((key) => keys.has(key));
+}
+
+function addDependencyPairKeys(
+  keys: Set<string>,
+  input: {
+    issue: Pick<Issue, "id" | "identifier">;
+    blocker: Pick<BlockerRef, "id" | "identifier">;
+  },
+): void {
+  for (const key of dependencyPairKeys(input)) {
+    keys.add(key);
+  }
+}
+
+function dependencyPairKeys(input: {
+  issue: Pick<Issue, "id" | "identifier">;
+  blocker: Pick<BlockerRef, "id" | "identifier">;
+}): string[] {
+  const issueKeys = refIdentityKeys(input.issue);
+  const blockerKeys = refIdentityKeys(input.blocker);
+  return issueKeys.flatMap((issueKey) =>
+    blockerKeys.map((blockerKey) => `${issueKey}->${blockerKey}`),
+  );
+}
+
+function refIdentityKeys(ref: {
+  id: string | null;
+  identifier: string | null;
+}): string[] {
+  return [
+    ...(ref.id === null ? [] : [`id:${ref.id}`]),
+    ...(ref.identifier === null
+      ? []
+      : [`identifier:${normalizeIssueIdentifier(ref.identifier)}`]),
+  ];
 }
 
 function dedupeAdvisoryWarnings(
@@ -382,12 +499,12 @@ function topologicallySortIssues(
   };
 }
 
-function findHardCycle(
+function findHardCycles(
   issues: readonly Issue[],
   hardOrderingEdges: readonly HardDispatchEdge[],
   issueById: ReadonlyMap<string, Issue>,
   issueByIdentifier: IssueIdentifierIndex,
-): ComputedDispatchOrderSnapshot["hard_cycle"] {
+): HardCycleDiagnostics {
   const issueIds = new Set(issues.map((issue) => issue.id));
   const outgoing = new Map<string, string[]>();
   for (const edge of hardOrderingEdges) {
@@ -404,68 +521,96 @@ function findHardCycle(
     }
   }
 
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const stack: string[] = [];
   const issueByIdLocal = new Map(issues.map((issue) => [issue.id, issue]));
+  // Report a bounded disjoint-cycle sample: once a cycle is represented, any
+  // overlapping cycle that shares one of its issues is covered by that sample.
+  const reportedCycleIssueIds = new Set<string>();
+  const cycles: ComputedDispatchOrderCycle[] = [];
+  let omittedCount = 0;
 
-  const visit = (issueId: string): string[] | null => {
-    if (visiting.has(issueId)) {
-      const start = stack.indexOf(issueId);
-      return start === -1 ? [issueId] : stack.slice(start);
-    }
-    if (visited.has(issueId)) {
-      return null;
-    }
-    visiting.add(issueId);
-    stack.push(issueId);
-    for (const nextId of outgoing.get(issueId) ?? []) {
-      const cycle = visit(nextId);
-      if (cycle !== null) {
-        return cycle;
+  const findCycle = (startIssueId: string): string[] | null => {
+    const visiting = new Set<string>();
+    const visited = new Set<string>();
+    const stack: string[] = [];
+
+    const visit = (issueId: string): string[] | null => {
+      if (reportedCycleIssueIds.has(issueId)) {
+        return null;
       }
-    }
-    stack.pop();
-    visiting.delete(issueId);
-    visited.add(issueId);
-    return null;
+      if (visiting.has(issueId)) {
+        const start = stack.indexOf(issueId);
+        return start === -1 ? [issueId] : stack.slice(start);
+      }
+      if (visited.has(issueId)) {
+        return null;
+      }
+      visiting.add(issueId);
+      stack.push(issueId);
+      for (const nextId of outgoing.get(issueId) ?? []) {
+        if (reportedCycleIssueIds.has(nextId)) {
+          continue;
+        }
+        const cycle = visit(nextId);
+        if (cycle !== null) {
+          return cycle;
+        }
+      }
+      stack.pop();
+      visiting.delete(issueId);
+      visited.add(issueId);
+      return null;
+    };
+
+    return visit(startIssueId);
   };
 
   for (const issue of issues) {
-    const cycle = visit(issue.id);
-    if (cycle !== null) {
-      const cycleSet = new Set(cycle);
-      const cycleEdges = hardOrderingEdges.filter((edge) => {
-        const blockerIssue = findIssueByRef(
-          edge.blocker,
-          issueById,
-          issueByIdentifier,
-        );
-        return (
-          cycleSet.has(edge.issue.id) &&
-          blockerIssue !== null &&
-          cycleSet.has(blockerIssue.id)
-        );
-      });
-      const edgeTrust = cycleEdges.some(
-        (edge) => edge.trust === "operator_confirmed",
-      )
-        ? "operator_confirmed"
-        : "legacy_hard";
-      return {
-        issue_ids: cycle,
-        issue_identifiers: cycle.map(
-          (issueId) => issueByIdLocal.get(issueId)?.identifier ?? issueId,
-        ),
-        edge_trust: edgeTrust,
-        reason:
-          edgeTrust === "operator_confirmed"
-            ? "Operator-confirmed hard blocked-by edges form a cycle; dispatch comparator refused linearization."
-            : "Legacy hard blocked-by edges form a cycle; dispatch comparator refused linearization.",
-      };
+    if (reportedCycleIssueIds.has(issue.id)) {
+      continue;
     }
+    const cycle = findCycle(issue.id);
+    if (cycle === null) {
+      continue;
+    }
+    for (const cycleIssueId of cycle) {
+      reportedCycleIssueIds.add(cycleIssueId);
+    }
+    if (cycles.length >= HARD_CYCLE_DIAGNOSTIC_LIMIT) {
+      omittedCount += 1;
+      continue;
+    }
+    const cycleSet = new Set(cycle);
+    const cycleEdges = hardOrderingEdges.filter((edge) => {
+      const blockerIssue = findIssueByRef(
+        edge.blocker,
+        issueById,
+        issueByIdentifier,
+      );
+      return (
+        cycleSet.has(edge.issue.id) &&
+        blockerIssue !== null &&
+        cycleSet.has(blockerIssue.id)
+      );
+    });
+    const edgeTrust = cycleEdges.some(
+      (edge) => edge.trust === "operator_confirmed",
+    )
+      ? "operator_confirmed"
+      : "legacy_hard";
+    cycles.push({
+      issue_ids: cycle,
+      issue_identifiers: cycle.map(
+        (issueId) => issueByIdLocal.get(issueId)?.identifier ?? issueId,
+      ),
+      edge_trust: edgeTrust,
+      reason:
+        edgeTrust === "operator_confirmed"
+          ? "Operator-confirmed hard blocked-by edges form a cycle; dispatch comparator refused linearization."
+          : "Legacy hard blocked-by edges form a cycle; dispatch comparator refused linearization.",
+    });
   }
-  return null;
+
+  return { cycles, omittedCount };
 }
 
 function applyAnchors(
