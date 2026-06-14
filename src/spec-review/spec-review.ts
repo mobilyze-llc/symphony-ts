@@ -1596,15 +1596,38 @@ function sha256Text(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function stableStringify(value: unknown): string {
+// Source-intent hashing accepts acyclic JSON-like values. Cycles are rejected
+// instead of encoded so staleness decisions fail loudly and predictably.
+function stableStringify(
+  value: unknown,
+  seen: WeakSet<object> = new WeakSet(),
+): string {
   if (Array.isArray(value)) {
-    return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+    if (seen.has(value)) {
+      throw new Error(
+        "Cannot stable-stringify circular value for spec-review source-intent hash.",
+      );
+    }
+    seen.add(value);
+    const serialized = `[${value.map((item) => stableStringify(item, seen)).join(",")}]`;
+    seen.delete(value);
+    return serialized;
   }
   if (isRecord(value)) {
-    return `{${Object.keys(value)
+    if (seen.has(value)) {
+      throw new Error(
+        "Cannot stable-stringify circular value for spec-review source-intent hash.",
+      );
+    }
+    seen.add(value);
+    const serialized = `{${Object.keys(value)
       .sort()
-      .map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`)
+      .map(
+        (key) => `${JSON.stringify(key)}:${stableStringify(value[key], seen)}`,
+      )
       .join(",")}}`;
+    seen.delete(value);
+    return serialized;
   }
   return JSON.stringify(value);
 }

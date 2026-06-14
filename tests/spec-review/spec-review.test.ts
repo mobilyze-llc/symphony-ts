@@ -112,6 +112,30 @@ describe("spec review", () => {
     );
   });
 
+  it("keeps the acyclic source intent hash contract unchanged", () => {
+    expect(computeSourceIntentHash(makeIssue())).toBe(
+      "40f7cf08e18c90e4da8438e8cb2ed289c04ccee050396e665c0526406340fbbd",
+    );
+  });
+
+  it("rejects circular source intent hash inputs with a clear error", () => {
+    const circularState: Record<string, unknown> = {};
+    circularState.self = circularState;
+    const issue = makeIssue({
+      blockedBy: [
+        {
+          id: "blocker",
+          identifier: "SYMPH-200",
+          state: circularState as never,
+        },
+      ],
+    });
+
+    expect(() => computeSourceIntentHash(issue)).toThrow(
+      "Cannot stable-stringify circular value for spec-review source-intent hash.",
+    );
+  });
+
   it("preserves user-authored headings appended after a generated review section", () => {
     const issue = makeIssue({
       description: "Build the thing.\n",
