@@ -99,6 +99,19 @@ failures, runner failures, or enforce-mode `needs_operator_context` results must
 exit non-zero. This prevents monitors from treating safe privacy refusal as
 watcher failure while still making "no useful review occurred" visible.
 
+Successful spec-review reconciliation is ordered so the durable journal cannot
+authorize enforce-mode admission before the Linear issue body carries the
+matching generated review marker. For readiness rows that can admit work, the
+watcher must publish required Linear Docs, patch the latest issue description
+with the generated spec-review block, and only then append the successful
+`spec_review_result` journal row. If the successful issue-description write
+fails, the watcher must append/return `failed` and leave no new `valid` journal
+row for that source intent. Marker comments are advisory: they run after the
+body write and journal row, and their failure must not downgrade an otherwise
+durable review. Failure, runner, privacy, and invalid-artifact rows may be
+journaled before status-body writes because those states do not admit enforce
+mode.
+
 The source intent hash includes the full Linear issue description after
 generated spec-review markers are stripped, plus a structured projection of
 the `Acceptance Criteria` Markdown section. That projection is deliberately

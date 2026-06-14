@@ -447,6 +447,20 @@ export async function runSpecReviewWatchCli(
             updateIssueDescription: async (issueId, description) => {
               await tracker.updateIssueDescription(issueId, description);
             },
+            patchIssueDescription: async (issueId, patch) => {
+              const [issue] = await tracker.fetchIssueReferencesByIds([
+                issueId,
+              ]);
+              if (issue === undefined) {
+                throw new Error(
+                  `Linear issue ${issueId} was not found before patching description.`,
+                );
+              }
+              await tracker.updateIssueDescription(
+                issueId,
+                patch(issue.description ?? ""),
+              );
+            },
             postComment: async (issueId, body) => {
               await tracker.postComment(issueId, body);
             },

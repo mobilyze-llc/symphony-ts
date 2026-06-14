@@ -118,6 +118,10 @@ export interface SpecReviewParsedArtifact {
 export interface SpecReviewWriteClient {
   fetchIssueDescription?(issueId: string): Promise<string | null>;
   updateIssueDescription(issueId: string, description: string): Promise<void>;
+  patchIssueDescription?(
+    issueId: string,
+    patch: (currentDescription: string) => string,
+  ): Promise<void>;
   postComment(issueId: string, body: string): Promise<void>;
 }
 
@@ -143,6 +147,7 @@ export interface SpecReviewRunIssueInput {
   writer: SpecReviewWriteClient;
   documentPublisher?: SpecReviewDocumentPublisher | undefined;
   runner?: typeof runClaudeCmux;
+  appendSpecReviewResultJournal?: typeof appendSpecReviewResultJournal;
   now?: () => Date;
 }
 
@@ -707,6 +712,8 @@ export async function runSpecReviewForIssue(
 ): Promise<SpecReviewRunIssueResult> {
   const now = input.now ?? (() => new Date());
   const runClaude = input.runner ?? runClaudeCmux;
+  const appendJournal =
+    input.appendSpecReviewResultJournal ?? appendSpecReviewResultJournal;
   const sourceIntentHash = computeSourceIntentHash(input.issue);
   const artifactDir = resolve(
     input.artifactRoot,
@@ -764,7 +771,7 @@ export async function runSpecReviewForIssue(
       runner.artifactPath === null
         ? null
         : await fileSha256Text(runner.artifactPath);
-    const entries = await appendSpecReviewResultJournal(input.workspaceRoot, {
+    const entries = await appendJournal(input.workspaceRoot, {
       issue: input.issue,
       mode: input.mode,
       sourceIntentHash,
@@ -776,13 +783,9 @@ export async function runSpecReviewForIssue(
       summary,
       now: now(),
     });
-    await input.writer.updateIssueDescription(
-      input.issue.id,
+    await writeIssueDescription(input.writer, input.issue, (description) =>
       buildSpecReviewStatusDescription({
-        originalDescription: await fetchLatestIssueDescription(
-          input.writer,
-          input.issue,
-        ),
+        originalDescription: description,
         sourceIntentHash,
         artifactHash,
         artifactPath: runner.artifactPath,
@@ -810,35 +813,32 @@ export async function runSpecReviewForIssue(
     };
   }
 
-  const artifactText = await readFile(runner.artifactPath, "utf8");
+  const artifactPath = runner.artifactPath;
+  const artifactText = await readFile(artifactPath, "utf8");
   const artifactHash = sha256Text(artifactText);
   let parsed: SpecReviewParsedArtifact;
   try {
     parsed = parseSpecReviewArtifact(artifactText);
   } catch (error) {
     const summary = `Spec review invalid_artifact: ${errorMessage(error)}`;
-    const entries = await appendSpecReviewResultJournal(input.workspaceRoot, {
+    const entries = await appendJournal(input.workspaceRoot, {
       issue: input.issue,
       mode: input.mode,
       sourceIntentHash,
       readinessState: "invalid_artifact",
       verdict: null,
-      artifactPath: runner.artifactPath,
+      artifactPath,
       artifactHash,
       linearDocUrl: null,
       summary,
       now: now(),
     });
-    await input.writer.updateIssueDescription(
-      input.issue.id,
+    await writeIssueDescription(input.writer, input.issue, (description) =>
       buildSpecReviewStatusDescription({
-        originalDescription: await fetchLatestIssueDescription(
-          input.writer,
-          input.issue,
-        ),
+        originalDescription: description,
         sourceIntentHash,
         artifactHash,
-        artifactPath: runner.artifactPath,
+        artifactPath,
         mode: input.mode,
         readinessState: "invalid_artifact",
         verdict: null,
@@ -855,7 +855,7 @@ export async function runSpecReviewForIssue(
       readinessState: "invalid_artifact",
       verdict: null,
       runnerStatus: runner.status,
-      artifactPath: runner.artifactPath,
+      artifactPath,
       linearDocUrl: null,
       markerCommentPosted: false,
       journalEntries: entries,
@@ -879,28 +879,24 @@ export async function runSpecReviewForIssue(
       linearDocUrl = doc.url;
     } catch (error) {
       const summary = `Spec review failed: Linear Docs publish failed: ${errorMessage(error)}`;
-      const entries = await appendSpecReviewResultJournal(input.workspaceRoot, {
+      const entries = await appendJournal(input.workspaceRoot, {
         issue: input.issue,
         mode: input.mode,
         sourceIntentHash,
         readinessState: "failed",
         verdict: parsed.verdict,
-        artifactPath: runner.artifactPath,
+        artifactPath,
         artifactHash,
         linearDocUrl: null,
         summary,
         now: now(),
       });
-      await input.writer.updateIssueDescription(
-        input.issue.id,
+      await writeIssueDescription(input.writer, input.issue, (description) =>
         buildSpecReviewStatusDescription({
-          originalDescription: await fetchLatestIssueDescription(
-            input.writer,
-            input.issue,
-          ),
+          originalDescription: description,
           sourceIntentHash,
           artifactHash,
-          artifactPath: runner.artifactPath,
+          artifactPath,
           mode: input.mode,
           readinessState: "failed",
           verdict: parsed.verdict,
@@ -917,7 +913,7 @@ export async function runSpecReviewForIssue(
         readinessState: "failed",
         verdict: parsed.verdict,
         runnerStatus: runner.status,
-        artifactPath: runner.artifactPath,
+        artifactPath,
         linearDocUrl: null,
         markerCommentPosted: false,
         journalEntries: entries,
@@ -926,52 +922,34 @@ export async function runSpecReviewForIssue(
     }
   }
 
-  const latestDescription = await fetchLatestIssueDescription(
-    input.writer,
-    input.issue,
-  );
-  const description = buildReviewedIssueDescription({
-    originalDescription: latestDescription,
-    sourceIntentHash,
-    artifactHash,
-    artifactPath: runner.artifactPath,
-    mode: input.mode,
-    readinessState,
-    verdict: parsed.verdict,
-    reconciliation: parsed.reconciliation,
-    linearDocUrl,
-    generatedAt: now().toISOString(),
-  });
-  const successEntries = await appendSpecReviewResultJournal(
-    input.workspaceRoot,
-    {
-      issue: input.issue,
-      mode: input.mode,
-      sourceIntentHash,
-      readinessState,
-      verdict: parsed.verdict,
-      artifactPath: runner.artifactPath,
-      artifactHash,
-      linearDocUrl,
-      summary: parsed.reconciliation.summary,
-      now: now(),
-    },
-  );
   let markerCommentPosted = false;
   let markerCommentWarning: string | null = null;
   try {
-    await input.writer.updateIssueDescription(input.issue.id, description);
+    await writeIssueDescription(input.writer, input.issue, (description) =>
+      buildReviewedIssueDescription({
+        originalDescription: description,
+        sourceIntentHash,
+        artifactHash,
+        artifactPath,
+        mode: input.mode,
+        readinessState,
+        verdict: parsed.verdict,
+        reconciliation: parsed.reconciliation,
+        linearDocUrl,
+        generatedAt: now().toISOString(),
+      }),
+    );
   } catch (error) {
     const summary = `Spec review failed: Linear write failed: ${errorMessage(error)}`;
     let failedEntries: DispatcherRunJournalEntry[] = [];
     try {
-      failedEntries = await appendSpecReviewResultJournal(input.workspaceRoot, {
+      failedEntries = await appendJournal(input.workspaceRoot, {
         issue: input.issue,
         mode: input.mode,
         sourceIntentHash,
         readinessState: "failed",
         verdict: parsed.verdict,
-        artifactPath: runner.artifactPath,
+        artifactPath,
         artifactHash,
         linearDocUrl,
         summary,
@@ -987,7 +965,74 @@ export async function runSpecReviewForIssue(
       readinessState: "failed",
       verdict: parsed.verdict,
       runnerStatus: runner.status,
-      artifactPath: runner.artifactPath,
+      artifactPath,
+      linearDocUrl,
+      markerCommentPosted,
+      journalEntries: failedEntries,
+      message: summary,
+    };
+  }
+  let successEntries: DispatcherRunJournalEntry[];
+  try {
+    successEntries = await appendJournal(input.workspaceRoot, {
+      issue: input.issue,
+      mode: input.mode,
+      sourceIntentHash,
+      readinessState,
+      verdict: parsed.verdict,
+      artifactPath,
+      artifactHash,
+      linearDocUrl,
+      summary: parsed.reconciliation.summary,
+      now: now(),
+    });
+  } catch (error) {
+    const summary = `Spec review failed: journal append failed after Linear write: ${errorMessage(error)}`;
+    try {
+      await writeIssueDescription(input.writer, input.issue, (description) =>
+        buildSpecReviewStatusDescription({
+          originalDescription: description,
+          sourceIntentHash,
+          artifactHash,
+          artifactPath,
+          mode: input.mode,
+          readinessState: "failed",
+          verdict: parsed.verdict,
+          runnerStatus: runner.status,
+          linearDocUrl,
+          summary,
+          generatedAt: now().toISOString(),
+        }),
+      );
+    } catch {
+      // The failed return is still safer than reporting success; durable
+      // admission remains journal-authoritative and will not see a valid row.
+    }
+    let failedEntries: DispatcherRunJournalEntry[] = [];
+    try {
+      failedEntries = await appendJournal(input.workspaceRoot, {
+        issue: input.issue,
+        mode: input.mode,
+        sourceIntentHash,
+        readinessState: "failed",
+        verdict: parsed.verdict,
+        artifactPath,
+        artifactHash,
+        linearDocUrl,
+        summary,
+        now: now(),
+      });
+    } catch {
+      failedEntries = [];
+    }
+    return {
+      issueId: input.issue.id,
+      issueIdentifier: input.issue.identifier,
+      sourceIntentHash,
+      readinessState: "failed",
+      verdict: parsed.verdict,
+      runnerStatus: runner.status,
+      artifactPath,
       linearDocUrl,
       markerCommentPosted,
       journalEntries: failedEntries,
@@ -1001,7 +1046,7 @@ export async function runSpecReviewForIssue(
         issue: input.issue,
         sourceIntentHash,
         artifactHash,
-        artifactPath: runner.artifactPath,
+        artifactPath,
         readinessState,
         verdict: parsed.verdict,
         linearDocUrl,
@@ -1024,12 +1069,25 @@ export async function runSpecReviewForIssue(
     readinessState,
     verdict: parsed.verdict,
     runnerStatus: runner.status,
-    artifactPath: runner.artifactPath,
+    artifactPath,
     linearDocUrl,
     markerCommentPosted,
     journalEntries: successEntries,
     message: summary,
   };
+}
+
+async function writeIssueDescription(
+  writer: SpecReviewWriteClient,
+  issue: Issue,
+  patch: (currentDescription: string) => string,
+): Promise<void> {
+  if (writer.patchIssueDescription !== undefined) {
+    await writer.patchIssueDescription(issue.id, patch);
+    return;
+  }
+  const latestDescription = await fetchLatestIssueDescription(writer, issue);
+  await writer.updateIssueDescription(issue.id, patch(latestDescription));
 }
 
 async function fetchLatestIssueDescription(
