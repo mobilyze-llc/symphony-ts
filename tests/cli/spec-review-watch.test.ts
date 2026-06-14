@@ -148,7 +148,7 @@ describe("symphony-spec-review-watch CLI", () => {
       },
     );
 
-    expect(exitCode).toBe(1);
+    expect(exitCode).toBe(0);
     expect(runReview).toHaveBeenCalledOnce();
     expect(appendJournal).toHaveBeenCalledWith(
       workspace,
@@ -160,9 +160,25 @@ describe("symphony-spec-review-watch CLI", () => {
     const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
       selectionArtifactPath: string;
       selectedCount: number;
+      summary: {
+        blockedCount: number;
+        privacyBlockedCount: number;
+        reviewAttemptedCount: number;
+        exitCode: number;
+        exitReason: string;
+      };
       results: Array<{ issueIdentifier: string; readinessState: string }>;
     };
     expect(output.selectedCount).toBe(1);
+    expect(output.summary).toEqual(
+      expect.objectContaining({
+        blockedCount: 1,
+        privacyBlockedCount: 1,
+        reviewAttemptedCount: 1,
+        exitCode: 0,
+        exitReason: "all_results_healthy",
+      }),
+    );
     expect(output.results).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -184,7 +200,17 @@ describe("symphony-spec-review-watch CLI", () => {
         reasons: string[];
         issue: { title: string; description: string | null };
       }>;
+      summary: {
+        blockedCount: number;
+        privacyBlockedCount: number;
+      };
     };
+    expect(selectionArtifact.summary).toEqual(
+      expect.objectContaining({
+        blockedCount: 1,
+        privacyBlockedCount: 1,
+      }),
+    );
     expect(selectionArtifact.decisions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ status: "selected" }),
@@ -207,6 +233,97 @@ describe("symphony-spec-review-watch CLI", () => {
         }),
       }),
     );
+  });
+
+  it("exits zero and surfaces counts when every selected candidate is privacy-blocked", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    const artifactRoot = join(workspace, "artifacts");
+    const stdout = vi.fn();
+    const blockedIssue = makeIssue({
+      id: "blocked",
+      identifier: "SYMPH-2",
+      labels: ["secret", "needs:spec-review"],
+      title: "Secret customer key",
+      description: "private body",
+    });
+    const appendJournal = vi.fn(async (_workspaceRoot, input) => [
+      makeJournalEntry(input.issue, input.readinessState),
+    ]);
+    const runReview = vi.fn(async ({ issue }) => makeRunResult(issue, "valid"));
+
+    const exitCode = await runSpecReviewWatchCli(
+      [
+        "WORKFLOW.md",
+        "--workspace",
+        workspace,
+        "--artifact-root",
+        artifactRoot,
+        "--mode",
+        "enforce",
+      ],
+      {
+        stdout,
+        now: () => new Date("2026-06-14T00:00:00.000Z"),
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () => fakeConfig(),
+        createTracker: () => ({
+          fetchIssuesByStates: async () => [blockedIssue],
+          fetchIssueReferencesByIds: async () => [],
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+        runSpecReviewForIssue: runReview,
+        appendSpecReviewResultJournal: appendJournal,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(runReview).not.toHaveBeenCalled();
+    expect(appendJournal).toHaveBeenCalledWith(
+      workspace,
+      expect.objectContaining({
+        issue: blockedIssue,
+        readinessState: "privacy_blocked",
+      }),
+    );
+    const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
+      selectedCount: number;
+      summary: {
+        selectedCount: number;
+        blockedCount: number;
+        privacyBlockedCount: number;
+        reviewAttemptedCount: number;
+        exitCode: number;
+        exitReason: string;
+      };
+      results: Array<{ issueIdentifier: string; readinessState: string }>;
+    };
+    expect(output.selectedCount).toBe(0);
+    expect(output.summary).toEqual(
+      expect.objectContaining({
+        selectedCount: 0,
+        blockedCount: 1,
+        privacyBlockedCount: 1,
+        reviewAttemptedCount: 0,
+        exitCode: 0,
+        exitReason: "privacy_blocked_only",
+      }),
+    );
+    expect(output.results).toEqual([
+      expect.objectContaining({
+        issueIdentifier: "SYMPH-2",
+        readinessState: "privacy_blocked",
+      }),
+    ]);
   });
 
   it("passes configured source refs with truncation, missing, and path metadata", async () => {
@@ -523,6 +640,11 @@ describe("symphony-spec-review-watch CLI", () => {
       identifier: "SYMPH-2",
       labels: ["needs:spec-review"],
     });
+    const privacyBlockedIssue = makeIssue({
+      id: "blocked",
+      identifier: "SYMPH-3",
+      labels: ["private", "needs:spec-review"],
+    });
     const appendJournal = vi.fn(async (_workspaceRoot, input) => [
       makeJournalEntry(input.issue, input.readinessState),
     ]);
@@ -535,6 +657,177 @@ describe("symphony-spec-review-watch CLI", () => {
 
     const exitCode = await runSpecReviewWatchCli(
       ["WORKFLOW.md", "--workspace", workspace],
+      {
+        stdout,
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () => fakeConfig(),
+        createTracker: () => ({
+          fetchIssuesByStates: async () => [
+            firstIssue,
+            secondIssue,
+            privacyBlockedIssue,
+          ],
+          fetchIssueReferencesByIds: async () => [],
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+        runSpecReviewForIssue: runReview,
+        appendSpecReviewResultJournal: appendJournal,
+        preflightDocumentPublisher: async () => undefined,
+      },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(runReview).toHaveBeenCalledTimes(2);
+    const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
+      summary: {
+        failedCount: number;
+        privacyBlockedCount: number;
+        exitCode: number;
+        exitReason: string;
+      };
+      results: Array<{ issueIdentifier: string; readinessState: string }>;
+    };
+    expect(output.summary).toEqual(
+      expect.objectContaining({
+        failedCount: 1,
+        privacyBlockedCount: 1,
+        exitCode: 1,
+        exitReason: "failed_results",
+      }),
+    );
+    expect(output.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          issueIdentifier: "SYMPH-1",
+          readinessState: "failed",
+        }),
+        expect.objectContaining({
+          issueIdentifier: "SYMPH-2",
+          readinessState: "valid",
+        }),
+        expect.objectContaining({
+          issueIdentifier: "SYMPH-3",
+          readinessState: "privacy_blocked",
+        }),
+      ]),
+    );
+  });
+
+  it("counts runner-origin privacy blocks as selected review results", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    const stdout = vi.fn();
+    const firstIssue = makeIssue({
+      id: "first",
+      identifier: "SYMPH-1",
+      labels: ["needs:spec-review"],
+    });
+    const secondIssue = makeIssue({
+      id: "second",
+      identifier: "SYMPH-2",
+      labels: ["needs:spec-review"],
+    });
+    const runReview = vi.fn(async ({ issue }) =>
+      makeRunResult(issue, issue.id === "second" ? "privacy_blocked" : "valid"),
+    );
+
+    const exitCode = await runSpecReviewWatchCli(
+      ["WORKFLOW.md", "--workspace", workspace, "--mode", "enforce"],
+      {
+        stdout,
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () => fakeConfig(),
+        createTracker: () => ({
+          fetchIssuesByStates: async () => [firstIssue, secondIssue],
+          fetchIssueReferencesByIds: async () => [],
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+        runSpecReviewForIssue: runReview,
+        preflightDocumentPublisher: async () => undefined,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(runReview).toHaveBeenCalledTimes(2);
+    const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
+      summary: {
+        blockedCount: number;
+        privacyBlockedCount: number;
+        privacyResultCount: number;
+        reviewAttemptedCount: number;
+        exitCode: number;
+        exitReason: string;
+      };
+      results: Array<{ issueIdentifier: string; readinessState: string }>;
+    };
+    expect(output.summary).toEqual(
+      expect.objectContaining({
+        blockedCount: 0,
+        privacyBlockedCount: 0,
+        privacyResultCount: 1,
+        reviewAttemptedCount: 2,
+        exitCode: 0,
+        exitReason: "all_results_healthy",
+      }),
+    );
+    expect(output.results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          issueIdentifier: "SYMPH-1",
+          readinessState: "valid",
+        }),
+        expect.objectContaining({
+          issueIdentifier: "SYMPH-2",
+          readinessState: "privacy_blocked",
+        }),
+      ]),
+    );
+  });
+
+  it("reports failed_results before enforce operator context in mixed failure batches", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    const stdout = vi.fn();
+    const firstIssue = makeIssue({
+      id: "first",
+      identifier: "SYMPH-1",
+      labels: ["needs:spec-review"],
+    });
+    const secondIssue = makeIssue({
+      id: "second",
+      identifier: "SYMPH-2",
+      labels: ["needs:spec-review"],
+    });
+    const appendJournal = vi.fn(async (_workspaceRoot, input) => [
+      makeJournalEntry(input.issue, input.readinessState),
+    ]);
+    const runReview = vi.fn(async ({ issue }) => {
+      if (issue.id === "first") {
+        throw new Error("linear write failed");
+      }
+      return makeRunResult(issue, "needs_operator_context");
+    });
+
+    const exitCode = await runSpecReviewWatchCli(
+      ["WORKFLOW.md", "--workspace", workspace, "--mode", "enforce"],
       {
         stdout,
         loadWorkflowDefinition: async (workflowPath) => ({
@@ -561,23 +854,90 @@ describe("symphony-spec-review-watch CLI", () => {
     );
 
     expect(exitCode).toBe(1);
-    expect(runReview).toHaveBeenCalledTimes(2);
     const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
-      results: Array<{ issueIdentifier: string; readinessState: string }>;
+      summary: {
+        failedCount: number;
+        needsOperatorContextCount: number;
+        exitCode: number;
+        exitReason: string;
+      };
     };
-    expect(output.results).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          issueIdentifier: "SYMPH-1",
-          readinessState: "failed",
-        }),
-        expect.objectContaining({
-          issueIdentifier: "SYMPH-2",
-          readinessState: "valid",
-        }),
-      ]),
+    expect(output.summary).toEqual(
+      expect.objectContaining({
+        failedCount: 1,
+        needsOperatorContextCount: 1,
+        exitCode: 1,
+        exitReason: "failed_results",
+      }),
     );
   });
+
+  it.each(["runner_failed", "invalid_artifact"] as const)(
+    "reports error_results for %s review results",
+    async (readinessState) => {
+      const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+      const stdout = vi.fn();
+      const issue = makeIssue({
+        id: "selected",
+        identifier: "SYMPH-1",
+        labels: ["needs:spec-review"],
+      });
+      const runReview = vi.fn(async ({ issue }) =>
+        makeRunResult(issue, readinessState),
+      );
+
+      const exitCode = await runSpecReviewWatchCli(
+        ["WORKFLOW.md", "--workspace", workspace, "--mode", "enforce"],
+        {
+          stdout,
+          loadWorkflowDefinition: async (workflowPath) => ({
+            workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+            config: {},
+            promptTemplate: "",
+          }),
+          resolveWorkflowConfig: () => fakeConfig(),
+          createTracker: () => ({
+            fetchIssuesByStates: async () => [issue],
+            fetchIssueReferencesByIds: async () => [],
+            fetchTicketFeatureIssuesByStates: async () => [],
+            updateIssueDescription: async () => ({
+              id: "issue",
+              identifier: "SYMPH-1",
+              title: "Issue",
+            }),
+            postComment: async () => undefined,
+          }),
+          runSpecReviewForIssue: runReview,
+          preflightDocumentPublisher: async () => undefined,
+        },
+      );
+
+      expect(exitCode).toBe(1);
+      const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
+        summary: {
+          failedCount: number;
+          errorResultCount: number;
+          exitCode: number;
+          exitReason: string;
+        };
+        results: Array<{ issueIdentifier: string; readinessState: string }>;
+      };
+      expect(output.summary).toEqual(
+        expect.objectContaining({
+          failedCount: 0,
+          errorResultCount: 1,
+          exitCode: 1,
+          exitReason: "error_results",
+        }),
+      );
+      expect(output.results).toEqual([
+        expect.objectContaining({
+          issueIdentifier: "SYMPH-1",
+          readinessState,
+        }),
+      ]);
+    },
+  );
 
   it.each([
     ["observe", 0],
@@ -1015,14 +1375,24 @@ function makeRunResult(
   issue: Issue,
   readinessState: SpecReviewRunIssueResult["readinessState"],
 ): SpecReviewRunIssueResult {
+  const verdict =
+    readinessState === "privacy_blocked"
+      ? "blocked_privacy"
+      : readinessState === "invalid_artifact"
+        ? "invalid_artifact"
+        : readinessState === "runner_failed"
+          ? null
+          : "ready_as_written";
+
   return {
     issueId: issue.id,
     issueIdentifier: issue.identifier,
     sourceIntentHash: "source-hash",
     readinessState,
-    verdict: "ready_as_written",
-    runnerStatus: "passed",
-    artifactPath: "/tmp/artifact.md",
+    verdict,
+    runnerStatus: readinessState === "runner_failed" ? "failed" : "passed",
+    artifactPath:
+      readinessState === "runner_failed" ? null : "/tmp/artifact.md",
     linearDocUrl: null,
     markerCommentPosted: true,
     journalEntries: [makeJournalEntry(issue, readinessState)],

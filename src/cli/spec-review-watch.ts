@@ -54,6 +54,33 @@ type ExecFileAsync = (
   options?: { maxBuffer?: number; timeout?: number },
 ) => Promise<{ stdout: string; stderr: string }>;
 
+interface SpecReviewWatchSelectionSummary {
+  totalCount: number;
+  selectedCount: number;
+  skippedCount: number;
+  blockedCount: number;
+  privacyBlockedCount: number;
+  operatorBlockedCount: number;
+}
+
+interface SpecReviewWatchBatchSummary extends SpecReviewWatchSelectionSummary {
+  resultCount: number;
+  reviewAttemptedCount: number;
+  failedCount: number;
+  errorResultCount: number;
+  needsOperatorContextCount: number;
+  privacyResultCount: number;
+  validCount: number;
+  notRequiredCount: number;
+  exitCode: number;
+  exitReason:
+    | "all_results_healthy"
+    | "privacy_blocked_only"
+    | "enforce_operator_context"
+    | "failed_results"
+    | "error_results";
+}
+
 const LINEAR_DOCUMENT_PUBLISH_EXEC_OPTIONS = {
   maxBuffer: 2 * 1024 * 1024,
   timeout: 30_000,
@@ -96,6 +123,11 @@ function usage(): string {
     "  --cmux-spawn-bin <path>   cmux-spawn binary",
     "  --dry-run                 Select and print candidates without invoking Claude or writing Linear",
     "  --help                    Show this help",
+    "",
+    "Exit status:",
+    "  0 when all selected reviews are healthy or every selected candidate is privacy-blocked",
+    "  1 when selected work fails, runner/artifact errors occur, or enforce mode finds operator context is required",
+    "  2 for usage errors",
   ].join("\n");
 }
 
@@ -260,10 +292,19 @@ export async function runSpecReviewWatchCli(
   const selected = decisions.filter(
     (decision) => decision.status === "selected",
   );
+  const selectionSummary = summarizeSelection(decisions);
 
   if (parsed.dryRun) {
     stdout(
-      `${JSON.stringify({ decisions: redactSelectionDecisions(decisions), selectedCount: selected.length }, null, 2)}\n`,
+      `${JSON.stringify(
+        {
+          decisions: redactSelectionDecisions(decisions),
+          selectedCount: selected.length,
+          summary: selectionSummary,
+        },
+        null,
+        2,
+      )}\n`,
     );
     return 0;
   }
@@ -274,7 +315,15 @@ export async function runSpecReviewWatchCli(
   );
   await fs.writeFile(
     selectionArtifactPath,
-    `${JSON.stringify({ decisions: redactSelectionDecisions(decisions), selectedCount: selected.length }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        decisions: redactSelectionDecisions(decisions),
+        selectedCount: selected.length,
+        summary: selectionSummary,
+      },
+      null,
+      2,
+    )}\n`,
     "utf8",
   );
 
@@ -360,8 +409,9 @@ export async function runSpecReviewWatchCli(
           message: summary,
         });
       }
+      const summary = summarizeBatch(parsed.mode, decisions, results);
       stdout(
-        `${JSON.stringify({ selectedCount: selected.length, selectionArtifactPath, results }, null, 2)}\n`,
+        `${JSON.stringify({ selectedCount: selected.length, selectionArtifactPath, results, summary }, null, 2)}\n`,
       );
       return 1;
     }
@@ -439,14 +489,11 @@ export async function runSpecReviewWatchCli(
     }
   }
 
+  const summary = summarizeBatch(parsed.mode, decisions, results);
   stdout(
-    `${JSON.stringify({ selectedCount: selected.length, selectionArtifactPath, results }, null, 2)}\n`,
+    `${JSON.stringify({ selectedCount: selected.length, selectionArtifactPath, results, summary }, null, 2)}\n`,
   );
-  return results.every((result) =>
-    isSuccessfulReadinessState(parsed.mode, result.readinessState),
-  )
-    ? 0
-    : 1;
+  return summary.exitCode;
 }
 
 function isSuccessfulReadinessState(
@@ -456,7 +503,102 @@ function isSuccessfulReadinessState(
   if (readinessState === "valid" || readinessState === "not_required") {
     return true;
   }
+  if (readinessState === "privacy_blocked") {
+    return true;
+  }
   return mode !== "enforce" && readinessState === "needs_operator_context";
+}
+
+function summarizeSelection(
+  decisions: readonly ReturnType<typeof selectSpecReviewCandidates>[number][],
+): SpecReviewWatchSelectionSummary {
+  const selectedCount = decisions.filter(
+    (decision) => decision.status === "selected",
+  ).length;
+  const blockedDecisions = decisions.filter(
+    (decision) => decision.status === "blocked",
+  );
+  const privacyBlockedCount = blockedDecisions.filter((decision) =>
+    decision.reasons.includes("privacy_sensitive_label"),
+  ).length;
+
+  return {
+    totalCount: decisions.length,
+    selectedCount,
+    skippedCount: decisions.filter((decision) => decision.status === "skipped")
+      .length,
+    blockedCount: blockedDecisions.length,
+    privacyBlockedCount,
+    operatorBlockedCount: blockedDecisions.length - privacyBlockedCount,
+  };
+}
+
+function summarizeBatch(
+  mode: SpecReviewMode,
+  decisions: readonly ReturnType<typeof selectSpecReviewCandidates>[number][],
+  results: readonly SpecReviewRunIssueResult[],
+): SpecReviewWatchBatchSummary {
+  const selectionSummary = summarizeSelection(decisions);
+  const selectionBlockedIssueIds = new Set(
+    decisions
+      .filter((decision) => decision.status === "blocked")
+      .map((decision) => decision.issue.id),
+  );
+  const privacyResultCount = results.filter(
+    (result) => result.readinessState === "privacy_blocked",
+  ).length;
+  const failedCount = results.filter(
+    (result) => result.readinessState === "failed",
+  ).length;
+  const errorResultCount = results.filter(
+    (result) =>
+      result.readinessState === "runner_failed" ||
+      result.readinessState === "invalid_artifact",
+  ).length;
+  const needsOperatorContextCount = results.filter(
+    (result) => result.readinessState === "needs_operator_context",
+  ).length;
+  const validCount = results.filter(
+    (result) => result.readinessState === "valid",
+  ).length;
+  const notRequiredCount = results.filter(
+    (result) => result.readinessState === "not_required",
+  ).length;
+  const allHealthy = results.every((result) =>
+    isSuccessfulReadinessState(mode, result.readinessState),
+  );
+  const privacyBlockedOnly =
+    results.length > 0 && privacyResultCount === results.length;
+  const enforceOperatorContext =
+    mode === "enforce" && needsOperatorContextCount > 0;
+  const exitCode = allHealthy ? 0 : 1;
+  const exitReason =
+    exitCode === 0
+      ? privacyBlockedOnly
+        ? "privacy_blocked_only"
+        : "all_results_healthy"
+      : failedCount > 0
+        ? "failed_results"
+        : enforceOperatorContext
+          ? "enforce_operator_context"
+          : "error_results";
+
+  return {
+    ...selectionSummary,
+    resultCount: results.length,
+    reviewAttemptedCount:
+      results.length -
+      results.filter((result) => selectionBlockedIssueIds.has(result.issueId))
+        .length,
+    failedCount,
+    errorResultCount,
+    needsOperatorContextCount,
+    privacyResultCount,
+    validCount,
+    notRequiredCount,
+    exitCode,
+    exitReason,
+  };
 }
 
 async function readSourceOfTruthRefs(
