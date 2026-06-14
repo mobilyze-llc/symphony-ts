@@ -1,4 +1,4 @@
-import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import process from "node:process";
 import readline from "node:readline";
@@ -562,6 +562,30 @@ async function handleMessage(message) {
             process.exit(0);
           }, 5);
         }, 5);
+      }, 10);
+      return;
+    }
+
+    if (scenario === "stdin-epipe-tool-response") {
+      setTimeout(() => {
+        process.stdin.on("error", () => {});
+        closeSync(0);
+        writeJson({
+          id: "stdin-epipe-tool-1",
+          method: "item/tool/call",
+          params: {
+            toolName: "slow_tool",
+            input: {},
+          },
+        });
+        setTimeout(() => {
+          writeJson({
+            method: "turn/completed",
+            params: {
+              message: "Completed after stdin EPIPE",
+            },
+          });
+        }, 120);
       }, 10);
       return;
     }

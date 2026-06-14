@@ -29,6 +29,7 @@ const runHeadlessCouncilGate: typeof runHeadlessCouncilGateImpl = (
       : input,
     dependencies,
   );
+const TEST_LANE_STALL_DEADLINE_MS = 500;
 
 describe("runHeadlessCouncilGate", () => {
   it("allows default reviewer lane models to be overridden by environment", () => {
@@ -4117,7 +4118,10 @@ describe("runHeadlessCouncilGate", () => {
         diffPath: harness.diffPath,
         reviewerLanes: [opusLane(), piLane()],
       },
-      { runCommand: harness.runCommand, laneStallDeadlineMs: 50 },
+      {
+        runCommand: harness.runCommand,
+        laneStallDeadlineMs: TEST_LANE_STALL_DEADLINE_MS,
+      },
     );
 
     expect(result.verdict).toBe("error");
@@ -4170,7 +4174,7 @@ describe("runHeadlessCouncilGate", () => {
       },
       {
         runCommand: harness.runCommand,
-        laneStallDeadlineMs: 50,
+        laneStallDeadlineMs: TEST_LANE_STALL_DEADLINE_MS,
         progress: (message) => progress.push(message),
       },
     );
@@ -4223,7 +4227,7 @@ describe("runHeadlessCouncilGate", () => {
       },
       {
         runCommand: harness.runCommand,
-        laneStallDeadlineMs: 50,
+        laneStallDeadlineMs: TEST_LANE_STALL_DEADLINE_MS,
         progress: (message) => progress.push(message),
       },
     );
@@ -4269,7 +4273,7 @@ describe("runHeadlessCouncilGate", () => {
       },
       {
         runCommand: harness.runCommand,
-        laneStallDeadlineMs: 50,
+        laneStallDeadlineMs: TEST_LANE_STALL_DEADLINE_MS,
         progress: (message) => progress.push(message),
       },
     );
@@ -4328,7 +4332,10 @@ describe("runHeadlessCouncilGate", () => {
         reviewerLanes: [opusLane(), piLane()],
         codexLead: true,
       },
-      { runCommand: harness.runCommand, laneStallDeadlineMs: 50 },
+      {
+        runCommand: harness.runCommand,
+        laneStallDeadlineMs: TEST_LANE_STALL_DEADLINE_MS,
+      },
     );
 
     expect(result.verdict).toBe("error");

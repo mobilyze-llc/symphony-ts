@@ -68,6 +68,11 @@ const DEFAULT_MAX_LINE_BYTES = 10 * 1024 * 1024;
  * drops back into unhandled rejections (SYMPH-332).
  */
 const NOT_WRITABLE_MESSAGE = "Codex app-server process is not writable.";
+const NOT_WRITABLE_STREAM_ERROR_CODES = new Set([
+  "EPIPE",
+  "ERR_STREAM_DESTROYED",
+  "ERR_STREAM_WRITE_AFTER_END",
+]);
 const SUPPORTED_CODEX_SANDBOX_TYPES =
   "danger-full-access, dangerFullAccess, read-only, readOnly, workspace-write, workspaceWrite";
 
@@ -375,6 +380,13 @@ export class CodexAppServerClient {
     });
     child.stderr.on("data", (chunk: string) => {
       this.handleStderrChunk(chunk);
+    });
+    child.stdin.on("error", (error) => {
+      // Write callbacks retain request/response context; the stream event does not.
+      if (isAppServerNotWritableError(error)) {
+        return;
+      }
+      this.handleStdinWriteFailure(error);
     });
     child.on("error", (error) => {
       const wrapped = new CodexAppServerClientError(
@@ -1215,32 +1227,68 @@ export class CodexAppServerClient {
 
   private sendResponseOrDrop(payload: JsonObject, context: string): void {
     try {
-      this.send(payload);
+      this.send(payload, { dropContext: context });
     } catch (error) {
-      if (
-        !(error instanceof CodexAppServerClientError) ||
-        error.message !== NOT_WRITABLE_MESSAGE
-      ) {
+      if (!isAppServerNotWritableError(error)) {
         throw error;
       }
 
-      this.emit({
-        event: "other_message",
-        message: `Codex app-server response dropped for ${context}: app-server process already exited.`,
-      });
+      this.emitDroppedResponse(context, "app-server process is not writable.");
     }
   }
 
-  private send(message: JsonObject): void {
+  private send(message: JsonObject, options?: { dropContext?: string }): void {
     const child = this.child;
-    if (child === null || child.stdin.destroyed) {
+    if (child === null || child.stdin.destroyed || child.stdin.writableEnded) {
       throw new CodexAppServerClientError(
         NOT_WRITABLE_MESSAGE,
         ERROR_CODES.codexProtocolError,
       );
     }
 
-    child.stdin.write(`${JSON.stringify(message)}\n`);
+    child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
+      if (error !== null && error !== undefined) {
+        this.handleStdinWriteFailure(error, options);
+      }
+    });
+  }
+
+  private handleStdinWriteFailure(
+    error: unknown,
+    options?: { dropContext?: string },
+  ): void {
+    if (
+      options?.dropContext !== undefined &&
+      isAppServerNotWritableError(error)
+    ) {
+      this.emitDroppedResponse(
+        options.dropContext,
+        "app-server stdin is not writable.",
+      );
+      return;
+    }
+
+    const wrapped =
+      error instanceof CodexAppServerClientError
+        ? error
+        : new CodexAppServerClientError(
+            `Codex app-server stdin write failed: ${toErrorMessage(error)}`,
+            ERROR_CODES.codexProtocolError,
+            { cause: error },
+          );
+    this.rejectPending(wrapped);
+    if (this.currentTurn !== null) {
+      this.finishTurnWithError(wrapped, "turn_ended_with_error", {
+        closureInitiator: "upstream_exit",
+      });
+    }
+  }
+
+  private emitDroppedResponse(context: string, reason: string): void {
+    this.emit({
+      event: "other_message",
+      message: `Codex app-server response dropped for ${context}: ${reason}`,
+    });
   }
 
   private rejectPending(error: Error): void {
@@ -2449,6 +2497,37 @@ function toErrorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function isAppServerNotWritableError(error: unknown): boolean {
+  if (
+    error instanceof CodexAppServerClientError &&
+    error.message === NOT_WRITABLE_MESSAGE
+  ) {
+    return true;
+  }
+
+  if (error === null || typeof error !== "object") {
+    return false;
+  }
+
+  const maybeStreamError = error as {
+    code?: unknown;
+    message?: unknown;
+  };
+  if (
+    typeof maybeStreamError.code === "string" &&
+    NOT_WRITABLE_STREAM_ERROR_CODES.has(maybeStreamError.code)
+  ) {
+    return true;
+  }
+
+  return (
+    typeof maybeStreamError.message === "string" &&
+    (maybeStreamError.message.includes("write EPIPE") ||
+      maybeStreamError.message.includes("stream was destroyed") ||
+      maybeStreamError.message.includes("write after end"))
+  );
 }
 
 function optionalTelemetry(

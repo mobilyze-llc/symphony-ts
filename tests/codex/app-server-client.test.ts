@@ -1626,7 +1626,12 @@ describe("CodexAppServerClient", () => {
     const onUnhandled = (error: unknown): void => {
       unhandled.push(error instanceof Error ? error : new Error(String(error)));
     };
+    const uncaught: Error[] = [];
+    const onUncaught = (error: Error): void => {
+      uncaught.push(error);
+    };
     process.on("unhandledRejection", onUnhandled);
+    process.on("uncaughtException", onUncaught);
 
     try {
       const result = await client.startSession({
@@ -1652,8 +1657,78 @@ describe("CodexAppServerClient", () => {
       expect(dropEvents).toHaveLength(1);
       expect(dropEvents[0]?.message).toContain("request late-tool-1");
       expect(unhandled).toHaveLength(0);
+      expect(uncaught).toHaveLength(0);
     } finally {
       process.off("unhandledRejection", onUnhandled);
+      process.off("uncaughtException", onUncaught);
+      await client.close();
+    }
+  });
+
+  it("lets the write callback classify stdin EPIPE while a turn is still running", async () => {
+    const workspace = await createWorkspace();
+    const events: CodexClientEvent[] = [];
+    const slowTool: CodexDynamicTool = {
+      name: "slow_tool",
+      description: "A tool that resolves after stdin closes",
+      execute: () =>
+        new Promise((resolve) => {
+          setTimeout(() => {
+            resolve({ ok: true });
+          }, 20);
+        }),
+    };
+
+    const client = createClient(
+      "stdin-epipe-tool-response",
+      workspace,
+      events,
+      {
+        dynamicTools: [slowTool],
+        turnTimeoutMs: 5_000,
+        stallTimeoutMs: 5_000,
+      },
+    );
+    const unhandled: Error[] = [];
+    const onUnhandled = (error: unknown): void => {
+      unhandled.push(error instanceof Error ? error : new Error(String(error)));
+    };
+    const uncaught: Error[] = [];
+    const onUncaught = (error: Error): void => {
+      uncaught.push(error);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    process.on("uncaughtException", onUncaught);
+
+    try {
+      const result = await client.startSession({
+        prompt: "Close stdin during tool call",
+        title: "SYMPH-537: stdin EPIPE regression",
+      });
+
+      expect(result.status).toBe("completed");
+
+      const dropEvents = events.filter(
+        (event) =>
+          event.event === "other_message" &&
+          typeof event.message === "string" &&
+          event.message.includes("response dropped"),
+      );
+      expect(dropEvents).toHaveLength(1);
+      expect(dropEvents[0]?.message).toContain("request stdin-epipe-tool-1");
+      expect(dropEvents[0]?.message).toContain("stdin is not writable");
+      expect(
+        events.filter(
+          (event) =>
+            event.event === "turn_ended_with_error" &&
+            event.errorCode === ERROR_CODES.codexProtocolError,
+        ),
+      ).toHaveLength(0);
+      expect(unhandled).toHaveLength(0);
+      expect(uncaught).toHaveLength(0);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      process.off("uncaughtException", onUncaught);
       await client.close();
     }
   });
@@ -1679,7 +1754,12 @@ describe("CodexAppServerClient", () => {
     const onUnhandled = (error: unknown): void => {
       unhandled.push(error instanceof Error ? error : new Error(String(error)));
     };
+    const uncaught: Error[] = [];
+    const onUncaught = (error: Error): void => {
+      uncaught.push(error);
+    };
     process.on("unhandledRejection", onUnhandled);
+    process.on("uncaughtException", onUncaught);
 
     try {
       await client.startSession({
@@ -1692,8 +1772,10 @@ describe("CodexAppServerClient", () => {
       });
 
       expect(unhandled).toHaveLength(0);
+      expect(uncaught).toHaveLength(0);
     } finally {
       process.off("unhandledRejection", onUnhandled);
+      process.off("uncaughtException", onUncaught);
       await client.close();
     }
   });
