@@ -70,6 +70,24 @@ Dispatcher journal write ownership is deliberately narrow. The runtime host is t
 
 Recovery must preserve pause and escalation decisions. A crash after deterministic supervision emits a finding must not forget the finding; a crash during a gate must not run a second gate while the first lease is live; a crash during a tracker write must either observe the completed idempotency key or retry only after the lease expires.
 
+## Spec-Time Review Readiness Authority
+
+Spec-time Claude review readiness is durable dispatcher-journal state. For a
+given issue and source intent hash, the latest `spec_review_result` journal row
+wins over any generated readiness marker embedded in the Linear issue
+description. The generated marker is a human-readable cache and source-intent
+anchor, not the replay authority.
+
+Selection must therefore consult the dispatcher journal before deciding that a
+ticket with a current-looking marker is done. If the latest matching journal
+row is `valid`, `needs_operator_context`, or `privacy_blocked`, selection may
+skip the ticket for that source intent. If the latest matching journal row is a
+retryable or persistence-failure state such as `failed`, `runner_failed`, or
+`invalid_artifact`, selection must reselect the ticket even when the issue
+description still contains an older `readiness-state:valid` marker. Journal rows
+for a different source intent hash do not invalidate the current source intent;
+normal source-hash mismatch handling covers edited tickets.
+
 ## Reviewable Increment Boundaries
 
 Keep the full orchestration graft split into small PRs:

@@ -47,6 +47,12 @@ export interface SpecReviewSelectionConfig {
   highRiskTitlePatterns: string[];
 }
 
+interface SpecReviewCurrentState {
+  sourceIntentHash: string | null;
+  readinessState: SpecReviewReadinessState | null;
+  source: "description_marker" | "journal";
+}
+
 export interface SpecReviewSelectionDecision {
   issue: Issue;
   sourceIntentHash: string;
@@ -208,6 +214,7 @@ export function selectSpecReviewCandidates(input: {
   issues: readonly Issue[];
   ticketFeatures?: readonly TicketFeature[];
   backlogFindings?: readonly BacklogAuditFinding[];
+  specReviewJournal?: readonly DispatcherRunJournalEntry[];
   config?: Partial<SpecReviewSelectionConfig>;
 }): SpecReviewSelectionDecision[] {
   const config = {
@@ -236,17 +243,31 @@ export function selectSpecReviewCandidates(input: {
     const sourceIntentHash = sensitive
       ? SENSITIVE_SOURCE_INTENT_HASH
       : computeSourceIntentHash(issue);
-    const currentReview = sensitive
+    const descriptionReview = sensitive
       ? null
-      : extractSpecReviewMarker(issue.description ?? "");
+      : descriptionSpecReviewState(issue.description ?? "");
+    const journalReview = sensitive
+      ? null
+      : latestSpecReviewJournalState(
+          input.specReviewJournal ?? [],
+          issue.id,
+          sourceIntentHash,
+        );
+    const currentReview = journalReview ?? descriptionReview;
     const hasCurrentReviewForSourceIntent =
       reasons.length > 0 &&
       currentReview?.sourceIntentHash === sourceIntentHash &&
       isCurrentSpecReviewReadinessState(currentReview.readinessState);
-    const currentReviewReason =
-      currentReview?.readinessState === "valid"
-        ? "current_valid_spec_review"
-        : `current_spec_review:${currentReview?.readinessState ?? "unknown"}`;
+    const currentReviewReason = currentSpecReviewReason(currentReview);
+    const selectedReasons =
+      journalReview === null
+        ? reasons
+        : [
+            `latest_spec_review_journal:${
+              journalReview.readinessState ?? "unknown"
+            }`,
+            ...reasons,
+          ];
     return {
       issue,
       sourceIntentHash,
@@ -265,12 +286,75 @@ export function selectSpecReviewCandidates(input: {
             ? ["privacy_sensitive_label"]
             : hasCurrentReviewForSourceIntent
               ? [currentReviewReason]
-              : reasons,
+              : selectedReasons,
       redactionClass: sensitive ? "sensitive" : "standard",
       ticketFeature: feature,
       backlogFindings: findings,
     };
   });
+}
+
+function currentSpecReviewReason(
+  review: SpecReviewCurrentState | null,
+): string {
+  if (review?.source === "journal") {
+    return `current_spec_review_journal:${review.readinessState ?? "unknown"}`;
+  }
+  return review?.readinessState === "valid"
+    ? "current_valid_spec_review"
+    : `current_spec_review:${review?.readinessState ?? "unknown"}`;
+}
+
+function descriptionSpecReviewState(
+  description: string,
+): SpecReviewCurrentState {
+  const marker = extractSpecReviewMarker(description);
+  return {
+    sourceIntentHash: marker?.sourceIntentHash ?? null,
+    readinessState: marker?.readinessState ?? null,
+    source: "description_marker",
+  };
+}
+
+function latestSpecReviewJournalState(
+  journal: readonly DispatcherRunJournalEntry[],
+  issueId: string,
+  sourceIntentHash: string,
+): SpecReviewCurrentState | null {
+  let latest: (SpecReviewCurrentState & { sequence: number }) | null = null;
+  for (const entry of journal) {
+    if (entry.kind !== "spec_review_result" || entry.issueId !== issueId) {
+      continue;
+    }
+    const entrySourceIntentHash = stringMetadata(
+      entry.metadata.source_intent_hash,
+    );
+    if (entrySourceIntentHash !== sourceIntentHash) {
+      continue;
+    }
+    const readinessState = parseReadinessState(
+      stringMetadata(entry.metadata.readiness_state) ??
+        // Keep selection compatible with the runtime-snapshot projector for
+        // compacted or legacy spec-review rows that carried status metadata.
+        stringMetadata(entry.metadata.status),
+    );
+    if (readinessState === null) {
+      continue;
+    }
+    if (latest === null || entry.sequence > latest.sequence) {
+      latest = {
+        source: "journal",
+        sourceIntentHash: entrySourceIntentHash,
+        readinessState,
+        sequence: entry.sequence,
+      };
+    }
+  }
+  return latest;
+}
+
+function stringMetadata(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
 }
 
 function isPrivacySensitiveLabel(label: string): boolean {
