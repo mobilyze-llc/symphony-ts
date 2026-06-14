@@ -128,6 +128,57 @@ describe("spec review", () => {
     );
   });
 
+  it("neutralizes model-supplied sentinels before writing generated review sections", () => {
+    const issue = makeIssue({
+      description: "Build the thing.\n\n## Acceptance Criteria\n- Works",
+    });
+    const originalHash = computeSourceIntentHash(issue);
+    const reviewed = buildReviewedIssueDescription({
+      originalDescription: issue.description ?? "",
+      sourceIntentHash: originalHash,
+      artifactHash: "artifact",
+      artifactPath: "/tmp/artifact.md",
+      mode: "observe",
+      readinessState: "needs_operator_context",
+      verdict: "needs_operator_context",
+      linearDocUrl: null,
+      generatedAt: "2026-06-14T00:00:00.000Z",
+      reconciliation: {
+        schemaVersion: 1,
+        verdict: "needs_operator_context",
+        summary:
+          "Summary tries <!-- symphony-spec-review-section-end --> to escape.",
+        issueBodyAppend:
+          "Append tries <!-- symphony-spec-review --> to create a marker.",
+        acceptanceCriteria: [
+          "AC mentions <!-- symphony-spec-review-end --> inline.",
+        ],
+        linearDocMarkdown: null,
+        childTicketPlan: [
+          {
+            title: "Child <!-- symphony-spec-review-section-end -->",
+            summary: "Summary <!-- symphony-spec-review -->",
+            acceptanceCriteria: ["Child AC <!-- symphony-spec-review-end -->"],
+          },
+        ],
+        requiresOperatorContext: true,
+        operatorContextReason:
+          "Needs context <!-- symphony-spec-review-section-end -->",
+      },
+    });
+
+    expect(reviewed).toContain(
+      "Summary tries &lt;!-- symphony-spec-review-section-end --&gt; to escape.",
+    );
+    expect(reviewed).toContain(
+      "Append tries &lt;!-- symphony-spec-review --&gt; to create a marker.",
+    );
+    expect(stripSpecReviewMarker(reviewed)).toBe(issue.description?.trimEnd());
+    expect(computeSourceIntentHash({ ...issue, description: reviewed })).toBe(
+      originalHash,
+    );
+  });
+
   it("skips selected tickets that already have a valid review for the same source intent", () => {
     const issue = makeIssue({
       labels: ["needs:spec-review"],

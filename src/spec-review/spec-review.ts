@@ -176,6 +176,11 @@ const DEFAULT_SELECTION_CONFIG: SpecReviewSelectionConfig = {
 const SPEC_REVIEW_MARKER_START = "<!-- symphony-spec-review -->";
 const SPEC_REVIEW_MARKER_END = "<!-- symphony-spec-review-end -->";
 const SPEC_REVIEW_SECTION_END = "<!-- symphony-spec-review-section-end -->";
+const GENERATED_SPEC_REVIEW_SENTINELS = [
+  SPEC_REVIEW_MARKER_START,
+  SPEC_REVIEW_MARKER_END,
+  SPEC_REVIEW_SECTION_END,
+] as const;
 
 export function selectSpecReviewCandidates(input: {
   issues: readonly Issue[];
@@ -774,6 +779,7 @@ export function buildReviewedIssueDescription(input: {
   generatedAt: string;
 }): string {
   const base = stripSpecReviewMarker(input.originalDescription).trimEnd();
+  const reconciliation = sanitizeGeneratedReconciliation(input.reconciliation);
   const lines = [
     "",
     SPEC_REVIEW_MARKER_START,
@@ -795,26 +801,26 @@ export function buildReviewedIssueDescription(input: {
   if (input.linearDocUrl !== null) {
     lines.push(`- Linear Doc: ${input.linearDocUrl}`);
   }
-  lines.push("", input.reconciliation.summary);
-  if (input.reconciliation.issueBodyAppend !== null) {
-    lines.push("", input.reconciliation.issueBodyAppend.trim());
+  lines.push("", reconciliation.summary);
+  if (reconciliation.issueBodyAppend !== null) {
+    lines.push("", reconciliation.issueBodyAppend.trim());
   }
-  if (input.reconciliation.acceptanceCriteria.length > 0) {
+  if (reconciliation.acceptanceCriteria.length > 0) {
     lines.push("", "### Reviewed Acceptance Criteria", "");
-    for (const ac of input.reconciliation.acceptanceCriteria) {
+    for (const ac of reconciliation.acceptanceCriteria) {
       lines.push(`- ${ac}`);
     }
   }
-  if (input.reconciliation.childTicketPlan.length > 0) {
+  if (reconciliation.childTicketPlan.length > 0) {
     lines.push("", "### Child Ticket Plan", "");
-    for (const child of input.reconciliation.childTicketPlan) {
+    for (const child of reconciliation.childTicketPlan) {
       lines.push(`- ${child.title}: ${child.summary}`);
     }
   }
-  if (input.reconciliation.requiresOperatorContext) {
+  if (reconciliation.requiresOperatorContext) {
     lines.push(
       "",
-      `Operator context required: ${input.reconciliation.operatorContextReason ?? "not specified"}`,
+      `Operator context required: ${reconciliation.operatorContextReason ?? "not specified"}`,
     );
   }
   lines.push("", SPEC_REVIEW_SECTION_END);
@@ -861,7 +867,7 @@ export function buildSpecReviewStatusDescription(input: {
   if (input.linearDocUrl !== null) {
     lines.push(`- Linear Doc: ${input.linearDocUrl}`);
   }
-  lines.push("", input.summary);
+  lines.push("", sanitizeGeneratedSpecReviewText(input.summary));
   lines.push("", SPEC_REVIEW_SECTION_END);
   return `${base}${lines.join("\n")}\n`;
 }
@@ -977,10 +983,49 @@ export function formatSpecReviewMarkerComment(input: {
     `Artifact: \`${input.artifactPath}\``,
     input.linearDocUrl === null ? null : `Linear Doc: ${input.linearDocUrl}`,
     "",
-    input.summary,
+    sanitizeGeneratedSpecReviewText(input.summary),
   ]
     .filter((line): line is string => line !== null)
     .join("\n");
+}
+
+function sanitizeGeneratedReconciliation(
+  reconciliation: SpecReviewReconciliation,
+): SpecReviewReconciliation {
+  return {
+    ...reconciliation,
+    summary: sanitizeGeneratedSpecReviewText(reconciliation.summary),
+    issueBodyAppend:
+      reconciliation.issueBodyAppend === null
+        ? null
+        : sanitizeGeneratedSpecReviewText(reconciliation.issueBodyAppend),
+    acceptanceCriteria: reconciliation.acceptanceCriteria.map((item) =>
+      sanitizeGeneratedSpecReviewText(item),
+    ),
+    childTicketPlan: reconciliation.childTicketPlan.map((child) => ({
+      ...child,
+      title: sanitizeGeneratedSpecReviewText(child.title),
+      summary: sanitizeGeneratedSpecReviewText(child.summary),
+      acceptanceCriteria: child.acceptanceCriteria.map((item) =>
+        sanitizeGeneratedSpecReviewText(item),
+      ),
+    })),
+    operatorContextReason:
+      reconciliation.operatorContextReason === null
+        ? null
+        : sanitizeGeneratedSpecReviewText(reconciliation.operatorContextReason),
+  };
+}
+
+function sanitizeGeneratedSpecReviewText(text: string): string {
+  let sanitized = text;
+  for (const sentinel of GENERATED_SPEC_REVIEW_SENTINELS) {
+    sanitized = sanitized.replaceAll(
+      sentinel,
+      sentinel.replace("<!--", "&lt;!--").replace("-->", "--&gt;"),
+    );
+  }
+  return sanitized;
 }
 
 export async function appendSpecReviewResultJournal(

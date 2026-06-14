@@ -5,7 +5,10 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  buildLinearDocumentPublishRequest,
+  createLinearDocumentPublisher,
   parseDocumentCreateOutput,
+  parseDocumentListOutput,
   parseSpecReviewWatchArgs,
   runSpecReviewWatchCli,
 } from "../../src/cli/spec-review-watch.js";
@@ -338,6 +341,152 @@ describe("symphony-spec-review-watch CLI", () => {
     expect(() =>
       parseDocumentCreateOutput(JSON.stringify({ results: { id: "doc-3" } })),
     ).toThrow("did not include a URL");
+  });
+
+  it("parses known Linear document list output envelopes", () => {
+    expect(
+      parseDocumentListOutput(
+        JSON.stringify({
+          results: {
+            documents: [
+              {
+                title: "Spec Review - SYMPH-1",
+                url: "https://linear.example/doc",
+                slugId: "abc123",
+              },
+            ],
+          },
+        }),
+      ),
+    ).toEqual([
+      {
+        title: "Spec Review - SYMPH-1",
+        url: "https://linear.example/doc",
+        identifier: "abc123",
+      },
+    ]);
+  });
+
+  it("adds deterministic idempotency metadata to Linear Docs publish requests", () => {
+    const first = buildLinearDocumentPublishRequest({
+      title: "Spec Review - SYMPH-1",
+      markdown: "# Review\n",
+      idempotencyKey: "spec-review:issue-1:source-hash",
+    });
+    const second = buildLinearDocumentPublishRequest({
+      title: "Spec Review - SYMPH-1",
+      markdown: "# Review again\n",
+      idempotencyKey: "spec-review:issue-1:source-hash",
+    });
+
+    expect(first.title).toBe(second.title);
+    expect(first.idempotencyHash).toBe(second.idempotencyHash);
+    expect(first.markdown).toContain(
+      `<!-- symphony-spec-review-doc-idempotency-sha256:${first.idempotencyHash} -->`,
+    );
+  });
+
+  it("creates a deterministic Linear Doc with idempotent create when none exists", async () => {
+    const calls: Array<{ file: string; args: readonly string[] }> = [];
+    let contentFile: string | null = null;
+    const execFile = vi.fn(async (file: string, args: readonly string[]) => {
+      calls.push({ file, args });
+      if (args[1] === "list") {
+        return {
+          stdout: JSON.stringify({ results: { documents: [] } }),
+          stderr: "",
+        };
+      }
+      if (args[1] === "create") {
+        contentFile = String(args[args.indexOf("--content-file") + 1]);
+        return {
+          stdout: JSON.stringify({
+            results: {
+              url: "https://linear.example/doc",
+              slugId: "doc-new",
+            },
+          }),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected command ${args.join(" ")}`);
+    });
+
+    const publisher = createLinearDocumentPublisher(execFile);
+    const result = await publisher.publish({
+      issueIdentifier: "SYMPH-1",
+      title: "Spec Review - SYMPH-1",
+      markdown: "# Durable rationale",
+      idempotencyKey: "spec-review:issue-1:source-hash",
+    });
+
+    expect(result).toEqual({
+      url: "https://linear.example/doc",
+      identifier: "doc-new",
+    });
+    const createCall = calls.find((call) => call.args[1] === "create");
+    expect(createCall?.args).toContain("--idempotent");
+    expect(createCall?.args).toContainEqual(
+      expect.stringContaining("Spec Review - SYMPH-1"),
+    );
+    expect(contentFile).not.toBeNull();
+    expect(await readFile(String(contentFile), "utf8")).toContain(
+      "symphony-spec-review-doc-idempotency-sha256",
+    );
+  });
+
+  it("edits the matching deterministic Linear Doc on same-intent rerun", async () => {
+    const prepared = buildLinearDocumentPublishRequest({
+      title: "Spec Review - SYMPH-1",
+      markdown: "# Review",
+      idempotencyKey: "spec-review:issue-1:source-hash",
+    });
+    const calls: Array<{ file: string; args: readonly string[] }> = [];
+    const execFile = vi.fn(async (file: string, args: readonly string[]) => {
+      calls.push({ file, args });
+      if (args[1] === "list") {
+        return {
+          stdout: JSON.stringify({
+            results: {
+              documents: [
+                {
+                  title: prepared.title,
+                  url: "https://linear.example/doc",
+                  slugId: "existing-doc",
+                },
+              ],
+            },
+          }),
+          stderr: "",
+        };
+      }
+      if (args[1] === "edit") {
+        return {
+          stdout: JSON.stringify({
+            results: {
+              url: "https://linear.example/doc",
+              slugId: "existing-doc",
+            },
+          }),
+          stderr: "",
+        };
+      }
+      throw new Error(`unexpected command ${args.join(" ")}`);
+    });
+
+    const publisher = createLinearDocumentPublisher(execFile);
+    const result = await publisher.publish({
+      issueIdentifier: "SYMPH-1",
+      title: "Spec Review - SYMPH-1",
+      markdown: "# Updated rationale",
+      idempotencyKey: "spec-review:issue-1:source-hash",
+    });
+
+    expect(result.identifier).toBe("existing-doc");
+    expect(calls.map((call) => call.args[1])).toEqual(["list", "edit"]);
+    expect(calls[1]?.args).toEqual(
+      expect.arrayContaining(["edit", "existing-doc"]),
+    );
   });
 });
 

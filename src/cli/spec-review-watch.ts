@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,6 +42,12 @@ type SpecReviewWatchTracker = Pick<
   | "postComment"
   | "updateIssueDescription"
 >;
+
+type ExecFileAsync = (
+  file: string,
+  args: readonly string[],
+  options?: { maxBuffer?: number },
+) => Promise<{ stdout: string; stderr: string }>;
 
 export interface SpecReviewWatchCliDependencies {
   loadWorkflowDefinition?: typeof loadWorkflowDefinition;
@@ -436,24 +443,135 @@ export function parseDocumentCreateOutput(stdout: string): {
   throw new Error("Linear document create output did not include a URL.");
 }
 
-function createLinearDocumentPublisher(): SpecReviewDocumentPublisher {
+export function parseDocumentListOutput(
+  stdout: string,
+): Array<{ title: string | null; url: string; identifier: string | null }> {
+  const parsed = JSON.parse(stdout) as unknown;
+  const candidates = isRecord(parsed)
+    ? [
+        isRecord(parsed.results) ? parsed.results.documents : undefined,
+        parsed.documents,
+        isRecord(parsed.data) ? parsed.data.documents : undefined,
+      ]
+    : [];
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) {
+      continue;
+    }
+    return candidate.flatMap((value) => {
+      if (!isRecord(value)) {
+        return [];
+      }
+      const url = stringField(value.url);
+      if (url === null) {
+        return [];
+      }
+      return [
+        {
+          title: stringField(value.title),
+          url,
+          identifier:
+            stringField(value.slugId) ??
+            stringField(value.identifier) ??
+            stringField(value.id),
+        },
+      ];
+    });
+  }
+  return [];
+}
+
+export function buildLinearDocumentPublishRequest(input: {
+  title: string;
+  markdown: string;
+  idempotencyKey: string;
+}): { title: string; markdown: string; idempotencyHash: string } {
+  const idempotencyHash = createHash("sha256")
+    .update(input.idempotencyKey)
+    .digest("hex");
   return {
-    publish: async ({ issueIdentifier, title, markdown }) => {
+    title: `${input.title} (${idempotencyHash.slice(0, 12)})`,
+    markdown: [
+      `<!-- symphony-spec-review-doc-idempotency-sha256:${idempotencyHash} -->`,
+      "",
+      input.markdown.trimEnd(),
+      "",
+    ].join("\n"),
+    idempotencyHash,
+  };
+}
+
+export function createLinearDocumentPublisher(
+  execFileAsync?: ExecFileAsync,
+): SpecReviewDocumentPublisher {
+  return {
+    publish: async ({ issueIdentifier, title, markdown, idempotencyKey }) => {
       const tempDir = await fs.mkdtemp(
         resolve(tmpdir(), "symphony-spec-review-"),
       );
       const contentFile = resolve(tempDir, "doc.md");
-      await fs.writeFile(contentFile, markdown, "utf8");
-      const { execFile } = await import("node:child_process");
-      const { promisify } = await import("node:util");
-      const execFileAsync = promisify(execFile);
-      const output = await execFileAsync(
+      const prepared = buildLinearDocumentPublishRequest({
+        title,
+        markdown,
+        idempotencyKey,
+      });
+      await fs.writeFile(contentFile, prepared.markdown, "utf8");
+      const run = execFileAsync ?? (await defaultExecFileAsync());
+      const listOutput = await run(
+        "linear-pp-cli",
+        [
+          "documents",
+          "list",
+          "--issue",
+          issueIdentifier,
+          "--agent",
+          "--select",
+          "title,url,slugId",
+          "--limit",
+          "100",
+        ],
+        { maxBuffer: 2 * 1024 * 1024 },
+      );
+      const existingDocument = parseDocumentListOutput(listOutput.stdout).find(
+        (document) => document.title === prepared.title,
+      );
+      if (
+        existingDocument !== undefined &&
+        existingDocument.identifier !== null
+      ) {
+        const editOutput = await run(
+          "linear-pp-cli",
+          [
+            "documents",
+            "edit",
+            existingDocument.identifier,
+            "--title",
+            prepared.title,
+            "--content-file",
+            contentFile,
+            "--agent",
+            "--select",
+            "url,slugId",
+          ],
+          { maxBuffer: 2 * 1024 * 1024 },
+        );
+        try {
+          return parseDocumentCreateOutput(editOutput.stdout);
+        } catch {
+          return {
+            url: existingDocument.url,
+            identifier: existingDocument.identifier,
+          };
+        }
+      }
+      const output = await run(
         "linear-pp-cli",
         [
           "documents",
           "create",
+          "--idempotent",
           "--title",
-          title,
+          prepared.title,
           "--issue",
           issueIdentifier,
           "--content-file",
@@ -471,6 +589,12 @@ function createLinearDocumentPublisher(): SpecReviewDocumentPublisher {
       };
     },
   };
+}
+
+async function defaultExecFileAsync(): Promise<ExecFileAsync> {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  return promisify(execFile) as ExecFileAsync;
 }
 
 function redactSelectionDecisions(
