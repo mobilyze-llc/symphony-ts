@@ -2482,7 +2482,7 @@ describe("AgentRunner", () => {
                 "abort",
                 () => {
                   clearTimeout(timeout);
-                  reject(new Error("Stopped due to terminal_state."));
+                  reject(new Error("Stopped due to non_emergency_stop."));
                 },
                 { once: true },
               );
@@ -2495,15 +2495,74 @@ describe("AgentRunner", () => {
       attempt: null,
       signal: controller.signal,
     });
-    controller.abort("Stopped due to terminal_state.");
+    controller.abort("Stopped due to non_emergency_stop.");
 
     await expect(pending).rejects.toMatchObject({
       name: "AgentRunnerError",
       status: "canceled_by_reconciliation",
       failedPhase: "launching_agent_process",
-      message: "Stopped due to terminal_state.",
+      message: "Stopped due to non_emergency_stop.",
     } satisfies Partial<AgentRunnerError>);
-    expect(close).toHaveBeenCalled();
+    expect(close).toHaveBeenCalledWith({
+      closureInitiator: "operator_abort",
+    });
+  });
+
+  it("force-closes the Codex client when the orchestrator aborts for emergency stop", async () => {
+    const root = await createRoot();
+    const close = vi.fn().mockResolvedValue(undefined);
+    const controller = new AbortController();
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker: createTracker({
+        refreshStates: [
+          { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+        ],
+      }),
+      createCodexClient: (input) =>
+        createStubCodexClient([], input, {
+          close,
+          startSession: async () =>
+            await new Promise((resolve, reject) => {
+              const timeout = setTimeout(() => {
+                resolve({
+                  status: "completed" as const,
+                  threadId: "thread-1",
+                  turnId: "turn-1",
+                  sessionId: "thread-1-turn-1",
+                  usage: null,
+                  rateLimits: null,
+                  message: "done",
+                });
+              }, 500);
+              controller.signal.addEventListener(
+                "abort",
+                () => {
+                  clearTimeout(timeout);
+                  reject(new Error("Stopped due to emergency_stop."));
+                },
+                { once: true },
+              );
+            }),
+        }),
+    });
+
+    const pending = runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      signal: controller.signal,
+    });
+    controller.abort("Stopped due to emergency_stop.");
+
+    await expect(pending).rejects.toMatchObject({
+      name: "AgentRunnerError",
+      status: "canceled_by_reconciliation",
+      message: "Stopped due to emergency_stop.",
+    } satisfies Partial<AgentRunnerError>);
+    expect(close).toHaveBeenCalledWith({
+      closureInitiator: "operator_abort",
+      forceKillAfterGrace: true,
+    });
   });
 });
 

@@ -228,7 +228,10 @@ interface TrackedWorkerStopSignalDeliveryOptions {
   readProcessCwd?: ProcessCwdReader;
   readProcessCommand?: ProcessCommandReader;
   sendSignal?: ProcessSignalSender;
+  emergencyStopGraceMs?: number;
 }
+
+const EMERGENCY_STOP_SIGNAL_GRACE_MS = 1_000;
 
 export interface LsofCwdProcessEntry {
   pid: number;
@@ -5482,25 +5485,27 @@ export async function deliverTrackedWorkerStopSignal(
     };
   }
 
-  const attempts = [input.trackedProcessPid].map(
-    (pid): StopSignalDeliveryAttempt => {
-      const sigterm = signalPid(pid, "SIGTERM", options.sendSignal);
-      const sigkill =
-        sigterm.status === "failed"
-          ? signalPid(pid, "SIGKILL", options.sendSignal)
-          : null;
-      return {
-        pid,
-        processGroupId: null,
-        sigterm: sigterm.status,
-        sigkill: sigkill?.status ?? "not_attempted",
-      };
-    },
-  );
+  const attempts: StopSignalDeliveryAttempt[] = [];
+  for (const pid of [input.trackedProcessPid]) {
+    const sigterm = signalPid(pid, "SIGTERM", options.sendSignal);
+    let sigkill: ProcessSignalDeliveryResult | null = null;
+    if (input.reason === "emergency_stop") {
+      await delay(
+        options.emergencyStopGraceMs ?? EMERGENCY_STOP_SIGNAL_GRACE_MS,
+      );
+      sigkill = signalPid(pid, "SIGKILL", options.sendSignal);
+    } else if (sigterm.status === "failed") {
+      sigkill = signalPid(pid, "SIGKILL", options.sendSignal);
+    }
+    attempts.push({
+      pid,
+      processGroupId: null,
+      sigterm: sigterm.status,
+      sigkill: sigkill?.status ?? "not_attempted",
+    });
+  }
 
-  const failedAttempts = attempts.filter(
-    (attempt) => attempt.sigterm === "failed" && attempt.sigkill === "failed",
-  );
+  const failedAttempts = attempts.filter(isFailedStopSignalAttempt);
   const status = getStopSignalDeliveryStatus(attempts, failedAttempts);
   return {
     status,
@@ -5511,10 +5516,20 @@ export async function deliverTrackedWorkerStopSignal(
     warning:
       failedAttempts.length === 0
         ? null
-        : `SIGTERM and SIGKILL both failed for ${failedAttempts.length} worker process target(s): ${failedAttempts
-            .map((attempt) => `pid=${attempt.pid}`)
-            .join(", ")}`,
+        : input.reason === "emergency_stop"
+          ? `Emergency stop signal proof failed for ${failedAttempts.length} worker process target(s): ${failedAttempts
+              .map((attempt) => `pid=${attempt.pid}`)
+              .join(", ")}`
+          : `SIGTERM and SIGKILL both failed for ${failedAttempts.length} worker process target(s): ${failedAttempts
+              .map((attempt) => `pid=${attempt.pid}`)
+              .join(", ")}`,
   };
+}
+
+function isFailedStopSignalAttempt(
+  attempt: StopSignalDeliveryAttempt,
+): boolean {
+  return attempt.sigkill === "failed";
 }
 
 export async function verifyTrackedProcessSignalTarget(input: {
@@ -5784,6 +5799,10 @@ function formatWorkerErrorReason(error: unknown): string {
   const message = toErrorMessage(error);
   const code = extractErrorCode(error);
   return code === null ? message : `${code}: ${message}`;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function isCodexUserInputRequiredReason(reason: string | undefined): boolean {
