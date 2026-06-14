@@ -35,6 +35,8 @@ export * from "./tracker/linear-queries.js";
 export * from "./tracker/ticket-feature.js";
 export * from "./tracker/tracker.js";
 export * from "./runners/index.js";
+export * from "./claude-runner/cmux-claude-runner.js";
+export * from "./spec-review/spec-review.js";
 export * from "./workspace/path-safety.js";
 export * from "./workspace/workspace-manager.js";
 export * from "./slack-bot/index.js";

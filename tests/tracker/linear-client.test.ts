@@ -8,6 +8,7 @@ import {
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
   LINEAR_TICKET_FEATURE_ISSUES_QUERY,
+  LINEAR_UPDATE_ISSUE_DESCRIPTION_MUTATION,
   LinearTrackerClient,
   type TrackerError,
 } from "../../src/index.js";
@@ -107,6 +108,41 @@ describe("LinearTrackerClient", () => {
       [],
     );
     expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("updates only issue description for durable spec-review reconciliation", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issueUpdate: {
+            success: true,
+            issue: {
+              id: "issue-568",
+              identifier: "SYMPH-568",
+              title: "Spec review",
+            },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+
+    await expect(
+      client.updateIssueDescription("issue-568", "Reviewed body"),
+    ).resolves.toEqual({
+      id: "issue-568",
+      identifier: "SYMPH-568",
+      title: "Spec review",
+    });
+
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toBe(LINEAR_UPDATE_ISSUE_DESCRIPTION_MUTATION);
+    expect(request.query).not.toContain("labelIds");
+    expect(request.query).not.toContain("parentId");
+    expect(request.variables).toEqual({
+      issueId: "issue-568",
+      description: "Reviewed body",
+    });
   });
 
   it("fetches ticket feature issues with creator and relation history evidence", async () => {

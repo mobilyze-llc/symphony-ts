@@ -28,6 +28,7 @@ import {
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
   LINEAR_SEARCH_ISSUES_BY_TITLE_AND_TEAM_QUERY,
   LINEAR_TICKET_FEATURE_ISSUES_QUERY,
+  LINEAR_UPDATE_ISSUE_DESCRIPTION_MUTATION,
   LINEAR_WORKFLOW_STATES_QUERY,
 } from "./linear-queries.js";
 import {
@@ -417,6 +418,43 @@ export class LinearTrackerClient implements IssueTracker {
         { details: response },
       );
     }
+  }
+
+  async updateIssueDescription(
+    issueId: string,
+    description: string,
+  ): Promise<{ id: string; identifier: string; title: string }> {
+    const response = await this.postGraphql<LinearIssueDetailsUpdateData>(
+      LINEAR_UPDATE_ISSUE_DESCRIPTION_MUTATION,
+      { issueId, description },
+    );
+
+    if (response.issueUpdate?.success !== true) {
+      throw new TrackerError(
+        ERROR_CODES.linearGraphqlErrors,
+        "Linear issueUpdate(description) mutation did not return success.",
+        { details: response },
+      );
+    }
+
+    const issue = response.issueUpdate.issue;
+    if (
+      typeof issue?.id !== "string" ||
+      typeof issue.identifier !== "string" ||
+      typeof issue.title !== "string"
+    ) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear issueUpdate(description) returned incomplete issue data.",
+        { details: response },
+      );
+    }
+
+    return {
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+    };
   }
 
   async createIssue(input: {

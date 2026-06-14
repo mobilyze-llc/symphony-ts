@@ -362,6 +362,12 @@ export interface RuntimeSnapshot {
    */
   council_reviews?: Record<string, RuntimeSnapshotCouncilReview>;
   /**
+   * Durable spec-time review readiness (SYMPH-568), reduced from
+   * spec_review_result journal rows. This is the admission/dashboard-facing
+   * state; raw Claude prose and prompt context stay in artifacts/Linear Docs.
+   */
+  spec_reviews?: Record<string, RuntimeSnapshotSpecReview>;
+  /**
    * Fail-open component visibility (SYMPH-407 scope 5): every fail-open
    * element reports {enabled, degraded_reason?}.
    */
@@ -522,6 +528,25 @@ export interface RuntimeSnapshotCouncilReview {
   cursor_range: {
     first_sequence: number | null;
     last_sequence: number | null;
+  };
+}
+
+export interface RuntimeSnapshotSpecReview {
+  issue_id: string;
+  issue_identifier: string;
+  availability: "available";
+  readiness_state: string;
+  verdict: string | null;
+  mode: string | null;
+  source_intent_hash: string | null;
+  review_artifact_hash: string | null;
+  artifact_path: string | null;
+  linear_doc_url: string | null;
+  completed_at: string | null;
+  latest_summary: string;
+  cursor_range: {
+    first_sequence: number;
+    last_sequence: number;
   };
 }
 
@@ -789,6 +814,7 @@ export function buildRuntimeSnapshot(
     deploy_drift: enrichment?.deployDrift ?? null,
     watchdog: buildWatchdogSection(state, enrichment?.watchdog ?? null),
     council_reviews: buildCouncilReviewSnapshots(state),
+    spec_reviews: buildSpecReviewSnapshots(state),
     components: enrichment?.components ?? {},
   };
 }
@@ -933,6 +959,60 @@ function buildIssueIdentifierMap(
     }
   }
   return identifiers;
+}
+
+function buildSpecReviewSnapshots(
+  state: OrchestratorState,
+): Record<string, RuntimeSnapshotSpecReview> {
+  const byIssue = new Map<string, DispatcherRunJournalEntry[]>();
+  for (const entry of state.dispatcherRunJournal) {
+    if (entry.kind !== "spec_review_result") {
+      continue;
+    }
+    const entries = byIssue.get(entry.issueId) ?? [];
+    entries.push(entry);
+    byIssue.set(entry.issueId, entries);
+  }
+
+  const snapshots: Record<string, RuntimeSnapshotSpecReview> = {};
+  for (const [issueId, entries] of [...byIssue.entries()].sort(
+    ([leftId, leftEntries], [rightId, rightEntries]) =>
+      (leftEntries.at(-1)?.issueIdentifier ?? leftId).localeCompare(
+        rightEntries.at(-1)?.issueIdentifier ?? rightId,
+        "en",
+      ),
+  )) {
+    const sorted = entries.sort(
+      (left, right) => left.sequence - right.sequence,
+    );
+    const latest = sorted.at(-1);
+    if (latest === undefined) {
+      continue;
+    }
+    const metadata = latest.metadata;
+    snapshots[issueId] = {
+      issue_id: issueId,
+      issue_identifier: latest.issueIdentifier,
+      availability: "available",
+      readiness_state:
+        stringField(metadata.readiness_state) ??
+        stringField(metadata.status) ??
+        "failed",
+      verdict: stringField(metadata.review_verdict),
+      mode: stringField(metadata.mode),
+      source_intent_hash: stringField(metadata.source_intent_hash),
+      review_artifact_hash: stringField(metadata.review_artifact_hash),
+      artifact_path: stringField(metadata.artifact_path),
+      linear_doc_url: stringField(metadata.linear_doc_url),
+      completed_at: stringField(metadata.completed_at) ?? latest.timestamp,
+      latest_summary: latest.summary,
+      cursor_range: {
+        first_sequence: sorted[0]?.sequence ?? latest.sequence,
+        last_sequence: latest.sequence,
+      },
+    };
+  }
+  return snapshots;
 }
 
 function emptyCouncilReviewSnapshot(
@@ -1561,6 +1641,12 @@ export interface StateDeltaEntryMetadata {
   termination_action?: string;
   termination_alert_level?: string;
   resume_reason?: string;
+  mode?: string;
+  source_intent_hash?: string;
+  readiness_state?: string;
+  review_verdict?: string;
+  review_artifact_hash?: string;
+  linear_doc_url?: string;
   rework_count?: number;
   lane_count?: number;
   finding_count?: number;
@@ -1686,6 +1772,12 @@ const STATE_DELTA_METADATA_STRING_FIELDS = [
   "termination_action",
   "termination_alert_level",
   "resume_reason",
+  "mode",
+  "source_intent_hash",
+  "readiness_state",
+  "review_verdict",
+  "review_artifact_hash",
+  "linear_doc_url",
 ] as const;
 
 const STATE_DELTA_METADATA_NUMBER_FIELDS = [

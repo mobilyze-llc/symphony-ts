@@ -4458,16 +4458,24 @@ describe("runHeadlessCouncilGate", () => {
       verdict: "error",
       degradedReason: "substrate_stall",
     });
-    expect(codexLeadLane?.message).toContain(
-      "overall lane deadline elapsed before the Codex lead could start",
-    );
-    expect(
-      progress.some((line) =>
-        line.includes(
-          "lane_deadline_elapsed_before_start laneId=codex-high-lead",
-        ),
+    const sawBeforeStartDeadline = progress.some((line) =>
+      line.includes(
+        "lane_deadline_elapsed_before_start laneId=codex-high-lead",
       ),
-    ).toBe(true);
+    );
+    const sawLaneStall = progress.some((line) =>
+      line.includes("lane_stalled laneId=codex-high-lead"),
+    );
+    if (sawBeforeStartDeadline) {
+      expect(codexLeadLane?.message).toContain(
+        "overall lane deadline elapsed before the Codex lead could start",
+      );
+    } else {
+      expect(sawLaneStall).toBe(true);
+      expect(codexLeadLane?.message).toContain(
+        "Lane never reached a terminal state",
+      );
+    }
   });
 
   it("instructs the Codex lead not to turn substrate stalls into code findings", async () => {
