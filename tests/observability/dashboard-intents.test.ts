@@ -595,6 +595,18 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
                 stage: "implement",
                 attempt: null,
                 codex_app_server_pid: "1001",
+                process_identity: {
+                  pid: 1001,
+                  process_group_id: 1001,
+                  session_id: 1001,
+                  started_at: "linux-starttime:123456",
+                  command_present: true,
+                  launch_token_present: true,
+                },
+                identity_status: "present",
+                cleanup_status: "confirmed",
+                cleanup_status_reason:
+                  "Cleanup proof is confirmed; process identity is redacted for display.",
               },
             ],
             stop_requests: [

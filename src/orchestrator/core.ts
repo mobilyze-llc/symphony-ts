@@ -284,6 +284,11 @@ export interface StopSignalDeliveryAttempt {
 }
 
 export interface StopSignalDelivery {
+  /**
+   * Aggregate proof status. "delivered" means every target reached a terminal
+   * non-failed state; it can include a failed SIGTERM followed by delivered
+   * SIGKILL, so operator displays must keep per-signal attempts visible.
+   */
   status: StopSignalDeliveryStatus;
   reason: StopReason;
   attemptedAt: string;
@@ -12383,6 +12388,8 @@ function isStopSignalDeliveryStatus(
 }
 
 function isValidTimestamp(value: unknown): value is string {
+  // Intentionally Date.parse-permissive for persisted/runtime telemetry
+  // compatibility; producers still emit Date#toISOString.
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
 }
 
@@ -12410,6 +12417,9 @@ function isStopSignalDeliveryAttempt(
 }
 
 function isSignalTargetId(value: unknown): value is number {
+  // Signal telemetry only accepts process targets that are safe to address:
+  // pid 1 is the system init/launchd target and pid 0 has process-group
+  // semantics, so both are invalid proof targets.
   return Number.isInteger(value) && Number(value) > 1;
 }
 
@@ -12436,15 +12446,29 @@ function isStopSignalDeliveryStatusConsistent(
       (status === "failed" && typeof warning === "string")
     );
   }
-  const failedAttempts = attempts.filter(
-    (attempt) => attempt.sigkill === "failed",
-  );
-  if (failedAttempts.length === 0) {
-    return status === "delivered";
+  return status === deriveAttemptedStopSignalDeliveryStatus(attempts);
+}
+
+export function deriveAttemptedStopSignalDeliveryStatus(
+  attempts: readonly StopSignalDeliveryAttempt[],
+): Exclude<StopSignalDeliveryStatus, "not_attempted"> | null {
+  // Empty attempts do not distinguish "not attempted" from "failed before
+  // attempts were recorded"; callers must choose that transport status from
+  // their warning/context and only use this helper for attempted targets.
+  if (attempts.length === 0) {
+    return null;
   }
-  return failedAttempts.length === attempts.length
-    ? status === "failed"
-    : status === "partial";
+  const failedAttempts = getFailedStopSignalDeliveryAttempts(attempts);
+  if (failedAttempts.length === 0) {
+    return "delivered";
+  }
+  return failedAttempts.length === attempts.length ? "failed" : "partial";
+}
+
+export function getFailedStopSignalDeliveryAttempts(
+  attempts: readonly StopSignalDeliveryAttempt[],
+): StopSignalDeliveryAttempt[] {
+  return attempts.filter((attempt) => attempt.sigkill === "failed");
 }
 
 function isReviewSubstrateDegradationMessage(

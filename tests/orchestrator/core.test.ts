@@ -18,6 +18,8 @@ import {
   type SupervisionResteerRequest,
   classifyExitOutcome,
   computeFailureRetryDelayMs,
+  deriveAttemptedStopSignalDeliveryStatus,
+  getFailedStopSignalDeliveryAttempts,
   isStopSignalDelivery,
   sortIssuesForDispatch,
 } from "../../src/orchestrator/core.js";
@@ -2719,6 +2721,46 @@ describe("orchestrator core", () => {
           },
         ],
         warning: null,
+      }),
+    ).toBe(false);
+  });
+
+  it("uses the shared stop-signal delivery status contract", () => {
+    const sigkillDeliveredAfterSigtermFailure = [
+      {
+        pid: 4242,
+        processGroupId: null,
+        sigterm: "failed" as const,
+        sigkill: "delivered" as const,
+      },
+    ];
+    expect(deriveAttemptedStopSignalDeliveryStatus([])).toBeNull();
+    expect(
+      deriveAttemptedStopSignalDeliveryStatus(
+        sigkillDeliveredAfterSigtermFailure,
+      ),
+    ).toBe("delivered");
+    expect(
+      getFailedStopSignalDeliveryAttempts(sigkillDeliveredAfterSigtermFailure),
+    ).toEqual([]);
+    expect(
+      isStopSignalDelivery({
+        status: "delivered",
+        reason: "emergency_stop",
+        attemptedAt: "Fri, 06 Mar 2026 00:00:05 GMT",
+        workspacePath: "/tmp/workspaces/1",
+        attempts: sigkillDeliveredAfterSigtermFailure,
+        warning: null,
+      }),
+    ).toBe(true);
+    expect(
+      isStopSignalDelivery({
+        status: "failed",
+        reason: "emergency_stop",
+        attemptedAt: "2026-03-06T00:00:05.000Z",
+        workspacePath: "/tmp/workspaces/1",
+        attempts: sigkillDeliveredAfterSigtermFailure,
+        warning: "SIGTERM failed",
       }),
     ).toBe(false);
   });
