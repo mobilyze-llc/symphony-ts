@@ -52,12 +52,14 @@ describe("parseDotenv", () => {
       parseDotenv(`
 # comment
 export CMUX_SPAWN_BIN="/opt/cmux-spawn"
+export	REVIEW_GATE_ALT=/opt/alt-gate
 SYMPHONY_COUNCIL_REVIEW_GATE='/opt/symphony-council-review-gate'
 PATH=/opt/bin:/usr/bin # operator shell
 ignored
 `),
     ).toEqual({
       CMUX_SPAWN_BIN: "/opt/cmux-spawn",
+      REVIEW_GATE_ALT: "/opt/alt-gate",
       SYMPHONY_COUNCIL_REVIEW_GATE: "/opt/symphony-council-review-gate",
       PATH: "/opt/bin:/usr/bin",
     });
@@ -161,6 +163,44 @@ printf '{"ok":true}\\n'
       [join(bin, "symphony-council-review-gate"), "--help"],
       [join(bin, "cmux-spawn"), "preflight", "--caffeinate", "--json"],
     ]);
+  });
+
+  it("fails when executable env overrides are bare PATH commands", async () => {
+    const root = await createTempDir("review-runtime-preflight-bare-env-");
+    const workspace = join(root, "product");
+    const bin = join(root, "bin");
+    await mkdir(workspace, { recursive: true });
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(workspace, "package.json"), '{"name":"product"}\n');
+    await writeExecutable(
+      join(bin, "symphony-council-review-gate"),
+      "#!/usr/bin/env sh\nexit 0\n",
+    );
+    await writeExecutable(
+      join(bin, "cmux-spawn"),
+      "#!/usr/bin/env sh\nexit 0\n",
+    );
+    const envFile = join(root, ".env");
+    await writeFile(
+      envFile,
+      "SYMPHONY_COUNCIL_REVIEW_GATE=symphony-council-review-gate\nCMUX_SPAWN_BIN=cmux-spawn\n",
+    );
+
+    const stdout: string[] = [];
+    const exitCode = await runReviewRuntimePreflightCli(
+      ["--workspace", workspace, "--env-file", envFile, "--json"],
+      {
+        env: { PATH: `${bin}:/usr/bin:/bin` },
+        stdout: (message) => stdout.push(message),
+        stderr: () => undefined,
+        execFile: async () => ({ stdout: "", stderr: "" }),
+      },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(stdout.join("")).toContain(
+      "env overrides must be absolute or workspace-relative executable paths",
+    );
   });
 
   it("fails from a symphony-ts checkout so the smoke cannot pass via dist fallback", async () => {

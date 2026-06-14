@@ -274,8 +274,8 @@ export function parseDotenv(contents: string): Record<string, string> {
     if (trimmed === "" || trimmed.startsWith("#")) {
       continue;
     }
-    const line = trimmed.startsWith("export ")
-      ? trimmed.slice("export ".length).trim()
+    const line = /^export\s+/.test(trimmed)
+      ? trimmed.replace(/^export\s+/, "").trim()
       : trimmed;
     const equalsIndex = line.indexOf("=");
     if (equalsIndex <= 0) {
@@ -364,6 +364,15 @@ async function resolveExecutable(input: {
 }): Promise<ExecutableResolution> {
   const envValue = input.env[input.envName]?.trim();
   if (envValue !== undefined && envValue !== "") {
+    if (!envValue.includes("/") && !isAbsolute(envValue)) {
+      return {
+        name: input.name,
+        status: "failed",
+        source: "env",
+        path: null,
+        message: `${input.envName} is set to ${envValue}, but env overrides must be absolute or workspace-relative executable paths. Unset ${input.envName} to use ${input.commandName} on PATH. ${input.failureGuidance}`,
+      };
+    }
     const envPath = await resolveExecutableValue(
       envValue,
       input.env,
