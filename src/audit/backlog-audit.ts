@@ -1,7 +1,7 @@
 import { Agent } from "undici";
 import { z } from "zod";
 
-import type { Issue } from "../domain/model.js";
+import type { BlockerRef, Issue } from "../domain/model.js";
 
 export const BACKLOG_AUDIT_FINDING_TYPES = [
   "duplicate",
@@ -83,12 +83,19 @@ export interface RunBacklogAuditInput {
 
 export interface RunBacklogAuditChunkedInput extends RunBacklogAuditInput {
   chunkSize: number | null;
+  relationshipContextWindowSize?: number | null;
   onChunkStart?: (input: {
     chunkIndex: number;
     chunkCount: number;
     issueCount: number;
   }) => void;
-  onRelationshipPassStart?: (input: { issueCount: number }) => void;
+  onRelationshipPassStart?: (input: {
+    issueCount: number;
+    passIndex: number;
+    passCount: number;
+    contextIssueCount: number;
+    windowSize: number | null;
+  }) => void;
   runChunk?: (input: RunBacklogAuditInput) => Promise<BacklogAuditReport>;
 }
 
@@ -120,6 +127,7 @@ export const DEFAULT_BACKLOG_AUDIT_MAX_STATE_DELTA_ENTRIES = 5;
 export const DEFAULT_BACKLOG_AUDIT_MAX_STATE_DELTA_BYTES = 2_000;
 export const DEFAULT_BACKLOG_AUDIT_MAX_ISSUE_DESCRIPTION_CHARS = 80;
 export const DEFAULT_BACKLOG_AUDIT_CHUNK_SIZE = 4;
+export const DEFAULT_BACKLOG_AUDIT_RELATIONSHIP_CONTEXT_WINDOW_SIZE = 32;
 const STATE_DELTA_PAGE_LIMIT = 500;
 const MAX_STATE_DELTA_STRING_CHARS = 240;
 
@@ -314,22 +322,46 @@ export async function runBacklogAuditChunked(
   if (input.chunkSize !== null && input.chunkSize <= 0) {
     throw new Error("Backlog audit chunkSize must be a positive integer");
   }
+  const relationshipContextWindowSize =
+    input.relationshipContextWindowSize === undefined
+      ? DEFAULT_BACKLOG_AUDIT_RELATIONSHIP_CONTEXT_WINDOW_SIZE
+      : input.relationshipContextWindowSize;
+  if (
+    relationshipContextWindowSize !== null &&
+    relationshipContextWindowSize <= 0
+  ) {
+    throw new Error(
+      "Backlog audit relationshipContextWindowSize must be a positive integer",
+    );
+  }
   if (input.chunkSize === null || input.issues.length <= input.chunkSize) {
     return (input.runChunk ?? runBacklogAudit)(input);
   }
   const generatedAt = input.generatedAt ?? new Date().toISOString();
   const chunks = chunkIssues(input.issues, input.chunkSize);
-  const reports: BacklogAuditReport[] = [];
-  input.onRelationshipPassStart?.({ issueCount: input.issues.length });
-  reports.push(
-    await (input.runChunk ?? runBacklogAudit)({
-      ...input,
-      issues: [],
-      contextIssues: input.issues,
-      findingTypes: ["duplicate", "supersession"],
-      generatedAt,
-    }),
+  const relationshipContextWindows = buildRelationshipContextWindows(
+    input.issues,
+    relationshipContextWindowSize,
   );
+  const reports: BacklogAuditReport[] = [];
+  for (const [index, contextIssues] of relationshipContextWindows.entries()) {
+    input.onRelationshipPassStart?.({
+      issueCount: input.issues.length,
+      passIndex: index + 1,
+      passCount: relationshipContextWindows.length,
+      contextIssueCount: contextIssues.length,
+      windowSize: relationshipContextWindowSize,
+    });
+    reports.push(
+      await (input.runChunk ?? runBacklogAudit)({
+        ...input,
+        issues: [],
+        contextIssues,
+        findingTypes: ["duplicate", "supersession"],
+        generatedAt,
+      }),
+    );
+  }
   for (const [index, chunk] of chunks.entries()) {
     input.onChunkStart?.({
       chunkIndex: index + 1,
@@ -438,6 +470,32 @@ function chunkIssues(issues: readonly Issue[], chunkSize: number): Issue[][] {
     chunks.push(issues.slice(index, index + chunkSize));
   }
   return chunks;
+}
+
+function buildRelationshipContextWindows(
+  issues: readonly Issue[],
+  windowSize: number | null,
+): Issue[][] {
+  if (issues.length === 0) {
+    return [[]];
+  }
+  if (windowSize === null || issues.length <= windowSize) {
+    return [[...issues]];
+  }
+  const chunks = chunkIssues(issues, windowSize);
+  const windows: Issue[][] = [];
+  for (let leftIndex = 0; leftIndex < chunks.length; leftIndex += 1) {
+    for (
+      let rightIndex = leftIndex;
+      rightIndex < chunks.length;
+      rightIndex += 1
+    ) {
+      const left = chunks[leftIndex] ?? [];
+      const right = chunks[rightIndex] ?? [];
+      windows.push(leftIndex === rightIndex ? [...left] : [...left, ...right]);
+    }
+  }
+  return windows;
 }
 
 export function createBacklogAuditModelFetch(input: {
@@ -1201,10 +1259,7 @@ function toAuditIssue(
   issue: Issue,
   limits: { maxDescriptionChars: number | null },
 ): Record<string, unknown> {
-  const description =
-    issue.description === null
-      ? null
-      : stripStructuredBoundaryTags(issue.description);
+  const description = sanitizeAuditNullableText(issue.description);
   const descriptionExcerpt =
     description === null
       ? null
@@ -1212,9 +1267,9 @@ function toAuditIssue(
         ? description
         : description.slice(0, limits.maxDescriptionChars);
   return {
-    id: issue.id,
-    identifier: issue.identifier,
-    title: stripStructuredBoundaryTags(issue.title),
+    id: sanitizeAuditText(issue.id),
+    identifier: sanitizeAuditText(issue.identifier),
+    title: sanitizeAuditText(issue.title),
     description: descriptionExcerpt,
     description_truncated:
       description !== null &&
@@ -1222,31 +1277,50 @@ function toAuditIssue(
       description.length > limits.maxDescriptionChars,
     original_description_chars: description?.length ?? null,
     priority: issue.priority,
-    state: issue.state,
-    labels: issue.labels,
-    blockedBy: issue.blockedBy,
+    state: sanitizeAuditText(issue.state),
+    labels: sanitizeAuditTextArray(issue.labels),
+    blockedBy: sanitizeAuditBlockerRefs(issue.blockedBy),
     createdAt: issue.createdAt,
     updatedAt: issue.updatedAt,
-    url: issue.url,
+    url: sanitizeAuditNullableText(issue.url),
   };
 }
 
 function toAuditIssueIndexRow(issue: Issue): unknown[] {
-  const description =
-    issue.description === null
-      ? null
-      : stripStructuredBoundaryTags(issue.description);
+  const description = sanitizeAuditNullableText(issue.description);
   return [
-    issue.id,
-    issue.identifier,
-    stripStructuredBoundaryTags(issue.title).slice(0, 120),
-    issue.state,
+    sanitizeAuditText(issue.id),
+    sanitizeAuditText(issue.identifier),
+    sanitizeAuditText(issue.title).slice(0, 120),
+    sanitizeAuditText(issue.state),
     issue.priority,
-    issue.labels,
-    issue.blockedBy,
+    sanitizeAuditTextArray(issue.labels),
+    sanitizeAuditBlockerRefs(issue.blockedBy),
     issue.updatedAt,
     description === null ? null : description.slice(0, 60),
   ];
+}
+
+function sanitizeAuditNullableText(text: string | null): string | null {
+  return text === null ? null : sanitizeAuditText(text);
+}
+
+function sanitizeAuditTextArray(values: readonly string[]): string[] {
+  return values.map(sanitizeAuditText);
+}
+
+function sanitizeAuditBlockerRefs(values: readonly BlockerRef[]): BlockerRef[] {
+  return values.map((value) => ({
+    id: sanitizeAuditNullableText(value.id),
+    identifier: sanitizeAuditNullableText(value.identifier),
+    state: sanitizeAuditNullableText(value.state),
+  }));
+}
+
+function sanitizeAuditText(text: string): string {
+  // Treat tracker-derived strings as prompt text even when they are system
+  // handles today; future extractor fields should not smuggle boundary tags.
+  return stripStructuredBoundaryTags(text);
 }
 
 function stripStructuredBoundaryTags(text: string): string {
