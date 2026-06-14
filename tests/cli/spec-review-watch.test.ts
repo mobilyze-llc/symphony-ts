@@ -21,6 +21,8 @@ import type {
 import {
   SENSITIVE_SOURCE_INTENT_HASH,
   type SpecReviewRunIssueResult,
+  buildReviewedIssueDescription,
+  computeSourceIntentHash,
 } from "../../src/spec-review/spec-review.js";
 
 describe("symphony-spec-review-watch CLI", () => {
@@ -314,6 +316,84 @@ describe("symphony-spec-review-watch CLI", () => {
     expect(output).not.toContain("private body");
     expect(output).not.toContain("Secret customer key");
     expect(output).toContain("[redacted: privacy-sensitive]");
+  });
+
+  it("uses latest matching spec-review journal state when selecting dry-run candidates", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    const stdout = vi.fn();
+    const issue = makeIssue({
+      labels: ["needs:spec-review"],
+      description: "Build the thing.\n",
+    });
+    const sourceIntentHash = computeSourceIntentHash(issue);
+    const reviewedDescription = buildReviewedIssueDescription({
+      originalDescription: issue.description ?? "",
+      sourceIntentHash,
+      artifactHash: "artifact",
+      artifactPath: "/tmp/artifact.md",
+      mode: "observe",
+      readinessState: "valid",
+      verdict: "ready_as_written",
+      linearDocUrl: null,
+      generatedAt: "2026-06-14T00:00:00.000Z",
+      reconciliation: {
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "Looks good.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      },
+    });
+
+    const exitCode = await runSpecReviewWatchCli(
+      ["WORKFLOW.md", "--workspace", workspace, "--dry-run"],
+      {
+        stdout,
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () => fakeConfig(),
+        createTracker: () => ({
+          fetchIssuesByStates: async () => [
+            { ...issue, description: reviewedDescription },
+          ],
+          fetchIssueReferencesByIds: async () => [],
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+        readDispatcherRunJournal: async () => [
+          makeJournalEntry(issue, "valid", 1, sourceIntentHash),
+          makeJournalEntry(issue, "failed", 2, sourceIntentHash),
+        ],
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
+      selectedCount: number;
+      decisions: Array<{ status: string; reasons: string[] }>;
+    };
+    expect(output.selectedCount).toBe(1);
+    expect(output.decisions).toContainEqual(
+      expect.objectContaining({
+        status: "selected",
+        reasons: expect.arrayContaining([
+          "latest_spec_review_journal:failed",
+          "trigger_label:needs:spec-review",
+        ]),
+      }),
+    );
   });
 
   it("continues the batch when one selected issue throws", async () => {
@@ -839,10 +919,12 @@ function makeRunResult(
 function makeJournalEntry(
   issue: Issue,
   readinessState: string,
+  sequence = 1,
+  sourceIntentHash?: string,
 ): DispatcherRunJournalEntry {
   return {
-    sequence: 1,
-    idempotencyKey: `spec-review:${issue.id}`,
+    sequence,
+    idempotencyKey: `spec-review:${issue.id}:${sequence}`,
     timestamp: "2026-06-14T00:00:00.000Z",
     kind: "spec_review_result",
     issueId: issue.id,
@@ -855,6 +937,9 @@ function makeJournalEntry(
     summary: "test",
     metadata: {
       readiness_state: readinessState,
+      ...(sourceIntentHash === undefined
+        ? {}
+        : { source_intent_hash: sourceIntentHash }),
     },
   };
 }

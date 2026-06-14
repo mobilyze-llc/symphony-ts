@@ -11,6 +11,7 @@ import { resolveWorkflowConfig } from "../config/config-resolver.js";
 import type { ResolvedWorkflowConfig } from "../config/types.js";
 import { loadWorkflowDefinition } from "../config/workflow-loader.js";
 import type { DispatcherRunJournalEntry } from "../domain/model.js";
+import { readDispatcherRunJournal } from "../logging/run-journal.js";
 import {
   type SpecReviewDocumentPublisher,
   type SpecReviewMode,
@@ -60,6 +61,7 @@ export interface SpecReviewWatchCliDependencies {
   createTracker?: (config: ResolvedWorkflowConfig) => SpecReviewWatchTracker;
   runSpecReviewForIssue?: typeof runSpecReviewForIssue;
   appendSpecReviewResultJournal?: typeof appendSpecReviewResultJournal;
+  readDispatcherRunJournal?: typeof readDispatcherRunJournal;
   documentPublisher?: SpecReviewDocumentPublisher;
   preflightDocumentPublisher?: () => Promise<void>;
   now?: () => Date;
@@ -192,6 +194,8 @@ export async function runSpecReviewWatchCli(
   const runReview = dependencies.runSpecReviewForIssue ?? runSpecReviewForIssue;
   const appendJournal =
     dependencies.appendSpecReviewResultJournal ?? appendSpecReviewResultJournal;
+  const readJournal =
+    dependencies.readDispatcherRunJournal ?? readDispatcherRunJournal;
   let parsed: ParsedArgs;
   try {
     parsed = parseSpecReviewWatchArgs(argv);
@@ -235,7 +239,12 @@ export async function runSpecReviewWatchCli(
       ? []
       : await tracker.fetchTicketFeatureIssuesByStates(states);
   const ticketFeatures = extractTicketFeatures({ issues: featureIssues });
-  const decisions = selectSpecReviewCandidates({ issues, ticketFeatures });
+  const specReviewJournal = await readJournal(parsed.workspaceRoot);
+  const decisions = selectSpecReviewCandidates({
+    issues,
+    ticketFeatures,
+    specReviewJournal,
+  });
   const selected = decisions.filter(
     (decision) => decision.status === "selected",
   );

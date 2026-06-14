@@ -238,6 +238,203 @@ describe("spec review", () => {
     });
   });
 
+  it("reselects stale valid description markers when the latest matching journal result failed", () => {
+    const issue = makeIssue({
+      labels: ["needs:spec-review"],
+      description: "Build the thing.\n",
+    });
+    const sourceIntentHash = computeSourceIntentHash(issue);
+    const reviewedDescription = buildReviewedIssueDescription({
+      originalDescription: issue.description ?? "",
+      sourceIntentHash,
+      artifactHash: "artifact",
+      artifactPath: "/tmp/artifact.md",
+      mode: "observe",
+      readinessState: "valid",
+      verdict: "ready_as_written",
+      linearDocUrl: null,
+      generatedAt: "2026-06-14T00:00:00.000Z",
+      reconciliation: {
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "Looks good.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      },
+    });
+
+    expect(
+      selectSpecReviewCandidates({
+        issues: [{ ...issue, description: reviewedDescription }],
+        specReviewJournal: [
+          specReviewEntry(2, {
+            source_intent_hash: sourceIntentHash,
+            readiness_state: "failed",
+            review_verdict: "ready_as_written",
+          }),
+          specReviewEntry(1, {
+            source_intent_hash: sourceIntentHash,
+            readiness_state: "valid",
+            review_verdict: "ready_as_written",
+          }),
+        ],
+      })[0],
+    ).toMatchObject({
+      status: "selected",
+      reasons: expect.arrayContaining([
+        "latest_spec_review_journal:failed",
+        "trigger_label:needs:spec-review",
+      ]),
+    });
+  });
+
+  it.each(["runner_failed", "invalid_artifact"] as const)(
+    "reselects stale valid description markers when the latest matching journal result is %s",
+    (readinessState) => {
+      const issue = makeIssue({
+        labels: ["needs:spec-review"],
+        description: "Build the thing.\n",
+      });
+      const sourceIntentHash = computeSourceIntentHash(issue);
+      const reviewedDescription = buildReviewedIssueDescription({
+        originalDescription: issue.description ?? "",
+        sourceIntentHash,
+        artifactHash: "artifact",
+        artifactPath: "/tmp/artifact.md",
+        mode: "observe",
+        readinessState: "valid",
+        verdict: "ready_as_written",
+        linearDocUrl: null,
+        generatedAt: "2026-06-14T00:00:00.000Z",
+        reconciliation: {
+          schemaVersion: 1,
+          verdict: "ready_as_written",
+          summary: "Looks good.",
+          issueBodyAppend: null,
+          acceptanceCriteria: [],
+          linearDocMarkdown: null,
+          childTicketPlan: [],
+          requiresOperatorContext: false,
+          operatorContextReason: null,
+        },
+      });
+
+      expect(
+        selectSpecReviewCandidates({
+          issues: [{ ...issue, description: reviewedDescription }],
+          specReviewJournal: [
+            specReviewEntry(1, {
+              source_intent_hash: sourceIntentHash,
+              readiness_state: "valid",
+              review_verdict: "ready_as_written",
+            }),
+            specReviewEntry(2, {
+              source_intent_hash: sourceIntentHash,
+              readiness_state: readinessState,
+              review_verdict: null,
+            }),
+          ],
+        })[0],
+      ).toMatchObject({
+        status: "selected",
+        reasons: expect.arrayContaining([
+          `latest_spec_review_journal:${readinessState}`,
+          "trigger_label:needs:spec-review",
+        ]),
+      });
+    },
+  );
+
+  it("ignores failed journal results for a different source intent hash", () => {
+    const issue = makeIssue({
+      labels: ["needs:spec-review"],
+      description: "Build the thing.\n",
+    });
+    const sourceIntentHash = computeSourceIntentHash(issue);
+    const reviewedDescription = buildReviewedIssueDescription({
+      originalDescription: issue.description ?? "",
+      sourceIntentHash,
+      artifactHash: "artifact",
+      artifactPath: "/tmp/artifact.md",
+      mode: "observe",
+      readinessState: "valid",
+      verdict: "ready_as_written",
+      linearDocUrl: null,
+      generatedAt: "2026-06-14T00:00:00.000Z",
+      reconciliation: {
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "Looks good.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      },
+    });
+
+    expect(
+      selectSpecReviewCandidates({
+        issues: [{ ...issue, description: reviewedDescription }],
+        specReviewJournal: [
+          specReviewEntry(2, {
+            source_intent_hash: "different-source-intent",
+            readiness_state: "failed",
+            review_verdict: "ready_as_written",
+          }),
+        ],
+      })[0],
+    ).toMatchObject({
+      status: "skipped",
+      reasons: ["current_valid_spec_review"],
+    });
+  });
+
+  it("uses status metadata as a legacy readiness fallback for matching journal results", () => {
+    const issue = makeIssue({
+      labels: ["needs:spec-review"],
+      description: "Build the thing.\n",
+    });
+    const sourceIntentHash = computeSourceIntentHash(issue);
+
+    expect(
+      selectSpecReviewCandidates({
+        issues: [issue],
+        specReviewJournal: [
+          specReviewEntry(1, {
+            source_intent_hash: sourceIntentHash,
+            status: "valid",
+            review_verdict: "ready_as_written",
+          }),
+        ],
+      })[0],
+    ).toMatchObject({
+      status: "skipped",
+      reasons: ["current_spec_review_journal:valid"],
+    });
+
+    expect(
+      selectSpecReviewCandidates({
+        issues: [issue],
+        specReviewJournal: [
+          specReviewEntry(1, {
+            source_intent_hash: sourceIntentHash,
+            status: "completed",
+            review_verdict: "ready_as_written",
+          }),
+        ],
+      })[0],
+    ).toMatchObject({
+      status: "selected",
+      reasons: expect.arrayContaining(["trigger_label:needs:spec-review"]),
+    });
+  });
+
   it("skips selected tickets that already have a non-valid review for the same source intent", () => {
     const issue = makeIssue({
       labels: ["needs:spec-review"],
