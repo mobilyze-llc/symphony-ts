@@ -714,6 +714,7 @@ export async function runHeadlessCouncilGate(
   dependencies: HeadlessCouncilGateDependencies = {},
 ): Promise<HeadlessCouncilGateResult> {
   const now = dependencies.now ?? (() => new Date());
+  const nowMs = () => now().getTime();
   const runCommand = dependencies.runCommand ?? execFileCommand;
   const progress = dependencies.progress ?? (() => {});
   const env = input.env ?? process.env;
@@ -971,7 +972,7 @@ export async function runHeadlessCouncilGate(
       : commandTimeoutMs(laneTimeoutSeconds) +
         DEFAULT_LANE_STALL_GRACE_SECONDS * 1000;
 
-  const lanePhaseStartedAtMs = Date.now();
+  const lanePhaseStartedAtMs = nowMs();
   const overallTimeoutSeconds = Math.max(
     timeoutSeconds,
     ...reviewerLanes.map((lane) => timeoutSecondsForLane(lane, timeoutSeconds)),
@@ -984,7 +985,7 @@ export async function runHeadlessCouncilGate(
       : laneStallDeadlineMsFor(overallTimeoutSeconds);
   const overallLaneDeadlineAtMs = lanePhaseStartedAtMs + overallLaneDeadlineMs;
   const remainingOverallLaneMs = () =>
-    Math.max(0, overallLaneDeadlineAtMs - Date.now());
+    Math.max(0, overallLaneDeadlineAtMs - nowMs());
   const laneBudgetFor = (laneTimeoutSeconds: number): LaneExecutionBudget => {
     const remainingMs = remainingOverallLaneMs();
     const stallDeadlineMs = Math.min(
@@ -1036,7 +1037,7 @@ export async function runHeadlessCouncilGate(
         formatLaneProgress("deadline_elapsed_before_start", {
           laneId: lane.laneId,
           role: lane.role,
-          elapsedMs: Date.now() - lanePhaseStartedAtMs,
+          elapsedMs: nowMs() - lanePhaseStartedAtMs,
           remainingOverallMs: budget.remainingOverallMs,
         }),
       );
@@ -1051,7 +1052,7 @@ export async function runHeadlessCouncilGate(
       );
     }
 
-    const startedAtMs = Date.now();
+    const startedAtMs = nowMs();
     const abortController = new AbortController();
     progress(
       formatLaneProgress("started", {
@@ -1103,7 +1104,7 @@ export async function runHeadlessCouncilGate(
             formatLaneProgress("stalled", {
               laneId: lane.laneId,
               role: lane.role,
-              elapsedMs: Date.now() - startedAtMs,
+              elapsedMs: nowMs() - startedAtMs,
               deadlineMs: budget.stallDeadlineMs,
             }),
           );
@@ -1125,7 +1126,7 @@ export async function runHeadlessCouncilGate(
           state: result.state,
           verdict: result.verdict,
           degradedReason: result.degradedReason ?? "none",
-          elapsedMs: Date.now() - startedAtMs,
+          elapsedMs: nowMs() - startedAtMs,
         }),
       );
       return result;
@@ -1148,7 +1149,7 @@ export async function runHeadlessCouncilGate(
         formatLaneProgress("deadline_elapsed_before_start", {
           laneId: CODEX_LEAD_LANE_ID,
           role: CODEX_LEAD_ROLE,
-          elapsedMs: Date.now() - lanePhaseStartedAtMs,
+          elapsedMs: nowMs() - lanePhaseStartedAtMs,
           remainingOverallMs: codexLeadBudget.remainingOverallMs,
         }),
       );
@@ -1163,7 +1164,7 @@ export async function runHeadlessCouncilGate(
         ),
       ];
     } else {
-      const codexLeadStartedAtMs = Date.now();
+      const codexLeadStartedAtMs = nowMs();
       const codexLeadAbortController = new AbortController();
       progress(
         formatLaneProgress("started", {
@@ -1218,7 +1219,7 @@ export async function runHeadlessCouncilGate(
               formatLaneProgress("stalled", {
                 laneId: CODEX_LEAD_LANE_ID,
                 role: CODEX_LEAD_ROLE,
-                elapsedMs: Date.now() - codexLeadStartedAtMs,
+                elapsedMs: nowMs() - codexLeadStartedAtMs,
                 deadlineMs: codexLeadBudget.stallDeadlineMs,
               }),
             );
@@ -1240,7 +1241,7 @@ export async function runHeadlessCouncilGate(
           state: codexLeadResult.state,
           verdict: codexLeadResult.verdict,
           degradedReason: codexLeadResult.degradedReason ?? "none",
-          elapsedMs: Date.now() - codexLeadStartedAtMs,
+          elapsedMs: nowMs() - codexLeadStartedAtMs,
         }),
       );
       lanes = [...lanes, codexLeadResult];

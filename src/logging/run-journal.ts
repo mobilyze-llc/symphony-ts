@@ -151,10 +151,20 @@ export async function appendDispatcherRunJournalEntryToDisk(
   entry: DispatcherRunJournalEntry,
 ): Promise<void> {
   const artifactPath = getDispatcherRunJournalPath(workspaceRoot);
-  await fs.mkdir(join(workspaceRoot, DISPATCHER_RUN_JOURNAL_DIR), {
+  const journalDir = join(workspaceRoot, DISPATCHER_RUN_JOURNAL_DIR);
+  await fs.mkdir(journalDir, {
     recursive: true,
   });
-  await fs.appendFile(artifactPath, `${JSON.stringify(entry)}\n`, "utf8");
+  const row = `${JSON.stringify(entry)}\n`;
+  try {
+    await fs.appendFile(artifactPath, row, "utf8");
+  } catch (error) {
+    if (!isMissingPathError(error)) {
+      throw error;
+    }
+    await fs.mkdir(journalDir, { recursive: true });
+    await fs.appendFile(artifactPath, row, "utf8");
+  }
 }
 
 export function compactDispatcherRunJournalWithCheckpoint(
