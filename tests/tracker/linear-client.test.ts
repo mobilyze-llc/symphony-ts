@@ -4,6 +4,7 @@ import { ERROR_CODES } from "../../src/errors/codes.js";
 import {
   LINEAR_CANDIDATE_ISSUES_QUERY,
   LINEAR_CREATE_ISSUE_MUTATION,
+  LINEAR_ISSUE_BY_IDENTIFIER_QUERY,
   LINEAR_ISSUE_LABELS_BY_NAMES_QUERY,
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
@@ -108,6 +109,62 @@ describe("LinearTrackerClient", () => {
       [],
     );
     expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("fetches a full issue by identifier without constraining to project", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issue: issueNode({
+            id: "issue-585",
+            identifier: "SYMPH-585",
+            title: "Direct review",
+            createdAt: "2026-06-14T00:00:00.000Z",
+          }),
+        },
+      }),
+    );
+    const client = createClient({ fetchFn, projectSlug: "pipeline" });
+
+    const issue = await client.fetchIssueByIdentifier("SYMPH-585");
+
+    expect(issue).toMatchObject({
+      id: "issue-585",
+      identifier: "SYMPH-585",
+      labels: ["backend"],
+    });
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toBe(LINEAR_ISSUE_BY_IDENTIFIER_QUERY);
+    expect(request.query).not.toContain("project:");
+    expect(request.variables).toEqual({
+      identifier: "SYMPH-585",
+      relationFirst: 50,
+    });
+  });
+
+  it("fails closed when direct issue labels are absent", async () => {
+    const node = issueNode({
+      id: "issue-585",
+      identifier: "SYMPH-585",
+      title: "Direct review",
+      createdAt: "2026-06-14T00:00:00.000Z",
+    });
+    node.labels = undefined;
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issue: node,
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+
+    await expect(client.fetchIssueByIdentifier("SYMPH-585")).rejects.toThrow(
+      expect.objectContaining<Partial<TrackerError>>({
+        code: ERROR_CODES.linearUnknownPayload,
+        message: expect.stringContaining("did not include labels"),
+      }),
+    );
   });
 
   it("updates only issue description for durable spec-review reconciliation", async () => {

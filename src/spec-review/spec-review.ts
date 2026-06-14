@@ -244,11 +244,13 @@ export function selectSpecReviewCandidates(input: {
   backlogFindings?: readonly BacklogAuditFinding[];
   specReviewJournal?: readonly DispatcherRunJournalEntry[];
   config?: Partial<SpecReviewSelectionConfig>;
+  forceReview?: boolean;
 }): SpecReviewSelectionDecision[] {
   const config = {
     ...DEFAULT_SELECTION_CONFIG,
     ...(input.config ?? {}),
   };
+  const forceReview = input.forceReview === true;
   const featureById = new Map(
     (input.ticketFeatures ?? []).map((feature) => [feature.issue.id, feature]),
   );
@@ -265,6 +267,12 @@ export function selectSpecReviewCandidates(input: {
     const feature = featureById.get(issue.id) ?? null;
     const findings = findingsByIdentifier.get(issue.identifier) ?? [];
     const reasons = selectionReasons({ issue, feature, findings, config });
+    const forceReasons =
+      forceReview && reasons.length === 0
+        ? ["force_review_now"]
+        : forceReview
+          ? ["force_review_now", ...reasons]
+          : reasons;
     const sensitive = issue.labels.some((label) =>
       isPrivacySensitiveLabel(label),
     );
@@ -283,24 +291,25 @@ export function selectSpecReviewCandidates(input: {
         );
     const currentReview = journalReview ?? descriptionReview;
     const hasCurrentReviewForSourceIntent =
-      reasons.length > 0 &&
+      !forceReview &&
+      forceReasons.length > 0 &&
       currentReview?.sourceIntentHash === sourceIntentHash &&
       isCurrentSpecReviewReadinessState(currentReview.readinessState);
     const currentReviewReason = currentSpecReviewReason(currentReview);
     const selectedReasons =
       journalReview === null
-        ? reasons
+        ? forceReasons
         : [
             `latest_spec_review_journal:${
               journalReview.readinessState ?? "unknown"
             }`,
-            ...reasons,
+            ...forceReasons,
           ];
     return {
       issue,
       sourceIntentHash,
       status:
-        reasons.length === 0
+        forceReasons.length === 0
           ? "skipped"
           : sensitive
             ? "blocked"
@@ -308,7 +317,7 @@ export function selectSpecReviewCandidates(input: {
               ? "skipped"
               : "selected",
       reasons:
-        reasons.length === 0
+        forceReasons.length === 0
           ? []
           : sensitive
             ? ["privacy_sensitive_label"]

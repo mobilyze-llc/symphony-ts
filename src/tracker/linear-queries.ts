@@ -181,6 +181,17 @@ export const LINEAR_ISSUES_BY_STATES_QUERY = `
   }
 `.trim();
 
+export const LINEAR_ISSUE_BY_IDENTIFIER_QUERY = `
+  query SymphonyIssueByIdentifier(
+    $identifier: String!
+    $relationFirst: Int!
+  ) {
+    issue(id: $identifier) {
+      ${ISSUE_FIELDS}
+    }
+  }
+`.trim();
+
 export const LINEAR_TICKET_FEATURE_ISSUES_QUERY = `
   query SymphonyTicketFeatureIssues(
     $projectSlug: String!

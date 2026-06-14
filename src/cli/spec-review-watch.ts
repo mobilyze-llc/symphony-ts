@@ -10,7 +10,7 @@ import { pathToFileURL } from "node:url";
 import { resolveWorkflowConfig } from "../config/config-resolver.js";
 import type { ResolvedWorkflowConfig } from "../config/types.js";
 import { loadWorkflowDefinition } from "../config/workflow-loader.js";
-import type { DispatcherRunJournalEntry } from "../domain/model.js";
+import type { DispatcherRunJournalEntry, Issue } from "../domain/model.js";
 import { readDispatcherRunJournal } from "../logging/run-journal.js";
 import {
   DEFAULT_SPEC_REVIEW_SOURCE_REF,
@@ -33,8 +33,10 @@ interface ParsedArgs {
   mode: SpecReviewMode;
   states: string[] | null;
   issues: string[];
+  directIssues: string[];
   sourceRefs: string[];
   cmuxSpawnBin: string | null;
+  forceReview: boolean;
   dryRun: boolean;
   help: boolean;
 }
@@ -46,7 +48,9 @@ type SpecReviewWatchTracker = Pick<
   | "fetchTicketFeatureIssuesByStates"
   | "postComment"
   | "updateIssueDescription"
->;
+> & {
+  fetchIssueByIdentifier?: LinearTrackerClient["fetchIssueByIdentifier"];
+};
 
 type ExecFileAsync = (
   file: string,
@@ -119,6 +123,9 @@ function usage(): string {
     "  --mode <mode>             observe|warn|enforce (default: observe)",
     "  --states <csv>            Linear states to scan (default: workflow active states)",
     "  --issue <identifier>      Restrict to an issue identifier (repeatable)",
+    "  --issue-direct <id>       Fetch and review an issue identifier directly, outside state/project scans (repeatable)",
+    "  --ticket <id>             Alias for --issue-direct",
+    "  --force, --review-now     Review targeted issues even when normal selection heuristics would skip them",
     "  --source-ref <path>       Source-of-truth file to include (repeatable, default: SPEC.mobilyze.md)",
     "  --cmux-spawn-bin <path>   cmux-spawn binary",
     "  --dry-run                 Select and print candidates without invoking Claude or writing Linear",
@@ -141,8 +148,10 @@ export function parseSpecReviewWatchArgs(
   let mode: SpecReviewMode = "observe";
   let states: string[] | null = null;
   const issues: string[] = [];
+  const directIssues: string[] = [];
   const sourceRefs: string[] = [];
   let cmuxSpawnBin: string | null = null;
+  let forceReview = false;
   let dryRun = false;
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -158,14 +167,20 @@ export function parseSpecReviewWatchArgs(
         mode,
         states,
         issues,
+        directIssues,
         sourceRefs,
         cmuxSpawnBin,
+        forceReview,
         dryRun,
         help: true,
       };
     }
     if (token === "--dry-run") {
       dryRun = true;
+      continue;
+    }
+    if (token === "--force" || token === "--review-now") {
+      forceReview = true;
       continue;
     }
     if (token === "--workspace") {
@@ -189,6 +204,10 @@ export function parseSpecReviewWatchArgs(
     }
     if (token === "--issue") {
       issues.push(readValue(argv, ++index, token));
+      continue;
+    }
+    if (token === "--issue-direct" || token === "--ticket") {
+      directIssues.push(readValue(argv, ++index, token));
       continue;
     }
     if (token === "--source-ref") {
@@ -215,8 +234,10 @@ export function parseSpecReviewWatchArgs(
     mode,
     states,
     issues,
+    directIssues,
     sourceRefs,
     cmuxSpawnBin,
+    forceReview,
     dryRun,
     help: false,
   };
@@ -254,6 +275,16 @@ export async function runSpecReviewWatchCli(
     stdout(`${usage()}\n`);
     return 0;
   }
+  if (
+    parsed.forceReview &&
+    parsed.issues.length === 0 &&
+    parsed.directIssues.length === 0
+  ) {
+    stderr(
+      "--force/--review-now requires --issue, --issue-direct, or --ticket.\n",
+    );
+    return 2;
+  }
 
   const workflowPath =
     parsed.workflowPath ?? resolve(parsed.workspaceRoot, "WORKFLOW.md");
@@ -273,13 +304,28 @@ export async function runSpecReviewWatchCli(
       activeStates: config.tracker.activeStates,
     });
   const states = parsed.states ?? config.tracker.activeStates;
-  const issues = (await tracker.fetchIssuesByStates(states)).filter((issue) =>
-    parsed.issues.length === 0
-      ? true
-      : parsed.issues.includes(issue.identifier),
-  );
+  const shouldScanStates =
+    parsed.directIssues.length === 0 ||
+    parsed.issues.length > 0 ||
+    parsed.states !== null;
+  const scannedIssues = shouldScanStates
+    ? (await tracker.fetchIssuesByStates(states)).filter((issue) =>
+        parsed.issues.length === 0
+          ? true
+          : parsed.issues.includes(issue.identifier),
+      )
+    : [];
+  const directIssues = await fetchDirectIssues({
+    tracker,
+    identifiers: parsed.directIssues,
+    stderr,
+  });
+  if (directIssues === null) {
+    return 1;
+  }
+  const issues = dedupeIssuesById([...scannedIssues, ...directIssues]);
   const featureIssues =
-    tracker.fetchTicketFeatureIssuesByStates === undefined
+    !shouldScanStates || tracker.fetchTicketFeatureIssuesByStates === undefined
       ? []
       : await tracker.fetchTicketFeatureIssuesByStates(states);
   const ticketFeatures = extractTicketFeatures({ issues: featureIssues });
@@ -288,6 +334,7 @@ export async function runSpecReviewWatchCli(
     issues,
     ticketFeatures,
     specReviewJournal,
+    forceReview: parsed.forceReview,
   });
   const selected = decisions.filter(
     (decision) => decision.status === "selected",
@@ -508,6 +555,62 @@ export async function runSpecReviewWatchCli(
     `${JSON.stringify({ selectedCount: selected.length, selectionArtifactPath, results, summary }, null, 2)}\n`,
   );
   return summary.exitCode;
+}
+
+async function fetchDirectIssues(input: {
+  tracker: SpecReviewWatchTracker;
+  identifiers: readonly string[];
+  stderr: (text: string) => void;
+}): Promise<Issue[] | null> {
+  if (input.identifiers.length === 0) {
+    return [];
+  }
+  if (input.tracker.fetchIssueByIdentifier === undefined) {
+    input.stderr(
+      "--issue-direct/--ticket requires tracker support for fetchIssueByIdentifier.\n",
+    );
+    return null;
+  }
+
+  const issues: Issue[] = [];
+  const missing: string[] = [];
+  const uniqueIdentifiers = [...new Set(input.identifiers)];
+  for (const identifier of uniqueIdentifiers) {
+    let issue: Issue | null;
+    try {
+      issue = await input.tracker.fetchIssueByIdentifier(identifier);
+    } catch (error) {
+      input.stderr(
+        `Direct issue identifier ${identifier} could not be fetched safely: ${errorMessage(error)}\n`,
+      );
+      return null;
+    }
+    if (issue === null) {
+      missing.push(identifier);
+      continue;
+    }
+    issues.push(issue);
+  }
+  if (missing.length > 0) {
+    input.stderr(
+      `Direct issue identifier(s) not found: ${missing.join(", ")}\n`,
+    );
+    return null;
+  }
+  return issues;
+}
+
+function dedupeIssuesById(issues: readonly Issue[]): Issue[] {
+  const seen = new Set<string>();
+  const deduped: Issue[] = [];
+  for (const issue of issues) {
+    if (seen.has(issue.id)) {
+      continue;
+    }
+    seen.add(issue.id);
+    deduped.push(issue);
+  }
+  return deduped;
 }
 
 function isSuccessfulReadinessState(

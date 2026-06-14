@@ -16,6 +16,7 @@ import {
   LINEAR_CREATE_ISSUE_WITH_STATE_MUTATION,
   LINEAR_ISSUES_BY_LABELS_QUERY,
   LINEAR_ISSUES_BY_STATES_QUERY,
+  LINEAR_ISSUE_BY_IDENTIFIER_QUERY,
   LINEAR_ISSUE_DETAILS_BY_IDS_QUERY,
   LINEAR_ISSUE_DETAILS_UPDATE_MUTATION,
   LINEAR_ISSUE_LABELS_BY_NAMES_QUERY,
@@ -88,6 +89,10 @@ interface LinearIssueStatesData {
   issues?: {
     nodes?: unknown;
   };
+}
+
+interface LinearIssueByIdentifierData {
+  issue?: unknown | null;
 }
 
 interface LinearIssueUpdateData {
@@ -278,6 +283,23 @@ export class LinearTrackerClient implements IssueTracker {
       first: this.pageSize,
       relationFirst: this.pageSize,
     });
+  }
+
+  async fetchIssueByIdentifier(identifier: string): Promise<Issue | null> {
+    const response = await this.postGraphql<LinearIssueByIdentifierData>(
+      LINEAR_ISSUE_BY_IDENTIFIER_QUERY,
+      {
+        identifier,
+        relationFirst: this.pageSize,
+      },
+    );
+
+    if (response.issue === null || response.issue === undefined) {
+      return null;
+    }
+
+    assertIssueLabelsResolved(response.issue, identifier);
+    return normalizeLinearIssue(response.issue);
   }
 
   async fetchTicketFeatureIssuesByStates(
@@ -1124,6 +1146,32 @@ export class LinearTrackerClient implements IssueTracker {
     }
 
     return this.projectSlug;
+  }
+}
+
+function assertIssueLabelsResolved(node: unknown, identifier: string): void {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    throw new TrackerError(
+      ERROR_CODES.linearUnknownPayload,
+      `Linear issue-by-identifier payload for "${identifier}" was not an object.`,
+      { details: node },
+    );
+  }
+  const labels = "labels" in node ? node.labels : undefined;
+  if (!labels || typeof labels !== "object" || Array.isArray(labels)) {
+    throw new TrackerError(
+      ERROR_CODES.linearUnknownPayload,
+      `Linear issue-by-identifier payload for "${identifier}" did not include labels.`,
+      { details: node },
+    );
+  }
+  const nodes = "nodes" in labels ? labels.nodes : undefined;
+  if (!Array.isArray(nodes)) {
+    throw new TrackerError(
+      ERROR_CODES.linearUnknownPayload,
+      `Linear issue-by-identifier payload for "${identifier}" did not include labels.nodes.`,
+      { details: node },
+    );
   }
 }
 

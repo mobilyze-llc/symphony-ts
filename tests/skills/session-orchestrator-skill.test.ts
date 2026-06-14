@@ -1,4 +1,5 @@
 import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -6,6 +7,10 @@ const SKILL_DIR = resolve(__dirname, "../../skills/session-orchestrator");
 const DISCOVERY_DIR = resolve(
   __dirname,
   "../../.agents/skills/session-orchestrator",
+);
+const GLOBAL_SKILL_PATH = resolve(
+  homedir(),
+  ".codex/skills/session-orchestrator/SKILL.md",
 );
 const SKILL_PATH = resolve(SKILL_DIR, "SKILL.md");
 const workerPrompts = readFileSync(
@@ -17,6 +22,13 @@ const decisionBrief = readFileSync(
   "utf-8",
 );
 const skillContent = readFileSync(SKILL_PATH, "utf-8");
+const validationScript = readFileSync(
+  resolve(__dirname, "../../scripts/validate-session-orchestrator-skill.mjs"),
+  "utf-8",
+);
+const packageJson = JSON.parse(
+  readFileSync(resolve(__dirname, "../../package.json"), "utf-8"),
+) as { scripts?: Record<string, string> };
 
 describe("session-orchestrator skill", () => {
   it("has trigger metadata for temporary Symphony session orchestration work", () => {
@@ -34,6 +46,30 @@ describe("session-orchestrator skill", () => {
     expect(existsSync(resolve(DISCOVERY_DIR, "SKILL.md"))).toBe(true);
   });
 
+  it("keeps the global Codex skill location empty", () => {
+    expect(existsSync(GLOBAL_SKILL_PATH)).toBe(false);
+  });
+
+  it("has a validation script for repo/global skill drift", () => {
+    expect(validationScript).toContain("skills/session-orchestrator");
+    expect(validationScript).toContain(".agents/skills/session-orchestrator");
+    expect(validationScript).toContain(
+      ".codex/skills/session-orchestrator/SKILL.md",
+    );
+    expect(validationScript).toContain(
+      "Canonical source: repo-local skills/session-orchestrator/SKILL.md",
+    );
+    expect(validationScript).toContain("machine-scoped");
+    expect(validationScript).toContain("active global copy");
+    expect(validationScript).toContain("single discovered source of truth");
+  });
+
+  it("runs the drift validation gate before the normal test command", () => {
+    expect(packageJson.scripts?.pretest).toBe(
+      "pnpm run validate:session-orchestrator-skill",
+    );
+  });
+
   it("requires live current-truth orientation before execution", () => {
     expect(skillContent).toContain(
       "linear-pp-cli ... --agent --data-source live",
@@ -49,6 +85,15 @@ describe("session-orchestrator skill", () => {
     expect(skillContent).toContain("Operator Plan Discipline");
     expect(skillContent).toContain("third-failure reset");
     expect(skillContent).toContain("how much remains");
+  });
+
+  it("runs spec-review intake for newly picked tickets before implementation", () => {
+    expect(skillContent).toContain("$spec-review-lane");
+    expect(skillContent).toContain("Spec Review Intake");
+    expect(skillContent).toContain("before implementation");
+    expect(skillContent).toContain("--mode observe");
+    expect(skillContent).toContain("--force");
+    expect(skillContent).toContain("dispatcher journal row");
   });
 
   it("defines the requested risk taxonomy and high-risk state contract", () => {
