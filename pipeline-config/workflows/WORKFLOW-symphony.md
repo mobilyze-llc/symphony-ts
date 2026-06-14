@@ -20,5 +20,6 @@ For this live Symphony pipeline, consume the headless council gate's substrate-s
 
 - First occurrence: post `## Review Infrastructure Retry` with the artifact directory, reviewed head SHA, and stalled lane(s), then output `[STAGE_FAILED: infra]` with `substrate_stall:<lane>` details.
 - Repeated substrate-stall occurrence: the orchestrator parks infra-blocked; do not write `## Review Findings` or send the issue to implement unless the council artifact contains actual surviving P1/P2 code findings.
+- If every reviewer lane passed but the aggregate gate failed only on routing/provenance guarantees such as `routing_author_provenance_missing`, `routing_absent_decorrelated_reviewer_artifact`, or `routing_required_lane_not_decorrelated:<lane>`, this is a procedure/provenance stop. Post `## Review Infrastructure Retry` with the artifact directory, reviewed head SHA, and routing condition(s), then output `[STAGE_FAILED: infra]`; do not send the issue to implement for product-code rework.
 - Any other readable `verdict: "error"` or degraded condition is not a clean review: post `## Review Findings` with the error/degraded condition and artifact directory, then output `[STAGE_FAILED: review]`. Never output `[STAGE_COMPLETE]` for a non-PASS review-result.
 {% endif %}

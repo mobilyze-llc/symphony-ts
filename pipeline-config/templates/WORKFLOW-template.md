@@ -762,6 +762,7 @@ If a check fails, post a `## Review Findings` comment naming the missing evidenc
    ```bash
    ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-{{ issue.identifier }}-$(date +%s)"
    CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-$(command -v cmux-spawn || true)}"
+   AUTHOR_FAMILY="${SYMPHONY_COUNCIL_AUTHOR_FAMILY:-codex}"
    RISK_CONTRACT_ARTIFACT_ARGS=()
    if [ -n "${RISK_CONTRACT_ARTIFACT:-}" ]; then
      RISK_CONTRACT_ARTIFACT_ARGS=(--risk-contract-artifact "$RISK_CONTRACT_ARTIFACT")
@@ -792,6 +793,7 @@ If a check fails, post a `## Review Findings` comment naming the missing evidenc
      --repo "$REPO" \
      --pr "$PR_NUMBER" \
      --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
+     --author-family "$AUTHOR_FAMILY" \
      --mode {% if reworkCount > 0 %}convergence{% else %}full{% endif %} \
      --round {{ reworkCount | plus: 1 }} \
      --timeout-seconds 1800 \
@@ -811,6 +813,8 @@ If `$ARTIFACT_DIR/review-result.json` reports `verdict: "error"` and a lane has 
 2. Output `[STAGE_FAILED: infra]` with `substrate_stall:<lane>` details. Do NOT output `[STAGE_FAILED: review]`.
 
 The orchestrator retries the review gate once for substrate-stall infrastructure. If another substrate stall follows, it parks the issue loudly as infra-blocked instead of dispatching implement rework (SYMPH-441).
+
+If `$ARTIFACT_DIR/review-result.json` reports `verdict: "error"` only because the routing/provenance guarantee is missing (`routing_author_provenance_missing`, `routing_absent_decorrelated_reviewer_artifact`, or `routing_required_lane_not_decorrelated:<lane>`), while every reviewer lane passed and the council report names no surviving P1/P2 code finding, treat this as a review procedure/provenance stop. Post `## Review Infrastructure Retry` with the artifact directory, reviewed head SHA, and routing condition(s), then output `[STAGE_FAILED: infra]`. Do NOT send the issue back to implement for product-code rework.
 
 If `$ARTIFACT_DIR/review-result.json` is readable but reports any other `verdict: "error"` or degraded condition, fail closed as a review gate failure: post a `## Review Findings` comment naming the error/degraded condition and artifact directory, then output `[STAGE_FAILED: review]`. Do NOT output `[STAGE_COMPLETE]` for a non-PASS review-result.
 

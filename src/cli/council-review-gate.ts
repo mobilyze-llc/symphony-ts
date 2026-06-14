@@ -515,7 +515,7 @@ function renderUsage(): string {
     "  --mode full|convergence       Council loop mode (default: full)",
     "  --routing-mode fast|standard|high-risk|disagreement|legacy  Force Council v2 routing mode; fast currently uses Standard lane selection with fast metadata",
     "  --operator-override-reason TEXT  Record the operator reason for force/override routing",
-    "  --author-family FAMILY       Author implementation model family; repeatable for Council v2 decorrelation evidence",
+    "  --author-family FAMILY       Author implementation model family; repeatable for Council v2 decorrelation evidence; pass codex for Codex-authored implementation work",
     "  --previous-reviewed-head SHA  Previous reviewed head SHA for convergence metadata",
     "  --risk-contract-artifact PATH Bounded risk-predicate state contract artifact path; repeatable",
     "  --assert-fresh-review PATH    Assert an existing clean review-result.json covers current HEAD",

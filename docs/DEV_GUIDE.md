@@ -288,6 +288,14 @@ pnpm probe:review-runtime -- --workspace /path/to/product-repo --env-file .env
 The smoke runs `symphony-council-review-gate --help` and
 `cmux-spawn preflight --caffeinate --json`.
 
+Codex-led implementation workflows must pass `--author-family codex` when they
+run the council gate. The shipped workflow templates default
+`SYMPHONY_COUNCIL_AUTHOR_FAMILY` to `codex`; non-Codex-led product workflows
+must override that family before review. If every reviewer lane passes but the
+aggregate result fails only because author-family/decorrelation metadata is
+missing or wrong, stop for review procedure/provenance repair instead of sending
+the issue back to product implementation.
+
 `ops/symphony-deploy` runs the same preflight against a temporary product-shaped workspace after
 refreshing `.env` and before restarting the service.
 
