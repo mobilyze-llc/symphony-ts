@@ -269,6 +269,28 @@ commands. If a specific external CLI still does not find usable credentials in y
 provide that tool's credential explicitly via an env var such as `GH_TOKEN`, `GITHUB_TOKEN`, or a
 provider-specific API key.
 
+Product review stages additionally require the headless council gate and CMUX launcher to resolve
+from product workspaces. Production hosts should choose and record one stable install mechanism:
+
+- export `SYMPHONY_COUNCIL_REVIEW_GATE` to an executable gate wrapper, or install
+  `symphony-council-review-gate` on the launchd `PATH`;
+- export `CMUX_SPAWN_BIN` to an executable `cmux-spawn`, or install `cmux-spawn` on the launchd
+  `PATH`.
+
+The smoke check intentionally runs from a non-`symphony-ts` workspace and refuses a repo-local
+`dist/src/cli/council-review-gate.js` fallback:
+
+```bash
+pnpm build
+pnpm probe:review-runtime -- --workspace /path/to/product-repo --env-file .env
+```
+
+The smoke runs `symphony-council-review-gate --help` and
+`cmux-spawn preflight --caffeinate --json`.
+
+`ops/symphony-deploy` runs the same preflight against a temporary product-shaped workspace after
+refreshing `.env` and before restarting the service.
+
 The exact accepted sandbox and approval values depend on the installed Codex app-server version. To
 inspect the local schema, run `codex app-server generate-json-schema --out <dir>` and inspect the
 generated `ThreadStartParams` and `TurnStartParams` schema files.

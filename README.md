@@ -123,6 +123,23 @@ turn sandbox policy that explicitly allows network access instead of relying on 
 If a specific external CLI still does not see the credentials it needs in your environment, provide
 that tool's credential via environment variables before launching Symphony.
 
+Product review stages that use the headless council gate also need two review-runtime executables
+available from product workspaces:
+
+- `SYMPHONY_COUNCIL_REVIEW_GATE` must point to an executable
+  `symphony-council-review-gate`, or `symphony-council-review-gate` must be on `PATH`.
+- `CMUX_SPAWN_BIN` must point to an executable `cmux-spawn`, or `cmux-spawn` must be on `PATH`.
+
+Smoke this from a non-Symphony product workspace after building or installing Symphony:
+
+```bash
+pnpm build
+pnpm probe:review-runtime -- --workspace /path/to/product-repo --env-file .env
+```
+
+The smoke runs `symphony-council-review-gate --help` and
+`cmux-spawn preflight --caffeinate --json`.
+
 For a complete reference covering every supported field with defaults and inline documentation, see
 [docs/WORKFLOW.template.md](docs/WORKFLOW.template.md).
 

@@ -10,6 +10,7 @@ SYMPHONY_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Defaults — override via environment
 CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/projects/claude-config}"
 CTL="$SCRIPT_DIR/symphony-ctl"
+LAUNCHD_RUNTIME_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
 
 # Colors (disabled if not a terminal)
@@ -80,6 +81,58 @@ run_or_dry() {
   fi
 }
 
+run_review_runtime_preflight() {
+  local env_file="$1"
+  local workspace node_bin
+  node_bin="${SYMPHONY_NODE:-}"
+  if [[ -z "$node_bin" ]]; then
+    node_bin="$(command -v node 2>/dev/null || true)"
+  fi
+  if [[ -z "$node_bin" ]]; then
+    die "node not found. Install Node.js on PATH or set SYMPHONY_NODE to the Node.js executable used for review runtime preflight."
+  fi
+
+  workspace="$(mktemp -d "${TMPDIR:-/tmp}/symphony-review-runtime-preflight.XXXXXX")"
+  printf '{"name":"symphony-review-runtime-preflight-smoke","private":true}\n' > "$workspace/package.json"
+
+  if $DRY_RUN; then
+    run_or_dry env -i \
+      HOME="$HOME" \
+      PATH="$LAUNCHD_RUNTIME_PATH" \
+      "$node_bin" "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
+      --workspace "$workspace" \
+      --env-file "$env_file"
+    rm -rf "$workspace"
+    return
+  fi
+
+  if env -i \
+    HOME="$HOME" \
+    PATH="$LAUNCHD_RUNTIME_PATH" \
+    "$node_bin" "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
+    --workspace "$workspace" \
+    --env-file "$env_file"; then
+    rm -rf "$workspace"
+  else
+    local preflight_status=$?
+    rm -rf "$workspace"
+    REVIEW_RUNTIME_PREFLIGHT_FAILED=true
+    warn "Review runtime preflight failed. Configure SYMPHONY_COUNCIL_REVIEW_GATE and CMUX_SPAWN_BIN, or install symphony-council-review-gate and cmux-spawn on the launchd PATH before restarting Symphony."
+    return "$preflight_status"
+  fi
+}
+
+restart_stopped_services_after_error() {
+  if $REVIEW_RUNTIME_PREFLIGHT_FAILED; then
+    warn "Deploy failed review runtime preflight — leaving stopped services down instead of starting an unverified runtime."
+    return 0
+  fi
+
+  warn "Deploy failed — restarting services..."
+  "$CTL" start 2>/dev/null || true
+  "$SLACK_CTL" start 2>/dev/null || true
+}
+
 # Check if symphony-ctl service is installed (plist exists)
 service_installed() {
   [[ -f "$HOME/Library/LaunchAgents/com.symphony.${SYMPHONY_PROJECT:-symphony}.plist" ]]
@@ -148,6 +201,8 @@ fi
 echo ""
 
 NEED_ENV_RESTART=false
+NEED_SERVICE_REINSTALL=false
+REVIEW_RUNTIME_PREFLIGHT_FAILED=false
 SYMPHONY_UPDATED=false
 SYMPH_PRE_SHA=""
 SYMPH_POST_SHA=""
@@ -182,7 +237,7 @@ if $DO_SYMPHONY; then
 
   # Restart services if the script fails mid-deploy (set -e would leave them down)
   if $SERVICES_STOPPED && ! $DRY_RUN; then
-    trap 'warn "Deploy failed — restarting services..."; "$CTL" start 2>/dev/null || true; "$SLACK_CTL" start 2>/dev/null || true' ERR
+    trap 'restart_stopped_services_after_error' ERR
   fi
 
   # Ensure clean checkout to main — stash uncommitted changes if needed
@@ -259,6 +314,23 @@ if $DO_SYMPHONY; then
     fi
   fi
 
+  if [[ -f "$local_env" ]]; then
+    info "Checking review runtime preflight..."
+    REVIEW_RUNTIME_PREFLIGHT_FAILED=false
+    if run_review_runtime_preflight "$local_env"; then
+      if ! $NO_RESTART && service_installed; then
+        NEED_SERVICE_REINSTALL=true
+      fi
+      ok "Review runtime preflight passed"
+    else
+      preflight_status=$?
+      restart_stopped_services_after_error
+      exit "$preflight_status"
+    fi
+  else
+    warn ".env not found — skipping review runtime preflight"
+  fi
+
   # Prune stale branches (squash-merged PRs leave local refs behind)
   if [[ -x "$CTL" ]]; then
     info "Pruning stale branches..."
@@ -302,9 +374,10 @@ if ! $NO_RESTART && $DO_SYMPHONY; then
 
   if ! service_installed; then
     info "Service not installed — skipping"
-  elif $NEED_ENV_RESTART; then
-    # .env changed — must uninstall/install to rebake env vars into plist
-    info ".env was refreshed — reinstalling service (plist bakes env vars)..."
+  elif $NEED_ENV_RESTART || $NEED_SERVICE_REINSTALL; then
+    # Reinstall after a passing review-runtime preflight so the launchd plist
+    # is regenerated from the same .env that was just validated.
+    info "Reinstalling service (plist bakes validated env vars)..."
     run_or_dry "$CTL" uninstall
     run_or_dry "$CTL" install
     run_or_dry "$CTL" start
