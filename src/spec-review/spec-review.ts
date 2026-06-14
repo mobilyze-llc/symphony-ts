@@ -534,7 +534,10 @@ export async function runSpecReviewForIssue(
     await input.writer.updateIssueDescription(
       input.issue.id,
       buildSpecReviewStatusDescription({
-        originalDescription: input.issue.description ?? "",
+        originalDescription: await fetchLatestIssueDescription(
+          input.writer,
+          input.issue,
+        ),
         sourceIntentHash,
         artifactHash,
         artifactPath: runner.artifactPath,
@@ -584,7 +587,10 @@ export async function runSpecReviewForIssue(
     await input.writer.updateIssueDescription(
       input.issue.id,
       buildSpecReviewStatusDescription({
-        originalDescription: input.issue.description ?? "",
+        originalDescription: await fetchLatestIssueDescription(
+          input.writer,
+          input.issue,
+        ),
         sourceIntentHash,
         artifactHash,
         artifactPath: runner.artifactPath,
@@ -643,7 +649,10 @@ export async function runSpecReviewForIssue(
       await input.writer.updateIssueDescription(
         input.issue.id,
         buildSpecReviewStatusDescription({
-          originalDescription: input.issue.description ?? "",
+          originalDescription: await fetchLatestIssueDescription(
+            input.writer,
+            input.issue,
+          ),
           sourceIntentHash,
           artifactHash,
           artifactPath: runner.artifactPath,
@@ -672,10 +681,10 @@ export async function runSpecReviewForIssue(
     }
   }
 
-  const latestDescription =
-    (await input.writer.fetchIssueDescription?.(input.issue.id)) ??
-    input.issue.description ??
-    "";
+  const latestDescription = await fetchLatestIssueDescription(
+    input.writer,
+    input.issue,
+  );
   const description = buildReviewedIssueDescription({
     originalDescription: latestDescription,
     sourceIntentHash,
@@ -764,6 +773,15 @@ export async function runSpecReviewForIssue(
     journalEntries: entries,
     message: parsed.reconciliation.summary,
   };
+}
+
+async function fetchLatestIssueDescription(
+  writer: SpecReviewWriteClient,
+  issue: Issue,
+): Promise<string> {
+  return (
+    (await writer.fetchIssueDescription?.(issue.id)) ?? issue.description ?? ""
+  );
 }
 
 export function buildReviewedIssueDescription(input: {

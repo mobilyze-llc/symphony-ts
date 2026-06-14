@@ -492,6 +492,63 @@ describe("spec review", () => {
     });
   });
 
+  it("uses the latest issue description before writing runner-failure status", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-runner-fail-"));
+    const artifactRoot = join(workspace, ".artifacts");
+    await mkdir(artifactRoot, { recursive: true });
+
+    let updatedDescription = "";
+    const result = await runSpecReviewForIssue({
+      issue: makeIssue({ description: "Original body." }),
+      workspaceRoot: workspace,
+      artifactRoot,
+      mode: "observe",
+      writer: {
+        fetchIssueDescription: async () => "Operator edit during Claude run.",
+        updateIssueDescription: async (_issueId, description) => {
+          updatedDescription = description;
+        },
+        postComment: async () => {
+          throw new Error("unexpected comment");
+        },
+      },
+      runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
+        schemaVersion: 1,
+        status: "timed_out",
+        purpose: "spec-review",
+        model: "opus",
+        profile: "legacy",
+        workspace,
+        promptFile: runnerInput.promptFile,
+        promptSha256: null,
+        artifactDir: artifactRoot,
+        artifactName: "spec-review-opus",
+        artifactPath: null,
+        resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
+        cmuxSpawnBin: "cmux-spawn",
+        laneId: "claude-spec-review",
+        phase: "spec-review",
+        startedAt: "2026-06-14T00:00:00.000Z",
+        completedAt: "2026-06-14T00:00:01.000Z",
+        sourceVisibility: {
+          status: "ok",
+          workspace,
+          sources: [],
+        },
+        attempts: [],
+        validationErrors: ["timeout"],
+        usage: null,
+        message: "timeout",
+      }),
+      now: () => new Date("2026-06-14T00:00:00.000Z"),
+    });
+
+    expect(result.readinessState).toBe("runner_failed");
+    expect(updatedDescription).toContain("Operator edit during Claude run.");
+    expect(updatedDescription).not.toContain("Original body.");
+    expect(updatedDescription).toContain("- Readiness: `runner_failed`");
+  });
+
   it("journals and stamps invalid_artifact when the spec parser rejects a runner artifact", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "spec-review-run-"));
     const artifactRoot = join(workspace, ".artifacts");
@@ -519,11 +576,12 @@ describe("spec review", () => {
 
     let updatedDescription = "";
     const result = await runSpecReviewForIssue({
-      issue: makeIssue(),
+      issue: makeIssue({ description: "Original body." }),
       workspaceRoot: workspace,
       artifactRoot,
       mode: "observe",
       writer: {
+        fetchIssueDescription: async () => "Operator edit during Claude run.",
         updateIssueDescription: async (_issueId, description) => {
           updatedDescription = description;
         },
@@ -573,6 +631,8 @@ describe("spec review", () => {
     });
     expect(updatedDescription).toContain("- Readiness: `invalid_artifact`");
     expect(updatedDescription).toContain("- Runner status: `passed`");
+    expect(updatedDescription).toContain("Operator edit during Claude run.");
+    expect(updatedDescription).not.toContain("Original body.");
   });
 
   it("treats required Linear Docs publish failure as an incomplete review", async () => {
@@ -617,6 +677,7 @@ describe("spec review", () => {
       artifactRoot,
       mode: "observe",
       writer: {
+        fetchIssueDescription: async () => "Operator edit during Claude run.",
         updateIssueDescription: async (_issueId, description) => {
           updatedDescription = description;
         },
@@ -668,6 +729,7 @@ describe("spec review", () => {
     });
     expect(updatedDescription).toContain("- Readiness: `failed`");
     expect(updatedDescription).toContain("docs unavailable");
+    expect(updatedDescription).toContain("Operator edit during Claude run.");
   });
 
   it("returns failed when success-path Linear writes fail after journaling the artifact", async () => {
