@@ -141,8 +141,11 @@ The smoke runs `symphony-council-review-gate --help` and
 `cmux-spawn preflight --caffeinate --json`.
 
 When a Codex-led workflow runs the council gate for implementation work, pass
-`--author-family codex`. Missing author-family metadata is a review
-procedure/provenance stop, not a product-code finding.
+`--author-family codex` or leave the shipped
+`SYMPHONY_COUNCIL_AUTHOR_FAMILY` default as `codex`. Non-Codex-led product
+workflows must override that family before review. Missing or wrong
+author-family metadata is a review procedure/provenance stop, not a
+product-code finding.
 
 For a complete reference covering every supported field with defaults and inline documentation, see
 [docs/WORKFLOW.template.md](docs/WORKFLOW.template.md).

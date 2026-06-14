@@ -662,7 +662,8 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain("run_council_gate");
     expect(output).toContain("--mode full");
     expect(output).toContain("--round 1");
-    expect(output).toContain("--author-family codex");
+    expect(output).toContain("SYMPHONY_COUNCIL_AUTHOR_FAMILY");
+    expect(output).toContain('--author-family "$AUTHOR_FAMILY"');
     expect(output).toContain("--timeout-seconds 1800");
     expect(output).toContain("review_metadata.reviewed_head_sha");
     expect(output).toContain("review_metadata.base_sha");

@@ -2153,23 +2153,34 @@ function routingGuaranteeEscalationPredicates(
 ): CouncilEscalationPredicate[] {
   const predicates: CouncilEscalationPredicate[] = [];
   for (const condition of conditions) {
-    if (condition.startsWith("routing_required_lane_missing:")) {
-      predicates.push("missing_required_lane");
-    } else if (condition.startsWith("routing_required_lane_malformed:")) {
-      predicates.push("malformed_required_lane");
-    } else if (condition.startsWith("routing_required_lane_degraded:")) {
-      predicates.push("degraded_required_lane");
-    } else if (condition === "routing_absent_decorrelated_reviewer_artifact") {
-      predicates.push("absent_decorrelated_reviewer_artifact");
-    } else if (
-      condition.startsWith("routing_required_lane_not_decorrelated:")
-    ) {
-      predicates.push("absent_decorrelated_reviewer_artifact");
-    } else if (condition === "routing_author_provenance_missing") {
-      predicates.push("absent_decorrelated_reviewer_artifact");
+    const predicate = routingGuaranteeEscalationPredicate(condition);
+    if (predicate !== null) {
+      predicates.push(predicate);
     }
   }
   return uniqueEscalationPredicates(predicates);
+}
+
+function routingGuaranteeEscalationPredicate(
+  condition: string,
+): CouncilEscalationPredicate | null {
+  if (condition.startsWith("routing_required_lane_missing:")) {
+    return "missing_required_lane";
+  }
+  if (condition.startsWith("routing_required_lane_malformed:")) {
+    return "malformed_required_lane";
+  }
+  if (condition.startsWith("routing_required_lane_degraded:")) {
+    return "degraded_required_lane";
+  }
+  if (
+    condition === "routing_absent_decorrelated_reviewer_artifact" ||
+    condition.startsWith("routing_required_lane_not_decorrelated:") ||
+    condition === "routing_author_provenance_missing"
+  ) {
+    return "absent_decorrelated_reviewer_artifact";
+  }
+  return null;
 }
 
 function collectDisagreementEscalationPredicates(
@@ -6003,14 +6014,7 @@ function isRoutingOnlyProcedureStop(input: {
 }
 
 function isRoutingGuaranteeDegradedCondition(condition: string): boolean {
-  return (
-    condition === "routing_author_provenance_missing" ||
-    condition === "routing_absent_decorrelated_reviewer_artifact" ||
-    condition.startsWith("routing_required_lane_missing:") ||
-    condition.startsWith("routing_required_lane_malformed:") ||
-    condition.startsWith("routing_required_lane_degraded:") ||
-    condition.startsWith("routing_required_lane_not_decorrelated:")
-  );
+  return routingGuaranteeEscalationPredicate(condition) !== null;
 }
 
 function sameFamilyReopenNames(

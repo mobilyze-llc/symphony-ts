@@ -762,6 +762,7 @@ If a check fails, post a `## Review Findings` comment naming the missing evidenc
    ```bash
    ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-{{ issue.identifier }}-$(date +%s)"
    CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-$(command -v cmux-spawn || true)}"
+   AUTHOR_FAMILY="${SYMPHONY_COUNCIL_AUTHOR_FAMILY:-codex}"
    RISK_CONTRACT_ARTIFACT_ARGS=()
    if [ -n "${RISK_CONTRACT_ARTIFACT:-}" ]; then
      RISK_CONTRACT_ARTIFACT_ARGS=(--risk-contract-artifact "$RISK_CONTRACT_ARTIFACT")
@@ -792,7 +793,7 @@ If a check fails, post a `## Review Findings` comment naming the missing evidenc
      --repo "$REPO" \
      --pr "$PR_NUMBER" \
      --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
-     --author-family codex \
+     --author-family "$AUTHOR_FAMILY" \
      --mode {% if reworkCount > 0 %}convergence{% else %}full{% endif %} \
      --round {{ reworkCount | plus: 1 }} \
      --timeout-seconds 1800 \
