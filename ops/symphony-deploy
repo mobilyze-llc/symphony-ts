@@ -80,6 +80,28 @@ run_or_dry() {
   fi
 }
 
+run_review_runtime_preflight() {
+  local env_file="$1"
+  local workspace
+  workspace="$(mktemp -d "${TMPDIR:-/tmp}/symphony-review-runtime-preflight.XXXXXX")"
+
+  if $DRY_RUN; then
+    run_or_dry node "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
+      --workspace "$workspace" \
+      --env-file "$env_file"
+    rm -rf "$workspace"
+    return
+  fi
+
+  if ! node "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
+    --workspace "$workspace" \
+    --env-file "$env_file"; then
+    rm -rf "$workspace"
+    die "Review runtime preflight failed. Configure SYMPHONY_COUNCIL_REVIEW_GATE and CMUX_SPAWN_BIN, or install symphony-council-review-gate and cmux-spawn on PATH before restarting Symphony."
+  fi
+  rm -rf "$workspace"
+}
+
 # Check if symphony-ctl service is installed (plist exists)
 service_installed() {
   [[ -f "$HOME/Library/LaunchAgents/com.symphony.${SYMPHONY_PROJECT:-symphony}.plist" ]]
@@ -257,6 +279,14 @@ if $DO_SYMPHONY; then
     else
       ok ".env is current — skipping decrypt"
     fi
+  fi
+
+  if [[ -f "$local_env" ]]; then
+    info "Checking review runtime preflight..."
+    run_review_runtime_preflight "$local_env"
+    ok "Review runtime preflight passed"
+  else
+    warn ".env not found — skipping review runtime preflight"
   fi
 
   # Prune stale branches (squash-merged PRs leave local refs behind)
