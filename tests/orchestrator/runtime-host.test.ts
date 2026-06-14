@@ -50,7 +50,10 @@ import {
   signalPid,
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
-import type { ProcessIdentitySnapshot } from "../../src/shared/process-tree.js";
+import type {
+  ProcessIdentitySnapshot,
+  ProcessTreeTerminationResult,
+} from "../../src/shared/process-tree.js";
 import { TrackerError } from "../../src/tracker/errors.js";
 import { LinearTrackerClient } from "../../src/tracker/linear-client.js";
 import type {
@@ -844,6 +847,262 @@ describe("OrchestratorRuntimeHost", () => {
           entry.metadata.recovery === "journal_hydration",
       ),
     ).toBe(false);
+  });
+
+  it("keeps recovered emergency-stop cleanup fail-closed when detailed SIGKILL delivery failed", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ state: "Resume" })],
+      stateSnapshots: [{ id: "1", identifier: "ISSUE-1", state: "Resume" }],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const terminateDetachedPidTree = vi.fn(async () =>
+      createProcessTreeTerminationResult({
+        pid: 1001,
+        sigkillStatus: "failed",
+        // Proves rich SIGKILL status wins over legacy booleans.
+        sigkillSent: true,
+      }),
+    );
+    const writtenEntries: DispatcherRunJournalEntry[] = [];
+    const journal: DispatcherRunJournal = [
+      createPipelineStopJournalEntry(1, "1001", createProcessIdentity(1001)),
+      createPipelineResumeJournalEntry(2),
+    ];
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => journal,
+      writeDispatcherRunJournalEntry: async (_workspaceRoot, entry) => {
+        writtenEntries.push(entry);
+      },
+      listWorkspaceCwdProcessIds: async () => [],
+      terminateDetachedPidTree,
+      now: () => new Date("2026-03-06T00:02:00.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+
+    expect(terminateDetachedPidTree).toHaveBeenCalledWith(
+      1001,
+      expect.objectContaining({
+        expectedIdentity: createProcessIdentity(1001),
+      }),
+    );
+    expect(tick.dispatchedIssueIds).toEqual([]);
+    expect(fakeRunner.runInputs).toHaveLength(0);
+    expect(host.getState().resumeRequired.has("1")).toBe(true);
+    expect(host.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run_unconfirmed",
+      setBySequence: 1,
+    });
+    expect(
+      writtenEntries.some(
+        (entry) =>
+          entry.kind === "hard_stop_trigger" &&
+          entry.metadata.reason === "emergency_stop" &&
+          entry.metadata.recovery === "journal_hydration",
+      ),
+    ).toBe(false);
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "emergency_stop_recovery_cleanup_unconfirmed",
+        outcome: "degraded",
+        issue_identifier: "ISSUE-1",
+        process_tree_cleanup_confirmed: false,
+        process_tree_sigkill_status: "failed",
+      }),
+    );
+  });
+
+  it("logs confirmed and degraded workspace-cwd orphan cleanup outcomes during emergency-stop recovery", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ state: "Resume" })],
+      stateSnapshots: [{ id: "1", identifier: "ISSUE-1", state: "Resume" }],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const listWorkspaceCwdProcessIds = vi.fn(async () => [3003, 4004]);
+    const readProcessIdentity = vi.fn(async (pid: number) =>
+      pid === 4004
+        ? createProcessIdentity(4004, { processGroupId: 5005 })
+        : createProcessIdentity(pid),
+    );
+    const terminateDetachedPidTree = vi.fn(async (pid: number) =>
+      createProcessTreeTerminationResult({
+        pid,
+      }),
+    );
+    const terminateDetachedProcessGroupTree = vi.fn(
+      async (processGroupId: number) =>
+        createProcessTreeTerminationResult({
+          pid: null,
+          processGroupId,
+          sigkillStatus: "failed",
+        }),
+    );
+    const writtenEntries: DispatcherRunJournalEntry[] = [];
+    const journal: DispatcherRunJournal = [
+      createPipelineStopJournalEntry(1, "1001", createProcessIdentity(1001)),
+      createPipelineResumeJournalEntry(2),
+    ];
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => journal,
+      writeDispatcherRunJournalEntry: async (_workspaceRoot, entry) => {
+        writtenEntries.push(entry);
+      },
+      listWorkspaceCwdProcessIds,
+      readProcessIdentity,
+      terminateDetachedPidTree,
+      terminateDetachedProcessGroupTree,
+      now: () => new Date("2026-03-06T00:02:00.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+
+    expect(listWorkspaceCwdProcessIds).toHaveBeenCalledTimes(1);
+    expect(listWorkspaceCwdProcessIds).toHaveBeenCalledWith(
+      "/tmp/workspaces/1",
+    );
+    expect(terminateDetachedPidTree).toHaveBeenCalledWith(1001, {
+      graceMs: 1_000,
+      expectedIdentity: createProcessIdentity(1001),
+    });
+    expect(terminateDetachedPidTree).toHaveBeenCalledWith(3003, {
+      graceMs: 1_000,
+      expectedIdentity: createProcessIdentity(3003),
+    });
+    expect(terminateDetachedProcessGroupTree).toHaveBeenCalledWith(5005, {
+      graceMs: 1_000,
+    });
+    expect(tick.dispatchedIssueIds).toEqual(["1"]);
+    expect(host.getState().resumeRequired.has("1")).toBe(false);
+    expect(writtenEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "hard_stop_trigger",
+          issueId: "1",
+          metadata: expect.objectContaining({
+            status: "completed",
+            reason: "emergency_stop",
+            recovery: "journal_hydration",
+            sourceSequence: 1,
+          }),
+        }),
+      ]),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "orphaned_processes_killed",
+        issue_identifier: "ISSUE-1",
+        pids: ["3003"],
+      }),
+    );
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "orphaned_process_cleanup_degraded",
+        outcome: "degraded",
+        issue_identifier: "ISSUE-1",
+        pids: ["4004"],
+      }),
+    );
+
+    fakeRunner.resolve("1", createNormalResult());
+    await host.waitForIdle();
+  });
+
+  it("sweeps workspace-cwd orphan groups during cold-start hydration without an emergency-stop journal", async () => {
+    const tracker = createTracker({ candidates: [] });
+    const fakeRunner = new FakeAgentRunner();
+    const listWorkspaceCwdProcessIds = vi.fn(async () => [4004]);
+    const readProcessIdentity = vi.fn(async () =>
+      createProcessIdentity(4004, { processGroupId: 5005 }),
+    );
+    const terminateDetachedPidTree = vi.fn(async (pid: number) =>
+      createProcessTreeTerminationResult({ pid }),
+    );
+    const terminateDetachedProcessGroupTree = vi.fn(
+      async (processGroupId: number) =>
+        createProcessTreeTerminationResult({ pid: null, processGroupId }),
+    );
+    const journal: DispatcherRunJournal = [
+      createRuntimeJournalEntry({
+        sequence: 1,
+        kind: "admission",
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        summary: "Prior dispatcher admission started.",
+        lease: {
+          leaseId: "dispatcher:1:implement:initial",
+          issueId: "1",
+          issueIdentifier: "ISSUE-1",
+          operation: "dispatcher",
+          ownerId: "previous-runtime",
+          status: "active",
+          acquiredAt: "2026-03-06T00:00:00.000Z",
+          expiresAt: "2026-03-06T00:10:00.000Z",
+          completedAt: null,
+          stage: "implement",
+          attempt: null,
+          lastJournalSequence: 1,
+        },
+        metadata: { status: "started" },
+      }),
+    ];
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => journal,
+      listWorkspaceCwdProcessIds,
+      readProcessIdentity,
+      terminateDetachedPidTree,
+      terminateDetachedProcessGroupTree,
+      now: () => new Date("2026-03-06T00:02:00.000Z"),
+    });
+
+    const tick = await host.pollOnce();
+
+    expect(tick.dispatchedIssueIds).toEqual([]);
+    expect(fakeRunner.runInputs).toHaveLength(0);
+    expect(listWorkspaceCwdProcessIds).toHaveBeenCalledTimes(1);
+    expect(listWorkspaceCwdProcessIds).toHaveBeenCalledWith(
+      "/tmp/workspaces/1",
+    );
+    expect(readProcessIdentity).toHaveBeenCalledWith(4004);
+    expect(terminateDetachedPidTree).not.toHaveBeenCalled();
+    expect(terminateDetachedProcessGroupTree).toHaveBeenCalledWith(5005, {
+      graceMs: 1_000,
+    });
   });
 
   it.each([
@@ -7239,6 +7498,44 @@ function createProcessIdentity(
     command: "bash -lc codex-app-server",
     launchToken: "launch-token",
     ...overrides,
+  };
+}
+
+function createProcessTreeTerminationResult(input: {
+  pid: number | null;
+  processGroupId?: number | null;
+  sigtermStatus?: NonNullable<
+    ProcessTreeTerminationResult["sigterm"]
+  >["status"];
+  sigkillStatus?: NonNullable<
+    ProcessTreeTerminationResult["sigkill"]
+  >["status"];
+  sigtermSent?: boolean;
+  sigkillSent?: boolean;
+  identityStatus?: ProcessTreeTerminationResult["identityStatus"];
+  postGraceIdentityStatus?: ProcessTreeTerminationResult["postGraceIdentityStatus"];
+}): ProcessTreeTerminationResult {
+  const sigtermStatus = input.sigtermStatus ?? "delivered";
+  const sigkillStatus = input.sigkillStatus ?? "delivered";
+  return {
+    pid: input.pid,
+    processGroupId: input.processGroupId ?? null,
+    sigtermSent: input.sigtermSent ?? sigtermStatus !== "failed",
+    sigkillSent: input.sigkillSent ?? sigkillStatus !== "failed",
+    sigterm: {
+      signal: "SIGTERM",
+      status: sigtermStatus,
+      deliveredTo: sigtermStatus === "delivered" ? "process_group" : null,
+      attempts: [],
+    },
+    sigkill: {
+      signal: "SIGKILL",
+      status: sigkillStatus,
+      deliveredTo: sigkillStatus === "delivered" ? "process_group" : null,
+      attempts: [],
+    },
+    identityStatus: input.identityStatus ?? "matched",
+    postGraceIdentityStatus: input.postGraceIdentityStatus ?? "matched",
   };
 }
 
