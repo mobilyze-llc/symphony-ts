@@ -577,8 +577,16 @@ function normalizeHistoryActor(
   );
 }
 
-function normalizeUserActor(
-  actor: z.infer<typeof linearUserSchema> | null | undefined,
+export function normalizeUserActor(
+  actor:
+    | Partial<{
+        id: unknown;
+        name: unknown;
+        displayName: unknown;
+        email: unknown;
+      }>
+    | null
+    | undefined,
 ): TicketFeatureActor | null {
   if (actor === null || actor === undefined) {
     return null;
@@ -590,14 +598,23 @@ function normalizeUserActor(
     name: typeof actor.name === "string" ? actor.name : null,
     displayName:
       typeof actor.displayName === "string" ? actor.displayName : null,
-    email: normalizeEmail(actor.email),
+    email: normalizeEmail(typeof actor.email === "string" ? actor.email : null),
     botType: null,
     botSubType: null,
   };
 }
 
-function normalizeBotActor(
-  actor: z.infer<typeof linearBotActorSchema> | null | undefined,
+export function normalizeBotActor(
+  actor:
+    | Partial<{
+        id: unknown;
+        type: unknown;
+        subType: unknown;
+        name: unknown;
+        userDisplayName: unknown;
+      }>
+    | null
+    | undefined,
 ): TicketFeatureActor | null {
   if (actor === null || actor === undefined) {
     return null;
@@ -669,7 +686,7 @@ function normalizeEmail(value: string | null | undefined): string | null {
   return value.trim().toLowerCase();
 }
 
-function normalizeOperatorConfig(
+export function normalizeOperatorConfig(
   config:
     | Pick<
         WorkflowOperatorAnchorsConfig,
@@ -713,7 +730,7 @@ function attributeEdge(
   };
 }
 
-function classifyActor(
+export function classifyActor(
   actor: TicketFeatureActor | null,
   accountSets: {
     operatorAllowlist: ReadonlySet<string>;

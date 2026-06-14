@@ -19,6 +19,7 @@ import {
   SENSITIVE_SOURCE_INTENT_HASH,
   appendSpecReviewResultJournal,
   buildReviewedIssueDescription,
+  buildSpecReviewCommentContext,
   buildSpecReviewPrompt,
   buildSpecReviewStatusDescription,
   computeSourceIntentHash,
@@ -29,6 +30,7 @@ import {
   selectSpecReviewCandidates,
   stripSpecReviewMarker,
 } from "../../src/spec-review/spec-review.js";
+import type { LinearIssueComment } from "../../src/tracker/linear-client.js";
 import type { TicketFeature } from "../../src/tracker/ticket-feature.js";
 
 describe("spec review", () => {
@@ -1362,6 +1364,7 @@ describe("spec review", () => {
       sourceIntentHash: "source-hash",
       ticketFeature: null,
       backlogFindings: [],
+      comments: buildSpecReviewCommentContext({ comments: [] }),
       sourceOfTruthRefs: [
         {
           path: "SPEC.mobilyze.md",
@@ -1411,6 +1414,7 @@ describe("spec review", () => {
       sourceIntentHash: "source-hash",
       ticketFeature: null,
       backlogFindings: [],
+      comments: buildSpecReviewCommentContext({ comments: [] }),
       sourceOfTruthRefs: [],
       sourceOfTruthExcerpt: null,
       unavailableContext: [],
@@ -1418,6 +1422,92 @@ describe("spec review", () => {
 
     expect(prompt).toContain("````json");
     expect(prompt).toContain("Ticket text includes ```json");
+  });
+
+  it("renders classified comments in the spec-review prompt", () => {
+    const comments = buildSpecReviewCommentContext({
+      comments: [
+        makeComment({
+          id: "comment-operator",
+          body: "Operator says include comments.",
+          createdAt: "2026-06-14T00:01:00.000Z",
+          userEmail: "operator@mobilyze.com",
+        }),
+        makeComment({
+          id: "comment-agent",
+          body: "Agent status noise.",
+          createdAt: "2026-06-14T00:02:00.000Z",
+          userEmail: "agent@mobilyze.com",
+        }),
+        makeComment({
+          id: "comment-unknown",
+          body: "Unknown author note.",
+          createdAt: "2026-06-14T00:03:00.000Z",
+        }),
+      ],
+      operatorConfig: {
+        operatorAllowlist: ["operator@mobilyze.com"],
+        serviceAccounts: ["agent@mobilyze.com"],
+      },
+    });
+
+    const prompt = buildSpecReviewPrompt({
+      issue: makeIssue(),
+      sourceIntentHash: "source-hash",
+      ticketFeature: null,
+      backlogFindings: [],
+      comments,
+      sourceOfTruthRefs: [],
+      sourceOfTruthExcerpt: null,
+      unavailableContext: [],
+    });
+
+    expect(prompt).toContain('"comments"');
+    expect(prompt).toContain('"id": "comment-operator"');
+    expect(prompt).toContain('"authorClass": "operator"');
+    expect(prompt).toContain('"authorClass": "service_account"');
+    expect(prompt).toContain('"authorClass": "unknown"');
+    expect(prompt).toContain("Operator says include comments.");
+  });
+
+  it("drops non-operator comments oldest-first when total comment context is oversized", () => {
+    const comments = buildSpecReviewCommentContext({
+      comments: [
+        makeComment({
+          id: "comment-agent-old",
+          body: "old-agent-noise",
+          createdAt: "2026-06-14T00:01:00.000Z",
+          userEmail: "agent@mobilyze.com",
+        }),
+        makeComment({
+          id: "comment-operator",
+          body: "operator-directive",
+          createdAt: "2026-06-14T00:02:00.000Z",
+          userEmail: "operator@mobilyze.com",
+        }),
+        makeComment({
+          id: "comment-agent-new",
+          body: "new-agent-noise",
+          createdAt: "2026-06-14T00:03:00.000Z",
+          userEmail: "agent@mobilyze.com",
+        }),
+      ],
+      operatorConfig: {
+        operatorAllowlist: ["operator@mobilyze.com"],
+        serviceAccounts: ["agent@mobilyze.com"],
+      },
+      config: {
+        maxTotalCommentChars:
+          "operator-directive".length + "new-agent-noise".length,
+      },
+    });
+
+    expect(comments.comments.map((comment) => comment.id)).toEqual([
+      "comment-operator",
+      "comment-agent-new",
+    ]);
+    expect(comments.droppedCommentCount).toBe(1);
+    expect(comments.droppedCommentReason).toContain("oldest-first");
   });
 
   it("projects latest spec review readiness into runtime state and deltas", () => {
@@ -1599,6 +1689,69 @@ describe("spec review", () => {
     expect(updatedDescription).toContain("Operator edit during Claude run.");
     expect(updatedDescription).not.toContain("Original body.");
     expect(updatedDescription).toContain("- Readiness: `runner_failed`");
+  });
+
+  it("fails closed before spawning Claude when operator comments exceed the bound", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-comments-"));
+    const artifactRoot = join(workspace, ".artifacts");
+    await mkdir(artifactRoot, { recursive: true });
+
+    let runnerCalled = false;
+    let updatedDescription = "";
+    const result = await runSpecReviewForIssue({
+      issue: makeIssue({ description: "Original body." }),
+      workspaceRoot: workspace,
+      artifactRoot,
+      mode: "observe",
+      fetchIssueComments: async () => [
+        makeComment({
+          id: "comment-operator",
+          body: "x".repeat(11),
+          createdAt: "2026-06-14T00:01:00.000Z",
+          userEmail: "operator@mobilyze.com",
+        }),
+      ],
+      operatorConfig: {
+        operatorAllowlist: ["operator@mobilyze.com"],
+        serviceAccounts: [],
+      },
+      commentConfig: {
+        maxOperatorCommentChars: 10,
+        maxTotalCommentChars: 100,
+      },
+      writer: {
+        fetchIssueDescription: async () => "Operator edit during comment pack.",
+        updateIssueDescription: async (_issueId, description) => {
+          updatedDescription = description;
+        },
+        postComment: async () => {
+          throw new Error("unexpected comment");
+        },
+      },
+      runner: async (): Promise<ClaudeRunnerResult> => {
+        runnerCalled = true;
+        throw new Error("runner should not be called");
+      },
+      now: () => new Date("2026-06-14T00:00:00.000Z"),
+    });
+
+    expect(runnerCalled).toBe(false);
+    expect(result).toMatchObject({
+      readinessState: "needs_operator_context",
+      verdict: "needs_operator_context",
+      runnerStatus: "degraded",
+      artifactPath: null,
+    });
+    expect(result.message).toContain("oversized_operator_comment_context");
+    expect(updatedDescription).toContain("Operator edit during comment pack.");
+    expect(updatedDescription).toContain(
+      "- Readiness: `needs_operator_context`",
+    );
+    expect(updatedDescription).toContain("oversized_operator_comment_context");
+    expect(result.journalEntries[0]?.metadata).toMatchObject({
+      readiness_state: "needs_operator_context",
+      review_verdict: "needs_operator_context",
+    });
   });
 
   it("journals and stamps invalid_artifact when the spec parser rejects a runner artifact", async () => {
@@ -2313,6 +2466,45 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     createdAt: "2026-06-14T00:00:00.000Z",
     updatedAt: "2026-06-14T00:00:00.000Z",
     ...overrides,
+  };
+}
+
+function makeComment(input: {
+  id: string;
+  body: string;
+  createdAt: string;
+  userEmail?: string;
+  botActor?: boolean;
+}): LinearIssueComment {
+  return {
+    id: input.id,
+    body: input.body,
+    createdAt: input.createdAt,
+    updatedAt: input.createdAt,
+    user:
+      input.userEmail === undefined
+        ? null
+        : {
+            kind: "user",
+            id: "user-1",
+            name: "User",
+            displayName: "User",
+            email: input.userEmail,
+            botType: null,
+            botSubType: null,
+          },
+    botActor:
+      input.botActor === true
+        ? {
+            kind: "bot",
+            id: "bot-1",
+            name: "Bot",
+            displayName: "Bot",
+            email: null,
+            botType: "app",
+            botSubType: "automation",
+          }
+        : null,
   };
 }
 

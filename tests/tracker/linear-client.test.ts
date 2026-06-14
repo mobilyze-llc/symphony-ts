@@ -5,6 +5,7 @@ import {
   LINEAR_CANDIDATE_ISSUES_QUERY,
   LINEAR_CREATE_ISSUE_MUTATION,
   LINEAR_ISSUE_BY_IDENTIFIER_QUERY,
+  LINEAR_ISSUE_COMMENTS_QUERY,
   LINEAR_ISSUE_LABELS_BY_NAMES_QUERY,
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
@@ -168,6 +169,129 @@ describe("LinearTrackerClient", () => {
         message: expect.stringContaining("did not include labels"),
       }),
     );
+  });
+
+  it("fetches issue comments with pagination, actor fields, and deterministic ordering", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "issue-604",
+              comments: {
+                nodes: [
+                  commentNode({
+                    id: "comment-b",
+                    body: "Second by creation time",
+                    createdAt: "2026-06-14T00:02:00.000Z",
+                    userEmail: "operator@mobilyze.com",
+                  }),
+                ],
+                pageInfo: {
+                  hasNextPage: true,
+                  endCursor: "cursor-1",
+                },
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issue: {
+              id: "issue-604",
+              comments: {
+                nodes: [
+                  commentNode({
+                    id: "comment-a",
+                    body: "First by creation time",
+                    createdAt: "2026-06-14T00:01:00.000Z",
+                    botActor: true,
+                  }),
+                ],
+                pageInfo: {
+                  hasNextPage: false,
+                  endCursor: null,
+                },
+              },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    const comments = await client.fetchIssueComments("issue-604", {
+      maxPages: 2,
+    });
+
+    expect(comments.map((comment) => comment.id)).toEqual([
+      "comment-a",
+      "comment-b",
+    ]);
+    expect(comments[0]).toMatchObject({
+      botActor: {
+        kind: "bot",
+        name: "Linear Automation",
+      },
+      user: null,
+    });
+    expect(comments[1]).toMatchObject({
+      user: {
+        kind: "user",
+        email: "operator@mobilyze.com",
+      },
+      botActor: null,
+    });
+    const firstRequest = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(firstRequest.query).toBe(LINEAR_ISSUE_COMMENTS_QUERY);
+    expect(firstRequest.variables).toEqual({
+      issueId: "issue-604",
+      first: 50,
+      after: null,
+    });
+    expect(parseRequestBody(fetchFn.mock.calls[1]?.[1]).variables).toEqual({
+      issueId: "issue-604",
+      first: 50,
+      after: "cursor-1",
+    });
+  });
+
+  it("fails closed when issue comments exceed maxPages", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        data: {
+          issue: {
+            id: "issue-604",
+            comments: {
+              nodes: [
+                commentNode({
+                  id: "comment-a",
+                  body: "More pages remain",
+                  createdAt: "2026-06-14T00:01:00.000Z",
+                }),
+              ],
+              pageInfo: {
+                hasNextPage: true,
+                endCursor: "cursor-1",
+              },
+            },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+
+    await expect(
+      client.fetchIssueComments("issue-604", { maxPages: 1 }),
+    ).rejects.toThrow(
+      expect.objectContaining<Partial<TrackerError>>({
+        code: ERROR_CODES.linearUnknownPayload,
+        message: expect.stringContaining("exceeded maxPages"),
+      }),
+    );
+    expect(fetchFn).toHaveBeenCalledTimes(1);
   });
 
   it("updates only issue description for durable spec-review reconciliation", async () => {
@@ -975,6 +1099,40 @@ function issueNode(input: {
     inverseRelations: {
       nodes: [],
     },
+  };
+}
+
+function commentNode(input: {
+  id: string;
+  body: string;
+  createdAt: string;
+  userEmail?: string;
+  botActor?: boolean;
+}): Record<string, unknown> {
+  return {
+    id: input.id,
+    body: input.body,
+    createdAt: input.createdAt,
+    updatedAt: input.createdAt,
+    user:
+      input.userEmail === undefined
+        ? null
+        : {
+            id: "user-1",
+            name: "Operator",
+            displayName: "Operator",
+            email: input.userEmail,
+          },
+    botActor:
+      input.botActor === true
+        ? {
+            id: "bot-1",
+            type: "app",
+            subType: "automation",
+            name: "Linear Automation",
+            userDisplayName: "Linear Automation",
+          }
+        : null,
   };
 }
 
