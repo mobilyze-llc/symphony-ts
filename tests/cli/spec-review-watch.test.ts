@@ -310,6 +310,63 @@ describe("symphony-spec-review-watch CLI", () => {
     );
   });
 
+  it.each([
+    ["observe", 0],
+    ["warn", 0],
+    ["enforce", 1],
+  ] as const)(
+    "returns mode-aware status for needs_operator_context in %s mode",
+    async (mode, expectedExitCode) => {
+      const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+      const stdout = vi.fn();
+      const issue = makeIssue({
+        id: "selected",
+        identifier: "SYMPH-1",
+        labels: ["needs:spec-review"],
+      });
+      const runReview = vi.fn(async ({ issue }) =>
+        makeRunResult(issue, "needs_operator_context"),
+      );
+
+      const exitCode = await runSpecReviewWatchCli(
+        ["WORKFLOW.md", "--workspace", workspace, "--mode", mode],
+        {
+          stdout,
+          loadWorkflowDefinition: async (workflowPath) => ({
+            workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+            config: {},
+            promptTemplate: "",
+          }),
+          resolveWorkflowConfig: () => fakeConfig(),
+          createTracker: () => ({
+            fetchIssuesByStates: async () => [issue],
+            fetchIssueReferencesByIds: async () => [],
+            fetchTicketFeatureIssuesByStates: async () => [],
+            updateIssueDescription: async () => ({
+              id: "issue",
+              identifier: "SYMPH-1",
+              title: "Issue",
+            }),
+            postComment: async () => undefined,
+          }),
+          runSpecReviewForIssue: runReview,
+        },
+      );
+
+      expect(exitCode).toBe(expectedExitCode);
+      expect(runReview).toHaveBeenCalledOnce();
+      const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
+        results: Array<{ issueIdentifier: string; readinessState: string }>;
+      };
+      expect(output.results).toEqual([
+        expect.objectContaining({
+          issueIdentifier: "SYMPH-1",
+          readinessState: "needs_operator_context",
+        }),
+      ]);
+    },
+  );
+
   it("parses known Linear document create output envelopes", () => {
     expect(
       parseDocumentCreateOutput(

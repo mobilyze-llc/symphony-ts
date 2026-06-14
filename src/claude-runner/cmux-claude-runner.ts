@@ -263,10 +263,15 @@ export async function runClaudeCmux(
       runCommand,
     });
     const cmux = parseCmuxStdout(run.stdout);
-    const currentArtifactPath =
+    const rawArtifactPath =
       typeof cmux.artifact_path === "string"
         ? cmux.artifact_path
         : resolve(artifactDir, `${currentArtifactName}.md`);
+    const artifactPathValidation = await validateArtifactPathWithinDir(
+      artifactDir,
+      rawArtifactPath,
+    );
+    const currentArtifactPath = artifactPathValidation.artifactPath;
     const currentStatusPath =
       typeof cmux.status_path === "string"
         ? cmux.status_path
@@ -287,9 +292,11 @@ export async function runClaudeCmux(
     const laneState =
       cmux.state ?? (run.exitCode === 0 ? "complete" : "failed");
     validationErrors =
-      run.exitCode === 0 && laneState === "complete"
-        ? await validateClaudeArtifact(currentArtifactPath, input.validation)
-        : [`cmux-spawn lane ended ${laneState}`];
+      artifactPathValidation.validationErrors.length > 0
+        ? artifactPathValidation.validationErrors
+        : run.exitCode === 0 && laneState === "complete"
+          ? await validateClaudeArtifact(currentArtifactPath, input.validation)
+          : [`cmux-spawn lane ended ${laneState}`];
 
     attempts.push({
       attempt,
@@ -311,6 +318,9 @@ export async function runClaudeCmux(
       break;
     }
     finalStatus = "invalid_artifact";
+    if (artifactPathValidation.validationErrors.length > 0) {
+      break;
+    }
     if (attempt < maxAttempts) {
       currentArtifactName = `${input.artifactName}-repair-${attempt + 1}`;
       currentPromptFile = resolve(
@@ -490,6 +500,25 @@ async function realpathOrSelf(path: string): Promise<string> {
   } catch {
     return path;
   }
+}
+
+async function validateArtifactPathWithinDir(
+  artifactDir: string,
+  candidatePath: string,
+): Promise<{ artifactPath: string; validationErrors: string[] }> {
+  const resolvedArtifactDir = resolve(artifactDir);
+  const artifactPath = resolve(resolvedArtifactDir, candidatePath);
+  const canonicalArtifactDir = await realpathOrSelf(resolvedArtifactDir);
+  const canonicalArtifactPath = await realpathOrSelf(artifactPath);
+  if (!isInside(canonicalArtifactDir, canonicalArtifactPath)) {
+    return {
+      artifactPath,
+      validationErrors: [
+        `artifact_path resolves outside artifact dir: ${candidatePath}`,
+      ],
+    };
+  }
+  return { artifactPath, validationErrors: [] };
 }
 
 async function invokeCmuxRun(input: {

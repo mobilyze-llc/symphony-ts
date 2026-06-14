@@ -120,6 +120,99 @@ describe("Claude CMUX runner", () => {
     expect(result.attempts[1]?.artifactName).toBe("opus-repair-2");
   });
 
+  it("rejects cmux artifact paths outside the artifact dir without repair reads", async () => {
+    const harness = await createHarness();
+    const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-outside-"));
+    const outsideArtifact = join(outsideDir, "opus.md");
+    await writeFile(outsideArtifact, validReviewArtifact(), "utf8");
+    let runCount = 0;
+    const runCommand: ClaudeRunnerCommand = async (_command, args) => {
+      if (args[0] === "preflight") {
+        return { exitCode: 0, stdout: "{}", stderr: "" };
+      }
+      runCount += 1;
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          state: "complete",
+          artifact_path: outsideArtifact,
+          status_path: join(harness.artifactDir, "opus.status.json"),
+        }),
+        stderr: "",
+      };
+    };
+
+    const result = await runClaudeCmux(
+      {
+        purpose: "spec-review",
+        workspace: harness.workspace,
+        promptFile: harness.promptFile,
+        artifactDir: harness.artifactDir,
+        artifactName: "opus",
+        retryOnInvalid: true,
+        validation: {
+          minBytes: 50,
+          requireFirstHeading: "Verdict",
+          requiredHeadings: ["Source Read Status"],
+          verdictEnums: ["ready_as_written"],
+        },
+      },
+      { runCommand },
+    );
+
+    expect(runCount).toBe(1);
+    expect(result.status).toBe("invalid_artifact");
+    expect(result.attempts).toHaveLength(1);
+    expect(result.validationErrors).toEqual([
+      expect.stringContaining("artifact_path resolves outside artifact dir"),
+    ]);
+  });
+
+  it("rejects cmux artifact symlinks that resolve outside the artifact dir", async () => {
+    const harness = await createHarness();
+    const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-outside-"));
+    const outsideArtifact = join(outsideDir, "opus.md");
+    const linkedArtifact = join(harness.artifactDir, "opus.md");
+    await writeFile(outsideArtifact, validReviewArtifact(), "utf8");
+    await symlink(outsideArtifact, linkedArtifact);
+    const runCommand: ClaudeRunnerCommand = async (_command, args) => {
+      if (args[0] === "preflight") {
+        return { exitCode: 0, stdout: "{}", stderr: "" };
+      }
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          state: "complete",
+          artifact_path: linkedArtifact,
+          status_path: join(harness.artifactDir, "opus.status.json"),
+        }),
+        stderr: "",
+      };
+    };
+
+    const result = await runClaudeCmux(
+      {
+        purpose: "spec-review",
+        workspace: harness.workspace,
+        promptFile: harness.promptFile,
+        artifactDir: harness.artifactDir,
+        artifactName: "opus",
+        validation: {
+          minBytes: 50,
+          requireFirstHeading: "Verdict",
+          requiredHeadings: ["Source Read Status"],
+          verdictEnums: ["ready_as_written"],
+        },
+      },
+      { runCommand },
+    );
+
+    expect(result.status).toBe("invalid_artifact");
+    expect(result.validationErrors).toEqual([
+      expect.stringContaining("artifact_path resolves outside artifact dir"),
+    ]);
+  });
+
   it("fails before invocation when a declared source is outside the workspace", async () => {
     const harness = await createHarness();
     let commandCount = 0;
@@ -307,4 +400,18 @@ function readFlag(args: readonly string[], flag: string): string {
     throw new Error(`Missing ${flag}`);
   }
   return value;
+}
+
+function validReviewArtifact(): string {
+  return [
+    "## Verdict",
+    "",
+    "Verdict enum: ready_as_written",
+    "",
+    "## Source Read Status",
+    "",
+    "Read the prompt and source packet.",
+    "",
+    "Long enough artifact body for validation to pass.",
+  ].join("\n");
 }

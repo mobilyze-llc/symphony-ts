@@ -361,12 +361,20 @@ export async function runSpecReviewWatchCli(
     `${JSON.stringify({ selectedCount: selected.length, selectionArtifactPath, results }, null, 2)}\n`,
   );
   return results.every((result) =>
-    ["valid", "not_required", "needs_operator_context"].includes(
-      result.readinessState,
-    ),
+    isSuccessfulReadinessState(parsed.mode, result.readinessState),
   )
     ? 0
     : 1;
+}
+
+function isSuccessfulReadinessState(
+  mode: SpecReviewMode,
+  readinessState: SpecReviewRunIssueResult["readinessState"],
+): boolean {
+  if (readinessState === "valid" || readinessState === "not_required") {
+    return true;
+  }
+  return mode !== "enforce" && readinessState === "needs_operator_context";
 }
 
 async function readSourceOfTruthExcerpt(
