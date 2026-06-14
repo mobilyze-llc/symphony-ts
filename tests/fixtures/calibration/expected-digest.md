@@ -74,6 +74,15 @@ Operator actions taken:
 
 - release: 2 (seq 11, seq 13)
 
+## Backlog hygiene proposal precision
+
+Proposal precision joins each journaled `hygiene_proposal` to the first
+subsequent `hygiene_proposal_decision` for the same proposal. Operator
+accept/reject is calibration signal only; it does not imply issue-state
+mutation. Precision = accepted / (accepted + rejected).
+
+_No hygiene proposals in window._
+
 ## Queue baseline (week zero)
 
 FIFO-control samples recorded before queue-triage lanes gain authority.

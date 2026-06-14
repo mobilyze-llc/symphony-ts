@@ -8,6 +8,7 @@ import type {
   DispatcherRunJournalEntry,
   Issue,
 } from "../../src/domain/model.js";
+import type { BacklogHygieneProposal } from "../../src/orchestrator/backlog-hygiene.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
@@ -15,6 +16,60 @@ import {
 import type { IssueTracker } from "../../src/tracker/tracker.js";
 
 describe("dispatcher decision event emission", () => {
+  it("journals backlog hygiene proposals and decisions through the orchestrator writer", async () => {
+    const orchestrator = createOrchestrator();
+    const proposal: BacklogHygieneProposal = {
+      proposalId: "audit-1:F-1",
+      findingId: "F-1",
+      findingType: "duplicate",
+      issueIds: ["issue-1"],
+      issueIdentifiers: ["ISSUE-1"],
+      summary: "Duplicate queued work",
+      evidence: "Issue bodies overlap",
+      confidence: "medium",
+      generatedAt: "2026-03-06T00:00:00.000Z",
+      modelTier: "local_low_risk",
+    };
+
+    const proposalSequence = await orchestrator.recordBacklogHygieneProposal({
+      proposal,
+      actor: { kind: "dispatcher", host: "test" },
+      timestamp: "2026-03-06T00:00:01.000Z",
+    });
+    const decisionSequence =
+      await orchestrator.recordBacklogHygieneProposalDecision({
+        proposal,
+        decision: "rejected",
+        actor: { kind: "operator", host: "test" },
+        reason: "not actually duplicate",
+        timestamp: "2026-03-06T00:00:02.000Z",
+      });
+
+    expect(proposalSequence).toBe(1);
+    expect(decisionSequence).toBe(2);
+    expect(orchestrator.getState().dispatcherRunJournal).toEqual([
+      expect.objectContaining({
+        sequence: 1,
+        kind: "hygiene_proposal",
+        issueIdentifier: "ISSUE-1",
+        metadata: expect.objectContaining({
+          proposal_id: "audit-1:F-1",
+          finding_type: "duplicate",
+        }),
+      }),
+      expect.objectContaining({
+        sequence: 2,
+        kind: "hygiene_proposal_decision",
+        issueIdentifier: "ISSUE-1",
+        metadata: expect.objectContaining({
+          proposal_id: "audit-1:F-1",
+          decision: "rejected",
+          issue_state_mutation: false,
+        }),
+      }),
+    ]);
+  });
+
   it("emits measurable admission, right-sizing, and model-routing events on dispatch", async () => {
     const orchestrator = createOrchestrator({
       tracker: createTracker({

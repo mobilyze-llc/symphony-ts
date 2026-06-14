@@ -259,6 +259,11 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   // consumers use this to measure the FIFO control arm before hygiene lanes
   // or comparators gain authority.
   "queue_baseline",
+  // Backlog hygiene propose-mode (SYMPH-484): proposals and operator
+  // accept/reject calibration decisions. Accept/reject is not execution
+  // authority; it only labels proposal quality for calibration.
+  "hygiene_proposal",
+  "hygiene_proposal_decision",
   // Deterministic dispatch comparator disagreement (SYMPH-485): emitted when
   // the actual dispatch pick differs from the computed-order head.
   "ordering_disagreement",
