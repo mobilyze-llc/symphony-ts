@@ -32,6 +32,10 @@ import {
   evaluateDispatcherDecisionQuality,
   extractDispatcherDecisionEvents,
 } from "../orchestrator/decision-quality.js";
+import {
+  type PublicEmergencyStopInterruptedIssue,
+  projectEmergencyStopInterruptedIssue,
+} from "../orchestrator/emergency-stop-projection.js";
 import type { WatchdogRegistrySnapshot } from "../orchestrator/signature-cluster.js";
 import { formatEasternTimestamp } from "./format-timestamp.js";
 import {
@@ -317,17 +321,11 @@ export interface RuntimeSnapshot {
     reason: string;
     set_by_sequence: number | null;
     /**
-     * Process identity stays in dispatcher-run journal metadata, not this
-     * public runtime snapshot: it carries launch-token and command details
-     * used only for recovery-time identity checks.
+     * Raw process identity stays in dispatcher-run journal metadata. The
+     * public snapshot carries only redacted proof fields so operators can see
+     * cleanup status without command text or launch tokens.
      */
-    interrupted_issues: Array<{
-      issue_id: string;
-      issue_identifier: string;
-      stage: string | null;
-      attempt: number | null;
-      codex_app_server_pid: string | null;
-    }>;
+    interrupted_issues: PublicEmergencyStopInterruptedIssue[];
   } | null;
   /**
    * Journal cursor as of this snapshot (SYMPH-407): the sequence of the last
@@ -796,13 +794,7 @@ export function buildRuntimeSnapshot(
             reason: state.emergencyStop.reason,
             set_by_sequence: state.emergencyStop.setBySequence,
             interrupted_issues: state.emergencyStop.interruptedIssues.map(
-              (issue) => ({
-                issue_id: issue.issueId,
-                issue_identifier: issue.issueIdentifier,
-                stage: issue.stage,
-                attempt: issue.attempt,
-                codex_app_server_pid: issue.codexAppServerPid,
-              }),
+              (issue) => projectEmergencyStopInterruptedIssue(issue, state),
             ),
           },
     as_of_sequence:

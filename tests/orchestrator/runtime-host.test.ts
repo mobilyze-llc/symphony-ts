@@ -606,6 +606,75 @@ describe("OrchestratorRuntimeHost", () => {
     await host.waitForIdle();
   });
 
+  it("surfaces redacted emergency-stop cleanup proof in runtime and pipeline status", async () => {
+    const tracker = createTracker({
+      candidates: [],
+      stateSnapshots: [{ id: "1", identifier: "ISSUE-1", state: "Resume" }],
+    });
+    const codexAppServerIdentity = createProcessIdentity(1001);
+    const writtenEntries: DispatcherRunJournalEntry[] = [];
+    const journal: DispatcherRunJournal = [
+      createPipelineStopJournalEntry(1, "1001", codexAppServerIdentity),
+    ];
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      agentRunner: new FakeAgentRunner(),
+      readDispatcherRunJournal: async () => journal,
+      writeDispatcherRunJournalEntry: async (_workspaceRoot, entry) => {
+        writtenEntries.push(entry);
+      },
+      terminateDetachedPidTree: async () =>
+        createProcessTreeTerminationResult({
+          pid: 1001,
+          processGroupId: 1001,
+        }),
+      now: () => new Date("2026-03-06T00:02:00.000Z"),
+    });
+
+    const snapshot = await host.getRuntimeSnapshot();
+    const status = await host.getPipelineStatus();
+
+    const expectedInterruptedIssue = expect.objectContaining({
+      issue_id: "1",
+      issue_identifier: "ISSUE-1",
+      codex_app_server_pid: "1001",
+      identity_status: "present",
+      cleanup_status: "confirmed",
+      process_identity: {
+        pid: 1001,
+        process_group_id: 1001,
+        session_id: 1001,
+        started_at: "linux-starttime:123456",
+        command_present: true,
+        launch_token_present: true,
+      },
+    });
+    expect(snapshot.emergency_stop?.interrupted_issues).toEqual([
+      expectedInterruptedIssue,
+    ]);
+    expect(status.emergency_stop?.interrupted_issues).toEqual([
+      expectedInterruptedIssue,
+    ]);
+    expect(
+      snapshot.emergency_stop?.interrupted_issues[0]?.process_identity,
+    ).not.toHaveProperty("command");
+    expect(
+      snapshot.emergency_stop?.interrupted_issues[0]?.process_identity,
+    ).not.toHaveProperty("launch_token");
+    expect(writtenEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "hard_stop_trigger",
+          metadata: expect.objectContaining({
+            recovery: "journal_hydration",
+            sourceSequence: 1,
+          }),
+        }),
+      ]),
+    );
+  });
+
   it("does not let later same-issue emergency-stop proof suppress older recovered cleanup", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ state: "Resume" })],

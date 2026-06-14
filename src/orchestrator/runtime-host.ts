@@ -160,7 +160,13 @@ import type {
   SupervisionResteerRequest,
   TimerScheduler,
 } from "./core.js";
-import { OrchestratorCore, isStopSignalDelivery } from "./core.js";
+import {
+  OrchestratorCore,
+  deriveAttemptedStopSignalDeliveryStatus,
+  getFailedStopSignalDeliveryAttempts,
+  isStopSignalDelivery,
+} from "./core.js";
+import { projectEmergencyStopInterruptedIssue } from "./emergency-stop-projection.js";
 import { getDiff, runEnsembleGate } from "./gate-handler.js";
 import {
   type IntentActor,
@@ -2623,13 +2629,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       since: emergencyStop.since,
       reason: emergencyStop.reason,
       set_by_sequence: emergencyStop.setBySequence,
-      interrupted_issues: emergencyStop.interruptedIssues.map((issue) => ({
-        issue_id: issue.issueId,
-        issue_identifier: issue.issueIdentifier,
-        stage: issue.stage,
-        attempt: issue.attempt,
-        codex_app_server_pid: issue.codexAppServerPid,
-      })),
+      interrupted_issues: emergencyStop.interruptedIssues.map((issue) =>
+        projectEmergencyStopInterruptedIssue(
+          issue,
+          this.orchestrator.getState(),
+        ),
+      ),
     };
   }
 
@@ -3141,13 +3146,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         status: result.status,
         detail: result.detail,
         sequence: result.sequence,
-        interrupted_issues: result.interruptedIssues.map((issue) => ({
-          issue_id: issue.issueId,
-          issue_identifier: issue.issueIdentifier,
-          stage: issue.stage,
-          attempt: issue.attempt,
-          codex_app_server_pid: issue.codexAppServerPid,
-        })),
+        interrupted_issues: result.interruptedIssues.map((issue) =>
+          projectEmergencyStopInterruptedIssue(
+            issue,
+            this.orchestrator.getState(),
+          ),
+        ),
         stop_requests: result.stopRequests.map((request) => ({
           issue_identifier: request.issueIdentifier,
           stopped: true,
@@ -3416,8 +3420,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     delivery: StopSignalDelivery,
     execution: WorkerExecution,
   ): Promise<void> {
-    const failedAttempts = delivery.attempts.filter(
-      (attempt) => attempt.sigterm === "failed" && attempt.sigkill === "failed",
+    const failedAttempts = getFailedStopSignalDeliveryAttempts(
+      delivery.attempts,
     );
     const processGroupIds = delivery.attempts
       .map((attempt) => attempt.processGroupId)
@@ -5645,8 +5649,9 @@ export async function deliverTrackedWorkerStopSignal(
     });
   }
 
-  const failedAttempts = attempts.filter(isFailedStopSignalAttempt);
-  const status = getStopSignalDeliveryStatus(attempts, failedAttempts);
+  const failedAttempts = getFailedStopSignalDeliveryAttempts(attempts);
+  const status =
+    deriveAttemptedStopSignalDeliveryStatus(attempts) ?? "not_attempted";
   return {
     status,
     reason: input.reason,
@@ -5675,12 +5680,6 @@ async function listWorkspaceCwdProcessIdsFromLsof(
   return findWorkspaceCwdProcessIds(String(stdout), workspacePath, {
     readCurrentProcessCwd: readProcessCwd,
   });
-}
-
-function isFailedStopSignalAttempt(
-  attempt: StopSignalDeliveryAttempt,
-): boolean {
-  return attempt.sigkill === "failed";
 }
 
 export async function verifyTrackedProcessSignalTarget(input: {
@@ -5922,19 +5921,6 @@ function parseProcessId(value: string | null | undefined): number | null {
   }
   const pid = Number(value);
   return Number.isInteger(pid) && pid > 1 && pid !== process.pid ? pid : null;
-}
-
-function getStopSignalDeliveryStatus(
-  attempts: StopSignalDeliveryAttempt[],
-  failedAttempts: StopSignalDeliveryAttempt[],
-): StopSignalDelivery["status"] {
-  if (attempts.length === 0) {
-    return "not_attempted";
-  }
-  if (failedAttempts.length === 0) {
-    return "delivered";
-  }
-  return failedAttempts.length === attempts.length ? "failed" : "partial";
 }
 
 function isNoSuchProcess(error: unknown): boolean {

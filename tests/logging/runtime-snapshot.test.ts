@@ -18,6 +18,152 @@ import {
 import { reduceManagerRunJournal } from "../../src/orchestrator/manager-run.js";
 
 describe("runtime snapshot", () => {
+  it("projects emergency-stop cleanup proof and redacted process identity", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    const processIdentity = {
+      pid: 1001,
+      processGroupId: 1001,
+      sessionId: 1001,
+      startedAt: "linux-starttime:123456",
+      command: "bash -lc codex app-server --token secret",
+      launchToken: "secret-token",
+    };
+    state.resumeRequired = new Set([
+      "confirmed",
+      "confirmed-mismatch",
+      "unconfirmed",
+      "missing",
+      "mismatch",
+    ]);
+    state.resumeRequiredMarks = {
+      confirmed: {
+        reason: "killed_mid_run",
+        setBySequence: 11,
+        since: "2026-03-06T00:00:10.000Z",
+      },
+      "confirmed-mismatch": {
+        reason: "killed_mid_run",
+        setBySequence: 12,
+        since: "2026-03-06T00:00:10.500Z",
+      },
+      unconfirmed: {
+        reason: "killed_mid_run_unconfirmed",
+        setBySequence: 13,
+        since: "2026-03-06T00:00:11.000Z",
+      },
+      missing: {
+        reason: "killed_mid_run_unconfirmed",
+        setBySequence: 14,
+        since: "2026-03-06T00:00:12.000Z",
+      },
+      mismatch: {
+        reason: "killed_mid_run_unconfirmed",
+        setBySequence: 15,
+        since: "2026-03-06T00:00:13.000Z",
+      },
+    };
+    state.emergencyStop = {
+      active: true,
+      since: "2026-03-06T00:00:00.000Z",
+      reason: "runaway spend",
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      setBySequence: 10,
+      interruptedIssues: [
+        {
+          issueId: "confirmed",
+          issueIdentifier: "ISSUE-CONFIRMED",
+          stage: "implement",
+          attempt: null,
+          codexAppServerPid: "1001",
+          codexAppServerIdentity: processIdentity,
+        },
+        {
+          issueId: "confirmed-mismatch",
+          issueIdentifier: "ISSUE-CONFIRMED-MISMATCH",
+          stage: "implement",
+          attempt: null,
+          codexAppServerPid: "1001",
+          codexAppServerIdentity: { ...processIdentity, pid: 2002 },
+        },
+        {
+          issueId: "unconfirmed",
+          issueIdentifier: "ISSUE-UNCONFIRMED",
+          stage: "review",
+          attempt: 1,
+          codexAppServerPid: "1001",
+          codexAppServerIdentity: processIdentity,
+        },
+        {
+          issueId: "missing",
+          issueIdentifier: "ISSUE-MISSING",
+          stage: null,
+          attempt: null,
+          codexAppServerPid: null,
+          codexAppServerIdentity: null,
+        },
+        {
+          issueId: "mismatch",
+          issueIdentifier: "ISSUE-MISMATCH",
+          stage: "implement",
+          attempt: null,
+          codexAppServerPid: "1001",
+          codexAppServerIdentity: { ...processIdentity, pid: 2002 },
+        },
+      ],
+    };
+
+    const interruptedIssues =
+      buildRuntimeSnapshot(state).emergency_stop?.interrupted_issues;
+
+    expect(interruptedIssues).toEqual([
+      expect.objectContaining({
+        issue_identifier: "ISSUE-CONFIRMED",
+        identity_status: "present",
+        cleanup_status: "confirmed",
+        process_identity: {
+          pid: 1001,
+          process_group_id: 1001,
+          session_id: 1001,
+          started_at: "linux-starttime:123456",
+          command_present: true,
+          launch_token_present: true,
+        },
+      }),
+      expect.objectContaining({
+        issue_identifier: "ISSUE-CONFIRMED-MISMATCH",
+        identity_status: "mismatch",
+        cleanup_status: "confirmed",
+        cleanup_status_reason:
+          "Cleanup proof is confirmed, but captured process identity does not match the tracked app-server PID; see identity_status.",
+      }),
+      expect.objectContaining({
+        issue_identifier: "ISSUE-UNCONFIRMED",
+        identity_status: "present",
+        cleanup_status: "unconfirmed",
+      }),
+      expect.objectContaining({
+        issue_identifier: "ISSUE-MISSING",
+        identity_status: "missing",
+        cleanup_status: "missing_identity",
+        process_identity: null,
+      }),
+      expect.objectContaining({
+        issue_identifier: "ISSUE-MISMATCH",
+        identity_status: "mismatch",
+        cleanup_status: "identity_mismatch",
+      }),
+    ]);
+    expect(interruptedIssues?.[0]?.process_identity).not.toHaveProperty(
+      "command",
+    );
+    expect(interruptedIssues?.[0]?.process_identity).not.toHaveProperty(
+      "launch_token",
+    );
+  });
+
   it("projects the computed dispatch order read-model", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,

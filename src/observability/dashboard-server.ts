@@ -233,6 +233,21 @@ export interface EmergencyStopStateResponse {
     stage: string | null;
     attempt: number | null;
     codex_app_server_pid: string | null;
+    process_identity: {
+      pid: number;
+      process_group_id: number | null;
+      session_id: number | null;
+      started_at: string;
+      command_present: boolean;
+      launch_token_present: boolean;
+    } | null;
+    identity_status: "present" | "missing" | "mismatch";
+    cleanup_status:
+      | "confirmed"
+      | "unconfirmed"
+      | "missing_identity"
+      | "identity_mismatch";
+    cleanup_status_reason: string;
   }>;
 }
 
