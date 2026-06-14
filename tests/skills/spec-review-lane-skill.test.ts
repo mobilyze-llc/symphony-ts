@@ -51,11 +51,13 @@ describe("spec-review-lane skill", () => {
     expect(scriptContent).toContain("--issue-direct");
     expect(scriptContent).toContain("nextActionForReadiness");
     expect(scriptContent).toContain(
-      "return path !== null && existsSync(path) ? path : null;",
+      "const resolvedPath = isAbsolute(path) ? path : resolve(workspace, path);",
+    );
+    expect(scriptContent).toContain(
+      "return existsSync(resolvedPath) ? resolvedPath : null;",
     );
     expect(scriptContent).toContain('"--artifact-root"');
     expect(scriptContent).toContain('"--source-ref"');
-    expect(scriptContent).toContain('"--symphony-spec-review-watch-bin"');
     expect(scriptContent).toContain("supply_operator_context");
     expect(scriptContent).toContain("rerun_or_inspect_artifact");
     expect(scriptContent).toContain("handle_out_of_band");
@@ -96,8 +98,10 @@ describe("spec-review-lane skill", () => {
       );
 
       const summary = JSON.parse(output) as {
+        watcherBin: string;
         watcherArgs: string[];
       };
+      expect(summary.watcherBin).toBe("[path]");
       expect(summary.watcherArgs).toEqual([
         "[path]",
         "--workspace",
@@ -123,6 +127,8 @@ describe("spec-review-lane skill", () => {
     const tempDir = mkdtempSync(resolve(tmpdir(), "spec-review-lane-"));
     try {
       const watcherPath = resolve(tempDir, "watcher.mjs");
+      const relativeArtifact = "artifact.md";
+      writeFileSync(resolve(tempDir, relativeArtifact), "review");
       const missingArtifact = resolve(tempDir, "missing-artifact.md");
       const missingSelection = resolve(tempDir, "missing-selection.json");
       writeFileSync(
@@ -138,6 +144,12 @@ describe("spec-review-lane skill", () => {
           "    readinessState: 'valid',",
           "    verdict: 'ready_as_written',",
           `    artifactPath: ${JSON.stringify(missingArtifact)},`,
+          "    linearDocUrl: null",
+          "  }, {",
+          "    issueIdentifier: 'SYMPH-2',",
+          "    readinessState: 'valid',",
+          "    verdict: 'ready_as_written',",
+          `    artifactPath: ${JSON.stringify(relativeArtifact)},`,
           "    linearDocUrl: null",
           "  }]",
           "}));",
@@ -166,6 +178,9 @@ describe("spec-review-lane skill", () => {
       };
       expect(summary.selectionArtifactPath).toBeNull();
       expect(summary.results[0]?.artifactPath).toBeNull();
+      expect(summary.results[1]?.artifactPath).toBe(
+        resolve(tempDir, relativeArtifact),
+      );
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

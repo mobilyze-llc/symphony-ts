@@ -2,7 +2,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 
 const args = parseArgs(process.argv.slice(2));
 if (args.help) {
@@ -63,6 +63,7 @@ if (stderr.trim() !== "") {
 
 const summary = buildOperatorSummary({
   issue: args.issue,
+  workspace: args.workspace,
   mode: args.mode,
   dryRun: args.dryRun,
   watcherBin: args.watcherBin,
@@ -168,7 +169,7 @@ function buildOperatorSummary(input) {
       exitCode: input.exitCode,
       nextAction: input.exitCode === 0 ? "inspect_output" : "inspect_failure",
       rawOutputBytes: Buffer.byteLength(input.stdout),
-      watcherBin: input.watcherBin,
+      watcherBin: redactPathLike(input.watcherBin),
       watcherArgs: redactArgs(input.watcherArgs),
     };
   }
@@ -178,7 +179,7 @@ function buildOperatorSummary(input) {
     issueIdentifier: stringOrNull(result.issueIdentifier),
     readinessState: stringOrNull(result.readinessState),
     verdict: stringOrNull(result.verdict),
-    artifactPath: existingPathOrNull(result.artifactPath),
+    artifactPath: existingPathOrNull(result.artifactPath, input.workspace),
     linearDocUrl: stringOrNull(result.linearDocUrl),
     nextAction: nextActionForReadiness(stringOrNull(result.readinessState)),
   }));
@@ -192,7 +193,10 @@ function buildOperatorSummary(input) {
     exitCode: input.exitCode,
     selectedCount:
       typeof parsed.selectedCount === "number" ? parsed.selectedCount : null,
-    selectionArtifactPath: existingPathOrNull(parsed.selectionArtifactPath),
+    selectionArtifactPath: existingPathOrNull(
+      parsed.selectionArtifactPath,
+      input.workspace,
+    ),
     summary: parsed.summary ?? null,
     decisions: decisions.map((decision) => ({
       issueIdentifier: decision?.issue?.identifier ?? null,
@@ -221,9 +225,13 @@ function stringOrNull(value) {
   return typeof value === "string" && value.trim() !== "" ? value : null;
 }
 
-function existingPathOrNull(value) {
+function existingPathOrNull(value, workspace) {
   const path = stringOrNull(value);
-  return path !== null && existsSync(path) ? path : null;
+  if (path === null) {
+    return null;
+  }
+  const resolvedPath = isAbsolute(path) ? path : resolve(workspace, path);
+  return existsSync(resolvedPath) ? resolvedPath : null;
 }
 
 function nextActionForReadiness(readinessState) {
@@ -250,12 +258,15 @@ function redactArgs(args) {
     "--source-ref",
     "--artifact-root",
     "--cmux-spawn-bin",
-    "--symphony-spec-review-watch-bin",
   ]);
   return args.map((arg, index) => {
     const previous = args[index - 1];
     return index === 0 || pathFlags.has(previous) ? "[path]" : arg;
   });
+}
+
+function redactPathLike(value) {
+  return value.includes("/") ? "[path]" : value;
 }
 
 function usage() {
