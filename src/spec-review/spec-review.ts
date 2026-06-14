@@ -727,21 +727,8 @@ export async function runSpecReviewForIssue(
     generatedAt: now().toISOString(),
   });
   let markerCommentPosted = false;
+  let markerCommentWarning: string | null = null;
   try {
-    await input.writer.postComment(
-      input.issue.id,
-      formatSpecReviewMarkerComment({
-        issue: input.issue,
-        sourceIntentHash,
-        artifactHash,
-        artifactPath: runner.artifactPath,
-        readinessState,
-        verdict: parsed.verdict,
-        linearDocUrl,
-        summary: parsed.reconciliation.summary,
-      }),
-    );
-    markerCommentPosted = true;
     await input.writer.updateIssueDescription(input.issue.id, description);
   } catch (error) {
     const summary = `Spec review failed: Linear write failed: ${errorMessage(error)}`;
@@ -776,6 +763,28 @@ export async function runSpecReviewForIssue(
       message: summary,
     };
   }
+  try {
+    await input.writer.postComment(
+      input.issue.id,
+      formatSpecReviewMarkerComment({
+        issue: input.issue,
+        sourceIntentHash,
+        artifactHash,
+        artifactPath: runner.artifactPath,
+        readinessState,
+        verdict: parsed.verdict,
+        linearDocUrl,
+        summary: parsed.reconciliation.summary,
+      }),
+    );
+    markerCommentPosted = true;
+  } catch (error) {
+    markerCommentWarning = `marker comment failed: ${errorMessage(error)}`;
+  }
+  const summary =
+    markerCommentWarning === null
+      ? parsed.reconciliation.summary
+      : `${parsed.reconciliation.summary}; ${markerCommentWarning}`;
   const entries = await appendSpecReviewResultJournal(input.workspaceRoot, {
     issue: input.issue,
     mode: input.mode,
@@ -785,7 +794,7 @@ export async function runSpecReviewForIssue(
     artifactPath: runner.artifactPath,
     artifactHash,
     linearDocUrl,
-    summary: parsed.reconciliation.summary,
+    summary,
     now: now(),
   });
 
@@ -800,7 +809,7 @@ export async function runSpecReviewForIssue(
     linearDocUrl,
     markerCommentPosted,
     journalEntries: entries,
-    message: parsed.reconciliation.summary,
+    message: summary,
   };
 }
 

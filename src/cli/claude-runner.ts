@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import {
   CLAUDE_RUNNER_PURPOSES,
   type ClaudeRunnerPurpose,
+  isSafeClaudeArtifactName,
   runClaudeCmux,
 } from "../claude-runner/cmux-claude-runner.js";
 
@@ -178,6 +179,11 @@ export function parseClaudeRunnerArgs(
     if (value.trim() === "") {
       throw new UsageError(`${name} is required\n\n${usage()}`);
     }
+  }
+  if (!isSafeClaudeArtifactName(parsed.artifactName)) {
+    throw new UsageError(
+      "--artifact-name must be a basename containing only letters, numbers, dots, underscores, and hyphens",
+    );
   }
   return parsed;
 }

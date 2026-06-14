@@ -881,6 +881,7 @@ describe("spec review", () => {
       "utf8",
     );
 
+    let postCommentCalled = false;
     const result = await runSpecReviewForIssue({
       issue: makeIssue(),
       workspaceRoot: workspace,
@@ -888,12 +889,11 @@ describe("spec review", () => {
       mode: "observe",
       writer: {
         updateIssueDescription: async () => {
-          throw new Error(
-            "description should not be updated after comment failure",
-          );
+          throw new Error("linear unavailable");
         },
         postComment: async () => {
-          throw new Error("linear unavailable");
+          postCommentCalled = true;
+          throw new Error("comment should not be posted after body failure");
         },
       },
       runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
@@ -936,10 +936,108 @@ describe("spec review", () => {
       readiness_state: "failed",
       review_verdict: "ready_as_written",
     });
+    expect(postCommentCalled).toBe(false);
     const journal = await readDispatcherRunJournal(workspace);
     expect(journal.map((entry) => entry.metadata?.readiness_state)).toEqual([
       "failed",
     ]);
+  });
+
+  it("keeps successful readiness when the marker comment fails after durable writes", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-comment-"));
+    const artifactRoot = join(workspace, ".artifacts");
+    await mkdir(artifactRoot, { recursive: true });
+    const artifactPath = join(artifactRoot, "good-review.md");
+    await writeFile(
+      artifactPath,
+      [
+        "## Verdict",
+        "",
+        "Verdict enum: ready_as_written",
+        "",
+        "## Source Read Status",
+        "",
+        "Read the prompt.",
+        "",
+        "## Reconciliation JSON",
+        "",
+        "```json",
+        JSON.stringify({
+          schemaVersion: 1,
+          verdict: "ready_as_written",
+          summary: "Ready.",
+          issueBodyAppend: null,
+          acceptanceCriteria: [],
+          linearDocMarkdown: null,
+          childTicketPlan: [],
+          requiresOperatorContext: false,
+          operatorContextReason: null,
+        }),
+        "```",
+      ].join("\n"),
+      "utf8",
+    );
+
+    let updatedDescription = "";
+    const result = await runSpecReviewForIssue({
+      issue: makeIssue(),
+      workspaceRoot: workspace,
+      artifactRoot,
+      mode: "observe",
+      writer: {
+        updateIssueDescription: async (_issueId, description) => {
+          updatedDescription = description;
+        },
+        postComment: async () => {
+          throw new Error("comments unavailable");
+        },
+      },
+      runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
+        schemaVersion: 1,
+        status: "passed",
+        purpose: "spec-review",
+        model: "opus",
+        profile: "legacy",
+        workspace,
+        promptFile: runnerInput.promptFile,
+        promptSha256: null,
+        artifactDir: artifactRoot,
+        artifactName: "spec-review-opus",
+        artifactPath,
+        resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
+        cmuxSpawnBin: "cmux-spawn",
+        laneId: "claude-spec-review",
+        phase: "spec-review",
+        startedAt: "2026-06-14T00:00:00.000Z",
+        completedAt: "2026-06-14T00:00:01.000Z",
+        sourceVisibility: {
+          status: "ok",
+          workspace,
+          sources: [],
+        },
+        attempts: [],
+        validationErrors: [],
+        usage: null,
+        message: "complete",
+      }),
+      now: () => new Date("2026-06-14T00:00:00.000Z"),
+    });
+
+    expect(result).toMatchObject({
+      readinessState: "valid",
+      markerCommentPosted: false,
+      message: expect.stringContaining(
+        "marker comment failed: comments unavailable",
+      ),
+    });
+    expect(result.journalEntries[0]?.metadata).toMatchObject({
+      readiness_state: "valid",
+      review_verdict: "ready_as_written",
+    });
+    expect(result.journalEntries[0]?.summary).toContain(
+      "marker comment failed: comments unavailable",
+    );
+    expect(updatedDescription).toContain("- Readiness: `valid`");
   });
 
   it("uses the latest issue description before writing successful reconciliation", async () => {

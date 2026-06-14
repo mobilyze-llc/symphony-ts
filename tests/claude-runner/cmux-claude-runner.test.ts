@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -118,6 +125,89 @@ describe("Claude CMUX runner", () => {
     expect(result.status).toBe("passed");
     expect(result.attempts).toHaveLength(2);
     expect(result.attempts[1]?.artifactName).toBe("opus-repair-2");
+  });
+
+  it("rejects unsafe artifact names before invoking cmux", async () => {
+    const harness = await createHarness();
+    let commandCount = 0;
+
+    await expect(
+      runClaudeCmux(
+        {
+          purpose: "spec-review",
+          workspace: harness.workspace,
+          promptFile: harness.promptFile,
+          artifactDir: harness.artifactDir,
+          artifactName: "../opus",
+        },
+        {
+          runCommand: async () => {
+            commandCount += 1;
+            return { exitCode: 0, stdout: "{}", stderr: "" };
+          },
+        },
+      ),
+    ).rejects.toThrow("artifactName must be a basename");
+
+    expect(commandCount).toBe(0);
+  });
+
+  it("uses a repair fence that cannot be closed by prior artifact fences", async () => {
+    const harness = await createHarness();
+    let runCount = 0;
+    let repairPrompt = "";
+    const runCommand: ClaudeRunnerCommand = async (_command, args) => {
+      if (args[0] === "preflight") {
+        return { exitCode: 0, stdout: "{}", stderr: "" };
+      }
+      runCount += 1;
+      const artifactName = readFlag(args, "--artifact-name");
+      const artifactPath = join(harness.artifactDir, `${artifactName}.md`);
+      if (runCount === 1) {
+        await writeFile(
+          artifactPath,
+          ["Previous artifact", "", "```json", '{"ok":false}', "```"].join(
+            "\n",
+          ),
+          "utf8",
+        );
+      } else {
+        repairPrompt = await readFile(readFlag(args, "--prompt-file"), "utf8");
+        await writeFile(artifactPath, validReviewArtifact(), "utf8");
+      }
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          state: "complete",
+          artifact_path: artifactPath,
+          status_path: join(harness.artifactDir, `${artifactName}.status.json`),
+        }),
+        stderr: "",
+      };
+    };
+
+    const result = await runClaudeCmux(
+      {
+        purpose: "spec-review",
+        workspace: harness.workspace,
+        promptFile: harness.promptFile,
+        artifactDir: harness.artifactDir,
+        artifactName: "opus",
+        retryOnInvalid: true,
+        validation: {
+          minBytes: 50,
+          requireFirstHeading: "Verdict",
+          requiredHeadings: ["Source Read Status"],
+          verdictEnums: ["ready_as_written"],
+        },
+      },
+      { runCommand },
+    );
+
+    expect(result.status).toBe("passed");
+    expect(repairPrompt).toContain("````markdown\n");
+    expect(repairPrompt).toContain("```json");
+    expect(repairPrompt).toContain("\n````\n");
   });
 
   it("allows generated prompt and artifact files outside the workspace", async () => {

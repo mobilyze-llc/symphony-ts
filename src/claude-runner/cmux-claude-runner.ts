@@ -137,10 +137,19 @@ const DEFAULT_PROFILE = "legacy";
 const DEFAULT_TIMEOUT_SECONDS = 1_800;
 const DEFAULT_MIN_ARTIFACT_BYTES = 200;
 
+export function isSafeClaudeArtifactName(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
+}
+
 export async function runClaudeCmux(
   input: ClaudeCmuxRunnerInput,
   dependencies: ClaudeRunnerDependencies = {},
 ): Promise<ClaudeRunnerResult> {
+  if (!isSafeClaudeArtifactName(input.artifactName)) {
+    throw new Error(
+      "artifactName must be a basename containing only letters, numbers, dots, underscores, and hyphens",
+    );
+  }
   const now = dependencies.now ?? (() => new Date());
   const env = input.env ?? process.env;
   const runCommand = dependencies.runCommand ?? execFileClaudeRunnerCommand;
@@ -154,6 +163,7 @@ export async function runClaudeCmux(
   const workspace = resolve(input.workspace);
   const promptFile = resolve(input.promptFile);
   const artifactDir = resolve(input.artifactDir);
+  const artifactName = input.artifactName;
   const startedAt = now().toISOString();
 
   await mkdir(artifactDir, { recursive: true });
@@ -164,10 +174,7 @@ export async function runClaudeCmux(
   });
   const promptSha256 = await fileSha256(promptFile);
   const attempts: ClaudeRunnerAttempt[] = [];
-  const resultJsonPath = resolve(
-    artifactDir,
-    `${input.artifactName}.result.json`,
-  );
+  const resultJsonPath = resolve(artifactDir, `${artifactName}.result.json`);
 
   if (sourceVisibility.status !== "ok") {
     const result: ClaudeRunnerResult = {
@@ -180,7 +187,7 @@ export async function runClaudeCmux(
       promptFile,
       promptSha256,
       artifactDir,
-      artifactName: input.artifactName,
+      artifactName,
       artifactPath: null,
       resultJsonPath,
       cmuxSpawnBin,
@@ -218,7 +225,7 @@ export async function runClaudeCmux(
       promptFile,
       promptSha256,
       artifactDir,
-      artifactName: input.artifactName,
+      artifactName,
       artifactPath: null,
       resultJsonPath,
       cmuxSpawnBin,
@@ -240,7 +247,7 @@ export async function runClaudeCmux(
   }
 
   let currentPromptFile = promptFile;
-  let currentArtifactName = input.artifactName;
+  let currentArtifactName = artifactName;
   let finalStatus: ClaudeRunnerStatus = "failed";
   let artifactPath: string | null = null;
   let usage: Record<string, unknown> | null = null;
@@ -323,7 +330,7 @@ export async function runClaudeCmux(
       break;
     }
     if (attempt < maxAttempts) {
-      currentArtifactName = `${input.artifactName}-repair-${attempt + 1}`;
+      currentArtifactName = `${artifactName}-repair-${attempt + 1}`;
       currentPromptFile = resolve(
         artifactDir,
         `${currentArtifactName}.prompt.md`,
@@ -350,7 +357,7 @@ export async function runClaudeCmux(
     promptFile,
     promptSha256,
     artifactDir,
-    artifactName: input.artifactName,
+    artifactName,
     artifactPath,
     resultJsonPath,
     cmuxSpawnBin,
@@ -677,6 +684,7 @@ async function buildRepairPrompt(
   } catch {
     artifact = "";
   }
+  const artifactFence = markdownFenceFor(artifact);
   return [
     original,
     "",
@@ -689,11 +697,19 @@ async function buildRepairPrompt(
     "",
     "Previous artifact:",
     "",
-    "```markdown",
+    `${artifactFence}markdown`,
     artifact,
-    "```",
+    artifactFence,
     "",
   ].join("\n");
+}
+
+function markdownFenceFor(content: string): string {
+  const longestBacktickRun = Math.max(
+    0,
+    ...Array.from(content.matchAll(/`+/g), (match) => match[0].length),
+  );
+  return "`".repeat(Math.max(3, longestBacktickRun + 1));
 }
 
 function containsMarkdownHeading(text: string, heading: string): boolean {

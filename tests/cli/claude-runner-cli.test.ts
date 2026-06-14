@@ -56,6 +56,7 @@ describe("symphony-claude-runner CLI", () => {
   it("prints help and usage errors through injectable io", async () => {
     const stdout = vi.fn();
     const stderr = vi.fn();
+    const runClaude = vi.fn(async (input) => makeResult(input, "passed"));
 
     await expect(
       runClaudeRunnerCli(["--help"], { stdout, stderr }),
@@ -73,6 +74,28 @@ describe("symphony-claude-runner CLI", () => {
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining("--purpose must be one of"),
     );
+
+    await expect(
+      runClaudeRunnerCli(
+        [
+          "--purpose",
+          "custom",
+          "--workspace",
+          "/repo",
+          "--prompt-file",
+          "/repo/prompt.md",
+          "--artifact-dir",
+          "/repo/artifacts",
+          "--artifact-name",
+          "../opus",
+        ],
+        { runClaude, stdout, stderr },
+      ),
+    ).resolves.toBe(2);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining("--artifact-name must be a basename"),
+    );
+    expect(runClaude).not.toHaveBeenCalled();
   });
 
   it("passes parsed input to the runner and maps runner status to exit code", async () => {
