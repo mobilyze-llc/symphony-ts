@@ -32,6 +32,14 @@ describe("spec-review-lane skill", () => {
     expect(skillContent).toContain("durable watcher path");
   });
 
+  it("documents the stable source and user-level symlink install model", () => {
+    expect(skillContent).toContain("Source And Install Model");
+    expect(skillContent).toContain("skills/spec-review-lane");
+    expect(skillContent).toContain("~/.agents/skills/spec-review-lane");
+    expect(skillContent).toContain("~/.codex/skills/spec-review-lane");
+    expect(skillContent).toContain("copy-style installs drift");
+  });
+
   it("is exposed through the repo-local Codex discovery root", () => {
     expect(existsSync(DISCOVERY_DIR)).toBe(true);
     expect(lstatSync(DISCOVERY_DIR).isSymbolicLink()).toBe(true);

@@ -48,7 +48,7 @@ class UsageError extends Error {
 
 function usage(): string {
   return [
-    "Usage: symphony-claude-runner --purpose <purpose> --workspace <dir> --prompt-file <file> --artifact-dir <dir> --artifact-name <name> [options]",
+    "Usage: claude-runner --purpose <purpose> --workspace <dir> --prompt-file <file> --artifact-dir <dir> --artifact-name <name> [options]",
     "",
     "Calls Claude through cmux-spawn and validates the direct artifact before reporting success.",
     "",

@@ -4,11 +4,8 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const SKILL_DIR = resolve(__dirname, "../../skills/symphony-claude-runner");
-const DISCOVERY_DIR = resolve(
-  __dirname,
-  "../../.agents/skills/symphony-claude-runner",
-);
+const SKILL_DIR = resolve(__dirname, "../../skills/claude-runner");
+const DISCOVERY_DIR = resolve(__dirname, "../../.agents/skills/claude-runner");
 const SKILL_PATH = resolve(SKILL_DIR, "SKILL.md");
 const skillContent = readFileSync(SKILL_PATH, "utf-8");
 
@@ -18,12 +15,21 @@ function expectAll(snippets: readonly string[]): void {
   }
 }
 
-describe("symphony-claude-runner skill", () => {
+describe("claude-runner skill", () => {
   it("defines the reusable agent-facing Claude CMUX runner entrypoint", () => {
-    expect(skillContent).toMatch(/^name: symphony-claude-runner$/m);
-    expect(skillContent).toContain("symphony-claude-runner");
+    expect(skillContent).toMatch(/^name: claude-runner$/m);
+    expect(skillContent).toContain("# Claude Runner");
+    expect(skillContent).toContain("claude-runner");
     expect(skillContent).toContain("cmux-spawn run --agent claude");
     expect(skillContent).toContain("bounded Claude lane");
+  });
+
+  it("documents the stable source and user-level symlink install model", () => {
+    expect(skillContent).toContain("Source And Install Model");
+    expect(skillContent).toContain("skills/claude-runner");
+    expect(skillContent).toContain("~/.agents/skills/claude-runner");
+    expect(skillContent).toContain("~/.codex/skills/claude-runner");
+    expect(skillContent).toContain("symphony-claude-runner");
   });
 
   it("is exposed through the repo-local agent discovery root", () => {
@@ -43,6 +49,7 @@ describe("symphony-claude-runner skill", () => {
   it("documents every supported generic runner purpose with copy-ready templates", () => {
     for (const purpose of [
       "spec-partner",
+      "spec-review",
       "research",
       "critique",
       "review",

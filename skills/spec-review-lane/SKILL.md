@@ -12,6 +12,15 @@ ticket before implementation.
 This skill is the spec-review wrapper. For general Claude calls unrelated to
 durable ticket review, use the separate Claude-runner skill when it exists.
 
+## Source And Install Model
+
+The canonical skill source lives in `skills/spec-review-lane` in the stable
+`symphony-ts` checkout. Cross-repo discovery should use the user-level symlink
+`~/.agents/skills/spec-review-lane` pointing at that stable source directory.
+Repo-local discovery uses `.agents/skills/spec-review-lane` as a symlink to the
+same canonical repo directory. Do not install a copied global skill under
+`~/.codex/skills/spec-review-lane`; copy-style installs drift.
+
 ## Default Path
 
 Prefer the durable watcher path:
@@ -71,7 +80,7 @@ issue body, Linear Doc when created, and dispatcher journal row.
 
 ## Prompt-Only Fallback
 
-Use `symphony-claude-runner` directly only when the durable watcher path is not
+Use `claude-runner` directly only when the durable watcher path is not
 usable. Fallback artifacts are useful review evidence, but they are not durable
 spec-review readiness state.
 
