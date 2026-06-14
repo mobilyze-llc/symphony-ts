@@ -3024,6 +3024,7 @@ describe("runHeadlessCouncilGate", () => {
     );
     expect(lane.structuredArtifact).toMatchObject({
       parseStatus: "malformed",
+      confidence: 0,
       malformedReason:
         "Artifact did not start with a parseable Verdict section at the first non-whitespace line.",
       rawArtifactPath: lane.artifactPath,
@@ -3154,6 +3155,7 @@ describe("runHeadlessCouncilGate", () => {
       kind: "symphony-headless-council-reviewer-artifact",
       parseStatus: "synthesized_from_markdown",
       verdict: "fail",
+      confidence: 0.91,
       lane: {
         laneId: "claude-opus",
         modelFamily: "anthropic",
@@ -3216,6 +3218,107 @@ describe("runHeadlessCouncilGate", () => {
     expect(report).toContain("## Structured Findings");
     expect(report).toContain(structured.findings[0]!.fingerprint);
     expect(report).toContain(lane.structuredArtifactPath!);
+    expect(report).toContain(
+      "| Lane | Agent | Role | Model | Independent | State | Verdict | Degraded | Findings | Bundle File Hash | Bundle Hash | Structured Artifact | Raw Artifact |",
+    );
+    expect(report).toContain(structured.reviewBundle!.hash);
+    expect(report).toContain(structured.reviewBundle!.bundleHash);
+  });
+
+  it("keeps blank-line continuation paragraphs attached to their list-item finding", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "FINDINGS",
+            "",
+            "## P1 Must Fix",
+            "- src/review/headless-council-gate.ts:10 drops the parser context.",
+            "",
+            "  Continuation paragraph explains the concrete failure mode and must remain part of the same finding.",
+            "- tests/review/headless-council-gate.test.ts:20 adds a separate regression.",
+            "",
+            "## P2 Should Fix",
+            "None",
+          ].join("\n"),
+        },
+      },
+    });
+    await writeFile(
+      harness.diffPath,
+      [
+        "diff --git a/src/review/headless-council-gate.ts b/src/review/headless-council-gate.ts",
+        "+const parser = true;",
+        "diff --git a/tests/review/headless-council-gate.test.ts b/tests/review/headless-council-gate.test.ts",
+        "+const test = true;",
+      ].join("\n"),
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-458",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const findings = result.lanes[0]!.structuredArtifact!.findings;
+    expect(findings).toHaveLength(2);
+    expect(findings[0]!.rationale).toContain(
+      "Continuation paragraph explains the concrete failure mode",
+    );
+    expect(findings[0]!.evidence.map((item) => item.path)).toEqual([
+      "src/review/headless-council-gate.ts",
+    ]);
+    expect(findings[1]!.rationale).not.toContain("Continuation paragraph");
+    expect(findings[1]!.evidence.map((item) => item.path)).toEqual([
+      "tests/review/headless-council-gate.test.ts",
+    ]);
+  });
+
+  it("derives artifact confidence from the strongest finding confidence signal", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "FINDINGS",
+            "",
+            "## P1 Must Fix",
+            "- file.ts:1 has a lower-confidence blocker. confidence: 0.42",
+            "",
+            "## P2 Should Fix",
+            "- tests/review/headless-council-gate.test.ts:25 has the strongest signal. confidence: 0.87",
+            "",
+            "## Track",
+            "- docs/review.md:8 is a lower telemetry follow-up. confidence: 0.66",
+          ].join("\n"),
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-463",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const artifact = result.lanes[0]!.structuredArtifact!;
+    expect(artifact.findings.map((finding) => finding.confidence)).toEqual([
+      0.42, 0.87, 0.66,
+    ]);
+    expect(artifact.confidence).toBe(0.87);
   });
 
   it("filters prose dotted tokens without changing deterministic evidence fingerprints", async () => {
@@ -3495,7 +3598,7 @@ describe("runHeadlessCouncilGate", () => {
     const leadArtifact = result.lanes.find(
       (lane) => lane.laneId === "codex-high-lead",
     )!.structuredArtifact!;
-    expect(leadArtifact.confidence).toBe(0.85);
+    expect(leadArtifact.confidence).toBe(0.93);
     expect(leadArtifact.findings[0]).toMatchObject({
       severity: "P1",
       emittedSeverity: "P1",

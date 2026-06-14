@@ -515,6 +515,14 @@ curl -s http://localhost:3000/api/v1/state | jq '{
   records the selected execution preset (`standard` or `high-risk`) so reports,
   dashboards, and replay tooling can distinguish the selected metadata from the
   actual lane command budget.
+- The JSON `review-result.json` and lane `*.structured.json` artifacts remain
+  the source of truth for council tooling. The Markdown council report is
+  operator-facing, but its lane table keeps `Bundle File Hash` and
+  `Bundle Hash` columns as a compatibility surface for existing table readers.
+  Structured artifact `confidence` is `0` for malformed artifacts, otherwise
+  the maximum parsed per-finding confidence when findings exist; clean
+  no-finding artifacts use the verdict parser confidence (`0.75` for PASS,
+  `0.6` otherwise).
 - `review_routing.decorrelationBasis.authorFamilies` canonicalizes author
   provenance with token-boundary model-family matching. Recognized tokens are
   OpenAI/Codex (`codex`, `openai`, `gpt` including separator-delimited
