@@ -41,6 +41,27 @@ export type SpecReviewReadinessState =
 
 export type SpecReviewMode = "observe" | "warn" | "enforce";
 
+export const DEFAULT_SPEC_REVIEW_SOURCE_REF = "SPEC.mobilyze.md";
+export const SPEC_REVIEW_SOURCE_REF_MAX_CHARS = 6_000;
+
+export type SpecReviewSourceOfTruthStatus =
+  | "available"
+  | "truncated"
+  | "missing"
+  | "read_error"
+  | "invalid_source_path";
+
+export interface SpecReviewSourceOfTruthRef {
+  path: string;
+  status: SpecReviewSourceOfTruthStatus;
+  excerpt: string | null;
+  truncated: boolean;
+  originalChars: number | null;
+  includedChars: number;
+  maxChars: number;
+  error: string | null;
+}
+
 export interface SpecReviewSelectionConfig {
   triggerLabels: string[];
   highRiskLabelPrefixes: string[];
@@ -68,6 +89,7 @@ export interface SpecReviewContextPacket {
   sourceIntentHash: string;
   ticketFeature: TicketFeature | null;
   backlogFindings: BacklogAuditFinding[];
+  sourceOfTruthRefs: SpecReviewSourceOfTruthRef[];
   sourceOfTruthExcerpt: string | null;
   unavailableContext: string[];
 }
@@ -116,6 +138,7 @@ export interface SpecReviewRunIssueInput {
   artifactRoot: string;
   mode: SpecReviewMode;
   cmuxSpawnBin?: string;
+  sourceOfTruthRefs?: SpecReviewSourceOfTruthRef[];
   sourceOfTruthExcerpt?: string | null;
   writer: SpecReviewWriteClient;
   documentPublisher?: SpecReviewDocumentPublisher | undefined;
@@ -415,7 +438,8 @@ export function buildSpecReviewPrompt(packet: SpecReviewContextPacket): string {
     "",
     "## Source Read Status",
     "",
-    "Say which source refs were available, unavailable, or inferred.",
+    "Say which configured `sourceOfTruthRefs` were available, truncated, missing, unreadable, invalid, or inferred.",
+    "For every truncated source ref, state originalChars, includedChars, and maxChars. Do not infer omitted source content.",
     "",
     "## Review",
     "",
@@ -461,6 +485,7 @@ export function buildSpecReviewPrompt(packet: SpecReviewContextPacket): string {
           issue: packet.issue,
           ticketFeature: packet.ticketFeature,
           backlogFindings: packet.backlogFindings,
+          sourceOfTruthRefs: packet.sourceOfTruthRefs,
           sourceOfTruthExcerpt: packet.sourceOfTruthExcerpt,
           unavailableContext: packet.unavailableContext,
         },
@@ -488,6 +513,85 @@ function longestBacktickRun(text: string): number {
     }
   }
   return longest;
+}
+
+function normalizeSourceOfTruthRefs(input: {
+  sourceOfTruthRefs?: readonly SpecReviewSourceOfTruthRef[];
+  sourceOfTruthExcerpt?: string | null;
+}): SpecReviewSourceOfTruthRef[] {
+  if (input.sourceOfTruthRefs !== undefined) {
+    return input.sourceOfTruthRefs.map((ref) => ({ ...ref }));
+  }
+  if (
+    input.sourceOfTruthExcerpt !== null &&
+    input.sourceOfTruthExcerpt !== undefined
+  ) {
+    return [
+      {
+        path: DEFAULT_SPEC_REVIEW_SOURCE_REF,
+        status: "available",
+        excerpt: input.sourceOfTruthExcerpt,
+        truncated: false,
+        originalChars: input.sourceOfTruthExcerpt.length,
+        includedChars: input.sourceOfTruthExcerpt.length,
+        maxChars: SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
+        error: null,
+      },
+    ];
+  }
+  return [
+    {
+      path: DEFAULT_SPEC_REVIEW_SOURCE_REF,
+      status: "missing",
+      excerpt: null,
+      truncated: false,
+      originalChars: null,
+      includedChars: 0,
+      maxChars: SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
+      error: "Source-of-truth excerpt unavailable.",
+    },
+  ];
+}
+
+function combineSourceOfTruthExcerpts(
+  refs: readonly SpecReviewSourceOfTruthRef[],
+): string | null {
+  const excerpts = refs.flatMap((ref) =>
+    ref.excerpt === null
+      ? []
+      : [
+          [
+            `Source ref: ${ref.path}`,
+            `Status: ${ref.status}`,
+            ref.truncated
+              ? `Truncated: ${ref.includedChars}/${ref.originalChars ?? "unknown"} chars included (max ${ref.maxChars})`
+              : null,
+            "",
+            ref.excerpt,
+          ]
+            .filter((line): line is string => line !== null)
+            .join("\n"),
+        ],
+  );
+  return excerpts.length === 0 ? null : excerpts.join("\n\n");
+}
+
+function unavailableContextForSourceRefs(
+  refs: readonly SpecReviewSourceOfTruthRef[],
+): string[] {
+  return refs.flatMap((ref) => {
+    if (ref.status === "available") {
+      return [];
+    }
+    if (ref.status === "truncated") {
+      return [
+        `${ref.path} truncated from ${ref.originalChars ?? "unknown"} to ${ref.includedChars} characters (max ${ref.maxChars}).`,
+      ];
+    }
+    return [
+      `${ref.path} source-of-truth ref ${ref.status}${ref.error === null ? "" : `: ${ref.error}`}`,
+    ];
+  });
 }
 
 function extractSpecReviewMarker(description: string): {
@@ -611,17 +715,18 @@ export async function runSpecReviewForIssue(
   );
   await mkdir(artifactDir, { recursive: true });
 
+  const sourceOfTruthRefs = normalizeSourceOfTruthRefs(input);
+  const sourceOfTruthExcerpt =
+    input.sourceOfTruthExcerpt ??
+    combineSourceOfTruthExcerpts(sourceOfTruthRefs);
   const packet: SpecReviewContextPacket = {
     issue: input.issue,
     sourceIntentHash,
     ticketFeature: input.ticketFeature ?? null,
     backlogFindings: input.backlogFindings ?? [],
-    sourceOfTruthExcerpt: input.sourceOfTruthExcerpt ?? null,
-    unavailableContext:
-      input.sourceOfTruthExcerpt === null ||
-      input.sourceOfTruthExcerpt === undefined
-        ? ["SPEC.mobilyze.md excerpt unavailable"]
-        : [],
+    sourceOfTruthRefs,
+    sourceOfTruthExcerpt,
+    unavailableContext: unavailableContextForSourceRefs(sourceOfTruthRefs),
   };
   const promptPath = resolve(artifactDir, "prompt.md");
   await writeFile(promptPath, buildSpecReviewPrompt(packet), "utf8");

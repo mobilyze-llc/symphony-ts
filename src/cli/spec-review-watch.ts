@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { resolveWorkflowConfig } from "../config/config-resolver.js";
@@ -13,9 +13,12 @@ import { loadWorkflowDefinition } from "../config/workflow-loader.js";
 import type { DispatcherRunJournalEntry } from "../domain/model.js";
 import { readDispatcherRunJournal } from "../logging/run-journal.js";
 import {
+  DEFAULT_SPEC_REVIEW_SOURCE_REF,
+  SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
   type SpecReviewDocumentPublisher,
   type SpecReviewMode,
   type SpecReviewRunIssueResult,
+  type SpecReviewSourceOfTruthRef,
   appendSpecReviewResultJournal,
   runSpecReviewForIssue,
   selectSpecReviewCandidates,
@@ -30,6 +33,7 @@ interface ParsedArgs {
   mode: SpecReviewMode;
   states: string[] | null;
   issues: string[];
+  sourceRefs: string[];
   cmuxSpawnBin: string | null;
   dryRun: boolean;
   help: boolean;
@@ -88,6 +92,7 @@ function usage(): string {
     "  --mode <mode>             observe|warn|enforce (default: observe)",
     "  --states <csv>            Linear states to scan (default: workflow active states)",
     "  --issue <identifier>      Restrict to an issue identifier (repeatable)",
+    "  --source-ref <path>       Source-of-truth file to include (repeatable, default: SPEC.mobilyze.md)",
     "  --cmux-spawn-bin <path>   cmux-spawn binary",
     "  --dry-run                 Select and print candidates without invoking Claude or writing Linear",
     "  --help                    Show this help",
@@ -104,6 +109,7 @@ export function parseSpecReviewWatchArgs(
   let mode: SpecReviewMode = "observe";
   let states: string[] | null = null;
   const issues: string[] = [];
+  const sourceRefs: string[] = [];
   let cmuxSpawnBin: string | null = null;
   let dryRun = false;
 
@@ -120,6 +126,7 @@ export function parseSpecReviewWatchArgs(
         mode,
         states,
         issues,
+        sourceRefs,
         cmuxSpawnBin,
         dryRun,
         help: true,
@@ -152,6 +159,10 @@ export function parseSpecReviewWatchArgs(
       issues.push(readValue(argv, ++index, token));
       continue;
     }
+    if (token === "--source-ref") {
+      sourceRefs.push(readValue(argv, ++index, token));
+      continue;
+    }
     if (token === "--cmux-spawn-bin") {
       cmuxSpawnBin = readValue(argv, ++index, token);
       continue;
@@ -172,6 +183,7 @@ export function parseSpecReviewWatchArgs(
     mode,
     states,
     issues,
+    sourceRefs,
     cmuxSpawnBin,
     dryRun,
     help: false,
@@ -355,8 +367,11 @@ export async function runSpecReviewWatchCli(
     }
   }
 
-  const sourceOfTruthExcerpt = await readSourceOfTruthExcerpt(
+  const sourceOfTruthRefs = await readSourceOfTruthRefs(
     parsed.workspaceRoot,
+    parsed.sourceRefs.length === 0
+      ? [DEFAULT_SPEC_REVIEW_SOURCE_REF]
+      : parsed.sourceRefs,
   );
   for (const decision of selected) {
     try {
@@ -371,7 +386,7 @@ export async function runSpecReviewWatchCli(
           ...(parsed.cmuxSpawnBin === null
             ? {}
             : { cmuxSpawnBin: parsed.cmuxSpawnBin }),
-          sourceOfTruthExcerpt,
+          sourceOfTruthRefs,
           writer: {
             fetchIssueDescription: async (issueId) => {
               const [issue] = await tracker.fetchIssueReferencesByIds([
@@ -444,18 +459,109 @@ function isSuccessfulReadinessState(
   return mode !== "enforce" && readinessState === "needs_operator_context";
 }
 
-async function readSourceOfTruthExcerpt(
+async function readSourceOfTruthRefs(
   workspaceRoot: string,
-): Promise<string | null> {
-  try {
-    const text = await fs.readFile(
-      resolve(workspaceRoot, "SPEC.mobilyze.md"),
-      "utf8",
-    );
-    return text.slice(0, 6_000);
-  } catch {
-    return null;
+  sourceRefs: readonly string[],
+): Promise<SpecReviewSourceOfTruthRef[]> {
+  return Promise.all(
+    sourceRefs.map((sourceRef) =>
+      readSourceOfTruthRef(workspaceRoot, sourceRef),
+    ),
+  );
+}
+
+async function readSourceOfTruthRef(
+  workspaceRoot: string,
+  sourceRef: string,
+): Promise<SpecReviewSourceOfTruthRef> {
+  const normalizedRef = sourceRef.trim();
+  if (normalizedRef === "") {
+    return makeUnavailableSourceRef({
+      path: normalizedRef,
+      status: "invalid_source_path",
+      error: "Source ref path cannot be empty.",
+    });
   }
+  let resolvedWorkspace: string;
+  try {
+    resolvedWorkspace = await fs.realpath(workspaceRoot);
+  } catch (error) {
+    return makeUnavailableSourceRef({
+      path: normalizedRef,
+      status: "read_error",
+      error: `Workspace root unavailable: ${errorMessage(error)}`,
+    });
+  }
+  const resolvedSource = resolve(resolvedWorkspace, normalizedRef);
+  if (!isPathInside(resolvedWorkspace, resolvedSource)) {
+    return makeUnavailableSourceRef({
+      path: normalizedRef,
+      status: "invalid_source_path",
+      error: "Source ref must resolve inside the workspace.",
+    });
+  }
+  try {
+    const realSource = await fs.realpath(resolvedSource);
+    if (!isPathInside(resolvedWorkspace, realSource)) {
+      return makeUnavailableSourceRef({
+        path: normalizedRef,
+        status: "invalid_source_path",
+        error: "Source ref real path must stay inside the workspace.",
+      });
+    }
+    const text = await fs.readFile(realSource, "utf8");
+    const included = text.slice(0, SPEC_REVIEW_SOURCE_REF_MAX_CHARS);
+    const truncated = text.length > SPEC_REVIEW_SOURCE_REF_MAX_CHARS;
+    return {
+      path: normalizedRef,
+      status: truncated ? "truncated" : "available",
+      excerpt: included,
+      truncated,
+      originalChars: text.length,
+      includedChars: included.length,
+      maxChars: SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
+      error: null,
+    };
+  } catch (error) {
+    return makeUnavailableSourceRef({
+      path: normalizedRef,
+      status: isNotFoundError(error) ? "missing" : "read_error",
+      error: errorMessage(error),
+    });
+  }
+}
+
+function makeUnavailableSourceRef(input: {
+  path: string;
+  status: SpecReviewSourceOfTruthRef["status"];
+  error: string;
+}): SpecReviewSourceOfTruthRef {
+  return {
+    path: input.path,
+    status: input.status,
+    excerpt: null,
+    truncated: false,
+    originalChars: null,
+    includedChars: 0,
+    maxChars: SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
+    error: input.error,
+  };
+}
+
+function isPathInside(parent: string, child: string): boolean {
+  const childRelativePath = relative(parent, child);
+  return (
+    childRelativePath === "" ||
+    (childRelativePath !== ".." &&
+      !childRelativePath.startsWith(`..${sep}`) &&
+      !isAbsolute(childRelativePath))
+  );
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return (
+    isRecord(error) && (error.code === "ENOENT" || error.code === "ENOTDIR")
+  );
 }
 
 function readValue(

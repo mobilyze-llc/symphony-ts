@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,13 +20,14 @@ import type {
 } from "../../src/domain/model.js";
 import {
   SENSITIVE_SOURCE_INTENT_HASH,
+  SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
   type SpecReviewRunIssueResult,
   buildReviewedIssueDescription,
   computeSourceIntentHash,
 } from "../../src/spec-review/spec-review.js";
 
 describe("symphony-spec-review-watch CLI", () => {
-  it("parses workflow, workspace, mode, states, issue filters, and dry-run", () => {
+  it("parses workflow, workspace, mode, states, issue filters, source refs, and dry-run", () => {
     expect(
       parseSpecReviewWatchArgs(
         [
@@ -41,6 +42,10 @@ describe("symphony-spec-review-watch CLI", () => {
           "Backlog,Todo",
           "--issue",
           "SYMPH-1",
+          "--source-ref",
+          "SPEC.mobilyze.md",
+          "--source-ref",
+          "docs/review.md",
           "--cmux-spawn-bin",
           "/bin/cmux-spawn",
           "--dry-run",
@@ -54,6 +59,7 @@ describe("symphony-spec-review-watch CLI", () => {
       mode: "warn",
       states: ["Backlog", "Todo"],
       issues: ["SYMPH-1"],
+      sourceRefs: ["SPEC.mobilyze.md", "docs/review.md"],
       cmuxSpawnBin: "/bin/cmux-spawn",
       dryRun: true,
       help: false,
@@ -200,6 +206,114 @@ describe("symphony-spec-review-watch CLI", () => {
           description: null,
         }),
       }),
+    );
+  });
+
+  it("passes configured source refs with truncation, missing, and path metadata", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    await mkdir(join(workspace, "docs"), { recursive: true });
+    await mkdir(join(workspace, "..source"), { recursive: true });
+    await writeFile(
+      join(workspace, "SPEC.mobilyze.md"),
+      "a".repeat(SPEC_REVIEW_SOURCE_REF_MAX_CHARS + 5),
+      "utf8",
+    );
+    await writeFile(
+      join(workspace, "..source", "truth.md"),
+      "workspace-local dot-prefixed source",
+      "utf8",
+    );
+    const stdout = vi.fn();
+    const issue = makeIssue({
+      id: "selected",
+      identifier: "SYMPH-1",
+      labels: ["needs:spec-review"],
+    });
+    const runReview = vi.fn(async ({ issue }) => makeRunResult(issue, "valid"));
+
+    const exitCode = await runSpecReviewWatchCli(
+      [
+        "WORKFLOW.md",
+        "--workspace",
+        workspace,
+        "--source-ref",
+        "SPEC.mobilyze.md",
+        "--source-ref",
+        "docs/missing.md",
+        "--source-ref",
+        "..source/truth.md",
+        "--source-ref",
+        "../escape.md",
+      ],
+      {
+        stdout,
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () => fakeConfig(),
+        createTracker: () => ({
+          fetchIssuesByStates: async () => [issue],
+          fetchIssueReferencesByIds: async () => [],
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+        runSpecReviewForIssue: runReview,
+        preflightDocumentPublisher: async () => undefined,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(runReview).toHaveBeenCalledOnce();
+    const reviewInput = runReview.mock.calls[0]?.[0];
+    expect(reviewInput?.sourceOfTruthRefs).toEqual([
+      expect.objectContaining({
+        path: "SPEC.mobilyze.md",
+        status: "truncated",
+        truncated: true,
+        originalChars: SPEC_REVIEW_SOURCE_REF_MAX_CHARS + 5,
+        includedChars: SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
+        maxChars: SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
+        error: null,
+      }),
+      expect.objectContaining({
+        path: "docs/missing.md",
+        status: "missing",
+        excerpt: null,
+        truncated: false,
+        originalChars: null,
+        includedChars: 0,
+        maxChars: SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
+      }),
+      expect.objectContaining({
+        path: "..source/truth.md",
+        status: "available",
+        excerpt: "workspace-local dot-prefixed source",
+        truncated: false,
+        originalChars: "workspace-local dot-prefixed source".length,
+        includedChars: "workspace-local dot-prefixed source".length,
+        maxChars: SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
+        error: null,
+      }),
+      expect.objectContaining({
+        path: "../escape.md",
+        status: "invalid_source_path",
+        excerpt: null,
+        truncated: false,
+        originalChars: null,
+        includedChars: 0,
+        maxChars: SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
+        error: "Source ref must resolve inside the workspace.",
+      }),
+    ]);
+    expect(reviewInput?.sourceOfTruthRefs?.[0]?.excerpt).toHaveLength(
+      SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
     );
   });
 
