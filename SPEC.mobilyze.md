@@ -88,6 +88,17 @@ description still contains an older `readiness-state:valid` marker. Journal rows
 for a different source intent hash do not invalidate the current source intent;
 normal source-hash mismatch handling covers edited tickets.
 
+The spec-review watcher process status is a health signal, not an admission
+decision. A deterministic privacy block is safe watcher behavior: batches where
+every selected candidate is `privacy_blocked`, or where privacy-blocked
+candidates are mixed with otherwise healthy reviews, must exit zero and expose
+aggregate counts in the CLI output and selection artifact. The watcher must
+still journal each privacy-blocked issue with `privacy_blocked` so admission can
+block or warn from the durable per-issue readiness row. Actual substrate
+failures, runner failures, or enforce-mode `needs_operator_context` results must
+exit non-zero. This prevents monitors from treating safe privacy refusal as
+watcher failure while still making "no useful review occurred" visible.
+
 The source intent hash includes the full Linear issue description after
 generated spec-review markers are stripped, plus a structured projection of
 the `Acceptance Criteria` Markdown section. That projection is deliberately
