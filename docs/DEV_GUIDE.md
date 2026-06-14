@@ -285,6 +285,9 @@ pnpm build
 pnpm probe:review-runtime -- --workspace /path/to/product-repo --env-file .env
 ```
 
+The smoke runs `symphony-council-review-gate --help` and
+`cmux-spawn preflight --caffeinate --json`.
+
 `ops/symphony-deploy` runs the same preflight against a temporary product-shaped workspace after
 refreshing `.env` and before restarting the service.
 

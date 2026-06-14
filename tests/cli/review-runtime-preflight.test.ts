@@ -83,7 +83,8 @@ test "$1" = "--help"
       join(bin, "cmux-spawn"),
       `#!/usr/bin/env sh
 test "$1" = "preflight"
-test "$2" = "--json"
+test "$2" = "--caffeinate"
+test "$3" = "--json"
 printf '{"ok":true}\\n'
 `,
     );
@@ -115,7 +116,7 @@ printf '{"ok":true}\\n'
     expect(result.status).toBe("passed");
     expect(execCalls).toEqual([
       [gate, "--help"],
-      [cmux, "preflight", "--json"],
+      [cmux, "preflight", "--caffeinate", "--json"],
     ]);
   });
 

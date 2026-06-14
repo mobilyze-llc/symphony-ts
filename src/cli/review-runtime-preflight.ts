@@ -179,7 +179,7 @@ export async function runReviewRuntimePreflight(
       await runExecutableCheck({
         name: "cmux-spawn preflight",
         command: cmux.path,
-        args: ["preflight", "--json"],
+        args: ["preflight", "--caffeinate", "--json"],
         cwd: workspace,
         env,
         exec,
@@ -241,7 +241,7 @@ function usage(): string {
     "  --workspace DIR              Product workspace to run from (default: cwd)",
     "  --env-file PATH              Dotenv file to overlay onto the process env",
     "  --allow-symphony-workspace   Allow running from a symphony-ts checkout",
-    "  --skip-cmux-preflight        Resolve cmux-spawn but skip `preflight --json`",
+    "  --skip-cmux-preflight        Resolve cmux-spawn but skip `preflight --caffeinate --json`",
     "  --json                       Print machine-readable JSON",
     "  --help                       Show this help",
   ].join("\n");

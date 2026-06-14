@@ -84,6 +84,7 @@ run_review_runtime_preflight() {
   local env_file="$1"
   local workspace
   workspace="$(mktemp -d "${TMPDIR:-/tmp}/symphony-review-runtime-preflight.XXXXXX")"
+  printf '{"name":"symphony-review-runtime-preflight-smoke","private":true}\n' > "$workspace/package.json"
 
   if $DRY_RUN; then
     run_or_dry node "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
@@ -93,13 +94,16 @@ run_review_runtime_preflight() {
     return
   fi
 
-  if ! node "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
+  if node "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
     --workspace "$workspace" \
     --env-file "$env_file"; then
     rm -rf "$workspace"
-    die "Review runtime preflight failed. Configure SYMPHONY_COUNCIL_REVIEW_GATE and CMUX_SPAWN_BIN, or install symphony-council-review-gate and cmux-spawn on PATH before restarting Symphony."
+  else
+    local preflight_status=$?
+    rm -rf "$workspace"
+    warn "Review runtime preflight failed. Configure SYMPHONY_COUNCIL_REVIEW_GATE and CMUX_SPAWN_BIN, or install symphony-council-review-gate and cmux-spawn on PATH before restarting Symphony."
+    return "$preflight_status"
   fi
-  rm -rf "$workspace"
 }
 
 # Check if symphony-ctl service is installed (plist exists)
