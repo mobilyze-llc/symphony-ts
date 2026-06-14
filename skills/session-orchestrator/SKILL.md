@@ -12,6 +12,15 @@ review decisions, Linear/GitHub closeout, and durable reporting. Implementation
 work belongs in bounded worker threads or in the current thread only when the
 scope is intentionally small.
 
+## Source And Install Model
+
+The canonical skill source lives in `skills/session-orchestrator` in the stable
+`symphony-ts` checkout. Cross-repo discovery should use the user-level symlink
+`~/.agents/skills/session-orchestrator` pointing at that stable source
+directory. Repo-local discovery uses `.agents/skills/session-orchestrator` as a
+symlink to the same canonical repo directory. Do not install a copied global
+skill under `~/.codex/skills/session-orchestrator`; copy-style installs drift.
+
 ## Source Threads
 
 Ground decisions in current truth, not in memory:

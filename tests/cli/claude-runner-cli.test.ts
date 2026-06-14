@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -9,7 +11,18 @@ import {
   runClaudeRunnerCli,
 } from "../../src/cli/claude-runner.js";
 
-describe("symphony-claude-runner CLI", () => {
+describe("claude-runner CLI", () => {
+  it("uses claude-runner as the package binary name", () => {
+    const packageJson = JSON.parse(
+      readFileSync(resolve(__dirname, "../../package.json"), "utf8"),
+    ) as { bin?: Record<string, string> };
+
+    expect(packageJson.bin).toMatchObject({
+      "claude-runner": "./dist/src/cli/claude-runner.js",
+    });
+    expect(packageJson.bin).not.toHaveProperty("symphony-claude-runner");
+  });
+
   it("parses required paths, validators, sources, and retry mode", () => {
     expect(
       parseClaudeRunnerArgs(

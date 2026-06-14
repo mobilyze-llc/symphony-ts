@@ -1,18 +1,17 @@
 ---
-name: symphony-claude-runner
-description: Invoke Symphony's general-purpose Claude CMUX runner safely for bounded review, research, critique, spec-partner, and explicit development-agent prompts.
-argument-hint: <purpose> <prompt-file>
+name: claude-runner
+description: Invoke the general-purpose Claude CMUX runner safely for bounded review, research, critique, spec-partner, and explicit development-agent prompts.
 ---
 
-# Symphony Claude Runner
+# Claude Runner
 
 Use this skill when an agent needs a bounded Claude lane through Symphony's
-approved CMUX substrate. The entrypoint is `symphony-claude-runner`, which wraps
+approved CMUX substrate. The entrypoint is `claude-runner`, which wraps
 `cmux-spawn run --agent claude` and validates the artifact before returning
 success.
 
 Do not call `claude -p`, `claude --bg`, or hand-written unmanaged Claude
-subprocesses when `symphony-claude-runner` or the underlying CMUX substrate is
+subprocesses when `claude-runner` or the underlying CMUX substrate is
 available. If the runner cannot be found, fail closed or ask the operator how to
 continue; do not invent a parallel Claude launch path.
 
@@ -21,6 +20,14 @@ of this generic skill. The watcher owns ticket selection, source-intent hashes,
 Linear Doc publication, idempotency markers, and reconciliation into the
 runtime. Use this skill for bounded one-off Claude work where the caller owns
 the prompt, source list, validation contract, and result inspection.
+
+## Source And Install Model
+
+The canonical skill source lives in `skills/claude-runner` in the stable
+`symphony-ts` checkout. Cross-repo discovery should use the user-level symlink
+`~/.agents/skills/claude-runner` pointing at that stable source directory. Do
+not install a copied global skill under `~/.codex/skills/claude-runner`, and do
+not use the stale `symphony-claude-runner` skill name.
 
 ## Required Inputs
 
@@ -31,8 +38,8 @@ Prepare these before running the command:
 - `ARTIFACT_DIR`: directory for runner outputs, usually inside the workspace.
 - `ARTIFACT_NAME`: safe basename using letters, numbers, dots, underscores, or
   hyphens.
-- `PURPOSE`: one of `spec-partner`, `research`, `critique`, `review`,
-  `development-agent`, or `custom`.
+- `PURPOSE`: one of `review`, `research`, `spec-review`, `spec-partner`,
+  `development-agent`, `critique`, or `custom`.
 - `SOURCE` files: every source file Claude must read, expressed as paths inside
   `WORKSPACE_ROOT`; repeat `--source` for each one.
 - `MODEL` and `PROFILE`: default to `opus` and `legacy` when omitted.
@@ -57,7 +64,7 @@ test -n "$CMUX_SPAWN_BIN" || {
   exit 1
 }
 
-symphony-claude-runner \
+claude-runner \
   --purpose custom \
   --workspace "$WORKSPACE_ROOT" \
   --prompt-file "$WORKSPACE_ROOT/prompts/claude-task.md" \
@@ -89,7 +96,7 @@ Use for shaping or pressure-testing a draft spec. The lane is advisory and must
 not mutate files or Linear.
 
 ```bash
-symphony-claude-runner \
+claude-runner \
   --purpose spec-partner \
   --workspace "$WORKSPACE_ROOT" \
   --prompt-file "$WORKSPACE_ROOT/prompts/spec-partner.md" \
@@ -105,13 +112,40 @@ symphony-claude-runner \
   --retry-on-invalid
 ```
 
+### `spec-review`
+
+Use only for prompt-only spec-review fallback when the durable watcher path is
+not usable. Prefer `symphony-spec-review-watch` or the `spec-review-lane` skill
+for durable ticket readiness. Treat fallback artifacts as manual reconciliation
+evidence.
+
+```bash
+claude-runner \
+  --purpose spec-review \
+  --workspace "$WORKSPACE_ROOT" \
+  --prompt-file "$WORKSPACE_ROOT/prompts/spec-review.md" \
+  --artifact-dir "$ARTIFACT_DIR" \
+  --artifact-name spec-review-opus \
+  --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
+  --source SPEC.mobilyze.md \
+  --required-heading "Source Read Status" \
+  --required-heading "Verdict" \
+  --required-heading "Review" \
+  --required-heading "Reconciliation JSON" \
+  --required-json-section "Reconciliation JSON" \
+  --verdict-enum ready_as_written \
+  --verdict-enum needs_changes \
+  --min-bytes 900 \
+  --retry-on-invalid
+```
+
 ### `research`
 
 Use for bounded codebase or document research where Claude returns findings and
 source-backed evidence.
 
 ```bash
-symphony-claude-runner \
+claude-runner \
   --purpose research \
   --workspace "$WORKSPACE_ROOT" \
   --prompt-file "$WORKSPACE_ROOT/prompts/research.md" \
@@ -132,7 +166,7 @@ symphony-claude-runner \
 Use for critique of an existing plan, prompt, design, or implementation idea.
 
 ```bash
-symphony-claude-runner \
+claude-runner \
   --purpose critique \
   --workspace "$WORKSPACE_ROOT" \
   --prompt-file "$WORKSPACE_ROOT/prompts/critique.md" \
@@ -154,7 +188,7 @@ Use for read-only review where the caller wants a verdict enum. For PR-backed
 merge decisions, prefer the repo's council-review workflow when it applies.
 
 ```bash
-symphony-claude-runner \
+claude-runner \
   --purpose review \
   --workspace "$WORKSPACE_ROOT" \
   --prompt-file "$WORKSPACE_ROOT/prompts/review.md" \
@@ -182,7 +216,7 @@ validation command in the prompt. Keep file mutation authority explicit; read-on
 development planning should use `research`, `critique`, or `custom`.
 
 ```bash
-symphony-claude-runner \
+claude-runner \
   --purpose development-agent \
   --workspace "$WORKSPACE_ROOT" \
   --prompt-file "$WORKSPACE_ROOT/prompts/development-agent.md" \
@@ -207,7 +241,7 @@ validation contract specific enough that an empty or generic artifact cannot
 pass.
 
 ```bash
-symphony-claude-runner \
+claude-runner \
   --purpose custom \
   --workspace "$WORKSPACE_ROOT" \
   --prompt-file "$WORKSPACE_ROOT/prompts/custom.md" \
@@ -250,7 +284,7 @@ or `degraded` is not a usable pass.
 
 Claude lanes may be quiet for most of their runtime. Silence is not failure.
 Do not kill or restart a lane merely because stdout is idle. Wait for
-`symphony-claude-runner` to return or for its timeout to expire. When monitoring
+`claude-runner` to return or for its timeout to expire. When monitoring
 from another shell, poll these files until the command reaches a terminal state:
 
 - `<ARTIFACT_DIR>/<ARTIFACT_NAME>.status.json`
