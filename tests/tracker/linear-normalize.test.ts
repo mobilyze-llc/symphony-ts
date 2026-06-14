@@ -106,6 +106,37 @@ describe("linear-normalize", () => {
     ]);
   });
 
+  it("marks native blockedBy relations as truncated when Linear reports another relation page", () => {
+    const issue = normalizeLinearIssue({
+      id: "issue-1",
+      identifier: "ENG-123",
+      title: "Implement adapter",
+      state: {
+        name: "Todo",
+      },
+      inverseRelations: {
+        nodes: [
+          {
+            type: "relatesTo",
+            issue: {
+              id: "issue-x",
+              identifier: "ENG-X",
+              state: {
+                name: "Todo",
+              },
+            },
+          },
+        ],
+        pageInfo: {
+          hasNextPage: true,
+        },
+      },
+    });
+
+    expect(issue.blockedBy).toEqual([]);
+    expect(issue.blockedByRelationTruncated).toBe(true);
+  });
+
   it("returns null for non-integer priority and invalid timestamps", () => {
     const issue = normalizeLinearIssue({
       id: "issue-1",

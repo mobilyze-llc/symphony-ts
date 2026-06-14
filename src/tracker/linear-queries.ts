@@ -27,6 +27,9 @@ const ISSUE_FIELDS = `
         }
       }
     }
+    pageInfo {
+      hasNextPage
+    }
   }
 `;
 
