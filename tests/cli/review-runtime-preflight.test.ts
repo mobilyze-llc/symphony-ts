@@ -120,6 +120,49 @@ printf '{"ok":true}\\n'
     ]);
   });
 
+  it("resolves relative executable env paths from the product workspace", async () => {
+    const root = await createTempDir("review-runtime-preflight-relative-");
+    const workspace = join(root, "product");
+    const bin = join(workspace, "bin");
+    await mkdir(bin, { recursive: true });
+    await writeFile(join(workspace, "package.json"), '{"name":"product"}\n');
+
+    await writeExecutable(
+      join(bin, "symphony-council-review-gate"),
+      "#!/usr/bin/env sh\nexit 0\n",
+    );
+    await writeExecutable(
+      join(bin, "cmux-spawn"),
+      "#!/usr/bin/env sh\nexit 0\n",
+    );
+    const envFile = join(root, ".env");
+    await writeFile(
+      envFile,
+      "SYMPHONY_COUNCIL_REVIEW_GATE=./bin/symphony-council-review-gate\nCMUX_SPAWN_BIN=./bin/cmux-spawn\n",
+    );
+
+    const execCalls: string[][] = [];
+    const exitCode = await runReviewRuntimePreflightCli(
+      ["--workspace", workspace, "--env-file", envFile, "--json"],
+      {
+        cwd: root,
+        env: { PATH: "/usr/bin:/bin" },
+        stdout: () => undefined,
+        stderr: () => undefined,
+        execFile: async (file, args) => {
+          execCalls.push([file, ...args]);
+          return { stdout: "", stderr: "" };
+        },
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(execCalls).toEqual([
+      [join(bin, "symphony-council-review-gate"), "--help"],
+      [join(bin, "cmux-spawn"), "preflight", "--caffeinate", "--json"],
+    ]);
+  });
+
   it("fails from a symphony-ts checkout so the smoke cannot pass via dist fallback", async () => {
     const root = await createTempDir("review-runtime-preflight-symphony-");
     await mkdir(join(root, "dist/src/cli"), { recursive: true });

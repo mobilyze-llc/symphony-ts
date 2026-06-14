@@ -152,6 +152,7 @@ export async function runReviewRuntimePreflight(
     envName: "SYMPHONY_COUNCIL_REVIEW_GATE",
     commandName: "symphony-council-review-gate",
     env,
+    relativeBase: workspace,
     failureGuidance: GATE_GUIDANCE,
   });
   checks.push(resolutionToCheck(gate));
@@ -161,6 +162,7 @@ export async function runReviewRuntimePreflight(
     envName: "CMUX_SPAWN_BIN",
     commandName: "cmux-spawn",
     env,
+    relativeBase: workspace,
     failureGuidance: CMUX_GUIDANCE,
   });
   checks.push(resolutionToCheck(cmux));
@@ -357,11 +359,16 @@ async function resolveExecutable(input: {
   envName: string;
   commandName: string;
   env: NodeJS.ProcessEnv;
+  relativeBase: string;
   failureGuidance: string;
 }): Promise<ExecutableResolution> {
   const envValue = input.env[input.envName]?.trim();
   if (envValue !== undefined && envValue !== "") {
-    const envPath = await resolveExecutableValue(envValue, input.env);
+    const envPath = await resolveExecutableValue(
+      envValue,
+      input.env,
+      input.relativeBase,
+    );
     if (envPath !== null) {
       return {
         name: input.name,
@@ -403,9 +410,10 @@ async function resolveExecutable(input: {
 async function resolveExecutableValue(
   value: string,
   env: NodeJS.ProcessEnv,
+  relativeBase: string,
 ): Promise<string | null> {
   if (value.includes("/") || isAbsolute(value)) {
-    const absolute = isAbsolute(value) ? value : resolve(value);
+    const absolute = isAbsolute(value) ? value : resolve(relativeBase, value);
     return (await isExecutable(absolute)) ? absolute : null;
   }
   return findOnPath(value, env);
