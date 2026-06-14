@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { parseBacklogAuditArgs } from "../../src/audit/backlog-audit-cli.js";
+import {
+  ensureBacklogAuditCliNetworking,
+  parseBacklogAuditArgs,
+} from "../../src/audit/backlog-audit-cli.js";
 import {
   type BacklogAuditRuntimeEvidence,
   DEFAULT_BACKLOG_AUDIT_CHUNK_SIZE,
@@ -76,6 +79,10 @@ function chatCompletionResponse(content: string): Response {
 }
 
 describe("backlog audit", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("runs a local model judge over backlog and runtime read-model evidence", async () => {
     const fetchFn = vi.fn(
       async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
@@ -669,6 +676,46 @@ describe("backlog audit", () => {
     ).rejects.toThrow("runtime evidence fetch timed out");
   });
 
+  it("aborts slow local model headers with the configured audit timeout", async () => {
+    const fetchFn = vi.fn(
+      async (_input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal === undefined || signal === null) {
+            reject(new Error("missing abort signal"));
+            return;
+          }
+          signal.addEventListener(
+            "abort",
+            () => reject(new Error("local model headers timed out")),
+            { once: true },
+          );
+        }),
+    );
+
+    await expect(
+      runBacklogAudit({
+        config: {
+          baseUrl: "http://studio2.local:8000/v1",
+          model: "deepseek-v4-flash",
+          apiKey: null,
+          timeoutMs: 1,
+        },
+        issues: [ISSUE],
+        runtimeEvidence: RUNTIME_EVIDENCE,
+        fetchFn: fetchFn as unknown as typeof fetch,
+      }),
+    ).rejects.toThrow(
+      "POST http://studio2.local:8000/v1/chat/completions failed before response headers",
+    );
+    expect(fetchFn).toHaveBeenCalledWith(
+      "http://studio2.local:8000/v1/chat/completions",
+      expect.objectContaining({
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
   it("projects state evidence while retaining queue gate and council review contract fields", () => {
     const evidence = boundBacklogAuditRuntimeEvidence(
       {
@@ -1020,6 +1067,36 @@ describe("backlog audit", () => {
         dispatcher: { name: "audit-dispatcher", timeoutMs: 12345 },
       }),
     );
+  });
+
+  it("keeps LAN networking mutation scoped to the CLI bootstrap", async () => {
+    const configureNetworking = vi.fn();
+    await expect(
+      runBacklogAudit({
+        config: {
+          baseUrl: "http://studio2.local:8000/v1",
+          model: "deepseek-v4-flash",
+          apiKey: null,
+          timeoutMs: 60_000,
+        },
+        issues: [ISSUE],
+        runtimeEvidence: RUNTIME_EVIDENCE,
+        fetchFn: async () =>
+          chatCompletionResponse(
+            JSON.stringify({
+              summary: "No findings.",
+              findingTypeVolume: {},
+              findings: [],
+            }),
+          ),
+      }),
+    ).resolves.toMatchObject({ issueCount: 1 });
+    expect(configureNetworking).not.toHaveBeenCalled();
+
+    ensureBacklogAuditCliNetworking(configureNetworking);
+    ensureBacklogAuditCliNetworking(configureNetworking);
+    expect(configureNetworking).toHaveBeenCalledTimes(1);
+    expect(configureNetworking).toHaveBeenCalledWith(2_000);
   });
 
   it("runs oversized audits in chunks and merges the report", async () => {

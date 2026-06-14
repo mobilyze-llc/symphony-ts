@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { promises as fs, realpathSync, rmSync } from "node:fs";
+import { setDefaultAutoSelectFamilyAttemptTimeout } from "node:net";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -57,6 +58,7 @@ function usage(): string {
     "  --model <name>            Local model name, or SYMPHONY_QUEUE_AUDIT_MODEL",
     "  --api-key <key>           Optional local endpoint API key, or SYMPHONY_QUEUE_AUDIT_API_KEY",
     "  --timeout-ms <ms>         Runtime read-model and local judge timeout (default: 600000)",
+    "                            Also governs local model connect/header/body waits; pin .local endpoints to IPv4 if mDNS address selection is unreliable.",
     "  --states <csv>            Linear states to audit (default: workflow active_states)",
     `  --max-state-bytes <n>          Approx max /state JSON bytes in the judge prompt (default: ${DEFAULT_BACKLOG_AUDIT_MAX_STATE_BYTES}, or SYMPHONY_QUEUE_AUDIT_MAX_STATE_BYTES)`,
     `  --max-state-delta-entries <n>  Max /state/delta entries in the judge prompt (default: ${DEFAULT_BACKLOG_AUDIT_MAX_STATE_DELTA_ENTRIES}, or SYMPHONY_QUEUE_AUDIT_MAX_STATE_DELTA_ENTRIES)`,
@@ -253,9 +255,30 @@ export function parseBacklogAuditArgs(
   };
 }
 
+export interface RunBacklogAuditCliOptions {
+  configureNetworking?: () => void;
+}
+
+let cliNetworkTimeoutApplied = false;
+
+export function ensureBacklogAuditCliNetworking(
+  setAttemptTimeout = setDefaultAutoSelectFamilyAttemptTimeout,
+): void {
+  if (cliNetworkTimeoutApplied) {
+    return;
+  }
+  cliNetworkTimeoutApplied = true;
+  try {
+    setAttemptTimeout(2_000);
+  } catch {
+    // Older runtimes without the setter keep platform defaults.
+  }
+}
+
 export async function runBacklogAuditCli(
   argv: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
+  options: RunBacklogAuditCliOptions = {},
 ): Promise<number> {
   let args: ParsedArgs;
   try {
@@ -272,6 +295,10 @@ export async function runBacklogAuditCli(
     console.log(usage());
     return 0;
   }
+
+  // Keep this process-global LAN resolver tweak in CLI bootstrap. The exported
+  // audit library path must not mutate host process networking for callers.
+  (options.configureNetworking ?? ensureBacklogAuditCliNetworking)();
 
   const workflow = await loadWorkflowDefinition(args.workflowPath ?? undefined);
   const config = resolveWorkflowConfig(workflow, env);
