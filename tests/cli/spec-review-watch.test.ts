@@ -649,6 +649,86 @@ describe("symphony-spec-review-watch CLI", () => {
     );
   });
 
+  it("passes comment fetching and operator anchors into spec review runs", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    const stdout = vi.fn();
+    const issue = makeIssue({
+      id: "selected",
+      identifier: "SYMPH-604",
+      labels: ["needs:spec-review"],
+    });
+    const fetchIssueComments = vi.fn(async (issueId: string) => [
+      {
+        id: "comment-1",
+        body: `Comment for ${issueId}`,
+        createdAt: "2026-06-14T00:01:00.000Z",
+        updatedAt: "2026-06-14T00:01:00.000Z",
+        user: {
+          kind: "user" as const,
+          id: "user-1",
+          name: "Operator",
+          displayName: "Operator",
+          email: "operator@mobilyze.com",
+          botType: null,
+          botSubType: null,
+        },
+        botActor: null,
+      },
+    ]);
+    const operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: ["agent@mobilyze.com"],
+    };
+    const runReview = vi.fn(async ({ issue }) => makeRunResult(issue, "valid"));
+
+    const exitCode = await runSpecReviewWatchCli(
+      ["WORKFLOW.md", "--workspace", workspace],
+      {
+        stdout,
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () =>
+          ({
+            ...fakeConfig(),
+            operatorAnchors,
+          }) as ResolvedWorkflowConfig,
+        createTracker: () => ({
+          fetchIssuesByStates: async () => [issue],
+          fetchIssueReferencesByIds: async () => [],
+          fetchIssueComments,
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+        runSpecReviewForIssue: runReview,
+        preflightDocumentPublisher: async () => undefined,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(runReview).toHaveBeenCalledOnce();
+    const reviewInput = runReview.mock.calls[0]?.[0];
+    await expect(
+      reviewInput?.fetchIssueComments?.("selected", { maxPages: 5 }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        id: "comment-1",
+        body: "Comment for selected",
+      }),
+    ]);
+    expect(fetchIssueComments).toHaveBeenCalledWith("selected", {
+      maxPages: 5,
+    });
+    expect(reviewInput?.operatorConfig).toEqual(operatorAnchors);
+  });
+
   it("does not block unrelated sensitive active issues", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
     const stdout = vi.fn();

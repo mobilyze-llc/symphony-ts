@@ -17,6 +17,7 @@ import {
   LINEAR_ISSUES_BY_LABELS_QUERY,
   LINEAR_ISSUES_BY_STATES_QUERY,
   LINEAR_ISSUE_BY_IDENTIFIER_QUERY,
+  LINEAR_ISSUE_COMMENTS_QUERY,
   LINEAR_ISSUE_DETAILS_BY_IDS_QUERY,
   LINEAR_ISSUE_DETAILS_UPDATE_MUTATION,
   LINEAR_ISSUE_LABELS_BY_NAMES_QUERY,
@@ -33,8 +34,11 @@ import {
   LINEAR_WORKFLOW_STATES_QUERY,
 } from "./linear-queries.js";
 import {
+  type TicketFeatureActor,
   type TicketFeatureSourceIssue,
+  normalizeBotActor,
   normalizeLinearTicketFeatureIssue,
+  normalizeUserActor,
 } from "./ticket-feature.js";
 import type { IssueStateSnapshot, IssueTracker } from "./tracker.js";
 
@@ -118,6 +122,22 @@ interface LinearCommentCreateData {
     success?: boolean;
     comment?: { id?: string };
   };
+}
+
+interface LinearIssueCommentsData {
+  issue?: {
+    id?: string;
+    comments?: LinearGraphqlConnection<unknown>;
+  } | null;
+}
+
+export interface LinearIssueComment {
+  id: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  user: TicketFeatureActor | null;
+  botActor: TicketFeatureActor | null;
 }
 
 interface LinearIssueCreateData {
@@ -440,6 +460,92 @@ export class LinearTrackerClient implements IssueTracker {
         { details: response },
       );
     }
+  }
+
+  async fetchIssueComments(
+    issueId: string,
+    options: { maxPages?: number } = {},
+  ): Promise<LinearIssueComment[]> {
+    const maxPages = options.maxPages ?? 10;
+    if (!Number.isInteger(maxPages) || maxPages <= 0) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear issue comments maxPages must be a positive integer.",
+        { details: { maxPages } },
+      );
+    }
+
+    const comments: LinearIssueComment[] = [];
+    let after: string | null = null;
+    let pageCount = 0;
+
+    while (true) {
+      pageCount += 1;
+      const response: LinearIssueCommentsData =
+        await this.postGraphql<LinearIssueCommentsData>(
+          LINEAR_ISSUE_COMMENTS_QUERY,
+          {
+            issueId,
+            first: this.pageSize,
+            after,
+          },
+        );
+
+      const connection: LinearGraphqlConnection<unknown> | undefined =
+        response.issue?.comments;
+      if (!connection || typeof connection !== "object") {
+        throw new TrackerError(
+          ERROR_CODES.linearUnknownPayload,
+          "Linear issue comments payload was missing issue.comments.",
+          { details: response },
+        );
+      }
+
+      const nodes = connection.nodes;
+      if (!Array.isArray(nodes)) {
+        throw new TrackerError(
+          ERROR_CODES.linearUnknownPayload,
+          "Linear issue comments payload was missing comments.nodes.",
+          { details: response },
+        );
+      }
+
+      comments.push(...nodes.map((node) => normalizeLinearIssueComment(node)));
+
+      const pageInfo: LinearGraphqlPageInfo | null | undefined =
+        connection.pageInfo;
+      if (!pageInfo || typeof pageInfo !== "object") {
+        throw new TrackerError(
+          ERROR_CODES.linearUnknownPayload,
+          "Linear issue comments payload was missing pageInfo.",
+          { details: response },
+        );
+      }
+
+      if (pageInfo.hasNextPage !== true) {
+        break;
+      }
+
+      if (pageCount >= maxPages) {
+        throw new TrackerError(
+          ERROR_CODES.linearUnknownPayload,
+          "Linear issue comments exceeded maxPages.",
+          { details: { issueId, maxPages, pageCount } },
+        );
+      }
+
+      if (typeof pageInfo.endCursor !== "string" || pageInfo.endCursor === "") {
+        throw new TrackerError(
+          ERROR_CODES.linearMissingEndCursor,
+          "Linear issue comments pagination indicated more pages without an end cursor.",
+          { details: response },
+        );
+      }
+
+      after = pageInfo.endCursor;
+    }
+
+    return comments.sort(compareLinearIssueComments);
   }
 
   async updateIssueDescription(
@@ -1226,6 +1332,68 @@ function normalizeLinearIssueReference(node: unknown): LinearIssueReference {
           }
         : null,
   };
+}
+
+function normalizeLinearIssueComment(node: unknown): LinearIssueComment {
+  if (!node || typeof node !== "object" || Array.isArray(node)) {
+    throw new TrackerError(
+      ERROR_CODES.linearUnknownPayload,
+      "Linear issue comment payload was not an object.",
+      { details: node },
+    );
+  }
+
+  const raw = node as Record<string, unknown>;
+  const id = raw.id;
+  const body = raw.body;
+  if (typeof id !== "string" || id.trim() === "") {
+    throw new TrackerError(
+      ERROR_CODES.linearUnknownPayload,
+      "Linear issue comment payload was missing id.",
+      { details: node },
+    );
+  }
+  if (typeof body !== "string") {
+    throw new TrackerError(
+      ERROR_CODES.linearUnknownPayload,
+      "Linear issue comment payload was missing body.",
+      { details: node },
+    );
+  }
+
+  return {
+    id,
+    body,
+    createdAt: normalizeCommentTimestamp(raw.createdAt, "createdAt", node),
+    updatedAt: normalizeCommentTimestamp(raw.updatedAt, "updatedAt", node),
+    user: normalizeUserActor(raw.user as never),
+    botActor: normalizeBotActor(raw.botActor as never),
+  };
+}
+
+function normalizeCommentTimestamp(
+  value: unknown,
+  field: string,
+  details: unknown,
+): string {
+  if (typeof value !== "string" || Number.isNaN(Date.parse(value))) {
+    throw new TrackerError(
+      ERROR_CODES.linearUnknownPayload,
+      `Linear issue comment payload had invalid ${field}.`,
+      { details },
+    );
+  }
+  return new Date(value).toISOString();
+}
+
+function compareLinearIssueComments(
+  left: LinearIssueComment,
+  right: LinearIssueComment,
+): number {
+  return `${left.createdAt}\0${left.id}`.localeCompare(
+    `${right.createdAt}\0${right.id}`,
+    "en",
+  );
 }
 
 function buildGraphqlDiagnosticContext(

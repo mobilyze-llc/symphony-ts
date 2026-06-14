@@ -274,6 +274,43 @@ export const LINEAR_CREATE_COMMENT_MUTATION = `
   }
 `.trim();
 
+export const LINEAR_ISSUE_COMMENTS_QUERY = `
+  query SymphonyIssueComments(
+    $issueId: String!
+    $first: Int!
+    $after: String
+  ) {
+    issue(id: $issueId) {
+      id
+      comments(first: $first, after: $after) {
+        nodes {
+          id
+          body
+          createdAt
+          updatedAt
+          user {
+            id
+            name
+            displayName
+            email
+          }
+          botActor {
+            id
+            type
+            subType
+            name
+            userDisplayName
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+`.trim();
+
 export const LINEAR_UPDATE_ISSUE_DESCRIPTION_MUTATION = `
   mutation SymphonyUpdateIssueDescription($issueId: String!, $description: String!) {
     issueUpdate(id: $issueId, input: { description: $description }) {

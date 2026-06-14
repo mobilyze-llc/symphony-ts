@@ -7,12 +7,20 @@ import {
   type ClaudeRunnerResult,
   runClaudeCmux,
 } from "../claude-runner/cmux-claude-runner.js";
+import type { WorkflowOperatorAnchorsConfig } from "../config/types.js";
 import type { DispatcherRunJournalEntry, Issue } from "../domain/model.js";
 import {
   type DispatcherRunJournalEntryDraft,
   appendDispatcherRunJournalEntriesWithLock,
 } from "../logging/run-journal.js";
-import type { TicketFeature } from "../tracker/ticket-feature.js";
+import type { LinearIssueComment } from "../tracker/linear-client.js";
+import {
+  type TicketFeature,
+  type TicketFeatureActor,
+  type TicketFeatureActorClass,
+  classifyActor,
+  normalizeOperatorConfig,
+} from "../tracker/ticket-feature.js";
 
 export const SPEC_REVIEW_VERDICTS = [
   "ready_as_written",
@@ -68,6 +76,31 @@ export interface SpecReviewSelectionConfig {
   highRiskTitlePatterns: string[];
 }
 
+export interface SpecReviewCommentConfig {
+  maxCommentPages: number;
+  maxOperatorCommentChars: number;
+  maxTotalCommentChars: number;
+}
+
+export interface SpecReviewClassifiedComment {
+  id: string;
+  body: string;
+  createdAt: string;
+  updatedAt: string;
+  actor: TicketFeatureActor | null;
+  authorClass: TicketFeatureActorClass;
+}
+
+export interface SpecReviewCommentContext {
+  comments: SpecReviewClassifiedComment[];
+  droppedCommentCount: number;
+  droppedCommentReason: string | null;
+  totalCommentCount: number;
+  maxCommentPages: number;
+  maxOperatorCommentChars: number;
+  maxTotalCommentChars: number;
+}
+
 interface SpecReviewCurrentState {
   sourceIntentHash: string | null;
   readinessState: SpecReviewReadinessState | null;
@@ -89,6 +122,7 @@ export interface SpecReviewContextPacket {
   sourceIntentHash: string;
   ticketFeature: TicketFeature | null;
   backlogFindings: BacklogAuditFinding[];
+  comments: SpecReviewCommentContext;
   sourceOfTruthRefs: SpecReviewSourceOfTruthRef[];
   sourceOfTruthExcerpt: string | null;
   unavailableContext: string[];
@@ -144,6 +178,15 @@ export interface SpecReviewRunIssueInput {
   cmuxSpawnBin?: string;
   sourceOfTruthRefs?: SpecReviewSourceOfTruthRef[];
   sourceOfTruthExcerpt?: string | null;
+  fetchIssueComments?: (
+    issueId: string,
+    options: { maxPages: number },
+  ) => Promise<LinearIssueComment[]>;
+  operatorConfig?: Pick<
+    WorkflowOperatorAnchorsConfig,
+    "operatorAllowlist" | "serviceAccounts"
+  >;
+  commentConfig?: Partial<SpecReviewCommentConfig>;
   writer: SpecReviewWriteClient;
   documentPublisher?: SpecReviewDocumentPublisher | undefined;
   runner?: typeof runClaudeCmux;
@@ -215,6 +258,12 @@ const DEFAULT_SELECTION_CONFIG: SpecReviewSelectionConfig = {
   ],
 };
 
+export const DEFAULT_SPEC_REVIEW_COMMENT_CONFIG: SpecReviewCommentConfig = {
+  maxCommentPages: 5,
+  maxOperatorCommentChars: 8_000,
+  maxTotalCommentChars: 12_000,
+};
+
 const SPEC_REVIEW_MARKER_START = "<!-- symphony-spec-review -->";
 const SPEC_REVIEW_MARKER_END = "<!-- symphony-spec-review-end -->";
 const SPEC_REVIEW_SECTION_END = "<!-- symphony-spec-review-section-end -->";
@@ -237,6 +286,16 @@ const PRIVACY_SENSITIVE_LABEL_PREFIXES = [
   "sensitive:",
   "secret:",
 ];
+
+const OVERSIZED_OPERATOR_COMMENT_CONTEXT_REASON =
+  "oversized_operator_comment_context";
+
+class SpecReviewNeedsOperatorContextError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SpecReviewNeedsOperatorContextError";
+  }
+}
 
 export function selectSpecReviewCandidates(input: {
   issues: readonly Issue[];
@@ -497,6 +556,7 @@ export function buildSpecReviewPrompt(packet: SpecReviewContextPacket): string {
         {
           sourceIntentHash: packet.sourceIntentHash,
           issue: packet.issue,
+          comments: packet.comments,
           ticketFeature: packet.ticketFeature,
           backlogFindings: packet.backlogFindings,
           sourceOfTruthRefs: packet.sourceOfTruthRefs,
@@ -508,6 +568,99 @@ export function buildSpecReviewPrompt(packet: SpecReviewContextPacket): string {
       ),
     ),
   ].join("\n");
+}
+
+export function buildSpecReviewCommentContext(input: {
+  comments: readonly LinearIssueComment[];
+  operatorConfig?: Pick<
+    WorkflowOperatorAnchorsConfig,
+    "operatorAllowlist" | "serviceAccounts"
+  >;
+  config?: Partial<SpecReviewCommentConfig>;
+}): SpecReviewCommentContext {
+  const config = resolveSpecReviewCommentConfig(input.config);
+  const accountSets = normalizeOperatorConfig(input.operatorConfig);
+  const classified = input.comments
+    .map((comment) => {
+      const actor = comment.botActor ?? comment.user;
+      return {
+        id: comment.id,
+        body: comment.body,
+        createdAt: comment.createdAt,
+        updatedAt: comment.updatedAt,
+        actor,
+        authorClass: classifyActor(actor, accountSets),
+      };
+    })
+    .sort(compareClassifiedComments);
+
+  const operatorChars = classified
+    .filter((comment) => comment.authorClass === "operator")
+    .reduce((total, comment) => total + comment.body.length, 0);
+  if (operatorChars > config.maxOperatorCommentChars) {
+    throw new SpecReviewNeedsOperatorContextError(
+      `${OVERSIZED_OPERATOR_COMMENT_CONTEXT_REASON}: operator comment content ${operatorChars} chars exceeds maxOperatorCommentChars ${config.maxOperatorCommentChars}.`,
+    );
+  }
+
+  const included = [...classified];
+  let droppedCommentCount = 0;
+  while (totalCommentChars(included) > config.maxTotalCommentChars) {
+    const dropIndex = included.findIndex(
+      (comment) => comment.authorClass !== "operator",
+    );
+    if (dropIndex === -1) {
+      throw new SpecReviewNeedsOperatorContextError(
+        `${OVERSIZED_OPERATOR_COMMENT_CONTEXT_REASON}: operator-only comment context exceeds maxTotalCommentChars ${config.maxTotalCommentChars}.`,
+      );
+    }
+    included.splice(dropIndex, 1);
+    droppedCommentCount += 1;
+  }
+
+  return {
+    comments: included,
+    droppedCommentCount,
+    droppedCommentReason:
+      droppedCommentCount === 0
+        ? null
+        : `Dropped ${droppedCommentCount} non-operator comment(s) oldest-first by (createdAt, id) to fit maxTotalCommentChars.`,
+    totalCommentCount: classified.length,
+    maxCommentPages: config.maxCommentPages,
+    maxOperatorCommentChars: config.maxOperatorCommentChars,
+    maxTotalCommentChars: config.maxTotalCommentChars,
+  };
+}
+
+function resolveSpecReviewCommentConfig(
+  config: Partial<SpecReviewCommentConfig> | undefined,
+): SpecReviewCommentConfig {
+  const resolved = {
+    ...DEFAULT_SPEC_REVIEW_COMMENT_CONFIG,
+    ...(config ?? {}),
+  };
+  for (const [key, value] of Object.entries(resolved)) {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`Spec review comment config ${key} must be positive.`);
+    }
+  }
+  return resolved;
+}
+
+function compareClassifiedComments(
+  left: SpecReviewClassifiedComment,
+  right: SpecReviewClassifiedComment,
+): number {
+  return `${left.createdAt}\0${left.id}`.localeCompare(
+    `${right.createdAt}\0${right.id}`,
+    "en",
+  );
+}
+
+function totalCommentChars(
+  comments: readonly Pick<SpecReviewClassifiedComment, "body">[],
+): number {
+  return comments.reduce((total, comment) => total + comment.body.length, 0);
 }
 
 function formatMarkdownFence(info: string, content: string): string {
@@ -735,11 +888,74 @@ export async function runSpecReviewForIssue(
   const sourceOfTruthExcerpt =
     input.sourceOfTruthExcerpt ??
     combineSourceOfTruthExcerpts(sourceOfTruthRefs);
+  const commentConfig = resolveSpecReviewCommentConfig(input.commentConfig);
+  let comments: SpecReviewCommentContext;
+  try {
+    const issueComments =
+      input.fetchIssueComments === undefined
+        ? []
+        : await input.fetchIssueComments(input.issue.id, {
+            maxPages: commentConfig.maxCommentPages,
+          });
+    comments = buildSpecReviewCommentContext({
+      comments: issueComments,
+      ...(input.operatorConfig === undefined
+        ? {}
+        : { operatorConfig: input.operatorConfig }),
+      config: commentConfig,
+    });
+  } catch (error) {
+    if (!(error instanceof SpecReviewNeedsOperatorContextError)) {
+      throw error;
+    }
+    const summary = `Spec review needs_operator_context: ${error.message}`;
+    const entries = await appendJournal(input.workspaceRoot, {
+      issue: input.issue,
+      mode: input.mode,
+      sourceIntentHash,
+      readinessState: "needs_operator_context",
+      verdict: "needs_operator_context",
+      artifactPath: null,
+      artifactHash: null,
+      linearDocUrl: null,
+      summary,
+      now: now(),
+    });
+    await writeIssueDescription(input.writer, input.issue, (description) =>
+      buildSpecReviewStatusDescription({
+        originalDescription: description,
+        sourceIntentHash,
+        artifactHash: null,
+        artifactPath: null,
+        mode: input.mode,
+        readinessState: "needs_operator_context",
+        verdict: "needs_operator_context",
+        runnerStatus: "degraded",
+        linearDocUrl: null,
+        summary,
+        generatedAt: now().toISOString(),
+      }),
+    );
+    return {
+      issueId: input.issue.id,
+      issueIdentifier: input.issue.identifier,
+      sourceIntentHash,
+      readinessState: "needs_operator_context",
+      verdict: "needs_operator_context",
+      runnerStatus: "degraded",
+      artifactPath: null,
+      linearDocUrl: null,
+      markerCommentPosted: false,
+      journalEntries: entries,
+      message: summary,
+    };
+  }
   const packet: SpecReviewContextPacket = {
     issue: input.issue,
     sourceIntentHash,
     ticketFeature: input.ticketFeature ?? null,
     backlogFindings: input.backlogFindings ?? [],
+    comments,
     sourceOfTruthRefs,
     sourceOfTruthExcerpt,
     unavailableContext: unavailableContextForSourceRefs(sourceOfTruthRefs),

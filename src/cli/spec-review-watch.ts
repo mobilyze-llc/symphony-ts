@@ -50,6 +50,7 @@ type SpecReviewWatchTracker = Pick<
   | "updateIssueDescription"
 > & {
   fetchIssueByIdentifier?: LinearTrackerClient["fetchIssueByIdentifier"];
+  fetchIssueComments?: LinearTrackerClient["fetchIssueComments"];
 };
 
 type ExecFileAsync = (
@@ -480,6 +481,15 @@ export async function runSpecReviewWatchCli(
           workspaceRoot: parsed.workspaceRoot,
           artifactRoot,
           mode: parsed.mode,
+          ...(tracker.fetchIssueComments === undefined
+            ? {}
+            : {
+                fetchIssueComments: async (issueId, options) =>
+                  tracker.fetchIssueComments?.(issueId, options) ?? [],
+              }),
+          ...(config.operatorAnchors === undefined
+            ? {}
+            : { operatorConfig: config.operatorAnchors }),
           ...(parsed.cmuxSpawnBin === null
             ? {}
             : { cmuxSpawnBin: parsed.cmuxSpawnBin }),
