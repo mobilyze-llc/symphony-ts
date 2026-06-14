@@ -2442,6 +2442,12 @@ describe("runHeadlessCouncilGate", () => {
       reason: "gate_error",
       action: "inspect_review_substrate",
     });
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain("- Status: degraded");
+    expect(report).toContain("- Reason: gate_error");
+    expect(report).toContain(
+      "- Stop rule: stop for review-gate error repair; do not continue pipeline",
+    );
     expect(harness.commands).toEqual([]);
   });
 

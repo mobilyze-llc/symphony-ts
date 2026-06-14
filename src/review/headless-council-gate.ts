@@ -6328,33 +6328,25 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
   if (result.termination === undefined) {
     lines.push("- Not recorded");
   } else {
+    const termination = result.termination;
     const substrateOrProvenanceDegraded =
-      hasReviewSubstrateDegradation({
-        lanes: result.lanes,
-        degradedConditions: result.degradedConditions,
-      }) ||
-      isRoutingOnlyProcedureStop({
-        verdict: result.verdict,
-        lanes: result.lanes,
-        degradedConditions: result.degradedConditions,
-        blockingFindingCount: result.termination.blockingFindingCount,
-      });
+      hasTerminationSubstrateOrProvenanceDegradation(result, termination);
     lines.push(
-      `- Status: ${result.termination.status}`,
-      `- Reason: ${result.termination.reason}`,
-      `- Action: ${result.termination.action}`,
-      `- Rounds per cycle: ${result.termination.roundsPerCycle} (warning ${result.termination.thresholds.roundWarning}, cap ${result.termination.thresholds.roundCap})`,
-      `- Alert level: ${result.termination.alertLevel}`,
-      `- Product blockers present: ${result.termination.blockingFindingCount > 0 ? "yes" : "no"}`,
-      `- Track-only items present: ${result.termination.blockingFindingCount === 0 && result.termination.trackFindingCount > 0 ? "yes" : "no"}`,
+      `- Status: ${termination.status}`,
+      `- Reason: ${termination.reason}`,
+      `- Action: ${termination.action}`,
+      `- Rounds per cycle: ${termination.roundsPerCycle} (warning ${termination.thresholds.roundWarning}, cap ${termination.thresholds.roundCap})`,
+      `- Alert level: ${termination.alertLevel}`,
+      `- Product blockers present: ${termination.blockingFindingCount > 0 ? "yes" : "no"}`,
+      `- Track-only items present: ${termination.blockingFindingCount === 0 && termination.trackFindingCount > 0 ? "yes" : "no"}`,
       `- Substrate/provenance degraded: ${substrateOrProvenanceDegraded ? "yes" : "no"}`,
-      `- Stop rule: ${formatTerminationStopRule(result.termination, substrateOrProvenanceDegraded)}`,
-      `- Blocking findings: ${result.termination.blockingFindingCount}`,
-      `- Non-blocking findings: ${result.termination.nonBlockingFindingCount}`,
-      `- Track findings to file: ${result.termination.trackFindingCount}`,
-      `- Synthesis attached: ${result.termination.synthesisAttached ? "yes" : "no"}`,
-      `- Trip-wire families: ${result.termination.tripwireFamilyNames.join(", ") || "none"}`,
-      `- Synthesis families: ${result.termination.synthesisFamilyNames.join(", ") || "none"}`,
+      `- Stop rule: ${formatTerminationStopRule(result, termination)}`,
+      `- Blocking findings: ${termination.blockingFindingCount}`,
+      `- Non-blocking findings: ${termination.nonBlockingFindingCount}`,
+      `- Track findings to file: ${termination.trackFindingCount}`,
+      `- Synthesis attached: ${termination.synthesisAttached ? "yes" : "no"}`,
+      `- Trip-wire families: ${termination.tripwireFamilyNames.join(", ") || "none"}`,
+      `- Synthesis families: ${termination.synthesisFamilyNames.join(", ") || "none"}`,
     );
   }
 
@@ -6383,10 +6375,40 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
   return lines.join("\n");
 }
 
-function formatTerminationStopRule(
+function hasTerminationSubstrateOrProvenanceDegradation(
+  result: HeadlessCouncilGateResult,
   termination: CouncilTerminationAssessment,
-  substrateOrProvenanceDegraded: boolean,
+): boolean {
+  return (
+    hasReviewSubstrateDegradation({
+      lanes: result.lanes,
+      degradedConditions: result.degradedConditions,
+    }) ||
+    isRoutingOnlyProcedureStop({
+      verdict: result.verdict,
+      lanes: result.lanes,
+      degradedConditions: result.degradedConditions,
+      blockingFindingCount: termination.blockingFindingCount,
+    })
+  );
+}
+
+function formatTerminationStopRule(
+  result: HeadlessCouncilGateResult,
+  termination: CouncilTerminationAssessment,
 ): string {
+  const substrateOrProvenanceDegraded =
+    hasTerminationSubstrateOrProvenanceDegradation(result, termination);
+
+  if (termination.status === "degraded") {
+    if (
+      substrateOrProvenanceDegraded &&
+      termination.blockingFindingCount === 0
+    ) {
+      return "stop for review-substrate/provenance repair; do not launch another product-code review round";
+    }
+    return "stop for review-gate error repair; do not continue pipeline";
+  }
   if (substrateOrProvenanceDegraded && termination.blockingFindingCount === 0) {
     return "stop for review-substrate/provenance repair; do not launch another product-code review round";
   }
