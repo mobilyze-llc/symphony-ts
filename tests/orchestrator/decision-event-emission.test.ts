@@ -100,9 +100,11 @@ describe("dispatcher decision event emission", () => {
       metadata: expect.objectContaining({
         comparator_version: "dispatch-comparator-v1",
         computed_order_status: "linearized",
-        outcome_since_sequence: 0,
+        outcome_window_anchor: "current_tail_first_sample",
+        outcome_window_as_of_sequence: expect.any(Number),
+        outcome_window_scanned_entry_count: 0,
         outcome_window_semantics: expect.stringContaining(
-          "urgent_reopen_outcomes may reference the earlier failure",
+          "first baseline without a prior queue_baseline anchors at the current journal tail",
         ),
         considered_issue_ids: ["2", "1"],
         dispatch_picks: ["2", "1"],
@@ -112,6 +114,9 @@ describe("dispatcher decision event emission", () => {
         delivery_outcomes: [],
       }),
     });
+    expect(baseline?.metadata.outcome_since_sequence).toBe(
+      baseline?.metadata.outcome_window_as_of_sequence,
+    );
   });
 
   it("counts hard exclusions by excluded issue, not blocker edge", async () => {
@@ -178,6 +183,17 @@ describe("dispatcher decision event emission", () => {
       runJournal: [
         journalEntry({
           sequence: 1,
+          kind: "queue_baseline",
+          issueId: "__dispatch__",
+          issueIdentifier: "__dispatch__",
+          summary: "Prior baseline.",
+          metadata: {
+            schema_version: 1,
+            comparator_version: "priority-fifo-control-v0",
+          },
+        }),
+        journalEntry({
+          sequence: 2,
           kind: "failure_exhausted",
           issueId: "dead",
           issueIdentifier: "ISSUE-DEAD",
@@ -201,6 +217,10 @@ describe("dispatcher decision event emission", () => {
       );
 
     expect(baseline?.metadata).toMatchObject({
+      outcome_since_sequence: 1,
+      outcome_window_anchor: "previous_queue_baseline",
+      outcome_window_as_of_sequence: expect.any(Number),
+      outcome_window_scanned_entry_count: expect.any(Number),
       considered_issue_ids: [],
       dispatch_picks: [],
       quiet_death_outcomes: [
@@ -210,9 +230,12 @@ describe("dispatcher decision event emission", () => {
         }),
       ],
     });
+    expect(
+      Number(baseline?.metadata.outcome_window_scanned_entry_count),
+    ).toBeGreaterThanOrEqual(1);
   });
 
-  it("journals non-empty queue-baseline outcome samples from prior journal entries", async () => {
+  it("excludes pre-existing outcomes from the first queue-baseline sample", async () => {
     const orchestrator = createOrchestrator({
       runJournal: [
         journalEntry({
@@ -284,42 +307,18 @@ describe("dispatcher decision event emission", () => {
       );
 
     expect(baseline?.metadata).toMatchObject({
-      manual_jumps_reorders: [
-        expect.objectContaining({
-          sequence: 2,
-          issue_id: "dead",
-          issue_identifier: "ISSUE-DEAD",
-          verb: "release",
-        }),
-      ],
-      quiet_death_outcomes: [
-        expect.objectContaining({
-          sequence: 1,
-          issue_id: "dead",
-          issue_identifier: "ISSUE-DEAD",
-          failure_signature: "sig-dead",
-        }),
-      ],
-      urgent_reopen_outcomes: [
-        expect.objectContaining({
-          issue_id: "dead",
-          reopened_after_sequence: 1,
-        }),
-      ],
-      delivery_outcomes: [
-        expect.objectContaining({
-          issue_id: "delivered",
-          issue_identifier: "ISSUE-DONE",
-          spend: {
-            scope: "baseline_window",
-            since_sequence: 0,
-            total_tokens: 1234,
-            turns: 3,
-            stages: 1,
-          },
-        }),
-      ],
+      outcome_window_anchor: "current_tail_first_sample",
+      outcome_window_as_of_sequence: expect.any(Number),
+      outcome_window_scanned_entry_count: 0,
+      considered_issue_ids: ["next"],
+      manual_jumps_reorders: [],
+      quiet_death_outcomes: [],
+      urgent_reopen_outcomes: [],
+      delivery_outcomes: [],
     });
+    expect(baseline?.metadata.outcome_since_sequence).toBe(
+      baseline?.metadata.outcome_window_as_of_sequence,
+    );
   });
 
   it("journals only queue-baseline outcomes observed since the previous baseline", async () => {
@@ -388,6 +387,9 @@ describe("dispatcher decision event emission", () => {
 
     expect(baseline?.metadata).toMatchObject({
       outcome_since_sequence: 2,
+      outcome_window_anchor: "previous_queue_baseline",
+      outcome_window_as_of_sequence: expect.any(Number),
+      outcome_window_scanned_entry_count: expect.any(Number),
       manual_jumps_reorders: [
         expect.objectContaining({
           sequence: 4,
@@ -409,6 +411,9 @@ describe("dispatcher decision event emission", () => {
         }),
       ],
     });
+    expect(
+      Number(baseline?.metadata.outcome_window_scanned_entry_count),
+    ).toBeGreaterThanOrEqual(2);
     expect(baseline?.metadata).not.toMatchObject({
       quiet_death_outcomes: [
         expect.objectContaining({
@@ -500,6 +505,9 @@ describe("dispatcher decision event emission", () => {
 
     expect(baseline?.metadata).toMatchObject({
       outcome_since_sequence: 3,
+      outcome_window_anchor: "previous_queue_baseline",
+      outcome_window_as_of_sequence: expect.any(Number),
+      outcome_window_scanned_entry_count: expect.any(Number),
       delivery_outcomes: [
         expect.objectContaining({
           sequence: 5,
@@ -514,11 +522,25 @@ describe("dispatcher decision event emission", () => {
         }),
       ],
     });
+    expect(
+      Number(baseline?.metadata.outcome_window_scanned_entry_count),
+    ).toBeGreaterThanOrEqual(2);
   });
 
   it("partitions delivery spend between repeated terminal writes in one baseline window", async () => {
     const orchestrator = createOrchestrator({
       runJournal: [
+        journalEntry({
+          sequence: 0,
+          kind: "queue_baseline",
+          issueId: "__dispatch__",
+          issueIdentifier: "__dispatch__",
+          summary: "Prior baseline.",
+          metadata: {
+            schema_version: 1,
+            comparator_version: "priority-fifo-control-v0",
+          },
+        }),
         journalEntry({
           sequence: 1,
           kind: "stage_record",
@@ -582,6 +604,10 @@ describe("dispatcher decision event emission", () => {
       );
 
     expect(baseline?.metadata).toMatchObject({
+      outcome_since_sequence: 0,
+      outcome_window_anchor: "previous_queue_baseline",
+      outcome_window_as_of_sequence: expect.any(Number),
+      outcome_window_scanned_entry_count: expect.any(Number),
       delivery_outcomes: [
         expect.objectContaining({
           sequence: 2,
@@ -601,6 +627,9 @@ describe("dispatcher decision event emission", () => {
         }),
       ],
     });
+    expect(
+      Number(baseline?.metadata.outcome_window_scanned_entry_count),
+    ).toBeGreaterThanOrEqual(4);
   });
 
   it("journals a queue-baseline sample when pipeline-halt blocks dispatch", async () => {
