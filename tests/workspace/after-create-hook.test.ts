@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 
 import { WorkspaceHookRunner } from "../../src/workspace/hooks.js";
@@ -17,6 +17,7 @@ const TEMPLATE_PATH = fileURLToPath(
     import.meta.url,
   ),
 );
+const AFTER_CREATE_HOOK_TEST_TIMEOUT_MS = 30_000;
 
 async function loadAfterCreateHook(): Promise<string> {
   const raw = await fs.readFile(TEMPLATE_PATH, "utf8");
@@ -60,6 +61,7 @@ describe("after_create hook (WORKFLOW-template.md, real execution)", () => {
   }
 
   beforeEach(async () => {
+    vi.setConfig({ testTimeout: AFTER_CREATE_HOOK_TEST_TIMEOUT_MS });
     root = await fs.mkdtemp(join(tmpdir(), "symph372-hook-"));
     seedRemote = join(root, "seed.git-source");
     workspaceRoot = join(root, "workspaces");

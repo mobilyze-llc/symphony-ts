@@ -1192,6 +1192,9 @@ describe("OrchestratorRuntimeHost", () => {
     );
     expect(logEntry?.skipped_rechecks).toHaveLength(20);
 
+    await vi.waitFor(() => {
+      expect(fakeRunner.runs.has("1")).toBe(true);
+    });
     fakeRunner.resolve("1", createNormalResult());
     await host.waitForIdle();
   });
