@@ -4588,6 +4588,64 @@ describe("runHeadlessCouncilGate", () => {
     }
   });
 
+  it("deterministically covers the Codex lead deadline-before-start branch", async () => {
+    const progress: string[] = [];
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        timeoutSeconds: 60,
+      },
+      {
+        runCommand: harness.runCommand,
+        laneStallDeadlineMs: 1_000,
+        overallLaneDeadlineMs: 10,
+        progress: (message) => progress.push(message),
+        now: sequencedClock([0, 0, 0, 0, 15, 15, 15, 15]),
+      },
+    );
+
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({ state: "complete", verdict: "pass" });
+    const codexLeadLane = result.lanes.find(
+      (lane) => lane.laneId === "codex-high-lead",
+    );
+    expect(codexLeadLane).toMatchObject({
+      state: "timed_out",
+      verdict: "error",
+      degradedReason: "substrate_stall",
+    });
+    expect(codexLeadLane?.message).toContain(
+      "overall lane deadline elapsed before the Codex lead could start",
+    );
+    expect(
+      progress.some((line) =>
+        line.includes(
+          "lane_deadline_elapsed_before_start laneId=codex-high-lead",
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      progress.some((line) =>
+        line.includes("lane_stalled laneId=codex-high-lead"),
+      ),
+    ).toBe(false);
+    expect(
+      harness.commands.some(
+        (command) =>
+          command.args[0] === "run" &&
+          command.args.includes("--artifact-name") &&
+          command.args[command.args.indexOf("--artifact-name") + 1] ===
+            "codex-high-lead",
+      ),
+    ).toBe(false);
+  });
+
   it("instructs the Codex lead not to turn substrate stalls into code findings", async () => {
     const harness = await createHarness();
     await runHeadlessCouncilGate(
@@ -7440,6 +7498,16 @@ function humanImplementerProvenance(): ReviewBundleProvenanceEntry {
     reasoningEffort: null,
     sourceStage: "implement",
     commitRange: null,
+  };
+}
+
+function sequencedClock(offsetsMs: readonly number[]): () => Date {
+  const epochMs = Date.UTC(2026, 0, 1);
+  let index = 0;
+  return () => {
+    const offsetMs = offsetsMs[Math.min(index, offsetsMs.length - 1)] ?? 0;
+    index += 1;
+    return new Date(epochMs + offsetMs);
   };
 }
 
