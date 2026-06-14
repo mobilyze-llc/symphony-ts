@@ -160,6 +160,12 @@ export interface SpecReviewAdmissionDecision {
 
 export const SENSITIVE_SOURCE_INTENT_HASH = "redacted-privacy-sensitive";
 
+const CURRENT_SPEC_REVIEW_READINESS_STATES = new Set<SpecReviewReadinessState>([
+  "valid",
+  "needs_operator_context",
+  "privacy_blocked",
+]);
+
 const DEFAULT_SELECTION_CONFIG: SpecReviewSelectionConfig = {
   triggerLabels: ["needs:spec-review", "spec-review", "review:spec"],
   highRiskLabelPrefixes: ["risk:", "area:orchestration", "area:review"],
@@ -222,7 +228,7 @@ export function selectSpecReviewCandidates(input: {
     const hasCurrentReviewForSourceIntent =
       reasons.length > 0 &&
       currentReview?.sourceIntentHash === sourceIntentHash &&
-      currentReview.readinessState !== null;
+      isCurrentSpecReviewReadinessState(currentReview.readinessState);
     const currentReviewReason =
       currentReview?.readinessState === "valid"
         ? "current_valid_spec_review"
@@ -247,6 +253,15 @@ export function selectSpecReviewCandidates(input: {
       backlogFindings: findings,
     };
   });
+}
+
+function isCurrentSpecReviewReadinessState(
+  readinessState: SpecReviewReadinessState | null,
+): boolean {
+  return (
+    readinessState !== null &&
+    CURRENT_SPEC_REVIEW_READINESS_STATES.has(readinessState)
+  );
 }
 
 export function computeSourceIntentHash(issue: Issue): string {

@@ -243,6 +243,33 @@ describe("Claude CMUX runner", () => {
     );
   });
 
+  it("normalizes artifact verdict enum casing during validation", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "claude-artifact-"));
+    const artifact = join(dir, "artifact.md");
+    await writeFile(
+      artifact,
+      [
+        "## Verdict",
+        "",
+        "Verdict enum: Ready_As_Written",
+        "",
+        "## Source Read Status",
+        "",
+        "Read source.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await expect(
+      validateClaudeArtifact(artifact, {
+        minBytes: 20,
+        requireFirstHeading: "Verdict",
+        requiredHeadings: ["Source Read Status"],
+        verdictEnums: ["ready_as_written"],
+      }),
+    ).resolves.toEqual([]);
+  });
+
   it("does not accept generic status text as the artifact verdict", () => {
     expect(
       extractVerdictEnum(

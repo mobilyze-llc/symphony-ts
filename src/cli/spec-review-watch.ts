@@ -509,44 +509,72 @@ export function createLinearDocumentPublisher(
       const tempDir = await fs.mkdtemp(
         resolve(tmpdir(), "symphony-spec-review-"),
       );
-      const contentFile = resolve(tempDir, "doc.md");
-      const prepared = buildLinearDocumentPublishRequest({
-        title,
-        markdown,
-        idempotencyKey,
-      });
-      await fs.writeFile(contentFile, prepared.markdown, "utf8");
-      const run = execFileAsync ?? (await defaultExecFileAsync());
-      const listOutput = await run(
-        "linear-pp-cli",
-        [
-          "documents",
-          "list",
-          "--issue",
-          issueIdentifier,
-          "--agent",
-          "--select",
-          "title,url,slugId",
-          "--limit",
-          "100",
-        ],
-        { maxBuffer: 2 * 1024 * 1024 },
-      );
-      const existingDocument = parseDocumentListOutput(listOutput.stdout).find(
-        (document) => document.title === prepared.title,
-      );
-      if (
-        existingDocument !== undefined &&
-        existingDocument.identifier !== null
-      ) {
-        const editOutput = await run(
+      try {
+        const contentFile = resolve(tempDir, "doc.md");
+        const prepared = buildLinearDocumentPublishRequest({
+          title,
+          markdown,
+          idempotencyKey,
+        });
+        await fs.writeFile(contentFile, prepared.markdown, "utf8");
+        const run = execFileAsync ?? (await defaultExecFileAsync());
+        const listOutput = await run(
           "linear-pp-cli",
           [
             "documents",
-            "edit",
-            existingDocument.identifier,
+            "list",
+            "--issue",
+            issueIdentifier,
+            "--agent",
+            "--select",
+            "title,url,slugId",
+            "--limit",
+            "100",
+          ],
+          { maxBuffer: 2 * 1024 * 1024 },
+        );
+        const existingDocument = parseDocumentListOutput(
+          listOutput.stdout,
+        ).find((document) => document.title === prepared.title);
+        if (
+          existingDocument !== undefined &&
+          existingDocument.identifier !== null
+        ) {
+          const editOutput = await run(
+            "linear-pp-cli",
+            [
+              "documents",
+              "edit",
+              existingDocument.identifier,
+              "--title",
+              prepared.title,
+              "--content-file",
+              contentFile,
+              "--agent",
+              "--select",
+              "url,slugId",
+            ],
+            { maxBuffer: 2 * 1024 * 1024 },
+          );
+          try {
+            return parseDocumentCreateOutput(editOutput.stdout);
+          } catch {
+            return {
+              url: existingDocument.url,
+              identifier: existingDocument.identifier,
+            };
+          }
+        }
+        const output = await run(
+          "linear-pp-cli",
+          [
+            "documents",
+            "create",
+            "--idempotent",
             "--title",
             prepared.title,
+            "--issue",
+            issueIdentifier,
             "--content-file",
             contentFile,
             "--agent",
@@ -555,38 +583,14 @@ export function createLinearDocumentPublisher(
           ],
           { maxBuffer: 2 * 1024 * 1024 },
         );
-        try {
-          return parseDocumentCreateOutput(editOutput.stdout);
-        } catch {
-          return {
-            url: existingDocument.url,
-            identifier: existingDocument.identifier,
-          };
-        }
+        const parsedOutput = parseDocumentCreateOutput(output.stdout);
+        return {
+          url: parsedOutput.url,
+          identifier: parsedOutput.identifier,
+        };
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
       }
-      const output = await run(
-        "linear-pp-cli",
-        [
-          "documents",
-          "create",
-          "--idempotent",
-          "--title",
-          prepared.title,
-          "--issue",
-          issueIdentifier,
-          "--content-file",
-          contentFile,
-          "--agent",
-          "--select",
-          "url,slugId",
-        ],
-        { maxBuffer: 2 * 1024 * 1024 },
-      );
-      const parsedOutput = parseDocumentCreateOutput(output.stdout);
-      return {
-        url: parsedOutput.url,
-        identifier: parsedOutput.identifier,
-      };
     },
   };
 }

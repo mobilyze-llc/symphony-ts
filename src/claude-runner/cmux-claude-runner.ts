@@ -424,7 +424,7 @@ export function extractVerdictEnum(text: string): string | null {
   const match = /verdict(?:\s+enum)?\s*[:：]\s*`?([a-z][a-z0-9_-]+)`?/i.exec(
     text,
   );
-  return match?.[1] === undefined ? null : match[1].trim();
+  return match?.[1] === undefined ? null : match[1].trim().toLowerCase();
 }
 
 async function inspectSourceVisibility(input: {

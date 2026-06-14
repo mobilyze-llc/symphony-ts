@@ -394,6 +394,7 @@ describe("symphony-spec-review-watch CLI", () => {
   it("creates a deterministic Linear Doc with idempotent create when none exists", async () => {
     const calls: Array<{ file: string; args: readonly string[] }> = [];
     let contentFile: string | null = null;
+    let contentFileText = "";
     const execFile = vi.fn(async (file: string, args: readonly string[]) => {
       calls.push({ file, args });
       if (args[1] === "list") {
@@ -404,6 +405,7 @@ describe("symphony-spec-review-watch CLI", () => {
       }
       if (args[1] === "create") {
         contentFile = String(args[args.indexOf("--content-file") + 1]);
+        contentFileText = await readFile(contentFile, "utf8");
         return {
           stdout: JSON.stringify({
             results: {
@@ -435,9 +437,12 @@ describe("symphony-spec-review-watch CLI", () => {
       expect.stringContaining("Spec Review - SYMPH-1"),
     );
     expect(contentFile).not.toBeNull();
-    expect(await readFile(String(contentFile), "utf8")).toContain(
+    expect(contentFileText).toContain(
       "symphony-spec-review-doc-idempotency-sha256",
     );
+    await expect(readFile(String(contentFile), "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
   });
 
   it("edits the matching deterministic Linear Doc on same-intent rerun", async () => {

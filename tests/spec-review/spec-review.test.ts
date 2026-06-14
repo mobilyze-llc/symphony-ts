@@ -19,6 +19,7 @@ import {
   SENSITIVE_SOURCE_INTENT_HASH,
   buildReviewedIssueDescription,
   buildSpecReviewPrompt,
+  buildSpecReviewStatusDescription,
   computeSourceIntentHash,
   evaluateSpecReviewAdmission,
   parseSpecReviewArtifact,
@@ -256,6 +257,36 @@ describe("spec review", () => {
     ).toMatchObject({
       status: "skipped",
       reasons: ["current_spec_review:needs_operator_context"],
+    });
+  });
+
+  it("reselects retryable failure reviews for the same source intent", () => {
+    const issue = makeIssue({
+      labels: ["needs:spec-review"],
+      description: "Build the thing.\n",
+    });
+    const sourceIntentHash = computeSourceIntentHash(issue);
+    const failedDescription = buildSpecReviewStatusDescription({
+      originalDescription: issue.description ?? "",
+      sourceIntentHash,
+      artifactHash: null,
+      artifactPath: null,
+      mode: "observe",
+      readinessState: "runner_failed",
+      verdict: null,
+      runnerStatus: "timed_out",
+      linearDocUrl: null,
+      summary: "Transient timeout.",
+      generatedAt: "2026-06-14T00:00:00.000Z",
+    });
+
+    expect(
+      selectSpecReviewCandidates({
+        issues: [{ ...issue, description: failedDescription }],
+      })[0],
+    ).toMatchObject({
+      status: "selected",
+      reasons: expect.arrayContaining(["trigger_label:needs:spec-review"]),
     });
   });
 
