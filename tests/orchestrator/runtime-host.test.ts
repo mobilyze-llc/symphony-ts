@@ -5836,6 +5836,88 @@ describe("pipeline notifications", () => {
     expect(calls).toEqual([[4242, "SIGTERM"]]);
   });
 
+  it("escalates emergency-stop delivery to SIGKILL after the grace window", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "emergency_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        emergencyStopGraceMs: 0,
+        readProcessCwd: async () => "/tmp/workspaces/1",
+        readProcessCommand: async () => "bash -lc codex app-server",
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "delivered",
+      warning: null,
+      attempts: [
+        {
+          pid: 4242,
+          processGroupId: null,
+          sigterm: "delivered",
+          sigkill: "delivered",
+        },
+      ],
+    });
+    expect(calls).toEqual([
+      [4242, "SIGTERM"],
+      [4242, "SIGKILL"],
+    ]);
+  });
+
+  it("marks emergency-stop delivery failed when SIGKILL escalation fails", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "emergency_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        emergencyStopGraceMs: 0,
+        readProcessCwd: async () => "/tmp/workspaces/1",
+        readProcessCommand: async () => "bash -lc codex app-server",
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+          if (signal === "SIGKILL") {
+            throw new Error("permission denied");
+          }
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "failed",
+      warning:
+        "Emergency stop signal proof failed for 1 worker process target(s): pid=4242",
+      attempts: [
+        {
+          pid: 4242,
+          processGroupId: null,
+          sigterm: "delivered",
+          sigkill: "failed",
+        },
+      ],
+    });
+    expect(calls).toEqual([
+      [4242, "SIGTERM"],
+      [4242, "SIGKILL"],
+    ]);
+  });
+
   it("does not signal a tracked pid whose cwd no longer matches the workspace", async () => {
     const calls: Array<[number, NodeJS.Signals]> = [];
     const delivery = await deliverTrackedWorkerStopSignal(

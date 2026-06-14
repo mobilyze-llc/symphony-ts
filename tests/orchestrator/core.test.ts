@@ -2527,6 +2527,42 @@ describe("orchestrator core", () => {
     expect(
       isStopSignalDelivery({
         status: "delivered",
+        reason: "emergency_stop",
+        attemptedAt: "2026-03-06T00:00:05.000Z",
+        workspacePath: "/tmp/workspaces/1",
+        attempts: [
+          {
+            pid: 4242,
+            processGroupId: null,
+            sigterm: "delivered",
+            sigkill: "delivered",
+          },
+        ],
+        warning: null,
+      }),
+    ).toBe(true);
+
+    expect(
+      isStopSignalDelivery({
+        status: "failed",
+        reason: "emergency_stop",
+        attemptedAt: "2026-03-06T00:00:05.000Z",
+        workspacePath: "/tmp/workspaces/1",
+        attempts: [
+          {
+            pid: 4242,
+            processGroupId: null,
+            sigterm: "delivered",
+            sigkill: "failed",
+          },
+        ],
+        warning: "SIGKILL failed",
+      }),
+    ).toBe(true);
+
+    expect(
+      isStopSignalDelivery({
+        status: "delivered",
         reason: "manual_stop",
         attemptedAt: "2026-03-06T00:00:05.000Z",
         workspacePath: "/tmp/workspaces/1",
@@ -2771,7 +2807,7 @@ describe("orchestrator core", () => {
       setBySequence: expect.any(Number),
     });
     expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
-      reason: "killed_mid_run",
+      reason: "killed_mid_run_unconfirmed",
       setBySequence: expect.any(Number),
     });
 
@@ -2793,6 +2829,126 @@ describe("orchestrator core", () => {
       expect(retry.dispatched).toBe(false);
       expect(retry.retryEntry?.error).toBe("emergency stop active");
     }
+  });
+
+  it("records live emergency-stop termination proof before allowing cleanup-confirmed resume", async () => {
+    const stopRunningIssue = vi.fn(async () => ({
+      status: "delivered" as const,
+      reason: "emergency_stop" as const,
+      attemptedAt: "2026-03-06T00:00:05.000Z",
+      workspacePath: "/tmp/workspaces/1",
+      attempts: [
+        {
+          pid: 4242,
+          processGroupId: null,
+          sigterm: "delivered" as const,
+          sigkill: "delivered" as const,
+        },
+      ],
+      warning: null,
+    }));
+    const orchestrator = createOrchestrator({ stopRunningIssue });
+
+    await orchestrator.pollTick();
+    const stop = await orchestrator.requestEmergencyStop({
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      reason: { class: "operator_emergency_stop", human: "stop now" },
+    });
+
+    expect(stop.stopRequests[0]?.signalDelivery).toMatchObject({
+      status: "delivered",
+      attempts: [
+        {
+          pid: 4242,
+          sigterm: "delivered",
+          sigkill: "delivered",
+        },
+      ],
+    });
+    expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run",
+    });
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.findLast(
+          (entry) =>
+            entry.kind === "hard_stop_trigger" &&
+            entry.issueId === "1" &&
+            entry.metadata.reason === "emergency_stop",
+        )?.metadata,
+    ).toMatchObject({
+      emergencyStopTerminationConfirmed: true,
+      signalDelivery: expect.objectContaining({ status: "delivered" }),
+    });
+  });
+
+  it("defers continuation retry admission while emergency stop is active", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const orchestrator = createOrchestrator({ spawnWorker });
+
+    await orchestrator.pollTick();
+    const continuation = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:00:05.000Z"),
+    });
+    expect(continuation?.delayType).toBe("continuation");
+
+    await orchestrator.requestEmergencyStop({
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      reason: { class: "operator_emergency_stop", human: "stop now" },
+    });
+    const retry = await orchestrator.onRetryTimer("1");
+
+    expect(retry.dispatched).toBe(false);
+    expect(retry.retryEntry).toMatchObject({
+      delayType: "continuation",
+      error: "emergency stop active",
+    });
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+  });
+
+  it("defers rework retry admission while emergency stop is active", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const orchestrator = createOrchestrator({
+      config: createReviewFailureReworkConfig(),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker,
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "review";
+    const rework = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "[STAGE_FAILED: review] Missing null check in handler.ts line 42",
+    });
+    expect(rework?.delayType).toBe("continuation");
+    expect(rework?.error).toContain("rework to implement");
+
+    await orchestrator.requestEmergencyStop({
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      reason: { class: "operator_emergency_stop", human: "stop now" },
+    });
+    const retry = await orchestrator.onRetryTimer("1");
+
+    expect(retry.dispatched).toBe(false);
+    expect(retry.retryEntry).toMatchObject({
+      delayType: "continuation",
+      error: "emergency stop active",
+    });
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
   });
 
   it("applies codex session events to the running entry and aggregate counters", async () => {
@@ -5879,6 +6035,120 @@ describe("dispatcher run journal restart recovery", () => {
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
   });
 
+  it("restart recovery keeps explicitly unconfirmed emergency-stop hard-stop proof parked after pipeline resume replay", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    let issueState = "Todo";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "intent:pipeline:stop:1",
+          kind: "intent",
+          operation: "dispatcher",
+          leaseId: "intent:pipeline:stop:1",
+          leaseStatus: "completed",
+          metadata: {
+            status: "applied",
+            verb: "pipeline_stop",
+            actor: { kind: "operator", host: "pro14", session: null },
+            reason: { class: "operator_emergency_stop", human: "stop now" },
+            interruptedIssues: [
+              {
+                issueId: "1",
+                issueIdentifier: "ISSUE-1",
+                stage: "investigate",
+                attempt: null,
+              },
+            ],
+          },
+        }),
+        createJournalEntry({
+          sequence: 2,
+          idempotencyKey: "hard_stop:1:investigate:initial:emergency_stop:2",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:investigate:initial:emergency_stop:2",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            reason: "emergency_stop",
+            issueState: "Todo",
+            emergencyStopTerminationConfirmed: false,
+            signalDelivery: {
+              status: "failed",
+              reason: "emergency_stop",
+              attemptedAt: "2026-03-06T00:00:05.000Z",
+              workspacePath: "/tmp/workspaces/1",
+              attempts: [
+                {
+                  pid: 4242,
+                  processGroupId: null,
+                  sigterm: "delivered",
+                  sigkill: "failed",
+                },
+              ],
+              warning: "SIGKILL failed",
+            },
+          },
+        }),
+        createJournalEntry({
+          sequence: 3,
+          idempotencyKey: "intent:pipeline:resume:3",
+          kind: "intent",
+          operation: "dispatcher",
+          leaseId: "intent:pipeline:resume:3",
+          leaseStatus: "completed",
+          metadata: {
+            status: "applied",
+            verb: "pipeline_resume",
+            actor: { kind: "operator", host: "pro14", session: null },
+            reason: { class: "operator_resume", human: "triaged" },
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().emergencyStop).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run_unconfirmed",
+      setBySequence: 2,
+    });
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+
+    issueState = "Resume";
+    const stillParked = await orchestrator.pollTick();
+    expect(stillParked.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "dispatch_verdict" &&
+            entry.issueId === "1" &&
+            entry.metadata.reason_code === "emergency_stop_unconfirmed_kill",
+        ),
+    ).toBe(true);
+  });
+
   it("restart recovery keeps pipeline-only emergency-stop interruptions parked after resume replay", async () => {
     const spawnWorker = vi.fn(async () => ({
       workerHandle: { pid: 1001 },
@@ -5951,6 +6221,100 @@ describe("dispatcher run journal restart recovery", () => {
     expect(stillParked.dispatchedIssueIds).toEqual([]);
     expect(spawnWorker).not.toHaveBeenCalled();
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "dispatch_verdict" &&
+            entry.issueId === "1" &&
+            entry.metadata.reason_code === "emergency_stop_unconfirmed_kill",
+        ),
+    ).toBe(true);
+  });
+
+  it("restart recovery preserves emergency-stop cleanup guard across later re-marks", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    let issueState = "Todo";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({ id: "1", identifier: "ISSUE-1", state: issueState }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "intent:pipeline:stop:1",
+          kind: "intent",
+          operation: "dispatcher",
+          leaseId: "intent:pipeline:stop:1",
+          leaseStatus: "completed",
+          metadata: {
+            status: "applied",
+            verb: "pipeline_stop",
+            actor: { kind: "operator", host: "pro14", session: null },
+            reason: { class: "operator_emergency_stop", human: "stop now" },
+            interruptedIssues: [
+              {
+                issueId: "1",
+                issueIdentifier: "ISSUE-1",
+                stage: "investigate",
+                attempt: null,
+              },
+            ],
+          },
+        }),
+        createJournalEntry({
+          sequence: 2,
+          idempotencyKey: "operator_input_required:1:investigate:initial",
+          kind: "operator_input_required",
+          operation: "dispatcher",
+          leaseId: "operator_input_required:1:investigate:initial",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            status: "completed",
+            reason: `${ERROR_CODES.codexUserInputRequired}: Codex requested operator input during a turn.`,
+            errorCode: ERROR_CODES.codexUserInputRequired,
+            issueState: "Todo",
+          },
+        }),
+        createJournalEntry({
+          sequence: 3,
+          idempotencyKey: "intent:pipeline:resume:3",
+          kind: "intent",
+          operation: "dispatcher",
+          leaseId: "intent:pipeline:resume:3",
+          leaseStatus: "completed",
+          metadata: {
+            status: "applied",
+            verb: "pipeline_resume",
+            actor: { kind: "operator", host: "pro14", session: null },
+            reason: { class: "operator_resume", human: "triaged" },
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().emergencyStop).toBeNull();
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "operator_input_required",
+      setBySequence: 2,
+    });
+
+    issueState = "Resume";
+    const stillParked = await orchestrator.pollTick();
+    expect(stillParked.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
     expect(
       orchestrator
         .getState()
@@ -11088,6 +11452,71 @@ function createImplementThenGateConfig(): ResolvedWorkflowConfig {
         transitions: {
           onComplete: null,
           onApprove: "done",
+          onRework: "implement",
+        },
+        linearState: null,
+      },
+      done: {
+        type: "terminal",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: null,
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: "Done",
+      },
+    },
+  };
+  return config;
+}
+
+function createReviewFailureReworkConfig(): ResolvedWorkflowConfig {
+  const config = createConfig();
+  config.stages = {
+    initialStage: "implement",
+    fastTrack: null,
+    stages: {
+      implement: {
+        type: "agent",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "review",
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: null,
+      },
+      review: {
+        type: "agent",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: 2,
+        reviewers: [],
+        transitions: {
+          onComplete: "done",
+          onApprove: null,
           onRework: "implement",
         },
         linearState: null,

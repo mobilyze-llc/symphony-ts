@@ -98,6 +98,8 @@ export interface AgentRunnerCodexClient {
   continueTurn(prompt: string, title: string): Promise<CodexTurnResult>;
   close(input?: {
     closureInitiator?: CodexSessionClosureInitiator;
+    forceKillAfterGrace?: boolean;
+    graceMs?: number;
   }): Promise<void>;
 }
 
@@ -1454,9 +1456,16 @@ function isMidTurnSessionClosureError(error: unknown): boolean {
 async function closeBestEffort(
   client: AgentRunnerCodexClient,
   closureInitiator: CodexSessionClosureInitiator,
+  options: { forceKillAfterGrace?: boolean; graceMs?: number } = {},
 ): Promise<void> {
   try {
-    await client.close({ closureInitiator });
+    await client.close({
+      closureInitiator,
+      ...(options.forceKillAfterGrace === undefined
+        ? {}
+        : { forceKillAfterGrace: options.forceKillAfterGrace }),
+      ...(options.graceMs === undefined ? {} : { graceMs: options.graceMs }),
+    });
   } catch {
     // Closing is cleanup-only here; preserve the primary failure cause.
   }
@@ -1716,6 +1725,8 @@ function isLiveUsageEvent(event: CodexClientEvent): boolean {
   }
 }
 
+const EMERGENCY_STOP_ABORT_MESSAGE = "Stopped due to emergency_stop.";
+
 function createAgentAbortController(signal: AbortSignal | undefined): {
   bindClient(client: AgentRunnerCodexClient): void;
   dispose(): void;
@@ -1734,7 +1745,11 @@ function createAgentAbortController(signal: AbortSignal | undefined): {
       return;
     }
 
-    void closeBestEffort(client, "operator_abort");
+    const isEmergencyStopAbort =
+      toAbortMessage(signal?.reason) === EMERGENCY_STOP_ABORT_MESSAGE;
+    void closeBestEffort(client, "operator_abort", {
+      ...(isEmergencyStopAbort ? { forceKillAfterGrace: true } : {}),
+    });
   };
 
   if (signal !== undefined) {

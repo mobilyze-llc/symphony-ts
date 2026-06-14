@@ -1849,10 +1849,41 @@ export class OrchestratorCore {
 
     // requestStop records manual/inactive stops in the same journal kind with
     // StopReason codes; budget and cost hard stops use outcome-bearing entries.
+    if (reason === "emergency_stop") {
+      const terminationConfirmed =
+        // Old emergency-stop hard-stop records predate explicit proof metadata;
+        // keep those upgrade replays compatible while treating explicit false
+        // as an unconfirmed live kill.
+        readMetadataBoolean(
+          entry.metadata,
+          "emergencyStopTerminationConfirmed",
+        ) !== false;
+      this.markIssueRequiresExplicitResume(
+        entry.issueId,
+        readMetadataString(entry.metadata, "issueState"),
+        entry.timestamp,
+        {
+          reason: terminationConfirmed
+            ? "killed_mid_run"
+            : "killed_mid_run_unconfirmed",
+          setBySequence: entry.sequence,
+        },
+      );
+      if (terminationConfirmed) {
+        this.confirmEmergencyStopProcessCleanup(entry.issueId);
+      } else {
+        this.requireEmergencyStopProcessCleanup(entry.issueId, {
+          setBySequence: entry.sequence,
+          since: entry.timestamp,
+        });
+      }
+      this.recoverPendingStageSignal(entry);
+      return;
+    }
+
     if (
       reason === "manual_stop" ||
       reason === "inactive_state" ||
-      reason === "emergency_stop" ||
       outcome !== null
     ) {
       const trigger = readMetadataString(entry.metadata, "trigger");
@@ -1864,15 +1895,10 @@ export class OrchestratorCore {
           reason:
             reason === "manual_stop" || reason === "inactive_state"
               ? reason
-              : reason === "emergency_stop"
-                ? "killed_mid_run"
-                : `hard_stop:${trigger ?? outcome ?? "unknown"}`,
+              : `hard_stop:${trigger ?? outcome ?? "unknown"}`,
           setBySequence: entry.sequence,
         },
       );
-      if (reason === "emergency_stop") {
-        this.confirmEmergencyStopProcessCleanup(entry.issueId);
-      }
       this.recoverPendingStageSignal(entry);
     }
   }
@@ -6489,6 +6515,12 @@ export class OrchestratorCore {
         pausedState !== EXPLICIT_RESUME_STATE,
       pausedAt: pausedAt ?? this.now().toISOString(),
       parkSeq: this.parkSequence,
+      ...(existingGuard?.requiresConfirmedEmergencyStop === undefined
+        ? {}
+        : {
+            requiresConfirmedEmergencyStop:
+              existingGuard.requiresConfirmedEmergencyStop,
+          }),
     });
     // Intent-fence generation (SYMPH-399): stop-like pauses and watchdog
     // parks share one monotonic counter so a fenced verb can never act on
@@ -10188,15 +10220,22 @@ export class OrchestratorCore {
         reason === "inactive_state" ||
         reason === "emergency_stop"
       ) {
+        const pausedAt = this.now().toISOString();
         this.recordIssueRequiresExplicitResume(
           runningEntry.issue.id,
           runningEntry.issue.state,
-          null,
+          pausedAt,
           {
             reason: reason === "emergency_stop" ? "killed_mid_run" : reason,
             setBySequence: lease.lastJournalSequence,
           },
         );
+        if (reason === "emergency_stop") {
+          this.requireEmergencyStopProcessCleanup(runningEntry.issue.id, {
+            setBySequence: lease.lastJournalSequence,
+            since: pausedAt,
+          });
+        }
       }
       const signalDeliveryResult = await this.stopRunningIssue?.({
         issueId: runningEntry.issue.id,
@@ -10204,11 +10243,21 @@ export class OrchestratorCore {
         cleanupWorkspace,
         reason,
       });
+      const emergencyStopTerminationConfirmed =
+        reason === "emergency_stop"
+          ? isEmergencyStopTerminationConfirmed(signalDeliveryResult)
+          : null;
       if (
         signalDeliveryResult === null ||
         isStopSignalDelivery(signalDeliveryResult)
       ) {
         stopRequest.signalDelivery = signalDeliveryResult;
+      }
+      if (
+        reason === "emergency_stop" &&
+        emergencyStopTerminationConfirmed === true
+      ) {
+        this.confirmEmergencyStopProcessCleanup(runningEntry.issue.id);
       }
       await this.completeDispatcherLease({
         leaseId,
@@ -10229,6 +10278,8 @@ export class OrchestratorCore {
                 sourceSequence: options.emergencyStopSourceSequence ?? null,
                 codexAppServerPid: runningEntry.codexAppServerPid,
                 codexAppServerIdentity: runningEntry.codexAppServerIdentity,
+                emergencyStopTerminationConfirmed,
+                signalDelivery: stopRequest.signalDelivery ?? null,
               }
             : {}),
         },
@@ -11348,6 +11399,14 @@ function readMetadataNumber(
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function readMetadataBoolean(
+  metadata: Record<string, unknown>,
+  key: string,
+): boolean | null {
+  const value = metadata[key];
+  return typeof value === "boolean" ? value : null;
+}
+
 function collectOperatorIntentSamples(
   journal: DispatcherRunJournal,
   sinceSequence = 0,
@@ -12121,6 +12180,21 @@ export function isStopSignalDelivery(
   );
 }
 
+function isEmergencyStopTerminationConfirmed(value: unknown): boolean {
+  if (!isStopSignalDelivery(value)) {
+    return false;
+  }
+  return (
+    value.status === "delivered" &&
+    value.attempts.length > 0 &&
+    value.attempts.every(
+      (attempt) =>
+        attempt.sigkill !== "failed" &&
+        (attempt.sigterm === "delivered" || attempt.sigkill === "delivered"),
+    )
+  );
+}
+
 function isStopSignalDeliveryStatus(
   value: unknown,
 ): value is StopSignalDeliveryStatus {
@@ -12155,7 +12229,7 @@ function isStopSignalDeliveryAttempt(
     return false;
   }
   return candidate.sigterm === "delivered"
-    ? candidate.sigkill === "not_attempted"
+    ? true
     : candidate.sigkill !== "not_attempted";
 }
 
@@ -12187,7 +12261,7 @@ function isStopSignalDeliveryStatusConsistent(
     );
   }
   const failedAttempts = attempts.filter(
-    (attempt) => attempt.sigterm === "failed" && attempt.sigkill === "failed",
+    (attempt) => attempt.sigkill === "failed",
   );
   if (failedAttempts.length === 0) {
     return status === "delivered";

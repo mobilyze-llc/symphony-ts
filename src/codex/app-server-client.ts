@@ -282,6 +282,8 @@ export class CodexAppServerClient {
 
   async close(input?: {
     closureInitiator?: CodexSessionClosureInitiator;
+    forceKillAfterGrace?: boolean;
+    graceMs?: number;
   }): Promise<void> {
     this.closed = true;
     const closureInitiator = input?.closureInitiator ?? "client_close";
@@ -314,7 +316,10 @@ export class CodexAppServerClient {
       return;
     }
 
-    await terminateChildProcessTree(child, { forceKillAfterGrace: false });
+    await terminateChildProcessTree(child, {
+      forceKillAfterGrace: input?.forceKillAfterGrace ?? false,
+      ...(input?.graceMs === undefined ? {} : { graceMs: input.graceMs }),
+    });
     await this.cleanupEphemeralCodexHome();
   }
 
