@@ -193,6 +193,17 @@ Round policy:
   the named invariant family.
 - Do not reopen unrelated P3 or Track findings unless they create a current
   P1/P2.
+- Every review checkpoint must separate current round, reviewed head, surviving
+  product P1/P2 blockers, Track-only items, and substrate/provenance degraded
+  status. Do not collapse those into one "review failed" bucket.
+- After the round cap, another review round needs an explicit reason category:
+  current product P1/P2, targeted same-family invariant check, or
+  review-substrate/provenance repair.
+- If reviewer lanes pass and the aggregate gate fails only because author
+  provenance or non-author-family decorrelation evidence is missing, stop at a
+  review procedure decision. Add the missing invocation metadata, such as
+  `--author-family` for a Codex-led implementation, or route substrate repair;
+  do not launch another product-code review loop.
 - On the third failed review, third same-family reopen, or third review turn
   that leaves the ticket unmergeable, do not simply stop. Step back and diagnose
   why the ticket failed again: wrong invariant, underspecified acceptance

@@ -1066,7 +1066,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.verdict).toBe("error");
     expect(result.termination).toMatchObject({
       status: "degraded",
-      reason: "gate_error",
+      reason: "degraded_review_substrate",
       trackFindingCount: 1,
       nonBlockingFindingCount: 1,
     });
@@ -4137,6 +4137,48 @@ describe("runHeadlessCouncilGate", () => {
       "- Action: operator_decision_required_with_synthesis",
     );
     expect(report).toContain("- Rounds per cycle: 3 (warning 2, cap 3)");
+  });
+
+  it("stops routing-only provenance failures as review substrate instead of product rework", async () => {
+    const harness = await createHarness();
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-599",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        reviewerLanes: [piLane()],
+        provenance: [],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(result.degradedConditions).toEqual(
+      expect.arrayContaining([
+        "routing_author_provenance_missing",
+        "routing_absent_decorrelated_reviewer_artifact",
+        "routing_required_lane_not_decorrelated:pi-deepseek",
+      ]),
+    );
+    expect(result.summary).toContain("no product blockers");
+    expect(result.summary).toContain("review routing/provenance guarantees");
+    expect(result.termination).toMatchObject({
+      status: "degraded",
+      reason: "degraded_review_substrate",
+      action: "inspect_review_substrate",
+      blockingFindingCount: 0,
+    });
+
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain("- Product blockers present: no");
+    expect(report).toContain("- Track-only items present: no");
+    expect(report).toContain("- Substrate/provenance degraded: yes");
+    expect(report).toContain(
+      "- Stop rule: stop for review-substrate/provenance repair; do not launch another product-code review round",
+    );
   });
 
   it("keeps Track-only FINDINGS as pass while preserving the Track finding", async () => {

@@ -447,6 +447,7 @@ run_council_gate \
   --repo "$REPO" \
   --pr "$PR_NUMBER" \
   --cmux-spawn-bin "$CMUX_SPAWN_BIN" \
+  --author-family codex \
   --mode {% if reworkCount > 0 %}convergence{% else %}full{% endif %} \
   --round {{ reworkCount | plus: 1 }} \
   --timeout-seconds 1800 \

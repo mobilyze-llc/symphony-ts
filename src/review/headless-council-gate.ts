@@ -5834,6 +5834,12 @@ function assessCouncilTermination(input: {
     input.thresholds.sameFamilyReopenLimit,
   );
   const baseAlertLevel = roundAlertLevel(input.round, input.thresholds);
+  const routingOnlyProcedureStop = isRoutingOnlyProcedureStop({
+    verdict: input.verdict,
+    lanes: input.lanes,
+    degradedConditions: input.degradedConditions,
+    blockingFindingCount: blockingFindings.length,
+  });
 
   let status: CouncilTerminationStatus;
   let reason: CouncilTerminationReason;
@@ -5841,11 +5847,16 @@ function assessCouncilTermination(input: {
   let alertLevel = baseAlertLevel;
   const reviewSubstrateDegraded = hasReviewSubstrateDegradation(input);
 
-  if (input.verdict === "error" || reviewSubstrateDegraded) {
+  if (
+    input.verdict === "error" ||
+    reviewSubstrateDegraded ||
+    routingOnlyProcedureStop
+  ) {
     status = "degraded";
-    reason = reviewSubstrateDegraded
-      ? "degraded_review_substrate"
-      : "gate_error";
+    reason =
+      reviewSubstrateDegraded || routingOnlyProcedureStop
+        ? "degraded_review_substrate"
+        : "gate_error";
     action = "inspect_review_substrate";
     alertLevel = alertLevel === "ok" ? "warning" : alertLevel;
   } else if (tripwireFamilyNames.length > 0) {
@@ -5973,6 +5984,35 @@ function isReviewSubstrateDegradedCondition(condition: string): boolean {
   );
 }
 
+function isRoutingOnlyProcedureStop(input: {
+  verdict: HeadlessGateVerdict;
+  lanes: readonly HeadlessLaneResult[];
+  degradedConditions: readonly string[];
+  blockingFindingCount: number;
+}): boolean {
+  return (
+    input.verdict === "error" &&
+    input.blockingFindingCount === 0 &&
+    input.lanes.length > 0 &&
+    input.lanes.every(
+      (lane) => lane.verdict === "pass" && lane.degradedReason === null,
+    ) &&
+    input.degradedConditions.length > 0 &&
+    input.degradedConditions.every(isRoutingGuaranteeDegradedCondition)
+  );
+}
+
+function isRoutingGuaranteeDegradedCondition(condition: string): boolean {
+  return (
+    condition === "routing_author_provenance_missing" ||
+    condition === "routing_absent_decorrelated_reviewer_artifact" ||
+    condition.startsWith("routing_required_lane_missing:") ||
+    condition.startsWith("routing_required_lane_malformed:") ||
+    condition.startsWith("routing_required_lane_degraded:") ||
+    condition.startsWith("routing_required_lane_not_decorrelated:")
+  );
+}
+
 function sameFamilyReopenNames(
   currentBlockingFindings: readonly StructuredReviewFinding[],
   priorStructuredArtifacts: readonly StructuredReviewerArtifact[],
@@ -6067,6 +6107,16 @@ function summarizeVerdict(
     .map((lane) => lane.laneId);
   if (stalledLanes.length > 0) {
     return `Headless council review emitted partial artifacts; lane(s) never reached a terminal state (substrate stall, not a council FAIL): ${stalledLanes.join(", ")}. Degraded: ${degradedConditions.join("; ")}`;
+  }
+  if (
+    lanes.length > 0 &&
+    lanes.every(
+      (lane) => lane.verdict === "pass" && lane.degradedReason === null,
+    ) &&
+    degradedConditions.length > 0 &&
+    degradedConditions.every(isRoutingGuaranteeDegradedCondition)
+  ) {
+    return `Headless council review found no product blockers, but failed closed on review routing/provenance guarantees: ${degradedConditions.join("; ")}`;
   }
   return `Headless council review failed closed: ${degradedConditions.join("; ")}`;
 }
@@ -6274,12 +6324,27 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
   if (result.termination === undefined) {
     lines.push("- Not recorded");
   } else {
+    const substrateOrProvenanceDegraded =
+      hasReviewSubstrateDegradation({
+        lanes: result.lanes,
+        degradedConditions: result.degradedConditions,
+      }) ||
+      isRoutingOnlyProcedureStop({
+        verdict: result.verdict,
+        lanes: result.lanes,
+        degradedConditions: result.degradedConditions,
+        blockingFindingCount: result.termination.blockingFindingCount,
+      });
     lines.push(
       `- Status: ${result.termination.status}`,
       `- Reason: ${result.termination.reason}`,
       `- Action: ${result.termination.action}`,
       `- Rounds per cycle: ${result.termination.roundsPerCycle} (warning ${result.termination.thresholds.roundWarning}, cap ${result.termination.thresholds.roundCap})`,
       `- Alert level: ${result.termination.alertLevel}`,
+      `- Product blockers present: ${result.termination.blockingFindingCount > 0 ? "yes" : "no"}`,
+      `- Track-only items present: ${result.termination.blockingFindingCount === 0 && result.termination.trackFindingCount > 0 ? "yes" : "no"}`,
+      `- Substrate/provenance degraded: ${substrateOrProvenanceDegraded ? "yes" : "no"}`,
+      `- Stop rule: ${formatTerminationStopRule(result.termination, substrateOrProvenanceDegraded)}`,
       `- Blocking findings: ${result.termination.blockingFindingCount}`,
       `- Non-blocking findings: ${result.termination.nonBlockingFindingCount}`,
       `- Track findings to file: ${result.termination.trackFindingCount}`,
@@ -6312,6 +6377,25 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
     "",
   );
   return lines.join("\n");
+}
+
+function formatTerminationStopRule(
+  termination: CouncilTerminationAssessment,
+  substrateOrProvenanceDegraded: boolean,
+): string {
+  if (substrateOrProvenanceDegraded && termination.blockingFindingCount === 0) {
+    return "stop for review-substrate/provenance repair; do not launch another product-code review round";
+  }
+  if (termination.reason === "round_cap_hit") {
+    return "operator decision required before any additional review round";
+  }
+  if (termination.reason === "same_family_reopen") {
+    return "restructure against the named invariant or park with synthesis before rerun";
+  }
+  if (termination.blockingFindingCount > 0) {
+    return "fix surviving product P1/P2 findings before convergence";
+  }
+  return "continue pipeline";
 }
 
 function formatWorkspaceIntegrityReportLines(

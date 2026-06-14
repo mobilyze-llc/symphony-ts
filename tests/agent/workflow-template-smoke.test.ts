@@ -595,6 +595,8 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     );
     expect(output).toContain("Review Infrastructure Retry");
     expect(output).toContain("substrate_stall:<lane>");
+    expect(output).toContain("routing_author_provenance_missing");
+    expect(output).toContain("review procedure/provenance stop");
     expect(output).toContain("Do NOT output `[STAGE_FAILED: review]`");
     expect(output).toContain("parks the issue loudly as infra-blocked");
     expect(output).toContain(
@@ -631,6 +633,8 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain("## Review Infrastructure Retry");
     expect(output).toContain("[STAGE_FAILED: infra]");
     expect(output).toContain("actual surviving P1/P2 code findings");
+    expect(output).toContain("routing_author_provenance_missing");
+    expect(output).toContain("procedure/provenance stop");
     expect(output).toContain('Any other readable `verdict: "error"`');
     expect(output).toContain("Never output `[STAGE_COMPLETE]`");
   });
@@ -658,6 +662,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain("run_council_gate");
     expect(output).toContain("--mode full");
     expect(output).toContain("--round 1");
+    expect(output).toContain("--author-family codex");
     expect(output).toContain("--timeout-seconds 1800");
     expect(output).toContain("review_metadata.reviewed_head_sha");
     expect(output).toContain("review_metadata.base_sha");

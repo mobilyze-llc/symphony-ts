@@ -390,6 +390,20 @@ describe("session-orchestrator skill", () => {
     );
   });
 
+  it("stops round-cap and provenance-only review failures before product rework", () => {
+    expect(skillContent).toContain("product P1/P2 blockers");
+    expect(skillContent).toContain("Track-only items");
+    expect(skillContent).toContain("substrate/provenance degraded");
+    expect(skillContent).toContain(
+      "current product P1/P2, targeted same-family invariant check, or",
+    );
+    expect(skillContent).toContain("non-author-family decorrelation");
+    expect(skillContent).toContain("`--author-family`");
+    expect(skillContent).toContain(
+      "do not launch another product-code review loop",
+    );
+  });
+
   it("keeps durable follow-up in Linear through live discovery", () => {
     expect(skillContent).toContain("Search before create");
     expect(skillContent).toContain("linear-pp-cli similar");
