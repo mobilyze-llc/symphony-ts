@@ -129,6 +129,7 @@ describe("domain model", () => {
       secondsRunning: 0,
     });
     expect(state.codexRateLimits).toBeNull();
+    expect(state.codexRateLimitsObservedAt).toBeNull();
     expect(state.rateLimitAdmission).toBeNull();
     expect(state.issueExecutionHistory).toEqual({});
     expect(state.managerRunJournal).toEqual([]);

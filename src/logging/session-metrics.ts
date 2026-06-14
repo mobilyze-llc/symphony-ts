@@ -305,6 +305,7 @@ export function applyCodexEventToOrchestratorState(
 
   if (event.rateLimits !== undefined) {
     state.codexRateLimits = event.rateLimits;
+    state.codexRateLimitsObservedAt = event.timestamp;
   }
 
   return result;

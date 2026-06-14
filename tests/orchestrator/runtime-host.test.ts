@@ -1356,6 +1356,9 @@ describe("OrchestratorRuntimeHost", () => {
       await coldHost.pollOnce();
       await coldHost.flushEvents();
       expect(coldHost.getState().codexRateLimits).toEqual(rateLimits);
+      expect(coldHost.getState().codexRateLimitsObservedAt).toBe(
+        "2026-03-06T00:00:05.000Z",
+      );
     } finally {
       removeWorkspaceWithRetry(workspaceRoot);
     }
@@ -8053,6 +8056,7 @@ describe("state-document enrichment wiring (SYMPH-407)", () => {
         },
       };
       host.getState().codexRateLimits = liveRateLimits;
+      host.getState().codexRateLimitsObservedAt = "2026-06-12T09:30:00.000Z";
 
       await host.pollOnce();
       const snapshot = await host.getRuntimeSnapshot();
@@ -8064,6 +8068,7 @@ describe("state-document enrichment wiring (SYMPH-407)", () => {
         primary_used_pct: 12,
       });
       expect(snapshot.rate_limit_views.live_telemetry).toMatchObject({
+        observed_at: "2026-06-12T09:30:00.000Z",
         primary_used_pct: 55,
       });
     } finally {

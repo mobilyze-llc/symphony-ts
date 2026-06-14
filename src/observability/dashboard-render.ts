@@ -14,6 +14,16 @@ export interface DashboardRenderOptions {
   liveUpdatesEnabled: boolean;
 }
 
+const COMPUTED_ORDER_SUMMARY_LABELS = {
+  hardExcludedIssues: "Hard-excluded issues",
+  hardExclusionEdges: "Hard exclusion edges",
+  hardCycles: "Hard cycles",
+  omittedHardCycles: "Omitted hard cycles",
+  advisoryWarnings: "Advisory warnings",
+  wouldHaveBeenAdvisoryExclusions: "Would-have-been advisory exclusions",
+  supersededNativeHardBlockers: "Superseded native hard blockers",
+} as const;
+
 const DASHBOARD_STYLES = String.raw`
       :root {
         color-scheme: dark;
@@ -787,7 +797,19 @@ ${DASHBOARD_STYLES}
           </div>
 
           <p id="rate-limit-admission" class="section-copy">${escapeHtml(initialRateLimitAdmission)}</p>
+          <div id="rate-limit-views">${renderRateLimitViews(snapshot)}</div>
           <pre id="rate-limits" class="code-panel">${escapeHtml(initialRateLimits)}</pre>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Deploy drift</h2>
+              <p class="section-copy">Running commit compared with the local origin/main ref captured by the runtime.</p>
+            </div>
+          </div>
+
+          <div id="deploy-drift">${renderDeployDrift(snapshot)}</div>
         </section>
 
         <section class="section-card">
@@ -1260,6 +1282,37 @@ function renderDashboardClientScript(
           return parts.join(' · ');
         }
 
+        function renderRateLimitViews(next) {
+          var views = next.rate_limit_views || {};
+          var file = views.runner_snapshot_file || null;
+          var gate = views.gate || null;
+          var live = views.live_telemetry || null;
+          var disagreement = views.disagreement == null ? 'unknown' : (views.disagreement ? 'yes' : 'no');
+          return '<p class="section-copy">' +
+            'Runner file observed: ' + escapeHtml(file && file.observed_at ? file.observed_at : 'n/a') +
+            ' · Gate evaluated: ' + escapeHtml(gate && gate.evaluated_at ? gate.evaluated_at : 'n/a') +
+            ' · Live telemetry observed: ' + escapeHtml(live && live.observed_at ? live.observed_at : 'n/a') +
+            ' · Disagreement: ' + escapeHtml(disagreement) +
+            '</p>';
+        }
+
+        function renderDeployDrift(next) {
+          var drift = next.deploy_drift || null;
+          if (!drift) {
+            return '<p class="empty-state">Deploy drift has not been captured yet.</p>';
+          }
+          var status = drift.drift === true ? 'drift' : drift.drift === false ? 'aligned' : 'unknown';
+          return '<div class="detail-grid">' +
+            '<div><span class="detail-kv-label">Status</span><span class="detail-kv-value">' + escapeHtml(status) + '</span></div>' +
+            '<div><span class="detail-kv-label">Running commit</span><span class="detail-kv-value mono">' + escapeHtml(drift.running_commit || 'unknown') + '</span></div>' +
+            '<div><span class="detail-kv-label">origin/main commit</span><span class="detail-kv-value mono">' + escapeHtml(drift.origin_main_commit || 'unknown') + '</span></div>' +
+            '<div><span class="detail-kv-label">Captured at</span><span class="detail-kv-value mono">' + escapeHtml(drift.captured_at || 'unknown') + '</span></div>' +
+            '<div><span class="detail-kv-label">Note</span><span class="detail-kv-value">' + escapeHtml(drift.note || '') + '</span></div>' +
+          '</div>';
+        }
+
+        var computedOrderSummaryLabels = ${JSON.stringify(COMPUTED_ORDER_SUMMARY_LABELS)};
+
         // Keep the computed-order summary labels in sync with the server-side
         // renderComputedOrder implementation below; this copy powers live updates.
         function renderComputedOrder(next) {
@@ -1299,7 +1352,7 @@ function renderDashboardClientScript(
           });
           var advisory = Array.isArray(order.advisory_warnings) ? order.advisory_warnings.length : 0;
           var wouldExclude = Array.isArray(order.would_have_been_excluded_by_advisory_edges) ? order.would_have_been_excluded_by_advisory_edges.length : 0;
-          var summary = '<p class="section-copy">Hard-excluded issues: ' + formatInteger(hardExcludedIssueCount) + ' · Hard exclusion edges: ' + formatInteger(exclusions) + ' · Hard cycles: ' + formatInteger(hardCycleCount) + ' · Omitted hard cycles: ' + formatInteger(omittedHardCycles) + ' · Advisory warnings: ' + formatInteger(advisory) + ' · Would-have-been advisory exclusions: ' + formatInteger(wouldExclude) + ' · Superseded native hard blockers: ' + formatInteger(supersededNativeHardBlockers.length) + '</p>';
+          var summary = '<p class="section-copy">' + computedOrderSummaryLabels.hardExcludedIssues + ': ' + formatInteger(hardExcludedIssueCount) + ' · ' + computedOrderSummaryLabels.hardExclusionEdges + ': ' + formatInteger(exclusions) + ' · ' + computedOrderSummaryLabels.hardCycles + ': ' + formatInteger(hardCycleCount) + ' · ' + computedOrderSummaryLabels.omittedHardCycles + ': ' + formatInteger(omittedHardCycles) + ' · ' + computedOrderSummaryLabels.advisoryWarnings + ': ' + formatInteger(advisory) + ' · ' + computedOrderSummaryLabels.wouldHaveBeenAdvisoryExclusions + ': ' + formatInteger(wouldExclude) + ' · ' + computedOrderSummaryLabels.supersededNativeHardBlockers + ': ' + formatInteger(supersededNativeHardBlockers.length) + '</p>';
           var exclusionPanel = exclusions === 0
             ? ''
             : '<p class="detail-section-title">Hard exclusions</p><div class="table-wrap"><table class="data-table" style="min-width: 720px;"><thead><tr><th>Issue</th><th>Blocked by</th><th>Reason</th></tr></thead><tbody>' +
@@ -1385,6 +1438,8 @@ function renderDashboardClientScript(
           document.getElementById('retry-rows').innerHTML = renderRetryRows(next);
           document.getElementById('rate-limits').textContent = prettyValue(next.rate_limits);
           document.getElementById('rate-limit-admission').textContent = rateLimitAdmissionLabel(next.rate_limit_admission);
+          document.getElementById('rate-limit-views').innerHTML = renderRateLimitViews(next);
+          document.getElementById('deploy-drift').innerHTML = renderDeployDrift(next);
         }
 
         function rateLimitAdmissionLabel(admission) {
@@ -1880,6 +1935,42 @@ function renderRateLimitAdmissionLabel(
   return `Dispatch headroom floor: ok${detail}.`;
 }
 
+function renderRateLimitViews(snapshot: RuntimeSnapshot): string {
+  const views = snapshot.rate_limit_views;
+  const file = views.runner_snapshot_file;
+  const gate = views.gate;
+  const live = views.live_telemetry;
+  const disagreement =
+    views.disagreement === null ? "unknown" : views.disagreement ? "yes" : "no";
+  return `<p class="section-copy">Runner file observed: ${escapeHtml(
+    file?.observed_at ?? "n/a",
+  )} · Gate evaluated: ${escapeHtml(
+    gate?.evaluated_at ?? "n/a",
+  )} · Live telemetry observed: ${escapeHtml(
+    live?.observed_at ?? "n/a",
+  )} · Disagreement: ${escapeHtml(disagreement)}</p>`;
+}
+
+function renderDeployDrift(snapshot: RuntimeSnapshot): string {
+  const drift = snapshot.deploy_drift;
+  if (drift === null) {
+    return '<p class="empty-state">Deploy drift has not been captured yet.</p>';
+  }
+  const status =
+    drift.drift === true
+      ? "drift"
+      : drift.drift === false
+        ? "aligned"
+        : "unknown";
+  return `<div class="detail-grid">
+    <div><span class="detail-kv-label">Status</span><span class="detail-kv-value">${escapeHtml(status)}</span></div>
+    <div><span class="detail-kv-label">Running commit</span><span class="detail-kv-value mono">${escapeHtml(drift.running_commit ?? "unknown")}</span></div>
+    <div><span class="detail-kv-label">origin/main commit</span><span class="detail-kv-value mono">${escapeHtml(drift.origin_main_commit ?? "unknown")}</span></div>
+    <div><span class="detail-kv-label">Captured at</span><span class="detail-kv-value mono">${escapeHtml(drift.captured_at)}</span></div>
+    <div><span class="detail-kv-label">Note</span><span class="detail-kv-value">${escapeHtml(drift.note)}</span></div>
+  </div>`;
+}
+
 function renderRateLimitWindowKv(
   windows: RuntimeSnapshot["running"][number]["rate_limit_window"],
 ): string {
@@ -2032,19 +2123,19 @@ function renderComputedOrder(snapshot: RuntimeSnapshot): string {
   const hardExcludedIssueCount = new Set(
     order.exclusions.map((exclusion) => exclusion.issue_id),
   ).size;
-  const summary = `<p class="section-copy">Hard-excluded issues: ${formatInteger(
+  const summary = `<p class="section-copy">${COMPUTED_ORDER_SUMMARY_LABELS.hardExcludedIssues}: ${formatInteger(
     hardExcludedIssueCount,
-  )} · Hard exclusion edges: ${formatInteger(
+  )} · ${COMPUTED_ORDER_SUMMARY_LABELS.hardExclusionEdges}: ${formatInteger(
     order.exclusions.length,
-  )} · Hard cycles: ${formatInteger(
+  )} · ${COMPUTED_ORDER_SUMMARY_LABELS.hardCycles}: ${formatInteger(
     hardCycles.length,
-  )} · Omitted hard cycles: ${formatInteger(
+  )} · ${COMPUTED_ORDER_SUMMARY_LABELS.omittedHardCycles}: ${formatInteger(
     omittedHardCycles,
-  )} · Advisory warnings: ${formatInteger(
+  )} · ${COMPUTED_ORDER_SUMMARY_LABELS.advisoryWarnings}: ${formatInteger(
     order.advisory_warnings.length,
-  )} · Would-have-been advisory exclusions: ${formatInteger(
+  )} · ${COMPUTED_ORDER_SUMMARY_LABELS.wouldHaveBeenAdvisoryExclusions}: ${formatInteger(
     order.would_have_been_excluded_by_advisory_edges.length,
-  )} · Superseded native hard blockers: ${formatInteger(
+  )} · ${COMPUTED_ORDER_SUMMARY_LABELS.supersededNativeHardBlockers}: ${formatInteger(
     supersededNativeHardBlockers.length,
   )}</p>`;
   const exclusionPanel =
