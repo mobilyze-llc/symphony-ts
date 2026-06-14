@@ -23,6 +23,7 @@ import {
   SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
   type SpecReviewRunIssueResult,
   buildReviewedIssueDescription,
+  buildSpecReviewSourceIntentComments,
   computeSourceIntentHash,
 } from "../../src/spec-review/spec-review.js";
 
@@ -918,6 +919,117 @@ describe("symphony-spec-review-watch CLI", () => {
           "latest_spec_review_journal:failed",
           "trigger_label:needs:spec-review",
         ]),
+      }),
+    );
+  });
+
+  it("uses operator comments when deciding whether a dry-run candidate is stale", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    const stdout = vi.fn();
+    const issue = makeIssue({
+      labels: ["needs:spec-review"],
+      description: "Build the thing.\n",
+    });
+    const baseHash = computeSourceIntentHash(issue);
+    const operatorComments = [
+      {
+        id: "comment-operator",
+        body: "Operator adds a requirement.",
+        createdAt: "2026-06-14T00:01:00.000Z",
+        updatedAt: "2026-06-14T00:01:00.000Z",
+        user: {
+          kind: "user" as const,
+          id: "user-1",
+          name: "Operator",
+          displayName: "Operator",
+          email: "operator@mobilyze.com",
+          botType: null,
+          botSubType: null,
+        },
+        botActor: null,
+      },
+    ];
+    const operatorConfig = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: null,
+      ingestSecret: null,
+    };
+    const expectedHash = computeSourceIntentHash(issue, {
+      comments: buildSpecReviewSourceIntentComments({
+        comments: operatorComments,
+        operatorConfig,
+      }),
+    });
+    const reviewedDescription = buildReviewedIssueDescription({
+      originalDescription: issue.description ?? "",
+      sourceIntentHash: baseHash,
+      artifactHash: "artifact",
+      artifactPath: "/tmp/artifact.md",
+      mode: "observe",
+      readinessState: "valid",
+      verdict: "ready_as_written",
+      linearDocUrl: null,
+      generatedAt: "2026-06-14T00:00:00.000Z",
+      reconciliation: {
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "Looks good.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      },
+    });
+
+    const exitCode = await runSpecReviewWatchCli(
+      ["WORKFLOW.md", "--workspace", workspace, "--dry-run"],
+      {
+        stdout,
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () =>
+          ({
+            ...fakeConfig(),
+            operatorAnchors: operatorConfig,
+          }) as ResolvedWorkflowConfig,
+        createTracker: () => ({
+          fetchIssuesByStates: async () => [
+            { ...issue, description: reviewedDescription },
+          ],
+          fetchIssueReferencesByIds: async () => [],
+          fetchIssueComments: async () => operatorComments,
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
+      selectedCount: number;
+      decisions: Array<{
+        status: string;
+        reasons: string[];
+        sourceIntentHash: string;
+      }>;
+    };
+    expect(output.selectedCount).toBe(1);
+    expect(output.decisions).toContainEqual(
+      expect.objectContaining({
+        status: "selected",
+        sourceIntentHash: expectedHash,
+        reasons: expect.arrayContaining(["trigger_label:needs:spec-review"]),
       }),
     );
   });

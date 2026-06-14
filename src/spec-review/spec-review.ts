@@ -101,6 +101,12 @@ export interface SpecReviewCommentContext {
   maxTotalCommentChars: number;
 }
 
+export interface SpecReviewSourceIntentComment {
+  id: string;
+  authorClass: "operator";
+  bodyHash: string;
+}
+
 interface SpecReviewCurrentState {
   sourceIntentHash: string | null;
   readinessState: SpecReviewReadinessState | null;
@@ -302,6 +308,10 @@ export function selectSpecReviewCandidates(input: {
   ticketFeatures?: readonly TicketFeature[];
   backlogFindings?: readonly BacklogAuditFinding[];
   specReviewJournal?: readonly DispatcherRunJournalEntry[];
+  sourceIntentCommentsByIssueId?: ReadonlyMap<
+    string,
+    readonly SpecReviewSourceIntentComment[]
+  >;
   config?: Partial<SpecReviewSelectionConfig>;
   forceReview?: boolean;
 }): SpecReviewSelectionDecision[] {
@@ -332,12 +342,12 @@ export function selectSpecReviewCandidates(input: {
         : forceReview
           ? ["force_review_now", ...reasons]
           : reasons;
-    const sensitive = issue.labels.some((label) =>
-      isPrivacySensitiveLabel(label),
-    );
+    const sensitive = isSpecReviewPrivacySensitiveIssue(issue);
     const sourceIntentHash = sensitive
       ? SENSITIVE_SOURCE_INTENT_HASH
-      : computeSourceIntentHash(issue);
+      : computeSourceIntentHash(issue, {
+          comments: input.sourceIntentCommentsByIssueId?.get(issue.id) ?? [],
+        });
     const descriptionReview = sensitive
       ? null
       : descriptionSpecReviewState(issue.description ?? "");
@@ -453,6 +463,10 @@ function stringMetadata(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value : null;
 }
 
+export function isSpecReviewPrivacySensitiveIssue(issue: Issue): boolean {
+  return issue.labels.some((label) => isPrivacySensitiveLabel(label));
+}
+
 function isPrivacySensitiveLabel(label: string): boolean {
   const normalized = label.trim().toLowerCase();
   return (
@@ -472,8 +486,13 @@ function isCurrentSpecReviewReadinessState(
   );
 }
 
-export function computeSourceIntentHash(issue: Issue): string {
-  return sha256Json({
+export function computeSourceIntentHash(
+  issue: Issue,
+  options: {
+    comments?: readonly SpecReviewSourceIntentComment[];
+  } = {},
+): string {
+  const payload: Record<string, unknown> = {
     title: issue.title,
     description: stripSpecReviewMarker(issue.description ?? "").trimEnd(),
     acceptanceCriteria: extractAcceptanceCriteria(issue.description ?? ""),
@@ -494,7 +513,12 @@ export function computeSourceIntentHash(issue: Issue): string {
         /^(area|company|component|mode|risk|source|kind):/.test(label),
       )
       .sort(),
-  });
+  };
+  const comments = normalizeSourceIntentComments(options.comments ?? []);
+  if (comments.length > 0) {
+    payload.comments = comments;
+  }
+  return sha256Json(payload);
 }
 
 export function buildSpecReviewPrompt(packet: SpecReviewContextPacket): string {
@@ -632,6 +656,32 @@ export function buildSpecReviewCommentContext(input: {
   };
 }
 
+export function buildSpecReviewSourceIntentComments(input: {
+  comments: readonly LinearIssueComment[];
+  operatorConfig?: Pick<
+    WorkflowOperatorAnchorsConfig,
+    "operatorAllowlist" | "serviceAccounts"
+  >;
+}): SpecReviewSourceIntentComment[] {
+  const accountSets = normalizeOperatorConfig(input.operatorConfig);
+  return input.comments
+    .flatMap((comment): SpecReviewSourceIntentComment[] => {
+      const actor = comment.botActor ?? comment.user;
+      const authorClass = classifyActor(actor, accountSets);
+      if (authorClass !== "operator") {
+        return [];
+      }
+      return [
+        {
+          id: comment.id,
+          authorClass,
+          bodyHash: sha256Text(normalizeSourceIntentCommentBody(comment.body)),
+        },
+      ];
+    })
+    .sort(compareSourceIntentComments);
+}
+
 function resolveSpecReviewCommentConfig(
   config: Partial<SpecReviewCommentConfig> | undefined,
 ): SpecReviewCommentConfig {
@@ -661,6 +711,26 @@ function totalCommentChars(
   comments: readonly Pick<SpecReviewClassifiedComment, "body">[],
 ): number {
   return comments.reduce((total, comment) => total + comment.body.length, 0);
+}
+
+function normalizeSourceIntentComments(
+  comments: readonly SpecReviewSourceIntentComment[],
+): SpecReviewSourceIntentComment[] {
+  return [...comments].sort(compareSourceIntentComments);
+}
+
+function compareSourceIntentComments(
+  left: SpecReviewSourceIntentComment,
+  right: SpecReviewSourceIntentComment,
+): number {
+  return `${left.id}\0${left.authorClass}\0${left.bodyHash}`.localeCompare(
+    `${right.id}\0${right.authorClass}\0${right.bodyHash}`,
+    "en",
+  );
+}
+
+function normalizeSourceIntentCommentBody(body: string): string {
+  return body.replaceAll(/\r\n?/g, "\n").trimEnd();
 }
 
 function formatMarkdownFence(info: string, content: string): string {
@@ -876,27 +946,30 @@ export async function runSpecReviewForIssue(
   const runClaude = input.runner ?? runClaudeCmux;
   const appendJournal =
     input.appendSpecReviewResultJournal ?? appendSpecReviewResultJournal;
-  const sourceIntentHash = computeSourceIntentHash(input.issue);
-  const artifactDir = resolve(
-    input.artifactRoot,
-    input.issue.identifier,
-    sourceIntentHash.slice(0, 12),
-  );
-  await mkdir(artifactDir, { recursive: true });
-
-  const sourceOfTruthRefs = normalizeSourceOfTruthRefs(input);
-  const sourceOfTruthExcerpt =
-    input.sourceOfTruthExcerpt ??
-    combineSourceOfTruthExcerpts(sourceOfTruthRefs);
   const commentConfig = resolveSpecReviewCommentConfig(input.commentConfig);
+  const sensitive = isSpecReviewPrivacySensitiveIssue(input.issue);
+  let sourceIntentHash = sensitive
+    ? SENSITIVE_SOURCE_INTENT_HASH
+    : computeSourceIntentHash(input.issue);
   let comments: SpecReviewCommentContext;
   try {
-    const issueComments =
-      input.fetchIssueComments === undefined
+    const issueComments = sensitive
+      ? []
+      : input.fetchIssueComments === undefined
         ? []
         : await input.fetchIssueComments(input.issue.id, {
             maxPages: commentConfig.maxCommentPages,
           });
+    if (!sensitive) {
+      sourceIntentHash = computeSourceIntentHash(input.issue, {
+        comments: buildSpecReviewSourceIntentComments({
+          comments: issueComments,
+          ...(input.operatorConfig === undefined
+            ? {}
+            : { operatorConfig: input.operatorConfig }),
+        }),
+      });
+    }
     comments = buildSpecReviewCommentContext({
       comments: issueComments,
       ...(input.operatorConfig === undefined
@@ -950,6 +1023,17 @@ export async function runSpecReviewForIssue(
       message: summary,
     };
   }
+  const artifactDir = resolve(
+    input.artifactRoot,
+    input.issue.identifier,
+    sourceIntentHash.slice(0, 12),
+  );
+  await mkdir(artifactDir, { recursive: true });
+
+  const sourceOfTruthRefs = normalizeSourceOfTruthRefs(input);
+  const sourceOfTruthExcerpt =
+    input.sourceOfTruthExcerpt ??
+    combineSourceOfTruthExcerpts(sourceOfTruthRefs);
   const packet: SpecReviewContextPacket = {
     issue: input.issue,
     sourceIntentHash,

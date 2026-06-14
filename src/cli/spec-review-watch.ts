@@ -13,13 +13,17 @@ import { loadWorkflowDefinition } from "../config/workflow-loader.js";
 import type { DispatcherRunJournalEntry, Issue } from "../domain/model.js";
 import { readDispatcherRunJournal } from "../logging/run-journal.js";
 import {
+  DEFAULT_SPEC_REVIEW_COMMENT_CONFIG,
   DEFAULT_SPEC_REVIEW_SOURCE_REF,
   SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
   type SpecReviewDocumentPublisher,
   type SpecReviewMode,
   type SpecReviewRunIssueResult,
+  type SpecReviewSourceIntentComment,
   type SpecReviewSourceOfTruthRef,
   appendSpecReviewResultJournal,
+  buildSpecReviewSourceIntentComments,
+  isSpecReviewPrivacySensitiveIssue,
   runSpecReviewForIssue,
   selectSpecReviewCandidates,
 } from "../spec-review/spec-review.js";
@@ -331,10 +335,17 @@ export async function runSpecReviewWatchCli(
       : await tracker.fetchTicketFeatureIssuesByStates(states);
   const ticketFeatures = extractTicketFeatures({ issues: featureIssues });
   const specReviewJournal = await readJournal(parsed.workspaceRoot);
+  const sourceIntentCommentsByIssueId =
+    await fetchSelectionSourceIntentComments({
+      issues,
+      tracker,
+      operatorConfig: config.operatorAnchors,
+    });
   const decisions = selectSpecReviewCandidates({
     issues,
     ticketFeatures,
     specReviewJournal,
+    sourceIntentCommentsByIssueId,
     forceReview: parsed.forceReview,
   });
   const selected = decisions.filter(
@@ -621,6 +632,38 @@ function dedupeIssuesById(issues: readonly Issue[]): Issue[] {
     deduped.push(issue);
   }
   return deduped;
+}
+
+async function fetchSelectionSourceIntentComments(input: {
+  issues: readonly Issue[];
+  tracker: SpecReviewWatchTracker;
+  operatorConfig: ResolvedWorkflowConfig["operatorAnchors"];
+}): Promise<ReadonlyMap<string, readonly SpecReviewSourceIntentComment[]>> {
+  if (input.tracker.fetchIssueComments === undefined) {
+    return new Map();
+  }
+  const commentsByIssueId = new Map<
+    string,
+    readonly SpecReviewSourceIntentComment[]
+  >();
+  for (const issue of input.issues) {
+    if (isSpecReviewPrivacySensitiveIssue(issue)) {
+      continue;
+    }
+    const comments = await input.tracker.fetchIssueComments(issue.id, {
+      maxPages: DEFAULT_SPEC_REVIEW_COMMENT_CONFIG.maxCommentPages,
+    });
+    commentsByIssueId.set(
+      issue.id,
+      buildSpecReviewSourceIntentComments({
+        comments,
+        ...(input.operatorConfig === undefined
+          ? {}
+          : { operatorConfig: input.operatorConfig }),
+      }),
+    );
+  }
+  return commentsByIssueId;
 }
 
 function isSuccessfulReadinessState(
