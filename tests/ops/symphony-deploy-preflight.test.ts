@@ -96,6 +96,85 @@ it("runs review runtime preflight with launchd-shaped PATH", async () => {
   expect(childArgs).toContain("--env-file");
 });
 
+it("does not restart stopped services after review preflight failure", async () => {
+  const root = await createTempDir("symphony-deploy-preflight-fail-");
+  const symphonyRoot = join(root, "symphony-ts");
+  const binDir = join(root, "bin");
+  const envFile = join(root, ".env");
+  const restartLog = join(root, "restart.log");
+  const fakeNode = join(binDir, "node");
+  const fakeCtl = join(binDir, "ctl");
+
+  await mkdir(binDir, { recursive: true });
+  await mkdir(symphonyRoot, { recursive: true });
+  await writeFile(envFile, "CMUX_SPAWN_BIN=/opt/cmux-spawn\n");
+  await writeFile(fakeNode, ["#!/usr/bin/env bash", "exit 42", ""].join("\n"), {
+    mode: 0o755,
+  });
+  await writeFile(
+    fakeCtl,
+    ["#!/usr/bin/env bash", `printf '%s\\n' "$*" >> "${restartLog}"`, ""].join(
+      "\n",
+    ),
+    { mode: 0o755 },
+  );
+
+  const deploy = await readFile("ops/symphony-deploy", "utf8");
+  const launchdPathLine = deploy.match(/^LAUNCHD_RUNTIME_PATH=.*$/m)?.[0];
+  const snippetStart = deploy.indexOf("run_review_runtime_preflight()");
+  const snippetEnd = deploy.indexOf(
+    "# Check if symphony-ctl service is installed",
+  );
+  expect(launchdPathLine).toBeDefined();
+  expect(snippetStart).toBeGreaterThanOrEqual(0);
+  expect(snippetEnd).toBeGreaterThan(snippetStart);
+
+  const result = spawnSync(
+    "bash",
+    [
+      "-c",
+      [
+        "warn() { :; }",
+        launchdPathLine,
+        deploy.slice(snippetStart, snippetEnd),
+        "DRY_RUN=false",
+        'SYMPHONY_ROOT="$1"',
+        'TMPDIR="$2"',
+        'SYMPHONY_NODE="$3"',
+        'CTL="$4"',
+        'SLACK_CTL="$5"',
+        "REVIEW_RUNTIME_PREFLIGHT_FAILED=false",
+        'run_review_runtime_preflight "$6"',
+        "preflight_code=$?",
+        "restart_stopped_services_after_error",
+        'printf "%s\\n" "$preflight_code" "$REVIEW_RUNTIME_PREFLIGHT_FAILED"',
+      ].join("\n"),
+      "bash",
+      symphonyRoot,
+      root,
+      fakeNode,
+      fakeCtl,
+      fakeCtl,
+      envFile,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        HOME: root,
+        PATH: `${binDir}:/usr/bin:/bin`,
+      },
+    },
+  );
+
+  expect(result.status).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(result.stdout.trim().split("\n")).toEqual(["42", "true"]);
+
+  await expect(readFile(restartLog, "utf8")).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+});
+
 async function createTempDir(prefix: string): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), prefix));
   tempDirs.push(path);

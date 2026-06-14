@@ -109,9 +109,21 @@ run_review_runtime_preflight() {
   else
     local preflight_status=$?
     rm -rf "$workspace"
+    REVIEW_RUNTIME_PREFLIGHT_FAILED=true
     warn "Review runtime preflight failed. Configure SYMPHONY_COUNCIL_REVIEW_GATE and CMUX_SPAWN_BIN, or install symphony-council-review-gate and cmux-spawn on the launchd PATH before restarting Symphony."
     return "$preflight_status"
   fi
+}
+
+restart_stopped_services_after_error() {
+  if $REVIEW_RUNTIME_PREFLIGHT_FAILED; then
+    warn "Deploy failed review runtime preflight — leaving stopped services down instead of starting an unverified runtime."
+    return 0
+  fi
+
+  warn "Deploy failed — restarting services..."
+  "$CTL" start 2>/dev/null || true
+  "$SLACK_CTL" start 2>/dev/null || true
 }
 
 # Check if symphony-ctl service is installed (plist exists)
@@ -182,6 +194,8 @@ fi
 echo ""
 
 NEED_ENV_RESTART=false
+NEED_SERVICE_REINSTALL=false
+REVIEW_RUNTIME_PREFLIGHT_FAILED=false
 SYMPHONY_UPDATED=false
 SYMPH_PRE_SHA=""
 SYMPH_POST_SHA=""
@@ -216,7 +230,7 @@ if $DO_SYMPHONY; then
 
   # Restart services if the script fails mid-deploy (set -e would leave them down)
   if $SERVICES_STOPPED && ! $DRY_RUN; then
-    trap 'warn "Deploy failed — restarting services..."; "$CTL" start 2>/dev/null || true; "$SLACK_CTL" start 2>/dev/null || true' ERR
+    trap 'restart_stopped_services_after_error' ERR
   fi
 
   # Ensure clean checkout to main — stash uncommitted changes if needed
@@ -295,7 +309,11 @@ if $DO_SYMPHONY; then
 
   if [[ -f "$local_env" ]]; then
     info "Checking review runtime preflight..."
+    REVIEW_RUNTIME_PREFLIGHT_FAILED=false
     run_review_runtime_preflight "$local_env"
+    if ! $NO_RESTART && service_installed; then
+      NEED_SERVICE_REINSTALL=true
+    fi
     ok "Review runtime preflight passed"
   else
     warn ".env not found — skipping review runtime preflight"
@@ -344,9 +362,10 @@ if ! $NO_RESTART && $DO_SYMPHONY; then
 
   if ! service_installed; then
     info "Service not installed — skipping"
-  elif $NEED_ENV_RESTART; then
-    # .env changed — must uninstall/install to rebake env vars into plist
-    info ".env was refreshed — reinstalling service (plist bakes env vars)..."
+  elif $NEED_ENV_RESTART || $NEED_SERVICE_REINSTALL; then
+    # Reinstall after a passing review-runtime preflight so the launchd plist
+    # is regenerated from the same .env that was just validated.
+    info "Reinstalling service (plist bakes validated env vars)..."
     run_or_dry "$CTL" uninstall
     run_or_dry "$CTL" install
     run_or_dry "$CTL" start
