@@ -1,4 +1,4 @@
-# Symphony Session Orchestrator Worker Prompts
+# Session Orchestrator Worker Prompts
 
 Use these skeletons when assigning bounded work from a root orchestrator session.
 Fill every bracket before sending. Keep prompts factual and scoped.

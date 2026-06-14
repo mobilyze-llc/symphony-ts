@@ -1,9 +1,9 @@
 ---
 name: session-orchestrator
-description: Run temporary Codex-led session orchestration for Symphony bootstrap work. Use when planning or executing Symphony tickets outside the autonomous scheduler, especially queue-clearing waves, high-risk invariant tickets, review-loop discipline, worker delegation, Linear claim hygiene, cap-hit synthesis, or backlog normalization while Symphony reliability and review-substrate trust are still being restored.
+description: Run temporary Codex-led orchestration sessions for Symphony bootstrap work. Use when planning or executing Symphony tickets outside the autonomous scheduler, especially queue-clearing waves, high-risk invariant tickets, review-loop discipline, worker delegation, Linear claim hygiene, cap-hit synthesis, or backlog normalization while Symphony reliability and review-substrate trust are still being restored.
 ---
 
-# Symphony Session Orchestrator
+# Session Orchestrator
 
 Use this skill when a Codex root session is acting as the temporary Symphony
 operator/orchestrator instead of letting Symphony autonomously consume the
@@ -251,7 +251,7 @@ When many Track issues exist, normalize before execution:
 Use this shape for Linear Docs or local handoffs:
 
 ```markdown
-# Symphony Session Orchestrator Checkpoint - YYYY-MM-DD HH:mm ET
+# Session Orchestrator Checkpoint - YYYY-MM-DD HH:mm ET
 
 ## Current Truth
 - `origin/main`: <sha>

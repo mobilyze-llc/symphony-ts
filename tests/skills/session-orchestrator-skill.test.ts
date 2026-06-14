@@ -33,10 +33,15 @@ const decisionBrief = readFileSync(
   "utf-8",
 );
 const skillContent = readFileSync(SKILL_PATH, "utf-8");
+const openaiMetadata = readFileSync(
+  resolve(SKILL_DIR, "agents/openai.yaml"),
+  "utf-8",
+);
 const validationScript = readFileSync(
   resolve(__dirname, "../../scripts/validate-skill-installs.mjs"),
   "utf-8",
 );
+const oldDisplayName = ["Symphony", "Session", "Orchestrator"].join(" ");
 const packageJson = JSON.parse(
   readFileSync(resolve(__dirname, "../../package.json"), "utf-8"),
 ) as { scripts?: Record<string, string> };
@@ -44,10 +49,22 @@ const packageJson = JSON.parse(
 describe("session-orchestrator skill", () => {
   it("has trigger metadata for temporary Symphony session orchestration work", () => {
     expect(skillContent).toMatch(/^name: session-orchestrator$/m);
-    expect(skillContent).toMatch(/session orchestration/i);
+    expect(skillContent).toMatch(/orchestration sessions/i);
     expect(skillContent).toMatch(/queue-clearing waves/i);
     expect(skillContent).toMatch(/cap-hit synthesis/i);
     expect(skillContent).toMatch(/backlog normalization/i);
+  });
+
+  it("uses the current session-orchestrator display name everywhere user-facing", () => {
+    expect(skillContent).toContain("# Session Orchestrator");
+    expect(skillContent).not.toContain(`# ${oldDisplayName}`);
+    expect(workerPrompts).toContain("# Session Orchestrator Worker Prompts");
+    expect(workerPrompts).not.toContain(`# ${oldDisplayName} Worker Prompts`);
+    expect(openaiMetadata).toContain('display_name: "Session Orchestrator"');
+    expect(openaiMetadata).toContain(
+      'default_prompt: "Use $session-orchestrator',
+    );
+    expect(openaiMetadata).not.toContain(`display_name: "${oldDisplayName}"`);
   });
 
   it("is exposed through the repo-local Codex discovery root", () => {

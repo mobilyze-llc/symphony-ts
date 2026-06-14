@@ -1,4 +1,4 @@
 interface:
-  display_name: "Symphony Session Orchestrator"
-  short_description: "Symphony session orchestration runbook"
+  display_name: "Session Orchestrator"
+  short_description: "Codex-led Symphony ticket orchestration"
   default_prompt: "Use $session-orchestrator to plan and run a bounded Symphony ticket wave."
