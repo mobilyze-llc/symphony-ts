@@ -106,23 +106,35 @@ const BACKLOG_HYGIENE_SCOPE_IDENTIFIER = "__backlog_hygiene__";
 export function decideBacklogHygieneModelTier(
   evaluation: QueueTriageEvaluationResult,
 ): BacklogHygieneModelTierDecision {
-  const failedDimensions = QUEUE_TRIAGE_EVALUATION_DIMENSIONS.filter(
+  const corpus =
+    QUEUE_TRIAGE_GOLDEN_CORPUS.find(
+      (candidate) => candidate.id === evaluation.corpusId,
+    ) ?? null;
+  if (corpus === null) {
+    return {
+      tier: "frontier_high_judgment",
+      reason:
+        "Evaluation corpus is not in the queue-triage golden corpus registry; high-judgment recommendations require frontier review.",
+      corpusId: evaluation.corpusId,
+      failedDimensions: [...QUEUE_TRIAGE_EVALUATION_DIMENSIONS],
+    };
+  }
+
+  const failedDimensions = corpus.dimensions.filter(
     (dimension) =>
       (evaluation.dimensionScores[dimension] ?? 0) < evaluation.threshold,
   );
   if (failedDimensions.length === 0) {
     return {
       tier: "local_low_risk",
-      reason:
-        "Local model cleared every queue-triage golden-corpus dimension for low-risk proposal drafting.",
+      reason: `Local model cleared queue-triage golden corpus ${corpus.id} for low-risk proposal drafting.`,
       corpusId: evaluation.corpusId,
       failedDimensions,
     };
   }
   return {
     tier: "frontier_high_judgment",
-    reason:
-      "Local model did not clear the queue-triage golden-corpus bar; high-judgment recommendations require frontier review.",
+    reason: `Local model did not clear queue-triage golden corpus ${corpus.id}; high-judgment recommendations require frontier review.`,
     corpusId: evaluation.corpusId,
     failedDimensions,
   };
@@ -344,12 +356,16 @@ function actorMetadata(actor: VerdictActor): {
   };
 }
 
-function toErrorMessage(error: unknown): string {
+function toErrorMessage(error: unknown, seen = new WeakSet<object>()): string {
   if (!(error instanceof Error)) {
     return String(error);
   }
+  if (seen.has(error)) {
+    return `${error.message}; cause: [circular cause]`;
+  }
+  seen.add(error);
   if (error.cause === undefined) {
     return error.message;
   }
-  return `${error.message}; cause: ${toErrorMessage(error.cause)}`;
+  return `${error.message}; cause: ${toErrorMessage(error.cause, seen)}`;
 }

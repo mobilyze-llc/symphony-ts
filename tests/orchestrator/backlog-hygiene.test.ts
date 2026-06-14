@@ -6,6 +6,7 @@ import type { Issue } from "../../src/domain/model.js";
 import {
   BACKLOG_HYGIENE_PROPOSAL_LABELS,
   QUEUE_TRIAGE_EVALUATION_DIMENSIONS,
+  QUEUE_TRIAGE_GOLDEN_CORPUS,
   buildBacklogHygieneDecisionJournalEntry,
   buildBacklogHygieneProposalJournalEntry,
   buildBacklogHygieneProposals,
@@ -78,12 +79,47 @@ function auditReport(): BacklogAuditReport {
 
 function passingEvaluation() {
   return {
-    corpusId: "2026-06-13-queue-triage-wave",
+    corpusId: QUEUE_TRIAGE_GOLDEN_CORPUS[0].id,
     threshold: 0.8,
     dimensionScores: Object.fromEntries(
       QUEUE_TRIAGE_EVALUATION_DIMENSIONS.map((dimension) => [dimension, 0.9]),
     ),
   };
+}
+
+function auditResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              summary: "Synthetic audit response.",
+              findingTypeVolume: {
+                duplicate: 1,
+                supersession: 0,
+                stale: 0,
+                thin_spec: 0,
+                review_dispatch_mismatch: 0,
+                other: 0,
+              },
+              findings: [
+                {
+                  findingId: "F-1",
+                  type: "duplicate",
+                  issueIdentifiers: ["SYMPH-1"],
+                  summary: "Duplicate work",
+                  evidence: "Issue bodies overlap",
+                  confidence: "medium",
+                },
+              ],
+            }),
+          },
+        },
+      ],
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
 }
 
 describe("backlog hygiene proposal lane (SYMPH-484)", () => {
@@ -132,6 +168,54 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     expect(proposals[0]?.issueIdentifiers).toEqual(["SYMPH-3"]);
   });
 
+  it("validates cap units and treats a zero cap as no proposals", () => {
+    const baseInput = {
+      report: auditReport(),
+      candidateIssues: [issue({ id: "1", identifier: "SYMPH-1" })],
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+    };
+
+    expect(
+      buildBacklogHygieneProposals({
+        ...baseInput,
+        maxProposalsPerProductPerPoll: 0,
+      }),
+    ).toEqual([]);
+    expect(() =>
+      buildBacklogHygieneProposals({
+        ...baseInput,
+        maxProposalsPerProductPerPoll: 1.5,
+      }),
+    ).toThrow("maxProposalsPerProductPerPoll must be an integer.");
+  });
+
+  it("uses the golden corpus registry when deciding local-vs-frontier model tier", () => {
+    const missingDimensionDecision = decideBacklogHygieneModelTier({
+      corpusId: QUEUE_TRIAGE_GOLDEN_CORPUS[0].id,
+      threshold: 0.8,
+      dimensionScores: { ordering: 0.9 },
+    });
+    expect(missingDimensionDecision.tier).toBe("frontier_high_judgment");
+    expect(missingDimensionDecision.failedDimensions).toEqual(
+      QUEUE_TRIAGE_EVALUATION_DIMENSIONS.filter(
+        (dimension) => dimension !== "ordering",
+      ),
+    );
+
+    const unknownCorpusDecision = decideBacklogHygieneModelTier({
+      corpusId: "unknown-corpus",
+      threshold: 0.8,
+      dimensionScores: {},
+    });
+    expect(unknownCorpusDecision.tier).toBe("frontier_high_judgment");
+    expect(unknownCorpusDecision.failedDimensions).toEqual(
+      QUEUE_TRIAGE_EVALUATION_DIMENSIONS,
+    );
+    expect(unknownCorpusDecision.reason).toContain(
+      "not in the queue-triage golden corpus registry",
+    );
+  });
+
   it("returns no proposals when the audit throws", async () => {
     const result = await runBacklogHygieneProposalLane({
       enabled: true,
@@ -155,6 +239,31 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     expect(result.warnings[0]).toContain("model offline");
   });
 
+  it("guards audit-failure warning rendering against circular cause chains", async () => {
+    const circular = new Error("model offline");
+    (circular as Error & { cause?: unknown }).cause = circular;
+
+    const result = await runBacklogHygieneProposalLane({
+      enabled: true,
+      config: {
+        baseUrl: "http://127.0.0.1:9999",
+        model: "local",
+        apiKey: null,
+        timeoutMs: 1,
+      },
+      issues: [issue({ id: "1", identifier: "SYMPH-1" })],
+      runtimeEvidence: { state: {}, stateDelta: {} },
+      maxProposalsPerProductPerPoll: 5,
+      evaluation: passingEvaluation(),
+      fetchFn: vi.fn(async () => {
+        throw circular;
+      }) as typeof fetch,
+    });
+
+    expect(result.status).toBe("audit_failed");
+    expect(result.warnings[0]).toContain("[circular cause]");
+  });
+
   it("blocks high-judgment recommendations until the model clears the golden corpus", async () => {
     const result = await runBacklogHygieneProposalLane({
       enabled: true,
@@ -168,7 +277,7 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
       runtimeEvidence: { state: {}, stateDelta: {} },
       maxProposalsPerProductPerPoll: 5,
       evaluation: {
-        corpusId: "2026-06-13-queue-triage-wave",
+        corpusId: QUEUE_TRIAGE_GOLDEN_CORPUS[0].id,
         threshold: 0.8,
         dimensionScores: { ordering: 0.2 },
       },
@@ -179,6 +288,32 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
 
     expect(result.status).toBe("model_tier_blocked");
     expect(result.proposals).toEqual([]);
+  });
+
+  it("exercises the explicit frontier-allowed path before emitting proposals", async () => {
+    const result = await runBacklogHygieneProposalLane({
+      enabled: true,
+      config: {
+        baseUrl: "http://127.0.0.1:9999",
+        model: "frontier-review",
+        apiKey: null,
+        timeoutMs: 1,
+      },
+      issues: [issue({ id: "1", identifier: "SYMPH-1" })],
+      runtimeEvidence: { state: {}, stateDelta: {} },
+      maxProposalsPerProductPerPoll: 5,
+      evaluation: {
+        corpusId: QUEUE_TRIAGE_GOLDEN_CORPUS[0].id,
+        threshold: 0.8,
+        dimensionScores: { ordering: 0.2 },
+      },
+      allowFrontierRecommendations: true,
+      fetchFn: vi.fn(async () => auditResponse()) as typeof fetch,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.proposals).toHaveLength(1);
+    expect(result.proposals[0]?.modelTier).toBe("frontier_high_judgment");
   });
 
   it("journals proposals and accept/reject decisions as calibration-only label transitions", () => {
