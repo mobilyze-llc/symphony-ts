@@ -179,7 +179,10 @@ describe("pause triage", () => {
         const prompt = String(init?.body);
         expect(prompt).toContain("<worker_message>");
         expect(prompt).toContain("fenced-payload");
-        expect(prompt).toContain("AUTHORED BY THE WORKER ITSELF");
+        expect(prompt).toContain("<tracker_title>");
+        expect(prompt).toContain(
+          "authored by the tracker or the worker itself",
+        );
         // The worker cannot smuggle a closing fence of its own.
         for (const tag of FENCE_BYPASS_TAGS) {
           expect(prompt).not.toContain(tag);
