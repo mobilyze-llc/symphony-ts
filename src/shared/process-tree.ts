@@ -16,12 +16,42 @@ export interface ProcessIdentitySnapshot {
 
 export interface ProcessTreeTerminationResult {
   pid: number | null;
+  processGroupId?: number | null;
   sigtermSent: boolean;
   sigkillSent: boolean;
+  sigterm?: ProcessSignalDelivery | null;
+  sigkill?: ProcessSignalDelivery | null;
+  identityStatus?: ProcessTerminationIdentityStatus;
+  postGraceIdentityStatus?: ProcessTerminationIdentityStatus | null;
 }
 
 export interface ProcessKillError extends Error {
   code?: string;
+}
+
+export type ProcessSignalDeliveryStatus = "delivered" | "absent" | "failed";
+export type ProcessSignalTarget = "process_group" | "pid";
+export type ProcessTerminationIdentityStatus =
+  | "not_checked"
+  | "matched"
+  | "missing_expected_identity"
+  | "identity_inconclusive"
+  | "identity_mismatch"
+  | "absent";
+
+export interface ProcessSignalAttempt {
+  target: ProcessSignalTarget;
+  pid: number;
+  signal: NodeJS.Signals;
+  status: ProcessSignalDeliveryStatus;
+  errorCode: string | null;
+}
+
+export interface ProcessSignalDelivery {
+  signal: NodeJS.Signals;
+  status: ProcessSignalDeliveryStatus;
+  deliveredTo: ProcessSignalTarget | null;
+  attempts: ProcessSignalAttempt[];
 }
 
 export type ProcessKill = typeof process.kill;
@@ -103,26 +133,50 @@ export async function terminateChildProcessTree(
 ): Promise<ProcessTreeTerminationResult> {
   const pid = child.pid ?? null;
   if (pid === null) {
-    return { pid, sigtermSent: false, sigkillSent: false };
+    return buildTerminationResult({
+      pid,
+      sigterm: null,
+      sigkill: null,
+      identityStatus: "not_checked",
+      postGraceIdentityStatus: null,
+    });
   }
   if (childHasExited(child)) {
-    return { pid, sigtermSent: false, sigkillSent: false };
+    return buildTerminationResult({
+      pid,
+      sigterm: null,
+      sigkill: null,
+      identityStatus: "absent",
+      postGraceIdentityStatus: null,
+    });
   }
 
   const kill = options?.kill ?? process.kill;
   const graceMs = options?.graceMs ?? 1_000;
-  const sigtermSent = signalPidOrProcessGroup(pid, "SIGTERM", kill);
+  const sigterm = signalPidOrProcessGroupDetailed(pid, "SIGTERM", kill);
   if (options?.forceKillAfterGrace === false) {
     await waitForChildExit(child);
-    return { pid, sigtermSent, sigkillSent: false };
+    return buildTerminationResult({
+      pid,
+      sigterm,
+      sigkill: null,
+      identityStatus: "not_checked",
+      postGraceIdentityStatus: null,
+    });
   }
   await delay(graceMs);
 
-  const sigkillSent = signalPidOrProcessGroup(pid, "SIGKILL", kill);
+  const sigkill = signalPidOrProcessGroupDetailed(pid, "SIGKILL", kill);
   if (!childHasExited(child)) {
     await Promise.race([waitForChildExit(child), delay(100)]);
   }
-  return { pid, sigtermSent, sigkillSent };
+  return buildTerminationResult({
+    pid,
+    sigterm,
+    sigkill,
+    identityStatus: "not_checked",
+    postGraceIdentityStatus: null,
+  });
 }
 
 export async function terminateDetachedPidTree(
@@ -136,41 +190,113 @@ export async function terminateDetachedPidTree(
 ): Promise<ProcessTreeTerminationResult> {
   const kill = options?.kill ?? process.kill;
   const graceMs = options?.graceMs ?? 1_000;
+  let identityStatus: ProcessTerminationIdentityStatus = "not_checked";
+  let postGraceIdentityStatus: ProcessTerminationIdentityStatus | null = null;
   if (options !== undefined && "expectedIdentity" in options) {
     const expectedIdentity = options.expectedIdentity ?? null;
     if (expectedIdentity === null) {
-      return { pid, sigtermSent: false, sigkillSent: false };
+      return buildTerminationResult({
+        pid,
+        sigterm: null,
+        sigkill: null,
+        identityStatus: "missing_expected_identity",
+        postGraceIdentityStatus,
+      });
     }
     const probeIdentity = options.probeIdentity ?? readProcessIdentity;
     const observedIdentity = await probeIdentity(pid);
     if (observedIdentity === null) {
       if (!isPidDefinitelyAbsent(pid, kill)) {
-        return { pid, sigtermSent: false, sigkillSent: false };
+        return buildTerminationResult({
+          pid,
+          sigterm: null,
+          sigkill: null,
+          identityStatus: "identity_inconclusive",
+          postGraceIdentityStatus,
+        });
       }
+      identityStatus = "absent";
     } else if (!processIdentityMatches(expectedIdentity, observedIdentity)) {
-      return { pid, sigtermSent: false, sigkillSent: false };
+      return buildTerminationResult({
+        pid,
+        sigterm: null,
+        sigkill: null,
+        identityStatus: "identity_mismatch",
+        postGraceIdentityStatus,
+      });
+    } else {
+      identityStatus = "matched";
     }
   }
 
-  const sigtermSent = signalPidOrProcessGroup(pid, "SIGTERM", kill);
+  const sigterm = signalPidOrProcessGroupDetailed(pid, "SIGTERM", kill);
   await delay(graceMs);
   if (options !== undefined && "expectedIdentity" in options) {
     const expectedIdentity = options.expectedIdentity ?? null;
     if (expectedIdentity === null) {
-      return { pid, sigtermSent, sigkillSent: false };
+      return buildTerminationResult({
+        pid,
+        sigterm,
+        sigkill: null,
+        identityStatus,
+        postGraceIdentityStatus: "missing_expected_identity",
+      });
     }
     const probeIdentity = options.probeIdentity ?? readProcessIdentity;
     const observedIdentity = await probeIdentity(pid);
     if (observedIdentity === null) {
       if (!isPidDefinitelyAbsent(pid, kill)) {
-        return { pid, sigtermSent, sigkillSent: false };
+        return buildTerminationResult({
+          pid,
+          sigterm,
+          sigkill: null,
+          identityStatus,
+          postGraceIdentityStatus: "identity_inconclusive",
+        });
       }
+      postGraceIdentityStatus = "absent";
     } else if (!processIdentityMatches(expectedIdentity, observedIdentity)) {
-      return { pid, sigtermSent, sigkillSent: false };
+      return buildTerminationResult({
+        pid,
+        sigterm,
+        sigkill: null,
+        identityStatus,
+        postGraceIdentityStatus: "identity_mismatch",
+      });
+    } else {
+      postGraceIdentityStatus = "matched";
     }
   }
-  const sigkillSent = signalPidOrProcessGroup(pid, "SIGKILL", kill);
-  return { pid, sigtermSent, sigkillSent };
+  const sigkill = signalPidOrProcessGroupDetailed(pid, "SIGKILL", kill);
+  return buildTerminationResult({
+    pid,
+    sigterm,
+    sigkill,
+    identityStatus,
+    postGraceIdentityStatus,
+  });
+}
+
+export async function terminateDetachedProcessGroupTree(
+  processGroupId: number,
+  options?: {
+    graceMs?: number;
+    kill?: ProcessKill;
+  },
+): Promise<ProcessTreeTerminationResult> {
+  const kill = options?.kill ?? process.kill;
+  const graceMs = options?.graceMs ?? 1_000;
+  const sigterm = signalProcessGroupDetailed(processGroupId, "SIGTERM", kill);
+  await delay(graceMs);
+  const sigkill = signalProcessGroupDetailed(processGroupId, "SIGKILL", kill);
+  return buildTerminationResult({
+    pid: null,
+    processGroupId,
+    sigterm,
+    sigkill,
+    identityStatus: "not_checked",
+    postGraceIdentityStatus: null,
+  });
 }
 
 export async function readProcessIdentity(
@@ -243,17 +369,163 @@ export function signalPidOrProcessGroup(
   signal: NodeJS.Signals,
   kill: ProcessKill = process.kill,
 ): boolean {
+  return signalPidOrProcessGroupDetailed(pid, signal, kill).status !== "failed";
+}
+
+export function signalPidOrProcessGroupDetailed(
+  pid: number,
+  signal: NodeJS.Signals,
+  kill: ProcessKill = process.kill,
+): ProcessSignalDelivery {
+  const attempts: ProcessSignalAttempt[] = [];
   try {
     kill(-pid, signal);
-    return true;
+    attempts.push({
+      target: "process_group",
+      pid: -pid,
+      signal,
+      status: "delivered",
+      errorCode: null,
+    });
+    return {
+      signal,
+      status: "delivered",
+      deliveredTo: "process_group",
+      attempts,
+    };
   } catch (groupError) {
+    attempts.push({
+      target: "process_group",
+      pid: -pid,
+      signal,
+      status: isNoSuchProcess(groupError) ? "absent" : "failed",
+      errorCode: processKillErrorCode(groupError),
+    });
     try {
       kill(pid, signal);
-      return true;
+      attempts.push({
+        target: "pid",
+        pid,
+        signal,
+        status: "delivered",
+        errorCode: null,
+      });
+      return { signal, status: "delivered", deliveredTo: "pid", attempts };
     } catch (pidError) {
-      return isNoSuchProcess(groupError) && isNoSuchProcess(pidError);
+      attempts.push({
+        target: "pid",
+        pid,
+        signal,
+        status: isNoSuchProcess(pidError) ? "absent" : "failed",
+        errorCode: processKillErrorCode(pidError),
+      });
+      const status =
+        isNoSuchProcess(groupError) && isNoSuchProcess(pidError)
+          ? "absent"
+          : "failed";
+      return { signal, status, deliveredTo: null, attempts };
     }
   }
+}
+
+export function signalProcessGroupDetailed(
+  processGroupId: number,
+  signal: NodeJS.Signals,
+  kill: ProcessKill = process.kill,
+): ProcessSignalDelivery {
+  const targetPid = -processGroupId;
+  if (isUnsafeProcessGroupId(processGroupId)) {
+    return {
+      signal,
+      status: "failed",
+      deliveredTo: null,
+      attempts: [
+        {
+          target: "process_group",
+          pid: targetPid,
+          signal,
+          status: "failed",
+          errorCode: "unsafe_process_group",
+        },
+      ],
+    };
+  }
+
+  try {
+    kill(targetPid, signal);
+    return {
+      signal,
+      status: "delivered",
+      deliveredTo: "process_group",
+      attempts: [
+        {
+          target: "process_group",
+          pid: targetPid,
+          signal,
+          status: "delivered",
+          errorCode: null,
+        },
+      ],
+    };
+  } catch (error) {
+    return {
+      signal,
+      status: isNoSuchProcess(error) ? "absent" : "failed",
+      deliveredTo: null,
+      attempts: [
+        {
+          target: "process_group",
+          pid: targetPid,
+          signal,
+          status: isNoSuchProcess(error) ? "absent" : "failed",
+          errorCode: processKillErrorCode(error),
+        },
+      ],
+    };
+  }
+}
+
+export function processTreeTerminationConfirmed(
+  result: ProcessTreeTerminationResult,
+): boolean {
+  if (result.sigkill === undefined && result.identityStatus === undefined) {
+    return result.sigkillSent;
+  }
+
+  return (
+    result.sigkill?.status === "delivered" ||
+    result.sigkill?.status === "absent" ||
+    (result.sigkill === null && result.identityStatus === "absent")
+  );
+}
+
+function buildTerminationResult(input: {
+  pid: number | null;
+  processGroupId?: number | null;
+  sigterm: ProcessSignalDelivery | null;
+  sigkill: ProcessSignalDelivery | null;
+  identityStatus: ProcessTerminationIdentityStatus;
+  postGraceIdentityStatus: ProcessTerminationIdentityStatus | null;
+}): ProcessTreeTerminationResult {
+  const result = {
+    pid: input.pid,
+    sigtermSent: input.sigterm !== null && input.sigterm.status !== "failed",
+    sigkillSent: input.sigkill !== null && input.sigkill.status !== "failed",
+  } as ProcessTreeTerminationResult;
+  Object.defineProperties(result, {
+    processGroupId: {
+      value: input.processGroupId ?? null,
+      enumerable: false,
+    },
+    sigterm: { value: input.sigterm, enumerable: false },
+    sigkill: { value: input.sigkill, enumerable: false },
+    identityStatus: { value: input.identityStatus, enumerable: false },
+    postGraceIdentityStatus: {
+      value: input.postGraceIdentityStatus,
+      enumerable: false,
+    },
+  });
+  return result;
 }
 
 function waitForChildExit(
@@ -434,6 +706,14 @@ function isPidDefinitelyAbsent(pid: number, kill: ProcessKill): boolean {
   }
 }
 
+function isUnsafeProcessGroupId(processGroupId: number): boolean {
+  return (
+    !Number.isSafeInteger(processGroupId) ||
+    processGroupId <= 1 ||
+    processGroupId === process.pid
+  );
+}
+
 function isNoSuchProcess(error: unknown): boolean {
   return (
     error !== null &&
@@ -441,4 +721,13 @@ function isNoSuchProcess(error: unknown): boolean {
     "code" in error &&
     (error as ProcessKillError).code === "ESRCH"
   );
+}
+
+function processKillErrorCode(error: unknown): string | null {
+  return error !== null &&
+    typeof error === "object" &&
+    "code" in error &&
+    typeof (error as ProcessKillError).code === "string"
+    ? ((error as ProcessKillError).code ?? null)
+    : null;
 }

@@ -129,10 +129,16 @@ import { createRunnerFromConfig, isAiSdkRunner } from "../runners/factory.js";
 import type { RunnerKind } from "../runners/types.js";
 import { getDurableCodexSessionArtifactDirectory } from "../shared/codex-session-artifacts.js";
 import {
+  processTreeTerminationConfirmed,
+  readProcessIdentity as readProcessIdentityDefault,
   readProcessIdentityMetadata,
   terminateDetachedPidTree as terminateDetachedPidTreeDefault,
+  terminateDetachedProcessGroupTree as terminateDetachedProcessGroupTreeDefault,
 } from "../shared/process-tree.js";
-import type { ProcessIdentitySnapshot } from "../shared/process-tree.js";
+import type {
+  ProcessIdentitySnapshot,
+  ProcessTreeTerminationResult,
+} from "../shared/process-tree.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import { LinearTrackerClient } from "../tracker/linear-client.js";
 import type { IssueTracker } from "../tracker/tracker.js";
@@ -214,6 +220,10 @@ export interface WorkerStopSignalDeliveryInput {
 export type DeliverWorkerStopSignal = (
   input: WorkerStopSignalDeliveryInput,
 ) => Promise<StopSignalDelivery>;
+type WorkspaceCwdProcessLister = (workspacePath: string) => Promise<number[]>;
+type ProcessIdentityReader = (
+  pid: number,
+) => Promise<ProcessIdentitySnapshot | null>;
 
 export interface ProcessSignalDeliveryResult {
   status: Exclude<StopSignalDeliveryAttempt["sigterm"], "not_attempted">;
@@ -277,6 +287,8 @@ export interface RuntimeHostOptions {
     workspaceRoot: string,
     entry: DispatcherRunJournalEntry,
   ) => Promise<void>;
+  listWorkspaceCwdProcessIds?: WorkspaceCwdProcessLister;
+  readProcessIdentity?: ProcessIdentityReader;
   compactDispatcherRunJournal?: (
     workspaceRoot: string,
     checkpointDraft: DispatcherRunJournalEntryDraft,
@@ -284,6 +296,7 @@ export interface RuntimeHostOptions {
   ) => Promise<CompactDispatcherRunJournalResult>;
   dispatcherRunJournalCompactionTailEntries?: number;
   terminateDetachedPidTree?: typeof terminateDetachedPidTreeDefault;
+  terminateDetachedProcessGroupTree?: typeof terminateDetachedProcessGroupTreeDefault;
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
   deliverWorkerStopSignal?: DeliverWorkerStopSignal;
@@ -402,6 +415,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     entry: DispatcherRunJournalEntry,
   ) => Promise<void>;
 
+  private readonly listWorkspaceCwdProcessIds: WorkspaceCwdProcessLister;
+
+  private readonly readProcessIdentity: ProcessIdentityReader;
+
   private readonly compactDispatcherRunJournal: (
     workspaceRoot: string,
     checkpointDraft: DispatcherRunJournalEntryDraft,
@@ -412,9 +429,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   private readonly terminateDetachedPidTree: typeof terminateDetachedPidTreeDefault;
 
+  private readonly terminateDetachedProcessGroupTree: typeof terminateDetachedProcessGroupTreeDefault;
+
   static readonly PRUNE_DEBOUNCE_MS = 300_000;
 
   #lastPruneAt = 0;
+  private readonly startupOrphanCleanupSweeps = new Set<string>();
   private readonly workers = new Map<string, WorkerExecution>();
   private readonly expectedBaseRevisions = new Map<string, string | null>();
 
@@ -487,6 +507,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.writeDispatcherRunJournalEntry =
       options.writeDispatcherRunJournalEntry ??
       appendDispatcherRunJournalEntryToDisk;
+    this.listWorkspaceCwdProcessIds =
+      options.listWorkspaceCwdProcessIds ?? listWorkspaceCwdProcessIdsFromLsof;
+    this.readProcessIdentity =
+      options.readProcessIdentity ?? readProcessIdentityDefault;
     this.compactDispatcherRunJournal =
       options.compactDispatcherRunJournal ??
       compactDispatcherRunJournalFileWithLock;
@@ -496,6 +520,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       );
     this.terminateDetachedPidTree =
       options.terminateDetachedPidTree ?? terminateDetachedPidTreeDefault;
+    this.terminateDetachedProcessGroupTree =
+      options.terminateDetachedProcessGroupTree ??
+      terminateDetachedProcessGroupTreeDefault;
     this.captureDeployDriftFn =
       options.captureDeployDrift ??
       (() => captureDeployDrift({ repoRoot: resolveRuntimeRepoRoot() }));
@@ -1696,6 +1723,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         let journal = await this.readDispatcherRunJournal(workspaceRoot);
         this.orchestrator.recoverFromRunJournal(journal);
         await this.cleanupUnconfirmedEmergencyStopProcesses(journal);
+        await this.cleanupRecoveredDispatcherAdmissionOrphans(
+          this.orchestrator.getState().dispatcherRunJournal,
+        );
         journal = this.orchestrator.getState().dispatcherRunJournal;
         const compaction =
           await this.compactLoadedDispatcherRunJournal(workspaceRoot);
@@ -1811,6 +1841,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       });
 
       const unconfirmedPlans: EmergencyStopRecoveryCleanupPlan[] = [];
+      const orphanCleanupSweeps = new Set<string>();
       for (const plan of sortedPlans) {
         const parsedPid = parseProcessPid(plan.codexAppServerPid);
         let targetedCleanupSucceeded = false;
@@ -1826,30 +1857,32 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               graceMs: 1_000,
               expectedIdentity: plan.codexAppServerIdentity,
             });
-            if (termination.sigkillSent) {
+            if (processTreeTerminationConfirmed(termination)) {
               targetedCleanupSucceeded = true;
               await this.logger?.log(
                 "info",
                 "emergency_stop_recovery_process_tree_killed",
-                `Killed recovered emergency-stop process tree for ${plan.issueIdentifier}.`,
+                `Confirmed recovered emergency-stop process-tree cleanup for ${plan.issueIdentifier}.`,
                 {
                   issue_id: issueId,
                   issue_identifier: plan.issueIdentifier,
                   codex_app_server_pid: plan.codexAppServerPid,
                   source_sequence: plan.setBySequence,
+                  ...processTreeTerminationLogFields(termination),
                 },
               );
             } else {
               unconfirmedPlans.push(plan);
               await this.logger?.warn(
-                "emergency_stop_recovery_identity_mismatch",
-                "Emergency-stop recovery found a Codex app-server PID whose process identity could not be confirmed.",
+                "emergency_stop_recovery_cleanup_unconfirmed",
+                "Emergency-stop recovery could not confirm recovered Codex app-server process-tree cleanup.",
                 {
                   outcome: "degraded",
                   issue_id: issueId,
                   issue_identifier: plan.issueIdentifier,
                   codex_app_server_pid: plan.codexAppServerPid,
                   source_sequence: plan.setBySequence,
+                  ...processTreeTerminationLogFields(termination),
                 },
               );
             }
@@ -1870,7 +1903,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
           const { workspacePath } =
             this.workspaceManager.resolveForIssue(issueId);
-          await this.killOrphanedProcesses(workspacePath, plan.issueIdentifier);
+          const orphanCleanupSweepKey = `${issueId}\0${workspacePath}`;
+          if (!orphanCleanupSweeps.has(orphanCleanupSweepKey)) {
+            orphanCleanupSweeps.add(orphanCleanupSweepKey);
+            this.startupOrphanCleanupSweeps.add(orphanCleanupSweepKey);
+            await this.killOrphanedProcesses(
+              workspacePath,
+              plan.issueIdentifier,
+            );
+          }
           if (targetedCleanupSucceeded) {
             const cleanupSequence =
               await this.orchestrator.recordEmergencyStopRecoveryCleanup({
@@ -3708,44 +3749,142 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     issueIdentifier: string,
   ): Promise<void> {
     try {
-      const { stdout } = await execFileAsync("lsof", ["-d", "cwd", "-Fpn"], {
-        timeout: 5000,
-      });
-
       // This fallback only discovers processes whose cwd is still inside the
       // workspace. Descendants that chdir elsewhere must be contained by the
       // tracked PID/process-tree stop path instead of this lsof sweep.
-      const pidsToKill = await findWorkspaceCwdProcessIds(
-        String(stdout),
-        workspacePath,
-        { readCurrentProcessCwd: readProcessCwd },
-      );
+      const pidsToKill = await this.listWorkspaceCwdProcessIds(workspacePath);
 
       if (pidsToKill.length > 0) {
-        await Promise.all(
-          pidsToKill.map(async (pid) => {
+        type OrphanCleanupOutcome = {
+          pid: number;
+          processGroupId: number | null;
+          termination: ProcessTreeTerminationResult | null;
+          reason: string | null;
+        };
+        type ConfirmedOrphanCleanupOutcome = OrphanCleanupOutcome & {
+          termination: ProcessTreeTerminationResult;
+          reason: null;
+        };
+        const outcomes: OrphanCleanupOutcome[] = await Promise.all(
+          pidsToKill.map(async (pid): Promise<OrphanCleanupOutcome> => {
             try {
-              await this.terminateDetachedPidTree(pid, {
-                graceMs: 1_000,
-              });
-            } catch {
-              // Process may have already exited
+              const identity = await this.readProcessIdentity(pid);
+              if (identity === null || identity.processGroupId === null) {
+                return {
+                  pid,
+                  processGroupId: null,
+                  termination: null,
+                  reason: "process_identity_unavailable",
+                };
+              }
+              const termination =
+                identity.processGroupId === pid
+                  ? await this.terminateDetachedPidTree(pid, {
+                      graceMs: 1_000,
+                      expectedIdentity: identity,
+                    })
+                  : await this.terminateDetachedProcessGroupTree(
+                      identity.processGroupId,
+                      { graceMs: 1_000 },
+                    );
+              return {
+                pid,
+                processGroupId: identity.processGroupId,
+                termination,
+                reason: null,
+              };
+            } catch (error) {
+              return {
+                pid,
+                processGroupId: null,
+                termination: null,
+                reason: toErrorMessage(error),
+              };
             }
           }),
         );
-        await this.logger?.log(
-          "info",
-          "orphaned_processes_killed",
-          `Killed ${pidsToKill.length} orphaned process(es) in ${workspacePath}`,
-          {
-            issue_identifier: issueIdentifier,
-            pids: pidsToKill.map(String),
-            discovery: "workspace_cwd",
-          },
+        const confirmedOutcomes = outcomes.filter(
+          (outcome): outcome is ConfirmedOrphanCleanupOutcome =>
+            outcome.termination !== null &&
+            processTreeTerminationConfirmed(outcome.termination),
         );
+        const degradedOutcomes = outcomes.filter(
+          (outcome) =>
+            outcome.termination === null ||
+            !processTreeTerminationConfirmed(outcome.termination),
+        );
+
+        if (confirmedOutcomes.length > 0) {
+          await this.logger?.log(
+            "info",
+            "orphaned_processes_killed",
+            `Confirmed cleanup for ${confirmedOutcomes.length} orphaned process(es) in ${workspacePath}`,
+            {
+              issue_identifier: issueIdentifier,
+              pids: confirmedOutcomes.map((outcome) => String(outcome.pid)),
+              discovery: "workspace_cwd",
+              cleanup_results: confirmedOutcomes.map((outcome) => ({
+                pid: outcome.pid,
+                process_group_id: outcome.processGroupId,
+                ...processTreeTerminationLogFields(outcome.termination),
+              })),
+            },
+          );
+        }
+
+        if (degradedOutcomes.length > 0) {
+          await this.logger?.warn(
+            "orphaned_process_cleanup_degraded",
+            `Could not confirm cleanup for ${degradedOutcomes.length} orphaned process(es) in ${workspacePath}`,
+            {
+              outcome: "degraded",
+              issue_identifier: issueIdentifier,
+              pids: degradedOutcomes.map((outcome) => String(outcome.pid)),
+              discovery: "workspace_cwd",
+              cleanup_results: degradedOutcomes.map((outcome) => ({
+                pid: outcome.pid,
+                process_group_id: outcome.processGroupId,
+                ...(outcome.termination === null
+                  ? { error: outcome.reason }
+                  : processTreeTerminationLogFields(outcome.termination)),
+              })),
+            },
+          );
+        }
       }
     } catch {
       // Best-effort — lsof unavailable or other failure should not block finalization
+    }
+  }
+
+  private async cleanupRecoveredDispatcherAdmissionOrphans(
+    journal: DispatcherRunJournal,
+  ): Promise<void> {
+    for (const plan of collectRecoveredDispatcherAdmissionCleanupPlans(
+      journal,
+    )) {
+      try {
+        const { workspacePath } = this.workspaceManager.resolveForIssue(
+          plan.issueId,
+        );
+        const sweepKey = `${plan.issueId}\0${workspacePath}`;
+        if (this.startupOrphanCleanupSweeps.has(sweepKey)) {
+          continue;
+        }
+        this.startupOrphanCleanupSweeps.add(sweepKey);
+        await this.killOrphanedProcesses(workspacePath, plan.issueIdentifier);
+      } catch (error) {
+        await this.logger?.warn(
+          "dispatcher_recovery_orphan_cleanup_failed",
+          "Failed to clean up orphaned process groups for a recovered dispatcher admission.",
+          {
+            outcome: "degraded",
+            issue_id: plan.issueId,
+            issue_identifier: plan.issueIdentifier,
+            reason: toErrorMessage(error),
+          },
+        );
+      }
     }
   }
 
@@ -5526,6 +5665,17 @@ export async function deliverTrackedWorkerStopSignal(
   };
 }
 
+async function listWorkspaceCwdProcessIdsFromLsof(
+  workspacePath: string,
+): Promise<number[]> {
+  const { stdout } = await execFileAsync("lsof", ["-d", "cwd", "-Fpn"], {
+    timeout: 5000,
+  });
+  return findWorkspaceCwdProcessIds(String(stdout), workspacePath, {
+    readCurrentProcessCwd: readProcessCwd,
+  });
+}
+
 function isFailedStopSignalAttempt(
   attempt: StopSignalDeliveryAttempt,
 ): boolean {
@@ -5793,6 +5943,71 @@ function isNoSuchProcess(error: unknown): boolean {
     "code" in error &&
     error.code === "ESRCH"
   );
+}
+
+function processTreeTerminationLogFields(
+  result: ProcessTreeTerminationResult,
+): Record<string, unknown> {
+  return {
+    process_tree_cleanup_confirmed: processTreeTerminationConfirmed(result),
+    process_tree_process_group_id: result.processGroupId ?? null,
+    process_tree_sigterm_sent: result.sigtermSent,
+    process_tree_sigkill_sent: result.sigkillSent,
+    process_tree_sigterm_status: result.sigterm?.status ?? null,
+    process_tree_sigterm_delivered_to: result.sigterm?.deliveredTo ?? null,
+    process_tree_sigkill_status: result.sigkill?.status ?? null,
+    process_tree_sigkill_delivered_to: result.sigkill?.deliveredTo ?? null,
+    process_tree_identity_status: result.identityStatus ?? null,
+    process_tree_post_grace_identity_status:
+      result.postGraceIdentityStatus ?? null,
+    process_tree_sigterm_attempts: processSignalAttemptsForLog(result.sigterm),
+    process_tree_sigkill_attempts: processSignalAttemptsForLog(result.sigkill),
+  };
+}
+
+function processSignalAttemptsForLog(
+  delivery: ProcessTreeTerminationResult["sigterm"],
+): Array<Record<string, unknown>> {
+  return (
+    delivery?.attempts.map((attempt) => ({
+      target: attempt.target,
+      pid: attempt.pid,
+      signal: attempt.signal,
+      status: attempt.status,
+      error_code: attempt.errorCode,
+    })) ?? []
+  );
+}
+
+function collectRecoveredDispatcherAdmissionCleanupPlans(
+  journal: DispatcherRunJournal,
+): Array<{ issueId: string; issueIdentifier: string }> {
+  const activeAdmissions = new Map<
+    string,
+    { issueId: string; issueIdentifier: string }
+  >();
+  for (const entry of journal) {
+    if (entry.kind !== "admission" || entry.operation !== "dispatcher") {
+      continue;
+    }
+    const leaseStatus = entry.lease?.status ?? null;
+    const metadataStatus = entry.metadata.status;
+    if (leaseStatus === "active" || metadataStatus === "started") {
+      activeAdmissions.set(entry.issueId, {
+        issueId: entry.issueId,
+        issueIdentifier: entry.issueIdentifier,
+      });
+      continue;
+    }
+    if (
+      leaseStatus === "completed" ||
+      leaseStatus === "expired" ||
+      "outcome" in entry.metadata
+    ) {
+      activeAdmissions.delete(entry.issueId);
+    }
+  }
+  return [...activeAdmissions.values()];
 }
 
 function formatWorkerErrorReason(error: unknown): string {
