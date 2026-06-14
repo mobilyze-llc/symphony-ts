@@ -39,6 +39,11 @@ describe("spec-review-lane skill", () => {
     expect(scriptContent).toContain("symphony-spec-review-watch");
     expect(scriptContent).toContain("--issue-direct");
     expect(scriptContent).toContain("nextActionForReadiness");
+    expect(scriptContent).toContain(
+      "return path !== null && existsSync(path) ? path : null;",
+    );
+    expect(scriptContent).toContain('"--artifact-root"');
+    expect(scriptContent).toContain('"--symphony-spec-review-watch-bin"');
     expect(scriptContent).toContain("supply_operator_context");
     expect(scriptContent).toContain("rerun_or_inspect_artifact");
     expect(scriptContent).toContain("handle_out_of_band");

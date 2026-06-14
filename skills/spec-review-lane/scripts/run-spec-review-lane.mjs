@@ -223,7 +223,7 @@ function stringOrNull(value) {
 
 function existingPathOrNull(value) {
   const path = stringOrNull(value);
-  return path !== null && existsSync(path) ? path : path;
+  return path !== null && existsSync(path) ? path : null;
 }
 
 function nextActionForReadiness(readinessState) {
@@ -244,9 +244,16 @@ function nextActionForReadiness(readinessState) {
 }
 
 function redactArgs(args) {
+  const pathFlags = new Set([
+    "--workspace",
+    "--workflow",
+    "--artifact-root",
+    "--cmux-spawn-bin",
+    "--symphony-spec-review-watch-bin",
+  ]);
   return args.map((arg, index) => {
     const previous = args[index - 1];
-    return previous === "--cmux-spawn-bin" ? "[path]" : arg;
+    return pathFlags.has(previous) ? "[path]" : arg;
   });
 }
 

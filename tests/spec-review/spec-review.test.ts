@@ -826,11 +826,12 @@ describe("spec review", () => {
 
     expect(decision).toMatchObject({
       status: "selected",
-      reasons: expect.arrayContaining([
-        "force_review_now",
-        "trigger_label:needs:spec-review",
-      ]),
     });
+    expect(decision?.reasons).toEqual([
+      "force_review_now",
+      "title_pattern:\\breview\\b",
+      "trigger_label:needs:spec-review",
+    ]);
   });
 
   it("does not privacy-block ordinary security and risk labels", () => {
