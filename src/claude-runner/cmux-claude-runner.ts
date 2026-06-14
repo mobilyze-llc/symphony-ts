@@ -76,6 +76,7 @@ export interface ClaudeRunnerSourceVisibility {
   status: "ok" | "invalid_source_path";
   workspace: string;
   sources: Array<{
+    kind: "prompt" | "source";
     path: string;
     resolvedPath: string;
     sha256: string | null;
@@ -444,14 +445,18 @@ async function inspectSourceVisibility(input: {
 }): Promise<ClaudeRunnerSourceVisibility> {
   const workspacePath = resolve(input.workspace);
   const canonicalWorkspace = await realpathOrSelf(workspacePath);
-  const paths = [input.promptFile, ...input.sourcePaths];
-  const sources = await Promise.all(
-    paths.map(async (sourcePath) => {
+  const promptSource = await inspectPromptFile(
+    input.promptFile,
+    canonicalWorkspace,
+  );
+  const declaredSources = await Promise.all(
+    input.sourcePaths.map(async (sourcePath) => {
       const resolvedPath = resolve(workspacePath, sourcePath);
       const canonicalPath = await realpathOrSelf(resolvedPath);
       const insideWorkspace = isInside(canonicalWorkspace, canonicalPath);
       if (!insideWorkspace) {
         return {
+          kind: "source" as const,
           path: sourcePath,
           resolvedPath: canonicalPath,
           sha256: null,
@@ -464,6 +469,7 @@ async function inspectSourceVisibility(input: {
       try {
         const stats = await stat(resolvedPath);
         return {
+          kind: "source" as const,
           path: sourcePath,
           resolvedPath: canonicalPath,
           sha256: await fileSha256(resolvedPath),
@@ -474,6 +480,7 @@ async function inspectSourceVisibility(input: {
         };
       } catch (error) {
         return {
+          kind: "source" as const,
           path: sourcePath,
           resolvedPath: canonicalPath,
           sha256: null,
@@ -485,13 +492,60 @@ async function inspectSourceVisibility(input: {
       }
     }),
   );
+  const sources = [promptSource, ...declaredSources];
   return {
-    status: sources.every((source) => source.readable && source.insideWorkspace)
-      ? "ok"
-      : "invalid_source_path",
+    status:
+      promptSource.readable &&
+      declaredSources.every(
+        (source) => source.readable && source.insideWorkspace,
+      )
+        ? "ok"
+        : "invalid_source_path",
     workspace: input.workspace,
     sources,
   };
+}
+
+async function inspectPromptFile(
+  promptFile: string,
+  canonicalWorkspace: string,
+): Promise<{
+  kind: "prompt";
+  path: string;
+  resolvedPath: string;
+  sha256: string | null;
+  bytes: number | null;
+  readable: boolean;
+  insideWorkspace: boolean;
+  error: string | null;
+}> {
+  const resolvedPath = resolve(promptFile);
+  const canonicalPath = await realpathOrSelf(resolvedPath);
+  const insideWorkspace = isInside(canonicalWorkspace, canonicalPath);
+  try {
+    const stats = await stat(resolvedPath);
+    return {
+      kind: "prompt",
+      path: promptFile,
+      resolvedPath: canonicalPath,
+      sha256: await fileSha256(resolvedPath),
+      bytes: stats.size,
+      readable: true,
+      insideWorkspace,
+      error: null,
+    };
+  } catch (error) {
+    return {
+      kind: "prompt",
+      path: promptFile,
+      resolvedPath: canonicalPath,
+      sha256: null,
+      bytes: null,
+      readable: false,
+      insideWorkspace,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 async function realpathOrSelf(path: string): Promise<string> {

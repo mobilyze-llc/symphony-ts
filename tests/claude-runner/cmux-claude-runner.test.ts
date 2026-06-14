@@ -120,6 +120,59 @@ describe("Claude CMUX runner", () => {
     expect(result.attempts[1]?.artifactName).toBe("opus-repair-2");
   });
 
+  it("allows generated prompt and artifact files outside the workspace", async () => {
+    const harness = await createHarness();
+    const externalArtifactDir = await mkdtemp(
+      join(tmpdir(), "claude-runner-artifacts-"),
+    );
+    const externalPromptFile = join(externalArtifactDir, "prompt.md");
+    await writeFile(externalPromptFile, "Generated prompt\n", "utf8");
+    const runCommand: ClaudeRunnerCommand = async (_command, args) => {
+      if (args[0] === "preflight") {
+        return { exitCode: 0, stdout: "{}", stderr: "" };
+      }
+      const artifactName = readFlag(args, "--artifact-name");
+      const artifactPath = join(externalArtifactDir, `${artifactName}.md`);
+      await writeFile(artifactPath, validReviewArtifact(), "utf8");
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          state: "complete",
+          artifact_path: artifactPath,
+          status_path: join(externalArtifactDir, `${artifactName}.status.json`),
+        }),
+        stderr: "",
+      };
+    };
+
+    const result = await runClaudeCmux(
+      {
+        purpose: "spec-review",
+        workspace: harness.workspace,
+        promptFile: externalPromptFile,
+        artifactDir: externalArtifactDir,
+        artifactName: "opus",
+        validation: {
+          minBytes: 50,
+          requireFirstHeading: "Verdict",
+          requiredHeadings: ["Source Read Status"],
+          verdictEnums: ["ready_as_written"],
+        },
+      },
+      { runCommand },
+    );
+
+    expect(result.status).toBe("passed");
+    expect(result.sourceVisibility.status).toBe("ok");
+    expect(result.sourceVisibility.sources[0]).toMatchObject({
+      kind: "prompt",
+      path: externalPromptFile,
+      readable: true,
+      insideWorkspace: false,
+      error: null,
+    });
+  });
+
   it("rejects cmux artifact paths outside the artifact dir without repair reads", async () => {
     const harness = await createHarness();
     const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-outside-"));
