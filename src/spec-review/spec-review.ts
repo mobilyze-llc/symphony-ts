@@ -756,6 +756,7 @@ export async function runSpecReviewForIssue(
         "Source Read Status",
         "Reconciliation JSON",
       ],
+      requiredJsonSections: ["Reconciliation JSON"],
       verdictEnums: [...SPEC_REVIEW_VERDICTS],
       requireSourceReadStatus: true,
     },
@@ -1592,16 +1593,33 @@ function extractMarkdownSection(
 ): string | null {
   const lines = text.split(/\r?\n/);
   let inSection = false;
+  let fence: { marker: "`" | "~"; length: number } | null = null;
   const content: string[] = [];
 
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const line = lines[lineIndex] ?? "";
+    const wasInFence = fence !== null;
+    const fenceMatch = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fenceMatch?.[1] !== undefined) {
+      const marker = fenceMatch[1][0] as "`" | "~";
+      if (fence === null) {
+        fence = { marker, length: fenceMatch[1].length };
+      } else if (
+        fence.marker === marker &&
+        fenceMatch[1].length >= fence.length
+      ) {
+        fence = null;
+      }
+    }
+    const heading =
+      wasInFence || fenceMatch?.[1] !== undefined
+        ? null
+        : markdownHeadingText(line);
     if (!inSection) {
-      inSection =
-        markdownHeadingText(line) === normalizeArtifactHeading(sectionHeading);
+      inSection = heading === normalizeArtifactHeading(sectionHeading);
       continue;
     }
-    if (markdownHeadingText(line) !== null) {
+    if (heading !== null) {
       return content.join("\n");
     }
     content.push(line);
@@ -1686,7 +1704,12 @@ function markdownHeadingText(line: string): string | null {
 }
 
 function normalizeArtifactHeading(value: string): string {
-  return value.trim().replace(/\s+/g, " ").toLowerCase();
+  return value
+    .replaceAll(/[`*_]/g, "")
+    .replace(/[:.!?–—-]\s*$/u, "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
 }
 
 function isAsciiWhitespace(value: string | undefined): boolean {
