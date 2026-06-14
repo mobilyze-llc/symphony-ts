@@ -207,8 +207,12 @@ describe("Dashboard Pipeline column", () => {
     expect(html).toContain("Hard exclusion edges: 2");
     expect(html).toContain("Hard cycles: 0");
     expect(html).toContain("Superseded native hard blockers: 1");
-    expect(html.match(/Hard-excluded issues:/g)).toHaveLength(2);
-    expect(html.match(/Hard exclusion edges:/g)).toHaveLength(2);
+    expect(html.match(/Hard-excluded issues:/g)).toHaveLength(1);
+    expect(html.match(/Hard exclusion edges:/g)).toHaveLength(1);
+    expect(html).toContain('"hardExcludedIssues":"Hard-excluded issues"');
+    expect(html).toContain('"hardExclusionEdges":"Hard exclusion edges"');
+    expect(html).toContain("computedOrderSummaryLabels.hardExcludedIssues");
+    expect(html).toContain("computedOrderSummaryLabels.hardExclusionEdges");
     expect(html).toContain("dispatch-comparator-v1");
     expect(html).toContain("SYMPH-485");
     expect(html).toContain("SYMPH-486");
@@ -278,6 +282,76 @@ describe("Dashboard Pipeline column", () => {
     const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
     expect(html).toContain(getDisplayVersion());
     expect(html).toContain("Symphony Observability");
+  });
+
+  it("renders deploy drift and wires live updates to refresh the block", () => {
+    const snapshot: RuntimeSnapshot = {
+      ...buildSnapshot({}),
+      deploy_drift: {
+        running_commit: "aaa111",
+        origin_main_commit: "bbb222",
+        drift: true,
+        captured_at: "2026-06-12T10:00:00.000Z",
+        note: "captured once at startup; origin_main_commit is the local ref",
+      },
+    };
+
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: true });
+
+    expect(html).toContain("Deploy drift");
+    expect(html).toContain("Running commit");
+    expect(html).toContain("aaa111");
+    expect(html).toContain("origin/main commit");
+    expect(html).toContain("bbb222");
+    expect(html).toContain("2026-06-12T10:00:00.000Z");
+    expect(html).toContain(
+      "captured once at startup; origin_main_commit is the local ref",
+    );
+    expect(html).toContain("function renderDeployDrift(next)");
+    expect(html).toContain(
+      "document.getElementById('deploy-drift').innerHTML = renderDeployDrift(next);",
+    );
+  });
+
+  it("renders live rate-view freshness and refreshes it in live updates", () => {
+    const snapshot: RuntimeSnapshot = {
+      ...buildSnapshot({}),
+      rate_limit_views: {
+        runner_snapshot_file: {
+          source: "/workspaces/.symphony/rate-limits.json",
+          observed_at: "2026-06-12T09:55:00.000Z",
+          rate_limits: {},
+          primary_used_pct: 39,
+          secondary_used_pct: 6,
+        },
+        gate: {
+          source: "dispatch admission gate (rate_limit_admission evaluation)",
+          evaluated_at: "2026-06-12T10:00:00.000Z",
+          blocked: true,
+          reason: "secondary window headroom 2.0% < 5% floor",
+          primary_used_pct: 39,
+          secondary_used_pct: 98,
+        },
+        live_telemetry: {
+          source: "in-memory runner telemetry (orchestrator state)",
+          observed_at: "2026-06-12T09:58:00.000Z",
+          primary_used_pct: 40,
+          secondary_used_pct: 97,
+        },
+        disagreement: true,
+      },
+    };
+
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: true });
+
+    expect(html).toContain("Runner file observed: 2026-06-12T09:55:00.000Z");
+    expect(html).toContain("Gate evaluated: 2026-06-12T10:00:00.000Z");
+    expect(html).toContain("Live telemetry observed: 2026-06-12T09:58:00.000Z");
+    expect(html).toContain("Disagreement: yes");
+    expect(html).toContain("function renderRateLimitViews(next)");
+    expect(html).toContain(
+      "document.getElementById('rate-limit-views').innerHTML = renderRateLimitViews(next);",
+    );
   });
 
   it("renders dispatcher decision-quality metrics and category table", () => {

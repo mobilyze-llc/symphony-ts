@@ -405,6 +405,7 @@ export interface RuntimeSnapshotRateLimitLiveView
   extends RuntimeSnapshotRateLimitViewWindowPcts {
   /** Provenance: in-memory telemetry from the runner event stream. */
   source: string;
+  observed_at: string | null;
 }
 
 export interface RuntimeSnapshotRateLimitViews {
@@ -1387,6 +1388,7 @@ function buildRateLimitViews(
   if (liveParsed !== null) {
     liveTelemetry = {
       source: "in-memory runner telemetry (orchestrator state)",
+      observed_at: state.codexRateLimitsObservedAt,
       primary_used_pct: liveParsed.primary?.usedPercent ?? null,
       secondary_used_pct: liveParsed.secondary?.usedPercent ?? null,
     };

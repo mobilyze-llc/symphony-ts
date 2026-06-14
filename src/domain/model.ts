@@ -1209,6 +1209,7 @@ export interface OrchestratorState {
   emergencyStop: PipelineEmergencyStopState | null;
   codexTotals: CodexTotals;
   codexRateLimits: CodexRateLimits;
+  codexRateLimitsObservedAt: string | null;
   rateLimitAdmission: RateLimitAdmissionState | null;
   issueStages: Record<string, string>;
   issuePendingStageSignals: Record<string, PendingStageSignal>;
@@ -1440,6 +1441,7 @@ export function createInitialOrchestratorState(input: {
       secondsRunning: 0,
     },
     codexRateLimits: null,
+    codexRateLimitsObservedAt: null,
     rateLimitAdmission: null,
     issueStages: {},
     issuePendingStageSignals: {},

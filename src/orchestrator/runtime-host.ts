@@ -1635,6 +1635,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       };
       if (state.codexRateLimits === null) {
         state.codexRateLimits = persisted.rateLimits;
+        state.codexRateLimitsObservedAt = persisted.observedAt;
         this.lastPersistedRateLimitsJson = JSON.stringify(persisted.rateLimits);
         await this.logger?.info(
           "rate_limit_snapshot_hydrated",

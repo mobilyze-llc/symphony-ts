@@ -2690,6 +2690,11 @@ describe("state-document enrichment (SYMPH-407)", () => {
 
   it("renders both rate views with sources and disagrees visibly when trackers disagree", () => {
     const state = makeState();
+    state.codexRateLimits = {
+      primary: { used_percent: 40, window_minutes: 300, resets_at: 1 },
+      secondary: { used_percent: 97, window_minutes: 10080, resets_at: 2 },
+    };
+    state.codexRateLimitsObservedAt = "2026-06-12T09:58:00.000Z";
     state.rateLimitAdmission = {
       blocked: true,
       reason: "secondary window headroom 2.0% < 5% floor",
@@ -2723,6 +2728,12 @@ describe("state-document enrichment (SYMPH-407)", () => {
       blocked: true,
       primary_used_pct: 39,
       secondary_used_pct: 98,
+    });
+    expect(snapshot.rate_limit_views.live_telemetry).toEqual({
+      source: "in-memory runner telemetry (orchestrator state)",
+      observed_at: "2026-06-12T09:58:00.000Z",
+      primary_used_pct: 40,
+      secondary_used_pct: 97,
     });
     // The SYMPH-338 case: file says 6%, gate says 98% — visible disagreement.
     expect(snapshot.rate_limit_views.disagreement).toBe(true);

@@ -77,6 +77,7 @@ describe("session metrics", () => {
     expect(state.codexRateLimits).toEqual({
       requestsRemaining: 8,
     });
+    expect(state.codexRateLimitsObservedAt).toBe("2026-03-06T10:00:01.000Z");
   });
 
   it("tracks per-session rate-limit window start/latest with reset re-baselining", () => {

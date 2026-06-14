@@ -504,6 +504,78 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
     expect(received).toHaveLength(0);
   });
 
+  it("rejects non-string pipeline control reasons before host mutation", async () => {
+    const received: Array<PipelineControlContext | undefined> = [];
+    const server = await startDashboardServer({
+      port: 0,
+      operatorAuth: OPERATOR_AUTH,
+      host: createHost({
+        requestPipelinePause: (context) => {
+          received.push(context);
+          return { paused: true, issues: [] };
+        },
+        requestPipelineResume: (context) => {
+          received.push(context);
+          return { paused: false, issues: [] };
+        },
+        requestEmergencyStop: (context) => {
+          received.push(context);
+          return {
+            status: "applied",
+            detail: "emergency stop applied",
+            sequence: 17,
+            interrupted_issues: [],
+            stop_requests: [],
+          };
+        },
+      }),
+    });
+    servers.push(server);
+
+    const invalidReasons: unknown[] = [
+      { class: "structured" },
+      ["array reason"],
+      42,
+      true,
+      null,
+    ];
+    const paths = [
+      "/api/v1/pipeline/pause",
+      "/api/v1/pipeline/resume",
+      "/api/v1/pipeline/stop",
+    ];
+
+    for (const path of paths) {
+      for (const reason of invalidReasons) {
+        const response = await sendRequest(server.port, {
+          method: "POST",
+          path,
+          body: JSON.stringify({ reason }),
+          headers: { "content-type": "application/json", ...AUTH_HEADERS },
+        });
+        expect(response.statusCode).toBe(400);
+      }
+    }
+
+    expect(received).toHaveLength(0);
+
+    for (const path of paths) {
+      const response = await sendRequest(server.port, {
+        method: "POST",
+        path,
+        body: JSON.stringify({ reason: `valid reason for ${path}` }),
+        headers: { "content-type": "application/json", ...AUTH_HEADERS },
+      });
+      expect(response.statusCode).toBe(200);
+    }
+
+    expect(received.map((context) => context?.reason)).toEqual([
+      "valid reason for /api/v1/pipeline/pause",
+      "valid reason for /api/v1/pipeline/resume",
+      "valid reason for /api/v1/pipeline/stop",
+    ]);
+  });
+
   it("forwards emergency stop requests through the pipeline stop control endpoint", async () => {
     const received: Array<PipelineControlContext | undefined> = [];
     const server = await startDashboardServer({

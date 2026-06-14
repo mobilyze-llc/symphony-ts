@@ -11976,6 +11976,7 @@ function cloneOrchestratorState(state: OrchestratorState): OrchestratorState {
     emergencyStop: clonePlain(state.emergencyStop),
     codexTotals: clonePlain(state.codexTotals),
     codexRateLimits: clonePlain(state.codexRateLimits),
+    codexRateLimitsObservedAt: state.codexRateLimitsObservedAt,
     rateLimitAdmission: clonePlain(state.rateLimitAdmission),
     issueStages: clonePlain(state.issueStages),
     issuePendingStageSignals: clonePlain(state.issuePendingStageSignals),
@@ -12022,6 +12023,7 @@ function restoreOrchestratorState(
   target.emergencyStop = snapshot.emergencyStop;
   target.codexTotals = snapshot.codexTotals;
   target.codexRateLimits = snapshot.codexRateLimits;
+  target.codexRateLimitsObservedAt = snapshot.codexRateLimitsObservedAt;
   target.rateLimitAdmission = snapshot.rateLimitAdmission;
   target.issueStages = snapshot.issueStages;
   target.issuePendingStageSignals = snapshot.issuePendingStageSignals;
