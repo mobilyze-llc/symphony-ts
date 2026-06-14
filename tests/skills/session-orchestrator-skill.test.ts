@@ -1,5 +1,16 @@
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
+import { execFileSync } from "node:child_process";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -23,7 +34,7 @@ const decisionBrief = readFileSync(
 );
 const skillContent = readFileSync(SKILL_PATH, "utf-8");
 const validationScript = readFileSync(
-  resolve(__dirname, "../../scripts/validate-session-orchestrator-skill.mjs"),
+  resolve(__dirname, "../../scripts/validate-skill-installs.mjs"),
   "utf-8",
 );
 const packageJson = JSON.parse(
@@ -50,23 +61,247 @@ describe("session-orchestrator skill", () => {
     expect(existsSync(GLOBAL_SKILL_PATH)).toBe(false);
   });
 
-  it("has a validation script for repo/global skill drift", () => {
-    expect(validationScript).toContain("skills/session-orchestrator");
-    expect(validationScript).toContain(".agents/skills/session-orchestrator");
+  it("has a validation script for repo, user-level, and global skill drift", () => {
+    expect(validationScript).toContain('"session-orchestrator"');
+    expect(validationScript).toContain(".agents/skills");
+    expect(validationScript).toContain('"spec-review-lane"');
+    expect(validationScript).toContain('"claude-runner"');
+    expect(validationScript).toContain("~/.agents/skills/<name>");
+    expect(validationScript).toContain("--user-installs");
+    expect(validationScript).toContain(".codex/skills");
     expect(validationScript).toContain(
-      ".codex/skills/session-orchestrator/SKILL.md",
-    );
-    expect(validationScript).toContain(
-      "Canonical source: repo-local skills/session-orchestrator/SKILL.md",
+      "Canonical source: repo-local skills/<name>/SKILL.md",
     );
     expect(validationScript).toContain("machine-scoped");
     expect(validationScript).toContain("active global copy");
     expect(validationScript).toContain("single discovered source of truth");
+    expect(validationScript).toContain("symphony-claude-runner");
+  });
+
+  it("validates required user-level symlink installs without using the real home directory", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "skill-install-contract-"));
+    try {
+      const repoRoot = resolve(tempDir, "repo");
+      const userSkillsRoot = resolve(tempDir, "home/.agents/skills");
+      const codexSkillsRoot = resolve(tempDir, "home/.codex/skills");
+      mkdirSync(resolve(repoRoot, "skills"), { recursive: true });
+      mkdirSync(resolve(repoRoot, ".agents/skills"), { recursive: true });
+      mkdirSync(userSkillsRoot, { recursive: true });
+      mkdirSync(codexSkillsRoot, { recursive: true });
+
+      for (const skillName of [
+        "session-orchestrator",
+        "spec-review-lane",
+        "claude-runner",
+      ]) {
+        const skillDir = resolve(repoRoot, "skills", skillName);
+        mkdirSync(skillDir, { recursive: true });
+        writeFileSync(
+          resolve(skillDir, "SKILL.md"),
+          `---\nname: ${skillName}\n---\n`,
+        );
+        symlinkSync(
+          `../../skills/${skillName}`,
+          resolve(repoRoot, ".agents/skills", skillName),
+        );
+        symlinkSync(skillDir, resolve(userSkillsRoot, skillName));
+      }
+
+      const output = execFileSync(
+        process.execPath,
+        [
+          resolve(__dirname, "../../scripts/validate-skill-installs.mjs"),
+          "--user-installs",
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            SYMPHONY_SKILL_REPO_ROOT: repoRoot,
+            SYMPHONY_STABLE_ROOT: repoRoot,
+            SYMPHONY_USER_SKILLS_DIR: userSkillsRoot,
+            SYMPHONY_CODEX_SKILLS_DIR: codexSkillsRoot,
+          },
+        },
+      );
+
+      expect(JSON.parse(output)).toMatchObject({
+        ok: true,
+        requireUserInstalls: true,
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("discovers the stable main worktree for user-level install targets", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "skill-install-main-"));
+    try {
+      const stableRoot = resolve(tempDir, "stable");
+      const featureRoot = resolve(tempDir, "feature");
+      const userSkillsRoot = resolve(tempDir, "home/.agents/skills");
+      const codexSkillsRoot = resolve(tempDir, "home/.codex/skills");
+
+      execFileSync("git", ["init", "--initial-branch=main", stableRoot]);
+      execFileSync("git", [
+        "-C",
+        stableRoot,
+        "config",
+        "user.email",
+        "test@example.com",
+      ]);
+      execFileSync("git", [
+        "-C",
+        stableRoot,
+        "config",
+        "user.name",
+        "Test User",
+      ]);
+      writeFileSync(resolve(stableRoot, "README.md"), "fixture\n");
+      execFileSync("git", ["-C", stableRoot, "add", "README.md"]);
+      execFileSync("git", ["-C", stableRoot, "commit", "-m", "fixture"]);
+      execFileSync("git", [
+        "-C",
+        stableRoot,
+        "worktree",
+        "add",
+        "-b",
+        "feature",
+        featureRoot,
+      ]);
+
+      mkdirSync(resolve(featureRoot, ".agents/skills"), { recursive: true });
+      mkdirSync(userSkillsRoot, { recursive: true });
+      mkdirSync(codexSkillsRoot, { recursive: true });
+
+      for (const skillName of [
+        "session-orchestrator",
+        "spec-review-lane",
+        "claude-runner",
+      ]) {
+        for (const root of [stableRoot, featureRoot]) {
+          const skillDir = resolve(root, "skills", skillName);
+          mkdirSync(skillDir, { recursive: true });
+          writeFileSync(
+            resolve(skillDir, "SKILL.md"),
+            `---\nname: ${skillName}\n---\n`,
+          );
+        }
+        symlinkSync(
+          `../../skills/${skillName}`,
+          resolve(featureRoot, ".agents/skills", skillName),
+        );
+        symlinkSync(
+          resolve(stableRoot, "skills", skillName),
+          resolve(userSkillsRoot, skillName),
+        );
+      }
+
+      const output = execFileSync(
+        process.execPath,
+        [
+          resolve(__dirname, "../../scripts/validate-skill-installs.mjs"),
+          "--user-installs",
+        ],
+        {
+          cwd: featureRoot,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            SYMPHONY_SKILL_REPO_ROOT: featureRoot,
+            SYMPHONY_USER_SKILLS_DIR: userSkillsRoot,
+            SYMPHONY_CODEX_SKILLS_DIR: codexSkillsRoot,
+          },
+        },
+      );
+
+      const result = JSON.parse(output) as { ok: boolean; stableRoot: string };
+      expect(result).toMatchObject({
+        ok: true,
+      });
+      expect(realpathSync(result.stableRoot)).toBe(realpathSync(stableRoot));
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects copied global skills and the stale Claude runner skill name", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "skill-install-drift-"));
+    try {
+      const repoRoot = resolve(tempDir, "repo");
+      const userSkillsRoot = resolve(tempDir, "home/.agents/skills");
+      const codexSkillsRoot = resolve(tempDir, "home/.codex/skills");
+      mkdirSync(resolve(repoRoot, ".agents/skills"), { recursive: true });
+      mkdirSync(userSkillsRoot, { recursive: true });
+      mkdirSync(resolve(codexSkillsRoot, "claude-runner"), { recursive: true });
+      writeFileSync(
+        resolve(codexSkillsRoot, "claude-runner/SKILL.md"),
+        "---\nname: claude-runner\n---\n",
+      );
+
+      for (const skillName of [
+        "session-orchestrator",
+        "spec-review-lane",
+        "claude-runner",
+      ]) {
+        const skillDir = resolve(repoRoot, "skills", skillName);
+        mkdirSync(skillDir, { recursive: true });
+        writeFileSync(
+          resolve(skillDir, "SKILL.md"),
+          `---\nname: ${skillName}\n---\n`,
+        );
+        symlinkSync(
+          `../../skills/${skillName}`,
+          resolve(repoRoot, ".agents/skills", skillName),
+        );
+      }
+      symlinkSync(
+        "../../skills/symphony-claude-runner",
+        resolve(repoRoot, ".agents/skills/symphony-claude-runner"),
+      );
+
+      try {
+        execFileSync(
+          process.execPath,
+          [resolve(__dirname, "../../scripts/validate-skill-installs.mjs")],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              SYMPHONY_SKILL_REPO_ROOT: repoRoot,
+              SYMPHONY_STABLE_ROOT: repoRoot,
+              SYMPHONY_USER_SKILLS_DIR: userSkillsRoot,
+              SYMPHONY_CODEX_SKILLS_DIR: codexSkillsRoot,
+            },
+          },
+        );
+        throw new Error("Expected validation to fail");
+      } catch (error) {
+        const stderr =
+          typeof error === "object" &&
+          error !== null &&
+          "stderr" in error &&
+          Buffer.isBuffer(error.stderr)
+            ? error.stderr.toString("utf8")
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        expect(stderr).toMatch(/active global copy|stale skill name/);
+      }
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("runs the drift validation gate before the normal test command", () => {
     expect(packageJson.scripts?.pretest).toBe(
-      "pnpm run validate:session-orchestrator-skill",
+      "pnpm run validate:skill-installs",
+    );
+    expect(packageJson.scripts?.["validate:skill-installs"]).toBe(
+      "node scripts/validate-skill-installs.mjs",
+    );
+    expect(packageJson.scripts?.["validate:session-orchestrator-skill"]).toBe(
+      "pnpm run validate:skill-installs",
     );
   });
 
@@ -77,6 +312,14 @@ describe("session-orchestrator skill", () => {
     expect(skillContent).toContain("git fetch origin main --prune");
     expect(skillContent).toContain("SPEC.mobilyze.md");
     expect(skillContent).toContain("handoffs/");
+  });
+
+  it("documents the stable source and user-level symlink install model", () => {
+    expect(skillContent).toContain("Source And Install Model");
+    expect(skillContent).toContain("skills/session-orchestrator");
+    expect(skillContent).toContain("~/.agents/skills/session-orchestrator");
+    expect(skillContent).toContain("~/.codex/skills/session-orchestrator");
+    expect(skillContent).toContain("copy-style installs drift");
   });
 
   it("keeps the operator-facing plan current while work changes", () => {

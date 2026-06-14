@@ -558,7 +558,7 @@ curl -s http://localhost:3000/api/v1/state | jq '{
   JSON sections are delimiter-aware and accept wider fences when the JSON string
   contains shorter markdown fences, but malformed, unterminated, missing,
   duplicate, or non-object JSON fails closed with actionable validation errors.
-- `symphony-claude-runner` writes bounded command diagnostics into the normalized
+- `claude-runner` writes bounded command diagnostics into the normalized
   result envelope under `diagnostics`. Each stdout/stderr value records retained
   text, original byte count, omitted byte count, truncation status, and the
   configured byte limit. Use `--diagnostic-byte-limit` when a caller needs a
