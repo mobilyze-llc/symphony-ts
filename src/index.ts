@@ -19,6 +19,7 @@ export * from "./logging/session-metrics.js";
 export * from "./logging/structured-logger.js";
 export * from "./observability/dashboard-server.js";
 export * from "./orchestrator/core.js";
+export * from "./orchestrator/backlog-hygiene.js";
 export * from "./orchestrator/gate-handler.js";
 export * from "./orchestrator/manager-run.js";
 export * from "./orchestrator/right-sizing.js";

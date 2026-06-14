@@ -53,6 +53,27 @@ export interface PrecisionRow {
   cursors: Array<{ verdictSequence: number; outcomeSequence: number | null }>;
 }
 
+export interface HygieneProposalDecisionJoinRow {
+  proposalId: string;
+  issueId: string;
+  issueIdentifier: string;
+  findingType: string;
+  proposalSequence: number;
+  decision: "accepted" | "rejected" | "undecided";
+  decisionSequence: number | null;
+}
+
+export interface HygieneProposalPrecisionRow {
+  findingType: string;
+  accepted: number;
+  rejected: number;
+  undecided: number;
+  /** accepted / (accepted + rejected); null when no decided proposals. */
+  precision: number | null;
+  /** proposal→decision cursor pairs backing the row. */
+  cursors: Array<{ proposalSequence: number; decisionSequence: number | null }>;
+}
+
 export type ParkJudgement =
   | "true_park"
   | "false_park"
@@ -123,6 +144,8 @@ export interface CalibrationReport {
   alertVolume: AlertVolumeRow[];
   operatorActions: OperatorActionRow[];
   queueBaseline: QueueBaselineSample[];
+  hygieneProposalDecisions: HygieneProposalDecisionJoinRow[];
+  hygieneProposalPrecisionByFindingType: HygieneProposalPrecisionRow[];
 }
 
 // ---------------------------------------------------------------------------
@@ -287,6 +310,46 @@ function buildPrecisionRows(
         cursors: rows.map((r) => ({
           verdictSequence: r.verdictSequence,
           outcomeSequence: r.outcomeSequence,
+        })),
+      };
+    });
+}
+
+function metaProposalDecision(
+  entry: DispatcherRunJournalEntry,
+): "accepted" | "rejected" | null {
+  const decision = metaString(entry, "decision");
+  return decision === "accepted" || decision === "rejected" ? decision : null;
+}
+
+function buildHygieneProposalPrecisionRows(
+  joins: HygieneProposalDecisionJoinRow[],
+): HygieneProposalPrecisionRow[] {
+  const groups = new Map<string, HygieneProposalDecisionJoinRow[]>();
+  for (const row of joins) {
+    const bucket = groups.get(row.findingType) ?? [];
+    bucket.push(row);
+    groups.set(row.findingType, bucket);
+  }
+
+  return [...groups.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([findingType, rows]) => {
+      const accepted = rows.filter((row) => row.decision === "accepted").length;
+      const rejected = rows.filter((row) => row.decision === "rejected").length;
+      const undecided = rows.filter(
+        (row) => row.decision === "undecided",
+      ).length;
+      const decided = accepted + rejected;
+      return {
+        findingType,
+        accepted,
+        rejected,
+        undecided,
+        precision: decided === 0 ? null : accepted / decided,
+        cursors: rows.map((row) => ({
+          proposalSequence: row.proposalSequence,
+          decisionSequence: row.decisionSequence,
         })),
       };
     });
@@ -459,6 +522,38 @@ export function computeCalibrationReport(
     ];
   });
 
+  const hygieneProposalDecisions: HygieneProposalDecisionJoinRow[] =
+    sorted.flatMap((proposal) => {
+      if (proposal.kind !== "hygiene_proposal") {
+        return [];
+      }
+      const proposalId = metaString(proposal, "proposal_id");
+      const findingType = metaString(proposal, "finding_type");
+      if (proposalId === null || findingType === null) {
+        return [];
+      }
+      const decision = sorted.find(
+        (candidate) =>
+          candidate.sequence > proposal.sequence &&
+          candidate.kind === "hygiene_proposal_decision" &&
+          metaString(candidate, "proposal_id") === proposalId &&
+          metaProposalDecision(candidate) !== null,
+      );
+      const proposalDecision =
+        decision === undefined ? null : metaProposalDecision(decision);
+      return [
+        {
+          proposalId,
+          issueId: proposal.issueId,
+          issueIdentifier: proposal.issueIdentifier,
+          findingType,
+          proposalSequence: proposal.sequence,
+          decision: proposalDecision ?? "undecided",
+          decisionSequence: decision?.sequence ?? null,
+        },
+      ];
+    });
+
   return {
     journalEntryCount: sorted.length,
     firstSequence: sorted[0]?.sequence ?? null,
@@ -474,6 +569,10 @@ export function computeCalibrationReport(
     alertVolume,
     operatorActions,
     queueBaseline,
+    hygieneProposalDecisions,
+    hygieneProposalPrecisionByFindingType: buildHygieneProposalPrecisionRows(
+      hygieneProposalDecisions,
+    ),
   };
 }
 
@@ -522,6 +621,31 @@ function formatPrecisionTable(
       .join(", ");
     lines.push(
       `| ${escapeMarkdownCell(row.key)} | ${row.recovered} | ${row.reParked} | ${row.unresolved} | ${formatPercent(row.precision)} | ${cursors} |`,
+    );
+  }
+  return lines;
+}
+
+function formatHygieneProposalPrecisionTable(
+  rows: HygieneProposalPrecisionRow[],
+): string[] {
+  if (rows.length === 0) {
+    return ["_No hygiene proposals in window._"];
+  }
+  const lines = [
+    "| finding type | accepted | rejected | undecided | proposal precision | cursors |",
+    "| --- | --- | --- | --- | --- | --- |",
+  ];
+  for (const row of rows) {
+    const cursors = row.cursors
+      .map((cursor) =>
+        cursor.decisionSequence === null
+          ? `seq ${cursor.proposalSequence}→?`
+          : `seq ${cursor.proposalSequence}→${cursor.decisionSequence}`,
+      )
+      .join(", ");
+    lines.push(
+      `| ${escapeMarkdownCell(row.findingType)} | ${row.accepted} | ${row.rejected} | ${row.undecided} | ${formatPercent(row.precision)} | ${cursors} |`,
     );
   }
   return lines;
@@ -687,6 +811,22 @@ export function renderCalibrationDigest(
       );
     }
   }
+  lines.push("");
+
+  lines.push("## Backlog hygiene proposal precision");
+  lines.push("");
+  lines.push(
+    "Proposal precision joins each journaled `hygiene_proposal` to the first",
+    "subsequent `hygiene_proposal_decision` for the same proposal. Operator",
+    "accept/reject is calibration signal only; it does not imply issue-state",
+    "mutation. Precision = accepted / (accepted + rejected).",
+  );
+  lines.push("");
+  lines.push(
+    ...formatHygieneProposalPrecisionTable(
+      report.hygieneProposalPrecisionByFindingType,
+    ),
+  );
   lines.push("");
 
   lines.push("## Queue baseline (week zero)");

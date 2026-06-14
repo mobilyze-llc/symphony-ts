@@ -165,7 +165,7 @@ async function runLocalModelJudge(input: {
   prompt: string;
   fetchFn: typeof fetch;
 }): Promise<BacklogAuditVerdict> {
-  const baseUrl = input.config.baseUrl.replace(/\/+$/, "");
+  const baseUrl = trimTrailingSlashes(input.config.baseUrl);
   let response: Response;
   try {
     response = await input.fetchFn(`${baseUrl}/chat/completions`, {
@@ -533,7 +533,7 @@ export async function fetchBacklogAuditRuntimeEvidence(input: {
   timeoutMs?: number | null;
 }): Promise<BacklogAuditRuntimeEvidence> {
   const fetchFn = input.fetchFn ?? globalThis.fetch;
-  const base = input.baseUrl.replace(/\/+$/, "");
+  const base = trimTrailingSlashes(input.baseUrl);
   const state = await fetchJson(
     fetchFn,
     `${base}/api/v1/state`,
@@ -543,6 +543,14 @@ export async function fetchBacklogAuditRuntimeEvidence(input: {
     state,
     stateDelta: await fetchCompleteStateDelta(fetchFn, base, input.timeoutMs),
   };
+}
+
+function trimTrailingSlashes(value: string): string {
+  let end = value.length;
+  while (end > 0 && value.charCodeAt(end - 1) === 47) {
+    end -= 1;
+  }
+  return value.slice(0, end);
 }
 
 async function fetchJson(

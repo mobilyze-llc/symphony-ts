@@ -175,6 +175,52 @@ function queueBaseline(input: {
   });
 }
 
+function hygieneProposal(input: {
+  sequence: number;
+  issueId: string;
+  issueIdentifier: string;
+  proposalId: string;
+  findingType: string;
+}): DispatcherRunJournalEntry {
+  return entry({
+    sequence: input.sequence,
+    kind: "hygiene_proposal",
+    issueId: input.issueId,
+    issueIdentifier: input.issueIdentifier,
+    metadata: {
+      schema_version: 1,
+      status: "proposed",
+      proposal_id: input.proposalId,
+      finding_type: input.findingType,
+      actor: { kind: "dispatcher", host: "test" },
+    },
+  });
+}
+
+function hygieneProposalDecision(input: {
+  sequence: number;
+  issueId: string;
+  issueIdentifier: string;
+  proposalId: string;
+  decision: "accepted" | "rejected";
+}): DispatcherRunJournalEntry {
+  return entry({
+    sequence: input.sequence,
+    kind: "hygiene_proposal_decision",
+    issueId: input.issueId,
+    issueIdentifier: input.issueIdentifier,
+    metadata: {
+      schema_version: 1,
+      status: "applied",
+      proposal_id: input.proposalId,
+      decision: input.decision,
+      mutation_authority: "calibration_label_only",
+      issue_state_mutation: false,
+      actor: { kind: "operator", host: "test" },
+    },
+  });
+}
+
 describe("calibration digest (SYMPH-411)", () => {
   it("retry_once → success plus retry_once → re-park yields 50% precision with both cursors", () => {
     const journal = [
@@ -605,6 +651,78 @@ describe("calibration digest (SYMPH-411)", () => {
     expect(digest).toContain(
       "| seq 10 | priority-fifo-control-v0 | 2 | 1 | 1 | 1 | 0 | 1 |",
     );
+  });
+
+  it("tallies backlog hygiene proposal precision by finding type", () => {
+    const report = computeCalibrationReport([
+      hygieneProposal({
+        sequence: 10,
+        issueId: "issue-a",
+        issueIdentifier: "SYMPH-100",
+        proposalId: "p-1",
+        findingType: "duplicate",
+      }),
+      hygieneProposal({
+        sequence: 11,
+        issueId: "issue-b",
+        issueIdentifier: "SYMPH-101",
+        proposalId: "p-2",
+        findingType: "duplicate",
+      }),
+      hygieneProposal({
+        sequence: 12,
+        issueId: "issue-c",
+        issueIdentifier: "SYMPH-102",
+        proposalId: "p-3",
+        findingType: "stale",
+      }),
+      hygieneProposalDecision({
+        sequence: 20,
+        issueId: "issue-a",
+        issueIdentifier: "SYMPH-100",
+        proposalId: "p-1",
+        decision: "accepted",
+      }),
+      hygieneProposalDecision({
+        sequence: 21,
+        issueId: "issue-b",
+        issueIdentifier: "SYMPH-101",
+        proposalId: "p-2",
+        decision: "rejected",
+      }),
+    ]);
+
+    expect(report.hygieneProposalPrecisionByFindingType).toEqual([
+      {
+        findingType: "duplicate",
+        accepted: 1,
+        rejected: 1,
+        undecided: 0,
+        precision: 0.5,
+        cursors: [
+          { proposalSequence: 10, decisionSequence: 20 },
+          { proposalSequence: 11, decisionSequence: 21 },
+        ],
+      },
+      {
+        findingType: "stale",
+        accepted: 0,
+        rejected: 0,
+        undecided: 1,
+        precision: null,
+        cursors: [{ proposalSequence: 12, decisionSequence: null }],
+      },
+    ]);
+
+    const digest = renderCalibrationDigest(report, {
+      generatedAt: "2026-06-12T00:00:00.000Z",
+      journalLabel: "synthetic",
+    });
+    expect(digest).toContain("## Backlog hygiene proposal precision");
+    expect(digest).toContain(
+      "| duplicate | 1 | 1 | 0 | 50.0% | seq 10→20, seq 11→21 |",
+    );
+    expect(digest).toContain("| stale | 0 | 0 | 1 | n/a | seq 12→? |");
   });
 
   it("renders the synthetic journal to the expected golden digest", () => {

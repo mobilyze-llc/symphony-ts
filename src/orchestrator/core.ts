@@ -111,6 +111,12 @@ import {
   validateAnchorPlacementForIssue,
 } from "./anchor-policy.js";
 import {
+  type BacklogHygieneProposal,
+  type BacklogHygieneProposalDecision,
+  buildBacklogHygieneDecisionJournalEntry,
+  buildBacklogHygieneProposalJournalEntry,
+} from "./backlog-hygiene.js";
+import {
   type ContinuousFeedbackReviewResult,
   ensureDecorrelatedFeedbackLane,
   formatContinuousFeedbackComment,
@@ -2771,6 +2777,58 @@ export class OrchestratorCore {
       console.warn(
         `[orchestrator] failed to journal ordering disagreement: ${formatWarningError(error)}`,
       );
+    }
+  }
+
+  async recordBacklogHygieneProposal(input: {
+    proposal: BacklogHygieneProposal;
+    actor: VerdictActor;
+    timestamp?: string;
+  }): Promise<number | null> {
+    try {
+      const entry = await this.recordRunJournalEntry(
+        buildBacklogHygieneProposalJournalEntry({
+          proposal: input.proposal,
+          actor: input.actor,
+          ownerId: this.leaseOwnerId,
+          ...(input.timestamp === undefined
+            ? {}
+            : { timestamp: input.timestamp }),
+        }),
+      );
+      return entry.sequence;
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to journal backlog hygiene proposal: ${formatWarningError(error)}`,
+      );
+      return null;
+    }
+  }
+
+  async recordBacklogHygieneProposalDecision(input: {
+    proposal: BacklogHygieneProposal;
+    decision: BacklogHygieneProposalDecision;
+    actor: VerdictActor;
+    reason: string;
+    timestamp?: string;
+  }): Promise<number | null> {
+    try {
+      const entry = await this.recordRunJournalEntry(
+        buildBacklogHygieneDecisionJournalEntry({
+          proposal: input.proposal,
+          decision: input.decision,
+          actor: input.actor,
+          ownerId: this.leaseOwnerId,
+          reason: input.reason,
+          timestamp: input.timestamp ?? this.now().toISOString(),
+        }),
+      );
+      return entry.sequence;
+    } catch (error) {
+      console.warn(
+        `[orchestrator] failed to journal backlog hygiene proposal decision: ${formatWarningError(error)}`,
+      );
+      return null;
     }
   }
 
