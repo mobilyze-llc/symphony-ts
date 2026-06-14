@@ -56,6 +56,7 @@ export interface SpecReviewWatchCliDependencies {
   runSpecReviewForIssue?: typeof runSpecReviewForIssue;
   appendSpecReviewResultJournal?: typeof appendSpecReviewResultJournal;
   documentPublisher?: SpecReviewDocumentPublisher;
+  preflightDocumentPublisher?: () => Promise<void>;
   now?: () => Date;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
@@ -286,10 +287,63 @@ export async function runSpecReviewWatchCli(
     });
   }
 
+  const results: SpecReviewRunIssueResult[] = [...blockedResults];
+  const documentPublisher =
+    dependencies.documentPublisher ?? createLinearDocumentPublisher();
+  const preflightDocumentPublisher =
+    dependencies.preflightDocumentPublisher ??
+    (dependencies.documentPublisher === undefined
+      ? preflightLinearDocumentPublisher
+      : undefined);
+  if (selected.length > 0 && preflightDocumentPublisher !== undefined) {
+    try {
+      await preflightDocumentPublisher();
+    } catch (error) {
+      const preflightMessage = errorMessage(error);
+      stderr(`${preflightMessage}\n`);
+      for (const decision of selected) {
+        let summary = `Spec review failed for ${decision.issue.identifier}: ${preflightMessage}`;
+        let entries: DispatcherRunJournalEntry[] = [];
+        try {
+          entries = await appendJournal(parsed.workspaceRoot, {
+            issue: decision.issue,
+            mode: parsed.mode,
+            sourceIntentHash: decision.sourceIntentHash,
+            readinessState: "failed",
+            verdict: null,
+            artifactPath: selectionArtifactPath,
+            artifactHash: null,
+            linearDocUrl: null,
+            summary,
+            now: now(),
+          });
+        } catch (journalError) {
+          summary = `${summary}; journal append failed: ${errorMessage(journalError)}`;
+        }
+        results.push({
+          issueId: decision.issue.id,
+          issueIdentifier: decision.issue.identifier,
+          sourceIntentHash: decision.sourceIntentHash,
+          readinessState: "failed",
+          verdict: null,
+          runnerStatus: "failed",
+          artifactPath: selectionArtifactPath,
+          linearDocUrl: null,
+          markerCommentPosted: false,
+          journalEntries: entries,
+          message: summary,
+        });
+      }
+      stdout(
+        `${JSON.stringify({ selectedCount: selected.length, selectionArtifactPath, results }, null, 2)}\n`,
+      );
+      return 1;
+    }
+  }
+
   const sourceOfTruthExcerpt = await readSourceOfTruthExcerpt(
     parsed.workspaceRoot,
   );
-  const results: SpecReviewRunIssueResult[] = [...blockedResults];
   for (const decision of selected) {
     try {
       results.push(
@@ -318,8 +372,7 @@ export async function runSpecReviewWatchCli(
               await tracker.postComment(issueId, body);
             },
           },
-          documentPublisher:
-            dependencies.documentPublisher ?? createLinearDocumentPublisher(),
+          documentPublisher,
         }),
       );
     } catch (error) {
@@ -601,6 +654,21 @@ export function createLinearDocumentPublisher(
       }
     },
   };
+}
+
+export async function preflightLinearDocumentPublisher(
+  execFileAsync?: ExecFileAsync,
+): Promise<void> {
+  const run = execFileAsync ?? (await defaultExecFileAsync());
+  try {
+    await run("linear-pp-cli", ["documents", "--help"], {
+      maxBuffer: 512 * 1024,
+    });
+  } catch (error) {
+    throw new Error(
+      `Linear Docs publisher preflight failed: linear-pp-cli is unavailable or not executable for the spec-review watcher. Install or repair linear-pp-cli before running Claude. ${errorMessage(error)}`,
+    );
+  }
 }
 
 async function defaultExecFileAsync(): Promise<ExecFileAsync> {
