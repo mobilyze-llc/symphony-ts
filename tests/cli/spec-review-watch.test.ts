@@ -556,6 +556,20 @@ describe("symphony-spec-review-watch CLI", () => {
     );
   });
 
+  it("wraps timeout-shaped preflight failures in the operator diagnostic", async () => {
+    const timeoutError = Object.assign(new Error("spawn ETIMEDOUT"), {
+      code: "ETIMEDOUT",
+      killed: true,
+    });
+    const execFile = vi.fn(async () => {
+      throw timeoutError;
+    });
+
+    await expect(preflightLinearDocumentPublisher(execFile)).rejects.toThrow(
+      "Linear Docs publisher preflight failed: linear-pp-cli is unavailable or not executable for the spec-review watcher. Install or repair linear-pp-cli before running Claude. spawn ETIMEDOUT",
+    );
+  });
+
   it("parses known Linear document create output envelopes", () => {
     expect(
       parseDocumentCreateOutput(
@@ -638,32 +652,42 @@ describe("symphony-spec-review-watch CLI", () => {
   });
 
   it("creates a deterministic Linear Doc with idempotent create when none exists", async () => {
-    const calls: Array<{ file: string; args: readonly string[] }> = [];
+    const calls: Array<{
+      file: string;
+      args: readonly string[];
+      options: { maxBuffer?: number; timeout?: number } | undefined;
+    }> = [];
     let contentFile: string | null = null;
     let contentFileText = "";
-    const execFile = vi.fn(async (file: string, args: readonly string[]) => {
-      calls.push({ file, args });
-      if (args[1] === "list") {
-        return {
-          stdout: JSON.stringify({ results: { documents: [] } }),
-          stderr: "",
-        };
-      }
-      if (args[1] === "create") {
-        contentFile = String(args[args.indexOf("--content-file") + 1]);
-        contentFileText = await readFile(contentFile, "utf8");
-        return {
-          stdout: JSON.stringify({
-            results: {
-              url: "https://linear.example/doc",
-              slugId: "doc-new",
-            },
-          }),
-          stderr: "",
-        };
-      }
-      throw new Error(`unexpected command ${args.join(" ")}`);
-    });
+    const execFile = vi.fn(
+      async (
+        file: string,
+        args: readonly string[],
+        options?: { maxBuffer?: number; timeout?: number },
+      ) => {
+        calls.push({ file, args, options });
+        if (args[1] === "list") {
+          return {
+            stdout: JSON.stringify({ results: { documents: [] } }),
+            stderr: "",
+          };
+        }
+        if (args[1] === "create") {
+          contentFile = String(args[args.indexOf("--content-file") + 1]);
+          contentFileText = await readFile(contentFile, "utf8");
+          return {
+            stdout: JSON.stringify({
+              results: {
+                url: "https://linear.example/doc",
+                slugId: "doc-new",
+              },
+            }),
+            stderr: "",
+          };
+        }
+        throw new Error(`unexpected command ${args.join(" ")}`);
+      },
+    );
 
     const publisher = createLinearDocumentPublisher(execFile);
     const result = await publisher.publish({
@@ -678,6 +702,10 @@ describe("symphony-spec-review-watch CLI", () => {
       identifier: "doc-new",
     });
     const createCall = calls.find((call) => call.args[1] === "create");
+    expect(calls.map((call) => call.options)).toEqual([
+      { maxBuffer: 2 * 1024 * 1024, timeout: 30_000 },
+      { maxBuffer: 2 * 1024 * 1024, timeout: 30_000 },
+    ]);
     expect(createCall?.args).toContain("--idempotent");
     expect(createCall?.args).toContainEqual(
       expect.stringContaining("Spec Review - SYMPH-1"),
@@ -697,38 +725,48 @@ describe("symphony-spec-review-watch CLI", () => {
       markdown: "# Review",
       idempotencyKey: "spec-review:issue-1:source-hash",
     });
-    const calls: Array<{ file: string; args: readonly string[] }> = [];
-    const execFile = vi.fn(async (file: string, args: readonly string[]) => {
-      calls.push({ file, args });
-      if (args[1] === "list") {
-        return {
-          stdout: JSON.stringify({
-            results: {
-              documents: [
-                {
-                  title: prepared.title,
-                  url: "https://linear.example/doc",
-                  slugId: "existing-doc",
-                },
-              ],
-            },
-          }),
-          stderr: "",
-        };
-      }
-      if (args[1] === "edit") {
-        return {
-          stdout: JSON.stringify({
-            results: {
-              url: "https://linear.example/doc",
-              slugId: "existing-doc",
-            },
-          }),
-          stderr: "",
-        };
-      }
-      throw new Error(`unexpected command ${args.join(" ")}`);
-    });
+    const calls: Array<{
+      file: string;
+      args: readonly string[];
+      options: { maxBuffer?: number; timeout?: number } | undefined;
+    }> = [];
+    const execFile = vi.fn(
+      async (
+        file: string,
+        args: readonly string[],
+        options?: { maxBuffer?: number; timeout?: number },
+      ) => {
+        calls.push({ file, args, options });
+        if (args[1] === "list") {
+          return {
+            stdout: JSON.stringify({
+              results: {
+                documents: [
+                  {
+                    title: prepared.title,
+                    url: "https://linear.example/doc",
+                    slugId: "existing-doc",
+                  },
+                ],
+              },
+            }),
+            stderr: "",
+          };
+        }
+        if (args[1] === "edit") {
+          return {
+            stdout: JSON.stringify({
+              results: {
+                url: "https://linear.example/doc",
+                slugId: "existing-doc",
+              },
+            }),
+            stderr: "",
+          };
+        }
+        throw new Error(`unexpected command ${args.join(" ")}`);
+      },
+    );
 
     const publisher = createLinearDocumentPublisher(execFile);
     const result = await publisher.publish({
@@ -740,6 +778,10 @@ describe("symphony-spec-review-watch CLI", () => {
 
     expect(result.identifier).toBe("existing-doc");
     expect(calls.map((call) => call.args[1])).toEqual(["list", "edit"]);
+    expect(calls.map((call) => call.options)).toEqual([
+      { maxBuffer: 2 * 1024 * 1024, timeout: 30_000 },
+      { maxBuffer: 2 * 1024 * 1024, timeout: 30_000 },
+    ]);
     expect(calls[1]?.args).toEqual(
       expect.arrayContaining(["edit", "existing-doc"]),
     );

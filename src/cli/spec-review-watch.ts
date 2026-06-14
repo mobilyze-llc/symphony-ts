@@ -49,6 +49,11 @@ type ExecFileAsync = (
   options?: { maxBuffer?: number; timeout?: number },
 ) => Promise<{ stdout: string; stderr: string }>;
 
+const LINEAR_DOCUMENT_PUBLISH_EXEC_OPTIONS = {
+  maxBuffer: 2 * 1024 * 1024,
+  timeout: 30_000,
+} as const;
+
 export interface SpecReviewWatchCliDependencies {
   loadWorkflowDefinition?: typeof loadWorkflowDefinition;
   resolveWorkflowConfig?: typeof resolveWorkflowConfig;
@@ -592,7 +597,7 @@ export function createLinearDocumentPublisher(
             "--limit",
             "100",
           ],
-          { maxBuffer: 2 * 1024 * 1024 },
+          LINEAR_DOCUMENT_PUBLISH_EXEC_OPTIONS,
         );
         const existingDocument = parseDocumentListOutput(
           listOutput.stdout,
@@ -615,7 +620,7 @@ export function createLinearDocumentPublisher(
               "--select",
               "url,slugId",
             ],
-            { maxBuffer: 2 * 1024 * 1024 },
+            LINEAR_DOCUMENT_PUBLISH_EXEC_OPTIONS,
           );
           try {
             return parseDocumentCreateOutput(editOutput.stdout);
@@ -642,7 +647,7 @@ export function createLinearDocumentPublisher(
             "--select",
             "url,slugId",
           ],
-          { maxBuffer: 2 * 1024 * 1024 },
+          LINEAR_DOCUMENT_PUBLISH_EXEC_OPTIONS,
         );
         const parsedOutput = parseDocumentCreateOutput(output.stdout);
         return {
