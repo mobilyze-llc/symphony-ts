@@ -86,7 +86,7 @@ describe("symphony-spec-review-watch CLI", () => {
     const blockedIssue = makeIssue({
       id: "blocked",
       identifier: "SYMPH-2",
-      labels: ["security", "needs:spec-review"],
+      labels: ["secret", "needs:spec-review"],
       title: "Secret customer key",
       description: "private body",
     });
@@ -206,7 +206,7 @@ describe("symphony-spec-review-watch CLI", () => {
     const sensitiveIssue = makeIssue({
       id: "sensitive",
       identifier: "SYMPH-2",
-      labels: ["security"],
+      labels: ["private"],
       title: "Secret customer key",
       description: "private body",
     });
@@ -279,7 +279,7 @@ describe("symphony-spec-review-watch CLI", () => {
     const blockedIssue = makeIssue({
       id: "blocked",
       identifier: "SYMPH-2",
-      labels: ["security"],
+      labels: ["private"],
       title: "Secret customer key",
       description: "private body",
     });

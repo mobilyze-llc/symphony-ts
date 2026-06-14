@@ -95,6 +95,23 @@ describe("spec review", () => {
     );
   });
 
+  it("keeps source intent hash stable across blocker relation ordering", () => {
+    const issue = makeIssue({
+      blockedBy: [
+        { id: "blocker-b", identifier: "SYMPH-200", state: "Backlog" },
+        { id: "blocker-a", identifier: "SYMPH-100", state: "Done" },
+      ],
+    });
+    const reordered = {
+      ...issue,
+      blockedBy: [...issue.blockedBy].reverse(),
+    };
+
+    expect(computeSourceIntentHash(reordered)).toBe(
+      computeSourceIntentHash(issue),
+    );
+  });
+
   it("preserves user-authored headings appended after a generated review section", () => {
     const issue = makeIssue({
       description: "Build the thing.\n",
@@ -296,7 +313,7 @@ describe("spec review", () => {
         makeIssue({
           id: "secret-1",
           identifier: "SYMPH-1",
-          labels: ["security", "needs:spec-review"],
+          labels: ["secret", "needs:spec-review"],
           title: "Secret customer key",
           description: "private body",
         }),
@@ -330,6 +347,25 @@ describe("spec review", () => {
       SENSITIVE_SOURCE_INTENT_HASH,
       SENSITIVE_SOURCE_INTENT_HASH,
     ]);
+  });
+
+  it("does not privacy-block ordinary security and risk labels", () => {
+    const [decision] = selectSpecReviewCandidates({
+      issues: [
+        makeIssue({
+          labels: ["area:security", "risk:high", "needs:spec-review"],
+          title: "Harden security review path",
+        }),
+      ],
+    });
+
+    expect(decision).toMatchObject({
+      status: "selected",
+      redactionClass: "standard",
+    });
+    expect(decision?.reasons).toContain("trigger_label:needs:spec-review");
+    expect(decision?.reasons).not.toContain("privacy_sensitive_label");
+    expect(decision?.sourceIntentHash).not.toBe(SENSITIVE_SOURCE_INTENT_HASH);
   });
 
   it("does not strip user-authored Spec Review sections without the sentinel", () => {
@@ -475,6 +511,70 @@ describe("spec review", () => {
         verdict: "ready_as_written",
       },
     });
+  });
+
+  it("reads the verdict enum only from the verdict section", () => {
+    const artifact = [
+      "## Verdict",
+      "",
+      "Verdict enum: ready_as_written",
+      "",
+      "## Review Notes",
+      "",
+      "Echoed prompt text says Verdict enum: invalid_artifact.",
+      "",
+      "## Reconciliation JSON",
+      "",
+      "```json",
+      JSON.stringify({
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "No spec edits needed.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      }),
+      "```",
+    ].join("\n");
+
+    expect(parseSpecReviewArtifact(artifact)).toMatchObject({
+      verdict: "ready_as_written",
+    });
+  });
+
+  it("rejects artifacts whose verdict section does not contain a verdict enum", () => {
+    const artifact = [
+      "## Verdict",
+      "",
+      "The reviewer forgot the enum.",
+      "",
+      "## Review Notes",
+      "",
+      "Echoed prompt text says Verdict enum: ready_as_written.",
+      "",
+      "## Reconciliation JSON",
+      "",
+      "```json",
+      JSON.stringify({
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "No spec edits needed.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      }),
+      "```",
+    ].join("\n");
+
+    expect(() => parseSpecReviewArtifact(artifact)).toThrow(
+      "Spec review artifact is missing a valid verdict enum.",
+    );
   });
 
   it("parses reconciliation JSON from the reconciliation section, not earlier examples", () => {
@@ -996,7 +1096,7 @@ describe("spec review", () => {
     expect(updatedDescription).toContain("Operator edit during Claude run.");
   });
 
-  it("does not journal success readiness before Linear writes complete", async () => {
+  it("journals success readiness before the Linear marker and supersedes it on description failure", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "spec-review-linear-"));
     const artifactRoot = join(workspace, ".artifacts");
     await mkdir(artifactRoot, { recursive: true });
@@ -1032,6 +1132,7 @@ describe("spec review", () => {
     );
 
     let postCommentCalled = false;
+    let readinessAtDescriptionWrite: string[] = [];
     const result = await runSpecReviewForIssue({
       issue: makeIssue(),
       workspaceRoot: workspace,
@@ -1039,6 +1140,9 @@ describe("spec review", () => {
       mode: "observe",
       writer: {
         updateIssueDescription: async () => {
+          readinessAtDescriptionWrite = (
+            await readDispatcherRunJournal(workspace)
+          ).map((entry) => String(entry.metadata?.readiness_state));
           throw new Error("linear unavailable");
         },
         postComment: async () => {
@@ -1089,8 +1193,10 @@ describe("spec review", () => {
     expect(postCommentCalled).toBe(false);
     const journal = await readDispatcherRunJournal(workspace);
     expect(journal.map((entry) => entry.metadata?.readiness_state)).toEqual([
+      "valid",
       "failed",
     ]);
+    expect(readinessAtDescriptionWrite).toEqual(["valid"]);
   });
 
   it("keeps successful readiness when the marker comment fails after durable writes", async () => {
@@ -1184,9 +1290,11 @@ describe("spec review", () => {
       readiness_state: "valid",
       review_verdict: "ready_as_written",
     });
-    expect(result.journalEntries[0]?.summary).toContain(
+    expect(result.journalEntries[0]?.summary).toBe("Ready.");
+    expect(result.message).toContain(
       "marker comment failed: comments unavailable",
     );
+    await expect(readDispatcherRunJournal(workspace)).resolves.toHaveLength(1);
     expect(updatedDescription).toContain("- Readiness: `valid`");
   });
 

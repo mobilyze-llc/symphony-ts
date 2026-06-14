@@ -190,6 +190,20 @@ const GENERATED_SPEC_REVIEW_SENTINELS = [
   SPEC_REVIEW_SECTION_END,
 ] as const;
 
+const PRIVACY_SENSITIVE_LABELS = new Set([
+  "confidential",
+  "pii",
+  "private",
+  "sensitive",
+  "secret",
+]);
+const PRIVACY_SENSITIVE_LABEL_PREFIXES = [
+  "confidential:",
+  "privacy:",
+  "sensitive:",
+  "secret:",
+];
+
 export function selectSpecReviewCandidates(input: {
   issues: readonly Issue[];
   ticketFeatures?: readonly TicketFeature[];
@@ -217,7 +231,7 @@ export function selectSpecReviewCandidates(input: {
     const findings = findingsByIdentifier.get(issue.identifier) ?? [];
     const reasons = selectionReasons({ issue, feature, findings, config });
     const sensitive = issue.labels.some((label) =>
-      /sensitive|private|secret|security/i.test(label),
+      isPrivacySensitiveLabel(label),
     );
     const sourceIntentHash = sensitive
       ? SENSITIVE_SOURCE_INTENT_HASH
@@ -259,6 +273,16 @@ export function selectSpecReviewCandidates(input: {
   });
 }
 
+function isPrivacySensitiveLabel(label: string): boolean {
+  const normalized = label.trim().toLowerCase();
+  return (
+    PRIVACY_SENSITIVE_LABELS.has(normalized) ||
+    PRIVACY_SENSITIVE_LABEL_PREFIXES.some((prefix) =>
+      normalized.startsWith(prefix),
+    )
+  );
+}
+
 function isCurrentSpecReviewReadinessState(
   readinessState: SpecReviewReadinessState | null,
 ): boolean {
@@ -273,11 +297,18 @@ export function computeSourceIntentHash(issue: Issue): string {
     title: issue.title,
     description: stripSpecReviewMarker(issue.description ?? "").trimEnd(),
     acceptanceCriteria: extractAcceptanceCriteria(issue.description ?? ""),
-    blockedBy: issue.blockedBy.map((blocker) => ({
-      id: blocker.id,
-      identifier: blocker.identifier,
-      state: blocker.state,
-    })),
+    blockedBy: issue.blockedBy
+      .map((blocker) => ({
+        id: blocker.id,
+        identifier: blocker.identifier,
+        state: blocker.state,
+      }))
+      .sort((left, right) =>
+        `${left.identifier}\0${left.id}\0${left.state}`.localeCompare(
+          `${right.identifier}\0${right.id}\0${right.state}`,
+          "en",
+        ),
+      ),
     scopeLabels: issue.labels
       .filter((label) =>
         /^(area|company|component|mode|risk|source|kind):/.test(label),
@@ -722,6 +753,21 @@ export async function runSpecReviewForIssue(
     linearDocUrl,
     generatedAt: now().toISOString(),
   });
+  const successEntries = await appendSpecReviewResultJournal(
+    input.workspaceRoot,
+    {
+      issue: input.issue,
+      mode: input.mode,
+      sourceIntentHash,
+      readinessState,
+      verdict: parsed.verdict,
+      artifactPath: runner.artifactPath,
+      artifactHash,
+      linearDocUrl,
+      summary: parsed.reconciliation.summary,
+      now: now(),
+    },
+  );
   let markerCommentPosted = false;
   let markerCommentWarning: string | null = null;
   try {
@@ -781,18 +827,6 @@ export async function runSpecReviewForIssue(
     markerCommentWarning === null
       ? parsed.reconciliation.summary
       : `${parsed.reconciliation.summary}; ${markerCommentWarning}`;
-  const entries = await appendSpecReviewResultJournal(input.workspaceRoot, {
-    issue: input.issue,
-    mode: input.mode,
-    sourceIntentHash,
-    readinessState,
-    verdict: parsed.verdict,
-    artifactPath: runner.artifactPath,
-    artifactHash,
-    linearDocUrl,
-    summary,
-    now: now(),
-  });
 
   return {
     issueId: input.issue.id,
@@ -804,7 +838,7 @@ export async function runSpecReviewForIssue(
     artifactPath: runner.artifactPath,
     linearDocUrl,
     markerCommentPosted,
-    journalEntries: entries,
+    journalEntries: successEntries,
     message: summary,
   };
 }
@@ -1193,8 +1227,12 @@ function extractAcceptanceCriteria(description: string): string | null {
 }
 
 function extractSpecReviewVerdict(text: string): SpecReviewVerdict | null {
+  const verdictSection = extractMarkdownSection(text, "Verdict");
+  if (verdictSection === null) {
+    return null;
+  }
   const match = /verdict(?:\s+enum)?\s*[:：]\s*`?([a-z][a-z0-9_-]+)`?/i.exec(
-    text,
+    verdictSection,
   );
   const value = match?.[1];
   return value === undefined ? null : normalizeSpecReviewVerdict(value);
@@ -1213,19 +1251,17 @@ function extractJsonFenceInSection(
   text: string,
   sectionHeading: string,
 ): string | null {
-  const lines = text.split(/\r?\n/);
-  let inSection = false;
+  const section = extractMarkdownSection(text, sectionHeading);
+  if (section === null) {
+    return null;
+  }
+  return extractJsonFenceFromSection(section);
+}
 
+function extractJsonFenceFromSection(section: string): string | null {
+  const lines = section.split(/\r?\n/);
   for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
     const line = lines[lineIndex] ?? "";
-    if (!inSection) {
-      inSection =
-        markdownHeadingText(line) === normalizeArtifactHeading(sectionHeading);
-      continue;
-    }
-    if (markdownHeadingText(line) !== null) {
-      return null;
-    }
     const openingFence = parseJsonOpeningFence(line);
     if (openingFence === null) {
       continue;
@@ -1244,8 +1280,31 @@ function extractJsonFenceInSection(
     }
     return null;
   }
-
   return null;
+}
+
+function extractMarkdownSection(
+  text: string,
+  sectionHeading: string,
+): string | null {
+  const lines = text.split(/\r?\n/);
+  let inSection = false;
+  const content: string[] = [];
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex] ?? "";
+    if (!inSection) {
+      inSection =
+        markdownHeadingText(line) === normalizeArtifactHeading(sectionHeading);
+      continue;
+    }
+    if (markdownHeadingText(line) !== null) {
+      return content.join("\n");
+    }
+    content.push(line);
+  }
+
+  return inSection ? content.join("\n") : null;
 }
 
 function parseJsonOpeningFence(
