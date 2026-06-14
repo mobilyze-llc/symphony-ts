@@ -633,6 +633,38 @@ describe("POST /api/v1/anchor-field-edits", () => {
     ]);
   });
 
+  it("maps unresolved anchor field edits to 404 instead of pre-pinning non-active issues", async () => {
+    const server = await startDashboardServer({
+      port: 0,
+      anchorFieldEditSecret: "shared-secret",
+      host: createHost({
+        requestAnchorFieldEdit: () =>
+          anchorFieldEditResult({
+            status: "issue_not_found",
+            detail:
+              "Issue 'ISSUE-1' could not be resolved from runtime state or the tracker's active states.",
+          }),
+      }),
+    });
+    servers.push(server);
+
+    const response = await postAnchorFieldEdit(
+      server.port,
+      {
+        issueIdentifier: "ISSUE-1",
+        fieldName: "Queue Anchor",
+        value: "top until-merged",
+        editorEmail: "operator@mobilyze.com",
+        editedAt: "2026-06-12T12:00:00.000Z",
+      },
+      {
+        secret: "shared-secret",
+      },
+    );
+    expect(response.statusCode).toBe(404);
+    expect(JSON.parse(response.body).status).toBe("issue_not_found");
+  });
+
   it("rejects field edits that omit value instead of treating them as clears", async () => {
     const received: AnchorFieldEditRequest[] = [];
     const server = await startDashboardServer({

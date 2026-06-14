@@ -230,6 +230,44 @@ describe("anchor intent family (SYMPH-486)", () => {
     expect(replayed.getState().issueAnchors["1"]).toBeUndefined();
   });
 
+  it("rejects self and pipeline-sentinel relative anchors before mutating state", async () => {
+    const orchestrator = createOrchestrator();
+
+    const self = await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "bad self pin" },
+      anchor: {
+        placement: { kind: "above", issueIdentifier: "issue-1" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+    expect(self.status).toBe("no_op");
+    expect(self.detail).toContain("references ISSUE-1 itself");
+
+    const sentinel = await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "bad sentinel pin" },
+      anchor: {
+        placement: { kind: "below", issueIdentifier: "PIPELINE" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+    expect(sentinel.status).toBe("no_op");
+    expect(sentinel.detail).toContain("pipeline sentinel");
+    expect(orchestrator.getState().issueAnchors["1"]).toBeUndefined();
+    expect(
+      intentEntries(orchestrator).map((entry) => entry.metadata.status),
+    ).toEqual(["no_op", "no_op"]);
+  });
+
   it("flip-back anchors append fresh journal evidence and replay to the live state", async () => {
     const orchestrator = createOrchestrator();
     await orchestrator.writeIntent({
@@ -639,6 +677,17 @@ describe("anchor intent family (SYMPH-486)", () => {
     });
     expect(newer.status).toBe("applied");
 
+    const duplicateSameTimestamp = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:01:00.000Z",
+    });
+    expect(duplicateSameTimestamp.status).toBe("rejected_stale");
+    expect(duplicateSameTimestamp.sequence).toBeNull();
+
     const stale = await orchestrator.ingestAnchorFieldEdit({
       issueId: "1",
       issueIdentifier: "ISSUE-1",
@@ -652,6 +701,70 @@ describe("anchor intent family (SYMPH-486)", () => {
     expect(orchestrator.getState().issueAnchors["1"]?.placement).toEqual({
       kind: "top",
     });
+  });
+
+  it("classifies self and sentinel field-edit references as invalid", async () => {
+    const config = createConfig();
+    config.operatorAnchors = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+      fieldName: "Queue Anchor",
+      ingestSecret: null,
+    };
+    const orchestrator = createOrchestrator({ config });
+
+    const self = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "above ISSUE-1 until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:00:00.000Z",
+    });
+    expect(self.status).toBe("invalid");
+    expect(self.detail).toContain("references ISSUE-1 itself");
+
+    const sentinel = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "below PIPELINE until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:01:00.000Z",
+    });
+    expect(sentinel.status).toBe("invalid");
+    expect(sentinel.detail).toContain("pipeline sentinel");
+    expect(orchestrator.getState().issueAnchors["1"]).toBeUndefined();
+    expect(
+      intentEntries(orchestrator).map((entry) => entry.metadata.status),
+    ).toEqual(["no_op", "no_op"]);
+
+    const delayed = await orchestrator.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:00:30.000Z",
+    });
+    expect(delayed.status).toBe("rejected_stale");
+    expect(delayed.sequence).toBeNull();
+
+    const replayed = createOrchestrator({
+      config,
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    const delayedAfterReplay = await replayed.ingestAnchorFieldEdit({
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      fieldName: "Queue Anchor",
+      value: "top until-merged",
+      editorEmail: "operator@mobilyze.com",
+      editedAt: "2026-06-11T12:00:30.000Z",
+    });
+    expect(delayedAfterReplay.status).toBe("rejected_stale");
+    expect(delayedAfterReplay.sequence).toBeNull();
+    expect(replayed.getState().issueAnchors["1"]).toBeUndefined();
   });
 
   it("same-value field edit no-ops advance the cursor across replay", async () => {
@@ -916,6 +1029,45 @@ describe("anchor intent family (SYMPH-486)", () => {
       setBySequence: secondResult.sequence,
     });
     expect(writeRunJournalEntry).toHaveBeenCalledTimes(2);
+  });
+
+  it("direct relative anchor writes are idempotent across issue identifier case variance", async () => {
+    const orchestrator = createOrchestrator();
+
+    const first = await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "direct anchor" },
+      anchor: {
+        placement: { kind: "below", issueIdentifier: "ISSUE-0" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+    expect(first.status).toBe("applied");
+
+    const sameAnchorDifferentCase = await orchestrator.writeIntent({
+      verb: "anchor",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: OPERATOR,
+      reason: { class: "operator_anchor", human: "direct anchor" },
+      anchor: {
+        placement: { kind: "below", issueIdentifier: "issue-0" },
+        expiry: { kind: "until_merged" },
+        source: "symphonyctl",
+      },
+    });
+    expect(sameAnchorDifferentCase.status).toBe("no_op");
+    expect(
+      intentEntries(orchestrator).map((entry) => entry.metadata.status),
+    ).toEqual(["applied", "no_op"]);
+    expect(orchestrator.getState().issueAnchors["1"]).toMatchObject({
+      placement: { kind: "below", issueIdentifier: "ISSUE-0" },
+      setBySequence: first.sequence,
+    });
   });
 
   it("field edit cursors advance by source edit time, not local process time", async () => {

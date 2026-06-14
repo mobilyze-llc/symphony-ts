@@ -8,6 +8,12 @@ import type {
 } from "../domain/model.js";
 import { normalizeIssueState } from "../domain/model.js";
 import type { TicketFeature } from "../tracker/ticket-feature.js";
+import {
+  formatInvalidAnchorPlacementDetail,
+  isIssueAnchorExpired,
+  normalizeIssueIdentifier,
+  validateAnchorPlacementForIssue,
+} from "./anchor-policy.js";
 
 export const DISPATCH_COMPARATOR_VERSION = "dispatch-comparator-v1";
 
@@ -475,7 +481,7 @@ function applyAnchors(
     .filter(
       (anchor) =>
         issueIds.has(anchor.issueId) &&
-        !isAnchorExpired(anchor, completedIssueIds, now),
+        !isIssueAnchorExpired(anchor, { completedIssueIds, now }),
     )
     .sort((left, right) => {
       const priorityDelta =
@@ -499,6 +505,18 @@ function applyAnchors(
       continue;
     }
     const placement = anchor.placement;
+    const placementValidation = validateAnchorPlacementForIssue(
+      placement,
+      anchored.identifier,
+    );
+    if (!placementValidation.valid) {
+      ordered.splice(Math.min(currentIndex, ordered.length), 0, anchored);
+      const invalidTarget = placementValidation.placement.issueIdentifier;
+      warnings.push(
+        `Operator anchor for ${anchor.issueIdentifier} references invalid target ${invalidTarget}: ${formatInvalidAnchorPlacementDetail(placementValidation.placement, anchored.identifier, placementValidation.reason)}; preserved natural priority/FIFO position.`,
+      );
+      continue;
+    }
     if (placement.kind === "top") {
       const firstSamePriority = ordered.findIndex(
         (issue) => issue.priority === anchored.priority,
@@ -518,7 +536,9 @@ function applyAnchors(
       continue;
     }
     const targetIndex = ordered.findIndex(
-      (issue) => issue.identifier === placement.issueIdentifier,
+      (issue) =>
+        normalizeIssueIdentifier(issue.identifier) ===
+        normalizeIssueIdentifier(placement.issueIdentifier),
     );
     if (targetIndex === -1) {
       ordered.splice(Math.min(currentIndex, ordered.length), 0, anchored);
@@ -570,17 +590,6 @@ function buildRationale(
     );
   }
   return rationale;
-}
-
-function isAnchorExpired(
-  anchor: IssueAnchorRecord,
-  completedIssueIds: ReadonlySet<string>,
-  now: Date,
-): boolean {
-  if (anchor.expiry.kind === "until_merged") {
-    return completedIssueIds.has(anchor.issueId);
-  }
-  return Date.parse(anchor.expiry.at) <= now.getTime();
 }
 
 function isOpenBlocker(

@@ -26,6 +26,7 @@ import type {
 } from "../domain/model.js";
 import type { ComponentStatus } from "../observability/component-status.js";
 import type { DeployDriftStatus } from "../observability/deploy-drift.js";
+import { isIssueAnchorExpired } from "../orchestrator/anchor-policy.js";
 import { PIPELINE_VERDICT_SCOPE_ID } from "../orchestrator/core.js";
 import {
   evaluateDispatcherDecisionQuality,
@@ -837,10 +838,10 @@ function isSnapshotAnchorExpired(
   state: OrchestratorState,
   now: Date,
 ): boolean {
-  if (anchor.expiry.kind === "until_merged") {
-    return state.completed.has(anchor.issueId);
-  }
-  return Date.parse(anchor.expiry.at) <= now.getTime();
+  return isIssueAnchorExpired(anchor, {
+    completedIssueIds: state.completed,
+    now,
+  });
 }
 
 const REVIEW_JOURNAL_EVENT_KINDS = new Set<DispatcherRunJournalEventKind>([

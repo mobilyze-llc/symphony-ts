@@ -105,6 +105,12 @@ import type { IssueStateSnapshot, IssueTracker } from "../tracker/tracker.js";
 import { formatAdmissionCard } from "./admission-card.js";
 import { parseAnchorUntilTimestamp } from "./anchor-date.js";
 import {
+  formatInvalidAnchorPlacementDetail,
+  isIssueAnchorExpired,
+  normalizeIssueIdentifier,
+  validateAnchorPlacementForIssue,
+} from "./anchor-policy.js";
+import {
   type ContinuousFeedbackReviewResult,
   ensureDecorrelatedFeedbackLane,
   formatContinuousFeedbackComment,
@@ -6940,6 +6946,30 @@ export class OrchestratorCore {
       };
     }
 
+    const placementValidation = validateAnchorPlacementForIssue(
+      parsed.placement,
+      input.issueIdentifier,
+    );
+    if (!placementValidation.valid) {
+      const detail = formatInvalidAnchorPlacementDetail(
+        placementValidation.placement,
+        input.issueIdentifier,
+        placementValidation.reason,
+      );
+      const sequence = await this.recordInvalidAnchorFieldEdit({
+        input,
+        actor,
+        editorEmail,
+        editedAtMs,
+        detail,
+      });
+      return {
+        status: "invalid",
+        detail,
+        sequence,
+      };
+    }
+
     const result = await this.writeIntentUnlocked({
       verb: "anchor",
       issueId: input.issueId,
@@ -6999,6 +7029,20 @@ export class OrchestratorCore {
           return {
             status: "no_op",
             detail: "missing anchor placement and expiry",
+          };
+        }
+        const placementValidation = validateAnchorPlacementForIssue(
+          input.anchor.placement,
+          input.issueIdentifier,
+        );
+        if (!placementValidation.valid) {
+          return {
+            status: "no_op",
+            detail: formatInvalidAnchorPlacementDetail(
+              placementValidation.placement,
+              input.issueIdentifier,
+              placementValidation.reason,
+            ),
           };
         }
         const active = this.getActiveIssueAnchor(issueId);
@@ -10696,10 +10740,10 @@ export class OrchestratorCore {
   }
 
   private isAnchorExpired(anchor: IssueAnchorRecord): boolean {
-    if (anchor.expiry.kind === "until_merged") {
-      return this.state.completed.has(anchor.issueId);
-    }
-    return Date.parse(anchor.expiry.at) <= this.now().getTime();
+    return isIssueAnchorExpired(anchor, {
+      completedIssueIds: this.state.completed,
+      now: this.now(),
+    });
   }
 
   private applyAnchorJournalEntry(entry: DispatcherRunJournalEntry): void {
@@ -11160,9 +11204,51 @@ function anchorPayloadMatchesRecord(
   record: IssueAnchorRecord,
 ): boolean {
   return (
-    JSON.stringify(canonicalAnchorPayload(payload)) ===
-    JSON.stringify(canonicalAnchorPayload(record))
+    anchorPlacementsEqual(payload.placement, record.placement) &&
+    anchorExpiriesEqual(payload.expiry, record.expiry) &&
+    payload.source === record.source &&
+    (payload.fieldName ?? null) === record.fieldName &&
+    normalizeNullableEmail(payload.editorEmail) ===
+      normalizeNullableEmail(record.editorEmail)
   );
+}
+
+function anchorPlacementsEqual(
+  left: IssueAnchorPlacement,
+  right: IssueAnchorPlacement,
+): boolean {
+  switch (left.kind) {
+    case "top":
+      return right.kind === "top";
+    case "above":
+    case "below":
+      return (
+        right.kind === left.kind &&
+        normalizeIssueIdentifier(left.issueIdentifier) ===
+          normalizeIssueIdentifier(right.issueIdentifier)
+      );
+  }
+}
+
+function anchorExpiriesEqual(
+  left: IssueAnchorExpiry,
+  right: IssueAnchorExpiry,
+): boolean {
+  if (left.kind !== right.kind) {
+    return false;
+  }
+  if (left.kind === "until_merged" || right.kind === "until_merged") {
+    return true;
+  }
+  return left.at === right.at;
+}
+
+function normalizeNullableEmail(
+  value: string | null | undefined,
+): string | null {
+  return value === undefined || value === null
+    ? null
+    : normalizeAccountEmail(value);
 }
 
 function formatAnchorPlacement(placement: IssueAnchorPlacement): string {
