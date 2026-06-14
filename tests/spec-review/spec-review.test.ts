@@ -758,6 +758,81 @@ describe("spec review", () => {
     ]);
   });
 
+  it("force-selects untriggered tickets but still blocks sensitive ones", () => {
+    const decisions = selectSpecReviewCandidates({
+      forceReview: true,
+      issues: [
+        makeIssue({
+          id: "ordinary",
+          identifier: "SYMPH-1",
+          labels: [],
+        }),
+        makeIssue({
+          id: "secret",
+          identifier: "SYMPH-2",
+          labels: ["private"],
+        }),
+      ],
+    });
+
+    expect(decisions).toEqual([
+      expect.objectContaining({
+        status: "selected",
+        reasons: expect.arrayContaining(["force_review_now"]),
+        redactionClass: "standard",
+      }),
+      expect.objectContaining({
+        status: "blocked",
+        reasons: ["privacy_sensitive_label"],
+        redactionClass: "sensitive",
+        sourceIntentHash: SENSITIVE_SOURCE_INTENT_HASH,
+      }),
+    ]);
+  });
+
+  it("force reruns tickets that already have a current review", () => {
+    const issue = makeIssue({
+      labels: ["needs:spec-review"],
+      description: "Build the thing.\n",
+    });
+    const sourceIntentHash = computeSourceIntentHash(issue);
+    const reviewedDescription = buildReviewedIssueDescription({
+      originalDescription: issue.description ?? "",
+      sourceIntentHash,
+      artifactHash: "artifact",
+      artifactPath: "/tmp/artifact.md",
+      mode: "observe",
+      readinessState: "valid",
+      verdict: "ready_as_written",
+      linearDocUrl: null,
+      generatedAt: "2026-06-14T00:00:00.000Z",
+      reconciliation: {
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "Looks good.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      },
+    });
+
+    const [decision] = selectSpecReviewCandidates({
+      forceReview: true,
+      issues: [{ ...issue, description: reviewedDescription }],
+    });
+
+    expect(decision).toMatchObject({
+      status: "selected",
+      reasons: expect.arrayContaining([
+        "force_review_now",
+        "trigger_label:needs:spec-review",
+      ]),
+    });
+  });
+
   it("does not privacy-block ordinary security and risk labels", () => {
     const [decision] = selectSpecReviewCandidates({
       issues: [

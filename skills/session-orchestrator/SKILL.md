@@ -23,6 +23,9 @@ Ground decisions in current truth, not in memory:
   `symphony-ts` checkout.
 - `SPEC.mobilyze.md` for fork-specific behavior and `SPEC.upstream.md` for
   upstream compatibility.
+- The repo-local `spec-review-lane` skill before implementation of each newly
+  picked ticket, so spec-time review is moved upstream while the autonomous
+  watcher is still being bootstrapped.
 - Live Linear discovery instead of hardcoded ticket memory. Search for active
   issues and docs by current labels, keywords, project membership, and recent
   comments before creating or prioritizing process work.
@@ -48,20 +51,49 @@ Read these references only when needed:
 3. Read the live Linear issues before touching state. For each candidate:
    `linear-pp-cli issues <ISSUE-ID> --agent --data-source live --select identifier,title,description,state.name,url,project.name,parent.identifier,labels.name`.
 4. Classify each candidate with the risk taxonomy below before assigning work.
-5. Call `update_plan` with the active issue or activity and a complete
+5. For every newly picked ticket that will be implemented in this session, run
+   the repo-local `$spec-review-lane` skill in `observe` mode before
+   implementation. Use the direct-ticket path with `--force` so the ticket does
+   not need autonomous Symphony pickup first. Record the readiness/verdict,
+   artifact path, and next action in `update_plan` or the checkpoint before
+   coding. If the lane reports `needs_operator_context`, `privacy_blocked`,
+   `failed`, `runner_failed`, or `invalid_artifact`, resolve or route that state
+   before starting implementation unless the operator explicitly scopes the run
+   to implementation-only.
+6. Call `update_plan` with the active issue or activity and a complete
    go-forward list of tickets/tasks in the current queue. Keep this operator
    plan current as work is claimed, delegated, reviewed, merged, closed,
    blocked, split, or expanded.
-6. Claim only the tickets you will actively run. Use visible Linear state and
+7. Claim only the tickets you will actively run. Use visible Linear state and
    a short comment that names the orchestrator, branch or worker, scope, and stop
    condition. Do not add orchestrator-run tickets to the `Pipeline` project unless
    the intent is automated Symphony pickup.
-7. Decide whether to work in the orchestrator thread or delegate. Keep the
+8. Decide whether to work in the orchestrator thread or delegate. Keep the
    orchestrator lightweight by default.
-8. Write or update a compact persistent checkpoint after material decisions:
+9. Write or update a compact persistent checkpoint after material decisions:
    current head, active tickets, active workers, PRs, review state, blocked
    decisions, and next poll time. Prefer Linear Docs for durable session docs;
    use `handoffs/` at the stable root only for local fallback handoffs.
+
+## Spec Review Intake
+
+Before implementing a newly picked ticket, invoke `$spec-review-lane` unless the
+operator explicitly says to skip spec review for that ticket. The default shape
+is:
+
+```bash
+skills/spec-review-lane/scripts/run-spec-review-lane.mjs \
+  --workflow WORKFLOW.md \
+  --workspace <repo-root> \
+  --issue <ISSUE-ID> \
+  --mode observe \
+  --force
+```
+
+Use `--dry-run` first when checking selection only. Treat prompt-only Claude
+runner fallback artifacts as manual reconciliation evidence, not durable
+spec-review readiness, unless the spec-review watcher wrote the Linear marker
+and dispatcher journal row.
 
 ## Operator Plan Discipline
 

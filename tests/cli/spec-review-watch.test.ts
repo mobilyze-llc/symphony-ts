@@ -42,6 +42,9 @@ describe("symphony-spec-review-watch CLI", () => {
           "Backlog,Todo",
           "--issue",
           "SYMPH-1",
+          "--issue-direct",
+          "SYMPH-2",
+          "--force",
           "--source-ref",
           "SPEC.mobilyze.md",
           "--source-ref",
@@ -59,8 +62,10 @@ describe("symphony-spec-review-watch CLI", () => {
       mode: "warn",
       states: ["Backlog", "Todo"],
       issues: ["SYMPH-1"],
+      directIssues: ["SYMPH-2"],
       sourceRefs: ["SPEC.mobilyze.md", "docs/review.md"],
       cmuxSpawnBin: "/bin/cmux-spawn",
+      forceReview: true,
       dryRun: true,
       help: false,
     });
@@ -80,6 +85,216 @@ describe("symphony-spec-review-watch CLI", () => {
     ).resolves.toBe(2);
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining("--mode must be observe, warn, or enforce"),
+    );
+  });
+
+  it("requires force/review-now to be targeted", async () => {
+    const stdout = vi.fn();
+    const stderr = vi.fn();
+
+    await expect(
+      runSpecReviewWatchCli(["--force"], { stdout, stderr }),
+    ).resolves.toBe(2);
+
+    expect(stderr).toHaveBeenCalledWith(
+      "--force/--review-now requires --issue, --issue-direct, or --ticket.\n",
+    );
+  });
+
+  it("directly selects an out-of-state issue without scanning states", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    const stdout = vi.fn();
+    const directIssue = makeIssue({
+      id: "direct",
+      identifier: "SYMPH-585",
+      labels: [],
+      state: "Done",
+    });
+    const fetchIssuesByStates = vi.fn(async () => {
+      throw new Error("state scan should not run");
+    });
+    const fetchIssueByIdentifier = vi.fn(async (identifier: string) => {
+      expect(identifier).toBe("SYMPH-585");
+      return directIssue;
+    });
+
+    const exitCode = await runSpecReviewWatchCli(
+      [
+        "WORKFLOW.md",
+        "--workspace",
+        workspace,
+        "--ticket",
+        "SYMPH-585",
+        "--review-now",
+        "--dry-run",
+      ],
+      {
+        stdout,
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () => fakeConfig(),
+        createTracker: () => ({
+          fetchIssuesByStates,
+          fetchIssueByIdentifier,
+          fetchIssueReferencesByIds: async () => [],
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(fetchIssuesByStates).not.toHaveBeenCalled();
+    expect(fetchIssueByIdentifier).toHaveBeenCalledOnce();
+    const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
+      selectedCount: number;
+      decisions: Array<{
+        status: string;
+        reasons: string[];
+        issue: { identifier: string; state: string };
+      }>;
+    };
+    expect(output.selectedCount).toBe(1);
+    expect(output.decisions).toEqual([
+      expect.objectContaining({
+        status: "selected",
+        reasons: expect.arrayContaining(["force_review_now"]),
+        issue: expect.objectContaining({
+          identifier: "SYMPH-585",
+          state: "Done",
+        }),
+      }),
+    ]);
+  });
+
+  it("does not let force unblock a direct privacy-sensitive issue", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    const stdout = vi.fn();
+    const blockedIssue = makeIssue({
+      id: "blocked",
+      identifier: "SYMPH-586",
+      labels: ["privacy:customer", "needs:spec-review"],
+    });
+    const appendJournal = vi.fn(async (_workspaceRoot, input) => [
+      makeJournalEntry(input.issue, input.readinessState),
+    ]);
+    const runReview = vi.fn(async ({ issue }) => makeRunResult(issue, "valid"));
+
+    const exitCode = await runSpecReviewWatchCli(
+      [
+        "WORKFLOW.md",
+        "--workspace",
+        workspace,
+        "--issue-direct",
+        "SYMPH-586",
+        "--force",
+      ],
+      {
+        stdout,
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () => fakeConfig(),
+        createTracker: () => ({
+          fetchIssuesByStates: async () => {
+            throw new Error("state scan should not run");
+          },
+          fetchIssueByIdentifier: async () => blockedIssue,
+          fetchIssueReferencesByIds: async () => [],
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+        runSpecReviewForIssue: runReview,
+        appendSpecReviewResultJournal: appendJournal,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(runReview).not.toHaveBeenCalled();
+    expect(appendJournal).toHaveBeenCalledWith(
+      workspace,
+      expect.objectContaining({
+        issue: blockedIssue,
+        readinessState: "privacy_blocked",
+      }),
+    );
+    const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
+      selectedCount: number;
+      summary: {
+        blockedCount: number;
+        privacyBlockedCount: number;
+        exitReason: string;
+      };
+      results: Array<{ issueIdentifier: string; readinessState: string }>;
+    };
+    expect(output.selectedCount).toBe(0);
+    expect(output.summary).toEqual(
+      expect.objectContaining({
+        blockedCount: 1,
+        privacyBlockedCount: 1,
+        exitReason: "privacy_blocked_only",
+      }),
+    );
+    expect(output.results).toEqual([
+      expect.objectContaining({
+        issueIdentifier: "SYMPH-586",
+        readinessState: "privacy_blocked",
+      }),
+    ]);
+  });
+
+  it("fails closed when direct issue fetch support is unavailable", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    const stdout = vi.fn();
+    const stderr = vi.fn();
+    const runReview = vi.fn(async ({ issue }) => makeRunResult(issue, "valid"));
+
+    const exitCode = await runSpecReviewWatchCli(
+      ["WORKFLOW.md", "--workspace", workspace, "--issue-direct", "SYMPH-1"],
+      {
+        stdout,
+        stderr,
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () => fakeConfig(),
+        createTracker: () => ({
+          fetchIssuesByStates: async () => [],
+          fetchIssueReferencesByIds: async () => [],
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+        runSpecReviewForIssue: runReview,
+      },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(runReview).not.toHaveBeenCalled();
+    expect(stdout).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      "--issue-direct/--ticket requires tracker support for fetchIssueByIdentifier.\n",
     );
   });
 

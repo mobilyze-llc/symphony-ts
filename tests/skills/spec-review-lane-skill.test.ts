@@ -1,0 +1,46 @@
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import { resolve } from "node:path";
+import { describe, expect, it } from "vitest";
+
+const SKILL_DIR = resolve(__dirname, "../../skills/spec-review-lane");
+const DISCOVERY_DIR = resolve(
+  __dirname,
+  "../../.agents/skills/spec-review-lane",
+);
+const SKILL_PATH = resolve(SKILL_DIR, "SKILL.md");
+const SCRIPT_PATH = resolve(SKILL_DIR, "scripts/run-spec-review-lane.mjs");
+const skillContent = readFileSync(SKILL_PATH, "utf-8");
+const scriptContent = readFileSync(SCRIPT_PATH, "utf-8");
+
+describe("spec-review-lane skill", () => {
+  it("documents the durable watcher as the default path", () => {
+    expect(skillContent).toMatch(/^name: spec-review-lane$/m);
+    expect(skillContent).toContain("symphony-spec-review-watch");
+    expect(skillContent).toContain("--issue-direct");
+    expect(skillContent).toContain("--force");
+    expect(skillContent).toContain("durable watcher path");
+  });
+
+  it("is exposed through the repo-local Codex discovery root", () => {
+    expect(existsSync(DISCOVERY_DIR)).toBe(true);
+    expect(lstatSync(DISCOVERY_DIR).isSymbolicLink()).toBe(true);
+    expect(realpathSync(DISCOVERY_DIR)).toBe(realpathSync(SKILL_DIR));
+    expect(existsSync(resolve(DISCOVERY_DIR, "SKILL.md"))).toBe(true);
+  });
+
+  it("keeps prompt-only fallback manual and non-durable", () => {
+    expect(skillContent).toContain("manual reconciliation");
+    expect(skillContent).toMatch(/not durable\s+spec-review readiness state/);
+    expect(skillContent).toContain("do not write a `spec_review_result`");
+    expect(skillContent).toContain("generated readiness marker");
+  });
+
+  it("wraps the watcher and derives deterministic next actions", () => {
+    expect(scriptContent).toContain("symphony-spec-review-watch");
+    expect(scriptContent).toContain("--issue-direct");
+    expect(scriptContent).toContain("nextActionForReadiness");
+    expect(scriptContent).toContain("supply_operator_context");
+    expect(scriptContent).toContain("rerun_or_inspect_artifact");
+    expect(scriptContent).toContain("handle_out_of_band");
+  });
+});
