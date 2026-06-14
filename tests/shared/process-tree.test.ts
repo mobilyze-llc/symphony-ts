@@ -88,6 +88,7 @@ describe("process tree termination", () => {
       sigtermSent: true,
       sigkillSent: true,
     });
+    expect(result.processGroupId).toBe(1234);
     expect(calls).toEqual([
       { pid: -1234, signal: "SIGTERM" },
       { pid: -1234, signal: "SIGKILL" },
@@ -208,6 +209,7 @@ describe("process tree termination", () => {
     });
     expect(result.identityStatus).toBe("matched");
     expect(result.postGraceIdentityStatus).toBe("matched");
+    expect(result.processGroupId).toBe(1234);
     expect(probeIdentity).toHaveBeenCalledTimes(2);
     expect(calls).toEqual([
       { pid: -1234, signal: "SIGTERM" },
@@ -244,6 +246,7 @@ describe("process tree termination", () => {
     });
     expect(result.identityStatus).toBe("absent");
     expect(result.postGraceIdentityStatus).toBe("absent");
+    expect(result.processGroupId).toBe(1234);
     expect(probeIdentity).toHaveBeenCalledTimes(2);
     expect(calls).toEqual([
       { pid: 1234, signal: 0 },
@@ -341,6 +344,7 @@ describe("process tree termination", () => {
       sigkillSent: false,
     });
     expect(result.identityStatus).toBe("identity_mismatch");
+    expect(result.processGroupId).toBe(1234);
     expect(calls).toEqual([]);
   });
 
@@ -375,6 +379,7 @@ describe("process tree termination", () => {
     });
     expect(result.identityStatus).toBe("matched");
     expect(result.postGraceIdentityStatus).toBe("identity_mismatch");
+    expect(result.processGroupId).toBe(1234);
     expect(calls).toEqual([{ pid: -1234, signal: "SIGTERM" }]);
   });
 
@@ -594,6 +599,22 @@ describe("process tree termination", () => {
   });
 
   it("refuses unsafe process group ids", () => {
+    const kill = vi.fn<typeof process.kill>();
+
+    expect(signalPidOrProcessGroupDetailed(1, "SIGKILL", kill)).toEqual({
+      signal: "SIGKILL",
+      status: "failed",
+      deliveredTo: null,
+      attempts: [
+        {
+          target: "process_group",
+          pid: -1,
+          signal: "SIGKILL",
+          status: "failed",
+          errorCode: "unsafe_process_group",
+        },
+      ],
+    });
     expect(signalProcessGroupDetailed(1, "SIGKILL")).toEqual({
       signal: "SIGKILL",
       status: "failed",
@@ -608,6 +629,7 @@ describe("process tree termination", () => {
         },
       ],
     });
+    expect(kill).not.toHaveBeenCalled();
   });
 
   it("confirms rich terminations by detailed SIGKILL or definite absence", () => {
@@ -641,6 +663,22 @@ describe("process tree termination", () => {
         },
         identityStatus: "matched",
         postGraceIdentityStatus: "matched",
+      }),
+    ).toBe(false);
+    expect(
+      processTreeTerminationConfirmed({
+        pid: 55,
+        sigtermSent: true,
+        sigkillSent: false,
+        sigterm: {
+          signal: "SIGTERM",
+          status: "delivered",
+          deliveredTo: "process_group",
+          attempts: [],
+        },
+        sigkill: null,
+        identityStatus: "absent",
+        postGraceIdentityStatus: "identity_mismatch",
       }),
     ).toBe(false);
     expect(

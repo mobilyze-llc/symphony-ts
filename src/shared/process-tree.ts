@@ -144,6 +144,7 @@ export async function terminateChildProcessTree(
   if (childHasExited(child)) {
     return buildTerminationResult({
       pid,
+      processGroupId: pid,
       sigterm: null,
       sigkill: null,
       identityStatus: "absent",
@@ -158,6 +159,7 @@ export async function terminateChildProcessTree(
     await waitForChildExit(child);
     return buildTerminationResult({
       pid,
+      processGroupId: pid,
       sigterm,
       sigkill: null,
       identityStatus: "not_checked",
@@ -172,6 +174,7 @@ export async function terminateChildProcessTree(
   }
   return buildTerminationResult({
     pid,
+    processGroupId: pid,
     sigterm,
     sigkill,
     identityStatus: "not_checked",
@@ -197,6 +200,7 @@ export async function terminateDetachedPidTree(
     if (expectedIdentity === null) {
       return buildTerminationResult({
         pid,
+        processGroupId: pid,
         sigterm: null,
         sigkill: null,
         identityStatus: "missing_expected_identity",
@@ -209,6 +213,7 @@ export async function terminateDetachedPidTree(
       if (!isPidDefinitelyAbsent(pid, kill)) {
         return buildTerminationResult({
           pid,
+          processGroupId: pid,
           sigterm: null,
           sigkill: null,
           identityStatus: "identity_inconclusive",
@@ -219,6 +224,7 @@ export async function terminateDetachedPidTree(
     } else if (!processIdentityMatches(expectedIdentity, observedIdentity)) {
       return buildTerminationResult({
         pid,
+        processGroupId: pid,
         sigterm: null,
         sigkill: null,
         identityStatus: "identity_mismatch",
@@ -236,6 +242,7 @@ export async function terminateDetachedPidTree(
     if (expectedIdentity === null) {
       return buildTerminationResult({
         pid,
+        processGroupId: pid,
         sigterm,
         sigkill: null,
         identityStatus,
@@ -248,6 +255,7 @@ export async function terminateDetachedPidTree(
       if (!isPidDefinitelyAbsent(pid, kill)) {
         return buildTerminationResult({
           pid,
+          processGroupId: pid,
           sigterm,
           sigkill: null,
           identityStatus,
@@ -258,6 +266,7 @@ export async function terminateDetachedPidTree(
     } else if (!processIdentityMatches(expectedIdentity, observedIdentity)) {
       return buildTerminationResult({
         pid,
+        processGroupId: pid,
         sigterm,
         sigkill: null,
         identityStatus,
@@ -270,6 +279,7 @@ export async function terminateDetachedPidTree(
   const sigkill = signalPidOrProcessGroupDetailed(pid, "SIGKILL", kill);
   return buildTerminationResult({
     pid,
+    processGroupId: pid,
     sigterm,
     sigkill,
     identityStatus,
@@ -378,6 +388,23 @@ export function signalPidOrProcessGroupDetailed(
   kill: ProcessKill = process.kill,
 ): ProcessSignalDelivery {
   const attempts: ProcessSignalAttempt[] = [];
+  if (isUnsafeProcessGroupId(pid)) {
+    return {
+      signal,
+      status: "failed",
+      deliveredTo: null,
+      attempts: [
+        {
+          target: "process_group",
+          pid: -pid,
+          signal,
+          status: "failed",
+          errorCode: "unsafe_process_group",
+        },
+      ],
+    };
+  }
+
   try {
     kill(-pid, signal);
     attempts.push({
@@ -491,6 +518,15 @@ export function processTreeTerminationConfirmed(
   if (result.sigkill === undefined && result.identityStatus === undefined) {
     return result.sigkillSent;
   }
+  if (
+    result.sigkill === null &&
+    result.identityStatus === "absent" &&
+    result.postGraceIdentityStatus !== undefined &&
+    result.postGraceIdentityStatus !== null &&
+    result.postGraceIdentityStatus !== "absent"
+  ) {
+    return false;
+  }
 
   return (
     result.sigkill?.status === "delivered" ||
@@ -512,6 +548,8 @@ function buildTerminationResult(input: {
     sigtermSent: input.sigterm !== null && input.sigterm.status !== "failed",
     sigkillSent: input.sigkill !== null && input.sigkill.status !== "failed",
   } as ProcessTreeTerminationResult;
+  // Keep proof fields non-enumerable so legacy structural assertions and JSON
+  // summaries retain the historical { pid, sigtermSent, sigkillSent } shape.
   Object.defineProperties(result, {
     processGroupId: {
       value: input.processGroupId ?? null,
