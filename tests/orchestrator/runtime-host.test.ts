@@ -8465,6 +8465,74 @@ describe("state-document enrichment wiring (SYMPH-407)", () => {
     }
   });
 
+  it("preserves runtime execution history during spec-review snapshot refreshes", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-read-model-"));
+    try {
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const journalDir = join(workspaceRoot, ".symphony", "run-journals");
+      const journalPath = join(journalDir, "dispatcher.jsonl");
+      mkdirSync(journalDir, { recursive: true });
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({ candidates: [] }),
+        agentRunner: new FakeAgentRunner(),
+        captureDeployDrift: async () => null,
+        now: () => new Date("2026-06-12T10:00:05.000Z"),
+      });
+
+      await host.getRuntimeSnapshot();
+      const runtimeOnlyHistory = [
+        {
+          stageName: "implement",
+          durationMs: 12_345,
+          totalTokens: 678,
+          inputTokens: 456,
+          outputTokens: 222,
+          turns: 3,
+          outcome: "running",
+        },
+      ];
+      host.getState().issueExecutionHistory["issue-583"] = runtimeOnlyHistory;
+
+      const reviewEntry = createRuntimeJournalEntry({
+        sequence: 1,
+        idempotencyKey: "spec-review:issue-583:hash-583:valid:artifact-583",
+        timestamp: "2026-06-12T10:01:00.000Z",
+        kind: "spec_review_result",
+        issueId: "issue-583",
+        issueIdentifier: "SYMPH-583",
+        operation: "tracker_write",
+        stage: "spec_review",
+        ownerId: "symphony-spec-review-watch",
+        summary: "Spec review completed for SYMPH-583.",
+        metadata: {
+          mode: "warn",
+          source_intent_hash: "hash-583",
+          readiness_state: "valid",
+          review_verdict: "ready_as_written",
+          review_artifact_hash: "artifact-583",
+          completed_at: "2026-06-12T10:01:00.000Z",
+        },
+      });
+      writeFileSync(journalPath, `${JSON.stringify(reviewEntry)}\n`, {
+        flag: "a",
+      });
+
+      const refreshedSnapshot = await host.getRuntimeSnapshot();
+
+      expect(refreshedSnapshot.spec_reviews?.["issue-583"]).toMatchObject({
+        issue_identifier: "SYMPH-583",
+        readiness_state: "valid",
+      });
+      expect(host.getState().issueExecutionHistory["issue-583"]).toEqual(
+        runtimeOnlyHistory,
+      );
+    } finally {
+      removeWorkspaceWithRetry(workspaceRoot);
+    }
+  });
+
   it("mirrors the persisted runner file view even when live telemetry exists", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-rl-fileview-"));
     try {
