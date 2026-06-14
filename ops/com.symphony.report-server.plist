@@ -2,11 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   com.symphony.report-server.plist — Static file server for HTML reports
-  Install: cp ops/com.symphony.report-server.plist ~/Library/LaunchAgents/
-  Load:    launchctl load ~/Library/LaunchAgents/com.symphony.report-server.plist
+  Host: pro14 (user ericlitman). Serves ~/.symphony/reports/ on port 8090,
+  which is where symphony-deploy syncs index.html + mobile-dashboard.html and
+  what BASE_URL (pro14.local:8090) points to.
 
-  Serves $SYMPHONY_HOME/reports/ on $TOKEN_REPORT_PORT (default 8090).
-  KeepAlive: true — restarts automatically if the server crashes.
+  Install: cp ops/com.symphony.report-server.plist ~/Library/LaunchAgents/
+  Load:    launchctl load -w ~/Library/LaunchAgents/com.symphony.report-server.plist
+  Unload:  launchctl unload ~/Library/LaunchAgents/com.symphony.report-server.plist
+
+  RunAtLoad + KeepAlive: starts on login and restarts automatically if it crashes.
 
   SYMPH-131
 -->
@@ -22,25 +26,28 @@
         <string>http.server</string>
         <string>8090</string>
         <string>--directory</string>
-        <string>/Users/clawdilize/.symphony/reports</string>
+        <string>/Users/ericlitman/.symphony/reports</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/clawdilize/.symphony/reports</string>
+    <string>/Users/ericlitman/.symphony/reports</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>/usr/bin:/usr/sbin:/bin:/sbin</string>
         <key>HOME</key>
-        <string>/Users/clawdilize</string>
+        <string>/Users/ericlitman</string>
     </dict>
 
     <key>StandardOutPath</key>
-    <string>/Users/clawdilize/.symphony/logs/report-server-stdout.log</string>
+    <string>/Users/ericlitman/.symphony/logs/report-server-stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/clawdilize/.symphony/logs/report-server-stderr.log</string>
+    <string>/Users/ericlitman/.symphony/logs/report-server-stderr.log</string>
+
+    <key>RunAtLoad</key>
+    <true/>
 
     <key>KeepAlive</key>
     <true/>
