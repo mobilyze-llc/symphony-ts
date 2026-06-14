@@ -43,6 +43,14 @@ describe("session-orchestrator skill", () => {
     expect(skillContent).toContain("handoffs/");
   });
 
+  it("keeps the operator-facing plan current while work changes", () => {
+    expect(skillContent).toContain("Call `update_plan`");
+    expect(skillContent).toContain("go-forward list of tickets/tasks");
+    expect(skillContent).toContain("Operator Plan Discipline");
+    expect(skillContent).toContain("third-failure reset");
+    expect(skillContent).toContain("how much remains");
+  });
+
   it("defines the requested risk taxonomy and high-risk state contract", () => {
     for (const riskClass of [
       "normal",
@@ -105,6 +113,25 @@ describe("session-orchestrator skill", () => {
     expect(workerPrompts).toContain("current origin/main");
     expect(workerPrompts).toContain("Live proof:");
     expect(workerPrompts).toContain("Stop conditions:");
+  });
+
+  it("lets the orchestrator proactively use bounded subagents or threads", () => {
+    expect(skillContent).toContain(
+      "Do not wait for the operator to suggest subagents or threads",
+    );
+    expect(skillContent).toContain("orchestrator's discretion");
+    expect(skillContent).toContain(
+      "one bounded implementation worker per issue",
+    );
+    expect(skillContent).toContain("Parallelize only when");
+  });
+
+  it("requires judgment after a third failed review instead of stopping by default", () => {
+    expect(skillContent).toContain("On the third failed review");
+    expect(skillContent).toContain("do not simply stop");
+    expect(skillContent).toContain("Step back and diagnose");
+    expect(skillContent).toContain("use judgment to pick the next move");
+    expect(skillContent).toContain("continue with the chosen recovery path");
   });
 
   it("includes an isolated dry-run prompt for forward testing", () => {

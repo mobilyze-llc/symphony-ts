@@ -48,16 +48,36 @@ Read these references only when needed:
 3. Read the live Linear issues before touching state. For each candidate:
    `linear-pp-cli issues <ISSUE-ID> --agent --data-source live --select identifier,title,description,state.name,url,project.name,parent.identifier,labels.name`.
 4. Classify each candidate with the risk taxonomy below before assigning work.
-5. Claim only the tickets you will actively run. Use visible Linear state and
+5. Call `update_plan` with the active issue or activity and a complete
+   go-forward list of tickets/tasks in the current queue. Keep this operator
+   plan current as work is claimed, delegated, reviewed, merged, closed,
+   blocked, split, or expanded.
+6. Claim only the tickets you will actively run. Use visible Linear state and
    a short comment that names the orchestrator, branch or worker, scope, and stop
    condition. Do not add orchestrator-run tickets to the `Pipeline` project unless
    the intent is automated Symphony pickup.
-6. Decide whether to work in the orchestrator thread or delegate. Keep the
+7. Decide whether to work in the orchestrator thread or delegate. Keep the
    orchestrator lightweight by default.
-7. Write or update a compact persistent checkpoint after material decisions:
+8. Write or update a compact persistent checkpoint after material decisions:
    current head, active tickets, active workers, PRs, review state, blocked
    decisions, and next poll time. Prefer Linear Docs for durable session docs;
    use `handoffs/` at the stable root only for local fallback handoffs.
+
+## Operator Plan Discipline
+
+Use `update_plan` as the live work ledger for the operator. It should show:
+
+- The ticket number or activity currently being worked.
+- Any active worker thread or subagent and its scope.
+- The go-forward queue of tickets and tasks, in intended execution order.
+- New tickets or Track work added during the run.
+- Closed, merged, parked, blocked, or delegated items as their status changes.
+
+Update the plan at every material transition: after live issue discovery,
+ticket claiming, delegation, review result, third-failure reset, PR open,
+merge, Linear closeout, new follow-up filing, or scope split. The plan is not a
+ceremonial TODO list; it is how the orchestrator keeps the operator aware of how
+work is structured and how much remains.
 
 ## Risk Taxonomy
 
@@ -86,6 +106,13 @@ For `high-risk invariant`, write this state contract before code:
 
 - The root orchestrator is the only control plane. It may create, assign, steer,
   rename, archive, or stop workers. Workers must not spawn or steer workers.
+- Do not wait for the operator to suggest subagents or threads. Use them at the
+  orchestrator's discretion when they reduce cycle time, isolate risk, provide
+  independent review, or let low-risk work proceed in parallel without
+  ownership conflict.
+- Prefer one bounded implementation worker per issue or tightly related cluster.
+  Parallelize only when file ownership, Linear scope, and validation gates are
+  separable.
 - Put the no-subdelegation rule in every worker prompt.
 - Assign one bounded issue or cluster per worker. Include source of truth,
   authorization boundary, current-head proof, review plan, live-proof
@@ -125,8 +152,20 @@ Round policy:
   the named invariant family.
 - Do not reopen unrelated P3 or Track findings unless they create a current
   P1/P2.
-- If a round cap, budget cap, or same-family reopen loop is hit, stop and write
-  an operator decision brief instead of starting another automatic round.
+- On the third failed review, third same-family reopen, or third review turn
+  that leaves the ticket unmergeable, do not simply stop. Step back and diagnose
+  why the ticket failed again: wrong invariant, underspecified acceptance
+  criteria, stale base, weak proof, substrate degradation, overbroad scope,
+  conflicting reviewers, or implementation drift.
+- After the third failure diagnosis, use judgment to pick the next move:
+  narrow the invariant, rewrite the fix, split the ticket, delegate a fresh
+  worker or reviewer, rerun a scoped council, update Linear with a Track item,
+  or write an operator decision brief if the next step needs authorization.
+  Ask the operator only for decisions outside the current authorization or when
+  the safe path genuinely depends on product judgment.
+- If a budget cap or unsafe substrate blocks useful progress, park or brief the
+  issue with evidence. Otherwise continue with the chosen recovery path and
+  update `update_plan` so the operator can see the reset and remaining queue.
 
 ## Tracking Durable Work
 
