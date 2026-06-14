@@ -10,6 +10,7 @@ SYMPHONY_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Defaults — override via environment
 CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/projects/claude-config}"
 CTL="$SCRIPT_DIR/symphony-ctl"
+LAUNCHD_RUNTIME_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 export SOPS_AGE_KEY_FILE="${SOPS_AGE_KEY_FILE:-$HOME/.config/sops/age/keys.txt}"
 
 # Colors (disabled if not a terminal)
@@ -82,26 +83,33 @@ run_or_dry() {
 
 run_review_runtime_preflight() {
   local env_file="$1"
-  local workspace
+  local workspace node_bin
   workspace="$(mktemp -d "${TMPDIR:-/tmp}/symphony-review-runtime-preflight.XXXXXX")"
+  node_bin="${SYMPHONY_NODE:-$(command -v node 2>/dev/null || echo /opt/homebrew/bin/node)}"
   printf '{"name":"symphony-review-runtime-preflight-smoke","private":true}\n' > "$workspace/package.json"
 
   if $DRY_RUN; then
-    run_or_dry node "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
+    run_or_dry env -i \
+      HOME="$HOME" \
+      PATH="$LAUNCHD_RUNTIME_PATH" \
+      "$node_bin" "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
       --workspace "$workspace" \
       --env-file "$env_file"
     rm -rf "$workspace"
     return
   fi
 
-  if node "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
+  if env -i \
+    HOME="$HOME" \
+    PATH="$LAUNCHD_RUNTIME_PATH" \
+    "$node_bin" "$SYMPHONY_ROOT/dist/src/cli/review-runtime-preflight.js" \
     --workspace "$workspace" \
     --env-file "$env_file"; then
     rm -rf "$workspace"
   else
     local preflight_status=$?
     rm -rf "$workspace"
-    warn "Review runtime preflight failed. Configure SYMPHONY_COUNCIL_REVIEW_GATE and CMUX_SPAWN_BIN, or install symphony-council-review-gate and cmux-spawn on PATH before restarting Symphony."
+    warn "Review runtime preflight failed. Configure SYMPHONY_COUNCIL_REVIEW_GATE and CMUX_SPAWN_BIN, or install symphony-council-review-gate and cmux-spawn on the launchd PATH before restarting Symphony."
     return "$preflight_status"
   fi
 }
