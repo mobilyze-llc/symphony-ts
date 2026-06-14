@@ -1058,6 +1058,9 @@ describe("OrchestratorRuntimeHost", () => {
     expect(listWorkspaceCwdProcessIds).toHaveBeenCalledTimes(1);
     expect(listWorkspaceCwdProcessIds).toHaveBeenCalledWith(
       "/tmp/workspaces/1",
+      expect.objectContaining({
+        onSkippedRecheck: expect.any(Function),
+      }),
     );
     expect(terminateDetachedPidTree).toHaveBeenCalledWith(1001, {
       graceMs: 1_000,
@@ -1101,6 +1104,93 @@ describe("OrchestratorRuntimeHost", () => {
         pids: ["4004"],
       }),
     );
+
+    fakeRunner.resolve("1", createNormalResult());
+    await host.waitForIdle();
+  });
+
+  it("logs bounded workspace-cwd recheck skips during emergency-stop recovery", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ state: "Resume" })],
+      stateSnapshots: [{ id: "1", identifier: "ISSUE-1", state: "Resume" }],
+    });
+    const fakeRunner = new FakeAgentRunner();
+    const entries: StructuredLogEntry[] = [];
+    const logger = new StructuredLogger([
+      {
+        write(entry) {
+          entries.push(entry);
+        },
+      },
+    ]);
+    const listWorkspaceCwdProcessIds = vi.fn(
+      async (
+        _workspacePath: string,
+        options?: {
+          onSkippedRecheck?: (skip: {
+            pid: number;
+            discoveredCwdPath: string;
+            currentCwdPath: string | null;
+            reason:
+              | "current_cwd_unavailable"
+              | "current_cwd_timed_out"
+              | "current_cwd_outside_workspace";
+          }) => void | Promise<void>;
+        },
+      ) => {
+        for (let pid = 3000; pid < 3025; pid += 1) {
+          options?.onSkippedRecheck?.({
+            pid,
+            discoveredCwdPath: `/tmp/workspaces/1/process-${pid}`,
+            currentCwdPath: null,
+            reason: "current_cwd_unavailable",
+          });
+        }
+        return [];
+      },
+    );
+    const journal: DispatcherRunJournal = [
+      createPipelineStopJournalEntry(1, "1001", createProcessIdentity(1001)),
+      createPipelineResumeJournalEntry(2),
+    ];
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      logger,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => journal,
+      listWorkspaceCwdProcessIds,
+      now: () => new Date("2026-03-06T00:02:00.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        event: "workspace_cwd_recheck_skipped",
+        outcome: "degraded",
+        issue_identifier: "ISSUE-1",
+        workspace_path: "/tmp/workspaces/1",
+        discovery: "workspace_cwd",
+        skipped_count: 25,
+        truncated: true,
+        skipped_rechecks: expect.arrayContaining([
+          expect.objectContaining({
+            pid: 3000,
+            reason: "current_cwd_unavailable",
+            discovered_cwd_path: "/tmp/workspaces/1/process-3000",
+            current_cwd_path: null,
+          }),
+        ]),
+      }),
+    );
+    const logEntry = entries.find(
+      (entry) => entry.event === "workspace_cwd_recheck_skipped",
+    );
+    expect(logEntry?.skipped_rechecks).toHaveLength(20);
 
     fakeRunner.resolve("1", createNormalResult());
     await host.waitForIdle();
@@ -1166,6 +1256,9 @@ describe("OrchestratorRuntimeHost", () => {
     expect(listWorkspaceCwdProcessIds).toHaveBeenCalledTimes(1);
     expect(listWorkspaceCwdProcessIds).toHaveBeenCalledWith(
       "/tmp/workspaces/1",
+      expect.objectContaining({
+        onSkippedRecheck: expect.any(Function),
+      }),
     );
     expect(readProcessIdentity).toHaveBeenCalledWith(4004);
     expect(terminateDetachedPidTree).not.toHaveBeenCalled();
@@ -6464,6 +6557,128 @@ describe("pipeline notifications", () => {
         readCurrentProcessCwd: async (pid) => currentCwds.get(pid) ?? null,
       }),
     ).resolves.toEqual([2002]);
+  });
+
+  it("bounds concurrent workspace cwd rechecks while preserving result order", async () => {
+    const output = [
+      "p1001",
+      "n/tmp/workspaces/1/app-a",
+      "p2002",
+      "n/tmp/workspaces/1/app-b",
+      "p3003",
+      "n/tmp/workspaces/1/app-c",
+    ].join("\n");
+    const releases: Array<() => void> = [];
+    const started: number[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const waitUntil = async (predicate: () => boolean) => {
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        if (predicate()) {
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      throw new Error("condition was not reached");
+    };
+
+    const resultPromise = findWorkspaceCwdProcessIds(
+      output,
+      "/tmp/workspaces/1",
+      {
+        recheckConcurrency: 2,
+        readCurrentProcessCwd: async (pid) => {
+          started.push(pid);
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise<void>((resolve) => {
+            releases.push(resolve);
+          });
+          inFlight -= 1;
+          return `/tmp/workspaces/1/live-${pid}`;
+        },
+      },
+    );
+
+    await waitUntil(() => started.length === 2);
+    expect(maxInFlight).toBe(2);
+    releases.shift()?.();
+    await waitUntil(() => started.length === 3);
+    expect(maxInFlight).toBe(2);
+    for (const release of releases.splice(0)) {
+      release();
+    }
+
+    await expect(resultPromise).resolves.toEqual([1001, 2002, 3003]);
+  });
+
+  it("times out stalled workspace cwd rechecks and reports the skipped candidate", async () => {
+    const skipped: unknown[] = [];
+    await expect(
+      findWorkspaceCwdProcessIds(
+        ["p1001", "n/tmp/workspaces/1"].join("\n"),
+        "/tmp/workspaces/1",
+        {
+          recheckTimeoutMs: 1,
+          readCurrentProcessCwd: async () =>
+            new Promise<string | null>(() => {}),
+          onSkippedRecheck: (skip) => {
+            skipped.push(skip);
+          },
+        },
+      ),
+    ).resolves.toEqual([]);
+    expect(skipped).toEqual([
+      {
+        pid: 1001,
+        discoveredCwdPath: "/tmp/workspaces/1",
+        currentCwdPath: null,
+        reason: "current_cwd_timed_out",
+      },
+    ]);
+  });
+
+  it("rechecks combined legacy lsof table output with significant trailing whitespace", async () => {
+    const workspacePath = "/tmp/workspaces/team alpha/app  one ";
+    const output = [
+      "COMMAND   PID USER   FD   TYPE DEVICE SIZE/OFF NODE NAME",
+      `node     1001 eric  cwd    DIR   1,23      128  100 ${workspacePath}`,
+      `bash     2002 eric  cwd    DIR   1,23      128  101 ${workspacePath}/nested dir`,
+      "node     3003 eric  txt    REG   1,23      128  102 /tmp/workspaces/team alpha/app  one ",
+      `node     4004 eric  cwd    DIR   1,23      128  103 ${workspacePath}/stale dir`,
+      "ambiguous row without enough columns",
+    ].join("\n");
+    const skipped: unknown[] = [];
+    const currentCwds = new Map<number, string | null>([
+      [1001, workspacePath],
+      [2002, `${workspacePath}/nested dir`],
+      [4004, null],
+    ]);
+
+    await expect(
+      findWorkspaceCwdProcessIds(output, workspacePath, {
+        readCurrentProcessCwd: async (pid) => currentCwds.get(pid) ?? null,
+        onSkippedRecheck: (skip) => {
+          skipped.push(skip);
+        },
+      }),
+    ).resolves.toEqual([1001, 2002]);
+    expect(parseLsofCwdProcessEntries(output)).toEqual([
+      { pid: 1001, cwdPath: workspacePath },
+      { pid: 2002, cwdPath: `${workspacePath}/nested dir` },
+      {
+        pid: 4004,
+        cwdPath: `${workspacePath}/stale dir`,
+      },
+    ]);
+    expect(skipped).toEqual([
+      {
+        pid: 4004,
+        discoveredCwdPath: `${workspacePath}/stale dir`,
+        currentCwdPath: null,
+        reason: "current_cwd_unavailable",
+      },
+    ]);
   });
 
   it("does not emit issue_failed for a budget hard stop pause", async () => {
