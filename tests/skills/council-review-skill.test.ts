@@ -113,6 +113,51 @@ function writeCleanPassArtifacts(dir: string): void {
   );
 }
 
+function writeCompletedLaneStatus(
+  dir: string,
+  stem: string,
+  message = "Review complete",
+): void {
+  writeArtifact(
+    dir,
+    `${stem}.status.json`,
+    JSON.stringify({
+      schema: "agent-harness.lane-status.v1",
+      agent: "claude",
+      lane: stem,
+      phase: stem,
+      state: "complete",
+      message,
+      artifact: resolve(dir, `${stem}.md`),
+    }),
+  );
+}
+
+function validReviewArtifact(): string {
+  return [
+    "## Verdict",
+    "PASS",
+    "",
+    "## Artifact Quality",
+    "Current head SHA: 1111111111111111111111111111111111111111.",
+    "Reviewed the current PR-backed draft artifact and found the evidence surface complete.",
+    "The cmux status message was treated as diagnostic; this Markdown body is the authority.",
+    "",
+    "## No Findings",
+    "No P1/P2 findings. I inspected the reviewed diff against the current head and found no merge-blocking correctness, security, API-contract, or test-proof gaps.",
+    "",
+    "## P1 Must Fix",
+    "None",
+    "",
+    "## P2 Should Fix",
+    "None",
+    "",
+    "## Track",
+    "None",
+    "",
+  ].join("\n");
+}
+
 describe("council-review manual skill", () => {
   const skill = readSkillFile("SKILL.md");
   const opusPrompt = readSkillFile("templates/phase1-opus-prompt.md");
@@ -390,5 +435,47 @@ describe("council-review manual skill", () => {
         expect(assertion.stdout).not.toContain("must be");
       });
     }
+  });
+
+  it("rejects completed Opus lanes whose artifact is a thin status summary", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(
+        dir,
+        "phase1-opus",
+        "Opus review complete: 1 P1 and 2 P2s, artifact quality sound",
+      );
+      writeArtifact(
+        dir,
+        "phase1-opus.md",
+        "Codex council review ready: P1 test coverage gap + 2 P2 consistency issues identified\n",
+      );
+
+      const assertion = runPython(ASSERT_CLEAN_PASS, dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "phase1-opus: reviewer artifact too thin",
+      );
+      expect(assertion.stdout).toContain(
+        "status-message-only P1/P2 claims are non-authoritative",
+      );
+      expect(assertion.stdout).toContain(
+        "missing required heading '## Verdict'",
+      );
+    });
+  });
+
+  it("accepts completed reviewer artifacts that satisfy the closeout contract", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+
+      const assertion = runPython(ASSERT_CLEAN_PASS, dir);
+      expect(assertion.status).toBe(0);
+      expect(assertion.stdout).toContain(
+        "PASS council-review clean PASS assertion",
+      );
+    });
   });
 });

@@ -2,6 +2,7 @@
 """Fail closed unless council-review artifacts prove a PR-backed clean PASS."""
 
 from pathlib import Path
+import json
 import re
 import sys
 
@@ -9,6 +10,12 @@ import sys
 PASS_MODE = "PR-backed draft"
 SAFE_BASE_EQUIVALENCE = {"exact", "origin-prefix-equivalent"}
 SHA_RE = re.compile(r"[0-9a-fA-F]{7,64}")
+LANE_ARTIFACT_STEMS = ("phase1-opus", "phase1-pi", "phase2-opus")
+MIN_REVIEW_ARTIFACT_BYTES = 400
+REQUIRED_REVIEW_HEADINGS = (
+    "## Verdict",
+    "## Artifact Quality",
+)
 REQUIRED_ARTIFACTS = (
     "pr-mode.txt",
     "pr-is-draft.txt",
@@ -26,6 +33,110 @@ REQUIRED_ARTIFACTS = (
 def read_text(artifact_dir: Path, name: str) -> str:
     path = artifact_dir / name
     return path.read_text(encoding="utf-8").strip()
+
+
+def optional_text(artifact_dir: Path, name: str) -> str | None:
+    path = artifact_dir / name
+    if not path.exists():
+        return None
+    return path.read_text(encoding="utf-8").strip()
+
+
+def read_json_object(path: Path) -> dict:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def has_findings_surface(text: str) -> bool:
+    return any(
+        heading in text
+        for heading in (
+            "## No Findings",
+            "## P1 Must Fix",
+            "## P2 Should Fix",
+            "## Track",
+            "## Findings",
+        )
+    )
+
+
+def status_claims_blockers(status_message: str) -> bool:
+    return re.search(r"\bP[12]s?\b", status_message, re.IGNORECASE) is not None
+
+
+def validate_review_artifacts(artifact_dir: Path) -> list[str]:
+    failures = []
+    expected_head = optional_text(artifact_dir, "pr-head-sha.txt") or optional_text(
+        artifact_dir, "local-head-sha.txt"
+    )
+
+    for stem in LANE_ARTIFACT_STEMS:
+        artifact_path = artifact_dir / f"{stem}.md"
+        status_path = artifact_dir / f"{stem}.status.json"
+        cli_json_path = artifact_dir / f"{stem}.cli.json"
+        status = read_json_object(status_path) if status_path.exists() else {}
+        status_state = str(status.get("state") or "").strip().lower()
+        status_message = str(status.get("message") or "").strip()
+        status_artifact = str(status.get("artifact") or "").strip()
+        completed = status_state == "complete"
+        observed = completed or artifact_path.exists()
+
+        if not observed:
+            continue
+
+        resolved_artifact_path = (
+            Path(status_artifact)
+            if status_artifact
+            else artifact_path
+        )
+        if not resolved_artifact_path.is_absolute():
+            resolved_artifact_path = artifact_dir / resolved_artifact_path
+
+        if completed and not artifact_path.exists() and not resolved_artifact_path.exists():
+            failures.append(
+                f"{stem}: status is complete but reviewer artifact is missing"
+            )
+            continue
+
+        path_to_read = artifact_path if artifact_path.exists() else resolved_artifact_path
+        if not path_to_read.exists():
+            failures.append(
+                f"{stem}: reviewer artifact path does not exist: {path_to_read}"
+            )
+            continue
+
+        artifact = path_to_read.read_text(encoding="utf-8", errors="replace")
+        byte_count = len(artifact.encode("utf-8"))
+        if byte_count < MIN_REVIEW_ARTIFACT_BYTES:
+            failures.append(
+                f"{stem}: reviewer artifact too thin ({byte_count} bytes; minimum {MIN_REVIEW_ARTIFACT_BYTES}); status message: {status_message or 'n/a'}"
+            )
+        for heading in REQUIRED_REVIEW_HEADINGS:
+            if heading not in artifact:
+                failures.append(
+                    f"{stem}: reviewer artifact missing required heading {heading!r}"
+                )
+        if not has_findings_surface(artifact):
+            failures.append(
+                f"{stem}: reviewer artifact must include No Findings or structured finding sections"
+            )
+        if expected_head and expected_head not in artifact:
+            failures.append(
+                f"{stem}: reviewer artifact must cite current head SHA {expected_head}"
+            )
+        if status_claims_blockers(status_message) and byte_count < MIN_REVIEW_ARTIFACT_BYTES:
+            failures.append(
+                f"{stem}: status-message-only P1/P2 claims are non-authoritative without a contract-valid artifact"
+            )
+        if cli_json_path.exists() and not status_path.exists():
+            failures.append(
+                f"{stem}: cmux CLI JSON exists but status artifact is missing"
+            )
+
+    return failures
 
 
 def main() -> int:
@@ -81,6 +192,8 @@ def main() -> int:
     ):
         if not SHA_RE.fullmatch(value or ""):
             failures.append(f"{label} must be a 7-64 character hex object ID")
+
+    failures.extend(validate_review_artifacts(artifact_dir))
 
     if failures:
         print("FAIL council-review clean PASS assertion")

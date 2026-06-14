@@ -286,9 +286,14 @@ at `state: "starting"` until completion. Treat non-terminal
 `.status.json`, or `.pane.log` shows a terminal startup error.
 
 Treat a lane as failed if its status state is not `complete`, its
-artifact is missing, or its artifact is empty. Record failures in the
-council report and continue only if at least one external reviewer
-succeeded.
+artifact is missing, its artifact is empty, or its artifact does not
+satisfy the review artifact contract. A one-line summary artifact is
+not review evidence, even when the status JSON says `complete` or its
+message claims P1/P2 findings. Status messages are diagnostic only; the
+Markdown artifact body is the authoritative evidence surface. Record
+the artifact path, byte count, status message, and validation reason in
+the council report, then continue only if at least one external
+reviewer produced a contract-valid artifact.
 
 ### Phase 2: Cross-Examination
 
@@ -368,6 +373,15 @@ marked ready after all closeout gates passed; record that later
 transition in closeout evidence before calling the final PR state ready.
 If the review is degraded, list staged, unstaged, and untracked-file or
 PR-detection state explicitly.
+
+After reviewer artifacts and `$COUNCIL_DIR/council-report.md` exist,
+rerun `scripts/assert-clean-pass.py` and refresh
+`clean-pass-assertion.txt` plus
+`clean-pass-assertion-exit-code.txt`. The setup-time assertion only
+checks PR/diff provenance; the closeout assertion additionally rejects
+completed reviewer lanes whose Markdown artifact is tiny or missing the
+required review sections. Do not report a clean PASS from the
+setup-time assertion alone.
 
 Triage process:
 

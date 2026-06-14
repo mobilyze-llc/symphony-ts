@@ -47,6 +47,7 @@ For each challenged finding:
 
 - P1/P2 evidence must cite current-head file:line, current head SHA, contract violated, reachable failure mode, and missing test/proof gap.
 - Stale-base, degraded-lane, malformed, partial, or empty artifact evidence is unavailable evidence unless independently confirmed against current-head code.
+- Thin or non-contract reviewer artifacts are unavailable evidence even when status JSON says `complete`; record artifact path, byte count, status message, and validation reason.
 - Convergence scope: [`previous_reviewed_head..HEAD` plus semantic neighborhood / broad initial diff]
 - Reviewer immutability: [pre/post dirty-tree assertion or unavailable; no reviewer mutations observed / mutation evidence]
 
