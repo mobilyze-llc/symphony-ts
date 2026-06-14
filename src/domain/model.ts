@@ -261,6 +261,10 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   // Deterministic dispatch comparator disagreement (SYMPH-485): emitted when
   // the actual dispatch pick differs from the computed-order head.
   "ordering_disagreement",
+  // Durable spec-time external review readiness (SYMPH-568): emitted by the
+  // spec-review watcher/runner so admission and dashboards can read current
+  // ticket-review state without parsing Linear comments or raw Claude output.
+  "spec_review_result",
   // Replay retention checkpoint (SYMPH-293): compacted journals keep one
   // covered-prefix state row plus a recent raw tail instead of replaying every
   // historical row on restart.

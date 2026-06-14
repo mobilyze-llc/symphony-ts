@@ -17,8 +17,10 @@
     "symphony": "./dist/src/cli/main.js",
     "symphony-backlog-audit": "./dist/src/audit/backlog-audit-cli.js",
     "symphony-calibration-digest": "./dist/src/calibration/cli.js",
+    "symphony-claude-runner": "./dist/src/cli/claude-runner.js",
     "symphony-council-review-gate": "./dist/src/cli/council-review-gate.js",
     "symphony-manager-run-import": "./dist/src/cli/manager-run-import.js",
+    "symphony-spec-review-watch": "./dist/src/cli/spec-review-watch.js",
     "symphonyctl": "./dist/src/cli/symphonyctl.js"
   },
   "files": ["dist/src", "README.md"],

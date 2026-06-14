@@ -260,6 +260,19 @@ export const LINEAR_CREATE_COMMENT_MUTATION = `
   }
 `.trim();
 
+export const LINEAR_UPDATE_ISSUE_DESCRIPTION_MUTATION = `
+  mutation SymphonyUpdateIssueDescription($issueId: String!, $description: String!) {
+    issueUpdate(id: $issueId, input: { description: $description }) {
+      success
+      issue {
+        id
+        identifier
+        title
+      }
+    }
+  }
+`.trim();
+
 export const LINEAR_ISSUES_BY_LABELS_QUERY = `
   query SymphonyIssuesByLabels(
     $projectSlug: String!
