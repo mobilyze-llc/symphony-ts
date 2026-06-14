@@ -4652,14 +4652,8 @@ function inferArtifactConfidence(
   if (parsedVerdict.degradedReason === "malformed_artifact") {
     return 0;
   }
-  if (findings.some((finding) => finding.severity === "P1")) {
-    return 0.85;
-  }
-  if (findings.some((finding) => finding.severity === "P2")) {
-    return 0.8;
-  }
   if (findings.length > 0) {
-    return 0.65;
+    return Math.max(...findings.map((finding) => finding.confidence));
   }
   return parsedVerdict.verdict === "pass" ? 0.75 : 0.6;
 }
@@ -6180,14 +6174,15 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
     "",
     "## Lanes",
     "",
-    "| Lane | Agent | Role | Model | Independent | State | Verdict | Degraded | Findings | Structured Artifact | Raw Artifact |",
-    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    "| Lane | Agent | Role | Model | Independent | State | Verdict | Degraded | Findings | Bundle File Hash | Bundle Hash | Structured Artifact | Raw Artifact |",
+    "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
   ];
 
   for (const lane of result.lanes) {
     const structured = lane.structuredArtifact;
+    const laneReviewBundle = structured?.reviewBundle ?? lane.reviewBundle;
     lines.push(
-      `| ${lane.laneId} | ${lane.agent} | ${lane.role} | ${lane.model} | ${lane.independentReviewer ? "yes" : "no"} | ${lane.state} | ${structured?.verdict ?? lane.verdict} | ${lane.degradedReason ?? "n/a"} | ${structured?.findings.length ?? 0} | ${lane.structuredArtifactPath ?? "n/a"} | ${lane.rawArtifactPath ?? lane.artifactPath ?? "n/a"} |`,
+      `| ${lane.laneId} | ${lane.agent} | ${lane.role} | ${lane.model} | ${lane.independentReviewer ? "yes" : "no"} | ${lane.state} | ${structured?.verdict ?? lane.verdict} | ${lane.degradedReason ?? "n/a"} | ${structured?.findings.length ?? 0} | ${laneReviewBundle?.hash ?? "n/a"} | ${laneReviewBundle?.bundleHash ?? "n/a"} | ${lane.structuredArtifactPath ?? "n/a"} | ${lane.rawArtifactPath ?? lane.artifactPath ?? "n/a"} |`,
     );
   }
 
