@@ -247,13 +247,14 @@ function redactArgs(args) {
   const pathFlags = new Set([
     "--workspace",
     "--workflow",
+    "--source-ref",
     "--artifact-root",
     "--cmux-spawn-bin",
     "--symphony-spec-review-watch-bin",
   ]);
   return args.map((arg, index) => {
     const previous = args[index - 1];
-    return pathFlags.has(previous) ? "[path]" : arg;
+    return index === 0 || pathFlags.has(previous) ? "[path]" : arg;
   });
 }
 
