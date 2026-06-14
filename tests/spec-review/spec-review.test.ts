@@ -986,6 +986,37 @@ describe("spec review", () => {
     });
   });
 
+  it("accepts decorated artifact section headings consistently with runner validation", () => {
+    const artifact = [
+      "## **Verdict.**",
+      "",
+      "Verdict enum: ready_as_written",
+      "",
+      "## `Reconciliation JSON:`",
+      "",
+      "```json",
+      JSON.stringify({
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "No spec edits needed.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      }),
+      "```",
+    ].join("\n");
+
+    expect(parseSpecReviewArtifact(artifact)).toMatchObject({
+      verdict: "ready_as_written",
+      reconciliation: {
+        summary: "No spec edits needed.",
+      },
+    });
+  });
+
   it("does not treat empty heading markers as section boundaries", () => {
     const artifact = [
       "## Verdict",
@@ -1120,6 +1151,57 @@ describe("spec review", () => {
     expect(parseSpecReviewArtifact(artifact).reconciliation.summary).toBe(
       "Correct reconciliation.",
     );
+  });
+
+  it("ignores reconciliation headings smuggled inside fenced code", () => {
+    const artifact = [
+      "## Verdict",
+      "",
+      "```markdown",
+      "## Reconciliation JSON",
+      "```",
+      "",
+      "```json",
+      JSON.stringify({
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "Wrong fenced-code section.",
+        issueBodyAppend: null,
+        acceptanceCriteria: ["Wrong AC"],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      }),
+      "```",
+      "",
+      "Verdict enum: ready_as_written",
+      "",
+      "## Source Read Status",
+      "",
+      "Read the ticket.",
+      "",
+      "## Reconciliation JSON",
+      "",
+      "```json",
+      JSON.stringify({
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "Real reconciliation.",
+        issueBodyAppend: null,
+        acceptanceCriteria: ["Real AC"],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      }),
+      "```",
+    ].join("\n");
+
+    expect(parseSpecReviewArtifact(artifact).reconciliation).toMatchObject({
+      summary: "Real reconciliation.",
+      acceptanceCriteria: ["Real AC"],
+    });
   });
 
   it("parses wider reconciliation JSON fences with inner markdown fences", () => {
@@ -1430,6 +1512,7 @@ describe("spec review", () => {
         },
         attempts: [],
         validationErrors: ["timeout"],
+        diagnostics: makeClaudeRunnerDiagnostics(),
         usage: null,
         message: "timeout",
       }),
@@ -1507,6 +1590,7 @@ describe("spec review", () => {
         },
         attempts: [],
         validationErrors: [],
+        diagnostics: makeClaudeRunnerDiagnostics(),
         usage: null,
         message: "complete",
       }),
@@ -1608,6 +1692,7 @@ describe("spec review", () => {
         },
         attempts: [],
         validationErrors: [],
+        diagnostics: makeClaudeRunnerDiagnostics(),
         usage: null,
         message: "complete",
       }),
@@ -1704,6 +1789,7 @@ describe("spec review", () => {
         },
         attempts: [],
         validationErrors: [],
+        diagnostics: makeClaudeRunnerDiagnostics(),
         usage: null,
         message: "complete",
       }),
@@ -1828,6 +1914,7 @@ describe("spec review", () => {
         },
         attempts: [],
         validationErrors: [],
+        diagnostics: makeClaudeRunnerDiagnostics(),
         usage: null,
         message: "complete",
       }),
@@ -1926,6 +2013,7 @@ describe("spec review", () => {
         },
         attempts: [],
         validationErrors: [],
+        diagnostics: makeClaudeRunnerDiagnostics(),
         usage: null,
         message: "complete",
       }),
@@ -2024,6 +2112,7 @@ describe("spec review", () => {
         },
         attempts: [],
         validationErrors: [],
+        diagnostics: makeClaudeRunnerDiagnostics(),
         usage: null,
         message: "complete",
       }),
@@ -2117,6 +2206,7 @@ describe("spec review", () => {
         },
         attempts: [],
         validationErrors: [],
+        diagnostics: makeClaudeRunnerDiagnostics(),
         usage: null,
         message: "complete",
       }),
@@ -2147,6 +2237,14 @@ function makeIssue(overrides: Partial<Issue> = {}): Issue {
     createdAt: "2026-06-14T00:00:00.000Z",
     updatedAt: "2026-06-14T00:00:00.000Z",
     ...overrides,
+  };
+}
+
+function makeClaudeRunnerDiagnostics(): ClaudeRunnerResult["diagnostics"] {
+  return {
+    diagnosticByteLimit: 16 * 1024,
+    preflight: null,
+    attempts: [],
   };
 }
 

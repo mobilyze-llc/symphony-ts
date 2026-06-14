@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import {
   CLAUDE_RUNNER_PURPOSES,
   type ClaudeRunnerPurpose,
+  MAX_CLAUDE_RUNNER_DIAGNOSTIC_BYTE_LIMIT,
   isSafeClaudeArtifactName,
   runClaudeCmux,
 } from "../claude-runner/cmux-claude-runner.js";
@@ -26,6 +27,8 @@ interface ParsedArgs {
   requireFirstHeading: string | null;
   verdictEnums: string[];
   minBytes: number | null;
+  requiredJsonSections: string[];
+  diagnosticByteLimit: number | null;
   retryOnInvalid: boolean;
   help: boolean;
 }
@@ -63,7 +66,9 @@ function usage(): string {
     "  --required-heading <text>    Markdown heading required in artifact (repeatable)",
     "  --require-first-heading <h>  First non-empty line must be this heading",
     "  --verdict-enum <value>       Allowed verdict/status enum (repeatable)",
+    "  --required-json-section <h>  Heading whose section must contain one fenced JSON object (repeatable)",
     "  --min-bytes <n>              Minimum artifact byte size",
+    `  --diagnostic-byte-limit <n>  Max stdout/stderr bytes retained in result diagnostics (default: 16384, max: ${MAX_CLAUDE_RUNNER_DIAGNOSTIC_BYTE_LIMIT})`,
     "  --retry-on-invalid           Retry once with validation errors when artifact is malformed",
     "  --help                       Show this help",
   ].join("\n");
@@ -88,6 +93,8 @@ export function parseClaudeRunnerArgs(
     requireFirstHeading: null,
     verdictEnums: [],
     minBytes: null,
+    requiredJsonSections: [],
+    diagnosticByteLimit: null,
     retryOnInvalid: false,
     help: false,
   };
@@ -159,10 +166,22 @@ export function parseClaudeRunnerArgs(
       parsed.verdictEnums.push(readValue(argv, ++index, token));
       continue;
     }
+    if (token === "--required-json-section") {
+      parsed.requiredJsonSections.push(readValue(argv, ++index, token));
+      continue;
+    }
     if (token === "--min-bytes") {
       parsed.minBytes = parsePositiveInteger(
         readValue(argv, ++index, token),
         token,
+      );
+      continue;
+    }
+    if (token === "--diagnostic-byte-limit") {
+      parsed.diagnosticByteLimit = parseBoundedPositiveInteger(
+        readValue(argv, ++index, token),
+        token,
+        MAX_CLAUDE_RUNNER_DIAGNOSTIC_BYTE_LIMIT,
       );
       continue;
     }
@@ -229,6 +248,9 @@ export async function runClaudeRunnerCli(
       : { timeoutSeconds: parsed.timeoutSeconds }),
     sourcePaths: parsed.sourcePaths,
     retryOnInvalid: parsed.retryOnInvalid,
+    ...(parsed.diagnosticByteLimit === null
+      ? {}
+      : { diagnosticByteLimit: parsed.diagnosticByteLimit }),
     validation: {
       ...(parsed.minBytes === null ? {} : { minBytes: parsed.minBytes }),
       requiredHeadings: parsed.requiredHeadings,
@@ -236,6 +258,7 @@ export async function runClaudeRunnerCli(
         ? {}
         : { requireFirstHeading: parsed.requireFirstHeading }),
       verdictEnums: parsed.verdictEnums,
+      requiredJsonSections: parsed.requiredJsonSections,
     },
   });
 
@@ -259,6 +282,18 @@ function parsePositiveInteger(value: string, flag: string): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) {
     throw new UsageError(`${flag} must be a positive integer`);
+  }
+  return parsed;
+}
+
+function parseBoundedPositiveInteger(
+  value: string,
+  flag: string,
+  max: number,
+): number {
+  const parsed = parsePositiveInteger(value, flag);
+  if (parsed > max) {
+    throw new UsageError(`${flag} must be <= ${max}`);
   }
   return parsed;
 }

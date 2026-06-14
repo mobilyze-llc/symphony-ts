@@ -550,6 +550,19 @@ curl -s http://localhost:3000/api/v1/state | jq '{
   entries must have unique normalized keys; module initialization fails on a
   collision so aliases such as `P2: Should Fix` cannot silently change parser
   policy.
+- Claude runner artifacts are validated before a lane can report `passed`.
+  Purpose-specific callers can require a first heading, required headings,
+  verdict enums, non-empty `## Source Read Status`, and required fenced JSON
+  sections. `requireSourceReadStatus` is section-based: incidental
+  `SOURCE_READ_STATUS` prose elsewhere in the artifact does not count. Required
+  JSON sections are delimiter-aware and accept wider fences when the JSON string
+  contains shorter markdown fences, but malformed, unterminated, missing,
+  duplicate, or non-object JSON fails closed with actionable validation errors.
+- `symphony-claude-runner` writes bounded command diagnostics into the normalized
+  result envelope under `diagnostics`. Each stdout/stderr value records retained
+  text, original byte count, omitted byte count, truncation status, and the
+  configured byte limit. Use `--diagnostic-byte-limit` when a caller needs a
+  tighter or wider retained diagnostic budget.
 
 - `explicit_resume_required` lists every parked issue with the `reason`
   (e.g. `hard_stop:token_budget`, `operator_input_required`,

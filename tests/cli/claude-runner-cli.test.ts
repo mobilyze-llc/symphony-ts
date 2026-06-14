@@ -32,8 +32,12 @@ describe("symphony-claude-runner CLI", () => {
           "Verdict",
           "--verdict-enum",
           "ready",
+          "--required-json-section",
+          "Reconciliation JSON",
           "--min-bytes",
           "100",
+          "--diagnostic-byte-limit",
+          "512",
           "--retry-on-invalid",
         ],
         "/tmp",
@@ -48,7 +52,9 @@ describe("symphony-claude-runner CLI", () => {
       requiredHeadings: ["Verdict"],
       requireFirstHeading: "Verdict",
       verdictEnums: ["ready"],
+      requiredJsonSections: ["Reconciliation JSON"],
       minBytes: 100,
+      diagnosticByteLimit: 512,
       retryOnInvalid: true,
     });
   });
@@ -95,6 +101,29 @@ describe("symphony-claude-runner CLI", () => {
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining("--artifact-name must be a basename"),
     );
+
+    await expect(
+      runClaudeRunnerCli(
+        [
+          "--purpose",
+          "custom",
+          "--workspace",
+          "/repo",
+          "--prompt-file",
+          "/repo/prompt.md",
+          "--artifact-dir",
+          "/repo/artifacts",
+          "--artifact-name",
+          "opus",
+          "--diagnostic-byte-limit",
+          "262145",
+        ],
+        { runClaude, stdout, stderr },
+      ),
+    ).resolves.toBe(2);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining("--diagnostic-byte-limit must be <="),
+    );
     expect(runClaude).not.toHaveBeenCalled();
   });
 
@@ -118,6 +147,10 @@ describe("symphony-claude-runner CLI", () => {
         "Source Read Status",
         "--verdict-enum",
         "ready_as_written",
+        "--required-json-section",
+        "Reconciliation JSON",
+        "--diagnostic-byte-limit",
+        "1024",
       ],
       { runClaude, stdout },
     );
@@ -127,9 +160,11 @@ describe("symphony-claude-runner CLI", () => {
       expect.objectContaining({
         purpose: "spec-review",
         retryOnInvalid: false,
+        diagnosticByteLimit: 1024,
         validation: expect.objectContaining({
           requiredHeadings: ["Source Read Status"],
           verdictEnums: ["ready_as_written"],
+          requiredJsonSections: ["Reconciliation JSON"],
         }),
       }),
     );
@@ -190,6 +225,11 @@ function makeResult(
     },
     attempts: [],
     validationErrors: [],
+    diagnostics: {
+      diagnosticByteLimit: 16 * 1024,
+      preflight: null,
+      attempts: [],
+    },
     usage: null,
     message: "ok",
   };

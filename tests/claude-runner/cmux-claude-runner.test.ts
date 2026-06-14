@@ -50,6 +50,7 @@ describe("Claude CMUX runner", () => {
           minBytes: 50,
           requireFirstHeading: "Verdict",
           requiredHeadings: ["Source Read Status"],
+          requiredJsonSections: ["Reconciliation JSON"],
           verdictEnums: ["ready_as_written"],
         },
       },
@@ -125,6 +126,94 @@ describe("Claude CMUX runner", () => {
     expect(result.status).toBe("passed");
     expect(result.attempts).toHaveLength(2);
     expect(result.attempts[1]?.artifactName).toBe("opus-repair-2");
+  });
+
+  it("bounds stdout and stderr diagnostics in the normalized result", async () => {
+    const harness = await createHarness();
+    const noisyStderr = "é".repeat(20);
+    const runCommand: ClaudeRunnerCommand = async (_command, args) => {
+      if (args[0] === "preflight") {
+        return { exitCode: 0, stdout: "preflight-ok", stderr: "" };
+      }
+      const artifactName = readFlag(args, "--artifact-name");
+      const artifactPath = join(harness.artifactDir, `${artifactName}.md`);
+      await writeFile(artifactPath, validReviewArtifact(), "utf8");
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          state: "complete",
+          artifact_path: artifactPath,
+          status_path: join(harness.artifactDir, `${artifactName}.status.json`),
+          message: "complete",
+        }),
+        stderr: noisyStderr,
+      };
+    };
+
+    const result = await runClaudeCmux(
+      {
+        purpose: "spec-review",
+        workspace: harness.workspace,
+        promptFile: harness.promptFile,
+        artifactDir: harness.artifactDir,
+        artifactName: "opus",
+        diagnosticByteLimit: 13,
+        validation: {
+          minBytes: 50,
+          requireFirstHeading: "Verdict",
+          requiredHeadings: ["Source Read Status"],
+          requiredJsonSections: ["Reconciliation JSON"],
+          verdictEnums: ["ready_as_written"],
+          requireSourceReadStatus: true,
+        },
+      },
+      { runCommand },
+    );
+
+    expect(result.status).toBe("passed");
+    expect(result.diagnostics.diagnosticByteLimit).toBe(13);
+    expect(result.diagnostics.preflight?.stdout).toMatchObject({
+      text: "preflight-ok",
+      truncated: false,
+      omittedBytes: 0,
+    });
+    expect(result.diagnostics.attempts[0]?.stdout).toMatchObject({
+      truncated: true,
+      maxBytes: 13,
+    });
+    expect(result.diagnostics.attempts[0]?.stderr).toMatchObject({
+      text: "é".repeat(6),
+      originalBytes: 40,
+      omittedBytes: 28,
+      truncated: true,
+      maxBytes: 13,
+    });
+  });
+
+  it("rejects oversized diagnostic byte limits before invoking cmux", async () => {
+    const harness = await createHarness();
+    let commandCount = 0;
+
+    await expect(
+      runClaudeCmux(
+        {
+          purpose: "spec-review",
+          workspace: harness.workspace,
+          promptFile: harness.promptFile,
+          artifactDir: harness.artifactDir,
+          artifactName: "opus",
+          diagnosticByteLimit: 256 * 1024 + 1,
+        },
+        {
+          runCommand: async () => {
+            commandCount += 1;
+            return { exitCode: 0, stdout: "{}", stderr: "" };
+          },
+        },
+      ),
+    ).rejects.toThrow("diagnosticByteLimit must be <=");
+
+    expect(commandCount).toBe(0);
   });
 
   it("rejects unsafe artifact names before invoking cmux", async () => {
@@ -479,6 +568,281 @@ describe("Claude CMUX runner", () => {
     );
   });
 
+  it("requires source-read evidence in the Source Read Status section", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "claude-artifact-"));
+    const artifact = join(dir, "artifact.md");
+    await writeFile(
+      artifact,
+      [
+        "## Verdict",
+        "",
+        "Verdict enum: ready_as_written",
+        "",
+        "The phrase SOURCE_READ_STATUS appears here, but not as a heading.",
+        "",
+        "## Reconciliation JSON",
+        "",
+        "```json",
+        '{"schemaVersion":1}',
+        "```",
+        "",
+        "Long enough artifact body for validation to pass.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await expect(
+      validateClaudeArtifact(artifact, {
+        minBytes: 50,
+        requireSourceReadStatus: true,
+      }),
+    ).resolves.toContain(
+      "artifact is missing a non-empty Source Read Status section",
+    );
+  });
+
+  it("validates required JSON sections with delimiter-aware fences", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "claude-artifact-"));
+    const artifact = join(dir, "artifact.md");
+    await writeFile(
+      artifact,
+      [
+        "## Verdict",
+        "",
+        "Verdict enum: ready_as_written",
+        "",
+        "## Source Read Status",
+        "",
+        "Read source.",
+        "",
+        "## `Reconciliation   JSON:`",
+        "",
+        "````json",
+        "{",
+        '  "schemaVersion": 1,',
+        '  "markdown": "```json\\n{\\"nested\\":true}\\n```"',
+        "}",
+        "````",
+        "",
+        "Long enough artifact body for validation to pass.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await expect(
+      validateClaudeArtifact(artifact, {
+        minBytes: 50,
+        requiredJsonSections: ["Reconciliation JSON"],
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("accepts ATX closing markers in validated artifact headings", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "claude-artifact-"));
+    const artifact = join(dir, "artifact.md");
+    await writeFile(
+      artifact,
+      [
+        "## Verdict ###",
+        "",
+        "Verdict enum: ready_as_written",
+        "",
+        "## Reconciliation JSON ###",
+        "",
+        "```json",
+        '{"schemaVersion":1}',
+        "```",
+        "",
+        "Long enough artifact body for validation to pass.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await expect(
+      validateClaudeArtifact(artifact, {
+        minBytes: 50,
+        requireFirstHeading: "Verdict",
+        requiredJsonSections: ["Reconciliation JSON"],
+      }),
+    ).resolves.toEqual([]);
+  });
+
+  it("rejects duplicate JSON fences in required sections", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "claude-artifact-"));
+    const artifact = join(dir, "artifact.md");
+    await writeFile(
+      artifact,
+      [
+        "## Verdict",
+        "",
+        "Verdict enum: ready_as_written",
+        "",
+        "## Source Read Status",
+        "",
+        "Read source.",
+        "",
+        "## Reconciliation JSON",
+        "",
+        "```json",
+        '{"schemaVersion":1}',
+        "```",
+        "",
+        "```json",
+        '{"schemaVersion":2}',
+        "```",
+        "",
+        "Long enough artifact body for validation to pass.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await expect(
+      validateClaudeArtifact(artifact, {
+        minBytes: 50,
+        requiredJsonSections: ["Reconciliation JSON"],
+      }),
+    ).resolves.toEqual([
+      expect.stringContaining(
+        'artifact required JSON section "Reconciliation JSON" contains multiple fenced json objects',
+      ),
+    ]);
+  });
+
+  it("rejects unterminated JSON fences in required sections", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "claude-artifact-"));
+    const artifact = join(dir, "artifact.md");
+    await writeFile(
+      artifact,
+      [
+        "## Verdict",
+        "",
+        "Verdict enum: ready_as_written",
+        "",
+        "## Reconciliation JSON",
+        "",
+        "```json",
+        '{"schemaVersion":1}',
+        "",
+        "Long enough artifact body for validation to pass.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await expect(
+      validateClaudeArtifact(artifact, {
+        minBytes: 50,
+        requiredJsonSections: ["Reconciliation JSON"],
+      }),
+    ).resolves.toEqual([
+      expect.stringContaining(
+        'artifact required JSON section "Reconciliation JSON" has an unterminated fenced json object',
+      ),
+    ]);
+  });
+
+  it("rejects malformed required JSON sections", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "claude-artifact-"));
+    const artifact = join(dir, "artifact.md");
+    await writeFile(
+      artifact,
+      [
+        "## Verdict",
+        "",
+        "Verdict enum: ready_as_written",
+        "",
+        "## Source Read Status",
+        "",
+        "Read source.",
+        "",
+        "## Reconciliation JSON",
+        "",
+        "```json",
+        '{"schemaVersion":',
+        "```",
+        "",
+        "Long enough artifact body for validation to pass.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await expect(
+      validateClaudeArtifact(artifact, {
+        minBytes: 50,
+        requiredJsonSections: ["Reconciliation JSON"],
+      }),
+    ).resolves.toEqual([
+      expect.stringContaining(
+        'artifact required JSON section "Reconciliation JSON" contains invalid JSON',
+      ),
+    ]);
+  });
+
+  it("rejects non-object JSON in required sections", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "claude-artifact-"));
+    const artifact = join(dir, "artifact.md");
+    await writeFile(
+      artifact,
+      [
+        "## Verdict",
+        "",
+        "Verdict enum: ready_as_written",
+        "",
+        "## Reconciliation JSON",
+        "",
+        "```json",
+        '["not", "an", "object"]',
+        "```",
+        "",
+        "Long enough artifact body for validation to pass.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await expect(
+      validateClaudeArtifact(artifact, {
+        minBytes: 50,
+        requiredJsonSections: ["Reconciliation JSON"],
+      }),
+    ).resolves.toEqual([
+      expect.stringContaining(
+        'artifact required JSON section "Reconciliation JSON" JSON must be an object',
+      ),
+    ]);
+  });
+
+  it("rejects missing structured JSON in required sections", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "claude-artifact-"));
+    const artifact = join(dir, "artifact.md");
+    await writeFile(
+      artifact,
+      [
+        "## Verdict",
+        "",
+        "Verdict enum: ready_as_written",
+        "",
+        "## Source Read Status",
+        "",
+        "Read source.",
+        "",
+        "## Reconciliation JSON",
+        "",
+        "The model described the JSON but did not produce it.",
+        "",
+        "Long enough artifact body for validation to pass.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await expect(
+      validateClaudeArtifact(artifact, {
+        minBytes: 50,
+        requiredJsonSections: ["Reconciliation JSON"],
+      }),
+    ).resolves.toContain(
+      'artifact required JSON section "Reconciliation JSON" is missing a fenced json object',
+    );
+  });
+
   it("normalizes artifact verdict enum casing during validation", async () => {
     const dir = await mkdtemp(join(tmpdir(), "claude-artifact-"));
     const artifact = join(dir, "artifact.md");
@@ -554,6 +918,12 @@ function validReviewArtifact(): string {
     "## Source Read Status",
     "",
     "Read the prompt and source packet.",
+    "",
+    "## Reconciliation JSON",
+    "",
+    "```json",
+    '{"schemaVersion":1}',
+    "```",
     "",
     "Long enough artifact body for validation to pass.",
   ].join("\n");

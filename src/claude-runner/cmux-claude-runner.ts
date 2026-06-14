@@ -31,6 +31,7 @@ export interface ClaudeRunnerValidationConfig {
   requireFirstHeading?: string;
   verdictEnums?: string[];
   requireSourceReadStatus?: boolean;
+  requiredJsonSections?: string[];
 }
 
 export interface ClaudeCmuxRunnerInput {
@@ -48,6 +49,7 @@ export interface ClaudeCmuxRunnerInput {
   sourcePaths?: string[];
   validation?: ClaudeRunnerValidationConfig;
   retryOnInvalid?: boolean;
+  diagnosticByteLimit?: number;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -64,6 +66,7 @@ export type ClaudeRunnerCommand = (
     cwd: string;
     env: NodeJS.ProcessEnv;
     timeoutMs: number;
+    maxBufferBytes: number;
   },
 ) => Promise<ClaudeRunnerCommandResult>;
 
@@ -98,6 +101,25 @@ export interface ClaudeRunnerAttempt {
   validationErrors: string[];
 }
 
+export interface ClaudeRunnerBoundedText {
+  text: string;
+  originalBytes: number;
+  omittedBytes: number;
+  truncated: boolean;
+  maxBytes: number;
+}
+
+export interface ClaudeRunnerCommandDiagnostics {
+  stdout: ClaudeRunnerBoundedText;
+  stderr: ClaudeRunnerBoundedText;
+}
+
+export interface ClaudeRunnerDiagnostics {
+  diagnosticByteLimit: number;
+  preflight: ClaudeRunnerCommandDiagnostics | null;
+  attempts: ClaudeRunnerCommandDiagnostics[];
+}
+
 export interface ClaudeRunnerResult {
   schemaVersion: 1;
   status: ClaudeRunnerStatus;
@@ -119,6 +141,7 @@ export interface ClaudeRunnerResult {
   sourceVisibility: ClaudeRunnerSourceVisibility;
   attempts: ClaudeRunnerAttempt[];
   validationErrors: string[];
+  diagnostics: ClaudeRunnerDiagnostics;
   usage: Record<string, unknown> | null;
   message: string;
 }
@@ -136,6 +159,9 @@ const DEFAULT_MODEL = "opus";
 const DEFAULT_PROFILE = "legacy";
 const DEFAULT_TIMEOUT_SECONDS = 1_800;
 const DEFAULT_MIN_ARTIFACT_BYTES = 200;
+export const MAX_CLAUDE_RUNNER_DIAGNOSTIC_BYTE_LIMIT = 256 * 1024;
+const DEFAULT_DIAGNOSTIC_BYTE_LIMIT = 16 * 1024;
+const DEFAULT_COMMAND_MAX_BUFFER_BYTES = 1024 * 1024;
 
 export function isSafeClaudeArtifactName(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value);
@@ -160,6 +186,20 @@ export async function runClaudeCmux(
   const phase = input.phase ?? input.purpose;
   const laneId = input.laneId ?? `claude-${input.purpose}`;
   const timeoutSeconds = input.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS;
+  const diagnosticByteLimit =
+    input.diagnosticByteLimit ?? DEFAULT_DIAGNOSTIC_BYTE_LIMIT;
+  if (!Number.isInteger(diagnosticByteLimit) || diagnosticByteLimit <= 0) {
+    throw new Error("diagnosticByteLimit must be a positive integer");
+  }
+  if (diagnosticByteLimit > MAX_CLAUDE_RUNNER_DIAGNOSTIC_BYTE_LIMIT) {
+    throw new Error(
+      `diagnosticByteLimit must be <= ${MAX_CLAUDE_RUNNER_DIAGNOSTIC_BYTE_LIMIT}`,
+    );
+  }
+  const commandMaxBufferBytes = Math.max(
+    DEFAULT_COMMAND_MAX_BUFFER_BYTES,
+    diagnosticByteLimit * 4,
+  );
   const workspace = resolve(input.workspace);
   const promptFile = resolve(input.promptFile);
   const artifactDir = resolve(input.artifactDir);
@@ -174,6 +214,8 @@ export async function runClaudeCmux(
   });
   const promptSha256 = await fileSha256(promptFile);
   const attempts: ClaudeRunnerAttempt[] = [];
+  const attemptDiagnostics: ClaudeRunnerCommandDiagnostics[] = [];
+  let preflightDiagnostics: ClaudeRunnerCommandDiagnostics | null = null;
   const resultJsonPath = resolve(artifactDir, `${artifactName}.result.json`);
 
   if (sourceVisibility.status !== "ok") {
@@ -198,6 +240,11 @@ export async function runClaudeCmux(
       sourceVisibility,
       attempts,
       validationErrors: ["one or more declared source paths are unreadable"],
+      diagnostics: {
+        diagnosticByteLimit,
+        preflight: null,
+        attempts: [],
+      },
       usage: null,
       message: "source visibility validation failed before Claude invocation",
     };
@@ -212,8 +259,10 @@ export async function runClaudeCmux(
       cwd: workspace,
       env: { ...env },
       timeoutMs: 30_000,
+      maxBufferBytes: commandMaxBufferBytes,
     },
   );
+  preflightDiagnostics = commandDiagnostics(preflight, diagnosticByteLimit);
   if (preflight.exitCode !== 0) {
     const result: ClaudeRunnerResult = {
       schemaVersion: 1,
@@ -236,11 +285,13 @@ export async function runClaudeCmux(
       sourceVisibility,
       attempts,
       validationErrors: ["cmux-spawn preflight failed"],
+      diagnostics: {
+        diagnosticByteLimit,
+        preflight: preflightDiagnostics,
+        attempts: [],
+      },
       usage: null,
-      message:
-        preflight.stderr.trim() !== ""
-          ? preflight.stderr.trim()
-          : preflight.stdout.trim(),
+      message: diagnosticMessage(preflightDiagnostics),
     };
     await writeJsonFile(resultJsonPath, result);
     return result;
@@ -269,7 +320,10 @@ export async function runClaudeCmux(
       timeoutSeconds,
       env,
       runCommand,
+      maxBufferBytes: commandMaxBufferBytes,
     });
+    const diagnostics = commandDiagnostics(run, diagnosticByteLimit);
+    attemptDiagnostics.push(diagnostics);
     const cmux = parseCmuxStdout(run.stdout);
     const rawArtifactPath =
       typeof cmux.artifact_path === "string"
@@ -296,7 +350,7 @@ export async function runClaudeCmux(
 
     usage = cmux.usage ?? null;
     artifactPath = currentArtifactPath;
-    message = cmux.message ?? run.stderr;
+    message = cmux.message ?? diagnosticMessage(diagnostics);
     const laneState =
       cmux.state ?? (run.exitCode === 0 ? "complete" : "failed");
     validationErrors =
@@ -368,6 +422,11 @@ export async function runClaudeCmux(
     sourceVisibility,
     attempts,
     validationErrors,
+    diagnostics: {
+      diagnosticByteLimit,
+      preflight: preflightDiagnostics,
+      attempts: attemptDiagnostics,
+    },
     usage,
     message,
   };
@@ -418,9 +477,9 @@ export async function validateClaudeArtifact(
 
   if (
     validation.requireSourceReadStatus === true &&
-    !/source[_ -]?read[_ -]?status/i.test(text)
+    !hasSourceReadStatusSection(text)
   ) {
-    errors.push("artifact is missing SOURCE_READ_STATUS evidence");
+    errors.push("artifact is missing a non-empty Source Read Status section");
   }
 
   const verdictEnums = validation.verdictEnums ?? [];
@@ -431,6 +490,44 @@ export async function validateClaudeArtifact(
     } else if (!verdictEnums.includes(verdict)) {
       errors.push(
         `artifact verdict "${verdict}" is not one of ${verdictEnums.join(", ")}`,
+      );
+    }
+  }
+
+  for (const section of validation.requiredJsonSections ?? []) {
+    const json = extractJsonFenceInSection(text, section);
+    if (json.status === "missing_section") {
+      errors.push(`artifact is missing required JSON section "${section}"`);
+      continue;
+    }
+    if (json.status === "missing_fence") {
+      errors.push(
+        `artifact required JSON section "${section}" is missing a fenced json object`,
+      );
+      continue;
+    }
+    if (json.status === "unterminated_fence") {
+      errors.push(
+        `artifact required JSON section "${section}" has an unterminated fenced json object`,
+      );
+      continue;
+    }
+    if (json.status === "multiple_fences") {
+      errors.push(
+        `artifact required JSON section "${section}" contains multiple fenced json objects`,
+      );
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(json.text) as unknown;
+      if (!isRecord(parsed)) {
+        errors.push(
+          `artifact required JSON section "${section}" JSON must be an object`,
+        );
+      }
+    } catch (error) {
+      errors.push(
+        `artifact required JSON section "${section}" contains invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -595,6 +692,7 @@ async function invokeCmuxRun(input: {
   timeoutSeconds: number;
   env: NodeJS.ProcessEnv;
   runCommand: ClaudeRunnerCommand;
+  maxBufferBytes: number;
 }): Promise<ClaudeRunnerCommandResult> {
   return input.runCommand(
     input.cmuxSpawnBin,
@@ -625,6 +723,7 @@ async function invokeCmuxRun(input: {
       cwd: input.workspace,
       env: { ...input.env },
       timeoutMs: (input.timeoutSeconds + 60) * 1_000,
+      maxBufferBytes: input.maxBufferBytes,
     },
   );
 }
@@ -636,6 +735,7 @@ export async function execFileClaudeRunnerCommand(
     cwd: string;
     env: NodeJS.ProcessEnv;
     timeoutMs: number;
+    maxBufferBytes: number;
   },
 ): Promise<ClaudeRunnerCommandResult> {
   try {
@@ -643,7 +743,7 @@ export async function execFileClaudeRunnerCommand(
       cwd: options.cwd,
       env: options.env,
       timeout: options.timeoutMs,
-      maxBuffer: 20 * 1024 * 1024,
+      maxBuffer: options.maxBufferBytes,
     });
     return { exitCode: 0, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
@@ -716,12 +816,161 @@ function containsMarkdownHeading(text: string, heading: string): boolean {
   return text.split(/\r?\n/).some((line) => headingLineMatches(line, heading));
 }
 
-function headingLineMatches(line: string, heading: string): boolean {
-  const match = /^(#{1,6})\s+(.+?)\s*$/.exec(line.trim());
-  if (match?.[2] === undefined) {
-    return false;
+function hasSourceReadStatusSection(text: string): boolean {
+  const section = extractMarkdownSection(text, "Source Read Status");
+  return section !== null && section.content.trim() !== "";
+}
+
+type JsonFenceResult =
+  | { status: "ok"; text: string }
+  | { status: "missing_section" }
+  | { status: "missing_fence" }
+  | { status: "unterminated_fence" }
+  | { status: "multiple_fences" };
+
+function extractJsonFenceInSection(
+  text: string,
+  heading: string,
+): JsonFenceResult {
+  const section = extractMarkdownSection(text, heading);
+  if (section === null) {
+    return { status: "missing_section" };
   }
-  return normalizeHeading(match[2]) === normalizeHeading(heading);
+  const lines = section.content.split(/\r?\n/);
+  let foundText: string | null = null;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    const opening = parseJsonFenceOpening(line);
+    if (opening === null) {
+      continue;
+    }
+    const body: string[] = [];
+    let closed = false;
+    for (let cursor = index + 1; cursor < lines.length; cursor += 1) {
+      const candidate = lines[cursor] ?? "";
+      if (isClosingFence(candidate, opening)) {
+        if (foundText !== null) {
+          return { status: "multiple_fences" };
+        }
+        foundText = body.join("\n");
+        index = cursor;
+        closed = true;
+        break;
+      }
+      body.push(candidate);
+    }
+    if (!closed) {
+      return { status: "unterminated_fence" };
+    }
+  }
+  return foundText === null
+    ? { status: "missing_fence" }
+    : { status: "ok", text: foundText };
+}
+
+function extractMarkdownSection(
+  text: string,
+  heading: string,
+): { level: number; content: string } | null {
+  const lines = text.split(/\r?\n/);
+  let activeFence: MarkdownFence | null = null;
+  let startIndex: number | null = null;
+  let level = 0;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    activeFence = nextFenceState(activeFence, line);
+    if (activeFence !== null) {
+      continue;
+    }
+    const parsedHeading = parseMarkdownHeading(line);
+    if (parsedHeading === null) {
+      continue;
+    }
+    if (startIndex === null) {
+      if (normalizeHeading(parsedHeading.text) === normalizeHeading(heading)) {
+        startIndex = index + 1;
+        level = parsedHeading.level;
+      }
+      continue;
+    }
+    if (parsedHeading.level <= level) {
+      return { level, content: lines.slice(startIndex, index).join("\n") };
+    }
+  }
+  return startIndex === null
+    ? null
+    : { level, content: lines.slice(startIndex).join("\n") };
+}
+
+interface MarkdownFence {
+  marker: "`" | "~";
+  length: number;
+}
+
+function nextFenceState(
+  activeFence: MarkdownFence | null,
+  line: string,
+): MarkdownFence | null {
+  const match = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+  if (match?.[1] === undefined) {
+    return activeFence;
+  }
+  const marker = match[1][0] as "`" | "~";
+  if (activeFence === null) {
+    return { marker, length: match[1].length };
+  }
+  if (activeFence.marker === marker && match[1].length >= activeFence.length) {
+    return null;
+  }
+  return activeFence;
+}
+
+function parseMarkdownHeading(
+  line: string,
+): { level: number; text: string } | null {
+  const match = /^(#{1,6})\s+(.+?)\s*$/.exec(line.trim());
+  if (match?.[1] === undefined || match[2] === undefined) {
+    return null;
+  }
+  let text = match[2];
+  let closingStart = text.length;
+  while (closingStart > 0 && text[closingStart - 1] === "#") {
+    closingStart -= 1;
+  }
+  if (
+    closingStart < text.length &&
+    closingStart > 0 &&
+    /\s/.test(text[closingStart - 1] ?? "")
+  ) {
+    text = text.slice(0, closingStart).trimEnd();
+  }
+  return { level: match[1].length, text };
+}
+
+function parseJsonFenceOpening(line: string): MarkdownFence | null {
+  const match = /^ {0,3}(`{3,}|~{3,})\s*json\s*$/i.exec(line);
+  const fence = match?.[1];
+  if (fence === undefined) {
+    return null;
+  }
+  return { marker: fence[0] as "`" | "~", length: fence.length };
+}
+
+function isClosingFence(line: string, fence: MarkdownFence): boolean {
+  const trimmed = line.trim();
+  let count = 0;
+  while (trimmed[count] === fence.marker) {
+    count += 1;
+  }
+  return count >= fence.length && trimmed.slice(count).trim() === "";
+}
+
+function headingLineMatches(line: string, heading: string): boolean {
+  const parsedHeading = parseMarkdownHeading(line);
+  return (
+    parsedHeading !== null &&
+    normalizeHeading(parsedHeading.text) === normalizeHeading(heading)
+  );
 }
 
 function normalizeHeading(value: string): string {
@@ -729,6 +978,7 @@ function normalizeHeading(value: string): string {
     .replaceAll(/[`*_]/g, "")
     .replace(/[:.!?–—-]\s*$/u, "")
     .trim()
+    .replace(/\s+/g, " ")
     .toLowerCase();
 }
 
@@ -752,4 +1002,62 @@ async function writeJsonFile(path: string, value: unknown): Promise<void> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function commandDiagnostics(
+  result: ClaudeRunnerCommandResult,
+  maxBytes: number,
+): ClaudeRunnerCommandDiagnostics {
+  return {
+    stdout: boundedText(result.stdout, maxBytes),
+    stderr: boundedText(result.stderr, maxBytes),
+  };
+}
+
+function boundedText(text: string, maxBytes: number): ClaudeRunnerBoundedText {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= maxBytes) {
+    return {
+      text,
+      originalBytes: bytes.length,
+      omittedBytes: 0,
+      truncated: false,
+      maxBytes,
+    };
+  }
+  const truncated = truncateUtf8ByBytes(text, maxBytes);
+  return {
+    text: truncated.text,
+    originalBytes: bytes.length,
+    omittedBytes: bytes.length - truncated.bytes,
+    truncated: true,
+    maxBytes,
+  };
+}
+
+function truncateUtf8ByBytes(
+  text: string,
+  maxBytes: number,
+): { text: string; bytes: number } {
+  let bytes = 0;
+  let end = 0;
+  for (const char of text) {
+    const charBytes = Buffer.byteLength(char, "utf8");
+    if (bytes + charBytes > maxBytes) {
+      break;
+    }
+    bytes += charBytes;
+    end += char.length;
+  }
+  return { text: text.slice(0, end), bytes };
+}
+
+function diagnosticMessage(
+  diagnostics: ClaudeRunnerCommandDiagnostics,
+): string {
+  const stderr = diagnostics.stderr.text.trim();
+  if (stderr !== "") {
+    return stderr;
+  }
+  return diagnostics.stdout.text.trim();
 }
