@@ -290,13 +290,13 @@ describe("spec review", () => {
     });
   });
 
-  it("uses a fixed redacted source intent token for sensitive tickets", () => {
+  it("redacts sensitive tickets and only blocks them when otherwise selected", () => {
     const decisions = selectSpecReviewCandidates({
       issues: [
         makeIssue({
           id: "secret-1",
           identifier: "SYMPH-1",
-          labels: ["security"],
+          labels: ["security", "needs:spec-review"],
           title: "Secret customer key",
           description: "private body",
         }),
@@ -315,6 +315,14 @@ describe("spec review", () => {
         expect.objectContaining({
           status: "blocked",
           sourceIntentHash: SENSITIVE_SOURCE_INTENT_HASH,
+          reasons: ["privacy_sensitive_label"],
+          redactionClass: "sensitive",
+        }),
+        expect.objectContaining({
+          status: "skipped",
+          sourceIntentHash: SENSITIVE_SOURCE_INTENT_HASH,
+          reasons: [],
+          redactionClass: "sensitive",
         }),
       ]),
     );

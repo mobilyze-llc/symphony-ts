@@ -86,7 +86,7 @@ describe("symphony-spec-review-watch CLI", () => {
     const blockedIssue = makeIssue({
       id: "blocked",
       identifier: "SYMPH-2",
-      labels: ["security"],
+      labels: ["security", "needs:spec-review"],
       title: "Secret customer key",
       description: "private body",
     });
@@ -192,6 +192,79 @@ describe("symphony-spec-review-watch CLI", () => {
     );
     expect(selectionArtifact.decisions).toContainEqual(
       expect.objectContaining({
+        issue: expect.objectContaining({
+          title: "[redacted: privacy-sensitive]",
+          description: null,
+        }),
+      }),
+    );
+  });
+
+  it("does not block unrelated sensitive active issues", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    const stdout = vi.fn();
+    const sensitiveIssue = makeIssue({
+      id: "sensitive",
+      identifier: "SYMPH-2",
+      labels: ["security"],
+      title: "Secret customer key",
+      description: "private body",
+    });
+    const appendJournal = vi.fn(async (_workspaceRoot, input) => [
+      makeJournalEntry(input.issue, input.readinessState),
+    ]);
+    const runReview = vi.fn(async ({ issue }) => makeRunResult(issue, "valid"));
+
+    const exitCode = await runSpecReviewWatchCli(
+      ["WORKFLOW.md", "--workspace", workspace, "--mode", "warn"],
+      {
+        stdout,
+        now: () => new Date("2026-06-14T00:00:00.000Z"),
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () => fakeConfig(),
+        createTracker: () => ({
+          fetchIssuesByStates: async () => [sensitiveIssue],
+          fetchIssueReferencesByIds: async () => [],
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+        runSpecReviewForIssue: runReview,
+        appendSpecReviewResultJournal: appendJournal,
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(runReview).not.toHaveBeenCalled();
+    expect(appendJournal).not.toHaveBeenCalled();
+    const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
+      selectionArtifactPath: string;
+      selectedCount: number;
+      results: Array<{ issueIdentifier: string; readinessState: string }>;
+    };
+    expect(output.selectedCount).toBe(0);
+    expect(output.results).toEqual([]);
+    const selectionArtifact = JSON.parse(
+      await readFile(output.selectionArtifactPath, "utf8"),
+    ) as {
+      decisions: Array<{
+        status: string;
+        sourceIntentHash: string;
+        issue: { title: string; description: string | null };
+      }>;
+    };
+    expect(selectionArtifact.decisions).toContainEqual(
+      expect.objectContaining({
+        status: "skipped",
+        sourceIntentHash: SENSITIVE_SOURCE_INTENT_HASH,
         issue: expect.objectContaining({
           title: "[redacted: privacy-sensitive]",
           description: null,

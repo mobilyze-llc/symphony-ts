@@ -236,18 +236,22 @@ export function selectSpecReviewCandidates(input: {
     return {
       issue,
       sourceIntentHash,
-      status: sensitive
-        ? "blocked"
-        : hasCurrentReviewForSourceIntent
+      status:
+        reasons.length === 0
           ? "skipped"
-          : reasons.length > 0
-            ? "selected"
-            : "skipped",
-      reasons: sensitive
-        ? ["privacy_sensitive_label"]
-        : hasCurrentReviewForSourceIntent
-          ? [currentReviewReason]
-          : reasons,
+          : sensitive
+            ? "blocked"
+            : hasCurrentReviewForSourceIntent
+              ? "skipped"
+              : "selected",
+      reasons:
+        reasons.length === 0
+          ? []
+          : sensitive
+            ? ["privacy_sensitive_label"]
+            : hasCurrentReviewForSourceIntent
+              ? [currentReviewReason]
+              : reasons,
       redactionClass: sensitive ? "sensitive" : "standard",
       ticketFeature: feature,
       backlogFindings: findings,
