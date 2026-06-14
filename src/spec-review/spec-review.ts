@@ -1346,9 +1346,40 @@ function isClosingFence(
 }
 
 function markdownHeadingText(line: string): string | null {
-  const match = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/.exec(line);
-  const heading = match?.[1];
-  return heading === undefined ? null : normalizeArtifactHeading(heading);
+  let index = 0;
+  while (index < line.length && line[index] === " ") {
+    index += 1;
+  }
+  if (index > 3) {
+    return null;
+  }
+  let level = 0;
+  while (level < 7 && line[index + level] === "#") {
+    level += 1;
+  }
+  if (level === 0 || level > 6 || !isAsciiWhitespace(line[index + level])) {
+    return null;
+  }
+
+  let heading = line.slice(index + level).trim();
+  if (heading === "") {
+    return null;
+  }
+  let closingStart = heading.length;
+  while (closingStart > 0 && heading[closingStart - 1] === "#") {
+    closingStart -= 1;
+  }
+  if (
+    closingStart < heading.length &&
+    closingStart > 0 &&
+    isAsciiWhitespace(heading[closingStart - 1])
+  ) {
+    heading = heading.slice(0, closingStart).trimEnd();
+  }
+  if (heading === "") {
+    return null;
+  }
+  return normalizeArtifactHeading(heading);
 }
 
 function normalizeArtifactHeading(value: string): string {

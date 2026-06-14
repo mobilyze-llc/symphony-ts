@@ -545,6 +545,96 @@ describe("spec review", () => {
     });
   });
 
+  it("accepts markdown sections with closing heading markers", () => {
+    const artifact = [
+      "## Verdict ###",
+      "",
+      "Verdict enum: ready_as_written",
+      "",
+      "## Review Notes ###",
+      "",
+      "The optional closing markers should not change the section name.",
+      "",
+      "## Reconciliation JSON ###",
+      "",
+      "```json",
+      JSON.stringify({
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "No spec edits needed.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      }),
+      "```",
+    ].join("\n");
+
+    expect(parseSpecReviewArtifact(artifact)).toMatchObject({
+      verdict: "ready_as_written",
+    });
+  });
+
+  it("does not treat empty heading markers as section boundaries", () => {
+    const artifact = [
+      "## Verdict",
+      "",
+      "##   ",
+      "",
+      "Verdict enum: ready_as_written",
+      "",
+      "## Reconciliation JSON",
+      "",
+      "```json",
+      JSON.stringify({
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "No spec edits needed.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      }),
+      "```",
+    ].join("\n");
+
+    expect(parseSpecReviewArtifact(artifact)).toMatchObject({
+      verdict: "ready_as_written",
+    });
+  });
+
+  it("requires whitespace before closing heading markers", () => {
+    const artifact = [
+      "## Verdict##",
+      "",
+      "Verdict enum: ready_as_written",
+      "",
+      "## Reconciliation JSON",
+      "",
+      "```json",
+      JSON.stringify({
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "No spec edits needed.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      }),
+      "```",
+    ].join("\n");
+
+    expect(() => parseSpecReviewArtifact(artifact)).toThrow(
+      "missing a valid verdict enum",
+    );
+  });
+
   it("rejects artifacts whose verdict section does not contain a verdict enum", () => {
     const artifact = [
       "## Verdict",
