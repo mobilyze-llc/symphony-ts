@@ -112,6 +112,99 @@ describe("spec review", () => {
     );
   });
 
+  it("keeps the acyclic source intent hash contract unchanged", () => {
+    const issue = makeIssue({
+      title: "Add durable spec review",
+      description: "Build the thing.\n\n## Acceptance Criteria\n- Works",
+      labels: [],
+      blockedBy: [],
+    });
+
+    expect(computeSourceIntentHash(issue)).toBe(
+      "40f7cf08e18c90e4da8438e8cb2ed289c04ccee050396e665c0526406340fbbd",
+    );
+  });
+
+  it("rejects circular source intent hash inputs with a clear error", () => {
+    const circularState: Record<string, unknown> = {};
+    circularState.self = circularState;
+    const issue = makeIssue({
+      blockedBy: [
+        {
+          id: "blocker",
+          identifier: "SYMPH-200",
+          // Intentional type bypass: inject a circular object where Linear only supplies strings.
+          state: circularState as never,
+        },
+      ],
+    });
+
+    expect(() => computeSourceIntentHash(issue)).toThrow(
+      "Cannot stable-stringify circular value for spec-review source-intent hash.",
+    );
+  });
+
+  it("rejects indirect circular source intent hash inputs", () => {
+    const parent: Record<string, unknown> = {};
+    const child: Record<string, unknown> = { parent };
+    parent.child = child;
+    const issue = makeIssue({
+      blockedBy: [
+        {
+          id: "blocker",
+          identifier: "SYMPH-200",
+          // Intentional type bypass: exercise the hash helper's defensive path.
+          state: parent as never,
+        },
+      ],
+    });
+
+    expect(() => computeSourceIntentHash(issue)).toThrow(
+      "Cannot stable-stringify circular value for spec-review source-intent hash.",
+    );
+  });
+
+  it("allows shared acyclic source intent hash inputs", () => {
+    const sharedState = { kind: "shared" };
+    const issue = makeIssue({
+      blockedBy: [
+        {
+          id: "blocker-a",
+          identifier: "SYMPH-100",
+          // Intentional type bypass: repeated references are not cycles.
+          state: sharedState as never,
+        },
+        {
+          id: "blocker-b",
+          identifier: "SYMPH-200",
+          // Intentional type bypass: repeated references are not cycles.
+          state: sharedState as never,
+        },
+      ],
+    });
+
+    expect(() => computeSourceIntentHash(issue)).not.toThrow();
+  });
+
+  it("rejects circular array source intent hash inputs", () => {
+    const circularState: unknown[] = [];
+    circularState.push(circularState);
+    const issue = makeIssue({
+      blockedBy: [
+        {
+          id: "blocker",
+          identifier: "SYMPH-200",
+          // Intentional type bypass: exercise the hash helper's array cycle guard.
+          state: circularState as never,
+        },
+      ],
+    });
+
+    expect(() => computeSourceIntentHash(issue)).toThrow(
+      "Cannot stable-stringify circular value for spec-review source-intent hash.",
+    );
+  });
+
   it("preserves user-authored headings appended after a generated review section", () => {
     const issue = makeIssue({
       description: "Build the thing.\n",
