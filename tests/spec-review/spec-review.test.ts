@@ -17,6 +17,7 @@ import {
 } from "../../src/logging/runtime-snapshot.js";
 import {
   SENSITIVE_SOURCE_INTENT_HASH,
+  appendSpecReviewResultJournal,
   buildReviewedIssueDescription,
   buildSpecReviewPrompt,
   buildSpecReviewStatusDescription,
@@ -1624,7 +1625,7 @@ describe("spec review", () => {
     expect(updatedDescription).toContain("Operator edit during Claude run.");
   });
 
-  it("journals success readiness before the Linear marker and supersedes it on description failure", async () => {
+  it("writes the Linear marker before success journaling and does not leave a valid row on description failure", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "spec-review-linear-"));
     const artifactRoot = join(workspace, ".artifacts");
     await mkdir(artifactRoot, { recursive: true });
@@ -1722,10 +1723,133 @@ describe("spec review", () => {
     expect(postCommentCalled).toBe(false);
     const journal = await readDispatcherRunJournal(workspace);
     expect(journal.map((entry) => entry.metadata?.readiness_state)).toEqual([
-      "valid",
       "failed",
     ]);
-    expect(readinessAtDescriptionWrite).toEqual(["valid"]);
+    expect(readinessAtDescriptionWrite).toEqual([]);
+    expect(
+      evaluateSpecReviewAdmission({
+        mode: "enforce",
+        required: true,
+        watcherHealthy: true,
+        sourceIntentHash: result.sourceIntentHash,
+        review: {
+          readinessState: "failed",
+          sourceIntentHash: String(
+            journal.at(-1)?.metadata?.source_intent_hash,
+          ),
+          verdict: "ready_as_written",
+        },
+      }),
+    ).toMatchObject({
+      admitted: false,
+      action: "block",
+      reason: "review_not_ready",
+    });
+  });
+
+  it("downgrades the issue marker when success journaling fails after the body write", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-journal-"));
+    const artifactRoot = join(workspace, ".artifacts");
+    await mkdir(artifactRoot, { recursive: true });
+    const artifactPath = join(artifactRoot, "good-review.md");
+    await writeFile(
+      artifactPath,
+      [
+        "## Verdict",
+        "",
+        "Verdict enum: ready_as_written",
+        "",
+        "## Source Read Status",
+        "",
+        "Read the prompt.",
+        "",
+        "## Reconciliation JSON",
+        "",
+        "```json",
+        JSON.stringify({
+          schemaVersion: 1,
+          verdict: "ready_as_written",
+          summary: "Ready.",
+          issueBodyAppend: null,
+          acceptanceCriteria: [],
+          linearDocMarkdown: null,
+          childTicketPlan: [],
+          requiresOperatorContext: false,
+          operatorContextReason: null,
+        }),
+        "```",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const descriptions: string[] = [];
+    let postCommentCalled = false;
+    const result = await runSpecReviewForIssue({
+      issue: makeIssue(),
+      workspaceRoot: workspace,
+      artifactRoot,
+      mode: "observe",
+      writer: {
+        updateIssueDescription: async (_issueId, description) => {
+          descriptions.push(description);
+        },
+        postComment: async () => {
+          postCommentCalled = true;
+        },
+      },
+      appendSpecReviewResultJournal: async (workspaceRoot, input) => {
+        if (input.readinessState === "valid") {
+          throw new Error("journal disk full");
+        }
+        return appendSpecReviewResultJournal(workspaceRoot, input);
+      },
+      runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
+        schemaVersion: 1,
+        status: "passed",
+        purpose: "spec-review",
+        model: "opus",
+        profile: "legacy",
+        workspace,
+        promptFile: runnerInput.promptFile,
+        promptSha256: null,
+        artifactDir: artifactRoot,
+        artifactName: "spec-review-opus",
+        artifactPath,
+        resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
+        cmuxSpawnBin: "cmux-spawn",
+        laneId: "claude-spec-review",
+        phase: "spec-review",
+        startedAt: "2026-06-14T00:00:00.000Z",
+        completedAt: "2026-06-14T00:00:01.000Z",
+        sourceVisibility: {
+          status: "ok",
+          workspace,
+          sources: [],
+        },
+        attempts: [],
+        validationErrors: [],
+        usage: null,
+        message: "complete",
+      }),
+      now: () => new Date("2026-06-14T00:00:00.000Z"),
+    });
+
+    expect(result).toMatchObject({
+      readinessState: "failed",
+      verdict: "ready_as_written",
+      markerCommentPosted: false,
+      message: expect.stringContaining(
+        "journal append failed after Linear write",
+      ),
+    });
+    expect(postCommentCalled).toBe(false);
+    expect(descriptions).toHaveLength(2);
+    expect(descriptions[0]).toContain("- Readiness: `valid`");
+    expect(descriptions[1]).toContain("- Readiness: `failed`");
+    const journal = await readDispatcherRunJournal(workspace);
+    expect(journal.map((entry) => entry.metadata?.readiness_state)).toEqual([
+      "failed",
+    ]);
   });
 
   it("keeps successful readiness when the marker comment fails after durable writes", async () => {
@@ -1909,6 +2033,102 @@ describe("spec review", () => {
     expect(result.readinessState).toBe("valid");
     expect(updatedDescription).toContain("Operator edit during Claude run.");
     expect(updatedDescription).not.toContain("Original body.");
+  });
+
+  it("patches successful reconciliation against the writer's current description", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-patch-"));
+    const artifactRoot = join(workspace, ".artifacts");
+    await mkdir(artifactRoot, { recursive: true });
+    const artifactPath = join(artifactRoot, "good-review.md");
+    await writeFile(
+      artifactPath,
+      [
+        "## Verdict",
+        "",
+        "Verdict enum: ready_as_written",
+        "",
+        "## Source Read Status",
+        "",
+        "Read the prompt.",
+        "",
+        "## Reconciliation JSON",
+        "",
+        "```json",
+        JSON.stringify({
+          schemaVersion: 1,
+          verdict: "ready_as_written",
+          summary: "Ready.",
+          issueBodyAppend: null,
+          acceptanceCriteria: [],
+          linearDocMarkdown: null,
+          childTicketPlan: [],
+          requiresOperatorContext: false,
+          operatorContextReason: null,
+        }),
+        "```",
+      ].join("\n"),
+      "utf8",
+    );
+
+    let updatedDescription = "";
+    const result = await runSpecReviewForIssue({
+      issue: makeIssue({ description: "Original body." }),
+      workspaceRoot: workspace,
+      artifactRoot,
+      mode: "observe",
+      writer: {
+        fetchIssueDescription: async () => {
+          throw new Error(
+            "fetch should not be used when patching is available",
+          );
+        },
+        updateIssueDescription: async () => {
+          throw new Error("whole-body update should not be used");
+        },
+        patchIssueDescription: async (_issueId, patch) => {
+          updatedDescription = patch(
+            "Operator edit immediately before Linear write.",
+          );
+        },
+        postComment: async () => undefined,
+      },
+      runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
+        schemaVersion: 1,
+        status: "passed",
+        purpose: "spec-review",
+        model: "opus",
+        profile: "legacy",
+        workspace,
+        promptFile: runnerInput.promptFile,
+        promptSha256: null,
+        artifactDir: artifactRoot,
+        artifactName: "spec-review-opus",
+        artifactPath,
+        resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
+        cmuxSpawnBin: "cmux-spawn",
+        laneId: "claude-spec-review",
+        phase: "spec-review",
+        startedAt: "2026-06-14T00:00:00.000Z",
+        completedAt: "2026-06-14T00:00:01.000Z",
+        sourceVisibility: {
+          status: "ok",
+          workspace,
+          sources: [],
+        },
+        attempts: [],
+        validationErrors: [],
+        usage: null,
+        message: "complete",
+      }),
+      now: () => new Date("2026-06-14T00:00:00.000Z"),
+    });
+
+    expect(result.readinessState).toBe("valid");
+    expect(updatedDescription).toContain(
+      "Operator edit immediately before Linear write.",
+    );
+    expect(updatedDescription).not.toContain("Original body.");
+    expect(updatedDescription).toContain("- Readiness: `valid`");
   });
 });
 
