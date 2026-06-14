@@ -2784,9 +2784,10 @@ export class OrchestratorCore {
     const timestamp = this.now().toISOString();
     let metadata: Record<string, unknown>;
     try {
-      const outcomeSinceSequence = findLastQueueBaselineSequence(
+      const outcomeWindow = resolveQueueBaselineOutcomeWindow(
         this.state.dispatcherRunJournal,
       );
+      const outcomeSinceSequence = outcomeWindow.sinceSequence;
       const manualJumpsReorders = collectOperatorIntentSamples(
         this.state.dispatcherRunJournal,
         outcomeSinceSequence,
@@ -2848,7 +2849,10 @@ export class OrchestratorCore {
           input.computedOrder?.superseded_native_hard_blockers ?? [],
         outcome_since_sequence: outcomeSinceSequence,
         outcome_window_semantics:
-          "Outcome arrays contain events observed after outcome_since_sequence. urgent_reopen_outcomes may reference the earlier failure it reopened. delivery_outcomes.spend is resource consumption inside the baseline window, not lifetime ticket total.",
+          "Outcome arrays contain events observed after outcome_since_sequence. The first baseline without a prior queue_baseline anchors at the current journal tail so pre-existing history is excluded while considered issues and dispatch picks are still recorded. urgent_reopen_outcomes may reference the earlier failure it reopened. delivery_outcomes.spend is resource consumption inside the baseline window, not lifetime ticket total.",
+        outcome_window_anchor: outcomeWindow.anchor,
+        outcome_window_as_of_sequence: outcomeWindow.asOfSequence,
+        outcome_window_scanned_entry_count: outcomeWindow.scannedEntryCount,
         considered_issue_ids: input.consideredIssues.map((issue) => issue.id),
         considered_issue_identifiers: input.consideredIssues.map(
           (issue) => issue.identifier,
@@ -11822,10 +11826,31 @@ function countUniqueComputedOrderExclusionIssues(
   ).size;
 }
 
-function findLastQueueBaselineSequence(journal: DispatcherRunJournal): number {
-  return (
-    journal.findLast((entry) => entry.kind === "queue_baseline")?.sequence ?? 0
+function resolveQueueBaselineOutcomeWindow(journal: DispatcherRunJournal): {
+  sinceSequence: number;
+  asOfSequence: number;
+  scannedEntryCount: number;
+  anchor: "previous_queue_baseline" | "current_tail_first_sample";
+} {
+  const previousBaseline = journal.findLast(
+    (entry) => entry.kind === "queue_baseline",
   );
+  const asOfSequence = readJournalTailSequence(journal);
+  const sinceSequence = previousBaseline?.sequence ?? asOfSequence;
+  return {
+    sinceSequence,
+    asOfSequence,
+    scannedEntryCount: journal.filter((entry) => entry.sequence > sinceSequence)
+      .length,
+    anchor:
+      previousBaseline === undefined
+        ? "current_tail_first_sample"
+        : "previous_queue_baseline",
+  };
+}
+
+function readJournalTailSequence(journal: DispatcherRunJournal): number {
+  return journal.reduce((tail, entry) => Math.max(tail, entry.sequence), 0);
 }
 
 function formatWarningError(error: unknown): string {
