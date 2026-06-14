@@ -379,15 +379,11 @@ function extractSpecReviewMarker(description: string): {
   sourceIntentHash: string | null;
   readinessState: SpecReviewReadinessState | null;
 } | null {
-  const start = description.indexOf(SPEC_REVIEW_MARKER_START);
-  if (start < 0) {
+  const block = findGeneratedSpecReviewBlock(description);
+  if (block === null) {
     return null;
   }
-  const end = description.indexOf(SPEC_REVIEW_MARKER_END, start);
-  const marker = description.slice(
-    start,
-    end < 0 ? undefined : end + SPEC_REVIEW_MARKER_END.length,
-  );
+  const { marker } = block;
   return {
     sourceIntentHash: extractMarkerValue(marker, "source-intent-hash"),
     readinessState: parseReadinessState(
@@ -929,31 +925,56 @@ export function buildSpecReviewStatusDescription(input: {
 }
 
 export function stripSpecReviewMarker(description: string): string {
-  const start = description.indexOf(SPEC_REVIEW_MARKER_START);
-  if (start < 0) {
+  const block = findGeneratedSpecReviewBlock(description);
+  if (block === null) {
     return description;
   }
-  const end = description.indexOf(SPEC_REVIEW_MARKER_END, start);
-  if (end < 0) {
-    return description.slice(0, start).trimEnd();
+  return joinDescriptionParts(
+    description.slice(0, block.start),
+    description.slice(block.sectionEnd),
+  );
+}
+
+function findGeneratedSpecReviewBlock(description: string): {
+  start: number;
+  marker: string;
+  sectionEnd: number;
+} | null {
+  const start = description.indexOf(SPEC_REVIEW_MARKER_START);
+  if (start < 0) {
+    return null;
+  }
+  const markerEnd = description.indexOf(SPEC_REVIEW_MARKER_END, start);
+  if (markerEnd < 0) {
+    return null;
+  }
+  const markerEndExclusive = markerEnd + SPEC_REVIEW_MARKER_END.length;
+  const marker = description.slice(start, markerEndExclusive);
+  if (!isCompleteGeneratedSpecReviewMarker(marker)) {
+    return null;
   }
   const sectionStart = findGeneratedSpecReviewSectionStart(
     description,
-    end + SPEC_REVIEW_MARKER_END.length,
+    markerEndExclusive,
   );
   if (sectionStart === null) {
-    return joinDescriptionParts(
-      description.slice(0, start),
-      description.slice(end + SPEC_REVIEW_MARKER_END.length),
-    );
+    return null;
   }
   const sectionEnd = findGeneratedSpecReviewSectionEnd(
     description,
     sectionStart,
   );
-  return joinDescriptionParts(
-    description.slice(0, start),
-    description.slice(sectionEnd),
+  if (sectionEnd === null) {
+    return null;
+  }
+  return { start, marker, sectionEnd };
+}
+
+function isCompleteGeneratedSpecReviewMarker(marker: string): boolean {
+  return (
+    extractMarkerValue(marker, "source-intent-hash") !== null &&
+    extractMarkerValue(marker, "review-artifact-sha256") !== null &&
+    parseReadinessState(extractMarkerValue(marker, "readiness-state")) !== null
   );
 }
 
@@ -980,41 +1001,12 @@ function findGeneratedSpecReviewSectionStart(
 function findGeneratedSpecReviewSectionEnd(
   description: string,
   sectionStart: number,
-): number {
+): number | null {
   const endMarker = description.indexOf(SPEC_REVIEW_SECTION_END, sectionStart);
   if (endMarker >= 0) {
     return endMarker + SPEC_REVIEW_SECTION_END.length;
   }
-  const firstLineEnd = description.indexOf("\n", sectionStart);
-  let lineStart = firstLineEnd < 0 ? description.length : firstLineEnd + 1;
-  while (lineStart < description.length) {
-    const lineEnd = description.indexOf("\n", lineStart);
-    const line =
-      lineEnd < 0
-        ? description.slice(lineStart)
-        : description.slice(lineStart, lineEnd);
-    if (isTopLevelUserHeading(line)) {
-      return lineStart;
-    }
-    if (lineEnd < 0) {
-      break;
-    }
-    lineStart = lineEnd + 1;
-  }
-  return description.length;
-}
-
-function isTopLevelUserHeading(line: string): boolean {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith("#")) {
-    return false;
-  }
-  const hashes = trimmed.match(/^#+/)?.[0].length ?? 0;
-  return (
-    hashes <= 2 &&
-    /^#{1,2}\s+/.test(trimmed) &&
-    !/^##\s+Spec Review\b/i.test(trimmed)
-  );
+  return null;
 }
 
 export function formatSpecReviewMarkerComment(input: {
