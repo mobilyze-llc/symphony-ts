@@ -177,10 +177,14 @@ const CONTINUATION_RETRY_DELAY_MS = 1_000;
  */
 const MAX_SAME_CRITERION_REVIEW_FAILURES = 3;
 const SAME_FAMILY_REASONING_TRIPWIRE_COUNT = 2;
-const MAX_REVIEW_SUBSTRATE_STALL_FAILURES = 2;
+const MAX_REVIEW_SUBSTRATE_DEGRADATION_FAILURES = 2;
 const MAX_REVIEW_GATE_ERROR_FAILURES = 2;
-const SUBSTRATE_STALL_REGEX = /\bsubstrate_stall:/i;
-const SUBSTRATE_STALL_PREFIXES = ["substrate_stall:"];
+const REVIEW_SUBSTRATE_DEGRADATION_REGEX =
+  /\b(?:substrate_stall|malformed_substrate_json):/i;
+const REVIEW_SUBSTRATE_DEGRADATION_PREFIXES = [
+  "substrate_stall:",
+  "malformed_substrate_json:",
+];
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
@@ -4602,7 +4606,7 @@ export class OrchestratorCore {
       if (
         failureClass === "infra" &&
         options.emitSideEffects &&
-        this.handleReviewInfrastructureStall(
+        this.handleReviewSubstrateDegradation(
           issueId,
           runningEntry,
           agentMessage,
@@ -4837,23 +4841,23 @@ export class OrchestratorCore {
   }
 
   /**
-   * SYMPH-441: a substrate-stalled council gate is infrastructure, not code
-   * rework. The review worker reports the first occurrence as
+   * SYMPH-441 / SYMPH-511: a degraded council substrate is infrastructure,
+   * not code rework. The review worker reports the first occurrence as
    * `[STAGE_FAILED: infra]`, which retries the same review stage. If another
-   * substrate stall follows, park loudly so operators can relaunch/requeue
-   * without burning another implement round.
+   * same-family substrate degradation follows, park loudly so operators can
+   * relaunch/requeue without burning another implement round.
    */
-  private handleReviewInfrastructureStall(
+  private handleReviewSubstrateDegradation(
     issueId: string,
     runningEntry: RunningEntry,
     agentMessage: string | undefined,
   ): boolean {
     const stageName = this.state.issueStages[issueId] ?? null;
-    if (!isReviewSubstrateStallMessage(agentMessage)) {
-      const hadSubstrateStall =
+    if (!isReviewSubstrateDegradationMessage(agentMessage)) {
+      const hadSubstrateDegradation =
         this.state.issueReviewInfrastructureStalls[issueId] !== undefined;
       delete this.state.issueReviewInfrastructureStalls[issueId];
-      if (hadSubstrateStall && stageName === "review") {
+      if (hadSubstrateDegradation && stageName === "review") {
         delete this.state.issueFailureSignatures[`${issueId}:review`];
       }
       return false;
@@ -4864,11 +4868,11 @@ export class OrchestratorCore {
       return false;
     }
 
-    const stalledLanes = extractSubstrateStallLanes(agentMessage);
+    const stalledLanes = extractReviewSubstrateDegradedLanes(agentMessage);
     const signatureSource =
       stalledLanes.length > 0
-        ? `substrate_stall:${stalledLanes.join(",")}`
-        : "substrate_stall:unknown-lane";
+        ? `review_substrate_degraded:${stalledLanes.join(",")}`
+        : "review_substrate_degraded:unknown-lane";
     const signature = hashReviewInfrastructureSignature(signatureSource);
     const previous = this.state.issueReviewInfrastructureStalls[issueId];
     const count = previous !== undefined ? previous.count + 1 : 1;
@@ -4879,7 +4883,7 @@ export class OrchestratorCore {
     };
     delete this.state.issueFailureSignatures[`${issueId}:review`];
 
-    if (count < MAX_REVIEW_SUBSTRATE_STALL_FAILURES) {
+    if (count < MAX_REVIEW_SUBSTRATE_DEGRADATION_FAILURES) {
       return false;
     }
 
@@ -4907,7 +4911,7 @@ export class OrchestratorCore {
       input.stalledLanes.length > 0
         ? input.stalledLanes.join(", ")
         : "lane set not parseable from worker message";
-    const parkReason = `review gate infrastructure blocked: ${input.count} consecutive substrate_stall failures for ${laneText} (signature ${input.signature}); parked instead of reworking code (SYMPH-441)`;
+    const parkReason = `review gate infrastructure blocked: ${input.count} consecutive review-substrate degradation failures for ${laneText} (signature ${input.signature}); parked instead of reworking code (SYMPH-441/SYMPH-511)`;
     const reworkCount = this.state.issueReworkCounts[issueId] ?? 0;
     const stageHistory = this.state.issueExecutionHistory[issueId] ?? [];
 
@@ -4929,9 +4933,9 @@ export class OrchestratorCore {
       issueId,
       runningEntry.identifier,
       [
-        "## Parked: review gate infrastructure blocked (SYMPH-441)",
+        "## Parked: review gate infrastructure blocked (SYMPH-441/SYMPH-511)",
         "",
-        `The review gate reported ${input.count} consecutive substrate-stall infrastructure failures. Latest stalled lane set: ${laneText}.`,
+        `The review gate reported ${input.count} consecutive review-substrate infrastructure failures. Latest stalled lane set / degraded lane set: ${laneText}.`,
         "",
         "This is not a council FAIL with code findings, and the orchestrator did not dispatch implement rework. Requeue after the council substrate is healthy or relaunch the review gate in a quiet window.",
         "",
@@ -12357,15 +12361,19 @@ function isStopSignalDeliveryStatusConsistent(
     : status === "partial";
 }
 
-function isReviewSubstrateStallMessage(
+function isReviewSubstrateDegradationMessage(
   text: string | null | undefined,
 ): boolean {
   return (
-    text !== null && text !== undefined && SUBSTRATE_STALL_REGEX.test(text)
+    text !== null &&
+    text !== undefined &&
+    REVIEW_SUBSTRATE_DEGRADATION_REGEX.test(text)
   );
 }
 
-function extractSubstrateStallLanes(text: string | null | undefined): string[] {
+function extractReviewSubstrateDegradedLanes(
+  text: string | null | undefined,
+): string[] {
   if (text === null || text === undefined) {
     return [];
   }
@@ -12373,25 +12381,28 @@ function extractSubstrateStallLanes(text: string | null | undefined): string[] {
   const lowerText = text.toLowerCase();
   let searchFrom = 0;
   while (searchFrom < text.length) {
-    const match = findNextSubstrateStallPrefix(lowerText, searchFrom);
+    const match = findNextReviewSubstrateDegradationPrefix(
+      lowerText,
+      searchFrom,
+    );
     if (match === null) {
       break;
     }
     let laneStart = match.index + match.prefix.length;
     while (
       laneStart < text.length &&
-      isSubstrateStallLanePadding(text.charCodeAt(laneStart))
+      isReviewSubstrateLanePadding(text.charCodeAt(laneStart))
     ) {
       laneStart += 1;
     }
     let laneEnd = laneStart;
     while (
       laneEnd < text.length &&
-      !isSubstrateStallLaneDelimiter(text.charCodeAt(laneEnd))
+      !isReviewSubstrateLaneDelimiter(text.charCodeAt(laneEnd))
     ) {
       laneEnd += 1;
     }
-    const lane = trimSubstrateStallLane(text.slice(laneStart, laneEnd));
+    const lane = trimReviewSubstrateLane(text.slice(laneStart, laneEnd));
     if (lane !== "") {
       lanes.add(lane);
     }
@@ -12400,12 +12411,12 @@ function extractSubstrateStallLanes(text: string | null | undefined): string[] {
   return [...lanes].sort();
 }
 
-function findNextSubstrateStallPrefix(
+function findNextReviewSubstrateDegradationPrefix(
   lowerText: string,
   searchFrom: number,
 ): { index: number; prefix: string } | null {
   let best: { index: number; prefix: string } | null = null;
-  for (const prefix of SUBSTRATE_STALL_PREFIXES) {
+  for (const prefix of REVIEW_SUBSTRATE_DEGRADATION_PREFIXES) {
     const index = lowerText.indexOf(prefix, searchFrom);
     if (index !== -1 && (best === null || index < best.index)) {
       best = { index, prefix };
@@ -12414,7 +12425,7 @@ function findNextSubstrateStallPrefix(
   return best;
 }
 
-function isSubstrateStallLaneDelimiter(charCode: number): boolean {
+function isReviewSubstrateLaneDelimiter(charCode: number): boolean {
   return (
     charCode === 9 ||
     charCode === 10 ||
@@ -12427,11 +12438,11 @@ function isSubstrateStallLaneDelimiter(charCode: number): boolean {
   );
 }
 
-function isSubstrateStallLanePadding(charCode: number): boolean {
+function isReviewSubstrateLanePadding(charCode: number): boolean {
   return charCode === 9 || charCode === 32;
 }
 
-function trimSubstrateStallLane(value: string): string {
+function trimReviewSubstrateLane(value: string): string {
   let end = value.length;
   while (end > 0) {
     const charCode = value.charCodeAt(end - 1);

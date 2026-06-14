@@ -214,6 +214,14 @@ export interface StructuredReviewFamilySynthesis
   findingFingerprints: string[];
 }
 
+export interface StructuredReviewParseWarning {
+  code: "missing_triage_severity";
+  category: "triage";
+  rawText: string;
+  message: string;
+  fallbackSeverity: StructuredReviewFindingSeverity;
+}
+
 export interface StructuredReviewFinding {
   fingerprint: string;
   severity: StructuredReviewFindingSeverity;
@@ -263,6 +271,7 @@ export interface StructuredReviewerArtifact {
     triage: string;
   };
   findings: StructuredReviewFinding[];
+  parseWarnings?: StructuredReviewParseWarning[];
   familySyntheses: StructuredReviewFamilySynthesis[];
 }
 
@@ -4536,6 +4545,11 @@ function buildStructuredReviewerArtifact(input: {
       ? []
       : extractChangedPathsFromDiff(input.context.diff),
   );
+  const triage = parseTriageSectionFindings({
+    content: sections.triage,
+    changedPaths,
+    round: input.round,
+  });
   const findings = [
     ...parseSectionFindings({
       severity: "P1",
@@ -4551,14 +4565,7 @@ function buildStructuredReviewerArtifact(input: {
       round: input.round,
       category: "should_fix",
     }),
-    ...parseSectionFindings({
-      severity: "P2",
-      inferSeverity: inferTriageFindingSeverity,
-      content: sections.triage,
-      changedPaths,
-      round: input.round,
-      category: "triage",
-    }),
+    ...triage.findings,
     ...parseSectionFindings({
       severity: "Track",
       content: sections.track,
@@ -4607,6 +4614,7 @@ function buildStructuredReviewerArtifact(input: {
         : null,
     sections,
     findings,
+    parseWarnings: triage.parseWarnings,
     familySyntheses,
   };
 }
@@ -4658,7 +4666,6 @@ function inferArtifactConfidence(
 
 function parseSectionFindings(input: {
   severity: StructuredReviewFindingSeverity;
-  inferSeverity?: (entry: string) => StructuredReviewFindingSeverity;
   content: string;
   changedPaths: ReadonlySet<string>;
   round: number;
@@ -4668,12 +4675,45 @@ function parseSectionFindings(input: {
   return entries.map((entry) =>
     normalizeStructuredFinding({
       rawText: entry,
-      severity: input.inferSeverity?.(entry) ?? input.severity,
+      severity: input.severity,
       changedPaths: input.changedPaths,
       round: input.round,
       category: input.category,
     }),
   );
+}
+
+function parseTriageSectionFindings(input: {
+  content: string;
+  changedPaths: ReadonlySet<string>;
+  round: number;
+}): {
+  findings: StructuredReviewFinding[];
+  parseWarnings: StructuredReviewParseWarning[];
+} {
+  const parseWarnings: StructuredReviewParseWarning[] = [];
+  const findings = sectionFindingEntries(input.content).map((entry) => {
+    const explicitSeverity = extractTriageFindingSeverity(entry);
+    const severity = explicitSeverity ?? "P2";
+    if (explicitSeverity === null) {
+      parseWarnings.push({
+        code: "missing_triage_severity",
+        category: "triage",
+        rawText: entry,
+        message:
+          "Triage row lacked explicit P1/P2/Track/Dismissed severity; defaulted to P2 fail-closed.",
+        fallbackSeverity: "P2",
+      });
+    }
+    return normalizeStructuredFinding({
+      rawText: entry,
+      severity,
+      changedPaths: input.changedPaths,
+      round: input.round,
+      category: "triage",
+    });
+  });
+  return { findings, parseWarnings };
 }
 
 function sectionFindingEntries(section: string): string[] {
@@ -5254,9 +5294,9 @@ function extractIntroducedIn(
   return null;
 }
 
-function inferTriageFindingSeverity(
+function extractTriageFindingSeverity(
   text: string,
-): StructuredReviewFindingSeverity {
+): StructuredReviewFindingSeverity | null {
   const tableSeverity = text
     .replace(/^\|/, "")
     .split("|")
@@ -5265,7 +5305,7 @@ function inferTriageFindingSeverity(
   const severityToken =
     tableSeverity ?? /\b(P1|P2|Track|Dismissed)\b/i.exec(text)?.[1] ?? null;
   if (severityToken === null) {
-    return "P2";
+    return null;
   }
   return normalizeFindingSeverity(severityToken);
 }
@@ -6170,6 +6210,24 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
         finding.family == null ? "" : ` [family: ${finding.family.name}]`;
       lines.push(
         `- ${finding.severity} ${finding.fingerprint} (${laneId}): ${finding.title}${familyLabel}`,
+      );
+    }
+  }
+
+  const parseWarnings = result.lanes.flatMap(
+    (lane) =>
+      lane.structuredArtifact?.parseWarnings?.map((warning) => ({
+        laneId: lane.laneId,
+        warning,
+      })) ?? [],
+  );
+  lines.push("", "## Parse Warnings", "");
+  if (parseWarnings.length === 0) {
+    lines.push("- None");
+  } else {
+    for (const { laneId, warning } of parseWarnings) {
+      lines.push(
+        `- ${laneId}: ${warning.code} (${warning.category}) -> ${warning.fallbackSeverity}; ${warning.message} Raw: ${JSON.stringify(warning.rawText)}`,
       );
     }
   }
