@@ -158,6 +158,8 @@ export interface SpecReviewAdmissionDecision {
     | "review_not_ready";
 }
 
+export const SENSITIVE_SOURCE_INTENT_HASH = "redacted-privacy-sensitive";
+
 const DEFAULT_SELECTION_CONFIG: SpecReviewSelectionConfig = {
   triggerLabels: ["needs:spec-review", "spec-review", "review:spec"],
   highRiskLabelPrefixes: ["risk:", "area:orchestration", "area:review"],
@@ -211,26 +213,34 @@ export function selectSpecReviewCandidates(input: {
     const sensitive = issue.labels.some((label) =>
       /sensitive|private|secret|security/i.test(label),
     );
-    const sourceIntentHash = computeSourceIntentHash(issue);
-    const currentReview = extractSpecReviewMarker(issue.description ?? "");
-    const hasCurrentValidReview =
+    const sourceIntentHash = sensitive
+      ? SENSITIVE_SOURCE_INTENT_HASH
+      : computeSourceIntentHash(issue);
+    const currentReview = sensitive
+      ? null
+      : extractSpecReviewMarker(issue.description ?? "");
+    const hasCurrentReviewForSourceIntent =
       reasons.length > 0 &&
       currentReview?.sourceIntentHash === sourceIntentHash &&
-      currentReview.readinessState === "valid";
+      currentReview.readinessState !== null;
+    const currentReviewReason =
+      currentReview?.readinessState === "valid"
+        ? "current_valid_spec_review"
+        : `current_spec_review:${currentReview?.readinessState ?? "unknown"}`;
     return {
       issue,
       sourceIntentHash,
       status: sensitive
         ? "blocked"
-        : hasCurrentValidReview
+        : hasCurrentReviewForSourceIntent
           ? "skipped"
           : reasons.length > 0
             ? "selected"
             : "skipped",
       reasons: sensitive
         ? ["privacy_sensitive_label"]
-        : hasCurrentValidReview
-          ? ["current_valid_spec_review"]
+        : hasCurrentReviewForSourceIntent
+          ? [currentReviewReason]
           : reasons,
       redactionClass: sensitive ? "sensitive" : "standard",
       ticketFeature: feature,

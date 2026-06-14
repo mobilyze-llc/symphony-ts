@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -143,6 +143,45 @@ describe("Claude CMUX runner", () => {
     expect(result.status).toBe("failed");
     expect(commandCount).toBe(0);
     expect(result.sourceVisibility.status).toBe("invalid_source_path");
+  });
+
+  it("fails before invocation when a declared source symlinks outside the workspace", async () => {
+    const harness = await createHarness();
+    const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-outside-"));
+    const outsideSource = join(outsideDir, "source.md");
+    const linkedSource = join(harness.workspace, "linked-source.md");
+    await writeFile(outsideSource, "outside source\n", "utf8");
+    await symlink(outsideSource, linkedSource);
+
+    let commandCount = 0;
+    const result = await runClaudeCmux(
+      {
+        purpose: "research",
+        workspace: harness.workspace,
+        promptFile: harness.promptFile,
+        artifactDir: harness.artifactDir,
+        artifactName: "opus",
+        sourcePaths: ["linked-source.md"],
+      },
+      {
+        runCommand: async () => {
+          commandCount += 1;
+          return { exitCode: 0, stdout: "{}", stderr: "" };
+        },
+      },
+    );
+
+    expect(result.status).toBe("failed");
+    expect(commandCount).toBe(0);
+    expect(result.sourceVisibility.status).toBe("invalid_source_path");
+    const canonicalOutsideSource = await realpath(outsideSource);
+    expect(result.sourceVisibility.sources[1]).toMatchObject({
+      path: "linked-source.md",
+      resolvedPath: canonicalOutsideSource,
+      insideWorkspace: false,
+      readable: false,
+      error: "source path is outside workspace",
+    });
   });
 
   it("fails fast when cmux preflight fails", async () => {

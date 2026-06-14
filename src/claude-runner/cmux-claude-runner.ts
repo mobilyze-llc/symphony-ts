@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -432,15 +432,18 @@ async function inspectSourceVisibility(input: {
   promptFile: string;
   sourcePaths: readonly string[];
 }): Promise<ClaudeRunnerSourceVisibility> {
+  const workspacePath = resolve(input.workspace);
+  const canonicalWorkspace = await realpathOrSelf(workspacePath);
   const paths = [input.promptFile, ...input.sourcePaths];
   const sources = await Promise.all(
     paths.map(async (sourcePath) => {
-      const resolvedPath = resolve(input.workspace, sourcePath);
-      const insideWorkspace = isInside(input.workspace, resolvedPath);
+      const resolvedPath = resolve(workspacePath, sourcePath);
+      const canonicalPath = await realpathOrSelf(resolvedPath);
+      const insideWorkspace = isInside(canonicalWorkspace, canonicalPath);
       if (!insideWorkspace) {
         return {
           path: sourcePath,
-          resolvedPath,
+          resolvedPath: canonicalPath,
           sha256: null,
           bytes: null,
           readable: false,
@@ -452,7 +455,7 @@ async function inspectSourceVisibility(input: {
         const stats = await stat(resolvedPath);
         return {
           path: sourcePath,
-          resolvedPath,
+          resolvedPath: canonicalPath,
           sha256: await fileSha256(resolvedPath),
           bytes: stats.size,
           readable: true,
@@ -462,7 +465,7 @@ async function inspectSourceVisibility(input: {
       } catch (error) {
         return {
           path: sourcePath,
-          resolvedPath,
+          resolvedPath: canonicalPath,
           sha256: null,
           bytes: null,
           readable: false,
@@ -479,6 +482,14 @@ async function inspectSourceVisibility(input: {
     workspace: input.workspace,
     sources,
   };
+}
+
+async function realpathOrSelf(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch {
+    return path;
+  }
 }
 
 async function invokeCmuxRun(input: {

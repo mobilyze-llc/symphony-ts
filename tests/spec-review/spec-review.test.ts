@@ -15,6 +15,7 @@ import {
   buildStateDelta,
 } from "../../src/logging/runtime-snapshot.js";
 import {
+  SENSITIVE_SOURCE_INTENT_HASH,
   buildReviewedIssueDescription,
   buildSpecReviewPrompt,
   computeSourceIntentHash,
@@ -216,6 +217,79 @@ describe("spec review", () => {
       status: "skipped",
       reasons: ["current_valid_spec_review"],
     });
+  });
+
+  it("skips selected tickets that already have a non-valid review for the same source intent", () => {
+    const issue = makeIssue({
+      labels: ["needs:spec-review"],
+      description: "Build the thing.\n",
+    });
+    const sourceIntentHash = computeSourceIntentHash(issue);
+    const reviewedDescription = buildReviewedIssueDescription({
+      originalDescription: issue.description ?? "",
+      sourceIntentHash,
+      artifactHash: "artifact",
+      artifactPath: "/tmp/artifact.md",
+      mode: "observe",
+      readinessState: "needs_operator_context",
+      verdict: "needs_operator_context",
+      linearDocUrl: null,
+      generatedAt: "2026-06-14T00:00:00.000Z",
+      reconciliation: {
+        schemaVersion: 1,
+        verdict: "needs_operator_context",
+        summary: "Needs operator context.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: true,
+        operatorContextReason: "Missing scope decision.",
+      },
+    });
+
+    expect(
+      selectSpecReviewCandidates({
+        issues: [{ ...issue, description: reviewedDescription }],
+      })[0],
+    ).toMatchObject({
+      status: "skipped",
+      reasons: ["current_spec_review:needs_operator_context"],
+    });
+  });
+
+  it("uses a fixed redacted source intent token for sensitive tickets", () => {
+    const decisions = selectSpecReviewCandidates({
+      issues: [
+        makeIssue({
+          id: "secret-1",
+          identifier: "SYMPH-1",
+          labels: ["security"],
+          title: "Secret customer key",
+          description: "private body",
+        }),
+        makeIssue({
+          id: "secret-2",
+          identifier: "SYMPH-2",
+          labels: ["private"],
+          title: "Different private title",
+          description: "different private body",
+        }),
+      ],
+    });
+
+    expect(decisions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "blocked",
+          sourceIntentHash: SENSITIVE_SOURCE_INTENT_HASH,
+        }),
+      ]),
+    );
+    expect(decisions.map((decision) => decision.sourceIntentHash)).toEqual([
+      SENSITIVE_SOURCE_INTENT_HASH,
+      SENSITIVE_SOURCE_INTENT_HASH,
+    ]);
   });
 
   it("does not strip user-authored Spec Review sections without the sentinel", () => {

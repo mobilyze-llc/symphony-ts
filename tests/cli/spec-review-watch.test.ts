@@ -17,7 +17,10 @@ import type {
   DispatcherRunJournalEntry,
   Issue,
 } from "../../src/domain/model.js";
-import type { SpecReviewRunIssueResult } from "../../src/spec-review/spec-review.js";
+import {
+  SENSITIVE_SOURCE_INTENT_HASH,
+  type SpecReviewRunIssueResult,
+} from "../../src/spec-review/spec-review.js";
 
 describe("symphony-spec-review-watch CLI", () => {
   it("parses workflow, workspace, mode, states, issue filters, and dry-run", () => {
@@ -168,6 +171,7 @@ describe("symphony-spec-review-watch CLI", () => {
     ) as {
       decisions: Array<{
         status: string;
+        sourceIntentHash: string;
         reasons: string[];
         issue: { title: string; description: string | null };
       }>;
@@ -177,6 +181,7 @@ describe("symphony-spec-review-watch CLI", () => {
         expect.objectContaining({ status: "selected" }),
         expect.objectContaining({
           status: "blocked",
+          sourceIntentHash: SENSITIVE_SOURCE_INTENT_HASH,
           reasons: ["privacy_sensitive_label"],
         }),
       ]),
