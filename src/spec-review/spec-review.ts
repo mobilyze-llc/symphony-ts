@@ -707,18 +707,6 @@ export async function runSpecReviewForIssue(
     linearDocUrl,
     generatedAt: now().toISOString(),
   });
-  const entries = await appendSpecReviewResultJournal(input.workspaceRoot, {
-    issue: input.issue,
-    mode: input.mode,
-    sourceIntentHash,
-    readinessState,
-    verdict: parsed.verdict,
-    artifactPath: runner.artifactPath,
-    artifactHash,
-    linearDocUrl,
-    summary: parsed.reconciliation.summary,
-    now: now(),
-  });
   let markerCommentPosted = false;
   try {
     await input.writer.postComment(
@@ -753,7 +741,7 @@ export async function runSpecReviewForIssue(
         now: now(),
       });
     } catch {
-      failedEntries = entries;
+      failedEntries = [];
     }
     return {
       issueId: input.issue.id,
@@ -769,6 +757,18 @@ export async function runSpecReviewForIssue(
       message: summary,
     };
   }
+  const entries = await appendSpecReviewResultJournal(input.workspaceRoot, {
+    issue: input.issue,
+    mode: input.mode,
+    sourceIntentHash,
+    readinessState,
+    verdict: parsed.verdict,
+    artifactPath: runner.artifactPath,
+    artifactHash,
+    linearDocUrl,
+    summary: parsed.reconciliation.summary,
+    now: now(),
+  });
 
   return {
     issueId: input.issue.id,

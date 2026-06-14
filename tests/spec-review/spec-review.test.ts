@@ -10,6 +10,7 @@ import type {
   Issue,
 } from "../../src/domain/model.js";
 import { createInitialOrchestratorState } from "../../src/domain/model.js";
+import { readDispatcherRunJournal } from "../../src/logging/run-journal.js";
 import {
   buildRuntimeSnapshot,
   buildStateDelta,
@@ -806,7 +807,7 @@ describe("spec review", () => {
     expect(updatedDescription).toContain("Operator edit during Claude run.");
   });
 
-  it("returns failed when success-path Linear writes fail after journaling the artifact", async () => {
+  it("does not journal success readiness before Linear writes complete", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "spec-review-linear-"));
     const artifactRoot = join(workspace, ".artifacts");
     await mkdir(artifactRoot, { recursive: true });
@@ -896,6 +897,10 @@ describe("spec review", () => {
       readiness_state: "failed",
       review_verdict: "ready_as_written",
     });
+    const journal = await readDispatcherRunJournal(workspace);
+    expect(journal.map((entry) => entry.metadata?.readiness_state)).toEqual([
+      "failed",
+    ]);
   });
 
   it("uses the latest issue description before writing successful reconciliation", async () => {
