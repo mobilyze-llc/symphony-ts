@@ -147,6 +147,30 @@ printf '{"ok":true}\\n'
     expect(stderr.join("")).toContain("not the symphony-ts checkout");
   });
 
+  it("does not run executable smoke checks from a rejected workspace", async () => {
+    const root = await createTempDir("review-runtime-preflight-rejected-");
+    await mkdir(join(root, "dist/src/cli"), { recursive: true });
+    await writeFile(join(root, "package.json"), '{"name":"symphony-ts"}\n');
+    await writeFile(join(root, "dist/src/cli/council-review-gate.js"), "\n");
+
+    let execCalls = 0;
+    const exitCode = await runReviewRuntimePreflightCli(
+      ["--workspace", root, "--env-file", await envFileWithFakeBinaries(root)],
+      {
+        env: { PATH: "/usr/bin:/bin" },
+        stdout: () => undefined,
+        stderr: () => undefined,
+        execFile: async () => {
+          execCalls += 1;
+          return { stdout: "", stderr: "" };
+        },
+      },
+    );
+
+    expect(exitCode).toBe(1);
+    expect(execCalls).toBe(0);
+  });
+
   it("fails closed with the review-stage cmux guidance when cmux-spawn is missing", async () => {
     const root = await createTempDir("review-runtime-preflight-missing-cmux-");
     const workspace = join(root, "product");

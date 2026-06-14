@@ -135,7 +135,16 @@ export async function runReviewRuntimePreflight(
   const checks: PreflightCheck[] = [];
 
   if (!args.allowSymphonyWorkspace) {
-    checks.push(await checkProductWorkspace(workspace));
+    const workspaceCheck = await checkProductWorkspace(workspace);
+    checks.push(workspaceCheck);
+    if (workspaceCheck.status === "failed") {
+      return {
+        status: "failed",
+        workspace,
+        envFile: args.envFile,
+        checks,
+      };
+    }
   }
 
   const gate = await resolveExecutable({
