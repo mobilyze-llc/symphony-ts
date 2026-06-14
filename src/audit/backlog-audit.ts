@@ -1,5 +1,3 @@
-import { setDefaultAutoSelectFamilyAttemptTimeout } from "node:net";
-
 import { Agent } from "undici";
 import { z } from "zod";
 
@@ -125,26 +123,9 @@ export const DEFAULT_BACKLOG_AUDIT_CHUNK_SIZE = 4;
 const STATE_DELTA_PAGE_LIMIT = 500;
 const MAX_STATE_DELTA_STRING_CHARS = 240;
 
-let networkTimeoutApplied = false;
-function ensureLanTolerantNetworking(): void {
-  if (networkTimeoutApplied) {
-    return;
-  }
-  networkTimeoutApplied = true;
-  try {
-    // Process-global by Node design. This disposable CLI prefers LAN/local
-    // endpoint tolerance over the platform's very short default attempt window.
-    setDefaultAutoSelectFamilyAttemptTimeout(2_000);
-  } catch {
-    // Older runtimes without the setter keep platform defaults.
-  }
-}
-
 export async function runBacklogAudit(
   input: RunBacklogAuditInput,
 ): Promise<BacklogAuditReport> {
-  ensureLanTolerantNetworking();
-
   const verdict = await runLocalModelJudge({
     config: input.config,
     fetchFn: input.fetchFn ?? globalThis.fetch,
@@ -176,34 +157,42 @@ async function runLocalModelJudge(input: {
   fetchFn: typeof fetch;
 }): Promise<BacklogAuditVerdict> {
   const baseUrl = input.config.baseUrl.replace(/\/+$/, "");
-  const response = await input.fetchFn(`${baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(input.config.apiKey === null
-        ? {}
-        : { Authorization: `Bearer ${input.config.apiKey}` }),
-    },
-    body: JSON.stringify({
-      model: input.config.model,
-      messages: [
-        {
-          role: "system",
-          content:
-            "Return only the final JSON object requested by the user. Do not include analysis, prose, Markdown, code fences, or explanations.",
-        },
-        { role: "user", content: input.prompt },
-      ],
-      response_format: { type: "json_object" },
-      chat_template_kwargs: { enable_thinking: false },
-      temperature: 0,
-      max_tokens: 4_096,
-      reasoning_effort: "low",
-    }),
-    signal: AbortSignal.timeout(
-      input.config.timeoutMs ?? DEFAULT_BACKLOG_AUDIT_TIMEOUT_MS,
-    ),
-  });
+  let response: Response;
+  try {
+    response = await input.fetchFn(`${baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(input.config.apiKey === null
+          ? {}
+          : { Authorization: `Bearer ${input.config.apiKey}` }),
+      },
+      body: JSON.stringify({
+        model: input.config.model,
+        messages: [
+          {
+            role: "system",
+            content:
+              "Return only the final JSON object requested by the user. Do not include analysis, prose, Markdown, code fences, or explanations.",
+          },
+          { role: "user", content: input.prompt },
+        ],
+        response_format: { type: "json_object" },
+        chat_template_kwargs: { enable_thinking: false },
+        temperature: 0,
+        max_tokens: 4_096,
+        reasoning_effort: "low",
+      }),
+      signal: AbortSignal.timeout(
+        input.config.timeoutMs ?? DEFAULT_BACKLOG_AUDIT_TIMEOUT_MS,
+      ),
+    });
+  } catch (error) {
+    throw new Error(
+      `POST ${baseUrl}/chat/completions failed before response headers; --timeout-ms governs the local model request, including slow headers. If a .local or LAN endpoint fails address selection, pin --model-base-url to the working IPv4 address.`,
+      { cause: error },
+    );
+  }
   if (!response.ok) {
     throw new Error(
       `POST ${baseUrl}/chat/completions failed with HTTP ${response.status}`,
