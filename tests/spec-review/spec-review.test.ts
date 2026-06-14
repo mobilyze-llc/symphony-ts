@@ -415,6 +415,94 @@ describe("spec review", () => {
     });
   });
 
+  it("parses reconciliation JSON from the reconciliation section, not earlier examples", () => {
+    const artifact = [
+      "## Verdict",
+      "",
+      "Verdict enum: ready_as_written",
+      "",
+      "```json",
+      JSON.stringify({
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "Wrong earlier example.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      }),
+      "```",
+      "",
+      "## Source Read Status",
+      "",
+      "Read the ticket.",
+      "",
+      "## Reconciliation JSON",
+      "",
+      "```json",
+      JSON.stringify({
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "Correct reconciliation.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      }),
+      "```",
+    ].join("\n");
+
+    expect(parseSpecReviewArtifact(artifact).reconciliation.summary).toBe(
+      "Correct reconciliation.",
+    );
+  });
+
+  it("parses wider reconciliation JSON fences with inner markdown fences", () => {
+    const artifact = [
+      "## Verdict",
+      "",
+      "Verdict enum: ready_with_spec_edits",
+      "",
+      "## Source Read Status",
+      "",
+      "Read the ticket.",
+      "",
+      "## Reconciliation JSON",
+      "",
+      "````json",
+      JSON.stringify({
+        schemaVersion: 1,
+        verdict: "ready_with_spec_edits",
+        summary: "Add durable rationale.",
+        issueBodyAppend: null,
+        acceptanceCriteria: ["AC"],
+        linearDocMarkdown: [
+          "# Review",
+          "",
+          "```ts",
+          "const ok = true;",
+          "```",
+        ].join("\n"),
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      }),
+      "````",
+    ].join("\n");
+
+    expect(parseSpecReviewArtifact(artifact)).toMatchObject({
+      verdict: "ready_with_spec_edits",
+      reconciliation: {
+        summary: "Add durable rationale.",
+        linearDocMarkdown: expect.stringContaining("```ts"),
+      },
+    });
+  });
+
   it("parses large JSON fence padding without regex backtracking", () => {
     const artifact = [
       "## Verdict",

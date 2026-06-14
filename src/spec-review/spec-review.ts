@@ -423,7 +423,7 @@ export function parseSpecReviewArtifact(
   if (verdict === null) {
     throw new Error("Spec review artifact is missing a valid verdict enum.");
   }
-  const json = extractFirstJsonFence(text);
+  const json = extractJsonFenceInSection(text, "Reconciliation JSON");
   if (json === null) {
     throw new Error("Spec review artifact is missing reconciliation JSON.");
   }
@@ -1217,18 +1217,91 @@ function normalizeSpecReviewVerdict(value: string): SpecReviewVerdict | null {
   return isSpecReviewVerdict(normalized) ? normalized : null;
 }
 
-function extractFirstJsonFence(text: string): string | null {
-  const lowerText = text.toLowerCase();
-  const fenceStart = lowerText.indexOf("```json");
-  if (fenceStart === -1) {
+function extractJsonFenceInSection(
+  text: string,
+  sectionHeading: string,
+): string | null {
+  const lines = text.split(/\r?\n/);
+  let inSection = false;
+
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    const line = lines[lineIndex] ?? "";
+    if (!inSection) {
+      inSection =
+        markdownHeadingText(line) === normalizeArtifactHeading(sectionHeading);
+      continue;
+    }
+    if (markdownHeadingText(line) !== null) {
+      return null;
+    }
+    const openingFence = parseJsonOpeningFence(line);
+    if (openingFence === null) {
+      continue;
+    }
+    const content: string[] = [];
+    for (
+      let contentLineIndex = lineIndex + 1;
+      contentLineIndex < lines.length;
+      contentLineIndex += 1
+    ) {
+      const contentLine = lines[contentLineIndex] ?? "";
+      if (isClosingFence(contentLine, openingFence)) {
+        return content.join("\n").trim();
+      }
+      content.push(contentLine);
+    }
     return null;
   }
-  let contentStart = fenceStart + "```json".length;
-  while (contentStart < text.length && isAsciiWhitespace(text[contentStart])) {
-    contentStart += 1;
+
+  return null;
+}
+
+function parseJsonOpeningFence(
+  line: string,
+): { marker: "`" | "~"; length: number } | null {
+  const match = /^\s{0,3}(`{3,}|~{3,})\s*json\s*$/i.exec(line);
+  const fence = match?.[1];
+  if (fence === undefined) {
+    return null;
   }
-  const fenceEnd = text.indexOf("```", contentStart);
-  return fenceEnd === -1 ? null : text.slice(contentStart, fenceEnd).trim();
+  return {
+    marker: fence[0] as "`" | "~",
+    length: fence.length,
+  };
+}
+
+function isClosingFence(
+  line: string,
+  fence: { marker: "`" | "~"; length: number },
+): boolean {
+  let index = 0;
+  while (index < line.length && line[index] === " ") {
+    index += 1;
+  }
+  if (index > 3) {
+    return false;
+  }
+  let markerCount = 0;
+  while (line[index + markerCount] === fence.marker) {
+    markerCount += 1;
+  }
+  if (markerCount < fence.length) {
+    return false;
+  }
+  return line
+    .slice(index + markerCount)
+    .split("")
+    .every((character) => isAsciiWhitespace(character));
+}
+
+function markdownHeadingText(line: string): string | null {
+  const match = /^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$/.exec(line);
+  const heading = match?.[1];
+  return heading === undefined ? null : normalizeArtifactHeading(heading);
+}
+
+function normalizeArtifactHeading(value: string): string {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 function isAsciiWhitespace(value: string | undefined): boolean {
