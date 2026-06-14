@@ -51,6 +51,7 @@ import type {
   ContinuousFeedbackEvent,
   DispatcherRunJournal,
   DispatcherRunJournalEntry,
+  DispatcherRunJournalEventKind,
   ExecutionHistory,
   Issue,
   LoopTraceEntry,
@@ -378,6 +379,18 @@ const PIPELINE_RESTART_GUIDANCE = [
   "Add dependency relations and acceptance criteria before adding the Pipeline project.",
   "Once tickets enter Pipeline, wait for active Pipeline issues and runtime lanes to drain before restarting Symphony.",
 ];
+const SNAPSHOT_REFRESH_EXTERNAL_JOURNAL_KINDS =
+  new Set<DispatcherRunJournalEventKind>([
+    "review_round",
+    "fix_round",
+    "review_rework",
+    "review_lane",
+    "review_finding",
+    "review_synthesis",
+    "review_escalation",
+    "review_gate_result",
+    "spec_review_result",
+  ]);
 
 const execFileAsync = promisify(execFile);
 
@@ -389,6 +402,41 @@ const execFileAsync = promisify(execFile);
 function resolveRuntimeRepoRoot(): string {
   const thisFile = fileURLToPath(import.meta.url);
   return resolve(dirname(thisFile), "..", "..", "..");
+}
+
+function mergeDispatcherRunJournals(
+  currentJournal: DispatcherRunJournal,
+  durableJournal: DispatcherRunJournal,
+): DispatcherRunJournal {
+  const seenIdempotencyKeys = new Set(
+    currentJournal.map((entry) => entry.idempotencyKey),
+  );
+  const merged: DispatcherRunJournal = [...currentJournal];
+
+  for (const entry of durableJournal) {
+    if (seenIdempotencyKeys.has(entry.idempotencyKey)) {
+      continue;
+    }
+    seenIdempotencyKeys.add(entry.idempotencyKey);
+    merged.push(entry);
+  }
+
+  return merged.sort((left, right) => {
+    const sequenceDelta = left.sequence - right.sequence;
+    if (sequenceDelta !== 0) {
+      return sequenceDelta;
+    }
+    return left.idempotencyKey.localeCompare(right.idempotencyKey, "en");
+  });
+}
+
+function isSnapshotRefreshExternalJournalEntry(
+  entry: DispatcherRunJournalEntry,
+): boolean {
+  return (
+    entry.lease === null &&
+    SNAPSHOT_REFRESH_EXTERNAL_JOURNAL_KINDS.has(entry.kind)
+  );
 }
 
 export class RuntimeHostStartupError extends Error {
@@ -1281,7 +1329,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     // entries instead of an empty in-memory journal. Idempotent and
     // single-flight (shared hydration task with the poll path). Best-effort:
     // a disk-read failure degrades to in-memory state, never fails the read.
-    await this.ensureDispatcherRunJournalLoaded().catch(() => undefined);
+    await this.refreshDispatcherRunJournalForSnapshot().catch(() => undefined);
     await this.refreshManagerRunJournalForSnapshot();
     const state = this.orchestrator.getState();
     state.managerRuns = reduceManagerRunJournal(state.managerRunJournal, {
@@ -1332,7 +1380,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   }): Promise<StateDeltaResponse> {
     // Same eager hydration as getRuntimeSnapshot: deltas must be served
     // from the durable journal even before the first poll cycle runs.
-    await this.ensureDispatcherRunJournalLoaded().catch(() => undefined);
+    await this.refreshDispatcherRunJournalForSnapshot().catch(() => undefined);
     return buildStateDelta(this.orchestrator.getState().dispatcherRunJournal, {
       sinceSeq: input.sinceSeq,
       ...(input.limit === undefined ? {} : { limit: input.limit }),
@@ -1786,6 +1834,36 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         this.dispatcherRunJournalHydrationTask = null;
       }
     }
+  }
+
+  private async refreshDispatcherRunJournalForSnapshot(): Promise<void> {
+    await this.ensureDispatcherRunJournalLoaded();
+    const workspaceRoot = this.workspaceManager.root;
+    if (this.dispatcherRunJournalRoot !== workspaceRoot) {
+      return;
+    }
+
+    const durableJournal = await this.readDispatcherRunJournal(workspaceRoot);
+    const durableCursor = durableJournal.at(-1)?.sequence ?? 0;
+    const currentCursor = this.orchestrator.getRunJournalCursor();
+    if (durableCursor <= currentCursor) {
+      return;
+    }
+
+    // Snapshot reads may observe standalone read-model writers such as
+    // spec-review watch or council-review gate. Merge those rows directly into
+    // the journal without replaying operational state; mutating dispatcher
+    // effects must still route through the runtime host.
+    const mergedJournal = mergeDispatcherRunJournals(
+      this.orchestrator.getState().dispatcherRunJournal,
+      durableJournal.filter(isSnapshotRefreshExternalJournalEntry),
+    );
+    if ((mergedJournal.at(-1)?.sequence ?? 0) <= currentCursor) {
+      return;
+    }
+
+    this.orchestrator.getState().dispatcherRunJournal = mergedJournal;
+    this.rememberDispatcherRunJournalRoot(workspaceRoot, mergedJournal);
   }
 
   private async compactLoadedDispatcherRunJournal(

@@ -8301,6 +8301,170 @@ describe("state-document enrichment wiring (SYMPH-407)", () => {
     }
   });
 
+  it("refreshes spec-review snapshots after external dispatcher journal appends", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-spec-review-"));
+    try {
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const journalDir = join(workspaceRoot, ".symphony", "run-journals");
+      const journalPath = join(journalDir, "dispatcher.jsonl");
+      mkdirSync(journalDir, { recursive: true });
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({ candidates: [] }),
+        agentRunner: new FakeAgentRunner(),
+        captureDeployDrift: async () => null,
+        now: () => new Date("2026-06-12T10:00:05.000Z"),
+      });
+
+      const emptySnapshot = await host.getRuntimeSnapshot();
+      expect(emptySnapshot.spec_reviews).toEqual({});
+
+      const reviewEntry = createRuntimeJournalEntry({
+        sequence: 1,
+        idempotencyKey: "spec-review:issue-571:hash-571:valid:artifact-571",
+        timestamp: "2026-06-12T10:01:00.000Z",
+        kind: "spec_review_result",
+        issueId: "issue-571",
+        issueIdentifier: "SYMPH-571",
+        operation: "tracker_write",
+        stage: "spec_review",
+        ownerId: "symphony-spec-review-watch",
+        summary: "Spec review completed for SYMPH-571.",
+        metadata: {
+          mode: "warn",
+          source: "symphony-spec-review-watch",
+          source_intent_hash: "hash-571",
+          readiness_state: "valid",
+          review_verdict: "ready_as_written",
+          artifact_path: "/tmp/spec-review/SYMPH-571.md",
+          review_artifact_hash: "artifact-571",
+          linear_doc_url: "https://linear.app/mobilyze-llc/document/spec",
+          completed_at: "2026-06-12T10:01:00.000Z",
+        },
+      });
+      writeFileSync(journalPath, `${JSON.stringify(reviewEntry)}\n`, {
+        flag: "a",
+      });
+
+      const refreshedSnapshot = await host.getRuntimeSnapshot();
+
+      expect(refreshedSnapshot.as_of_sequence).toBe(1);
+      expect(refreshedSnapshot.spec_reviews?.["issue-571"]).toMatchObject({
+        issue_identifier: "SYMPH-571",
+        readiness_state: "valid",
+        verdict: "ready_as_written",
+        mode: "warn",
+        source_intent_hash: "hash-571",
+        review_artifact_hash: "artifact-571",
+        artifact_path: "/tmp/spec-review/SYMPH-571.md",
+        linear_doc_url: "https://linear.app/mobilyze-llc/document/spec",
+        cursor_range: {
+          first_sequence: 1,
+          last_sequence: 1,
+        },
+      });
+
+      const delta = await host.getStateDelta({ sinceSeq: 0 });
+      expect(delta.as_of_sequence).toBe(1);
+      expect(delta.entries).toEqual([
+        expect.objectContaining({
+          kind: "spec_review_result",
+          issueIdentifier: "SYMPH-571",
+        }),
+      ]);
+    } finally {
+      removeWorkspaceWithRetry(workspaceRoot);
+    }
+  });
+
+  it("limits snapshot refreshes to deduped external read-model journal rows", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-read-model-"));
+    try {
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      const journalDir = join(workspaceRoot, ".symphony", "run-journals");
+      const journalPath = join(journalDir, "dispatcher.jsonl");
+      mkdirSync(journalDir, { recursive: true });
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker: createTracker({ candidates: [] }),
+        agentRunner: new FakeAgentRunner(),
+        captureDeployDrift: async () => null,
+        now: () => new Date("2026-06-12T10:00:05.000Z"),
+      });
+
+      await host.getRuntimeSnapshot();
+      const unsupportedExternalEntry = createRuntimeJournalEntry({
+        sequence: 1,
+        kind: "admission",
+        issueId: "issue-ignored",
+        issueIdentifier: "SYMPH-IGNORED",
+        idempotencyKey: "external-admission:issue-ignored",
+      });
+      writeFileSync(
+        journalPath,
+        `${JSON.stringify(unsupportedExternalEntry)}\n`,
+        {
+          flag: "a",
+        },
+      );
+
+      const ignoredSnapshot = await host.getRuntimeSnapshot();
+      expect(ignoredSnapshot.as_of_sequence).toBe(0);
+      expect(ignoredSnapshot.spec_reviews).toEqual({});
+
+      const reviewEntry = createRuntimeJournalEntry({
+        sequence: 2,
+        idempotencyKey: "spec-review:issue-571:hash-571:valid:artifact-571",
+        timestamp: "2026-06-12T10:01:00.000Z",
+        kind: "spec_review_result",
+        issueId: "issue-571",
+        issueIdentifier: "SYMPH-571",
+        operation: "tracker_write",
+        stage: "spec_review",
+        ownerId: "symphony-spec-review-watch",
+        summary: "Spec review completed for SYMPH-571.",
+        metadata: {
+          mode: "warn",
+          source_intent_hash: "hash-571",
+          readiness_state: "valid",
+          review_verdict: "ready_as_written",
+          review_artifact_hash: "artifact-571",
+          completed_at: "2026-06-12T10:01:00.000Z",
+        },
+      });
+      const duplicateReviewEntry = {
+        ...reviewEntry,
+        sequence: 3,
+        summary: "Duplicate spec review row.",
+      };
+      writeFileSync(
+        journalPath,
+        `${JSON.stringify(reviewEntry)}\n${JSON.stringify(duplicateReviewEntry)}\n`,
+        { flag: "a" },
+      );
+
+      const refreshedSnapshot = await host.getRuntimeSnapshot();
+      expect(refreshedSnapshot.as_of_sequence).toBe(2);
+      expect(
+        refreshedSnapshot.spec_reviews?.["issue-571"]?.cursor_range,
+      ).toEqual({
+        first_sequence: 2,
+        last_sequence: 2,
+      });
+
+      const delta = await host.getStateDelta({ sinceSeq: 0 });
+      expect(delta.entries).toHaveLength(1);
+      expect(delta.entries[0]).toMatchObject({
+        sequence: 2,
+        kind: "spec_review_result",
+      });
+    } finally {
+      removeWorkspaceWithRetry(workspaceRoot);
+    }
+  });
+
   it("mirrors the persisted runner file view even when live telemetry exists", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-rl-fileview-"));
     try {
