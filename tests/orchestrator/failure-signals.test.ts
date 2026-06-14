@@ -245,6 +245,115 @@ describe("failure signal routing in onWorkerExit", () => {
     });
   });
 
+  it("retries malformed substrate JSON once, then parks infra-blocked", async () => {
+    const comments: string[] = [];
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+
+    const malformedSubstrateMessage =
+      "Headless council gate error: malformed_substrate_json:claude-opus with no surviving P1/P2 code findings.\n[STAGE_FAILED: infra]";
+    const firstRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: malformedSubstrateMessage,
+    });
+
+    expect(firstRetry).not.toBeNull();
+    expect(firstRetry!.error).toBe("agent reported failure: infra");
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toMatchObject({
+      count: 1,
+      stalledLanes: ["claude-opus"],
+    });
+
+    await orchestrator.onRetryTimer("1");
+    const secondRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: malformedSubstrateMessage,
+    });
+
+    expect(secondRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(orchestrator.getState().failureExhaustedIds.has("1")).toBe(true);
+    await Promise.resolve();
+    expect(comments.join("\n")).toContain(
+      "Parked: review gate infrastructure blocked",
+    );
+    expect(comments.join("\n")).toContain(
+      "review-substrate infrastructure failures",
+    );
+    expect(comments.join("\n")).toContain("degraded lane set");
+    expect(comments.join("\n")).toContain("claude-opus");
+  });
+
+  it("counts mixed review-substrate degradation markers as the same infra family", async () => {
+    const comments: string[] = [];
+    const orchestrator = createStagedOrchestrator({
+      stages: createAgentReviewWorkflowConfig(),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE]",
+    });
+    await orchestrator.onRetryTimer("1");
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+
+    const firstRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: substrate_stall:claude-opus with no surviving P1/P2 code findings.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(firstRetry).not.toBeNull();
+    expect(firstRetry!.error).toBe("agent reported failure: infra");
+    expect(
+      orchestrator.getState().issueReviewInfrastructureStalls["1"],
+    ).toMatchObject({
+      count: 1,
+      stalledLanes: ["claude-opus"],
+    });
+
+    await orchestrator.onRetryTimer("1");
+    const secondRetry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Headless council gate error: malformed_substrate_json:pi-deepseek with no surviving P1/P2 code findings.\n[STAGE_FAILED: infra]",
+    });
+
+    expect(secondRetry).toBeNull();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(orchestrator.getState().failureExhaustedIds.has("1")).toBe(true);
+    await Promise.resolve();
+    expect(comments.join("\n")).toContain(
+      "2 consecutive review-substrate infrastructure failures",
+    );
+    expect(comments.join("\n")).toContain("degraded lane set");
+    expect(comments.join("\n")).toContain("pi-deepseek");
+  });
+
   it("does not let a prior review infra retry make the first substrate stall park as no-novelty", async () => {
     const orchestrator = createStagedOrchestrator({
       stages: createAgentReviewWorkflowConfig(),

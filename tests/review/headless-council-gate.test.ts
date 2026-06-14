@@ -2563,6 +2563,11 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.degradedConditions).toContain(
       "malformed_substrate_json:claude-opus",
     );
+    expect(result.termination).toMatchObject({
+      status: "degraded",
+      reason: "degraded_review_substrate",
+      action: "inspect_review_substrate",
+    });
     await expect(
       readFile(join(harness.artifactDir, "claude-opus.cli.json"), "utf-8"),
     ).resolves.toBe("not json");
@@ -3038,6 +3043,60 @@ describe("runHeadlessCouncilGate", () => {
     );
   });
 
+  it("surfaces malformed required-lane artifacts separately while preserving salvaged PASS text", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "daemon salvaged summary: VERDICT PASS, no blockers, but no required artifact sections",
+        },
+      },
+    });
+    await writeFile(
+      harness.diffPath,
+      "diff --git a/src/orchestrator/core.ts b/src/orchestrator/core.ts\n+const risk = true;\n",
+    );
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-523",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        provenance: [codexImplementerProvenance()],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(result.degradedConditions).toContain(
+      "routing_required_lane_malformed:claude-opus",
+    );
+    expect(result.review_routing?.escalationPredicates).toContain(
+      "malformed_required_lane",
+    );
+    expect(result.termination).toMatchObject({
+      status: "degraded",
+      reason: "degraded_review_substrate",
+      action: "inspect_review_substrate",
+    });
+    const lane = result.lanes.find((entry) => entry.laneId === "claude-opus")!;
+    expect(lane).toMatchObject({
+      verdict: "fail",
+      degradedReason: "malformed_artifact",
+    });
+    expect(result.degradedConditions).toContain(
+      `malformed_artifact:claude-opus:${lane.artifactPath}`,
+    );
+    const rawArtifact = await readFile(lane.rawArtifactPath!, "utf-8");
+    expect(rawArtifact).toContain("daemon salvaged summary: VERDICT PASS");
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain("routing_required_lane_malformed:claude-opus");
+    expect(report).toContain(
+      `malformed_artifact:claude-opus:${lane.artifactPath}`,
+    );
+  });
+
   it("writes versioned structured artifacts with fingerprinted findings", async () => {
     const harness = await createHarness({
       laneBehavior: {
@@ -3475,6 +3534,58 @@ describe("runHeadlessCouncilGate", () => {
         findingFingerprints: [leadArtifact.findings[0]!.fingerprint],
       },
     ]);
+  });
+
+  it("warns on malformed triage rows while preserving fail-closed P2 behavior", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "codex-high-lead": {
+          artifact: [
+            "## Verdict",
+            "FINDINGS",
+            "",
+            "## Triage",
+            "- file.ts:1 missing explicit severity but could be blocking. confidence: 0.93",
+            "- Track | open | new | docs/review.md:5 document a non-blocking follow-up. confidence: 0.8",
+            "",
+            "## Track",
+            "None",
+          ].join("\n"),
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-462",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    const leadArtifact = result.lanes.find(
+      (lane) => lane.laneId === "codex-high-lead",
+    )!.structuredArtifact!;
+    expect(leadArtifact.findings.map((finding) => finding.severity)).toEqual([
+      "P2",
+      "Track",
+    ]);
+    expect(leadArtifact.parseWarnings).toEqual([
+      expect.objectContaining({
+        code: "missing_triage_severity",
+        category: "triage",
+        fallbackSeverity: "P2",
+        rawText: expect.stringContaining("missing explicit severity"),
+      }),
+    ]);
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain("## Parse Warnings");
+    expect(report).toContain("missing_triage_severity");
+    expect(report).toContain("defaulted to P2 fail-closed");
   });
 
   it("keeps h3 subheadings inside artifact sections", async () => {
