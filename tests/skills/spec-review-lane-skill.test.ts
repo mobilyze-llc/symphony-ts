@@ -1,8 +1,9 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -49,6 +50,9 @@ describe("spec-review-lane skill", () => {
   it("wraps the watcher and derives deterministic next actions", () => {
     expect(scriptContent).toContain("symphony-spec-review-watch");
     expect(scriptContent).toContain("--issue-direct");
+    expect(scriptContent).toContain("workspace_dist");
+    expect(scriptContent).toContain("stale_watcher");
+    expect(scriptContent).toContain("missing_executable");
     expect(scriptContent).toContain("nextActionForReadiness");
     expect(scriptContent).toContain(
       "const resolvedPath = isAbsolute(path) ? path : resolve(workspace, path);",
@@ -66,12 +70,18 @@ describe("spec-review-lane skill", () => {
   it("redacts path-bearing watcher args when watcher output is not JSON", () => {
     const tempDir = mkdtempSync(resolve(tmpdir(), "spec-review-lane-"));
     try {
-      const watcherPath = resolve(tempDir, "watcher.mjs");
+      const watcherPath = resolve(tempDir, "watcher.cjs");
       writeFileSync(
         watcherPath,
-        ["#!/usr/bin/env node", 'process.stdout.write("not-json");', ""].join(
-          "\n",
-        ),
+        [
+          "#!/usr/bin/env node",
+          'if (process.argv.includes("--help")) {',
+          '  process.stdout.write("--issue-direct\\n--ticket\\n");',
+          "  process.exit(0);",
+          "}",
+          'process.stdout.write("not-json");',
+          "",
+        ].join("\n"),
       );
       chmodSync(watcherPath, 0o755);
 
@@ -123,6 +133,407 @@ describe("spec-review-lane skill", () => {
     }
   });
 
+  it("uses the workspace built watcher by default and passes direct-ticket args", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "spec-review-lane-"));
+    try {
+      const watcherPath = resolve(tempDir, "dist/src/cli/spec-review-watch.js");
+      mkdirSync(resolve(tempDir, "dist/src/cli"), { recursive: true });
+      writeFileSync(
+        watcherPath,
+        [
+          "#!/usr/bin/env node",
+          'const { writeFileSync } = require("node:fs");',
+          'const { resolve } = require("node:path");',
+          'if (process.argv.includes("--help")) {',
+          '  process.stdout.write("--issue-direct\\n--ticket\\n");',
+          "  process.exit(0);",
+          "}",
+          'writeFileSync(resolve(process.cwd(), "seen-args.json"), JSON.stringify(process.argv.slice(2)));',
+          "process.stdout.write(JSON.stringify({",
+          "  selectedCount: 0,",
+          "  decisions: [],",
+          "  summary: { exitCode: 0 }",
+          "}));",
+          "",
+        ].join("\n"),
+      );
+
+      const output = execFileSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          tempDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(tempDir, "WORKFLOW.md"),
+          "--force",
+          "--dry-run",
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: "",
+            SYMPHONY_SPEC_REVIEW_WATCH_BIN: "",
+          },
+        },
+      );
+
+      const summary = JSON.parse(output) as {
+        status: string;
+        watcherSource: string;
+        selectedCount: number;
+      };
+      const seenArgs = JSON.parse(
+        readFileSync(resolve(tempDir, "seen-args.json"), "utf-8"),
+      ) as string[];
+      expect(summary.status).toBe("completed");
+      expect(summary.watcherSource).toBe("workspace_dist");
+      expect(summary.selectedCount).toBe(0);
+      expect(seenArgs).toContain("--issue-direct");
+      expect(seenArgs).toContain("SYMPH-1");
+      expect(seenArgs).toContain("--force");
+      expect(seenArgs).toContain("--dry-run");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves relative watcher overrides from the workspace for preflight and run", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "spec-review-lane-"));
+    try {
+      const watcherPath = resolve(tempDir, "watcher.cjs");
+      writeFileSync(
+        watcherPath,
+        [
+          "#!/usr/bin/env node",
+          'const { writeFileSync } = require("node:fs");',
+          'const { resolve } = require("node:path");',
+          'if (process.argv.includes("--help")) {',
+          '  process.stdout.write("--issue-direct\\n--ticket\\n");',
+          "  process.exit(0);",
+          "}",
+          'writeFileSync(resolve(process.cwd(), "relative-override-seen.json"), JSON.stringify(process.argv.slice(2)));',
+          "process.stdout.write(JSON.stringify({",
+          "  selectedCount: 0,",
+          "  decisions: [],",
+          "  summary: { exitCode: 0 }",
+          "}));",
+          "",
+        ].join("\n"),
+      );
+      chmodSync(watcherPath, 0o755);
+
+      const output = execFileSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          tempDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(tempDir, "WORKFLOW.md"),
+          "--symphony-spec-review-watch-bin",
+          "./watcher.cjs",
+        ],
+        {
+          cwd: __dirname,
+          encoding: "utf8",
+        },
+      );
+
+      const summary = JSON.parse(output) as {
+        status: string;
+        watcherSource: string;
+      };
+      const seenArgs = JSON.parse(
+        readFileSync(resolve(tempDir, "relative-override-seen.json"), "utf-8"),
+      ) as string[];
+      expect(summary.status).toBe("completed");
+      expect(summary.watcherSource).toBe("override");
+      expect(seenArgs).toContain("--issue-direct");
+      expect(seenArgs).toContain("SYMPH-1");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats backslash-bearing watcher overrides as path-like", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "spec-review-lane-"));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          tempDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(tempDir, "WORKFLOW.md"),
+          "--symphony-spec-review-watch-bin",
+          ".\\missing-watcher.cjs",
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(result.status).toBe(1);
+      const summary = JSON.parse(result.stdout) as {
+        diagnostic: { kind: string };
+        watcherBin: string;
+        watcherSource: string;
+      };
+      expect(summary.diagnostic.kind).toBe("missing_executable");
+      expect(summary.watcherBin).toBe("[path]");
+      expect(summary.watcherSource).toBe("override");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes a missing watcher executable from review failure", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "spec-review-lane-"));
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          tempDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(tempDir, "WORKFLOW.md"),
+          "--dry-run",
+        ],
+        {
+          encoding: "utf8",
+          env: { ...process.env, PATH: "" },
+        },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Spec review watcher is not available");
+      const summary = JSON.parse(result.stdout) as {
+        status: string;
+        diagnostic: { kind: string };
+        rawOutputBytes: number;
+        watcherSource: string;
+      };
+      expect(summary.status).toBe("failed");
+      expect(summary.diagnostic.kind).toBe("missing_executable");
+      expect(summary.rawOutputBytes).toBe(0);
+      expect(summary.watcherSource).toBe("path");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes a stale built watcher that lacks issue-direct support", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "spec-review-lane-"));
+    try {
+      const watcherPath = resolve(tempDir, "dist/src/cli/spec-review-watch.js");
+      mkdirSync(resolve(tempDir, "dist/src/cli"), { recursive: true });
+      writeFileSync(
+        watcherPath,
+        [
+          "#!/usr/bin/env node",
+          'if (process.argv.includes("--help")) {',
+          '  process.stdout.write("--issue\\n--force\\n");',
+          "  process.exit(0);",
+          "}",
+          'process.stdout.write("{}");',
+          "",
+        ].join("\n"),
+      );
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          tempDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(tempDir, "WORKFLOW.md"),
+          "--dry-run",
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("appears stale");
+      const summary = JSON.parse(result.stdout) as {
+        status: string;
+        diagnostic: { kind: string };
+        watcherSource: string;
+      };
+      expect(summary.status).toBe("failed");
+      expect(summary.diagnostic.kind).toBe("stale_watcher");
+      expect(summary.watcherSource).toBe("workspace_dist");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not accept substring-only direct-ticket help flags", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "spec-review-lane-"));
+    try {
+      const watcherPath = resolve(tempDir, "dist/src/cli/spec-review-watch.js");
+      mkdirSync(resolve(tempDir, "dist/src/cli"), { recursive: true });
+      writeFileSync(
+        watcherPath,
+        [
+          "#!/usr/bin/env node",
+          'if (process.argv.includes("--help")) {',
+          '  process.stdout.write("--issue-direct-extra\\n--ticket-extra\\n");',
+          "  process.exit(0);",
+          "}",
+          'process.stdout.write("{}");',
+          "",
+        ].join("\n"),
+      );
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          tempDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(tempDir, "WORKFLOW.md"),
+          "--dry-run",
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(result.status).toBe(1);
+      const summary = JSON.parse(result.stdout) as {
+        diagnostic: { kind: string };
+      };
+      expect(summary.diagnostic.kind).toBe("stale_watcher");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes watcher help preflight failure from stale build", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "spec-review-lane-"));
+    try {
+      const watcherPath = resolve(tempDir, "dist/src/cli/spec-review-watch.js");
+      mkdirSync(resolve(tempDir, "dist/src/cli"), { recursive: true });
+      writeFileSync(
+        watcherPath,
+        [
+          "#!/usr/bin/env node",
+          'if (process.argv.includes("--help")) {',
+          '  process.stderr.write("preflight exploded");',
+          "  process.exit(7);",
+          "}",
+          'process.stdout.write("{}");',
+          "",
+        ].join("\n"),
+      );
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          tempDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(tempDir, "WORKFLOW.md"),
+          "--dry-run",
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(result.status).toBe(7);
+      expect(result.stderr).toContain("help preflight failed");
+      const summary = JSON.parse(result.stdout) as {
+        status: string;
+        diagnostic: { kind: string; exitCode: number };
+        watcherSource: string;
+      };
+      expect(summary.status).toBe("failed");
+      expect(summary.diagnostic.kind).toBe("preflight_failed");
+      expect(summary.diagnostic.exitCode).toBe(7);
+      expect(summary.watcherSource).toBe("workspace_dist");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps downstream watcher review failure separate from wrapper diagnostics", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "spec-review-lane-"));
+    try {
+      const watcherPath = resolve(tempDir, "dist/src/cli/spec-review-watch.js");
+      mkdirSync(resolve(tempDir, "dist/src/cli"), { recursive: true });
+      writeFileSync(
+        watcherPath,
+        [
+          "#!/usr/bin/env node",
+          'if (process.argv.includes("--help")) {',
+          '  process.stdout.write("--issue-direct\\n--ticket\\n");',
+          "  process.exit(0);",
+          "}",
+          "process.stdout.write(JSON.stringify({",
+          "  selectedCount: 1,",
+          "  summary: { exitCode: 1, exitReason: 'error_results' },",
+          "  results: [{",
+          "    issueIdentifier: 'SYMPH-1',",
+          "    readinessState: 'runner_failed',",
+          "    verdict: null,",
+          "    artifactPath: null,",
+          "    linearDocUrl: null",
+          "  }]",
+          "}));",
+          "process.exit(1);",
+          "",
+        ].join("\n"),
+      );
+
+      const result = spawnSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          tempDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(tempDir, "WORKFLOW.md"),
+        ],
+        { encoding: "utf8" },
+      );
+
+      expect(result.status).toBe(1);
+      const summary = JSON.parse(result.stdout) as {
+        status: string;
+        diagnostic: null;
+        results: Array<{ readinessState: string; nextAction: string }>;
+        watcherSource: string;
+      };
+      expect(summary.status).toBe("failed");
+      expect(summary.diagnostic).toBeNull();
+      expect(summary.watcherSource).toBe("workspace_dist");
+      expect(summary.results[0]).toMatchObject({
+        readinessState: "runner_failed",
+        nextAction: "rerun_or_inspect_artifact",
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("reports missing watcher artifact paths as null", () => {
     const tempDir = mkdtempSync(resolve(tmpdir(), "spec-review-lane-"));
     try {
@@ -135,6 +546,10 @@ describe("spec-review-lane skill", () => {
         watcherPath,
         [
           "#!/usr/bin/env node",
+          'if (process.argv.includes("--help")) {',
+          '  process.stdout.write("--issue-direct\\n--ticket\\n");',
+          "  process.exit(0);",
+          "}",
           "process.stdout.write(JSON.stringify({",
           "  selectedCount: 1,",
           `  selectionArtifactPath: ${JSON.stringify(missingSelection)},`,

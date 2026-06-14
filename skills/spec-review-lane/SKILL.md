@@ -25,9 +25,18 @@ skills/spec-review-lane/scripts/run-spec-review-lane.mjs \
   --force
 ```
 
-The wrapper calls `symphony-spec-review-watch` with `--issue-direct` so the
-ticket does not need to be in the watcher's active states or Pipeline project.
-It prints a compact operator summary derived from the watcher's JSON output.
+The wrapper calls the durable watcher with `--issue-direct` so the ticket does
+not need to be in the watcher's active states or Pipeline project. By default it
+uses the built watcher in the target workspace at
+`dist/src/cli/spec-review-watch.js`; if that file does not exist, it falls back
+to `symphony-spec-review-watch` on `PATH`. Run `pnpm build` in the same checkout
+before using the default path, or pass `--symphony-spec-review-watch-bin` for an
+explicit watcher binary.
+
+Before launching a review, the wrapper preflights watcher `--help` and fails
+with an actionable diagnostic if the watcher is missing or stale enough not to
+list `--issue-direct` / `--ticket`. It prints a compact operator summary derived
+from the watcher's JSON output.
 
 Use `--dry-run` first when you only want selection proof:
 
@@ -54,7 +63,9 @@ skills/spec-review-lane/scripts/run-spec-review-lane.mjs \
   watcher default, currently `SPEC.mobilyze.md`.
 - `--artifact-root`: optional artifact directory.
 - `--cmux-spawn-bin`: optional cmux-spawn override.
-- `--symphony-spec-review-watch-bin`: optional watcher binary override.
+- `--symphony-spec-review-watch-bin`: optional watcher binary override. Without
+  this, the wrapper uses workspace `dist/src/cli/spec-review-watch.js`, then
+  `symphony-spec-review-watch` from `PATH`.
 
 ## Operator Summary
 

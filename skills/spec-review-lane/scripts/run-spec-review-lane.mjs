@@ -4,6 +4,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
+const WATCHER_PREFLIGHT_TIMEOUT_MS = 10_000;
+
 const args = parseArgs(process.argv.slice(2));
 if (args.help) {
   console.log(usage());
@@ -41,20 +43,33 @@ if (args.cmuxSpawnBin !== null) {
   watcherArgs.push("--cmux-spawn-bin", args.cmuxSpawnBin);
 }
 
+const resolvedWatcher = resolveWatcherInvocation(args);
 let stdout = "";
 let stderr = "";
 let exitCode = 0;
-try {
-  stdout = execFileSync(args.watcherBin, watcherArgs, {
-    cwd: args.workspace,
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-} catch (error) {
-  exitCode = typeof error.status === "number" ? error.status : 1;
-  stdout = typeof error.stdout === "string" ? error.stdout : "";
-  stderr = typeof error.stderr === "string" ? error.stderr : "";
+let diagnostic = null;
+const preflightFailure = preflightWatcher(resolvedWatcher, args.workspace);
+if (preflightFailure !== null) {
+  diagnostic = preflightFailure;
+  exitCode = preflightFailure.exitCode;
+  stderr = `${preflightFailure.message}\n`;
+} else {
+  try {
+    stdout = execFileSync(
+      resolvedWatcher.file,
+      [...resolvedWatcher.prefixArgs, ...watcherArgs],
+      {
+        cwd: args.workspace,
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+  } catch (error) {
+    exitCode = typeof error.status === "number" ? error.status : 1;
+    stdout = typeof error.stdout === "string" ? error.stdout : "";
+    stderr = typeof error.stderr === "string" ? error.stderr : "";
+  }
 }
 
 if (stderr.trim() !== "") {
@@ -66,10 +81,12 @@ const summary = buildOperatorSummary({
   workspace: args.workspace,
   mode: args.mode,
   dryRun: args.dryRun,
-  watcherBin: args.watcherBin,
+  watcherBin: resolvedWatcher.displayName,
+  watcherSource: resolvedWatcher.source,
   watcherArgs,
   stdout,
   exitCode,
+  diagnostic,
 });
 console.log(JSON.stringify(summary, null, 2));
 process.exitCode = exitCode;
@@ -85,9 +102,7 @@ function parseArgs(argv) {
     sourceRefs: [],
     artifactRoot: null,
     cmuxSpawnBin: null,
-    watcherBin:
-      process.env.SYMPHONY_SPEC_REVIEW_WATCH_BIN ??
-      "symphony-spec-review-watch",
+    watcherBin: stringOrNull(process.env.SYMPHONY_SPEC_REVIEW_WATCH_BIN),
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -141,6 +156,125 @@ function parseArgs(argv) {
   return parsed;
 }
 
+function resolveWatcherInvocation(args) {
+  if (args.watcherBin !== null) {
+    const watcherBin = resolvePathLikeOverride(args.watcherBin, args.workspace);
+    return {
+      file: watcherBin,
+      prefixArgs: [],
+      displayName: watcherBin,
+      source: "override",
+    };
+  }
+  const workspaceBuiltWatcher = resolve(
+    args.workspace,
+    "dist/src/cli/spec-review-watch.js",
+  );
+  if (existsSync(workspaceBuiltWatcher)) {
+    return {
+      file: process.execPath,
+      prefixArgs: [workspaceBuiltWatcher],
+      displayName: workspaceBuiltWatcher,
+      source: "workspace_dist",
+    };
+  }
+  return {
+    file: "symphony-spec-review-watch",
+    prefixArgs: [],
+    displayName: "symphony-spec-review-watch",
+    source: "path",
+  };
+}
+
+function resolvePathLikeOverride(value, workspace) {
+  return isPathLike(value) ? resolve(workspace, value) : value;
+}
+
+function preflightWatcher(watcher, cwd) {
+  let help = "";
+  try {
+    help = execFileSync(watcher.file, [...watcher.prefixArgs, "--help"], {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      timeout: WATCHER_PREFLIGHT_TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+  } catch (error) {
+    const missing = isMissingExecutableError(error);
+    return {
+      kind: missing ? "missing_executable" : "preflight_failed",
+      exitCode: missing
+        ? 1
+        : typeof error.status === "number"
+          ? error.status
+          : 1,
+      message: missing
+        ? missingWatcherMessage(watcher)
+        : `Spec review watcher help preflight failed before review launch. ${errorMessage(error)}`,
+    };
+  }
+  if (
+    !helpIncludesFlag(help, "--issue-direct") ||
+    !helpIncludesFlag(help, "--ticket")
+  ) {
+    return {
+      kind: "stale_watcher",
+      exitCode: 1,
+      message:
+        "Spec review watcher appears stale: --help does not list --issue-direct and --ticket. Run `pnpm build` from this checkout or pass a current watcher with --symphony-spec-review-watch-bin.",
+    };
+  }
+  return null;
+}
+
+function helpIncludesFlag(help, flag) {
+  let index = help.indexOf(flag);
+  while (index !== -1) {
+    const before = help[index - 1];
+    const after = help[index + flag.length];
+    if (isFlagBoundary(before) && isFlagBoundary(after)) {
+      return true;
+    }
+    index = help.indexOf(flag, index + flag.length);
+  }
+  return false;
+}
+
+function isFlagBoundary(char) {
+  return char === undefined || !isFlagNameChar(char);
+}
+
+function isFlagNameChar(char) {
+  if (char === "-" || char === "_") {
+    return true;
+  }
+  const code = char.charCodeAt(0);
+  return (
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122)
+  );
+}
+
+function isMissingExecutableError(error) {
+  return (
+    error?.code === "ENOENT" ||
+    (typeof error?.message === "string" && error.message.includes("ENOENT"))
+  );
+}
+
+function missingWatcherMessage(watcher) {
+  if (watcher.source === "path") {
+    return "Spec review watcher is not available: no repo-local built watcher exists at dist/src/cli/spec-review-watch.js and symphony-spec-review-watch is not on PATH. Run `pnpm build` from the workspace or pass --symphony-spec-review-watch-bin.";
+  }
+  return "Spec review watcher override could not be launched. Check --symphony-spec-review-watch-bin or SYMPHONY_SPEC_REVIEW_WATCH_BIN, or run `pnpm build` and use the workspace default.";
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function readValue(argv, index, option) {
   const value = argv[index];
   if (value === undefined || value.startsWith("--")) {
@@ -170,7 +304,9 @@ function buildOperatorSummary(input) {
       nextAction: input.exitCode === 0 ? "inspect_output" : "inspect_failure",
       rawOutputBytes: Buffer.byteLength(input.stdout),
       watcherBin: redactPathLike(input.watcherBin),
+      watcherSource: input.watcherSource,
       watcherArgs: redactArgs(input.watcherArgs),
+      diagnostic: input.diagnostic,
     };
   }
   const results = Array.isArray(parsed.results) ? parsed.results : [];
@@ -191,6 +327,8 @@ function buildOperatorSummary(input) {
     reconciliation: input.dryRun ? "selection_only" : "durable_watcher",
     status: input.exitCode === 0 ? "completed" : "failed",
     exitCode: input.exitCode,
+    watcherSource: input.watcherSource,
+    diagnostic: input.diagnostic,
     selectedCount:
       typeof parsed.selectedCount === "number" ? parsed.selectedCount : null,
     selectionArtifactPath: existingPathOrNull(
@@ -266,7 +404,11 @@ function redactArgs(args) {
 }
 
 function redactPathLike(value) {
-  return value.includes("/") ? "[path]" : value;
+  return isPathLike(value) ? "[path]" : value;
+}
+
+function isPathLike(value) {
+  return value.includes("/") || value.includes("\\");
 }
 
 function usage() {
@@ -280,7 +422,7 @@ function usage() {
     "  --source-ref <path>                       Source-of-truth file (repeatable)",
     "  --artifact-root <dir>                     Artifact root",
     "  --cmux-spawn-bin <path>                   cmux-spawn override",
-    "  --symphony-spec-review-watch-bin <path>   Watcher binary override",
+    "  --symphony-spec-review-watch-bin <path>   Watcher binary override (default: workspace dist, then PATH)",
     "  --dry-run                                 Selection only",
   ].join("\n");
 }
