@@ -154,6 +154,52 @@ describe("backlog audit", () => {
     });
   });
 
+  it("trims trailing model base URL slashes without regex backtracking", async () => {
+    const fetchFn = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              {
+                message: {
+                  content: JSON.stringify({
+                    summary: "No findings.",
+                    findingTypeVolume: {
+                      duplicate: 0,
+                      supersession: 0,
+                      stale: 0,
+                      thin_spec: 0,
+                      review_dispatch_mismatch: 0,
+                      other: 0,
+                    },
+                    findings: [],
+                  }),
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+    );
+
+    await runBacklogAudit({
+      config: {
+        baseUrl: "http://studio2.local:8000/v1///",
+        model: "deepseek-v4-flash",
+        apiKey: null,
+        timeoutMs: 60_000,
+      },
+      issues: [ISSUE],
+      runtimeEvidence: RUNTIME_EVIDENCE,
+      fetchFn: fetchFn as unknown as typeof fetch,
+    });
+
+    expect(fetchFn).toHaveBeenCalledWith(
+      "http://studio2.local:8000/v1/chat/completions",
+      expect.any(Object),
+    );
+  });
+
   it("strips structured boundary tags from every prompt-visible tracker field", () => {
     const prompt = buildBacklogAuditPrompt(
       [
