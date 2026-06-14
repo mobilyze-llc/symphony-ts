@@ -28,16 +28,19 @@ const FENCE_BYPASS_TAGS = [
   "<worker-message>",
   "<worker_>",
   "<worker->",
+  "</worker_<worker_x>message>",
   "</ticket_title >",
   "<ticket_title/>",
   "<ticket_title data-prompt=x>",
   "<ticket-title>",
   "<ticket_>",
   "<ticket->",
+  "</ticket_<ticket_x>title>",
   "</diff >",
   "<diff/>",
   "<diff data-prompt=x>",
   "<diff-content>",
+  "</di<diff_x>ff>",
 ];
 
 function chatCompletionResponse(content: string): Response {

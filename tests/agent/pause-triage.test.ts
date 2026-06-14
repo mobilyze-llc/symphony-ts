@@ -46,12 +46,14 @@ const FENCE_BYPASS_TAGS = [
   "<worker-message>",
   "<worker_>",
   "<worker->",
+  "</worker_<worker_x>message>",
   "</tracker_title >",
   "<tracker_title/>",
   "<tracker_title data-prompt=x>",
   "<tracker-title>",
   "<tracker_>",
   "<tracker->",
+  "</tracker_<tracker_x>title>",
 ];
 
 function chatCompletionResponse(content: string): Response {
