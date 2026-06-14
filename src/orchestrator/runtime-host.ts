@@ -226,7 +226,23 @@ export interface WorkerStopSignalDeliveryInput {
 export type DeliverWorkerStopSignal = (
   input: WorkerStopSignalDeliveryInput,
 ) => Promise<StopSignalDelivery>;
-type WorkspaceCwdProcessLister = (workspacePath: string) => Promise<number[]>;
+type WorkspaceCwdRecheckSkipReason =
+  | "current_cwd_unavailable"
+  | "current_cwd_timed_out"
+  | "current_cwd_outside_workspace";
+interface WorkspaceCwdRecheckSkip {
+  pid: number;
+  discoveredCwdPath: string;
+  currentCwdPath: string | null;
+  reason: WorkspaceCwdRecheckSkipReason;
+}
+interface WorkspaceCwdProcessListerOptions {
+  onSkippedRecheck?: (skip: WorkspaceCwdRecheckSkip) => void | Promise<void>;
+}
+type WorkspaceCwdProcessLister = (
+  workspacePath: string,
+  options?: WorkspaceCwdProcessListerOptions,
+) => Promise<number[]>;
 type ProcessIdentityReader = (
   pid: number,
 ) => Promise<ProcessIdentitySnapshot | null>;
@@ -351,6 +367,11 @@ interface WorkerExecution {
 /** Maximum ms to wait for idle workers during shutdown before forcing exit. */
 const SHUTDOWN_IDLE_TIMEOUT_MS = 30_000;
 const PIPELINE_HALT_LABEL = "pipeline-halt";
+// Workspace-cwd orphan discovery rechecks at most 8 PIDs at a time, each with
+// a 5s cap, so worst-case recheck latency is ceil(candidate_count / 8) * 5s.
+const WORKSPACE_CWD_RECHECK_CONCURRENCY = 8;
+const WORKSPACE_CWD_RECHECK_TIMEOUT_MS = 5_000;
+const WORKSPACE_CWD_RECHECK_SKIP_LOG_LIMIT = 20;
 
 const PIPELINE_RESTART_GUIDANCE = [
   "Stage candidate tickets outside Pipeline first.",
@@ -514,7 +535,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       options.writeDispatcherRunJournalEntry ??
       appendDispatcherRunJournalEntryToDisk;
     this.listWorkspaceCwdProcessIds =
-      options.listWorkspaceCwdProcessIds ?? listWorkspaceCwdProcessIdsFromLsof;
+      options.listWorkspaceCwdProcessIds ??
+      ((workspacePath, listerOptions) =>
+        listWorkspaceCwdProcessIdsFromLsof(workspacePath, listerOptions));
     this.readProcessIdentity =
       options.readProcessIdentity ?? readProcessIdentityDefault;
     this.compactDispatcherRunJournal =
@@ -3757,7 +3780,24 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       // This fallback only discovers processes whose cwd is still inside the
       // workspace. Descendants that chdir elsewhere must be contained by the
       // tracked PID/process-tree stop path instead of this lsof sweep.
-      const pidsToKill = await this.listWorkspaceCwdProcessIds(workspacePath);
+      const skippedCwdRechecks: WorkspaceCwdRecheckSkip[] = [];
+      let skippedCwdRecheckCount = 0;
+      const pidsToKill = await this.listWorkspaceCwdProcessIds(workspacePath, {
+        onSkippedRecheck: (skip) => {
+          skippedCwdRecheckCount += 1;
+          if (
+            skippedCwdRechecks.length < WORKSPACE_CWD_RECHECK_SKIP_LOG_LIMIT
+          ) {
+            skippedCwdRechecks.push(skip);
+          }
+        },
+      });
+      await this.logWorkspaceCwdRecheckSkips({
+        issueIdentifier,
+        workspacePath,
+        skippedCount: skippedCwdRecheckCount,
+        skipped: skippedCwdRechecks,
+      });
 
       if (pidsToKill.length > 0) {
         type OrphanCleanupOutcome = {
@@ -3859,6 +3899,39 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       }
     } catch {
       // Best-effort — lsof unavailable or other failure should not block finalization
+    }
+  }
+
+  private async logWorkspaceCwdRecheckSkips(input: {
+    issueIdentifier: string;
+    workspacePath: string;
+    skippedCount: number;
+    skipped: WorkspaceCwdRecheckSkip[];
+  }): Promise<void> {
+    if (input.skippedCount === 0) {
+      return;
+    }
+    try {
+      await this.logger?.warn(
+        "workspace_cwd_recheck_skipped",
+        `Skipped ${input.skippedCount} workspace-cwd candidate process(es) whose current cwd could not be verified.`,
+        {
+          outcome: "degraded",
+          issue_identifier: input.issueIdentifier,
+          workspace_path: input.workspacePath,
+          discovery: "workspace_cwd",
+          skipped_count: input.skippedCount,
+          truncated: input.skippedCount > WORKSPACE_CWD_RECHECK_SKIP_LOG_LIMIT,
+          skipped_rechecks: input.skipped.map((skip) => ({
+            pid: skip.pid,
+            reason: skip.reason,
+            discovered_cwd_path: skip.discoveredCwdPath,
+            current_cwd_path: skip.currentCwdPath,
+          })),
+        },
+      );
+    } catch {
+      // Logging is diagnostic only; cleanup remains best-effort fail-open.
     }
   }
 
@@ -5673,12 +5746,14 @@ export async function deliverTrackedWorkerStopSignal(
 
 async function listWorkspaceCwdProcessIdsFromLsof(
   workspacePath: string,
+  options?: WorkspaceCwdProcessListerOptions,
 ): Promise<number[]> {
   const { stdout } = await execFileAsync("lsof", ["-d", "cwd", "-Fpn"], {
     timeout: 5000,
   });
   return findWorkspaceCwdProcessIds(String(stdout), workspacePath, {
     readCurrentProcessCwd: readProcessCwd,
+    onSkippedRecheck: options?.onSkippedRecheck,
   });
 }
 
@@ -5825,9 +5900,12 @@ export async function findWorkspaceCwdProcessIds(
   workspacePath: string,
   options?: {
     readCurrentProcessCwd?: (pid: number) => Promise<string | null>;
+    recheckConcurrency?: number;
+    recheckTimeoutMs?: number;
+    onSkippedRecheck?: WorkspaceCwdProcessListerOptions["onSkippedRecheck"];
   },
 ): Promise<number[]> {
-  const pids: number[] = [];
+  const candidates: LsofCwdProcessEntry[] = [];
   const seen = new Set<number>();
 
   for (const entry of parseLsofCwdProcessEntries(stdout)) {
@@ -5837,20 +5915,129 @@ export async function findWorkspaceCwdProcessIds(
     if (!(await directoryIsWithinWorkspace(entry.cwdPath, workspacePath))) {
       continue;
     }
-    if (options?.readCurrentProcessCwd !== undefined) {
-      const currentCwd = await options.readCurrentProcessCwd(entry.pid);
-      if (
-        currentCwd === null ||
-        !(await directoryIsWithinWorkspace(currentCwd, workspacePath))
-      ) {
-        continue;
-      }
-    }
     seen.add(entry.pid);
-    pids.push(entry.pid);
+    candidates.push(entry);
   }
 
-  return pids;
+  const readCurrentProcessCwd = options?.readCurrentProcessCwd;
+  const onSkippedRecheck = options?.onSkippedRecheck;
+  if (readCurrentProcessCwd === undefined) {
+    return candidates.map((entry) => entry.pid);
+  }
+
+  const recheckConcurrency = normalizePositiveInteger(
+    options?.recheckConcurrency,
+    WORKSPACE_CWD_RECHECK_CONCURRENCY,
+  );
+  const recheckTimeoutMs = normalizePositiveInteger(
+    options?.recheckTimeoutMs,
+    WORKSPACE_CWD_RECHECK_TIMEOUT_MS,
+  );
+  const checkedPids = await mapWithConcurrency(
+    candidates,
+    recheckConcurrency,
+    async (entry): Promise<number | null> => {
+      const currentCwd = await readCurrentProcessCwdWithTimeout(
+        readCurrentProcessCwd,
+        entry.pid,
+        recheckTimeoutMs,
+      );
+      if (currentCwd.cwdPath === null) {
+        await notifyWorkspaceCwdRecheckSkipped(onSkippedRecheck, {
+          pid: entry.pid,
+          discoveredCwdPath: entry.cwdPath,
+          currentCwdPath: null,
+          reason: currentCwd.timedOut
+            ? "current_cwd_timed_out"
+            : "current_cwd_unavailable",
+        });
+        return null;
+      }
+      if (
+        !(await directoryIsWithinWorkspace(currentCwd.cwdPath, workspacePath))
+      ) {
+        await notifyWorkspaceCwdRecheckSkipped(onSkippedRecheck, {
+          pid: entry.pid,
+          discoveredCwdPath: entry.cwdPath,
+          currentCwdPath: currentCwd.cwdPath,
+          reason: "current_cwd_outside_workspace",
+        });
+        return null;
+      }
+      return entry.pid;
+    },
+  );
+
+  return checkedPids.filter((pid): pid is number => pid !== null);
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const indexedItems = items.map((item, index) => ({ index, item }));
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workers = Array.from(
+    { length: Math.min(concurrency, indexedItems.length) },
+    async () => {
+      while (nextIndex < indexedItems.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        const next = indexedItems[index];
+        if (next !== undefined) {
+          results[next.index] = await fn(next.item);
+        }
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
+}
+
+async function readCurrentProcessCwdWithTimeout(
+  readCurrentProcessCwd: (pid: number) => Promise<string | null>,
+  pid: number,
+  timeoutMs: number,
+): Promise<{ cwdPath: string | null; timedOut: boolean }> {
+  let timer: NodeJS.Timeout | null = null;
+  const currentCwd = readCurrentProcessCwd(pid).then(
+    (cwdPath) => ({ cwdPath, timedOut: false }),
+    () => ({ cwdPath: null, timedOut: false }),
+  );
+  const timeout = new Promise<{ cwdPath: null; timedOut: true }>((resolve) => {
+    timer = setTimeout(() => {
+      resolve({ cwdPath: null, timedOut: true });
+    }, timeoutMs);
+  });
+  const result = await Promise.race([currentCwd, timeout]);
+  if (timer !== null) {
+    clearTimeout(timer);
+  }
+  return result;
+}
+
+async function notifyWorkspaceCwdRecheckSkipped(
+  onSkippedRecheck:
+    | WorkspaceCwdProcessListerOptions["onSkippedRecheck"]
+    | undefined,
+  skip: WorkspaceCwdRecheckSkip,
+): Promise<void> {
+  try {
+    await onSkippedRecheck?.(skip);
+  } catch {
+    // Skip telemetry is diagnostic only; discovery remains best-effort.
+  }
+}
+
+function normalizePositiveInteger(
+  value: number | null | undefined,
+  fallback: number,
+): number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0
+    ? value
+    : fallback;
 }
 
 function parseLsofCwdTableEntry(line: string): LsofCwdProcessEntry | null {
