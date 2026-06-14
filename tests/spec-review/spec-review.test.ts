@@ -1183,6 +1183,7 @@ describe("spec review", () => {
 
     expect(result).toMatchObject({
       readinessState: "failed",
+      verdict: "ready_as_written",
       markerCommentPosted: false,
       message: expect.stringContaining("Linear write failed"),
     });
