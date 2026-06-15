@@ -433,6 +433,11 @@ rerun `scripts/assert-clean-pass.py --closeout` and refresh
 checks PR/diff provenance; the closeout assertion additionally rejects
 missing, non-complete, tiny, or malformed Phase 1 reviewer artifacts.
 Do not report a clean PASS from the setup-time assertion alone.
+`assert-clean-pass.py --closeout` validates reviewer evidence quality and
+provenance, not the final triage outcome and not that every reviewer artifact
+verdict is `PASS`; a Phase 1 artifact whose verdict is `FINDINGS` can still be
+contract-valid evidence. Phase 3 triage remains the authority for surviving
+P1/P2 blockers and merge readiness.
 
 Triage process:
 

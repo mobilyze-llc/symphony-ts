@@ -36,6 +36,7 @@ write_case() {
 
 write_completed_reviewer_artifact() {
   local dir="$1"
+  local message="${2:-Review complete}"
   local head_sha
   head_sha="$(cat "$dir/pr-head-sha.txt")"
 
@@ -62,7 +63,7 @@ None
 EOF
 
   cat > "$dir/phase1-opus.status.json" <<EOF
-{"schema":"agent-harness.lane-status.v1","agent":"claude","lane":"phase1-opus","phase":"phase1-opus","state":"complete","message":"Review complete","artifact":"$dir/phase1-opus.md"}
+{"schema":"agent-harness.lane-status.v1","agent":"claude","lane":"phase1-opus","phase":"phase1-opus","state":"complete","message":"$message","artifact":"$dir/phase1-opus.md"}
 EOF
 }
 
@@ -91,6 +92,17 @@ expect_fail() {
   echo "PASS $name"
 }
 
+expect_closeout_fail() {
+  local name="$1"
+  local dir="$2"
+  if "$ASSERT" --closeout "$dir" > "$dir/assertion.out" 2> "$dir/assertion.err"; then
+    echo "Expected failure but helper passed: $name" >&2
+    cat "$dir/assertion.out" >&2
+    exit 1
+  fi
+  echo "PASS $name"
+}
+
 clean="$WORK_DIR/clean-draft"
 write_case "$clean" "PR-backed draft" "true" "0" "" "match" "exact"
 expect_pass "matching PR-backed draft" "$clean"
@@ -99,6 +111,19 @@ closeout="$WORK_DIR/clean-closeout"
 write_case "$closeout" "PR-backed draft" "true" "0" "" "match" "exact"
 write_completed_reviewer_artifact "$closeout"
 expect_closeout_pass "matching PR-backed draft closeout" "$closeout"
+
+diagnostic_status="$WORK_DIR/diagnostic-status"
+write_case "$diagnostic_status" "PR-backed draft" "true" "0" "" "match" "exact"
+write_completed_reviewer_artifact "$diagnostic_status" "Review complete: 2 P1s mentioned in diagnostic status"
+expect_closeout_pass "valid artifact is authoritative over blocker-claiming status" "$diagnostic_status"
+
+thin_status="$WORK_DIR/thin-status"
+write_case "$thin_status" "PR-backed draft" "true" "0" "" "match" "exact"
+printf '%s\n' "P1 and P2 summary only" > "$thin_status/phase1-opus.md"
+cat > "$thin_status/phase1-opus.status.json" <<EOF
+{"schema":"agent-harness.lane-status.v1","agent":"claude","lane":"phase1-opus","phase":"phase1-opus","state":"complete","message":"Review complete: 1 P1","artifact":"$thin_status/phase1-opus.md"}
+EOF
+expect_closeout_fail "thin artifact with blocker-claiming status" "$thin_status"
 
 safe_base="$WORK_DIR/safe-base-equivalence"
 write_case "$safe_base" "PR-backed draft" "true" "0" "" "match" "origin-prefix-equivalent"
