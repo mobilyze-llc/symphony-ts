@@ -1178,7 +1178,7 @@ function reduceCouncilReviewEntries(
       if (degradedReason !== null) {
         degradedReasons.add(degradedReason);
       }
-      if (parseStatus !== null && parseStatus !== "ok") {
+      if (parseStatus === "malformed") {
         malformedLaneCount += 1;
       }
       const laneId = stringField(metadata.lane_id);

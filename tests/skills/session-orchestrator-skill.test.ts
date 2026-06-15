@@ -692,6 +692,11 @@ describe("session-orchestrator skill", () => {
       const councilReport = resolve(tempDir, "council-report.md");
       const evidencePath = resolve(tempDir, "closeout-review-evidence.json");
       writeFileSync(councilReport, "# Council report\n");
+      writeFileSync(resolve(tempDir, "pr-head-sha.txt"), `${HEAD_SHA}\n`);
+      writeFileSync(
+        resolve(tempDir, "assert-clean-pass.txt"),
+        "PASS council-review clean PASS assertion\n",
+      );
       writeFileSync(
         evidencePath,
         JSON.stringify({
@@ -729,6 +734,11 @@ describe("session-orchestrator skill", () => {
       const councilReport = resolve(tempDir, "council-report.md");
       const evidencePath = resolve(tempDir, "closeout-review-evidence.json");
       writeFileSync(councilReport, "# Council report\n");
+      writeFileSync(resolve(tempDir, "pr-head-sha.txt"), `${HEAD_SHA}\n`);
+      writeFileSync(
+        resolve(tempDir, "assert-clean-pass.txt"),
+        "PASS council-review clean PASS assertion\n",
+      );
       writeFileSync(
         evidencePath,
         JSON.stringify({
@@ -764,6 +774,14 @@ describe("session-orchestrator skill", () => {
       const evidencePath = resolve(tempDir, "closeout-review-evidence.json");
       writeFileSync(councilReport, "# Council report\n");
       writeFileSync(
+        resolve(tempDir, "pr-head-sha.txt"),
+        "2222222222222222222222222222222222222222\n",
+      );
+      writeFileSync(
+        resolve(tempDir, "assert-clean-pass.txt"),
+        "PASS council-review clean PASS assertion\n",
+      );
+      writeFileSync(
         evidencePath,
         JSON.stringify({
           schemaVersion: 1,
@@ -784,6 +802,50 @@ describe("session-orchestrator skill", () => {
 
       expect(checkpoint.status).toBe(1);
       expect(checkpoint.stdout).toContain("does not match reported head");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks pass evidence when the council artifact records a stale PR head", () => {
+    const tempDir = mkdtempSync(
+      resolve(tmpdir(), "review-checkpoint-stale-artifact-"),
+    );
+    try {
+      const councilReport = resolve(tempDir, "council-report.md");
+      const evidencePath = resolve(tempDir, "closeout-review-evidence.json");
+      writeFileSync(councilReport, "# Council report\n");
+      writeFileSync(
+        resolve(tempDir, "pr-head-sha.txt"),
+        "2222222222222222222222222222222222222222\n",
+      );
+      writeFileSync(
+        resolve(tempDir, "assert-clean-pass.txt"),
+        "PASS council-review clean PASS assertion\n",
+      );
+      writeFileSync(
+        evidencePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          outcome: "pass",
+          prUrl: "https://github.com/mobilyze-llc/symphony-ts/pull/1",
+          reviewedHeadSha: HEAD_SHA,
+          councilArtifactPath: councilReport,
+          cleanPassAssertionExitCode: 0,
+        }),
+      );
+
+      const checkpoint = runReviewEvidenceCheckpoint([
+        "--evidence",
+        evidencePath,
+        "--reported-head",
+        HEAD_SHA,
+      ]);
+
+      expect(checkpoint.status).toBe(1);
+      expect(checkpoint.stdout).toContain(
+        "council artifact PR head 2222222222222222222222222222222222222222 does not match reviewedHeadSha",
+      );
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

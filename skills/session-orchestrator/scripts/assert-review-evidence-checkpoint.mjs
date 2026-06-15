@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 const USAGE =
   "usage: assert-review-evidence-checkpoint.mjs --evidence FILE --reported-head SHA [--trivial-justification TEXT]";
@@ -82,6 +83,13 @@ function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
 
+function readOptionalText(path) {
+  if (!existsSync(path)) {
+    return null;
+  }
+  return readFileSync(path, "utf-8").trim();
+}
+
 function validateReviewedHead(evidence, reportedHead) {
   if (!isNonEmptyString(evidence.reviewedHeadSha)) {
     return "reviewedHeadSha is required";
@@ -113,6 +121,31 @@ function validatePassEvidence(evidence, reportedHead) {
     failures.push(
       `councilArtifactPath does not exist: ${evidence.councilArtifactPath}`,
     );
+  } else {
+    const artifactDir = dirname(evidence.councilArtifactPath);
+    const cleanPassOutput = readOptionalText(
+      join(artifactDir, "assert-clean-pass.txt"),
+    );
+    const prHeadSha = readOptionalText(join(artifactDir, "pr-head-sha.txt"));
+
+    if (cleanPassOutput === null) {
+      failures.push(
+        "assert-clean-pass.txt is required beside the council artifact for pass evidence",
+      );
+    } else if (
+      !cleanPassOutput.includes("PASS council-review clean PASS assertion")
+    ) {
+      failures.push("assert-clean-pass.txt must record a clean PASS assertion");
+    }
+    if (prHeadSha === null) {
+      failures.push(
+        "pr-head-sha.txt is required beside the council artifact for pass evidence",
+      );
+    } else if (prHeadSha !== evidence.reviewedHeadSha) {
+      failures.push(
+        `council artifact PR head ${prHeadSha} does not match reviewedHeadSha ${evidence.reviewedHeadSha}`,
+      );
+    }
   }
   if (evidence.cleanPassAssertionExitCode !== 0) {
     failures.push("cleanPassAssertionExitCode must be 0 for pass evidence");
