@@ -1812,8 +1812,10 @@ export class OrchestratorCore {
     const workerLane = toContinuousFeedbackLane(entry.metadata.workerLane);
     const reviewerLane = toContinuousFeedbackLane(entry.metadata.reviewerLane);
     const summary = readMetadataString(entry.metadata, "summary") ?? null;
+    const rawStatus = entry.metadata.status;
+    const parsedStatus = toContinuousFeedbackStatus(rawStatus);
     const status = projectContinuousFeedbackStatus(
-      toContinuousFeedbackStatus(entry.metadata.status),
+      parsedStatus,
       summary ?? entry.summary,
       {
         allowLegacySummaryProjection:
@@ -1823,13 +1825,23 @@ export class OrchestratorCore {
           ) === null,
       },
     );
+    if (parsedStatus === null && rawStatus !== undefined) {
+      console.warn(
+        `[orchestrator] Ignoring corrupt continuous-feedback checkpoint for ${entry.issueIdentifier}: invalid status ${JSON.stringify(rawStatus)}.`,
+      );
+    }
     if (
       event === null ||
       workerLane === null ||
       reviewerLane === null ||
-      status === null ||
-      status === "finding"
+      status === null
     ) {
+      return;
+    }
+    if (status === "finding") {
+      console.warn(
+        `[orchestrator] Skipping replay of continuous-feedback finding checkpoint for ${entry.issueIdentifier}: journal stores signatures but not full finding payloads; a live checkpoint will recheck.`,
+      );
       return;
     }
 
@@ -11690,11 +11702,16 @@ function readContinuousFeedbackStateRecord(
     }
     const summary =
       typeof rawState.summary === "string" ? rawState.summary : null;
-    const status = projectContinuousFeedbackStatus(
-      toContinuousFeedbackStatus(rawState.status),
-      summary,
-      { allowLegacySummaryProjection: false },
-    );
+    const rawStatus = rawState.status;
+    const parsedStatus = toContinuousFeedbackStatus(rawStatus);
+    const status = projectContinuousFeedbackStatus(parsedStatus, summary, {
+      allowLegacySummaryProjection: false,
+    });
+    if (parsedStatus === null && rawStatus !== undefined) {
+      console.warn(
+        `[orchestrator] Recovered continuous-feedback checkpoint state for ${issueId} with corrupt status ${JSON.stringify(rawStatus)} as pass.`,
+      );
+    }
     feedback[issueId] = {
       ...(clonePlain(rawState) as unknown as ContinuousFeedbackIssueState),
       status: status ?? "pass",

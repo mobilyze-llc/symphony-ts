@@ -130,6 +130,7 @@ export interface RuntimeSnapshotRateLimitAdmission {
 export interface RuntimeSnapshotContinuousFeedback {
   status: ContinuousFeedbackStatus;
   summary: string | null;
+  unavailable_summary: string | null;
   last_event: "commit" | "diff" | "checkpoint";
   last_checked_at: string;
   reviewer_lane: {
@@ -2142,6 +2143,8 @@ function toSnapshotContinuousFeedback(
   return {
     status: feedback.status,
     summary: feedback.summary,
+    unavailable_summary:
+      feedback.status === "unavailable" ? feedback.summary : null,
     last_event: feedback.lastEvent,
     last_checked_at: feedback.lastCheckedAt,
     reviewer_lane: { ...feedback.reviewerLane },

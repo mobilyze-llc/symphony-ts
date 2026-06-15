@@ -183,6 +183,8 @@ export interface LoopTraceWorkerExit {
 export interface LoopTraceContinuousFeedback {
   event: "commit" | "diff" | "checkpoint";
   status: ContinuousFeedbackStatus;
+  /** Provider/protocol failure detail; populated only when status is "unavailable". */
+  unavailableSummary: string | null;
   reviewerRunner: string;
   reviewerModel: string | null;
   findingSignatures: string[];

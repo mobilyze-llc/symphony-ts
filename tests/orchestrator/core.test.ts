@@ -7912,6 +7912,186 @@ describe("continuous feedback lane", () => {
     });
   });
 
+  it("documents summary-less checkpoint replay policy as a legacy pass", () => {
+    const runJournal: DispatcherRunJournal = [
+      {
+        sequence: 2,
+        idempotencyKey: "journal_checkpoint:1",
+        timestamp: "2026-03-06T00:00:05.000Z",
+        kind: "journal_checkpoint",
+        issueId: "__dispatcher__",
+        issueIdentifier: "DISPATCHER",
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        ownerId: "previous-runtime",
+        lease: null,
+        summary: "Dispatcher run-journal checkpoint through seq 1.",
+        metadata: {
+          schema_version: 1,
+          checkpoint_type: "dispatcher_run_journal",
+          coveredThroughSequence: 1,
+          state: {
+            continuousFeedback: {
+              "1": {
+                status: "pass",
+                lastEvent: "checkpoint",
+                lastCheckedAt: "2026-03-06T00:00:04.000Z",
+                reviewerLane: {
+                  runner: "pi",
+                  model: "local-flash",
+                  role: "continuous-feedback",
+                },
+                workerLane: {
+                  runner: "codex",
+                  model: null,
+                  role: "worker",
+                },
+                findings: [],
+              },
+            },
+          },
+        },
+      },
+    ];
+
+    const orchestrator = createOrchestrator({ runJournal });
+
+    expect(orchestrator.getState().continuousFeedback["1"]).toMatchObject({
+      status: "pass",
+      summary: null,
+      findings: [],
+    });
+  });
+
+  it("surfaces corrupt checkpoint state status during replay without crashing", () => {
+    const warnings: unknown[][] = [];
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation((...args: unknown[]) => {
+        warnings.push(args);
+      });
+    try {
+      const runJournal: DispatcherRunJournal = [
+        {
+          sequence: 2,
+          idempotencyKey: "journal_checkpoint:1",
+          timestamp: "2026-03-06T00:00:05.000Z",
+          kind: "journal_checkpoint",
+          issueId: "__dispatcher__",
+          issueIdentifier: "DISPATCHER",
+          operation: "dispatcher",
+          stage: null,
+          attempt: null,
+          ownerId: "previous-runtime",
+          lease: null,
+          summary: "Dispatcher run-journal checkpoint through seq 1.",
+          metadata: {
+            schema_version: 1,
+            checkpoint_type: "dispatcher_run_journal",
+            coveredThroughSequence: 1,
+            state: {
+              continuousFeedback: {
+                "1": {
+                  status: "corrupt",
+                  summary: "old checkpoint state",
+                  lastEvent: "checkpoint",
+                  lastCheckedAt: "2026-03-06T00:00:04.000Z",
+                  reviewerLane: {
+                    runner: "pi",
+                    model: "local-flash",
+                    role: "continuous-feedback",
+                  },
+                  workerLane: {
+                    runner: "codex",
+                    model: null,
+                    role: "worker",
+                  },
+                  findings: [],
+                },
+              },
+            },
+          },
+        },
+      ];
+
+      const orchestrator = createOrchestrator({ runJournal });
+
+      expect(orchestrator.getState().continuousFeedback["1"]).toMatchObject({
+        status: "pass",
+        summary: "old checkpoint state",
+      });
+      expect(
+        warnings.some((args) =>
+          String(args[0]).includes(
+            "Recovered continuous-feedback checkpoint state for 1 with corrupt status",
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("surfaces finding-entry replay policy instead of silently dropping finding tails", () => {
+    const warnings: unknown[][] = [];
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation((...args: unknown[]) => {
+        warnings.push(args);
+      });
+    try {
+      const runJournal: DispatcherRunJournal = [
+        {
+          sequence: 1,
+          idempotencyKey: "continuous_feedback:1:checkpoint:finding",
+          timestamp: "2026-03-06T00:00:04.000Z",
+          kind: "continuous_feedback",
+          issueId: "1",
+          issueIdentifier: "ISSUE-1",
+          operation: "feedback_lane",
+          stage: "implement",
+          attempt: 0,
+          ownerId: "previous-runtime",
+          lease: null,
+          summary: "Continuous feedback found 1 issue(s) for ISSUE-1.",
+          metadata: {
+            event: "checkpoint",
+            status: "finding",
+            continuousFeedbackStatusVersion: 2,
+            reviewerLane: {
+              runner: "pi",
+              model: "local-flash",
+              role: "continuous-feedback",
+            },
+            workerLane: {
+              runner: "codex",
+              model: null,
+              role: "worker",
+            },
+            findingSignatures: ["src/core.ts:null-check"],
+            suppressedSignatures: [],
+            summary: "One issue found.",
+            authoritative: false,
+          },
+        },
+      ];
+
+      const orchestrator = createOrchestrator({ runJournal });
+
+      expect(orchestrator.getState().continuousFeedback["1"]).toBeUndefined();
+      expect(
+        warnings.some((args) =>
+          String(args[0]).includes(
+            "Skipping replay of continuous-feedback finding checkpoint for ISSUE-1",
+          ),
+        ),
+      ).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
   it("dedupes repeated findings and bounces the worker for inner-loop rework", async () => {
     const comments: string[] = [];
     const runContinuousFeedback = vi.fn(() => ({

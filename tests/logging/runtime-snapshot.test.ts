@@ -384,6 +384,7 @@ describe("runtime snapshot", () => {
     expect(snapshot.running[0]!.continuous_feedback).toEqual({
       status: "finding",
       summary: "One issue found.",
+      unavailable_summary: null,
       last_event: "checkpoint",
       last_checked_at: "2026-03-06T10:00:05.000Z",
       reviewer_lane: {

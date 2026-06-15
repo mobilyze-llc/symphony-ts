@@ -2586,6 +2586,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               : result.status === "finding"
                 ? "finding"
                 : "pass",
+          unavailableSummary:
+            result.status === "unavailable" ? result.summary : null,
           reviewerRunner: result.reviewerLane?.runner ?? "unknown",
           reviewerModel: result.reviewerLane?.model ?? null,
           findingSignatures: result.findingSignatures,
