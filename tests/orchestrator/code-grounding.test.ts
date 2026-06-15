@@ -276,6 +276,77 @@ describe("managed code grounding (SYMPH-596)", () => {
     );
   });
 
+  it("rejects line-suffixed path evidence when the cited line is outside the file", async () => {
+    const sourceRepo = await createSourceRepo();
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "invalid-line-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [
+        backlogFinding({
+          evidence: "Implemented in `src/orchestrator/queue.ts:999999`.",
+        }),
+      ],
+    });
+
+    expect(report.status).toBe("not_found");
+    expect(report.entries[0]).toMatchObject({
+      status: "not_found",
+      citations: [],
+      missing: ["src/orchestrator/queue.ts:999999"],
+    });
+  });
+
+  it("keeps symbol verification scoped to cited paths when both are claimed", async () => {
+    const sourceRepo = await createSourceRepo();
+    await writeFile(
+      join(sourceRepo, "src", "orchestrator", "core.ts"),
+      "export const runCore = true;\n",
+    );
+    await git(sourceRepo, ["add", "."]);
+    await git(sourceRepo, ["commit", "-m", "Add core module"]);
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "path-symbol-scope-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [
+        backlogFinding({
+          evidence:
+            "Implemented in `src/orchestrator/core.ts` via `runQueueTriage`.",
+        }),
+      ],
+    });
+
+    expect(report.status).toBe("contradicted");
+    expect(report.entries[0]).toMatchObject({
+      status: "contradicted",
+      missing: ["runQueueTriage"],
+    });
+    expect(report.entries[0]?.citations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "src/orchestrator/core.ts" }),
+      ]),
+    );
+  });
+
   it("rejects exact cited paths that are symlinks out of the checkout", async () => {
     const sourceRepo = await createSourceRepo();
     const outsideRoot = await tempRoot("symph-cg-outside-");
@@ -393,6 +464,41 @@ describe("managed code grounding (SYMPH-596)", () => {
     await expect(
       readFile(join(paths.checkoutPath, "partial.txt")),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("fails loudly instead of resetting malformed lease indexes", async () => {
+    const sourceRepo = await createSourceRepo();
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+    await mkdir(join(workspaceRoot, ".symphony", "code-grounding"), {
+      recursive: true,
+    });
+    await writeFile(
+      join(workspaceRoot, ".symphony", "code-grounding", "leases.json"),
+      '{"version":1,"checkouts":"oops"}\n',
+    );
+
+    await expect(
+      runManagedCodeGrounding({
+        workspaceRoot,
+        runId: "malformed-lease-run",
+        config: codeGroundingConfig(),
+        target: {
+          repoUrl: sourceRepo,
+          sourcePath: sourceRepo,
+          commitSha,
+          repoScope: "symphony",
+        },
+        findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
+      }),
+    ).rejects.toThrow("Invalid code-grounding lease index");
+
+    expect(
+      await readFile(
+        join(workspaceRoot, ".symphony", "code-grounding", "leases.json"),
+        "utf8",
+      ),
+    ).toBe('{"version":1,"checkouts":"oops"}\n');
   });
 
   it("serializes concurrent scans that share the same managed checkout", async () => {
