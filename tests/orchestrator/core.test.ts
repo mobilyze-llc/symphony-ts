@@ -4179,6 +4179,160 @@ describe("orchestrator core", () => {
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
   });
 
+  it("journals identical re-parks after release as a fresh park generation", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const orchestrator = new OrchestratorCore({
+      config: createConfig(),
+      tracker,
+      spawnWorker,
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+    const budgetPause = {
+      outcome: "PAUSED-budget" as const,
+      trigger: "token_budget" as const,
+      reason: "Token budget exceeded.",
+      turnCount: 2,
+      totalTokens: 250001,
+      estimatedCostUsd: 5,
+    };
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: budgetPause,
+    });
+    await orchestrator.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "test-host", session: null },
+      reason: { class: "operator_release", human: "released after review" },
+    });
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: budgetPause,
+    });
+
+    const hardStops = orchestrator
+      .getState()
+      .dispatcherRunJournal.filter(
+        (entry) => entry.kind === "hard_stop_trigger",
+      );
+    expect(hardStops).toHaveLength(2);
+    expect(hardStops[0]?.idempotencyKey).not.toBe(hardStops[1]?.idempotencyKey);
+    expect(hardStops.map((entry) => entry.metadata.parkGeneration)).toEqual([
+      1, 2,
+    ]);
+
+    const restarted = new OrchestratorCore({
+      config: createConfig(),
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T01:00:00.000Z"),
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    expect(restarted.getState().resumeRequired.has("1")).toBe(true);
+    expect(restarted.getState().resumeRequiredMarks["1"]).toMatchObject({
+      setBySequence: hardStops[1]?.sequence,
+    });
+    const releaseAfterRestart = await restarted.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "test-host", session: null },
+      reason: { class: "operator_release", human: "verifying replay fence" },
+      fence: { expectedParkSeq: 2 },
+    });
+    expect(releaseAfterRestart.status).toBe("applied");
+    expect(restarted.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("journals identical input-required re-parks after release as a fresh park generation", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const orchestrator = new OrchestratorCore({
+      config: createConfig(),
+      tracker,
+      spawnWorker,
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+    const inputRequired = {
+      issueId: "1",
+      outcome: "abnormal" as const,
+      reason: `${ERROR_CODES.codexUserInputRequired}: Codex requested operator input during a turn.`,
+    };
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit(inputRequired);
+    await orchestrator.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "test-host", session: null },
+      reason: { class: "operator_release", human: "released after review" },
+    });
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit(inputRequired);
+
+    const inputRequiredEntries = orchestrator
+      .getState()
+      .dispatcherRunJournal.filter(
+        (entry) => entry.kind === "operator_input_required",
+      );
+    expect(inputRequiredEntries).toHaveLength(2);
+    expect(inputRequiredEntries[0]?.idempotencyKey).not.toBe(
+      inputRequiredEntries[1]?.idempotencyKey,
+    );
+    expect(
+      inputRequiredEntries.map((entry) => entry.metadata.parkGeneration),
+    ).toEqual([1, 2]);
+
+    const restarted = new OrchestratorCore({
+      config: createConfig(),
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T01:00:00.000Z"),
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    expect(restarted.getState().resumeRequired.has("1")).toBe(true);
+    expect(restarted.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "operator_input_required",
+      setBySequence: inputRequiredEntries[1]?.sequence,
+    });
+    const releaseAfterRestart = await restarted.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "test-host", session: null },
+      reason: { class: "operator_release", human: "verifying replay fence" },
+      fence: { expectedParkSeq: 2 },
+    });
+    expect(releaseAfterRestart.status).toBe("applied");
+    expect(restarted.getState().resumeRequired.has("1")).toBe(false);
+  });
+
   it("parks with the verdict recorded on hold/split or triage failure", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
