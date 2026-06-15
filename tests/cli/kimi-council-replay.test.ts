@@ -263,7 +263,7 @@ describe("buildComparisonReport", () => {
     expect(report.scoring.blockerRecallAgainstUnion).toBe(1);
   });
 
-  it("reports whether the canonical frozen review bundle hash was used", () => {
+  it("reports whether the Kimi replay bundle hash matches the source bundle hash", () => {
     const report = buildComparisonReport({
       issueId: "SYMPH-689",
       sourceCouncilDir: "/tmp/source-council",
@@ -284,11 +284,14 @@ describe("buildComparisonReport", () => {
       canonicalHash: "a".repeat(64),
       sourceHashStatus: "consistent",
       sourceHashes: ["a".repeat(64)],
+      kimiReplayBundleHash: "a".repeat(64),
+      sourceInputsPinnedByKimiReplay: false,
+      kimiReplayBundleHashMatchesSource: true,
       usedByKimiReplay: true,
     });
   });
 
-  it("reports when Kimi used a different frozen review bundle hash", () => {
+  it("reports when a fresh Kimi replay produced a different bundle hash", () => {
     const report = buildComparisonReport({
       issueId: "SYMPH-689",
       sourceCouncilDir: "/tmp/source-council",
@@ -309,6 +312,9 @@ describe("buildComparisonReport", () => {
       canonicalHash: "a".repeat(64),
       sourceHashStatus: "consistent",
       sourceHashes: ["a".repeat(64)],
+      kimiReplayBundleHash: "b".repeat(64),
+      sourceInputsPinnedByKimiReplay: false,
+      kimiReplayBundleHashMatchesSource: false,
       usedByKimiReplay: false,
     });
   });
@@ -337,6 +343,9 @@ describe("buildComparisonReport", () => {
       canonicalHash: null,
       sourceHashStatus: "divergent",
       sourceHashes: ["a".repeat(64), "b".repeat(64)],
+      kimiReplayBundleHash: "a".repeat(64),
+      sourceInputsPinnedByKimiReplay: false,
+      kimiReplayBundleHashMatchesSource: null,
       usedByKimiReplay: false,
     });
   });
@@ -365,6 +374,9 @@ describe("buildComparisonReport", () => {
       canonicalHash: null,
       sourceHashStatus: "absent",
       sourceHashes: [],
+      kimiReplayBundleHash: "a".repeat(64),
+      sourceInputsPinnedByKimiReplay: false,
+      kimiReplayBundleHashMatchesSource: null,
       usedByKimiReplay: false,
     });
   });
@@ -393,6 +405,9 @@ describe("buildComparisonReport", () => {
       canonicalHash: null,
       sourceHashStatus: "partial",
       sourceHashes: ["a".repeat(64)],
+      kimiReplayBundleHash: "a".repeat(64),
+      sourceInputsPinnedByKimiReplay: false,
+      kimiReplayBundleHashMatchesSource: null,
       usedByKimiReplay: false,
     });
   });
@@ -412,6 +427,9 @@ describe("buildComparisonReport", () => {
       canonicalHash: "a".repeat(64),
       sourceHashStatus: "consistent",
       sourceHashes: ["a".repeat(64)],
+      kimiReplayBundleHash: null,
+      sourceInputsPinnedByKimiReplay: false,
+      kimiReplayBundleHashMatchesSource: null,
       usedByKimiReplay: false,
     });
   });
@@ -693,7 +711,169 @@ describe("runKimiCouncilReplay", () => {
     ).resolves.toContain('"artifactContract": "complete"');
     await expect(
       readFile(join(replayArtifactDir, "kimi-replay-comparison.md"), "utf-8"),
-    ).resolves.toContain("Canonical frozen review bundle hash used: yes");
+    ).resolves.toContain("Kimi replay bundle hash match: yes");
+  });
+
+  it("reports non-default source bundle hash mismatches as unpinned fresh replay comparisons", async () => {
+    const sourceCouncilDir = await makeTempDir("source-council-");
+    const replayArtifactDir = await makeTempDir("kimi-replay-");
+    const sourceRoundTwoBundleHash = "a".repeat(64);
+    const freshReplayBundleHash = "b".repeat(64);
+    const sourceReviewBundlePath = join(sourceCouncilDir, "review-bundle.json");
+    await writeFile(
+      join(sourceCouncilDir, "diff.patch"),
+      "diff --git a/x b/x\n",
+    );
+    await writeFile(
+      sourceReviewBundlePath,
+      JSON.stringify({
+        schemaVersion: 1,
+        kind: "symphony-headless-council-review-bundle",
+        hashAlgorithm: "sha256",
+        target: {
+          issueId: "SYMPH-718",
+          repo: "mobilyze-llc/symphony-ts",
+          prNumber: 718,
+          mode: "standard",
+          routingMode: "targeted-convergence",
+          round: 2,
+        },
+        refs: {
+          baseRef: "main",
+          headRef: "feature",
+          baseSha: "0".repeat(40),
+          headSha: "1".repeat(40),
+          reviewedHeadSha: "1".repeat(40),
+          previousReviewedHeadSha: "2".repeat(40),
+        },
+        scope: {
+          changedPaths: ["x"],
+        },
+        targetedConvergence: null,
+        diff: {
+          path: join(sourceCouncilDir, "diff.patch"),
+          sha256: "3".repeat(64),
+          bytes: Buffer.byteLength("diff --git a/x b/x\n", "utf-8"),
+        },
+        gitStatus: "",
+        provenance: [],
+        optionalInputs: {
+          promptPaths: [],
+          evidenceDatasetPaths: [],
+          riskContractArtifactPaths: [],
+        },
+        bundleHash: sourceRoundTwoBundleHash,
+      }),
+    );
+    await writeFile(
+      join(sourceCouncilDir, "opus.structured.json"),
+      JSON.stringify({
+        lane: {
+          laneId: "opus",
+          agent: "claude",
+          role: "legacy-reviewer",
+          modelFamily: "anthropic",
+          mergeAuthoritative: true,
+        },
+        verdict: "pass",
+        parseStatus: "synthesized_from_markdown",
+        reviewBundle: {
+          path: sourceReviewBundlePath,
+          hash: "c".repeat(64),
+          bundleHash: sourceRoundTwoBundleHash,
+          hashAlgorithm: "sha256",
+        },
+        findings: [],
+      }),
+    );
+    runHeadlessCouncilGateMock.mockResolvedValue({
+      lanes: [
+        {
+          agent: "kimi",
+          structuredArtifactPath: join(
+            replayArtifactDir,
+            "kimi-k27-shadow.structured.json",
+          ),
+          structuredArtifact: {
+            lane: {
+              laneId: "kimi-k27-shadow",
+              agent: "kimi",
+              role: "kimi-k27-shadow-reviewer",
+              modelFamily: "moonshot-kimi",
+              mergeAuthoritative: false,
+            },
+            verdict: "pass",
+            parseStatus: "synthesized_from_markdown",
+            reviewBundle: {
+              path: join(replayArtifactDir, "review-bundle.json"),
+              hash: "d".repeat(64),
+              bundleHash: freshReplayBundleHash,
+              hashAlgorithm: "sha256",
+            },
+            findings: [],
+          },
+        },
+      ],
+      artifactPaths: {
+        resultJson: join(replayArtifactDir, "review-result.json"),
+      },
+    });
+
+    const report = await runKimiCouncilReplay({
+      sourceCouncilDir,
+      replayArtifactDir,
+      workspace: "/repo",
+      issueId: "SYMPH-718",
+    });
+
+    const sourceReviewBundle = JSON.parse(
+      await readFile(sourceReviewBundlePath, "utf-8"),
+    ) as {
+      target: { round: number; routingMode: string | null };
+      refs: { previousReviewedHeadSha: string | null };
+    };
+    expect(sourceReviewBundle.target.round).toBe(2);
+    expect(sourceReviewBundle.target.routingMode).toBe("targeted-convergence");
+    expect(sourceReviewBundle.refs.previousReviewedHeadSha).toBe(
+      "2".repeat(40),
+    );
+    expect(runHeadlessCouncilGateMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        diffPath: join(sourceCouncilDir, "diff.patch"),
+      }),
+    );
+    expect(report.scoring.artifactContract).toBe("complete");
+    expect(report.frozenReviewBundle).toEqual({
+      canonicalHash: sourceRoundTwoBundleHash,
+      sourceHashStatus: "consistent",
+      sourceHashes: [sourceRoundTwoBundleHash],
+      kimiReplayBundleHash: freshReplayBundleHash,
+      sourceInputsPinnedByKimiReplay: false,
+      kimiReplayBundleHashMatchesSource: false,
+      usedByKimiReplay: false,
+    });
+
+    const jsonReport = JSON.parse(
+      await readFile(
+        join(replayArtifactDir, "kimi-replay-comparison.json"),
+        "utf-8",
+      ),
+    ) as ReturnType<typeof buildComparisonReport>;
+    expect(jsonReport.frozenReviewBundle.sourceInputsPinnedByKimiReplay).toBe(
+      false,
+    );
+    expect(
+      jsonReport.frozenReviewBundle.kimiReplayBundleHashMatchesSource,
+    ).toBe(false);
+    const markdownReport = await readFile(
+      join(replayArtifactDir, "kimi-replay-comparison.md"),
+      "utf-8",
+    );
+    expect(markdownReport).toContain("Kimi replay bundle hash match: no");
+    expect(markdownReport).toContain("source bundle inputs not pinned");
+    expect(markdownReport).not.toContain(
+      "Canonical frozen review bundle hash used",
+    );
   });
 
   it("writes partial source bundle hash status to markdown", async () => {
@@ -779,7 +959,7 @@ describe("runKimiCouncilReplay", () => {
     expect(report.frozenReviewBundle.sourceHashStatus).toBe("partial");
     await expect(
       readFile(join(replayArtifactDir, "kimi-replay-comparison.md"), "utf-8"),
-    ).resolves.toContain("source hashes incomplete");
+    ).resolves.toContain("source bundle hashes incomplete");
   });
 
   it("keeps default Kimi CLI config when replay overrides are omitted", async () => {

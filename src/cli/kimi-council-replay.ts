@@ -67,6 +67,9 @@ interface KimiReplayComparisonReport {
     canonicalHash: string | null;
     sourceHashStatus: "absent" | "consistent" | "divergent" | "partial";
     sourceHashes: string[];
+    kimiReplayBundleHash: string | null;
+    sourceInputsPinnedByKimiReplay: boolean;
+    kimiReplayBundleHashMatchesSource: boolean | null;
     usedByKimiReplay: boolean;
   };
   gateResultPath: string;
@@ -428,13 +431,19 @@ function summarizeFrozenReviewBundleUse(
         : sourceHashes.length === 1
           ? "consistent"
           : "divergent";
+  const kimiReplayBundleHash = kimiLane?.reviewBundleCanonicalHash ?? null;
+  const kimiReplayBundleHashMatchesSource =
+    canonicalHash === null || kimiReplayBundleHash === null
+      ? null
+      : kimiReplayBundleHash === canonicalHash;
   return {
     canonicalHash,
     sourceHashStatus,
     sourceHashes,
-    usedByKimiReplay:
-      canonicalHash !== null &&
-      kimiLane?.reviewBundleCanonicalHash === canonicalHash,
+    kimiReplayBundleHash,
+    sourceInputsPinnedByKimiReplay: false,
+    kimiReplayBundleHashMatchesSource,
+    usedByKimiReplay: kimiReplayBundleHashMatchesSource === true,
   };
 }
 
@@ -479,16 +488,22 @@ function formatMarkdownReport(report: KimiReplayComparisonReport): string {
 function formatFrozenReviewBundleMarkdown(
   report: KimiReplayComparisonReport,
 ): string {
+  const kimiReplayHash =
+    report.frozenReviewBundle.kimiReplayBundleHash ?? "not available";
   if (report.frozenReviewBundle.sourceHashStatus === "divergent") {
-    return `Canonical frozen review bundle hash used: no (source hashes diverged: ${report.frozenReviewBundle.sourceHashes.join(", ")})`;
+    return `Fresh replay input comparison: unavailable (source bundle hashes diverged: ${report.frozenReviewBundle.sourceHashes.join(", ")}; Kimi replay bundle hash: ${kimiReplayHash}; source bundle inputs not pinned)`;
   }
   if (report.frozenReviewBundle.sourceHashStatus === "partial") {
-    return `Canonical frozen review bundle hash used: no (source hashes incomplete: ${report.frozenReviewBundle.sourceHashes.join(", ") || "none"})`;
+    return `Fresh replay input comparison: unavailable (source bundle hashes incomplete: ${report.frozenReviewBundle.sourceHashes.join(", ") || "none"}; Kimi replay bundle hash: ${kimiReplayHash}; source bundle inputs not pinned)`;
   }
   if (report.frozenReviewBundle.canonicalHash === null) {
-    return "Canonical frozen review bundle hash used: no (not available)";
+    return `Fresh replay input comparison: unavailable (source bundle hash not available; Kimi replay bundle hash: ${kimiReplayHash}; source bundle inputs not pinned)`;
   }
-  return `Canonical frozen review bundle hash used: ${report.frozenReviewBundle.usedByKimiReplay ? "yes" : "no"} (${report.frozenReviewBundle.canonicalHash})`;
+  const match =
+    report.frozenReviewBundle.kimiReplayBundleHashMatchesSource === true
+      ? "yes"
+      : "no";
+  return `Kimi replay bundle hash match: ${match} (source: ${report.frozenReviewBundle.canonicalHash}; Kimi replay: ${kimiReplayHash}; fresh replay inputs; source bundle inputs not pinned)`;
 }
 
 function formatError(error: unknown): string {
