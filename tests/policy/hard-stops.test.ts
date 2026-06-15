@@ -430,9 +430,10 @@ describe("hard-stop policy", () => {
     });
   });
 
-  it("denies prototype pull requests and all auto-merge attempts", () => {
+  it("allows thin and full implement PR handoff while denying prototype PRs", () => {
     const prototypePolicy = createModeScopedPermissionPolicy({
       mode: "prototype",
+      stageName: "implement",
       configuredApprovalPolicy: "full-auto",
       configuredThreadSandbox: { type: "fullAccess" },
       configuredTurnSandboxPolicy: { type: "fullAccess" },
@@ -458,8 +459,30 @@ describe("hard-stop policy", () => {
       },
     });
 
+    const thinPolicy = createModeScopedPermissionPolicy({
+      mode: "thin",
+      stageName: "implement",
+      configuredApprovalPolicy: "full-auto",
+      configuredThreadSandbox: { type: "fullAccess" },
+      configuredTurnSandboxPolicy: { type: "fullAccess" },
+      maxBudgetUsd: 50,
+    });
+    expect(thinPolicy).toMatchObject({
+      canOpenPullRequest: true,
+      canAutoMerge: false,
+      canBypassGates: false,
+      maxBudgetUsd: 20,
+    });
+    expect(
+      evaluateModePermission({
+        policy: thinPolicy,
+        action: "open_pull_request",
+      }),
+    ).toEqual({ allowed: true });
+
     const fullPolicy = createModeScopedPermissionPolicy({
       mode: "full",
+      stageName: "implement",
       configuredApprovalPolicy: "full-auto",
       configuredThreadSandbox: { type: "fullAccess" },
       configuredTurnSandboxPolicy: { type: "fullAccess" },
@@ -471,8 +494,103 @@ describe("hard-stop policy", () => {
         action: "open_pull_request",
       }),
     ).toEqual({ allowed: true });
+  });
+
+  it("denies non-implement PRs and all auto-merge or gate-bypass attempts", () => {
+    const thinMergePolicy = createModeScopedPermissionPolicy({
+      mode: "thin",
+      stageName: "merge",
+      configuredApprovalPolicy: "full-auto",
+      configuredThreadSandbox: { type: "fullAccess" },
+      configuredTurnSandboxPolicy: { type: "fullAccess" },
+      maxBudgetUsd: 50,
+    });
     expect(
-      evaluateModePermission({ policy: fullPolicy, action: "auto_merge" }),
+      evaluateModePermission({
+        policy: thinMergePolicy,
+        action: "open_pull_request",
+      }),
+    ).toMatchObject({
+      allowed: false,
+      hardStop: {
+        outcome: "BLOCKED-needs-human",
+        trigger: "permission_denied",
+        reason:
+          "open_pull_request is not allowed in thin mode during the merge stage.",
+      },
+    });
+
+    const fullMergePolicy = createModeScopedPermissionPolicy({
+      mode: "full",
+      stageName: "merge",
+      configuredApprovalPolicy: "full-auto",
+      configuredThreadSandbox: { type: "fullAccess" },
+      configuredTurnSandboxPolicy: { type: "fullAccess" },
+      maxBudgetUsd: 50,
+    });
+    expect(
+      evaluateModePermission({
+        policy: fullMergePolicy,
+        action: "open_pull_request",
+      }),
+    ).toMatchObject({
+      allowed: false,
+      hardStop: {
+        outcome: "BLOCKED-needs-human",
+        trigger: "permission_denied",
+        reason:
+          "open_pull_request is not allowed in full mode during the merge stage.",
+      },
+    });
+
+    const unscopedFullPolicy = createModeScopedPermissionPolicy({
+      mode: "full",
+      configuredApprovalPolicy: "full-auto",
+      configuredThreadSandbox: { type: "fullAccess" },
+      configuredTurnSandboxPolicy: { type: "fullAccess" },
+      maxBudgetUsd: 50,
+    });
+    expect(unscopedFullPolicy.canOpenPullRequest).toBe(false);
+    expect(
+      evaluateModePermission({
+        policy: unscopedFullPolicy,
+        action: "open_pull_request",
+      }),
+    ).toMatchObject({
+      allowed: false,
+      hardStop: {
+        outcome: "BLOCKED-needs-human",
+        trigger: "permission_denied",
+        reason:
+          "open_pull_request is not allowed in full mode without an active stage.",
+      },
+    });
+
+    const fullImplementPolicy = createModeScopedPermissionPolicy({
+      mode: "full",
+      stageName: "implement",
+      configuredApprovalPolicy: "full-auto",
+      configuredThreadSandbox: { type: "fullAccess" },
+      configuredTurnSandboxPolicy: { type: "fullAccess" },
+      maxBudgetUsd: 50,
+    });
+    expect(
+      evaluateModePermission({
+        policy: fullImplementPolicy,
+        action: "auto_merge",
+      }),
+    ).toMatchObject({
+      allowed: false,
+      hardStop: {
+        outcome: "BLOCKED-needs-human",
+        trigger: "permission_denied",
+      },
+    });
+    expect(
+      evaluateModePermission({
+        policy: fullImplementPolicy,
+        action: "bypass_gates",
+      }),
     ).toMatchObject({
       allowed: false,
       hardStop: {
@@ -545,9 +663,10 @@ describe("hard-stop policy", () => {
     ).toBe("bypass_gates");
   });
 
-  it("renders mode envelopes that deny thin/prototype PRs and all merge bypass actions", () => {
+  it("renders mode envelopes that allow thin implement PRs and deny merge bypass actions", () => {
     const thinPolicy = createModeScopedPermissionPolicy({
       mode: "thin",
+      stageName: "implement",
       configuredApprovalPolicy: "full-auto",
       configuredThreadSandbox: "workspace-write",
       configuredTurnSandboxPolicy: { type: "workspace-write" },
@@ -555,6 +674,7 @@ describe("hard-stop policy", () => {
     });
     const fullPolicy = createModeScopedPermissionPolicy({
       mode: "full",
+      stageName: "merge",
       configuredApprovalPolicy: "full-auto",
       configuredThreadSandbox: "workspace-write",
       configuredTurnSandboxPolicy: { type: "workspace-write" },
@@ -562,10 +682,16 @@ describe("hard-stop policy", () => {
     });
 
     expect(describeModePermissionEnvelope(thinPolicy)).toContain(
-      "Pull requests: denied",
+      "Stage: implement",
+    );
+    expect(describeModePermissionEnvelope(thinPolicy)).toContain(
+      "Pull requests: allowed",
     );
     expect(describeModePermissionEnvelope(fullPolicy)).toContain(
-      "Pull requests: allowed",
+      "Stage: merge",
+    );
+    expect(describeModePermissionEnvelope(fullPolicy)).toContain(
+      "Pull requests: denied",
     );
     expect(describeModePermissionEnvelope(fullPolicy)).toContain(
       "Auto-merge: denied",

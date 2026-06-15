@@ -3421,6 +3421,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         reasoningEffort,
         modePolicy: createModeScopedPermissionPolicy({
           mode: rightSizingDecision.mode,
+          stageName,
           configuredApprovalPolicy: this.config.codex.approvalPolicy,
           configuredThreadSandbox: this.config.codex.threadSandbox,
           configuredTurnSandboxPolicy: this.config.codex.turnSandboxPolicy,
