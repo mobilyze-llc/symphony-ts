@@ -182,6 +182,7 @@ import type {
 } from "./core.js";
 import {
   OrchestratorCore,
+  SERVICE_SHUTDOWN_ABORT_REASON,
   deriveAttemptedStopSignalDeliveryStatus,
   getFailedStopSignalDeliveryAttempts,
   isStopSignalDelivery,
@@ -3519,7 +3520,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   abortAllWorkers(): number {
     const count = this.workers.size;
     for (const worker of this.workers.values()) {
-      worker.controller.abort("Shutdown: aborting running workers.");
+      worker.controller.abort(SERVICE_SHUTDOWN_ABORT_REASON);
     }
     return count;
   }
