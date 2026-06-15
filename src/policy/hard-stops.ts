@@ -37,6 +37,8 @@ export interface HardStopDecision {
 
 export type ModePermissionAction =
   | "open_pull_request"
+  | "open_ready_pull_request"
+  | "mark_pull_request_ready"
   | "auto_merge"
   | "bypass_gates";
 
@@ -164,9 +166,12 @@ export function evaluateModePermission(input: {
   const allowed =
     input.action === "open_pull_request"
       ? input.policy.canOpenPullRequest
-      : input.action === "auto_merge"
-        ? input.policy.canAutoMerge
-        : input.policy.canBypassGates;
+      : input.action === "open_ready_pull_request" ||
+          input.action === "mark_pull_request_ready"
+        ? false
+        : input.action === "auto_merge"
+          ? input.policy.canAutoMerge
+          : input.policy.canBypassGates;
 
   if (allowed) {
     return { allowed: true };
@@ -175,7 +180,11 @@ export function evaluateModePermission(input: {
   const reason =
     input.action === "open_pull_request"
       ? `${input.action} is not allowed in ${input.policy.mode} mode${formatStageDenialContext(input.policy.stageName)}.`
-      : `${input.action} is not allowed in ${input.policy.mode} mode.`;
+      : input.action === "open_ready_pull_request"
+        ? "non-draft pull request creation is not allowed for pipeline-owned work. Re-run the PR creation command with `--draft` and keep the PR draft until review gates pass."
+        : input.action === "mark_pull_request_ready"
+          ? "marking a pipeline-owned pull request ready is not allowed until review gates pass. Keep the PR draft."
+          : `${input.action} is not allowed in ${input.policy.mode} mode.`;
 
   return {
     allowed: false,
@@ -218,21 +227,59 @@ export function detectModePermissionAction(input: {
     return "auto_merge";
   }
 
+  const tokens = normalized.split(" ");
+
+  if (/\bgh\s+pr\s+ready\b/.test(normalized)) {
+    return "mark_pull_request_ready";
+  }
+
+  if (
+    /\bgh\s+pr\s+edit\b/.test(normalized) &&
+    hasExplicitDraftFalseFlag(tokens)
+  ) {
+    return "mark_pull_request_ready";
+  }
+
   if (
     /\bgh\s+pr\s+create\b/.test(normalized) ||
     /\bhub\s+pull-request\b/.test(normalized)
   ) {
-    return "open_pull_request";
+    return hasDraftFlag(tokens)
+      ? "open_pull_request"
+      : "open_ready_pull_request";
   }
 
   return null;
+}
+
+function hasDraftFlag(tokens: string[]): boolean {
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "-d" || token === "--draft" || token === "--draft=true") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasExplicitDraftFalseFlag(tokens: string[]): boolean {
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--draft=false") {
+      return true;
+    }
+    if (token === "--draft" && tokens[index + 1] === "false") {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function describeModePermissionEnvelope(
   policy: ModeScopedPermissionPolicy,
 ): string {
   const pullRequestLine = policy.canOpenPullRequest
-    ? "- Pull requests: allowed to open a PR after required local validation passes when the issue requires one."
+    ? "- Pull requests: allowed to open a draft PR after required local validation passes when the issue requires one. Use `gh pr create --draft`; keep pipeline-owned PRs draft until review gates pass."
     : "- Pull requests: denied for this mode/stage. Do NOT run PR creation commands such as `gh pr create` or `hub pull-request`.";
 
   return [

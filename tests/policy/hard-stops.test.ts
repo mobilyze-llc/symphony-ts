@@ -479,6 +479,21 @@ describe("hard-stop policy", () => {
         action: "open_pull_request",
       }),
     ).toEqual({ allowed: true });
+    expect(
+      evaluateModePermission({
+        policy: thinPolicy,
+        action: "open_ready_pull_request",
+      }),
+    ).toMatchObject({
+      allowed: false,
+      hardStop: {
+        outcome: "BLOCKED-needs-human",
+        trigger: "permission_denied",
+        reason: expect.stringContaining(
+          "Re-run the PR creation command with `--draft`",
+        ),
+      },
+    });
 
     const fullPolicy = createModeScopedPermissionPolicy({
       mode: "full",
@@ -636,13 +651,61 @@ describe("hard-stop policy", () => {
     });
   });
 
-  it("classifies PR creation, auto-merge, and bypass commands for active runner enforcement", () => {
+  it("classifies PR creation, readiness flips, auto-merge, and bypass commands for active runner enforcement", () => {
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "gh pr create --fill --draft" },
+      }),
+    ).toBe("open_pull_request");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "gh pr create -d --fill" },
+      }),
+    ).toBe("open_pull_request");
     expect(
       detectModePermissionAction({
         toolName: "Bash",
         toolInput: { command: "gh pr create --fill" },
       }),
+    ).toBe("open_ready_pull_request");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "hub pull-request --draft" },
+      }),
     ).toBe("open_pull_request");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "hub pull-request -d" },
+      }),
+    ).toBe("open_pull_request");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "hub pull-request --message 'ship it'" },
+      }),
+    ).toBe("open_ready_pull_request");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "gh pr ready 270" },
+      }),
+    ).toBe("mark_pull_request_ready");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "gh pr edit 270 --draft=false" },
+      }),
+    ).toBe("mark_pull_request_ready");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "gh pr edit 270 --draft false" },
+      }),
+    ).toBe("mark_pull_request_ready");
     expect(
       detectModePermissionAction({
         toolName: "Bash",
@@ -685,7 +748,10 @@ describe("hard-stop policy", () => {
       "Stage: implement",
     );
     expect(describeModePermissionEnvelope(thinPolicy)).toContain(
-      "Pull requests: allowed",
+      "Pull requests: allowed to open a draft PR",
+    );
+    expect(describeModePermissionEnvelope(thinPolicy)).toContain(
+      "gh pr create --draft",
     );
     expect(describeModePermissionEnvelope(fullPolicy)).toContain(
       "Stage: merge",

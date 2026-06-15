@@ -691,7 +691,7 @@ Read ALL comments on this Linear issue starting with `## Review Findings`. These
    - Run the test command through the same log-capturing path, preferably `node scripts/symphony-run-logged.mjs --label tests -- pnpm test` when the helper exists; include command, exit code, log path, and summary/tail in PR body under `## Tool Output > Tests`.
    - Run Semgrep through the same log-capturing path if available, for example `node scripts/symphony-run-logged.mjs --label semgrep -- semgrep scan --config auto --json`; include the raw artifact path and a compact summary under `## SAST Output`, and paste raw JSON only if the artifact is under 20 KB.
 8. Commit your changes with message format: `feat({{ issue.identifier }}): <description>`.
-9. Open a PR targeting this repo (not its upstream fork parent) via `gh pr create --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")` with the issue description in the PR body. Include the Tool Output and SAST Output sections.
+9. Open a draft PR targeting this repo (not its upstream fork parent) via `gh pr create --draft --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")` with the issue description in the PR body. Include the Tool Output and SAST Output sections. Keep the PR draft until review gates pass.
 10. Link the PR to the Linear issue by including `{{ issue.identifier }}` in the PR title or body.
 
 ### Workpad (implement)
