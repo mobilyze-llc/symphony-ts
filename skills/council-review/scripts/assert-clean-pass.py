@@ -10,12 +10,13 @@ import sys
 PASS_MODE = "PR-backed draft"
 SAFE_BASE_EQUIVALENCE = {"exact", "origin-prefix-equivalent"}
 SHA_RE = re.compile(r"[0-9a-fA-F]{7,64}")
-LANE_ARTIFACT_STEMS = ("phase1-opus", "phase1-pi", "phase2-opus")
+LANE_ARTIFACT_STEMS = ("phase1-opus", "phase1-pi")
 MIN_REVIEW_ARTIFACT_BYTES = 400
 REQUIRED_REVIEW_HEADINGS = (
     "## Verdict",
     "## Artifact Quality",
 )
+VERDICT_RE = re.compile(r"\A\s*## Verdict\s*\n\s*(PASS|FINDINGS)\s*(?:\n|\Z)")
 REQUIRED_ARTIFACTS = (
     "pr-mode.txt",
     "pr-is-draft.txt",
@@ -50,15 +51,19 @@ def read_json_object(path: Path) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def has_heading(text: str, heading: str) -> bool:
+    return re.search(rf"(?m)^{re.escape(heading)}\s*$", text) is not None
+
+
 def has_findings_surface(text: str) -> bool:
-    return any(
-        heading in text
+    if has_heading(text, "## No Findings"):
+        return True
+    return all(
+        has_heading(text, heading)
         for heading in (
-            "## No Findings",
             "## P1 Must Fix",
             "## P2 Should Fix",
             "## Track",
-            "## Findings",
         )
     )
 
@@ -114,8 +119,12 @@ def validate_review_artifacts(artifact_dir: Path) -> list[str]:
             failures.append(
                 f"{stem}: reviewer artifact too thin ({byte_count} bytes; minimum {MIN_REVIEW_ARTIFACT_BYTES}); status message: {status_message or 'n/a'}"
             )
+        if not VERDICT_RE.search(artifact):
+            failures.append(
+                f"{stem}: reviewer artifact must start with ## Verdict followed by PASS or FINDINGS"
+            )
         for heading in REQUIRED_REVIEW_HEADINGS:
-            if heading not in artifact:
+            if not has_heading(artifact, heading):
                 failures.append(
                     f"{stem}: reviewer artifact missing required heading {heading!r}"
                 )

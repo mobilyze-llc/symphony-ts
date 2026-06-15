@@ -158,6 +158,33 @@ function validReviewArtifact(): string {
   ].join("\n");
 }
 
+function validPhase2CrossExamArtifact(): string {
+  return [
+    "### Reviewer Alpha Finding: Example edge-case claim",
+    "",
+    "**Verdict**: REFUTE",
+    "**Evidence**: Current head SHA 1111111111111111111111111111111111111111 was inspected. The alleged failure is not reachable because the guarded branch returns before artifact validation.",
+    "",
+    "### Reviewer Beta Finding: Example follow-up claim",
+    "",
+    "**Verdict**: CONFIRM",
+    "**Evidence**: The cross-exam lane is intentionally shaped around finding-by-finding confirmation, not the phase-1 reviewer artifact contract.",
+    "",
+  ].join("\n");
+}
+
+function malformedReviewArtifactWithContractSubstrings(): string {
+  return [
+    "Council status summary for current head SHA 1111111111111111111111111111111111111111.",
+    "This summary mentions ## Verdict and PASS in prose, but it does not start with the required verdict section.",
+    "It also mentions ## Artifact Quality and ## P1 Must Fix inline while avoiding real Markdown section headings.",
+    "The remaining text is padded so it is comfortably over the minimum byte threshold without becoming contract-valid review evidence.",
+    "A compliant artifact needs actual headings and either a No Findings section or the full structured finding surface.",
+    "This document is deliberately malformed and must fail closed even though it contains all of the important words.",
+    "",
+  ].join("\n");
+}
+
 describe("council-review manual skill", () => {
   const skill = readSkillFile("SKILL.md");
   const opusPrompt = readSkillFile("templates/phase1-opus-prompt.md");
@@ -475,6 +502,46 @@ describe("council-review manual skill", () => {
       expect(assertion.status).toBe(0);
       expect(assertion.stdout).toContain(
         "PASS council-review clean PASS assertion",
+      );
+    });
+  });
+
+  it("does not validate phase2-opus cross-exam artifacts as phase1 reviewer evidence", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+      writeCompletedLaneStatus(dir, "phase2-opus");
+      writeArtifact(dir, "phase2-opus.md", validPhase2CrossExamArtifact());
+
+      const assertion = runPython(ASSERT_CLEAN_PASS, dir);
+      expect(assertion.status).toBe(0);
+      expect(assertion.stdout).toContain(
+        "PASS council-review clean PASS assertion",
+      );
+    });
+  });
+
+  it("rejects malformed reviewer artifacts that only mention contract strings", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(
+        dir,
+        "phase1-opus.md",
+        malformedReviewArtifactWithContractSubstrings(),
+      );
+
+      const assertion = runPython(ASSERT_CLEAN_PASS, dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "must start with ## Verdict followed by PASS or FINDINGS",
+      );
+      expect(assertion.stdout).toContain(
+        "missing required heading '## Verdict'",
+      );
+      expect(assertion.stdout).toContain(
+        "reviewer artifact must include No Findings or structured finding sections",
       );
     });
   });
