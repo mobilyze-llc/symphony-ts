@@ -1034,6 +1034,111 @@ describe("symphony-spec-review-watch CLI", () => {
     );
   });
 
+  it("keeps selecting other dry-run candidates when one comment fetch fails", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
+    const stdout = vi.fn();
+    const stderr = vi.fn();
+    const staleIssue = makeIssue({
+      id: "stale",
+      identifier: "SYMPH-10",
+      labels: ["needs:spec-review"],
+      description: "Build the thing.\n",
+    });
+    const freshIssue = makeIssue({
+      id: "fresh",
+      identifier: "SYMPH-11",
+      labels: ["needs:spec-review"],
+      description: "Build the other thing.\n",
+    });
+    const reviewedDescription = buildReviewedIssueDescription({
+      originalDescription: staleIssue.description ?? "",
+      sourceIntentHash: computeSourceIntentHash(staleIssue),
+      artifactHash: "artifact",
+      artifactPath: "/tmp/artifact.md",
+      mode: "observe",
+      readinessState: "valid",
+      verdict: "ready_as_written",
+      linearDocUrl: null,
+      generatedAt: "2026-06-14T00:00:00.000Z",
+      reconciliation: {
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "Looks good.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      },
+    });
+    const fetchIssueComments = vi.fn(async (issueId: string) => {
+      if (issueId === "stale") {
+        throw new Error("Linear comments unavailable");
+      }
+      return [];
+    });
+
+    const exitCode = await runSpecReviewWatchCli(
+      ["WORKFLOW.md", "--workspace", workspace, "--dry-run"],
+      {
+        stdout,
+        stderr,
+        loadWorkflowDefinition: async (workflowPath) => ({
+          workflowPath: workflowPath ?? join(workspace, "WORKFLOW.md"),
+          config: {},
+          promptTemplate: "",
+        }),
+        resolveWorkflowConfig: () => fakeConfig(),
+        createTracker: () => ({
+          fetchIssuesByStates: async () => [
+            { ...staleIssue, description: reviewedDescription },
+            freshIssue,
+          ],
+          fetchIssueReferencesByIds: async () => [],
+          fetchIssueComments,
+          fetchTicketFeatureIssuesByStates: async () => [],
+          updateIssueDescription: async () => ({
+            id: "issue",
+            identifier: "SYMPH-1",
+            title: "Issue",
+          }),
+          postComment: async () => undefined,
+        }),
+      },
+    );
+
+    expect(exitCode).toBe(0);
+    expect(fetchIssueComments).toHaveBeenCalledTimes(2);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "Spec review comment context unavailable for SYMPH-10",
+      ),
+    );
+    const output = JSON.parse(String(stdout.mock.calls[0]?.[0])) as {
+      selectedCount: number;
+      decisions: Array<{
+        issue: { identifier: string };
+        status: string;
+        reasons: string[];
+      }>;
+    };
+    expect(output.selectedCount).toBe(2);
+    expect(output.decisions).toContainEqual(
+      expect.objectContaining({
+        issue: expect.objectContaining({ identifier: "SYMPH-10" }),
+        status: "selected",
+        reasons: expect.arrayContaining(["comment_context_unavailable"]),
+      }),
+    );
+    expect(output.decisions).toContainEqual(
+      expect.objectContaining({
+        issue: expect.objectContaining({ identifier: "SYMPH-11" }),
+        status: "selected",
+      }),
+    );
+  });
+
   it("continues the batch when one selected issue throws", async () => {
     const workspace = await mkdtemp(join(tmpdir(), "spec-review-watch-"));
     const stdout = vi.fn();

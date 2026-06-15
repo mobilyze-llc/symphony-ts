@@ -232,6 +232,36 @@ describe("spec review", () => {
     );
   });
 
+  it("normalizes whitespace-only operator comment bodies deterministically", () => {
+    const operatorConfig = {
+      operatorAllowlist: ["operator@mobilyze.com"],
+      serviceAccounts: [],
+    };
+    const sourceIntentComments = buildSpecReviewSourceIntentComments({
+      comments: [
+        makeComment({
+          id: "comment-empty-a",
+          body: "   \r\n",
+          createdAt: "2026-06-14T00:01:00.000Z",
+          userEmail: "operator@mobilyze.com",
+        }),
+        makeComment({
+          id: "comment-empty-b",
+          body: "\t",
+          createdAt: "2026-06-14T00:02:00.000Z",
+          userEmail: "operator@mobilyze.com",
+        }),
+      ],
+      operatorConfig,
+    });
+
+    expect(sourceIntentComments).toHaveLength(2);
+    expect(sourceIntentComments[0]?.bodyHash).toBe(
+      sourceIntentComments[1]?.bodyHash,
+    );
+    expect(sourceIntentComments[0]?.id).not.toBe(sourceIntentComments[1]?.id);
+  });
+
   it("keeps operator comment hash stable across prompt truncation and input ordering", () => {
     const issue = makeIssue();
     const operatorConfig = {
@@ -678,6 +708,48 @@ describe("spec review", () => {
     ).toMatchObject({
       status: "selected",
       reasons: expect.arrayContaining(["trigger_label:needs:spec-review"]),
+    });
+  });
+
+  it("reselects a prior valid review when selection comment context is unavailable", () => {
+    const issue = makeIssue({
+      labels: ["needs:spec-review"],
+      description: "Build the thing.\n",
+    });
+    const reviewedDescription = buildReviewedIssueDescription({
+      originalDescription: issue.description ?? "",
+      sourceIntentHash: computeSourceIntentHash(issue),
+      artifactHash: "artifact",
+      artifactPath: "/tmp/artifact.md",
+      mode: "observe",
+      readinessState: "valid",
+      verdict: "ready_as_written",
+      linearDocUrl: null,
+      generatedAt: "2026-06-14T00:00:00.000Z",
+      reconciliation: {
+        schemaVersion: 1,
+        verdict: "ready_as_written",
+        summary: "Looks good.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      },
+    });
+
+    expect(
+      selectSpecReviewCandidates({
+        issues: [{ ...issue, description: reviewedDescription }],
+        sourceIntentUnavailableIssueIds: new Set([issue.id]),
+      })[0],
+    ).toMatchObject({
+      status: "selected",
+      reasons: expect.arrayContaining([
+        "trigger_label:needs:spec-review",
+        "comment_context_unavailable",
+      ]),
     });
   });
 
@@ -2095,6 +2167,104 @@ describe("spec review", () => {
     });
 
     expect(result.sourceIntentHash).toBe(expectedHash);
+  });
+
+  it("does not fetch or fold comments for a direct privacy-sensitive run", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-sensitive-"));
+    const artifactRoot = join(workspace, ".artifacts");
+    await mkdir(artifactRoot, { recursive: true });
+    const artifactPath = join(artifactRoot, "good-review.md");
+    await writeFile(
+      artifactPath,
+      [
+        "## Verdict",
+        "",
+        "Verdict enum: ready_as_written",
+        "",
+        "## Source Read Status",
+        "",
+        "Read the prompt.",
+        "",
+        "## Reconciliation JSON",
+        "",
+        "```json",
+        JSON.stringify({
+          schemaVersion: 1,
+          verdict: "ready_as_written",
+          summary: "Ready.",
+          issueBodyAppend: null,
+          acceptanceCriteria: [],
+          linearDocMarkdown: null,
+          childTicketPlan: [],
+          requiresOperatorContext: false,
+          operatorContextReason: null,
+        }),
+        "```",
+      ].join("\n"),
+      "utf8",
+    );
+    let fetchCalled = false;
+    const issue = makeIssue({ labels: ["secret"] });
+
+    const result = await runSpecReviewForIssue({
+      issue,
+      workspaceRoot: workspace,
+      artifactRoot,
+      mode: "observe",
+      fetchIssueComments: async () => {
+        fetchCalled = true;
+        return [
+          makeComment({
+            id: "comment-operator",
+            body: "Operator private redirect.",
+            createdAt: "2026-06-14T00:01:00.000Z",
+            userEmail: "operator@mobilyze.com",
+          }),
+        ];
+      },
+      operatorConfig: {
+        operatorAllowlist: ["operator@mobilyze.com"],
+        serviceAccounts: [],
+      },
+      writer: {
+        fetchIssueDescription: async () => issue.description,
+        updateIssueDescription: async () => undefined,
+        postComment: async () => undefined,
+      },
+      runner: async (runnerInput): Promise<ClaudeRunnerResult> => ({
+        schemaVersion: 1,
+        status: "passed",
+        purpose: "spec-review",
+        model: "opus",
+        profile: "legacy",
+        workspace,
+        promptFile: runnerInput.promptFile,
+        promptSha256: null,
+        artifactDir: artifactRoot,
+        artifactName: "spec-review-opus",
+        artifactPath,
+        resultJsonPath: join(artifactRoot, "spec-review-opus.result.json"),
+        cmuxSpawnBin: "cmux-spawn",
+        laneId: "claude-spec-review",
+        phase: "spec-review",
+        startedAt: "2026-06-14T00:00:00.000Z",
+        completedAt: "2026-06-14T00:00:01.000Z",
+        sourceVisibility: {
+          status: "ok",
+          workspace,
+          sources: [],
+        },
+        attempts: [],
+        validationErrors: [],
+        diagnostics: makeClaudeRunnerDiagnostics(),
+        usage: null,
+        message: "complete",
+      }),
+      now: () => new Date("2026-06-14T00:00:00.000Z"),
+    });
+
+    expect(fetchCalled).toBe(false);
+    expect(result.sourceIntentHash).toBe(SENSITIVE_SOURCE_INTENT_HASH);
   });
 
   it("journals and stamps invalid_artifact when the spec parser rejects a runner artifact", async () => {

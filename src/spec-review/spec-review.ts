@@ -312,6 +312,7 @@ export function selectSpecReviewCandidates(input: {
     string,
     readonly SpecReviewSourceIntentComment[]
   >;
+  sourceIntentUnavailableIssueIds?: ReadonlySet<string>;
   config?: Partial<SpecReviewSelectionConfig>;
   forceReview?: boolean;
 }): SpecReviewSelectionDecision[] {
@@ -343,11 +344,16 @@ export function selectSpecReviewCandidates(input: {
           ? ["force_review_now", ...reasons]
           : reasons;
     const sensitive = isSpecReviewPrivacySensitiveIssue(issue);
+    const sourceIntentUnavailable =
+      !sensitive &&
+      input.sourceIntentUnavailableIssueIds?.has(issue.id) === true;
     const sourceIntentHash = sensitive
       ? SENSITIVE_SOURCE_INTENT_HASH
-      : computeSourceIntentHash(issue, {
-          comments: input.sourceIntentCommentsByIssueId?.get(issue.id) ?? [],
-        });
+      : sourceIntentUnavailable
+        ? computeSourceIntentUnavailableHash(issue)
+        : computeSourceIntentHash(issue, {
+            comments: input.sourceIntentCommentsByIssueId?.get(issue.id) ?? [],
+          });
     const descriptionReview = sensitive
       ? null
       : descriptionSpecReviewState(issue.description ?? "");
@@ -374,6 +380,9 @@ export function selectSpecReviewCandidates(input: {
             }`,
             ...forceReasons,
           ];
+    const effectiveSelectedReasons = sourceIntentUnavailable
+      ? [...selectedReasons, "comment_context_unavailable"]
+      : selectedReasons;
     return {
       issue,
       sourceIntentHash,
@@ -392,7 +401,7 @@ export function selectSpecReviewCandidates(input: {
             ? ["privacy_sensitive_label"]
             : hasCurrentReviewForSourceIntent
               ? [currentReviewReason]
-              : selectedReasons,
+              : effectiveSelectedReasons,
       redactionClass: sensitive ? "sensitive" : "standard",
       ticketFeature: feature,
       backlogFindings: findings,
@@ -519,6 +528,13 @@ export function computeSourceIntentHash(
     payload.comments = comments;
   }
   return sha256Json(payload);
+}
+
+function computeSourceIntentUnavailableHash(issue: Issue): string {
+  return sha256Json({
+    sourceIntentUnavailable: "linear_comments",
+    baseSourceIntentHash: computeSourceIntentHash(issue),
+  });
 }
 
 export function buildSpecReviewPrompt(packet: SpecReviewContextPacket): string {

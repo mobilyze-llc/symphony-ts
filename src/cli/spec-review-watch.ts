@@ -340,12 +340,16 @@ export async function runSpecReviewWatchCli(
       issues,
       tracker,
       operatorConfig: config.operatorAnchors,
+      stderr,
     });
   const decisions = selectSpecReviewCandidates({
     issues,
     ticketFeatures,
     specReviewJournal,
-    sourceIntentCommentsByIssueId,
+    sourceIntentCommentsByIssueId:
+      sourceIntentCommentsByIssueId.commentsByIssueId,
+    sourceIntentUnavailableIssueIds:
+      sourceIntentCommentsByIssueId.unavailableIssueIds,
     forceReview: parsed.forceReview,
   });
   const selected = decisions.filter(
@@ -638,32 +642,54 @@ async function fetchSelectionSourceIntentComments(input: {
   issues: readonly Issue[];
   tracker: SpecReviewWatchTracker;
   operatorConfig: ResolvedWorkflowConfig["operatorAnchors"];
-}): Promise<ReadonlyMap<string, readonly SpecReviewSourceIntentComment[]>> {
+  stderr: (text: string) => void;
+}): Promise<{
+  commentsByIssueId: ReadonlyMap<
+    string,
+    readonly SpecReviewSourceIntentComment[]
+  >;
+  unavailableIssueIds: ReadonlySet<string>;
+}> {
+  const empty = {
+    commentsByIssueId: new Map<
+      string,
+      readonly SpecReviewSourceIntentComment[]
+    >(),
+    unavailableIssueIds: new Set<string>(),
+  };
   if (input.tracker.fetchIssueComments === undefined) {
-    return new Map();
+    return empty;
   }
   const commentsByIssueId = new Map<
     string,
     readonly SpecReviewSourceIntentComment[]
   >();
+  const unavailableIssueIds = new Set<string>();
   for (const issue of input.issues) {
     if (isSpecReviewPrivacySensitiveIssue(issue)) {
       continue;
     }
-    const comments = await input.tracker.fetchIssueComments(issue.id, {
-      maxPages: DEFAULT_SPEC_REVIEW_COMMENT_CONFIG.maxCommentPages,
-    });
-    commentsByIssueId.set(
-      issue.id,
-      buildSpecReviewSourceIntentComments({
-        comments,
-        ...(input.operatorConfig === undefined
-          ? {}
-          : { operatorConfig: input.operatorConfig }),
-      }),
-    );
+    try {
+      const comments = await input.tracker.fetchIssueComments(issue.id, {
+        maxPages: DEFAULT_SPEC_REVIEW_COMMENT_CONFIG.maxCommentPages,
+      });
+      commentsByIssueId.set(
+        issue.id,
+        buildSpecReviewSourceIntentComments({
+          comments,
+          ...(input.operatorConfig === undefined
+            ? {}
+            : { operatorConfig: input.operatorConfig }),
+        }),
+      );
+    } catch (error) {
+      unavailableIssueIds.add(issue.id);
+      input.stderr(
+        `Spec review comment context unavailable for ${issue.identifier}: ${errorMessage(error)}\n`,
+      );
+    }
   }
-  return commentsByIssueId;
+  return { commentsByIssueId, unavailableIssueIds };
 }
 
 function isSuccessfulReadinessState(
