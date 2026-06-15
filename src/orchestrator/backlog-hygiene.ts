@@ -189,20 +189,14 @@ export async function runBacklogHygieneProposalLane(
     };
   }
 
-  const codeGroundingReport =
-    input.codeGrounding === null || input.codeGrounding === undefined
-      ? null
-      : await runManagedCodeGrounding({
-          ...input.codeGrounding,
-          findings: report.verdict.findings,
-        });
+  const groundingResult = await runCodeGroundingForProposalLane(input, report);
 
   const proposalInput: BuildBacklogHygieneProposalsInput = {
     report,
     candidateIssues: input.issues,
     maxProposalsPerProductPerPoll: input.maxProposalsPerProductPerPoll,
     modelTierDecision,
-    codeGroundingReport,
+    codeGroundingReport: groundingResult.report,
     ...(input.activeIssueIds === undefined
       ? {}
       : { activeIssueIds: input.activeIssueIds }),
@@ -218,7 +212,7 @@ export async function runBacklogHygieneProposalLane(
     status: "completed",
     report,
     proposals: buildBacklogHygieneProposals(proposalInput),
-    warnings: [],
+    warnings: groundingResult.warnings,
   };
 }
 
@@ -406,6 +400,35 @@ function summarizeCodeGroundingEvidence(
   ]
     .filter((part): part is string => part !== null)
     .join(" ");
+}
+
+async function runCodeGroundingForProposalLane(
+  input: RunBacklogHygieneProposalLaneInput,
+  report: BacklogAuditReport,
+): Promise<{
+  report: CodeGroundingReport | null;
+  warnings: string[];
+}> {
+  if (input.codeGrounding === null || input.codeGrounding === undefined) {
+    return { report: null, warnings: [] };
+  }
+  try {
+    const groundingReport = await runManagedCodeGrounding({
+      ...input.codeGrounding,
+      findings: report.verdict.findings,
+    });
+    return {
+      report: groundingReport,
+      warnings: groundingReport.warnings,
+    };
+  } catch (error) {
+    return {
+      report: null,
+      warnings: [
+        `code grounding failed; proposals emitted without grounding metadata: ${toErrorMessage(error)}`,
+      ],
+    };
+  }
 }
 
 function toErrorMessage(error: unknown, seen = new WeakSet<object>()): string {

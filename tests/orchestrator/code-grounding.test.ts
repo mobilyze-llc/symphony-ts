@@ -128,6 +128,45 @@ describe("managed code grounding (SYMPH-596)", () => {
     });
   });
 
+  it("serializes concurrent scans that share the same managed checkout", async () => {
+    const sourceRepo = await createSourceRepo();
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+    let activeScans = 0;
+    let maxActiveScans = 0;
+
+    const run = (runId: string) =>
+      runManagedCodeGrounding({
+        workspaceRoot,
+        runId,
+        config: codeGroundingConfig(),
+        target: {
+          repoUrl: sourceRepo,
+          sourcePath: sourceRepo,
+          commitSha,
+          repoScope: "symphony",
+        },
+        findings: [
+          backlogFinding({
+            evidence:
+              "Implemented in `src/orchestrator/queue.ts` via `runQueueTriage`.",
+          }),
+        ],
+        afterDeterministicScan: async () => {
+          activeScans++;
+          maxActiveScans = Math.max(maxActiveScans, activeScans);
+          await delay(25);
+          activeScans--;
+        },
+      });
+
+    const [first, second] = await Promise.all([run("run-a"), run("run-b")]);
+
+    expect(first.status).toBe("verified");
+    expect(second.status).toBe("verified");
+    expect(maxActiveScans).toBe(1);
+  });
+
   it("downgrades model verification when deterministic evidence did not verify it", () => {
     const downgraded = validateModelFindingAgainstEvidence({
       deterministic: {
@@ -262,4 +301,8 @@ async function tempRoot(prefix: string): Promise<string> {
 async function git(cwd: string, args: string[]): Promise<string> {
   const result = await execFileAsync("git", args, { cwd });
   return result.stdout.trim();
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
