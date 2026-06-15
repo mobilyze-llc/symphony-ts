@@ -177,7 +177,7 @@ describe("formatNotification", () => {
       text: { type: string; text: string };
     };
     expect(stageBlock.type).toBe("section");
-    expect(stageBlock.text.text).toContain("`investigate\\`phase`");
+    expect(stageBlock.text.text).toContain("`investigate\\u0060phase`");
     expect(stageBlock.text.text).toContain("`implement`");
     expect(stageBlock.text.text.match(/(?<!\\)`/g)).toHaveLength(4);
     // totals section includes rework count
@@ -1349,7 +1349,7 @@ describe("PipelineNotifier", () => {
           : undefined,
       )
       .find((text): text is string => text !== undefined);
-    expect(stageText).toContain("`imple\\`ment` 2m");
+    expect(stageText).toContain("`imple\\u0060ment` 2m");
     expect(stageText?.match(/(?<!\\)`/g)).toHaveLength(2);
   });
 
@@ -1714,8 +1714,11 @@ describe("formatNotification — tracker_write_failed (SYMPH-413)", () => {
     expect(result.text).toContain("GRAPHQL_VALIDATION_FAILED");
     const detailsMatch = result.text.match(/^Details: (`.*`)$/m);
     expect(detailsMatch?.[1]?.match(/(?<!\\)`/g)).toHaveLength(2);
-    expect(detailsMatch?.[1]).toContain('"Title has \\`inline\\`');
-    expect(detailsMatch?.[1]).toContain("slash\\\\\\\\\\`tick");
+    expect(detailsMatch?.[1]).toContain('"Title has \\u0060inline\\u0060');
+    expect(detailsMatch?.[1]).toContain("slash\\\\\\\\\\u0060tick");
+    expect(() =>
+      JSON.parse(detailsMatch?.[1]?.slice(1, -1) ?? ""),
+    ).not.toThrow();
     expect(result.text).not.toContain("[object Object]");
   });
 
