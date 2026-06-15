@@ -8,6 +8,9 @@ const DEFAULT_LINEAR_ENDPOINT = "https://api.linear.app/graphql";
 const DEFAULT_TEAM_KEY = "SYMPH";
 const DEFAULT_PIPELINE_HALT_LABEL = "pipeline-halt";
 const CALVER_TRACKING_ISSUE = "SYMPH-267";
+const POST_MERGE_GATE_TITLE_PREFIX = "pipeline-halt: post-merge gate failure";
+// Keep parsePostMergeGateMarker's regex anchored to this marker family.
+const POST_MERGE_GATE_MARKER_PREFIX = "<!-- post-merge-gate";
 
 function parseArgs(argv) {
   const [command, ...rest] = argv;
@@ -166,7 +169,7 @@ function buildFailureIssueContent() {
   const runUrl = `${requireEnv("GITHUB_SERVER_URL")}/${requireEnv(
     "GITHUB_REPOSITORY",
   )}/actions/runs/${requireEnv("GITHUB_RUN_ID")}`;
-  const prNumber = process.env.POST_MERGE_GATE_PR_NUMBER;
+  const prNumber = process.env.POST_MERGE_GATE_PR_NUMBER || null;
   const failedSteps = failedStepsFromEnv();
   const failedStepLines =
     failedSteps.length > 0
@@ -174,10 +177,19 @@ function buildFailureIssueContent() {
       : "- Gate failed before a named validation step reported failure";
 
   const prLine = prNumber ? `**PR:** #${prNumber}\n` : "";
+  const marker = buildPostMergeGateMarker({ commitSha, prNumber });
 
   return {
-    title: `pipeline-halt: post-merge gate failure on ${shortSha}`,
+    commitSha,
+    shortSha,
+    runUrl,
+    prNumber: prNumber ?? null,
+    failedStepLines,
+    marker,
+    title: `${POST_MERGE_GATE_TITLE_PREFIX} on ${shortSha}`,
     description: [
+      marker,
+      "",
       "## Post-Merge Gate Failure",
       "",
       `**Commit:** ${commitSha}`,
@@ -189,6 +201,37 @@ function buildFailureIssueContent() {
     ]
       .filter(Boolean)
       .join("\n"),
+    comment: [
+      marker,
+      "",
+      "## Post-Merge Gate Failure Rerun",
+      "",
+      `**Commit:** ${commitSha}`,
+      prLine.trimEnd(),
+      `**Run:** ${runUrl}`,
+      "",
+      "**Failed steps:**",
+      failedStepLines,
+    ]
+      .filter(Boolean)
+      .join("\n"),
+  };
+}
+
+function buildPostMergeGateMarker({ commitSha, prNumber }) {
+  return `${POST_MERGE_GATE_MARKER_PREFIX} sha=${commitSha} pr=${prNumber ?? "none"} -->`;
+}
+
+function parsePostMergeGateMarker(text) {
+  const pattern =
+    /<!--\s*post-merge-gate\s+sha=([a-f0-9]{7,64})\s+pr=([0-9]+|none)\s*-->/i;
+  const match = pattern.exec(text ?? "");
+  if (match === null || match[1] === undefined || match[2] === undefined) {
+    return null;
+  }
+  return {
+    sha: match[1],
+    pr: match[2] === "none" ? null : match[2],
   };
 }
 
@@ -218,6 +261,57 @@ async function requestLinear(endpoint, apiKey, query, variables) {
   }
 
   return body.data;
+}
+
+function assertIssueLookupShape(data) {
+  const nodes = data?.issues?.nodes;
+  if (!Array.isArray(nodes)) {
+    throw new Error(
+      `Malformed Linear issue lookup response: ${JSON.stringify(data)}`,
+    );
+  }
+  return nodes.map((node) => {
+    if (
+      typeof node?.id !== "string" ||
+      typeof node?.identifier !== "string" ||
+      typeof node?.url !== "string" ||
+      typeof node?.title !== "string" ||
+      typeof node?.description !== "string" ||
+      typeof node?.state?.type !== "string"
+    ) {
+      throw new Error(
+        `Malformed Linear issue lookup node: ${JSON.stringify(node)}`,
+      );
+    }
+    return node;
+  });
+}
+
+function findMatchingPipelineHaltIssue(nodes, context) {
+  const matches = nodes.filter((node) => {
+    if (!node.title.startsWith(POST_MERGE_GATE_TITLE_PREFIX)) {
+      return false;
+    }
+    if (["completed", "canceled"].includes(node.state.type)) {
+      return false;
+    }
+    const marker = parsePostMergeGateMarker(node.description);
+    if (marker === null) {
+      return false;
+    }
+    return (
+      marker.sha === context.commitSha ||
+      (context.prNumber !== null && marker.pr === context.prNumber)
+    );
+  });
+  if (matches.length > 1) {
+    throw new Error(
+      `Found multiple matching post-merge gate halt issues: ${matches
+        .map((issue) => issue.identifier)
+        .join(", ")}`,
+    );
+  }
+  return matches[0] ?? null;
 }
 
 async function runLinearFailureIssue(options) {
@@ -261,7 +355,67 @@ async function runLinearFailureIssue(options) {
     labelId = labelData?.issueLabelCreate?.issueLabel?.id;
   }
 
-  const { title, description } = buildFailureIssueContent();
+  const context = buildFailureIssueContent();
+  const existingIssueData = await requestLinear(
+    endpoint,
+    apiKey,
+    `query FindExistingPipelineHaltIssues($teamKey: String!, $labelName: String!) {
+      issues(
+        first: 50,
+        filter: {
+          team: { key: { eq: $teamKey } },
+          labels: { name: { eq: $labelName } },
+          state: { type: { nin: ["completed", "canceled"] } }
+        }
+      ) {
+        nodes {
+          id
+          identifier
+          url
+          title
+          description
+          state { type }
+        }
+      }
+    }`,
+    { teamKey, labelName },
+  );
+  const existingIssue = findMatchingPipelineHaltIssue(
+    assertIssueLookupShape(existingIssueData),
+    context,
+  );
+  if (existingIssue !== null) {
+    const commentData = await requestLinear(
+      endpoint,
+      apiKey,
+      `mutation CommentExistingPipelineHaltIssue($input: CommentCreateInput!) {
+        commentCreate(input: $input) { comment { id url } success }
+      }`,
+      {
+        input: {
+          issueId: existingIssue.id,
+          body: context.comment,
+        },
+      },
+    );
+    const comment = commentData?.commentCreate?.comment;
+    if (!comment?.id) {
+      throw new Error(
+        `Failed to comment on existing Linear issue: ${JSON.stringify(commentData)}`,
+      );
+    }
+
+    const result = { ...existingIssue, action: "updated", comment };
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(
+        `::notice::Updated Linear issue ${existingIssue.identifier}: ${existingIssue.url}`,
+      );
+    }
+    return;
+  }
+
   const issueData = await requestLinear(
     endpoint,
     apiKey,
@@ -271,8 +425,8 @@ async function runLinearFailureIssue(options) {
     {
       input: {
         teamId,
-        title,
-        description,
+        title: context.title,
+        description: context.description,
         ...(labelId ? { labelIds: [labelId] } : {}),
       },
     },
@@ -286,7 +440,7 @@ async function runLinearFailureIssue(options) {
   }
 
   if (options.json) {
-    console.log(JSON.stringify(issue, null, 2));
+    console.log(JSON.stringify({ ...issue, action: "created" }, null, 2));
   } else {
     console.log(
       `::notice::Created Linear issue ${issue.identifier}: ${issue.url}`,

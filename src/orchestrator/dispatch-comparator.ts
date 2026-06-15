@@ -248,6 +248,24 @@ function collectDependencyEdges(
       continue;
     }
 
+    if (feature.sourceVisibility.relationPageTruncated === true) {
+      edges.push({
+        issue,
+        blocker: {
+          id: null,
+          identifier: null,
+          state: null,
+        },
+        trust: "legacy_hard",
+        source: "ticket_feature",
+        reason:
+          "TicketFeature blockedBy relation page was truncated; treating candidate as possibly blocked.",
+      });
+      warnings.push(
+        `Dispatch comparator detected truncated TicketFeature blockedBy relation page for ${issue.identifier}; held candidate as possibly blocked.`,
+      );
+    }
+
     for (const edge of feature.specLineage.blockedBy) {
       edges.push({
         issue,
