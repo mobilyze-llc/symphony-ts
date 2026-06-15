@@ -27,6 +27,8 @@ describe("dispatcher decision event emission", () => {
       summary: "Duplicate queued work",
       evidence: "Issue bodies overlap",
       confidence: "medium",
+      codeGroundingStatus: null,
+      codeGroundingEvidence: null,
       generatedAt: "2026-03-06T00:00:00.000Z",
       modelTier: "local_low_risk",
     };
@@ -68,6 +70,55 @@ describe("dispatcher decision event emission", () => {
         }),
       }),
     ]);
+  });
+
+  it("runs backlog hygiene with code grounding from resolved workflow config", async () => {
+    let groundingCalls = 0;
+    const orchestrator = createOrchestrator({
+      config: {
+        ...createConfig(),
+        codeGrounding: {
+          enabled: true,
+          baseDir: ".symphony/code-grounding",
+          ttlMs: 86_400_000,
+          maxCheckoutsPerRepo: 5,
+        },
+      },
+    });
+
+    const result = await orchestrator.runBacklogHygieneProposalLane({
+      enabled: true,
+      config: {
+        baseUrl: "http://127.0.0.1:9999",
+        model: "local",
+        apiKey: null,
+        timeoutMs: 1,
+      },
+      issues: [createIssue({ id: "issue-1", identifier: "ISSUE-1" })],
+      runtimeEvidence: { state: {}, stateDelta: {} },
+      maxProposalsPerProductPerPoll: 1,
+      evaluation: passingBacklogHygieneEvaluation(),
+      fetchFn: async () => backlogHygieneAuditResponse(),
+      runId: "core-hygiene-run",
+      codeGroundingTarget: {
+        repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+        commitSha: "abc123",
+        repoScope: "symphony",
+      },
+      codeGroundingCommandRunner: async () => {
+        groundingCalls++;
+        return {
+          exitCode: 1,
+          stdout: "",
+          stderr: "grounding bridge reached",
+        };
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.proposals).toHaveLength(1);
+    expect(groundingCalls).toBeGreaterThan(0);
+    expect(result.warnings[0]).toContain("grounding bridge reached");
   });
 
   it("emits measurable admission, right-sizing, and model-routing events on dispatch", async () => {
@@ -980,6 +1031,57 @@ function createConfig(overrides?: {
     stages: overrides?.stages ?? null,
     escalationState: null,
   };
+}
+
+function passingBacklogHygieneEvaluation() {
+  return {
+    corpusId: "2026-06-13-queue-triage-wave",
+    threshold: 0.8,
+    dimensionScores: {
+      ordering: 0.9,
+      obsolescence: 0.9,
+      consolidation: 0.9,
+      parallelization: 0.9,
+      augmentation: 0.9,
+      evidence_grounding: 0.9,
+      review_round_lessons: 0.9,
+    },
+  };
+}
+
+function backlogHygieneAuditResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              summary: "Synthetic audit response.",
+              findingTypeVolume: {
+                duplicate: 1,
+                supersession: 0,
+                stale: 0,
+                thin_spec: 0,
+                review_dispatch_mismatch: 0,
+                other: 0,
+              },
+              findings: [
+                {
+                  findingId: "F-1",
+                  type: "duplicate",
+                  issueIdentifiers: ["ISSUE-1"],
+                  summary: "Duplicate work",
+                  evidence: "Implemented in `src/orchestrator/core.ts`.",
+                  confidence: "medium",
+                },
+              ],
+            }),
+          },
+        },
+      ],
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
 }
 
 function createIssue(overrides?: Partial<Issue>): Issue {

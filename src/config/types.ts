@@ -130,6 +130,17 @@ export interface WorkflowAdmissionCardConfig {
 }
 
 /**
+ * Managed code-grounding for backlog hygiene (SYMPH-596). Grounding checkouts
+ * live outside issue workspace keyspace and are bounded by TTL + per-repo cap.
+ */
+export interface WorkflowCodeGroundingConfig {
+  enabled: boolean;
+  baseDir: string;
+  ttlMs: number;
+  maxCheckoutsPerRepo: number;
+}
+
+/**
  * Operator anchor ingestion (SYMPH-486). The allowlist gates Linear
  * field-edit ingestion; service account edits are explicitly inert so
  * agent-authored tracker writes cannot mint operator anchors.
@@ -341,6 +352,8 @@ export interface ResolvedWorkflowConfig {
   acGate: WorkflowAcGateConfig;
   specFidelity: WorkflowSpecFidelityConfig;
   admissionCard: WorkflowAdmissionCardConfig;
+  /** Optional so older hand-built fixtures keep compiling; resolveWorkflowConfig always sets it. */
+  codeGrounding?: WorkflowCodeGroundingConfig;
   operatorAnchors?: WorkflowOperatorAnchorsConfig;
   watchdog: WorkflowWatchdogConfig;
   /** Optional so existing fixtures keep compiling; consumers default to 10. */

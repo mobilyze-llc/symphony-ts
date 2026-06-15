@@ -6,11 +6,19 @@ import {
   type RunBacklogAuditInput,
   runBacklogAudit,
 } from "../audit/backlog-audit.js";
+import type { ResolvedWorkflowConfig } from "../config/types.js";
 import type {
   DispatcherRunJournalEntry,
   Issue,
   VerdictActor,
 } from "../domain/model.js";
+import {
+  type CodeGroundingReport,
+  type CodeGroundingTarget,
+  type CodeGroundingVerificationStatus,
+  type RunCodeGroundingInput,
+  runManagedCodeGrounding,
+} from "./code-grounding.js";
 
 export const BACKLOG_HYGIENE_PROPOSAL_LABELS = {
   proposed: "hygiene:proposed",
@@ -66,6 +74,8 @@ export interface BacklogHygieneProposal {
   summary: string;
   evidence: string;
   confidence: BacklogAuditFinding["confidence"];
+  codeGroundingStatus: CodeGroundingVerificationStatus | null;
+  codeGroundingEvidence: string | null;
   generatedAt: string;
   modelTier: BacklogHygieneModelTier;
 }
@@ -86,6 +96,7 @@ export interface BuildBacklogHygieneProposalsInput {
   maxProposalsPerProductPerPoll: number;
   generatedAt?: string;
   modelTierDecision: BacklogHygieneModelTierDecision;
+  codeGroundingReport?: CodeGroundingReport | null;
 }
 
 export interface RunBacklogHygieneProposalLaneInput
@@ -96,6 +107,16 @@ export interface RunBacklogHygieneProposalLaneInput
   openParkIssueIds?: Iterable<string>;
   evaluation: QueueTriageEvaluationResult;
   allowFrontierRecommendations?: boolean;
+  codeGrounding?: Omit<RunCodeGroundingInput, "findings"> | null;
+}
+
+export interface BuildBacklogHygieneCodeGroundingInput {
+  workflowConfig: Pick<ResolvedWorkflowConfig, "codeGrounding" | "workspace">;
+  runId: string;
+  target: CodeGroundingTarget;
+  workspaceRoot?: string;
+  commandRunner?: RunCodeGroundingInput["commandRunner"];
+  afterDeterministicScan?: RunCodeGroundingInput["afterDeterministicScan"];
 }
 
 export type BacklogHygieneProposalDecision = "accepted" | "rejected";
@@ -194,18 +215,106 @@ export async function runBacklogHygieneProposalLane(
       ? {}
       : { findingTypes: input.findingTypes }),
   };
+  const proposalFindings = selectBacklogHygieneProposalFindings(proposalInput);
+  const groundingResult = await runCodeGroundingForProposalLane(
+    input,
+    proposalFindings,
+  );
+  proposalInput.codeGroundingReport = groundingResult.report;
 
   return {
     status: "completed",
     report,
     proposals: buildBacklogHygieneProposals(proposalInput),
-    warnings: [],
+    warnings: groundingResult.warnings,
+  };
+}
+
+export function buildBacklogHygieneCodeGroundingInput(
+  input: BuildBacklogHygieneCodeGroundingInput,
+): Omit<RunCodeGroundingInput, "findings"> | null {
+  if (input.workflowConfig.codeGrounding?.enabled !== true) {
+    return null;
+  }
+  return {
+    workspaceRoot: input.workspaceRoot ?? input.workflowConfig.workspace.root,
+    runId: input.runId,
+    config: input.workflowConfig.codeGrounding,
+    target: input.target,
+    ...(input.commandRunner === undefined
+      ? {}
+      : { commandRunner: input.commandRunner }),
+    ...(input.afterDeterministicScan === undefined
+      ? {}
+      : { afterDeterministicScan: input.afterDeterministicScan }),
   };
 }
 
 export function buildBacklogHygieneProposals(
   input: BuildBacklogHygieneProposalsInput,
 ): BacklogHygieneProposal[] {
+  const generatedAt = input.generatedAt ?? input.report.generatedAt;
+  const codeGroundingByFindingId = new Map(
+    (input.codeGroundingReport?.entries ?? []).map((entry) => [
+      entry.findingId,
+      entry,
+    ]),
+  );
+
+  const proposals: BacklogHygieneProposal[] = [];
+  for (const { finding, issues } of selectBacklogHygieneProposalCandidates(
+    input,
+  )) {
+    const codeGrounding = codeGroundingByFindingId.get(finding.findingId);
+    proposals.push({
+      proposalId: `${input.report.generatedAt}:${finding.findingId}`,
+      findingId: finding.findingId,
+      findingType: finding.type,
+      issueIds: issues.map((issue) => issue.id),
+      issueIdentifiers: issues.map((issue) => issue.identifier),
+      summary: finding.summary,
+      evidence: finding.evidence,
+      confidence: finding.confidence,
+      codeGroundingStatus: codeGrounding?.status ?? null,
+      codeGroundingEvidence:
+        codeGrounding === undefined
+          ? null
+          : summarizeCodeGroundingEvidence(codeGrounding),
+      generatedAt,
+      modelTier: input.modelTierDecision.tier,
+    });
+  }
+
+  return proposals;
+}
+
+export function selectBacklogHygieneProposalFindings(
+  input: Pick<
+    BuildBacklogHygieneProposalsInput,
+    | "report"
+    | "candidateIssues"
+    | "activeIssueIds"
+    | "openParkIssueIds"
+    | "findingTypes"
+    | "maxProposalsPerProductPerPoll"
+  >,
+): BacklogAuditFinding[] {
+  return selectBacklogHygieneProposalCandidates(input).map(
+    (candidate) => candidate.finding,
+  );
+}
+
+function selectBacklogHygieneProposalCandidates(
+  input: Pick<
+    BuildBacklogHygieneProposalsInput,
+    | "report"
+    | "candidateIssues"
+    | "activeIssueIds"
+    | "openParkIssueIds"
+    | "findingTypes"
+    | "maxProposalsPerProductPerPoll"
+  >,
+): Array<{ finding: BacklogAuditFinding; issues: Issue[] }> {
   if (!Number.isInteger(input.maxProposalsPerProductPerPoll)) {
     throw new Error("maxProposalsPerProductPerPoll must be an integer.");
   }
@@ -221,9 +330,8 @@ export function buildBacklogHygieneProposals(
   );
   const activeIssueIds = new Set(input.activeIssueIds ?? []);
   const openParkIssueIds = new Set(input.openParkIssueIds ?? []);
-  const generatedAt = input.generatedAt ?? input.report.generatedAt;
-
-  const proposals: BacklogHygieneProposal[] = [];
+  const candidates: Array<{ finding: BacklogAuditFinding; issues: Issue[] }> =
+    [];
   for (const finding of input.report.verdict.findings) {
     if (!allowedTypes.has(finding.type)) {
       continue;
@@ -243,24 +351,12 @@ export function buildBacklogHygieneProposals(
     ) {
       continue;
     }
-    proposals.push({
-      proposalId: `${input.report.generatedAt}:${finding.findingId}`,
-      findingId: finding.findingId,
-      findingType: finding.type,
-      issueIds: issues.map((issue) => issue.id),
-      issueIdentifiers: issues.map((issue) => issue.identifier),
-      summary: finding.summary,
-      evidence: finding.evidence,
-      confidence: finding.confidence,
-      generatedAt,
-      modelTier: input.modelTierDecision.tier,
-    });
-    if (proposals.length >= input.maxProposalsPerProductPerPoll) {
+    candidates.push({ finding, issues });
+    if (candidates.length >= input.maxProposalsPerProductPerPoll) {
       break;
     }
   }
-
-  return proposals;
+  return candidates;
 }
 
 export function buildBacklogHygieneProposalJournalEntry(input: {
@@ -293,6 +389,8 @@ export function buildBacklogHygieneProposalJournalEntry(input: {
       issue_identifiers: input.proposal.issueIdentifiers,
       confidence: input.proposal.confidence,
       evidence: input.proposal.evidence,
+      code_grounding_status: input.proposal.codeGroundingStatus,
+      code_grounding_evidence: input.proposal.codeGroundingEvidence,
       model_tier: input.proposal.modelTier,
       label: BACKLOG_HYGIENE_PROPOSAL_LABELS.proposed,
       actor: actorMetadata(input.actor),
@@ -354,6 +452,57 @@ function actorMetadata(actor: VerdictActor): {
     host: actor.host,
     session: actor.session ?? null,
   };
+}
+
+function summarizeCodeGroundingEvidence(
+  entry: CodeGroundingReport["entries"][number],
+): string {
+  const citations = entry.citations
+    .slice(0, 5)
+    .map(
+      (citation) =>
+        `${citation.path}:${citation.lineRange[0]}-${citation.lineRange[1]}#${citation.contentHash.slice(0, 12)}`,
+    );
+  const missing = entry.missing.slice(0, 5);
+  return [
+    entry.summary,
+    citations.length === 0 ? null : `citations=${citations.join(", ")}`,
+    missing.length === 0 ? null : `missing=${missing.join(", ")}`,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" ");
+}
+
+async function runCodeGroundingForProposalLane(
+  input: RunBacklogHygieneProposalLaneInput,
+  findings: readonly BacklogAuditFinding[],
+): Promise<{
+  report: CodeGroundingReport | null;
+  warnings: string[];
+}> {
+  if (input.codeGrounding === null || input.codeGrounding === undefined) {
+    return { report: null, warnings: [] };
+  }
+  if (findings.length === 0) {
+    return { report: null, warnings: [] };
+  }
+  try {
+    const groundingReport = await runManagedCodeGrounding({
+      ...input.codeGrounding,
+      findings,
+    });
+    return {
+      report: groundingReport,
+      warnings: groundingReport.warnings,
+    };
+  } catch (error) {
+    return {
+      report: null,
+      warnings: [
+        `code grounding failed; proposals emitted without grounding metadata: ${toErrorMessage(error)}`,
+      ],
+    };
+  }
 }
 
 function toErrorMessage(error: unknown, seen = new WeakSet<object>()): string {

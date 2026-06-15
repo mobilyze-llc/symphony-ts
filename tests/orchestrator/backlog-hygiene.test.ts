@@ -1,3 +1,7 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { BacklogAuditReport } from "../../src/audit/backlog-audit.js";
@@ -7,6 +11,7 @@ import {
   BACKLOG_HYGIENE_PROPOSAL_LABELS,
   QUEUE_TRIAGE_EVALUATION_DIMENSIONS,
   QUEUE_TRIAGE_GOLDEN_CORPUS,
+  buildBacklogHygieneCodeGroundingInput,
   buildBacklogHygieneDecisionJournalEntry,
   buildBacklogHygieneProposalJournalEntry,
   buildBacklogHygieneProposals,
@@ -168,6 +173,57 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     expect(proposals[0]?.issueIdentifiers).toEqual(["SYMPH-3"]);
   });
 
+  it("attaches code-grounding evidence to generated proposals", () => {
+    const proposals = buildBacklogHygieneProposals({
+      report: auditReport(),
+      candidateIssues: [issue({ id: "1", identifier: "SYMPH-1" })],
+      maxProposalsPerProductPerPoll: 1,
+      modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
+      codeGroundingReport: {
+        generatedAt: "2026-06-14T00:00:00.000Z",
+        status: "verified",
+        checkout: {
+          checkoutId: "cg-123",
+          path: "/tmp/workspace/.symphony/code-grounding/checkouts/cg-123",
+          commitSha: "abc123",
+          repoUrl: "file:///repo",
+        },
+        entries: [
+          {
+            findingId: "F-1",
+            status: "verified",
+            summary: "All extracted claims were found.",
+            citations: [
+              {
+                checkoutId: "cg-123",
+                commitSha: "abc123",
+                path: "src/orchestrator/backlog-hygiene.ts",
+                lineRange: [1, 20],
+                contentHash: "abcdef1234567890",
+                matchedSpan: "buildBacklogHygieneProposals",
+              },
+            ],
+            missing: [],
+          },
+        ],
+        cleanup: {
+          leaseReleased: true,
+          checkoutPurged: false,
+          dirtyState: null,
+        },
+        warnings: [],
+      },
+    });
+
+    expect(proposals[0]).toMatchObject({
+      findingId: "F-1",
+      codeGroundingStatus: "verified",
+    });
+    expect(proposals[0]?.codeGroundingEvidence).toContain(
+      "src/orchestrator/backlog-hygiene.ts:1-20#abcdef123456",
+    );
+  });
+
   it("validates cap units and treats a zero cap as no proposals", () => {
     const baseInput = {
       report: auditReport(),
@@ -187,6 +243,58 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
         maxProposalsPerProductPerPoll: 1.5,
       }),
     ).toThrow("maxProposalsPerProductPerPoll must be an integer.");
+  });
+
+  it("builds code-grounding input from resolved workflow config only when enabled", () => {
+    const enabled = buildBacklogHygieneCodeGroundingInput({
+      workflowConfig: {
+        workspace: { root: "/tmp/symphony-workspace" },
+        codeGrounding: {
+          enabled: true,
+          baseDir: ".symphony/code-grounding",
+          ttlMs: 86_400_000,
+          maxCheckoutsPerRepo: 5,
+        },
+      },
+      runId: "hygiene-run-1",
+      target: {
+        repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+        commitSha: "abc123",
+        repoScope: "symphony",
+      },
+    });
+
+    expect(enabled).toMatchObject({
+      workspaceRoot: "/tmp/symphony-workspace",
+      runId: "hygiene-run-1",
+      config: {
+        enabled: true,
+        baseDir: ".symphony/code-grounding",
+      },
+      target: {
+        repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+        commitSha: "abc123",
+      },
+    });
+    expect(
+      buildBacklogHygieneCodeGroundingInput({
+        workflowConfig: {
+          workspace: { root: "/tmp/symphony-workspace" },
+          codeGrounding: {
+            enabled: false,
+            baseDir: ".symphony/code-grounding",
+            ttlMs: 86_400_000,
+            maxCheckoutsPerRepo: 5,
+          },
+        },
+        runId: "hygiene-run-2",
+        target: {
+          repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+          commitSha: "abc123",
+          repoScope: "symphony",
+        },
+      }),
+    ).toBeNull();
   });
 
   it("uses the golden corpus registry when deciding local-vs-frontier model tier", () => {
@@ -316,6 +424,99 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     expect(result.proposals[0]?.modelTier).toBe("frontier_high_judgment");
   });
 
+  it("degrades code-grounding failures without dropping hygiene proposals", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "symph-hygiene-cg-"));
+    try {
+      const result = await runBacklogHygieneProposalLane({
+        enabled: true,
+        config: {
+          baseUrl: "http://127.0.0.1:9999",
+          model: "local",
+          apiKey: null,
+          timeoutMs: 1,
+        },
+        issues: [issue({ id: "1", identifier: "SYMPH-1" })],
+        runtimeEvidence: { state: {}, stateDelta: {} },
+        maxProposalsPerProductPerPoll: 5,
+        evaluation: passingEvaluation(),
+        fetchFn: vi.fn(async () => auditResponse()) as typeof fetch,
+        codeGrounding: {
+          workspaceRoot,
+          runId: "grounding-failure",
+          config: {
+            enabled: true,
+            baseDir: join(".symphony", "code-grounding"),
+            ttlMs: 86_400_000,
+            maxCheckoutsPerRepo: 5,
+          },
+          target: {
+            repoUrl: "file:///missing-repo",
+            commitSha: "bad",
+            repoScope: "symphony",
+          },
+          commandRunner: async () => ({
+            exitCode: 1,
+            stdout: "",
+            stderr: "clone failed",
+          }),
+        },
+      });
+
+      expect(result.status).toBe("completed");
+      expect(result.proposals).toHaveLength(1);
+      expect(result.proposals[0]?.codeGroundingStatus).toBeNull();
+      expect(result.warnings[0]).toContain("code grounding failed");
+      expect(result.warnings[0]).toContain("clone failed");
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("skips code grounding when cap and eligibility filters prevent proposals", async () => {
+    const commandRunner = vi.fn(async () => ({
+      exitCode: 1,
+      stdout: "",
+      stderr: "must not run",
+    }));
+
+    const result = await runBacklogHygieneProposalLane({
+      enabled: true,
+      config: {
+        baseUrl: "http://127.0.0.1:9999",
+        model: "local",
+        apiKey: null,
+        timeoutMs: 1,
+      },
+      issues: [issue({ id: "1", identifier: "SYMPH-1" })],
+      activeIssueIds: ["1"],
+      runtimeEvidence: { state: {}, stateDelta: {} },
+      maxProposalsPerProductPerPoll: 5,
+      evaluation: passingEvaluation(),
+      fetchFn: vi.fn(async () => auditResponse()) as typeof fetch,
+      codeGrounding: {
+        workspaceRoot: "/tmp/symphony-workspace",
+        runId: "no-proposals",
+        config: {
+          enabled: true,
+          baseDir: ".symphony/code-grounding",
+          ttlMs: 86_400_000,
+          maxCheckoutsPerRepo: 5,
+        },
+        target: {
+          repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+          commitSha: "abc123",
+          repoScope: "symphony",
+        },
+        commandRunner,
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.proposals).toEqual([]);
+    expect(result.warnings).toEqual([]);
+    expect(commandRunner).not.toHaveBeenCalled();
+  });
+
   it("journals proposals and accept/reject decisions as calibration-only label transitions", () => {
     const [proposal] = buildBacklogHygieneProposals({
       report: auditReport(),
@@ -334,6 +535,8 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     expect(proposalEntry.metadata.label).toBe(
       BACKLOG_HYGIENE_PROPOSAL_LABELS.proposed,
     );
+    expect(proposalEntry.metadata.code_grounding_status).toBeNull();
+    expect(proposalEntry.metadata.code_grounding_evidence).toBeNull();
 
     const decisionEntry = buildBacklogHygieneDecisionJournalEntry({
       proposal: proposal!,
