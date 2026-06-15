@@ -275,6 +275,15 @@ export function evaluateBudgetHardStop(input: {
   // (rate-limit window share, dollars). Missing cache telemetry degrades
   // to raw totals — the conservative direction. Computed exactly once per
   // evaluation; the dollar estimate derives from the same value.
+  //
+  // SYMPH-348: live enforcement is cadence-bound because the runner can
+  // only interrupt on Codex usage events. Recent raw 2026-06-12..14 session
+  // artifacts showed a max 35,091 billable-token event delta and no individual
+  // session-level token-grace, dollar, or premium-ceiling breach; supplemental
+  // stage evidence paused on the premium guard at $44.22/$50. Operators should
+  // still size `maxTokensPerUnit` against billable usage plus the configured
+  // `liveBudgetGraceRatio`, while treating raw totals as observability. Source
+  // paths are recorded in SYMPH-348 comment b07e5f58-1dfd-4f47-9c8c-fb95939af503.
   const billableTokens = computeBillableTokens({
     totalTokens: input.totalTokens,
     cacheReadTokens: input.cacheReadTokens ?? 0,
