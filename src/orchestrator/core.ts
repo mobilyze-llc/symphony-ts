@@ -149,6 +149,7 @@ import {
   PIPELINE_INTENT_ISSUE_IDENTIFIER,
   formatIntentActorKey,
   formatIntentAttribution,
+  isIntentActorKind,
 } from "./intent.js";
 import { createRightSizingDecision } from "./right-sizing.js";
 import { SignatureClusterRegistry } from "./signature-cluster.js";
@@ -7530,10 +7531,10 @@ export class OrchestratorCore {
    * so it cannot ride writeIntent — but it must still be a journal-attributed
    * intent entry recording the ACTUAL outcome: the caller journals `no_op`
    * for already-satisfied or infeasible requests before touching the view,
-   * and `applied` only AFTER the tracker view mutation (the halt-issue
-   * manipulation) succeeded. The verb is namespaced (`pipeline_pause` /
-   * `pipeline_resume`) so issue-verb replay reduction ignores these entries:
-   * the halt-issue view is re-derived from the tracker, not from replay.
+   * and `applied` only AFTER the control effect succeeded: either a Linear
+   * halt-issue mutation or the runtime-local pause gate used when the Linear
+   * halt view is degraded. The verb is namespaced (`pipeline_pause` /
+   * `pipeline_resume`) so issue-verb replay reduction ignores these entries.
    *
    * Every request journals its own audit entry (the journal sequence is the
    * uniqueness discriminator); effect-level idempotency lives in the caller,
@@ -7585,8 +7586,11 @@ export class OrchestratorCore {
         input.action === "pause" &&
         input.metadata?.local_pause === true
       ) {
-        this.state.pipelinePause = this.buildPipelinePauseStateFromJournal({
-          entry,
+        this.state.pipelinePause = this.buildPipelinePauseState({
+          timestamp: entry.timestamp,
+          reason: input.reason,
+          actor: input.actor,
+          haltViewMetadata: readMetadataRecord(entry.metadata, "halt_view"),
           sequence: entry.sequence,
         });
       }
@@ -7596,6 +7600,14 @@ export class OrchestratorCore {
       }
       return entry.sequence;
     } catch (error) {
+      this.applyDegradedPipelineIntentLiveEffect({
+        action: input.action,
+        status: input.status,
+        actor: input.actor,
+        reason: input.reason,
+        timestamp,
+        ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+      });
       console.warn(
         `[orchestrator] failed to journal pipeline intent ${verb}: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -8177,22 +8189,73 @@ export class OrchestratorCore {
     });
   }
 
+  private applyDegradedPipelineIntentLiveEffect(input: {
+    action: "pause" | "resume" | "stop";
+    status: "applied" | "no_op";
+    actor: IntentActor;
+    reason: IntentReason;
+    metadata?: Record<string, unknown>;
+    timestamp: string;
+  }): void {
+    if (input.status !== "applied") {
+      return;
+    }
+    if (input.action === "resume") {
+      this.state.emergencyStop = null;
+      this.state.pipelinePause = null;
+      return;
+    }
+    if (input.action === "pause" && input.metadata?.local_pause === true) {
+      this.state.pipelinePause = this.buildPipelinePauseState({
+        timestamp: input.timestamp,
+        reason: input.reason,
+        actor: input.actor,
+        haltViewMetadata: readMetadataRecord(input.metadata, "halt_view"),
+        sequence: null,
+      });
+    }
+  }
+
   private buildPipelinePauseStateFromJournal(input: {
     entry: DispatcherRunJournalEntry;
     sequence: number | null;
   }): PipelinePauseState {
     const reason = readMetadataRecord(input.entry.metadata, "reason");
     const actor = readMetadataRecord(input.entry.metadata, "actor");
-    const haltView = readMetadataRecord(input.entry.metadata, "halt_view");
+    const actorKind = readRecordString(actor, "kind");
+    return this.buildPipelinePauseState({
+      timestamp: input.entry.timestamp,
+      reason: {
+        class: readRecordString(reason, "class") ?? "operator_pipeline_pause",
+        human: readRecordString(reason, "human") ?? "pipeline pause requested",
+      },
+      actor: {
+        kind: isIntentActorKind(actorKind) ? actorKind : "operator",
+        host: readRecordString(actor, "host") ?? "unknown",
+        session: readRecordString(actor, "session"),
+      },
+      haltViewMetadata: readMetadataRecord(input.entry.metadata, "halt_view"),
+      sequence: input.sequence,
+    });
+  }
+
+  private buildPipelinePauseState(input: {
+    timestamp: string;
+    reason: IntentReason;
+    actor: IntentActor;
+    haltViewMetadata: Record<string, unknown> | null;
+    sequence: number | null;
+  }): PipelinePauseState {
+    const haltView = input.haltViewMetadata;
     const status = readRecordString(haltView, "status");
     return {
       active: true,
-      since: input.entry.timestamp,
-      reason: readRecordString(reason, "human") ?? "pipeline pause requested",
+      since: input.timestamp,
+      reason: input.reason.human,
       actor: {
-        kind: readRecordString(actor, "kind") ?? "operator",
-        host: readRecordString(actor, "host") ?? "unknown",
-        session: readRecordString(actor, "session"),
+        kind: input.actor.kind,
+        host: input.actor.host,
+        session: input.actor.session ?? null,
       },
       setBySequence: input.sequence,
       haltView: {

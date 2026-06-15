@@ -7,9 +7,9 @@
  * - requestPipelinePause/Resume journal a pipeline-scoped, actor-attributed
  *   intent entry that records the ACTUAL outcome: feasibility is checked
  *   before mutating, `no_op` is journaled for already-satisfied/infeasible
- *   requests, and `applied` is journaled only AFTER the Linear halt-issue
- *   view mutation succeeded (a failed journal write at that point is
- *   warn-only degraded mode).
+ *   requests, and `applied` is journaled only AFTER the pipeline control
+ *   effect succeeded (Linear halt issue or runtime-local pause gate). A failed
+ *   journal write at that point is warn-only degraded mode.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -266,6 +266,24 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
       reason: "halting for deploy",
     });
     expect(status.paused).toBe(true);
+    expect(status.local_pause).toMatchObject({
+      active: true,
+      reason: "halting for deploy",
+      halt_view: {
+        status: "created",
+        issue_identifier: "ENG-99",
+        issue_title: "Pipeline Halt",
+      },
+    });
+    expect(host.getState().pipelinePause).toMatchObject({
+      active: true,
+      reason: "halting for deploy",
+      haltView: {
+        status: "created",
+        issueIdentifier: "ENG-99",
+        issueTitle: "Pipeline Halt",
+      },
+    });
 
     const entry = pipelineEntries(host, "pipeline_pause")[0];
     expect(entry).toBeDefined();
@@ -315,6 +333,26 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
     ).rejects.toThrow("linear is down");
 
     expect(pipelineEntries(host, "pipeline_pause")).toHaveLength(0);
+  });
+
+  it("resume fails closed when the halt view is unreadable and no local pause is active", async () => {
+    const tracker = createLinearTracker();
+    const fetchByLabels = tracker.fetchOpenIssuesByLabels as ReturnType<
+      typeof vi.fn
+    >;
+    fetchByLabels.mockRejectedValue(
+      new Error("Linear GraphQL returned top-level errors."),
+    );
+
+    const host = createHost({ tracker });
+    await expect(
+      host.requestPipelineResume({
+        actor: { kind: "operator", host: "pro14" },
+        reason: "resume after uncertain pause",
+      }),
+    ).rejects.toThrow("pipeline resume cannot verify halt issues");
+    expect(pipelineEntries(host, "pipeline_resume")).toHaveLength(0);
+    expect(host.getState().pipelinePause).toBeNull();
   });
 
   it("pause applies a degraded runtime-local gate when the halt status read throws", async () => {
@@ -423,6 +461,55 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
     expect(
       pipelineEntries(host, "pipeline_resume").at(-1)?.metadata.status,
     ).toBe("applied");
+  });
+
+  it("healthy pause/resume round trip clears the runtime-local pause and halt issue", async () => {
+    const tracker = createLinearTracker();
+    const haltIssue = {
+      id: "halt-1",
+      identifier: "ENG-99",
+      title: "Pipeline Halt",
+    };
+    let haltActive = false;
+    const fetchByLabels = tracker.fetchOpenIssuesByLabels as ReturnType<
+      typeof vi.fn
+    >;
+    fetchByLabels.mockImplementation(async () =>
+      haltActive ? [haltIssue] : [],
+    );
+    const createHaltIssue = tracker.createIssue as ReturnType<typeof vi.fn>;
+    createHaltIssue.mockImplementation(async () => {
+      haltActive = true;
+      return haltIssue;
+    });
+    const updateIssueState = vi
+      .spyOn(tracker, "updateIssueState")
+      .mockImplementation(async (issueId, state) => {
+        if (issueId === haltIssue.id && state === "Cancelled") {
+          haltActive = false;
+        }
+      });
+    const host = createHost({ tracker });
+
+    const paused = await host.requestPipelinePause({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "deploy window",
+    });
+    expect(paused.local_pause).toMatchObject({
+      active: true,
+      halt_view: { status: "created" },
+    });
+    expect(host.getState().pipelinePause).not.toBeNull();
+
+    const resumed = await host.requestPipelineResume({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "deploy complete",
+    });
+
+    expect(updateIssueState).toHaveBeenCalledWith("halt-1", "Cancelled", "");
+    expect(resumed.paused).toBe(false);
+    expect(resumed.local_pause).toBeNull();
+    expect(host.getState().pipelinePause).toBeNull();
   });
 
   it("resume on a non-paused pipeline journals a no_op pipeline_resume intent", async () => {
@@ -534,6 +621,141 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
     expect(replayed.getState().resumeRequired.has("pipeline")).toBe(false);
     expect(replayed.getState().resumeRequiredMarks.pipeline).toBeUndefined();
     expect(replayed.getState().resumeRequired.size).toBe(0);
+    expect(replayed.getState().pipelinePause).toMatchObject({
+      active: true,
+      reason: "halting for deploy",
+      haltView: { status: "created" },
+    });
+  });
+
+  it("runtime-local pause defers retry timers before halt issue reads", async () => {
+    const orchestrator = new OrchestratorCore({
+      config: createConfig("/tmp/workspaces"),
+      tracker: createTracker({ activeIssues: [] }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 9001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      timerScheduler: {
+        set: vi.fn(() => null),
+        clear: vi.fn(),
+      },
+      now: () => new Date("2026-06-12T12:00:00.000Z"),
+    });
+    await orchestrator.journalPipelineIntent({
+      action: "pause",
+      status: "applied",
+      actor: { kind: "operator", host: "pro14" },
+      reason: {
+        class: "operator_pipeline_pause",
+        human: "fence a pilot",
+      },
+      detail: "pipeline pause applied via runtime-local gate",
+      metadata: {
+        local_pause: true,
+        halt_view: {
+          status: "uncertain",
+          error_message: "Linear GraphQL returned top-level errors.",
+        },
+      },
+    });
+    const state = orchestrator.getState();
+    state.claimed.add("1");
+    state.retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "SYMPH-1",
+      attempt: 2,
+      dueAtMs: Date.parse("2026-06-12T12:00:00.000Z"),
+      timerHandle: null,
+      error: "previous failure",
+      delayType: "failure",
+    };
+
+    const result = await orchestrator.onRetryTimer("1");
+
+    expect(result.dispatched).toBe(false);
+    expect(result.released).toBe(false);
+    expect(result.retryEntry).toMatchObject({
+      issueId: "1",
+      identifier: "SYMPH-1",
+      attempt: 2,
+      error: "runtime pipeline pause active",
+      delayType: "failure",
+    });
+    expect(orchestrator.getState().retryAttempts["1"]?.attempt).toBe(2);
+    expect(
+      orchestrator.getState().issueDispositions.__dispatch__,
+    ).toMatchObject({
+      disposition: "halt",
+      reasonCode: "runtime_pipeline_pause",
+    });
+  });
+
+  it("keeps live pipeline pause state consistent when intent journaling is degraded", async () => {
+    const warnSpy = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    try {
+      const orchestrator = new OrchestratorCore({
+        config: createConfig("/tmp/workspaces"),
+        tracker: createTracker({ activeIssues: [] }),
+        spawnWorker: async () => ({
+          workerHandle: { pid: 9001 },
+          monitorHandle: { ref: "monitor-1" },
+        }),
+        writeRunJournalEntry: async () => {
+          throw new Error("journal disk unavailable");
+        },
+        now: () => new Date("2026-06-12T12:00:00.000Z"),
+      });
+
+      const pauseSequence = await orchestrator.journalPipelineIntent({
+        action: "pause",
+        status: "applied",
+        actor: { kind: "operator", host: "pro14" },
+        reason: {
+          class: "operator_pipeline_pause",
+          human: "fence a pilot",
+        },
+        detail: "pipeline pause applied via runtime-local gate",
+        metadata: {
+          local_pause: true,
+          halt_view: {
+            status: "uncertain",
+            error_message: "Linear GraphQL returned top-level errors.",
+          },
+        },
+      });
+
+      expect(pauseSequence).toBeNull();
+      expect(orchestrator.getState().dispatcherRunJournal).toHaveLength(0);
+      expect(orchestrator.getState().pipelinePause).toMatchObject({
+        active: true,
+        setBySequence: null,
+        reason: "fence a pilot",
+        haltView: {
+          status: "uncertain",
+          errorMessage: "Linear GraphQL returned top-level errors.",
+        },
+      });
+
+      const resumeSequence = await orchestrator.journalPipelineIntent({
+        action: "resume",
+        status: "applied",
+        actor: { kind: "operator", host: "pro14" },
+        reason: {
+          class: "operator_pipeline_resume",
+          human: "resume after pilot",
+        },
+        detail: "pipeline resume applied",
+      });
+
+      expect(resumeSequence).toBeNull();
+      expect(orchestrator.getState().dispatcherRunJournal).toHaveLength(0);
+      expect(orchestrator.getState().pipelinePause).toBeNull();
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("serializes emergency-stop halt assertion before a concurrent resume", async () => {
