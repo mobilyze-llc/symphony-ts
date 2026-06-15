@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   realpath,
   rm,
   symlink,
@@ -154,6 +155,9 @@ describe("managed code grounding (SYMPH-596)", () => {
     expect(
       report.entries[0]?.citations.map((citation) => citation.path),
     ).toEqual(expect.arrayContaining(["src/orchestrator/queue.ts"]));
+    await expect(
+      readdir(join(workspaceRoot, ".symphony", "code-grounding", "artifacts")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
 
     const leaseIndex = JSON.parse(
       await readFile(
@@ -1032,13 +1036,19 @@ describe("managed code grounding (SYMPH-596)", () => {
     const staleCheckoutLock = join(baseRoot, "checkouts", "cg-stale.lock");
     const activeCheckout = join(baseRoot, "checkouts", "cg-active");
     const activeCheckoutLock = join(baseRoot, "checkouts", "cg-active.lock");
+    const staleArtifact = join(baseRoot, "artifacts", "stale");
+    const activeArtifact = join(baseRoot, "artifacts", "active");
     await mkdir(staleCheckout, { recursive: true });
     await mkdir(staleCheckoutLock, { recursive: true });
     await mkdir(activeCheckout, { recursive: true });
     await mkdir(activeCheckoutLock, { recursive: true });
+    await mkdir(staleArtifact, { recursive: true });
+    await mkdir(activeArtifact, { recursive: true });
     await writeFile(join(staleCheckout, "file.txt"), "stale");
     await writeFile(join(staleCheckoutLock, "owner.json"), "{}\n");
     await writeFile(join(activeCheckout, "file.txt"), "active");
+    await writeFile(join(staleArtifact, "report.json"), "{}\n");
+    await writeFile(join(activeArtifact, "report.json"), "{}\n");
     await writeFile(
       join(activeCheckoutLock, "owner.json"),
       `${JSON.stringify({
@@ -1059,7 +1069,7 @@ describe("managed code grounding (SYMPH-596)", () => {
               repoUrl: "repo",
               commitSha: "abc",
               checkoutPath: staleCheckout,
-              artifactRoot: join(baseRoot, "artifacts", "stale"),
+              artifactRoot: staleArtifact,
               createdAt: "2026-06-13T00:00:00.000Z",
               lastUsedAt: "2026-06-13T00:00:00.000Z",
               activeRunIds: [],
@@ -1069,7 +1079,7 @@ describe("managed code grounding (SYMPH-596)", () => {
               repoUrl: "repo",
               commitSha: "def",
               checkoutPath: activeCheckout,
-              artifactRoot: join(baseRoot, "artifacts", "active"),
+              artifactRoot: activeArtifact,
               createdAt: "2026-06-13T00:00:00.000Z",
               lastUsedAt: "2026-06-13T00:00:00.000Z",
               activeRunIds: ["run-active"],
@@ -1097,8 +1107,14 @@ describe("managed code grounding (SYMPH-596)", () => {
       readFile(join(staleCheckoutLock, "owner.json")),
     ).rejects.toMatchObject({ code: "ENOENT" });
     await expect(
+      readFile(join(staleArtifact, "report.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
       readFile(join(activeCheckout, "file.txt"), "utf8"),
     ).resolves.toBe("active");
+    await expect(
+      readFile(join(activeArtifact, "report.json"), "utf8"),
+    ).resolves.toBe("{}\n");
   });
 
   it("sweeps least-recently-used inactive checkouts over the per-repo cap", async () => {
@@ -1276,6 +1292,94 @@ describe("managed code grounding (SYMPH-596)", () => {
       checkouts: Record<string, unknown>;
     };
     expect(leaseIndex.checkouts["cg-locked"]).toBeDefined();
+  });
+
+  it("reaps old orphaned artifact directories while preserving young artifacts", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
+    const oldArtifact = join(baseRoot, "artifacts", "old-orphan");
+    const youngArtifact = join(baseRoot, "artifacts", "young-orphan");
+    await mkdir(oldArtifact, { recursive: true });
+    await mkdir(youngArtifact, { recursive: true });
+    await writeFile(join(oldArtifact, "report.json"), "{}\n");
+    await writeFile(join(youngArtifact, "report.json"), "{}\n");
+    await utimes(
+      oldArtifact,
+      new Date("2026-06-13T00:00:00.000Z"),
+      new Date("2026-06-13T00:00:00.000Z"),
+    );
+    await utimes(
+      youngArtifact,
+      new Date("2026-06-14T12:00:00.000Z"),
+      new Date("2026-06-14T12:00:00.000Z"),
+    );
+
+    await sweepCodeGroundingCheckouts({
+      workspaceRoot,
+      config: codeGroundingConfig(),
+      now: new Date("2026-06-15T00:00:00.000Z"),
+    });
+    await sweepCodeGroundingCheckouts({
+      workspaceRoot,
+      config: codeGroundingConfig(),
+      now: new Date("2026-06-15T00:00:00.000Z"),
+    });
+
+    await expect(
+      readFile(join(oldArtifact, "report.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(join(youngArtifact, "report.json"), "utf8"),
+    ).resolves.toBe("{}\n");
+  });
+
+  it("refuses artifact cleanup paths outside the artifacts root", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const outsideRoot = await tempRoot("symph-cg-outside-");
+    const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
+    const staleCheckout = join(baseRoot, "checkouts", "cg-stale");
+    const outsideArtifact = join(outsideRoot, "artifact");
+    await mkdir(staleCheckout, { recursive: true });
+    await mkdir(outsideArtifact, { recursive: true });
+    await writeFile(join(staleCheckout, "file.txt"), "stale");
+    await writeFile(join(outsideArtifact, "report.json"), "{}\n");
+    await mkdir(baseRoot, { recursive: true });
+    await writeFile(
+      join(baseRoot, "leases.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          checkouts: {
+            "cg-stale": {
+              checkoutId: "cg-stale",
+              repoUrl: "repo",
+              commitSha: "abc",
+              checkoutPath: staleCheckout,
+              artifactRoot: outsideArtifact,
+              createdAt: "2026-06-13T00:00:00.000Z",
+              lastUsedAt: "2026-06-13T00:00:00.000Z",
+              activeRunIds: [],
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    await expect(
+      sweepCodeGroundingCheckouts({
+        workspaceRoot,
+        config: {
+          ...codeGroundingConfig(),
+          ttlMs: 1,
+        },
+        now: new Date("2026-06-15T00:00:00.000Z"),
+      }),
+    ).rejects.toThrow("Workspace path escapes configured root");
+    await expect(
+      readFile(join(outsideArtifact, "report.json"), "utf8"),
+    ).resolves.toBe("{}\n");
   });
 });
 

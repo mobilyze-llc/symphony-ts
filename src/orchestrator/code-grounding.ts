@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
+import type { Dirent } from "node:fs";
 import { promises as fs } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
@@ -234,7 +235,6 @@ export async function runManagedCodeGrounding(
       paths.workspaceRoot,
       checkoutFileLockPath(paths),
     );
-    await fs.mkdir(paths.runArtifactRoot, { recursive: true });
     const release = await acquireCheckoutLease(paths, input);
     let report: CodeGroundingReport | null = null;
     try {
@@ -317,6 +317,8 @@ export async function sweepCodeGroundingCheckouts(input: {
     input.config.baseDir,
   );
   const leaseIndexPath = join(baseRoot, "leases.json");
+  const artifactsRoot = join(baseRoot, "artifacts");
+  assertWorkspacePathWithinRoot(baseRoot, artifactsRoot);
   await withLeaseIndexLock(workspaceRoot, baseRoot, async () => {
     const index = await readLeaseIndex(leaseIndexPath);
     const now = input.now ?? new Date();
@@ -355,9 +357,20 @@ export async function sweepCodeGroundingCheckouts(input: {
         }
         await fs.rm(record.checkoutPath, { recursive: true, force: true });
         await fs.rm(checkoutLockPath, { recursive: true, force: true });
+        await removeArtifactRoot(artifactsRoot, record.artifactRoot);
         delete index.checkouts[record.checkoutId];
       }
     }
+    await sweepOrphanedArtifactRoots({
+      artifactsRoot,
+      referencedArtifactRoots: new Set(
+        Object.values(index.checkouts).map((record) =>
+          normalizeArtifactChildPath(artifactsRoot, record.artifactRoot),
+        ),
+      ),
+      retentionMs: input.config.ttlMs,
+      now,
+    });
     await writeLeaseIndex(leaseIndexPath, index);
   });
 }
@@ -1095,6 +1108,77 @@ async function acquireCheckoutLease(
       }
     });
   };
+}
+
+async function removeArtifactRoot(
+  artifactsRoot: string,
+  artifactRoot: string,
+): Promise<void> {
+  const artifactPath = normalizeArtifactChildPath(artifactsRoot, artifactRoot);
+  try {
+    const stat = await fs.lstat(artifactPath);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      return;
+    }
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return;
+    }
+    throw error;
+  }
+  await fs.rm(artifactPath, { recursive: true, force: true });
+}
+
+async function sweepOrphanedArtifactRoots(input: {
+  artifactsRoot: string;
+  referencedArtifactRoots: ReadonlySet<string>;
+  retentionMs: number;
+  now: Date;
+}): Promise<void> {
+  let entries: Dirent<string>[];
+  try {
+    entries = await fs.readdir(input.artifactsRoot, { withFileTypes: true });
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return;
+    }
+    throw error;
+  }
+
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      continue;
+    }
+    const artifactPath = normalizeArtifactChildPath(
+      input.artifactsRoot,
+      join(input.artifactsRoot, entry.name),
+    );
+    if (input.referencedArtifactRoots.has(artifactPath)) {
+      continue;
+    }
+    const stat = await fs.lstat(artifactPath);
+    if (
+      stat.isSymbolicLink() ||
+      !stat.isDirectory() ||
+      input.now.getTime() - stat.mtimeMs <= input.retentionMs
+    ) {
+      continue;
+    }
+    await fs.rm(artifactPath, { recursive: true, force: true });
+  }
+}
+
+function normalizeArtifactChildPath(
+  artifactsRoot: string,
+  artifactRoot: string,
+): string {
+  const normalizedRoot = resolve(artifactsRoot);
+  const normalizedArtifactRoot = resolve(artifactRoot);
+  assertWorkspacePathWithinRoot(normalizedRoot, normalizedArtifactRoot);
+  if (normalizedArtifactRoot === normalizedRoot) {
+    throw new Error("Refusing to delete code-grounding artifacts root");
+  }
+  return normalizedArtifactRoot;
 }
 
 async function readLeaseIndex(path: string): Promise<LeaseIndex> {
