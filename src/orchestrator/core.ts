@@ -116,11 +116,19 @@ import {
   validateAnchorPlacementForIssue,
 } from "./anchor-policy.js";
 import {
+  type BacklogHygieneLaneResult,
   type BacklogHygieneProposal,
   type BacklogHygieneProposalDecision,
+  type RunBacklogHygieneProposalLaneInput,
+  buildBacklogHygieneCodeGroundingInput,
   buildBacklogHygieneDecisionJournalEntry,
   buildBacklogHygieneProposalJournalEntry,
+  runBacklogHygieneProposalLane as runBacklogHygieneProposalLaneForInput,
 } from "./backlog-hygiene.js";
+import type {
+  CodeGroundingCommandRunner,
+  CodeGroundingTarget,
+} from "./code-grounding.js";
 import {
   CONTINUOUS_FEEDBACK_PROVIDER_FAILURE_SUMMARY_PREFIX,
   type ContinuousFeedbackReviewResult,
@@ -2974,6 +2982,36 @@ export class OrchestratorCore {
       );
       return null;
     }
+  }
+
+  async runBacklogHygieneProposalLane(
+    input: Omit<RunBacklogHygieneProposalLaneInput, "codeGrounding"> & {
+      runId: string;
+      codeGroundingTarget: CodeGroundingTarget | null;
+      codeGroundingCommandRunner?: CodeGroundingCommandRunner;
+    },
+  ): Promise<BacklogHygieneLaneResult> {
+    const {
+      runId,
+      codeGroundingTarget,
+      codeGroundingCommandRunner,
+      ...laneInput
+    } = input;
+    const codeGrounding =
+      codeGroundingTarget === null
+        ? null
+        : buildBacklogHygieneCodeGroundingInput({
+            workflowConfig: this.config,
+            runId,
+            target: codeGroundingTarget,
+            ...(codeGroundingCommandRunner === undefined
+              ? {}
+              : { commandRunner: codeGroundingCommandRunner }),
+          });
+    return runBacklogHygieneProposalLaneForInput({
+      ...laneInput,
+      codeGrounding,
+    });
   }
 
   async recordBacklogHygieneProposalDecision(input: {
