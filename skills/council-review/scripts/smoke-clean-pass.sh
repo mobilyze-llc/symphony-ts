@@ -34,10 +34,49 @@ write_case() {
   printf '%s\n' "$local_base" > "$dir/resolved-base-sha.txt"
 }
 
+write_completed_reviewer_artifact() {
+  local dir="$1"
+  local head_sha
+  head_sha="$(cat "$dir/pr-head-sha.txt")"
+
+  cat > "$dir/phase1-opus.md" <<EOF
+## Verdict
+PASS
+
+## Artifact Quality
+Current head SHA: $head_sha.
+Reviewed the current PR-backed draft artifact and found the evidence surface complete.
+The cmux status message was treated as diagnostic; this Markdown body is the authority.
+
+## No Findings
+No P1/P2 findings. I inspected the reviewed diff against the current head and found no merge-blocking correctness, security, API-contract, or test-proof gaps.
+
+## P1 Must Fix
+None
+
+## P2 Should Fix
+None
+
+## Track
+None
+EOF
+
+  cat > "$dir/phase1-opus.status.json" <<EOF
+{"schema":"agent-harness.lane-status.v1","agent":"claude","lane":"phase1-opus","phase":"phase1-opus","state":"complete","message":"Review complete","artifact":"$dir/phase1-opus.md"}
+EOF
+}
+
 expect_pass() {
   local name="$1"
   local dir="$2"
   "$ASSERT" "$dir" > "$dir/assertion.out"
+  echo "PASS $name"
+}
+
+expect_closeout_pass() {
+  local name="$1"
+  local dir="$2"
+  "$ASSERT" --closeout "$dir" > "$dir/assertion.out"
   echo "PASS $name"
 }
 
@@ -55,6 +94,11 @@ expect_fail() {
 clean="$WORK_DIR/clean-draft"
 write_case "$clean" "PR-backed draft" "true" "0" "" "match" "exact"
 expect_pass "matching PR-backed draft" "$clean"
+
+closeout="$WORK_DIR/clean-closeout"
+write_case "$closeout" "PR-backed draft" "true" "0" "" "match" "exact"
+write_completed_reviewer_artifact "$closeout"
+expect_closeout_pass "matching PR-backed draft closeout" "$closeout"
 
 safe_base="$WORK_DIR/safe-base-equivalence"
 write_case "$safe_base" "PR-backed draft" "true" "0" "" "match" "origin-prefix-equivalent"

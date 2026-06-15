@@ -91,6 +91,20 @@ brief operator-decision note: remaining family, fixed evidence,
 remaining evidence, recommended action, and exact next question. Do not
 launch another broad review from inside this artifact.
 
+Artifact contract:
+
+- Start the artifact with `## Verdict` followed by exactly `PASS` or
+  `FINDINGS`.
+- Include `## Artifact Quality` and cite CURRENT HEAD SHA verbatim.
+- Include either `## No Findings` or structured finding sections
+  `## P1 Must Fix`, `## P2 Should Fix`, and `## Track`.
+- Do not return only a status summary. Transport completion is not
+  review evidence unless this artifact body satisfies the contract.
+- P1/P2 claims in status text, progress notes, or summaries are
+  diagnostic only unless repeated in the artifact with current-head
+  file:line evidence, contract violated, reachable failure mode, and
+  missing test/proof gap.
+
 Diff:
 
 ```diff

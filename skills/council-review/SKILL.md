@@ -46,7 +46,7 @@ Read these files only when the workflow asks for them:
 | `templates/cross-exam-opus-prompt.md` | Opus Phase 2 cross-exam prompt for Pi findings | During Phase 2 setup |
 | `templates/council-report.md` | Phase 3 report format | During triage |
 | `templates/cycle-report.md` | Final cycle summary format | During closeout |
-| `scripts/assert-clean-pass.py` | Executable closeout assertion over PR/diff provenance and clean-PASS artifacts | During Setup and Closeout |
+| `scripts/assert-clean-pass.py` | Executable setup and closeout assertion over PR/diff provenance and clean-PASS artifacts | During Setup and Closeout |
 | `scripts/write-review-target-artifacts.py` | Executable setup helper that writes PR mode and diff provenance artifacts from `gh`, git, and base-ref facts | During Setup |
 | `scripts/smoke-clean-pass.sh` | Focused smoke matrix for clean draft, mismatch, degraded, and no-PR cases | During skill validation |
 
@@ -286,9 +286,19 @@ at `state: "starting"` until completion. Treat non-terminal
 `.status.json`, or `.pane.log` shows a terminal startup error.
 
 Treat a lane as failed if its status state is not `complete`, its
-artifact is missing, or its artifact is empty. Record failures in the
-council report and continue only if at least one external reviewer
-succeeded.
+artifact is missing, its artifact is empty, or its artifact does not
+satisfy the review artifact contract. A one-line summary artifact is
+not review evidence, even when the status JSON says `complete` or its
+message claims P1/P2 findings. Status messages are diagnostic only; the
+Markdown artifact body is the authoritative evidence surface. Record
+the artifact path, byte count, status message, and validation reason in
+the council report, then continue only if at least one external
+reviewer produced a contract-valid artifact. That continuation rule
+allows degraded triage to proceed after a failed or unavailable lane; it
+does not make the run a compliant clean PASS. A PR-backed clean PASS is
+only available when the closeout assertion passes after all observed
+attempted Phase 1 lanes are either absent or complete with canonical,
+contract-valid Markdown artifacts.
 
 ### Phase 2: Cross-Examination
 
@@ -368,6 +378,14 @@ marked ready after all closeout gates passed; record that later
 transition in closeout evidence before calling the final PR state ready.
 If the review is degraded, list staged, unstaged, and untracked-file or
 PR-detection state explicitly.
+
+After reviewer artifacts and `$COUNCIL_DIR/council-report.md` exist,
+rerun `scripts/assert-clean-pass.py --closeout` and refresh
+`clean-pass-assertion.txt` plus
+`clean-pass-assertion-exit-code.txt`. The setup-time assertion only
+checks PR/diff provenance; the closeout assertion additionally rejects
+missing, non-complete, tiny, or malformed Phase 1 reviewer artifacts.
+Do not report a clean PASS from the setup-time assertion alone.
 
 Triage process:
 
@@ -524,10 +542,12 @@ fall back to direct CLI invocations.
 - Prefer clean draft PR review for non-trivial work; dirty working-tree
   review is degraded and must document staged, unstaged, and untracked
   file handling.
-- PR-backed clean PASS requires `scripts/assert-clean-pass.py` to exit
-  0 against `$COUNCIL_DIR`. That helper reads the mechanical draft-state,
-  git-status, PR head/base, local HEAD/base, base-equivalence, and
-  provenance artifacts. The required values include
+- PR-backed clean PASS requires `scripts/assert-clean-pass.py --closeout`
+  to exit 0 against `$COUNCIL_DIR` after reviewer artifacts exist. The
+  helper reads the mechanical draft-state, git-status, PR head/base,
+  local HEAD/base, base-equivalence, provenance artifacts, and at least
+  one contract-valid completed Phase 1 reviewer artifact. The required
+  values include
   `pr-is-draft.txt=true`, `pr-mode.txt=PR-backed draft`,
   `pr-view-exit-code.txt=0`, `pr-diff-provenance.txt=match`, safe base
   equivalence, matching PR/local head SHAs, matching PR/local base SHAs,
