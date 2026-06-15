@@ -167,7 +167,7 @@ function symlinkTargetFailure(linkPath, targetPath) {
   try {
     const linkStat = lstatSync(linkPath);
     if (!linkStat.isSymbolicLink()) {
-      return "not a symlink";
+      return `not a symlink; ${copyStyleDriftStatus(linkPath, targetPath)}`;
     }
 
     const actual = realpathSync(linkPath);
@@ -191,6 +191,21 @@ function pathExistsEvenIfDanglingSymlink(path) {
       return false;
     }
     return true;
+  }
+}
+
+function copyStyleDriftStatus(copyPath, targetPath) {
+  const copySkillPath = resolve(copyPath, "SKILL.md");
+  const targetSkillPath = resolve(targetPath, "SKILL.md");
+  try {
+    const copySkill = readFileSync(copySkillPath, "utf8");
+    const targetSkill = readFileSync(targetSkillPath, "utf8");
+    if (copySkill === targetSkill) {
+      return "copy-style directory has byte-identical SKILL.md but can drift";
+    }
+    return "copy-style directory has byte-divergent SKILL.md";
+  } catch (error) {
+    return `copy-style directory SKILL.md parity could not be checked: ${message(error)}`;
   }
 }
 
