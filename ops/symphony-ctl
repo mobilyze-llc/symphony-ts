@@ -5,13 +5,14 @@ set -euo pipefail
 # Usage: symphony-ctl {install|uninstall|start|stop|restart|status|logs|tail|cleanup}
 
 SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
-SYMPHONY_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DEFAULT_RUNTIME_CHECKOUT="$HOME/.codex/worktrees/symphony-ts-runtime-main"
 
 # Defaults — override via environment or .env
 SYMPHONY_PROJECT="${SYMPHONY_PROJECT:-symphony}"
 SERVICE_LABEL="com.symphony.${SYMPHONY_PROJECT}"
 PLIST_PATH="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs/symphony/${SYMPHONY_PROJECT}"
+SYMPHONY_ROOT="${SYMPHONY_ROOT:-${SYMPHONY_SERVICE_ROOT:-${SYMPHONY_RUNTIME_CHECKOUT:-$DEFAULT_RUNTIME_CHECKOUT}}}"
 ENV_FILE="${SYMPHONY_ENV_FILE:-$SYMPHONY_ROOT/.env}"
 WORKFLOW_PATH="${SYMPHONY_WORKFLOW:-$SYMPHONY_ROOT/pipeline-config/workflows/WORKFLOW-${SYMPHONY_PROJECT}.md}"
 NODE_BIN="${SYMPHONY_NODE:-$(which node 2>/dev/null || echo /opt/homebrew/bin/node)}"
@@ -36,7 +37,7 @@ check_node() {
 }
 
 check_built() {
-  [[ -f "$CLI_JS" ]] || die "Built CLI not found at $CLI_JS. Run 'pnpm build' in $SYMPHONY_ROOT first."
+  [[ -f "$CLI_JS" ]] || die "Built CLI not found at $CLI_JS. Run 'pnpm build' in $SYMPHONY_ROOT first, or set SYMPHONY_ROOT/SYMPHONY_SERVICE_ROOT/SYMPHONY_RUNTIME_CHECKOUT."
 }
 
 check_env_file() {
@@ -175,6 +176,7 @@ cmd_install() {
   generate_plist > "$PLIST_PATH"
   ok "Plist written to $PLIST_PATH"
 
+  enable_service
   launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
   ok "Service registered: $SERVICE_LABEL"
   info "Run 'symphony-ctl start' to begin polling."
@@ -201,6 +203,8 @@ cmd_start() {
     warn "Service is already running."
     return 0
   fi
+
+  enable_service
 
   # Re-register if previously stopped via bootout
   if ! launchctl print "gui/$(id -u)/${SERVICE_LABEL}" &>/dev/null; then
@@ -238,6 +242,12 @@ cmd_stop() {
 
 cmd_restart() {
   check_installed
+
+  enable_service
+
+  if ! launchctl print "gui/$(id -u)/${SERVICE_LABEL}" &>/dev/null; then
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_PATH"
+  fi
 
   # Use kickstart -k for atomic kill+restart — avoids the race condition
   # where KeepAlive respawns the process between stop and start.
@@ -317,8 +327,15 @@ cmd_tail() {
 # --- Helpers ---
 
 is_running() {
-  launchctl print "gui/$(id -u)/${SERVICE_LABEL}" &>/dev/null && \
-    launchctl print "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null | grep -q 'pid = [0-9]'
+  local status
+  status="$(launchctl print "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null)" || return 1
+  grep -q 'pid = [0-9]' <<< "$status"
+}
+
+enable_service() {
+  # launchd remembers disabled user-domain services across bootout/bootstrap.
+  # Enable before bootstrap/kickstart so a prior disabled flag cannot strand the restart.
+  launchctl enable "gui/$(id -u)/${SERVICE_LABEL}" 2>/dev/null || true
 }
 
 get_pid() {
@@ -1166,10 +1183,16 @@ Commands:
                        --json          Output machine-readable JSON instead of text
 
 Environment:
-  SYMPHONY_PROJECT    Project name for label/logs (default: symphony)
-  SYMPHONY_ENV_FILE   Path to .env file (default: <symphony-root>/.env)
-  SYMPHONY_WORKFLOW   Path to WORKFLOW.md (default: pipeline-config/workflows/WORKFLOW-\$SYMPHONY_PROJECT.md)
-  SYMPHONY_NODE       Path to node binary (default: auto-detected)
+  SYMPHONY_PROJECT           Project name for label/logs (default: symphony)
+  SYMPHONY_ROOT              Service checkout root (default: SYMPHONY_SERVICE_ROOT,
+                             then SYMPHONY_RUNTIME_CHECKOUT, then
+                             ~/.codex/worktrees/symphony-ts-runtime-main)
+  SYMPHONY_SERVICE_ROOT      Alias for the service checkout root
+  SYMPHONY_RUNTIME_CHECKOUT  Detached runtime checkout root
+  SYMPHONY_ENV_FILE          Path to .env file (default: <symphony-root>/.env)
+  SYMPHONY_WORKFLOW          Path to WORKFLOW.md
+                             (default: pipeline-config/workflows/WORKFLOW-\$SYMPHONY_PROJECT.md)
+  SYMPHONY_NODE              Path to node binary (default: auto-detected)
 
 EOF
 }

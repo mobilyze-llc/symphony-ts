@@ -13,11 +13,11 @@ set -euo pipefail
 #      on single checks). --force skips.
 #   4. stop the service (closes the post-drain dispatch race and the
 #      mixed old/new file hazard while updating the serve checkout)
-#   5. sync + frozen-lockfile install + build the SERVE checkout (the path the
-#      LaunchAgent actually runs dist/ from — today the dev checkout; see
-#      "Serve checkout" below). NO auto-stash, NO reset: dirty/diverged dev
-#      state fails loudly instead (stash-churn caused the 2026-06-10 stale
-#      deploy).
+#   5. if the LaunchAgent still serves a separate checkout, sync +
+#      frozen-lockfile install + build that SERVE checkout. NO auto-stash, NO
+#      reset: dirty/diverged state fails loudly instead (stash-churn caused the
+#      2026-06-10 stale deploy). The expected steady state is serve checkout ==
+#      detached runtime checkout.
 #   6. start the service
 #   7. version gate — poll stdout.log for symphony_version and ASSERT it
 #      contains the expected short SHA. Loud failure on mismatch.
@@ -30,14 +30,11 @@ set -euo pipefail
 #   - origin/main moving after the initial fetch → stale deploy that still
 #     passes the version gate for the old SHA
 #
-# Serve checkout: the LaunchAgent plist currently points ProgramArguments and
-# WorkingDirectory at the dev checkout (/Users/ericlitman/projects/symphony-ts),
-# NOT the runtime checkout. symphony_version is resolved at process start via
-# `git rev-parse --short=7 HEAD` in the service's working directory, so the
-# serve checkout's HEAD must actually be at origin/main for the version gate
-# to pass. This script reads the real serve path from the plist instead of
-# assuming. Follow-up (tracked on SYMPH-346): repoint the plist at the runtime
-# checkout so the dev repo is never a deploy target.
+# Serve checkout: the LaunchAgent plist should point ProgramArguments and
+# WorkingDirectory at the detached runtime checkout. symphony_version is
+# resolved at process start via `git rev-parse --short=7 HEAD` in the service's
+# working directory, so this script reads the real serve path from the plist and
+# keeps a separate serve-checkout branch only for stale or custom plists.
 
 SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
 
@@ -402,7 +399,7 @@ else
   assert_origin_main_unchanged "serve checkout sync"
 
   info "=== Serve checkout: $SERVE_ROOT ==="
-  warn "The service still serves dist/ from this checkout (see SYMPH-346 follow-up to repoint the plist at the runtime checkout)"
+  warn "The service serves dist/ from a separate checkout; expected steady state is a plist rooted at SYMPHONY_RUNTIME_CHECKOUT."
 
   serve_branch="$(git -C "$SERVE_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo 'unknown')"
 
