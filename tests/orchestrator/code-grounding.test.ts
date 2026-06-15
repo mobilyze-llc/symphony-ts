@@ -6,6 +6,7 @@ import {
   realpath,
   rm,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -499,6 +500,40 @@ describe("managed code grounding (SYMPH-596)", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("recovers malformed stale checkout lock owners during acquisition", async () => {
+    const sourceRepo = await createSourceRepo();
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+    const target = {
+      repoUrl: sourceRepo,
+      sourcePath: sourceRepo,
+      commitSha,
+      repoScope: "symphony" as const,
+    };
+    const paths = resolveCodeGroundingPaths({
+      workspaceRoot,
+      runId: "malformed-owner-run",
+      config: codeGroundingConfig(),
+      target,
+    });
+    const lockPath = join(paths.checkoutsRoot, `${paths.checkoutId}.lock`);
+    await mkdir(lockPath, { recursive: true });
+    await writeFile(join(lockPath, "owner.json"), "{");
+    const staleTime = new Date(Date.now() - 2 * 60 * 60_000);
+    await utimes(lockPath, staleTime, staleTime);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "malformed-owner-run",
+      config: codeGroundingConfig(),
+      target,
+      findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
+    });
+
+    expect(report.status).toBe("verified");
+    expect(report.cleanup.leaseReleased).toBe(true);
+  });
+
   it("fails loudly instead of resetting malformed lease indexes", async () => {
     const sourceRepo = await createSourceRepo();
     const workspaceRoot = await tempRoot("symph-cg-workspace-");
@@ -601,12 +636,22 @@ describe("managed code grounding (SYMPH-596)", () => {
     const staleCheckout = join(baseRoot, "checkouts", "cg-stale");
     const staleCheckoutLock = join(baseRoot, "checkouts", "cg-stale.lock");
     const activeCheckout = join(baseRoot, "checkouts", "cg-active");
+    const activeCheckoutLock = join(baseRoot, "checkouts", "cg-active.lock");
     await mkdir(staleCheckout, { recursive: true });
     await mkdir(staleCheckoutLock, { recursive: true });
     await mkdir(activeCheckout, { recursive: true });
+    await mkdir(activeCheckoutLock, { recursive: true });
     await writeFile(join(staleCheckout, "file.txt"), "stale");
     await writeFile(join(staleCheckoutLock, "owner.json"), "{}\n");
     await writeFile(join(activeCheckout, "file.txt"), "active");
+    await writeFile(
+      join(activeCheckoutLock, "owner.json"),
+      `${JSON.stringify({
+        pid: process.pid,
+        ownerToken: "active-owner",
+        acquiredAt: "2026-06-15T00:00:00.000Z",
+      })}\n`,
+    );
     await mkdir(baseRoot, { recursive: true });
     await writeFile(
       join(baseRoot, "leases.json"),
@@ -659,6 +704,55 @@ describe("managed code grounding (SYMPH-596)", () => {
     await expect(
       readFile(join(activeCheckout, "file.txt"), "utf8"),
     ).resolves.toBe("active");
+  });
+
+  it("sweeps expired checkouts with stale active run ids when no lock owner is alive", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
+    const crashedCheckout = join(baseRoot, "checkouts", "cg-crashed");
+    await mkdir(crashedCheckout, { recursive: true });
+    await writeFile(join(crashedCheckout, "file.txt"), "crashed");
+    await mkdir(baseRoot, { recursive: true });
+    const leaseIndexPath = join(baseRoot, "leases.json");
+    await writeFile(
+      leaseIndexPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          checkouts: {
+            "cg-crashed": {
+              checkoutId: "cg-crashed",
+              repoUrl: "repo",
+              commitSha: "abc",
+              checkoutPath: crashedCheckout,
+              artifactRoot: join(baseRoot, "artifacts", "crashed"),
+              createdAt: "2026-06-13T00:00:00.000Z",
+              lastUsedAt: "2026-06-13T00:00:00.000Z",
+              activeRunIds: ["crashed-run"],
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    await sweepCodeGroundingCheckouts({
+      workspaceRoot,
+      config: {
+        ...codeGroundingConfig(),
+        ttlMs: 1,
+      },
+      now: new Date("2026-06-15T00:00:00.000Z"),
+    });
+
+    await expect(
+      readFile(join(crashedCheckout, "file.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    const leaseIndex = JSON.parse(await readFile(leaseIndexPath, "utf8")) as {
+      checkouts: Record<string, unknown>;
+    };
+    expect(leaseIndex.checkouts["cg-crashed"]).toBeUndefined();
   });
 
   it("does not sweep an inactive checkout while its lock owner is alive", async () => {
