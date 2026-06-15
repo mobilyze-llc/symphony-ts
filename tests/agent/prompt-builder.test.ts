@@ -228,8 +228,9 @@ describe("prompt builder", () => {
     expect(prompt).toContain("## Mode Permission Envelope");
     expect(prompt).toContain("Mode: prototype");
     expect(prompt).toContain("Pull requests: denied");
-    expect(prompt).toContain("Auto-merge: denied");
+    expect(prompt).toContain("Auto-merge / merge-queue enqueue: denied");
     expect(prompt).toContain("Gate bypass: denied");
+    expect(prompt).toContain("[BLOCKED_NEEDS_HUMAN_BLOCKERS: {...}]");
     expect(prompt).toContain("open a PR with `gh pr create`");
   });
 
@@ -428,9 +429,17 @@ describe("prompt builder", () => {
     expect(prompt).toContain("Mode: full");
     expect(prompt).toContain("Stage: merge");
     expect(prompt).toContain("Pull requests: denied");
-    expect(prompt).toContain("Auto-merge: denied");
+    expect(prompt).toContain("Auto-merge / merge-queue enqueue: denied");
     expect(prompt).toContain("Gate bypass: denied");
     expect(prompt).toContain("You are in the MERGE stage");
+    expect(prompt).toContain(
+      "gh pr view --json mergeStateStatus,statusCheckRollup,reviewDecision,mergeable,state,isDraft",
+    );
+    expect(prompt).toContain("gh pr checks --required");
+    expect(prompt).toContain(
+      "Evaluate readiness before any merge permission boundary",
+    );
+    expect(prompt).toContain("[BLOCKED_NEEDS_HUMAN_BLOCKERS: {...}]");
   });
 
   it("does not include STAGE_COMPLETE in continuation when stageName is null", () => {

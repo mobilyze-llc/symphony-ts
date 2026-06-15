@@ -177,6 +177,7 @@ export const PIPELINE_VERDICT_SCOPE_ID = "__dispatch__";
 export const PIPELINE_VERDICT_SCOPE_IDENTIFIER = "PIPELINE";
 
 const CONTINUATION_RETRY_DELAY_MS = 1_000;
+const HARD_STOP_COMMENT_UNTRUSTED_FIELD_MAX_LEN = 600;
 
 /**
  * An issue may fail review on the SAME pre-gate criterion at most twice
@@ -9043,6 +9044,7 @@ export class OrchestratorCore {
         totalTokens: input.hardStop.totalTokens,
         billableTokens: input.hardStop.billableTokens ?? null,
         humanBlockOperation: input.hardStop.humanBlockOperation ?? null,
+        humanBlockBlockers: input.hardStop.humanBlockBlockers ?? null,
         estimatedCostUsd: input.hardStop.estimatedCostUsd,
         issueState: runningEntry.issue.state,
         ...pendingStageSignalMetadata(input.pendingStageSignal),
@@ -9069,10 +9071,16 @@ export class OrchestratorCore {
     const comment = [
       `Hard stop outcome: ${input.hardStop.outcome}`,
       `Trigger: ${input.hardStop.trigger}`,
-      // Field-level cap on the untrusted reason: the composed body must
-      // stay under the choke-point cap so a long reason can never truncate
-      // the deterministic resume instruction below (SYMPH-421).
-      `Reason: ${sanitizeForLinear(input.hardStop.reason, { maxLen: 1500 })}`,
+      // Field-level caps on untrusted fields: the composed body must stay
+      // under the choke-point cap so long worker text can never truncate the
+      // deterministic resume instruction below (SYMPH-421/SYMPH-629).
+      `Reason: ${sanitizeForLinear(input.hardStop.reason, { maxLen: HARD_STOP_COMMENT_UNTRUSTED_FIELD_MAX_LEN })}`,
+      ...(input.hardStop.humanBlockBlockers === undefined ||
+      input.hardStop.humanBlockBlockers === null
+        ? []
+        : [
+            `Blockers: ${sanitizeForLinear(input.hardStop.humanBlockBlockers, { maxLen: HARD_STOP_COMMENT_UNTRUSTED_FIELD_MAX_LEN })}`,
+          ]),
       `Turns: ${input.hardStop.turnCount}`,
       `Total tokens: ${input.hardStop.totalTokens}`,
       `Estimated cost: $${input.hardStop.estimatedCostUsd.toFixed(2)}`,

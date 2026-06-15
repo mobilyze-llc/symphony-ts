@@ -820,10 +820,13 @@ describe("hard-stop policy", () => {
       "Pull requests: denied",
     );
     expect(describeModePermissionEnvelope(fullPolicy)).toContain(
-      "Auto-merge: denied",
+      "Auto-merge / merge-queue enqueue: denied",
     );
     expect(describeModePermissionEnvelope(fullPolicy)).toContain(
       "Gate bypass: denied",
+    );
+    expect(describeModePermissionEnvelope(fullPolicy)).toContain(
+      "[BLOCKED_NEEDS_HUMAN_BLOCKERS: {...}]",
     );
   });
 });

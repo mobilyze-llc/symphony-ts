@@ -24,6 +24,7 @@ import {
   sortIssuesForDispatch,
 } from "../../src/orchestrator/core.js";
 import type { TrackerIssueWriteRequest } from "../../src/orchestrator/tracker-write.js";
+import { DEFAULT_LINEAR_MAX_LEN } from "../../src/shared/egress.js";
 import type { TicketFeatureSourceIssue } from "../../src/tracker/ticket-feature.js";
 import type {
   IssueStateSnapshot,
@@ -12465,6 +12466,51 @@ describe("egress sanitization retrofit (SYMPH-421)", () => {
     // ...so the deterministic resume-instruction footer always survives.
     expect(parkComment).toContain("Move the issue to Resume");
     expect(parkComment).toContain("Estimated cost:");
+  });
+
+  it("keeps the resume instruction intact when human-block blockers are 50k chars", async () => {
+    const comments: string[] = [];
+    const orchestrator = new OrchestratorCore({
+      config: createConfig(),
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      hardStop: {
+        ...budgetPause,
+        outcome: "BLOCKED-needs-human",
+        trigger: "worker_reported_block",
+        reason:
+          "Worker reported BLOCKED-needs-human because auto-merge is denied by the Mode Permission Envelope.",
+        humanBlockOperation: "auto_merge",
+        humanBlockBlockers: `{"readiness":["${"x".repeat(50_000)}"],"permission":["auto_merge_permission_denied"]}`,
+      },
+    });
+
+    const parkComment = comments.find((body) =>
+      body.startsWith("Hard stop outcome:"),
+    );
+    expect(parkComment).toBeDefined();
+    expect(parkComment).toContain("Blockers:");
+    expect(parkComment).toContain("[truncated by egress cap]");
+    expect(parkComment).toContain(
+      "Move the issue to Resume after human review to requeue it.",
+    );
+    expect(parkComment!.length).toBeLessThanOrEqual(DEFAULT_LINEAR_MAX_LEN);
   });
 
   it("keeps the resume instruction intact when an operator-input reason is 50k chars", async () => {
