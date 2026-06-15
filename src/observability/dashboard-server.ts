@@ -218,6 +218,31 @@ export interface PipelineRestartSafetyResponse {
 export interface PipelineStatusResponse {
   paused: boolean;
   issues: Array<{ identifier: string; title: string }>;
+  halt_view?: {
+    status: "known" | "unknown" | "unsupported";
+    error_message?: string;
+  };
+  local_pause?: {
+    active: true;
+    since: string;
+    reason: string;
+    actor: {
+      kind: string;
+      host: string;
+      session: string | null;
+    };
+    set_by_sequence: number | null;
+    halt_view: {
+      status: "created" | "already_paused" | "uncertain";
+      issue_identifier: string | null;
+      issue_title: string | null;
+      error_message: string | null;
+    };
+  } | null;
+  degraded?: Array<{
+    code: string;
+    message: string;
+  }>;
   restart_safety?: PipelineRestartSafetyResponse;
   emergency_stop?: EmergencyStopStateResponse | null;
 }

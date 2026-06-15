@@ -249,7 +249,7 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
 
   function pipelineEntries(
     host: OrchestratorRuntimeHost,
-    verb: "pipeline_pause" | "pipeline_resume",
+    verb: "pipeline_pause" | "pipeline_resume" | "pipeline_stop",
   ) {
     return host
       .getState()
@@ -315,6 +315,114 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
     ).rejects.toThrow("linear is down");
 
     expect(pipelineEntries(host, "pipeline_pause")).toHaveLength(0);
+  });
+
+  it("pause applies a degraded runtime-local gate when the halt status read throws", async () => {
+    const tracker = createLinearTracker();
+    const fetchByLabels = tracker.fetchOpenIssuesByLabels as ReturnType<
+      typeof vi.fn
+    >;
+    const createIssue = tracker.createIssue as ReturnType<typeof vi.fn>;
+    fetchByLabels.mockRejectedValue(
+      new Error("Linear GraphQL returned top-level errors."),
+    );
+
+    const host = createHost({ tracker });
+    const status = await host.requestPipelinePause({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "fence a pilot",
+    });
+
+    expect(status.paused).toBe(true);
+    expect(status.halt_view).toMatchObject({
+      status: "unknown",
+      error_message: expect.stringContaining("Linear GraphQL"),
+    });
+    expect(status.local_pause).toMatchObject({
+      active: true,
+      reason: "fence a pilot",
+      halt_view: {
+        status: "uncertain",
+        issue_identifier: "ENG-99",
+        issue_title: "Pipeline Halt",
+        error_message: expect.stringContaining("Linear GraphQL"),
+      },
+    });
+    expect(status.degraded?.[0]?.code).toBe(
+      "pipeline_pause_applied_halt_view_uncertain",
+    );
+    expect(createIssue).toHaveBeenCalledTimes(1);
+
+    const second = await host.requestPipelinePause({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "repeat while Linear is still flaky",
+    });
+    expect(second.paused).toBe(true);
+    expect(createIssue).toHaveBeenCalledTimes(1);
+    expect(
+      pipelineEntries(host, "pipeline_pause").map(
+        (entry) => entry.metadata.status,
+      ),
+    ).toEqual(["applied", "no_op"]);
+  });
+
+  it("runtime-local pause blocks dispatch even when halt issue reads fail open", async () => {
+    const tracker = createLinearTracker();
+    const fetchByLabels = tracker.fetchOpenIssuesByLabels as ReturnType<
+      typeof vi.fn
+    >;
+    fetchByLabels.mockRejectedValue(
+      new Error("Linear GraphQL returned top-level errors."),
+    );
+    vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+      createIssue({ id: "work-1", identifier: "SYMPH-1", state: "Todo" }),
+    ]);
+
+    const host = createHost({ tracker });
+    await host.requestPipelinePause({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "fence a pilot",
+    });
+
+    const result = await host.pollOnce();
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(host.getState().issueDispositions.__dispatch__).toMatchObject({
+      disposition: "halt",
+      reasonCode: "runtime_pipeline_pause",
+    });
+  });
+
+  it("resume clears a runtime-local pause once the halt view is known empty", async () => {
+    const tracker = createLinearTracker({
+      createIssueError: new Error("Linear create failed"),
+    });
+    const fetchByLabels = tracker.fetchOpenIssuesByLabels as ReturnType<
+      typeof vi.fn
+    >;
+    fetchByLabels.mockRejectedValueOnce(
+      new Error("Linear GraphQL returned top-level errors."),
+    );
+
+    const host = createHost({ tracker });
+    const paused = await host.requestPipelinePause({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "fence a pilot",
+    });
+    expect(paused.paused).toBe(true);
+    expect(host.getState().pipelinePause).not.toBeNull();
+
+    fetchByLabels.mockResolvedValue([]);
+    const resumed = await host.requestPipelineResume({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "resume after pilot",
+    });
+
+    expect(resumed.paused).toBe(false);
+    expect(resumed.local_pause).toBeNull();
+    expect(host.getState().pipelinePause).toBeNull();
+    expect(
+      pipelineEntries(host, "pipeline_resume").at(-1)?.metadata.status,
+    ).toBe("applied");
   });
 
   it("resume on a non-paused pipeline journals a no_op pipeline_resume intent", async () => {
@@ -481,6 +589,36 @@ describe("pipeline pause/resume journal-first intent (SYMPH-408b)", () => {
       "applied",
     );
     expect(pipelineEntries(host, "pipeline_resume")[0]?.metadata.status).toBe(
+      "applied",
+    );
+  });
+
+  it("emergency stop still applies when the halt status read is degraded", async () => {
+    const tracker = createLinearTracker({
+      createIssueError: new Error("Linear create failed"),
+    });
+    const fetchByLabels = tracker.fetchOpenIssuesByLabels as ReturnType<
+      typeof vi.fn
+    >;
+    fetchByLabels.mockRejectedValue(
+      new Error("Linear GraphQL returned top-level errors."),
+    );
+    const host = createHost({ tracker });
+
+    const stop = await host.requestEmergencyStop({
+      actor: { kind: "operator", host: "pro14" },
+      reason: "stop now",
+    });
+
+    expect(stop.status).toBe("applied");
+    expect(host.getState().emergencyStop).not.toBeNull();
+    expect(host.getState().pipelinePause).toMatchObject({
+      haltView: {
+        status: "uncertain",
+        errorMessage: expect.stringContaining("Linear GraphQL"),
+      },
+    });
+    expect(pipelineEntries(host, "pipeline_stop")[0]?.metadata.status).toBe(
       "applied",
     );
   });

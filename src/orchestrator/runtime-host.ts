@@ -2699,11 +2699,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   async getPipelineStatus(): Promise<PipelineStatusResponse> {
     const restartSafety = await this.getPipelineRestartSafety();
     const emergencyStop = this.getEmergencyStopStatus();
+    const localPause = this.getPipelineLocalPauseStatus();
 
     if (!(this.tracker instanceof LinearTrackerClient)) {
       return {
-        paused: false,
+        paused: localPause !== null,
         issues: [],
+        halt_view: { status: "unsupported" },
+        local_pause: localPause,
         restart_safety: restartSafety,
         emergency_stop: emergencyStop,
       };
@@ -2712,26 +2715,72 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const tracker = this.tracker as LinearTrackerClient;
     if (tracker.fetchOpenIssuesByLabels === undefined) {
       return {
-        paused: false,
+        paused: localPause !== null,
         issues: [],
+        halt_view: { status: "unsupported" },
+        local_pause: localPause,
         restart_safety: restartSafety,
         emergency_stop: emergencyStop,
       };
     }
 
-    const haltIssues = await tracker.fetchOpenIssuesByLabels(
-      [PIPELINE_HALT_LABEL],
-      ["Done", "Cancelled"],
-    );
+    let haltIssues: Issue[];
+    try {
+      haltIssues = await tracker.fetchOpenIssuesByLabels(
+        [PIPELINE_HALT_LABEL],
+        ["Done", "Cancelled"],
+      );
+    } catch (error) {
+      const message = toErrorMessage(error);
+      return {
+        paused: localPause !== null,
+        issues: [],
+        halt_view: { status: "unknown", error_message: message },
+        local_pause: localPause,
+        degraded: [
+          {
+            code: "pipeline_halt_view_unavailable",
+            message: `Pipeline halt view is unreadable: ${message}`,
+          },
+        ],
+        restart_safety: restartSafety,
+        emergency_stop: emergencyStop,
+      };
+    }
 
     return {
-      paused: haltIssues.length > 0,
+      paused: haltIssues.length > 0 || localPause !== null,
       issues: haltIssues.map((issue) => ({
         identifier: issue.identifier,
         title: issue.title,
       })),
+      halt_view: { status: "known" },
+      local_pause: localPause,
       restart_safety: restartSafety,
       emergency_stop: emergencyStop,
+    };
+  }
+
+  private getPipelineLocalPauseStatus(): Exclude<
+    PipelineStatusResponse["local_pause"],
+    undefined
+  > {
+    const localPause = this.orchestrator.getState().pipelinePause;
+    if (localPause === null) {
+      return null;
+    }
+    return {
+      active: true,
+      since: localPause.since,
+      reason: localPause.reason,
+      actor: localPause.actor,
+      set_by_sequence: localPause.setBySequence,
+      halt_view: {
+        status: localPause.haltView.status,
+        issue_identifier: localPause.haltView.issueIdentifier,
+        issue_title: localPause.haltView.issueTitle,
+        error_message: localPause.haltView.errorMessage,
+      },
     };
   }
 
@@ -3034,6 +3083,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     actor: IntentActor;
     reason: IntentReason;
     detail: string;
+    metadata?: Record<string, unknown>;
   }): Promise<void> {
     const sequence = await this.orchestrator.journalPipelineIntent(input);
     if (sequence === null) {
@@ -3114,29 +3164,83 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const projectId = trackerConfig.projectId ?? "";
     const haltLabelId = trackerConfig.haltLabelId ?? "";
 
-    // View mutation. A throw propagates and journals nothing: the journal
-    // must never claim "applied" for a halt issue that was never created.
-    const created = await tracker.createIssue({
-      teamId,
-      title: "Pipeline Halt",
-      projectId,
-      labelIds: [haltLabelId],
-    });
+    const haltViewWasUnknown = status.halt_view?.status === "unknown";
+    let created: { identifier: string; title: string } | null = null;
+    let haltIssueCreateError: string | null = null;
+    try {
+      created = await tracker.createIssue({
+        teamId,
+        title: "Pipeline Halt",
+        projectId,
+        labelIds: [haltLabelId],
+      });
+    } catch (error) {
+      if (!haltViewWasUnknown) {
+        throw error;
+      }
+      haltIssueCreateError = toErrorMessage(error);
+    }
+
+    const haltViewError = [
+      status.halt_view?.error_message,
+      haltIssueCreateError === null
+        ? null
+        : `halt issue creation failed: ${haltIssueCreateError}`,
+    ]
+      .filter((part): part is string => part !== null && part !== undefined)
+      .join("; ");
+    const haltViewMetadata = {
+      status: haltViewWasUnknown ? "uncertain" : "created",
+      issue_identifier: created?.identifier ?? null,
+      issue_title: created?.title ?? null,
+      error_message: haltViewError === "" ? null : haltViewError,
+    };
 
     await this.journalPipelineIntentDegradedOk({
       action: "pause",
       status: "applied",
       actor,
       reason,
-      detail: `pipeline pause applied; halt issue ${created.identifier} created`,
+      detail:
+        created === null
+          ? "pipeline pause applied via runtime-local gate; halt issue view uncertain"
+          : haltViewWasUnknown
+            ? `pipeline pause applied via runtime-local gate; halt issue ${created.identifier} created but prior halt view is uncertain`
+            : `pipeline pause applied; halt issue ${created.identifier} created`,
+      metadata: {
+        local_pause: true,
+        halt_view: haltViewMetadata,
+      },
     });
 
     return {
       paused: true,
-      issues: [{ identifier: created.identifier, title: created.title }],
+      issues:
+        created === null
+          ? []
+          : [{ identifier: created.identifier, title: created.title }],
+      halt_view: haltViewWasUnknown
+        ? {
+            status: "unknown",
+            ...(haltViewError === "" ? {} : { error_message: haltViewError }),
+          }
+        : { status: "known" },
+      local_pause: this.getPipelineLocalPauseStatus(),
+      ...(haltViewWasUnknown
+        ? {
+            degraded: [
+              {
+                code: "pipeline_pause_applied_halt_view_uncertain",
+                message:
+                  "Runtime-local pipeline pause is active, but the Linear halt view is uncertain.",
+              },
+            ],
+          }
+        : {}),
       ...(status.restart_safety !== undefined
         ? { restart_safety: status.restart_safety }
         : {}),
+      emergency_stop: status.emergency_stop ?? null,
     };
   }
 
@@ -3160,6 +3264,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     };
 
     const priorStatus = await this.getPipelineStatus();
+    const localPauseWasActive =
+      this.orchestrator.getState().pipelinePause !== null;
     if (!priorStatus.paused) {
       if (this.orchestrator.getState().emergencyStop !== null) {
         await this.journalPipelineIntentDegradedOk({
@@ -3170,6 +3276,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           detail: "pipeline resume applied; emergency stop cleared",
         });
         return await this.getPipelineStatus();
+      }
+      if (priorStatus.halt_view?.status === "unknown") {
+        throw new Error(
+          `pipeline resume cannot verify halt issues while the halt view is unreadable: ${priorStatus.halt_view.error_message ?? "unknown error"}`,
+        );
       }
       await this.journalPipelineIntentDegradedOk({
         action: "resume",
@@ -3205,10 +3316,22 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       ["Done", "Cancelled"],
     );
 
-    // Race guard: the pipeline read as paused above, but the halt issues were
-    // resolved (or cancelled by another actor) between the two reads. Nothing
-    // was mutated, so this must journal no_op — "applied" means ≥1 cancelled.
     if (haltIssues.length === 0) {
+      if (localPauseWasActive) {
+        await this.journalPipelineIntentDegradedOk({
+          action: "resume",
+          status: "applied",
+          actor,
+          reason,
+          detail:
+            "pipeline resume applied; runtime-local pause cleared and no halt issues found",
+        });
+        return await this.getPipelineStatus();
+      }
+
+      // Race guard: the pipeline read as paused above, but the halt issues were
+      // resolved (or cancelled by another actor) between the two reads. Nothing
+      // was mutated, so this must journal no_op — "applied" means ≥1 cancelled.
       await this.journalPipelineIntentDegradedOk({
         action: "resume",
         status: "no_op",
@@ -3237,6 +3360,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     return {
       paused: false,
       issues: [],
+      ...(status.halt_view === undefined
+        ? {}
+        : { halt_view: status.halt_view }),
+      local_pause: status.local_pause ?? null,
+      ...(status.degraded === undefined ? {} : { degraded: status.degraded }),
       ...(status.restart_safety !== undefined
         ? { restart_safety: status.restart_safety }
         : {}),
