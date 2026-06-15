@@ -46,7 +46,7 @@ Read these references only when needed:
 
 | File | Contents | When to read |
 | --- | --- | --- |
-| `references/worker-prompts.md` | Copy-ready prompts for implementation workers and read-only review/triage workers. | Before delegating, refreshing, or forward-testing worker instructions. |
+| `references/worker-prompts.md` | Copy-ready prompts for implementation, continuation, and read-only review/triage workers. | Before delegating, refreshing, rotating, or forward-testing worker instructions. |
 | `references/operator-decision-brief.md` | Cap-hit and operator decision brief template. | When a ticket reaches review cap, budget cap, substrate degradation, unclear split/merge choice, or a non-autonomous decision boundary. |
 
 ## Session Start Checklist
@@ -244,7 +244,7 @@ route to the existing operator decision brief.
 | Worker tool calls | `>= 100` in one worker context | Worker-self-attested at closeout; exact counts may be post-hoc only. |
 | Ticket/session tokens | `>= 50M` attributed tokens | Heuristic or post-hoc only until token telemetry is live. |
 | Compactions | `> 2` in one worker context | Orchestrator-observable when the active thread reports them; otherwise worker-self-attested. |
-| p90 request size | `> 250k` tokens | Heuristic or post-hoc only until token telemetry is live. |
+| p90 request size | `> 250k` tokens | Heuristic or post-hoc only until token telemetry is live; fires on the next check after enough requests make the distribution meaningful. |
 | Adjacent ticket bleed | More than two adjacent tickets repeatedly appear in one context | Orchestrator-observable from prompts, closeouts, and visible transcript shape. |
 | Broad raw output | Logs, searches, tests, or artifacts enter context without compression | Orchestrator-observable in the current transcript or closeout. |
 | Review/process repeat | Budget cap, third same-family reopen, or third failed review turn | Orchestrator-observable from review and plan state. |
@@ -425,7 +425,8 @@ Use this shape for Linear Docs or local handoffs:
 | --- | --- | --- | --- | --- |
 
 ## Context Firewall
-- Packet freshness: issue updatedAt/comment cutoff/base SHA/head SHA
+- Packet freshness: per-issue issue updatedAt/comment cutoff/base SHA/head SHA;
+  keep per-worker packet identity in the Active Work table
 - Tripwire status: <none | threshold | rotation | decision brief>
 - Raw evidence inspected: <no | yes, reason, path/URL, hash/excerpt>
 - Rotation chain: <worker -> closeout -> fresh worker, if any>

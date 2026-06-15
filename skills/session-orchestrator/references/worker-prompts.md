@@ -96,6 +96,7 @@ Base: [ref@sha]
 Original worker packet: [path/URL] @ [hash]
 Previous closeout packet: [path/URL] @ [hash]
 Continuation packet: [path/URL] @ [hash]
+Packet freshness: Linear updatedAt [timestamp], comment cutoff [timestamp/id], base [ref@sha], head [sha]
 Tripwire that caused rotation: [reason]
 Authorization: [local edits only | push draft PR | merge authorized after gates]
 
@@ -113,11 +114,24 @@ Scope:
 - Non-goals: [explicit non-goals].
 - Stop condition: [exact stop condition].
 
+Stop conditions:
+- Stop and report if path, branch, head, or base verification fails.
+- Stop and report if validation blocks on missing credentials, unsafe live
+  target, conflicting ownership, or unrelated failing baseline.
+- Stop at cap-hit or repeated same-family reopen with a decision-ready brief,
+  not another automatic round.
+- Stop and emit a compact closeout packet when any packet tripwire fires:
+  `>=100` tool calls, `>2` compactions, broad raw output entering context,
+  adjacent-ticket bleed, budget cap, or repeated same-family reopen. Token and
+  p90 tripwires may be approximate or post-hoc until telemetry is live.
+
 Worker contract:
 - Do not spawn, create, or steer other workers.
 - Do not ingest the prior worker transcript. Use only the packet, closeout,
   refreshed truth, and needed code/tests/docs.
 - Keep edits scoped to the existing branch/worktree.
+
+Handoff expectation:
 - Return the same compact closeout packet shape as the implementation worker.
 ```
 
@@ -180,11 +194,15 @@ Context-firewall scenarios to exercise in the plan:
   continue. Show the compact closeout, checkpoint update, live-truth refresh,
   and fresh same-worktree continuation worker packet.
 - SYMPH-D should be normalized into fewer lanes without creating unowned prose.
+- SYMPH-E has stale base evidence and a conflicting owner claim. Show that this
+  unsafe tripwire route produces the existing operator decision brief instead of
+  automatic continuation.
 
 Validation expectation:
 - This is a prompt-trace walkthrough, not an automated guard. It must prove the
   skill produces bounded packets, compact closeouts, raw-evidence exception
-  notes, tripwire handling through the existing operator-decision-brief shape,
-  and a negative case where packet summaries do not authorize blind
-  implementation without current-head proof and code/test inspection.
+  notes, continueable tripwire handling through same-worktree rotation, unsafe
+  tripwire handling through the existing operator-decision-brief shape, and a
+  negative case where packet summaries do not authorize blind implementation
+  without current-head proof and code/test inspection.
 ```

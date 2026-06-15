@@ -22,6 +22,7 @@ operator judgment instead of another automatic round.
 - Linear state: [state]
 - CI/local validation: [commands and results]
 - Live proof: [evidence or exact blocker]
+- Packet identity:
 - Context packet: [path/URL @ hash, or why unavailable]
 - Closeout packet: [path/URL @ hash, if any]
 
