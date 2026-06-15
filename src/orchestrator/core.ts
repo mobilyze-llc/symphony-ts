@@ -35,7 +35,9 @@ import {
   type BlockerRef,
   type ComputedDispatchOrderSnapshot,
   type ContinuousFeedbackEvent,
+  type ContinuousFeedbackIssueState,
   type ContinuousFeedbackLane,
+  type ContinuousFeedbackStatus,
   type DecorrelatedGateLane,
   type DecorrelatedGateOutcome,
   type DispatchFenceSource,
@@ -120,6 +122,7 @@ import {
   buildBacklogHygieneProposalJournalEntry,
 } from "./backlog-hygiene.js";
 import {
+  CONTINUOUS_FEEDBACK_PROVIDER_FAILURE_SUMMARY_PREFIX,
   type ContinuousFeedbackReviewResult,
   ensureDecorrelatedFeedbackLane,
   formatContinuousFeedbackComment,
@@ -409,7 +412,7 @@ export interface CodexEventResult {
 
 export interface ContinuousFeedbackCheckpointResult {
   ran: boolean;
-  status: "pass" | "finding" | "skipped";
+  status: ContinuousFeedbackStatus | "skipped";
   event: ContinuousFeedbackEvent;
   reviewerLane: ContinuousFeedbackLane | null;
   workerLane: ContinuousFeedbackLane | null;
@@ -1155,6 +1158,7 @@ export class OrchestratorCore {
     // sequence numbers from the previous journal would suppress reduction.
     this.reducedStageRecordSequences.clear();
     this.state.issueExecutionHistory = {};
+    this.state.continuousFeedback = {};
     this.replayedDispatchedIssueIds.clear();
     this.starvedTickCount = 0;
     this.pageAlertActive = false;
@@ -1450,6 +1454,10 @@ export class OrchestratorCore {
         this.recoverConsumedPendingStageSignal(entry);
       }
 
+      if (entry.kind === "continuous_feedback") {
+        this.recoverContinuousFeedbackCheckpoint(entry);
+      }
+
       if (
         entry.kind === "tracker_write" &&
         entry.idempotencyKey.includes(":terminal:") &&
@@ -1706,7 +1714,9 @@ export class OrchestratorCore {
       state.decorrelatedGateOutcomes,
       {},
     );
-    this.state.continuousFeedback = readRecordOr(state.continuousFeedback, {});
+    this.state.continuousFeedback = readContinuousFeedbackStateRecord(
+      state.continuousFeedback,
+    );
     this.state.dispatcherLeases = readRecordOr(state.dispatcherLeases, {});
     this.signatureClusterRegistry.hydrateCheckpointSnapshot(
       state.signatureClusterRegistry,
@@ -1793,6 +1803,51 @@ export class OrchestratorCore {
     }
 
     return coveredThroughSequence;
+  }
+
+  private recoverContinuousFeedbackCheckpoint(
+    entry: DispatcherRunJournalEntry,
+  ): void {
+    const event = toContinuousFeedbackEvent(entry.metadata.event);
+    const workerLane = toContinuousFeedbackLane(entry.metadata.workerLane);
+    const reviewerLane = toContinuousFeedbackLane(entry.metadata.reviewerLane);
+    const summary = readMetadataString(entry.metadata, "summary") ?? null;
+    const status = projectContinuousFeedbackStatus(
+      toContinuousFeedbackStatus(entry.metadata.status),
+      summary ?? entry.summary,
+      {
+        allowLegacySummaryProjection:
+          readMetadataNumber(
+            entry.metadata,
+            "continuousFeedbackStatusVersion",
+          ) === null,
+      },
+    );
+    if (
+      event === null ||
+      workerLane === null ||
+      reviewerLane === null ||
+      status === null ||
+      status === "finding"
+    ) {
+      return;
+    }
+
+    this.state.continuousFeedback[entry.issueId] =
+      mergeContinuousFeedbackCheckpoint(
+        this.state.continuousFeedback[entry.issueId],
+        {
+          issueId: entry.issueId,
+          issueIdentifier: entry.issueIdentifier,
+          event,
+          checkedAt: entry.timestamp,
+          workerLane,
+          reviewerLane,
+          findings: [],
+          status,
+          summary,
+        },
+      );
   }
 
   /**
@@ -8120,6 +8175,8 @@ export class OrchestratorCore {
         workerLane,
         reviewerLane,
         findings: result.findings,
+        summary: result.summary ?? null,
+        ...(result.status === undefined ? {} : { status: result.status }),
       },
     );
     this.state.continuousFeedback[input.issueId] = feedbackState;
@@ -8151,13 +8208,16 @@ export class OrchestratorCore {
       attempt: runningEntry.retryAttempt,
       ownerId: this.leaseOwnerId,
       lease: null,
-      summary:
-        status === "pass"
-          ? `Continuous feedback passed for ${runningEntry.identifier}.`
-          : `Continuous feedback found ${result.findings.length} issue(s) for ${runningEntry.identifier}.`,
+      summary: summarizeContinuousFeedbackCheckpoint(
+        status,
+        runningEntry.identifier,
+        result.summary ?? null,
+        result.findings.length,
+      ),
       metadata: {
         event: input.event,
         status,
+        continuousFeedbackStatusVersion: 2,
         reviewerLane,
         workerLane,
         findingSignatures,
@@ -11616,6 +11676,92 @@ function toDecorrelatedGateLane(value: unknown): DecorrelatedGateLane | null {
   };
 }
 
+function readContinuousFeedbackStateRecord(
+  value: unknown,
+): Record<string, ContinuousFeedbackIssueState> {
+  if (!isRecord(value)) {
+    return {};
+  }
+
+  const feedback: Record<string, ContinuousFeedbackIssueState> = {};
+  for (const [issueId, rawState] of Object.entries(value)) {
+    if (!isRecord(rawState)) {
+      continue;
+    }
+    const summary =
+      typeof rawState.summary === "string" ? rawState.summary : null;
+    const status = projectContinuousFeedbackStatus(
+      toContinuousFeedbackStatus(rawState.status),
+      summary,
+      { allowLegacySummaryProjection: false },
+    );
+    feedback[issueId] = {
+      ...(clonePlain(rawState) as unknown as ContinuousFeedbackIssueState),
+      status: status ?? "pass",
+      summary,
+    };
+  }
+  return feedback;
+}
+
+function toContinuousFeedbackEvent(
+  value: unknown,
+): ContinuousFeedbackEvent | null {
+  return value === "commit" || value === "diff" || value === "checkpoint"
+    ? value
+    : null;
+}
+
+function toContinuousFeedbackLane(
+  value: unknown,
+): ContinuousFeedbackLane | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  if (
+    typeof value.runner !== "string" ||
+    typeof value.role !== "string" ||
+    (value.model !== null && typeof value.model !== "string")
+  ) {
+    return null;
+  }
+
+  return {
+    runner: value.runner,
+    model: value.model,
+    role: value.role,
+  };
+}
+
+function toContinuousFeedbackStatus(
+  value: unknown,
+): ContinuousFeedbackStatus | null {
+  return value === "pass" || value === "finding" || value === "unavailable"
+    ? value
+    : null;
+}
+
+function projectContinuousFeedbackStatus(
+  status: ContinuousFeedbackStatus | null,
+  summary: string | null,
+  options: { allowLegacySummaryProjection: boolean },
+): ContinuousFeedbackStatus | null {
+  if (
+    options.allowLegacySummaryProjection &&
+    status === "pass" &&
+    summary !== null &&
+    summary
+      .trim()
+      .toLowerCase()
+      .startsWith(
+        `${CONTINUOUS_FEEDBACK_PROVIDER_FAILURE_SUMMARY_PREFIX.toLowerCase()} `,
+      )
+  ) {
+    return "unavailable";
+  }
+  return status;
+}
+
 function toOptionalBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null;
 }
@@ -13106,6 +13252,27 @@ function trimReviewSubstrateLane(value: string): string {
 
 function hashReviewInfrastructureSignature(source: string): string {
   return createHash("sha1").update(source).digest("hex").slice(0, 7);
+}
+
+function summarizeContinuousFeedbackCheckpoint(
+  status: ContinuousFeedbackStatus,
+  issueIdentifier: string,
+  providerSummary: string | null,
+  findingCount: number,
+): string {
+  switch (status) {
+    case "pass":
+      return `Continuous feedback passed for ${issueIdentifier}.`;
+    case "finding":
+      return `Continuous feedback found ${findingCount} issue(s) for ${issueIdentifier}.`;
+    case "unavailable": {
+      const detail =
+        providerSummary === null || providerSummary.trim() === ""
+          ? ""
+          : ` ${providerSummary.trim()}`;
+      return `Continuous feedback unavailable for ${issueIdentifier}.${detail}`;
+    }
+  }
 }
 
 function defaultTimerScheduler(): TimerScheduler {

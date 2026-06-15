@@ -21,6 +21,7 @@ const REVIEWER_LANE: ContinuousFeedbackLane = {
 function checkpoint(
   findings: Parameters<typeof mergeContinuousFeedbackCheckpoint>[1]["findings"],
   checkedAt = "2026-06-11T00:00:00.000Z",
+  status?: Parameters<typeof mergeContinuousFeedbackCheckpoint>[1]["status"],
 ) {
   return {
     issueId: "1",
@@ -30,6 +31,7 @@ function checkpoint(
     workerLane: WORKER_LANE,
     reviewerLane: REVIEWER_LANE,
     findings,
+    ...(status === undefined ? {} : { status }),
   };
 }
 
@@ -136,6 +138,31 @@ describe("feedback injection-hygiene policy (SYMPH-378)", () => {
       emptied.findings.find((f) => f.signature === "sig-real")?.status,
     ).toBe("resolved");
     expect(emptied.status).toBe("pass");
+  });
+
+  it("an unavailable checkpoint preserves prior opens instead of resolving them", () => {
+    const opened = mergeContinuousFeedbackCheckpoint(
+      undefined,
+      checkpoint([
+        {
+          signature: "sig-real",
+          title: "broken guard",
+          severity: "warning",
+          file: "src/foo.ts",
+        },
+      ]),
+    );
+
+    const unavailable = mergeContinuousFeedbackCheckpoint(
+      opened,
+      checkpoint([], "2026-06-11T00:05:00.000Z", "unavailable"),
+    );
+
+    expect(unavailable.status).toBe("unavailable");
+    expect(
+      unavailable.findings.find((f) => f.signature === "sig-real")?.status,
+    ).toBe("open");
+    expect(getOpenContinuousFeedbackFindings(unavailable)).toHaveLength(1);
   });
 
   it("an already-open finding is never demoted by a re-sighting that drops its file (council R1)", () => {

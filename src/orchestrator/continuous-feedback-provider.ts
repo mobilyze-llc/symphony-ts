@@ -5,9 +5,10 @@ import type {
   ContinuousFeedbackLane,
   Issue,
 } from "../domain/model.js";
-import type {
-  ContinuousFeedbackFindingInput,
-  ContinuousFeedbackReviewResult,
+import {
+  CONTINUOUS_FEEDBACK_PROVIDER_FAILURE_SUMMARY_PREFIX,
+  type ContinuousFeedbackFindingInput,
+  type ContinuousFeedbackReviewResult,
 } from "./continuous-feedback.js";
 import { getDiff } from "./gate-handler.js";
 
@@ -74,6 +75,7 @@ export function createContinuousFeedbackProvider(
       return {
         summary: summarizeProviderFailure(result),
         findings: [],
+        status: "unavailable",
       };
     }
 
@@ -196,19 +198,40 @@ function parseContinuousFeedbackOutput(
     return {
       summary: "Continuous feedback output was not parseable.",
       findings: [],
+      status: "unavailable",
     };
   }
   const summary =
     typeof parsed.summary === "string" ? parsed.summary.trim() : null;
-  const rawFindings = Array.isArray(parsed.findings) ? parsed.findings : [];
+  const finalSummary =
+    summary === null || summary === ""
+      ? "Continuous feedback completed."
+      : summary;
+  const schemaFailureSummary =
+    summary === null || summary === ""
+      ? "Continuous feedback output did not match the expected schema."
+      : summary;
+  if (!Array.isArray(parsed.findings)) {
+    return {
+      summary: schemaFailureSummary,
+      findings: [],
+      status: "unavailable",
+    };
+  }
+  const rawFindings = parsed.findings;
+  const findings = rawFindings.flatMap((finding) =>
+    normalizeContinuousFeedbackFinding(finding),
+  );
+  if (rawFindings.length > 0 && findings.length === 0) {
+    return {
+      summary: schemaFailureSummary,
+      findings: [],
+      status: "unavailable",
+    };
+  }
   return {
-    summary:
-      summary === null || summary === ""
-        ? "Continuous feedback completed."
-        : summary,
-    findings: rawFindings.flatMap((finding) =>
-      normalizeContinuousFeedbackFinding(finding),
-    ),
+    summary: finalSummary,
+    findings,
   };
 }
 
@@ -276,8 +299,8 @@ function summarizeProviderFailure(
       ? "without an exit code"
       : `with ${result.exitCode}`;
   return detail === ""
-    ? `Continuous feedback provider exited ${code}.`
-    : `Continuous feedback provider exited ${code}: ${detail}`;
+    ? `${CONTINUOUS_FEEDBACK_PROVIDER_FAILURE_SUMMARY_PREFIX} ${code}.`
+    : `${CONTINUOUS_FEEDBACK_PROVIDER_FAILURE_SUMMARY_PREFIX} ${code}: ${detail}`;
 }
 
 function formatLane(lane: ContinuousFeedbackLane): string {

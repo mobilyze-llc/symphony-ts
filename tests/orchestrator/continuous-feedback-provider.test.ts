@@ -85,7 +85,7 @@ describe("continuous feedback provider", () => {
     );
   });
 
-  it("returns a clean fallback when provider output is malformed", async () => {
+  it("marks malformed provider output as unavailable", async () => {
     const provider = createContinuousFeedbackProvider({
       resolveWorkspacePath: () => "/tmp/symphony-workspace",
       readDiff: () => "",
@@ -99,6 +99,69 @@ describe("continuous feedback provider", () => {
     await expect(provider(createProviderInput())).resolves.toEqual({
       summary: "Continuous feedback output was not parseable.",
       findings: [],
+      status: "unavailable",
+    });
+  });
+
+  it("marks provider output without a findings array as unavailable", async () => {
+    const provider = createContinuousFeedbackProvider({
+      resolveWorkspacePath: () => "/tmp/symphony-workspace",
+      readDiff: () => "",
+      runCommand: async () => ({
+        exitCode: 0,
+        stderr: "",
+        stdout: JSON.stringify({
+          summary: "Temporary provider error.",
+        }),
+      }),
+    });
+
+    await expect(provider(createProviderInput())).resolves.toEqual({
+      summary: "Temporary provider error.",
+      findings: [],
+      status: "unavailable",
+    });
+  });
+
+  it("marks provider output with non-array findings as unavailable", async () => {
+    const provider = createContinuousFeedbackProvider({
+      resolveWorkspacePath: () => "/tmp/symphony-workspace",
+      readDiff: () => "",
+      runCommand: async () => ({
+        exitCode: 0,
+        stderr: "",
+        stdout: JSON.stringify({
+          summary: "Schema violation.",
+          findings: {},
+        }),
+      }),
+    });
+
+    await expect(provider(createProviderInput())).resolves.toEqual({
+      summary: "Schema violation.",
+      findings: [],
+      status: "unavailable",
+    });
+  });
+
+  it("marks provider output with only invalid findings as unavailable", async () => {
+    const provider = createContinuousFeedbackProvider({
+      resolveWorkspacePath: () => "/tmp/symphony-workspace",
+      readDiff: () => "",
+      runCommand: async () => ({
+        exitCode: 0,
+        stderr: "",
+        stdout: JSON.stringify({
+          summary: "Invalid finding payload.",
+          findings: [{ detail: "Missing title." }],
+        }),
+      }),
+    });
+
+    await expect(provider(createProviderInput())).resolves.toEqual({
+      summary: "Invalid finding payload.",
+      findings: [],
+      status: "unavailable",
     });
   });
 
@@ -117,6 +180,26 @@ describe("continuous feedback provider", () => {
       summary:
         "Continuous feedback provider exited with 2: model runner failed",
       findings: [],
+      status: "unavailable",
+    });
+  });
+
+  it("marks timeout exits without a code as unavailable", async () => {
+    const provider = createContinuousFeedbackProvider({
+      resolveWorkspacePath: () => "/tmp/symphony-workspace",
+      readDiff: () => "",
+      runCommand: async () => ({
+        exitCode: null,
+        stderr: "Continuous feedback command timed out after 10ms.",
+        stdout: "",
+      }),
+    });
+
+    await expect(provider(createProviderInput())).resolves.toEqual({
+      summary:
+        "Continuous feedback provider exited without an exit code: Continuous feedback command timed out after 10ms.",
+      findings: [],
+      status: "unavailable",
     });
   });
 

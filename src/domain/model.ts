@@ -182,7 +182,7 @@ export interface LoopTraceWorkerExit {
 
 export interface LoopTraceContinuousFeedback {
   event: "commit" | "diff" | "checkpoint";
-  status: "pass" | "finding";
+  status: ContinuousFeedbackStatus;
   reviewerRunner: string;
   reviewerModel: string | null;
   findingSignatures: string[];
@@ -962,7 +962,7 @@ export interface DecorrelatedGateOutcome {
 }
 
 export type ContinuousFeedbackEvent = "commit" | "diff" | "checkpoint";
-export type ContinuousFeedbackStatus = "pass" | "finding";
+export type ContinuousFeedbackStatus = "pass" | "finding" | "unavailable";
 export type ContinuousFeedbackFindingSeverity = "info" | "warning" | "blocking";
 export type ContinuousFeedbackFindingStatus =
   | "open"
@@ -996,6 +996,7 @@ export interface ContinuousFeedbackFinding {
 
 export interface ContinuousFeedbackIssueState {
   status: ContinuousFeedbackStatus;
+  summary: string | null;
   lastEvent: ContinuousFeedbackEvent;
   lastCheckedAt: string;
   reviewerLane: ContinuousFeedbackLane;
