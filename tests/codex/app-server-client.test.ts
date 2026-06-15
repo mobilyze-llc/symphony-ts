@@ -872,6 +872,9 @@ describe("CodexAppServerClient", () => {
         "Headless output guard declined",
       );
     }
+    expect(detectHeadlessCommandOutputRisk("pnpm test")).toContain(
+      "Retry exactly: node scripts/symphony-run-logged.mjs --label validation -- pnpm test",
+    );
   });
 
   it("allows high-volume commands when output is captured or explicitly capped", () => {

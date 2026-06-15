@@ -1649,6 +1649,79 @@ describe("OrchestratorRuntimeHost", () => {
     });
   });
 
+  it("passes latest workpad context into investigate retry workers", async () => {
+    const tracker = createLinearTrackerForPipelineStatus();
+    vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+      createIssue({ state: "In Progress" }),
+    ]);
+    vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+    vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+      { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+    ]);
+    vi.spyOn(tracker, "fetchIssueComments").mockResolvedValue([
+      {
+        id: "workpad-old",
+        body: "## Workpad\n\nOlder plan.",
+        createdAt: "2026-03-06T00:01:00.000Z",
+        updatedAt: "2026-03-06T00:01:00.000Z",
+        user: null,
+        botActor: null,
+      },
+      {
+        id: "not-workpad",
+        body: "A regular issue comment.",
+        createdAt: "2026-03-06T00:03:00.000Z",
+        updatedAt: "2026-03-06T00:03:00.000Z",
+        user: null,
+        botActor: null,
+      },
+      {
+        id: "workpad-new",
+        body: "  ## Workpad\n\nLatest plan.",
+        createdAt: "2026-03-06T00:02:00.000Z",
+        updatedAt: "2026-03-06T00:04:00.000Z",
+        user: null,
+        botActor: null,
+      },
+    ]);
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createStagedConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:05:00.000Z"),
+    });
+
+    host.getState().issueStages["1"] = "investigate";
+    host.getState().retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      dueAtMs: Date.parse("2026-03-06T00:04:00.000Z"),
+      timerHandle: null,
+      error: null,
+      delayType: "continuation",
+    };
+
+    const retryResult = await host.runRetryTimer("1");
+
+    expect(retryResult).toMatchObject({
+      dispatched: true,
+    });
+    expect(fakeRunner.runInputs).toHaveLength(1);
+    expect(fakeRunner.runInputs[0]).toMatchObject({
+      attempt: 1,
+      stageName: "investigate",
+      workpadContext: {
+        present: true,
+        commentId: "workpad-new",
+      },
+    });
+  });
+
   it("persists rate-limit snapshots and hydrates them into a cold host", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-rl-snapshot-"));
     try {

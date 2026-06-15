@@ -2157,8 +2157,7 @@ function detectRiskyCommandSegment(segment: string): {
   if (isUncapturedValidationCommand(segment)) {
     return {
       description: "an uncaptured validation command",
-      remediation:
-        "Run validation through `node scripts/symphony-run-logged.mjs --label <label> -- <command> ...` so full stdout/stderr is preserved as an artifact and only a bounded tail reaches the transcript.",
+      remediation: renderLoggedValidationRemediation(segment),
     };
   }
 
@@ -2215,6 +2214,13 @@ function isBroadLineRgSegment(segment: string): boolean {
 
 function isUncapturedValidationCommand(segment: string): boolean {
   return /\b(?:pnpm\s+(?:test|vitest)|vitest\s+run|npm\s+test)\b/.test(segment);
+}
+
+function renderLoggedValidationRemediation(segment: string): string {
+  return [
+    "Run validation through the logged runner so full stdout/stderr is preserved as an artifact and only a bounded tail reaches the transcript.",
+    `Retry exactly: node scripts/symphony-run-logged.mjs --label validation -- ${segment}`,
+  ].join(" ");
 }
 
 function isUncapturedGithubFailedLogCommand(segment: string): boolean {
