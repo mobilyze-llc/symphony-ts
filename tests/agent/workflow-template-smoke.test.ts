@@ -15,7 +15,10 @@ import {
   renderPrompt,
   resolvePromptPartialRoots,
 } from "../../src/agent/prompt-builder.js";
-import { resolveWorkflowConfig } from "../../src/config/config-resolver.js";
+import {
+  resolveWorkflowConfig,
+  validateDispatchConfig,
+} from "../../src/config/config-resolver.js";
 import { loadWorkflowDefinition } from "../../src/config/workflow-loader.js";
 import type { Issue } from "../../src/domain/model.js";
 
@@ -47,6 +50,23 @@ const SHIPPED_PRODUCT_WORKFLOW_CONFIGS = [
   "../../pipeline-config/workflows/WORKFLOW-symphony.md",
   "../../pipeline-config/workflows/WORKFLOW-toys.md",
 ].map((path) => resolve(import.meta.dirname, path));
+// SYMPH-347 minimum queue-opening gate: these product queues were named in
+// the gate list and must stay explicitly represented even if the broader
+// shipped workflow set changes.
+const MINIMUM_QUEUE_GATE_PRODUCT_WORKFLOW_NAMES = new Set([
+  "WORKFLOW-household.md",
+  "WORKFLOW-hs-dash.md",
+  "WORKFLOW-hs-data.md",
+  "WORKFLOW-hs-mobile.md",
+  "WORKFLOW-jony-agent.md",
+  "WORKFLOW-stickerlabs.md",
+]);
+const REQUIRED_PRODUCT_ACTIVE_STATES = [
+  "Todo",
+  "In Progress",
+  "In Review",
+  "Resume",
+] as const;
 const ELIGIBILITY_ON_REWRITE_PARTIAL_PATH = resolve(
   import.meta.dirname,
   "../../pipeline-config/prompts/eligibility-on-ticket-rewrite.liquid",
@@ -395,6 +415,83 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       });
 
       expect(resolved.tracker.activeStates).toContain("Resume");
+    }
+  });
+
+  it("loads each shipped product workflow and covers runtime active states (SYMPH-347)", async () => {
+    const workflowDirectory = resolve(
+      import.meta.dirname,
+      "../../pipeline-config/workflows",
+    );
+    const discoveredWorkflowConfigs = (await readdir(workflowDirectory))
+      .filter((entry) => /^WORKFLOW-.+\.md$/.test(entry))
+      .map((entry) => resolve(workflowDirectory, entry))
+      .sort();
+    const expectedWorkflowConfigs = [
+      ...SHIPPED_PRODUCT_WORKFLOW_CONFIGS,
+    ].sort();
+    const discoveredWorkflowNames = new Set(
+      discoveredWorkflowConfigs.map((path) => path.split("/").at(-1)),
+    );
+
+    expect(discoveredWorkflowConfigs).toEqual(expectedWorkflowConfigs);
+    for (const workflowName of MINIMUM_QUEUE_GATE_PRODUCT_WORKFLOW_NAMES) {
+      expect(discoveredWorkflowNames.has(workflowName)).toBe(true);
+    }
+
+    const seenProjectSlugs = new Set<string>();
+    const seenPorts = new Set<number>();
+
+    for (const configPath of discoveredWorkflowConfigs) {
+      const workflowConfig = await loadWorkflowDefinition(configPath);
+      const resolved = resolveWorkflowConfig(workflowConfig, {
+        LINEAR_API_KEY: "test-token",
+        LOCAL_LLM_API_KEY: "test-local-token",
+      });
+
+      expect(validateDispatchConfig(resolved, { hostname: "pro14" })).toEqual({
+        ok: true,
+      });
+      expect(resolved.tracker.projectSlug).toMatch(/^[a-z0-9]{12}$/);
+      expect(resolved.tracker.projectSlug).not.toBe("<YOUR_PROJECT_SLUG_HERE>");
+      expect(seenProjectSlugs.has(resolved.tracker.projectSlug!)).toBe(false);
+      seenProjectSlugs.add(resolved.tracker.projectSlug!);
+
+      expect(resolved.server.port).not.toBeNull();
+      expect(seenPorts.has(resolved.server.port!)).toBe(false);
+      seenPorts.add(resolved.server.port!);
+
+      expect(resolved.tracker.activeStates).toEqual(
+        REQUIRED_PRODUCT_ACTIVE_STATES,
+      );
+      expect(resolved.escalationState).toBe("Blocked");
+      expect(resolved.tracker.activeStates).not.toContain("Blocked");
+
+      const stages = resolved.stages;
+      expect(stages).not.toBeNull();
+      if (stages === null) {
+        throw new Error(`Expected staged workflow for ${configPath}`);
+      }
+
+      for (const [stageName, stage] of Object.entries(stages.stages)) {
+        if (stage.type === "terminal") {
+          expect(stage.linearState).not.toBeNull();
+          expect(resolved.tracker.terminalStates).toContain(stage.linearState);
+          expect(resolved.tracker.activeStates).not.toContain(
+            stage.linearState!,
+          );
+          continue;
+        }
+
+        if (stage.linearState === null) {
+          continue;
+        }
+        expect(resolved.tracker.activeStates).toContain(stage.linearState);
+        expect(resolved.tracker.terminalStates).not.toContain(
+          stage.linearState!,
+        );
+        expect(stageName).not.toBe("");
+      }
     }
   });
 
