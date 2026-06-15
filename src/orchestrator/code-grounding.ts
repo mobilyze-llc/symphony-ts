@@ -543,6 +543,12 @@ async function readPathCandidateCitation(
     if (linkStat.isSymbolicLink()) {
       return undefined;
     }
+    const realAbsolutePath = await fs.realpath(absolutePath);
+    if (
+      !(await isRealPathInsideCheckout(paths.checkoutPath, realAbsolutePath))
+    ) {
+      return undefined;
+    }
     const stat = await fs.stat(absolutePath);
     if (!stat.isFile() || stat.size > MAX_SCAN_FILE_BYTES) {
       return undefined;
@@ -918,11 +924,32 @@ async function removeAbandonedCodeGroundingFileLock(
     if (Date.now() - stat.mtimeMs < FILE_LOCK_STALE_MS) {
       return false;
     }
+    if (await codeGroundingLockOwnerIsAlive(lockPath)) {
+      return false;
+    }
     await fs.rm(lockPath, { recursive: true, force: true });
     return true;
   } catch (error) {
     if (isMissingPathError(error)) {
       return true;
+    }
+    throw error;
+  }
+}
+
+async function codeGroundingLockOwnerIsAlive(
+  lockPath: string,
+): Promise<boolean> {
+  try {
+    const raw = await fs.readFile(
+      join(lockPath, FILE_LOCK_OWNER_FILENAME),
+      "utf8",
+    );
+    const parsed = JSON.parse(raw) as { pid?: unknown };
+    return typeof parsed.pid === "number" && isProcessAlive(parsed.pid);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return false;
     }
     throw error;
   }
@@ -1150,6 +1177,18 @@ async function realpathOrResolve(path: string): Promise<string> {
   }
 }
 
+async function isRealPathInsideCheckout(
+  checkoutPath: string,
+  realPath: string,
+): Promise<boolean> {
+  try {
+    assertWorkspacePathWithinRoot(await fs.realpath(checkoutPath), realPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function toRepoRelativePath(root: string, path: string): string {
   return relative(root, path).split(sep).join("/");
 }
@@ -1174,6 +1213,22 @@ function isMissingPathError(error: unknown): boolean {
     "code" in error &&
     (error as { code?: unknown }).code === "ENOENT"
   );
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") {
+      return false;
+    }
+    if (code === "EPERM") {
+      return true;
+    }
+    throw error;
+  }
 }
 
 function sleep(ms: number): Promise<void> {
