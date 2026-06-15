@@ -524,6 +524,52 @@ describe("council-review manual skill", () => {
     });
   });
 
+  it("rejects attempted lanes that only wrote cmux sidecars", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeArtifact(dir, "phase1-opus.cli.json", "{}\n");
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "phase1-opus: reviewer artifact requires complete lane status",
+      );
+      expect(assertion.stdout).toContain(
+        "phase1-opus: reviewer artifact path does not exist:",
+      );
+    });
+  });
+
+  it("rejects completed lanes whose canonical artifact is missing", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      const externalArtifact = resolve(dir, "external-opus.md");
+      writeArtifact(dir, "external-opus.md", validReviewArtifact());
+      writeArtifact(
+        dir,
+        "phase1-opus.status.json",
+        JSON.stringify({
+          schema: "agent-harness.lane-status.v1",
+          agent: "claude",
+          lane: "phase1-opus",
+          phase: "phase1-opus",
+          state: "complete",
+          message: "Review complete",
+          artifact: externalArtifact,
+        }),
+      );
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "phase1-opus: status is complete but reviewer artifact is missing",
+      );
+      expect(assertion.stdout).toContain(
+        "at least one phase1 reviewer artifact must satisfy the closeout contract",
+      );
+    });
+  });
+
   it("accepts completed reviewer artifacts that satisfy the closeout contract", () => {
     withArtifactDir((dir) => {
       writeCleanPassArtifacts(dir);

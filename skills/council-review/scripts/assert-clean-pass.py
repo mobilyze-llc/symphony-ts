@@ -83,12 +83,19 @@ def validate_review_artifacts(artifact_dir: Path) -> list[str]:
         artifact_path = artifact_dir / f"{stem}.md"
         status_path = artifact_dir / f"{stem}.status.json"
         cli_json_path = artifact_dir / f"{stem}.cli.json"
+        lane_sidecars = (
+            artifact_path,
+            status_path,
+            cli_json_path,
+            artifact_dir / f"{stem}.cli.stderr",
+            artifact_dir / f"{stem}.events.jsonl",
+            artifact_dir / f"{stem}.pane.log",
+        )
         status = read_json_object(status_path) if status_path.exists() else {}
         status_state = str(status.get("state") or "").strip().lower()
         status_message = str(status.get("message") or "").strip()
-        status_artifact = str(status.get("artifact") or "").strip()
         completed = status_state == "complete"
-        observed = completed or artifact_path.exists()
+        observed = completed or any(path.exists() for path in lane_sidecars)
 
         if not observed:
             continue
@@ -98,28 +105,19 @@ def validate_review_artifacts(artifact_dir: Path) -> list[str]:
                 f"{stem}: reviewer artifact requires complete lane status to count as closeout evidence"
             )
 
-        resolved_artifact_path = (
-            Path(status_artifact)
-            if status_artifact
-            else artifact_path
-        )
-        if not resolved_artifact_path.is_absolute():
-            resolved_artifact_path = artifact_dir / resolved_artifact_path
-
-        if completed and not artifact_path.exists() and not resolved_artifact_path.exists():
+        if completed and not artifact_path.exists():
             failures.append(
                 f"{stem}: status is complete but reviewer artifact is missing"
             )
             continue
 
-        path_to_read = artifact_path if artifact_path.exists() else resolved_artifact_path
-        if not path_to_read.exists():
+        if not artifact_path.exists():
             failures.append(
-                f"{stem}: reviewer artifact path does not exist: {path_to_read}"
+                f"{stem}: reviewer artifact path does not exist: {artifact_path}"
             )
             continue
 
-        artifact = path_to_read.read_text(encoding="utf-8", errors="replace")
+        artifact = artifact_path.read_text(encoding="utf-8", errors="replace")
         byte_count = len(artifact.encode("utf-8"))
         if byte_count < MIN_REVIEW_ARTIFACT_BYTES:
             failures.append(
