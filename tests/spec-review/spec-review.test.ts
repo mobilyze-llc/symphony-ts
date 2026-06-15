@@ -1279,6 +1279,96 @@ describe("spec review", () => {
     });
   });
 
+  it("parses comment dispositions from reconciliation JSON", () => {
+    const artifact = [
+      "## Verdict",
+      "",
+      "Verdict enum: ready_with_spec_edits",
+      "",
+      "## Source Read Status",
+      "",
+      "Read the ticket.",
+      "",
+      "## Reconciliation JSON",
+      "",
+      "```json",
+      JSON.stringify({
+        schemaVersion: 1,
+        verdict: "ready_with_spec_edits",
+        summary: "Ready with dispositions.",
+        issueBodyAppend: null,
+        acceptanceCriteria: [],
+        commentDispositions: [
+          {
+            id: "comment-1",
+            disposition: "incorporated",
+            rationale: "Body includes it.",
+          },
+          {
+            id: "comment-2",
+            disposition: "carried_forward",
+          },
+          {
+            id: "comment-3",
+            disposition: "not-a-disposition",
+          },
+        ],
+        linearDocMarkdown: null,
+        childTicketPlan: [],
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+      }),
+      "```",
+    ].join("\n");
+
+    expect(
+      parseSpecReviewArtifact(artifact).reconciliation.commentDispositions,
+    ).toEqual([
+      {
+        id: "comment-1",
+        disposition: "incorporated",
+        rationale: "Body includes it.",
+      },
+      {
+        id: "comment-2",
+        disposition: "carried_forward",
+        rationale: null,
+      },
+    ]);
+  });
+
+  it("persists comment dispositions in spec_review_result journal metadata", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "spec-review-journal-"));
+
+    const entries = await appendSpecReviewResultJournal(workspace, {
+      issue: makeIssue(),
+      mode: "observe",
+      sourceIntentHash: "source-hash",
+      readinessState: "valid",
+      verdict: "ready_with_spec_edits",
+      artifactPath: "/tmp/spec-review.md",
+      artifactHash: "artifact-hash",
+      linearDocUrl: null,
+      commentDispositions: [
+        {
+          id: "comment-1",
+          disposition: "superseded",
+          rationale: "Later body superseded it.",
+        },
+      ],
+      summary: "Ready.",
+      now: new Date("2026-06-14T00:00:00.000Z"),
+    });
+
+    expect(entries[0]?.metadata.comment_dispositions).toEqual([
+      {
+        id: "comment-1",
+        disposition: "superseded",
+        rationale: "Later body superseded it.",
+      },
+    ]);
+  });
+
   it("normalizes known verdict enum casing in artifacts", () => {
     const artifact = [
       "## Verdict",

@@ -66,6 +66,7 @@ import { validateWorkspaceCwd } from "../workspace/path-safety.js";
 import { WorkspaceManager } from "../workspace/workspace-manager.js";
 import {
   type BuildTurnPromptInput,
+  type ImplementationCommentDeltaContext,
   buildTurnPrompt,
 } from "./prompt-builder.js";
 
@@ -149,6 +150,7 @@ export interface AgentRunInput {
    * as `acceptance_criteria`; null/absent before the gate has passed.
    */
   acceptanceCriteria?: string | null;
+  implementationCommentDeltas?: ImplementationCommentDeltaContext | null;
   modePolicy?: ModeScopedPermissionPolicy;
   /**
    * Budget-escalation multiplier for this unit (SYMPH-337): scales the
@@ -584,6 +586,8 @@ export class AgentRunner {
           stageName: input.stageName ?? null,
           reworkCount: input.reworkCount ?? 0,
           acceptanceCriteria: input.acceptanceCriteria ?? null,
+          implementationCommentDeltas:
+            input.implementationCommentDeltas ?? null,
           modePolicy: input.modePolicy ?? null,
           turnNumber,
           maxTurns: effectiveMaxTurns,

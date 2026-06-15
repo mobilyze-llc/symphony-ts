@@ -1454,6 +1454,172 @@ describe("OrchestratorRuntimeHost", () => {
     expect(fakeRunner.runInputs[0]?.modePolicy?.maxBudgetUsd).toBeDefined();
   });
 
+  it("passes spec-review comment deltas into implementation workers", async () => {
+    const tracker = createLinearTrackerForPipelineStatus();
+    vi.spyOn(tracker, "fetchCandidateIssues").mockResolvedValue([
+      createIssue(),
+    ]);
+    vi.spyOn(tracker, "fetchIssuesByStates").mockResolvedValue([]);
+    vi.spyOn(tracker, "fetchIssueStatesByIds").mockResolvedValue([
+      { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+    ]);
+    vi.spyOn(tracker, "fetchIssueComments").mockResolvedValue([
+      {
+        id: "comment-post-cutoff",
+        body: "Operator changed the exact implementation requirement.",
+        createdAt: "2026-03-06T00:05:00.000Z",
+        updatedAt: "2026-03-06T00:05:00.000Z",
+        user: {
+          kind: "user",
+          id: "user-operator",
+          name: "Eric",
+          displayName: "Eric",
+          email: "eric@example.com",
+          botType: null,
+          botSubType: null,
+        },
+        botActor: null,
+      },
+      {
+        id: "comment-carried-forward",
+        body: "Keep this older nuance in the implementation.",
+        createdAt: "2026-03-06T00:01:00.000Z",
+        updatedAt: "2026-03-06T00:01:00.000Z",
+        user: null,
+        botActor: {
+          kind: "bot",
+          id: "bot-reviewer",
+          name: "Spec Reviewer",
+          displayName: "Spec Reviewer",
+          email: null,
+          botType: "app",
+          botSubType: "automation",
+        },
+      },
+      {
+        id: "comment-uncited-a",
+        body: "This older human comment was missed.",
+        createdAt: "2026-03-06T00:02:00.000Z",
+        updatedAt: "2026-03-06T00:02:00.000Z",
+        user: {
+          kind: "user",
+          id: "unknown-human",
+          name: "Reviewer",
+          displayName: "Reviewer",
+          email: "reviewer@example.com",
+          botType: null,
+          botSubType: null,
+        },
+        botActor: null,
+      },
+      {
+        id: "comment-uncited-b",
+        body: "This older operator comment was also missed.",
+        createdAt: "2026-03-06T00:02:30.000Z",
+        updatedAt: "2026-03-06T00:02:30.000Z",
+        user: {
+          kind: "user",
+          id: "user-operator",
+          name: "Eric",
+          displayName: "Eric",
+          email: "eric@example.com",
+          botType: null,
+          botSubType: null,
+        },
+        botActor: null,
+      },
+    ]);
+    const fakeRunner = new FakeAgentRunner();
+    const host = new OrchestratorRuntimeHost({
+      config: createStagedConfig({
+        stages: {
+          initialStage: "implement",
+          fastTrack: null,
+          stages: {
+            implement: {
+              type: "agent",
+              runner: null,
+              model: null,
+              prompt: null,
+              maxTurns: null,
+              timeoutMs: null,
+              concurrency: null,
+              gateType: null,
+              maxRework: null,
+              reviewers: [],
+              transitions: {
+                onComplete: null,
+                onApprove: null,
+                onRework: null,
+              },
+              linearState: null,
+            },
+          },
+        },
+      }),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      readDispatcherRunJournal: async () => [
+        createRuntimeJournalEntry({
+          sequence: 1,
+          kind: "spec_review_result",
+          timestamp: "2026-03-06T00:03:00.000Z",
+          metadata: {
+            readiness_state: "valid",
+            source_intent_hash: "source-hash",
+            completed_at: "2026-03-06T00:03:00.000Z",
+            comment_dispositions: [
+              {
+                id: "comment-carried-forward",
+                disposition: "carried_forward",
+                rationale: "Still required.",
+              },
+              {
+                id: "comment-uncited-a",
+                disposition: "uncited",
+                rationale: "Not covered by the body.",
+              },
+              {
+                id: "comment-uncited-b",
+                disposition: "uncited",
+                rationale: "Not covered by the body.",
+              },
+            ],
+          },
+        }),
+      ],
+      now: () => new Date("2026-03-06T00:04:00.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(fakeRunner.runInputs).toHaveLength(1);
+    expect(fakeRunner.runInputs[0]?.implementationCommentDeltas).toEqual({
+      sourceIntentHash: "source-hash",
+      cutoff: "2026-03-06T00:03:00.000Z",
+      requiresOperatorContext: true,
+      operatorContextReason:
+        "Uncited comments at or before the spec-review cutoff require operator reconciliation: comment-uncited-a (unknown), comment-uncited-b (unknown).",
+      comments: [
+        expect.objectContaining({
+          id: "comment-post-cutoff",
+          disposition: "post_cutoff",
+          effectiveAt: "2026-03-06T00:05:00.000Z",
+          body: "Operator changed the exact implementation requirement.",
+        }),
+        expect.objectContaining({
+          id: "comment-carried-forward",
+          disposition: "carried_forward",
+          effectiveAt: "2026-03-06T00:01:00.000Z",
+          body: "Keep this older nuance in the implementation.",
+        }),
+      ],
+    });
+  });
+
   it("persists rate-limit snapshots and hydrates them into a cold host", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-rl-snapshot-"));
     try {

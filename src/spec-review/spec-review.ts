@@ -107,6 +107,22 @@ export interface SpecReviewSourceIntentComment {
   bodyHash: string;
 }
 
+export const SPEC_REVIEW_COMMENT_DISPOSITIONS = [
+  "incorporated",
+  "superseded",
+  "carried_forward",
+  "uncited",
+] as const;
+
+export type SpecReviewCommentDisposition =
+  (typeof SPEC_REVIEW_COMMENT_DISPOSITIONS)[number];
+
+export interface SpecReviewCommentDispositionRecord {
+  id: string;
+  disposition: SpecReviewCommentDisposition;
+  rationale: string | null;
+}
+
 interface SpecReviewCurrentState {
   sourceIntentHash: string | null;
   readinessState: SpecReviewReadinessState | null;
@@ -140,6 +156,7 @@ export interface SpecReviewReconciliation {
   summary: string;
   issueBodyAppend: string | null;
   acceptanceCriteria: string[];
+  commentDispositions?: SpecReviewCommentDispositionRecord[];
   linearDocMarkdown: string | null;
   childTicketPlan: Array<{
     title: string;
@@ -1300,6 +1317,9 @@ export async function runSpecReviewForIssue(
   }
   let successEntries: DispatcherRunJournalEntry[];
   try {
+    const sanitizedReconciliation = sanitizeGeneratedReconciliation(
+      parsed.reconciliation,
+    );
     successEntries = await appendJournal(input.workspaceRoot, {
       issue: input.issue,
       mode: input.mode,
@@ -1309,7 +1329,8 @@ export async function runSpecReviewForIssue(
       artifactPath,
       artifactHash,
       linearDocUrl,
-      summary: parsed.reconciliation.summary,
+      commentDispositions: sanitizedReconciliation.commentDispositions ?? [],
+      summary: sanitizedReconciliation.summary,
       now: now(),
     });
   } catch (error) {
@@ -1657,6 +1678,16 @@ function sanitizeGeneratedReconciliation(
     acceptanceCriteria: reconciliation.acceptanceCriteria.map((item) =>
       sanitizeGeneratedSpecReviewText(item),
     ),
+    commentDispositions: (reconciliation.commentDispositions ?? []).map(
+      (record) => ({
+        id: sanitizeGeneratedSpecReviewText(record.id),
+        disposition: record.disposition,
+        rationale:
+          record.rationale === null
+            ? null
+            : sanitizeGeneratedSpecReviewText(record.rationale),
+      }),
+    ),
     childTicketPlan: reconciliation.childTicketPlan.map((child) => ({
       ...child,
       title: sanitizeGeneratedSpecReviewText(child.title),
@@ -1694,6 +1725,7 @@ export async function appendSpecReviewResultJournal(
     artifactPath: string | null;
     artifactHash: string | null;
     linearDocUrl: string | null;
+    commentDispositions?: readonly SpecReviewCommentDispositionRecord[];
     summary: string;
     now: Date;
   },
@@ -1725,6 +1757,14 @@ export async function appendSpecReviewResultJournal(
       artifact_path: input.artifactPath ?? undefined,
       review_artifact_hash: input.artifactHash ?? undefined,
       linear_doc_url: input.linearDocUrl ?? undefined,
+      comment_dispositions:
+        input.commentDispositions === undefined
+          ? undefined
+          : input.commentDispositions.map((record) => ({
+              id: record.id,
+              disposition: record.disposition,
+              rationale: record.rationale,
+            })),
       completed_at: input.now.toISOString(),
     },
   };
@@ -2069,6 +2109,7 @@ function normalizeReconciliation(value: unknown): SpecReviewReconciliation {
         ? value.issueBodyAppend
         : null,
     acceptanceCriteria: stringArray(value.acceptanceCriteria),
+    commentDispositions: parseCommentDispositions(value.commentDispositions),
     linearDocMarkdown:
       typeof value.linearDocMarkdown === "string" &&
       value.linearDocMarkdown.trim() !== ""
@@ -2095,6 +2136,46 @@ function normalizeReconciliation(value: unknown): SpecReviewReconciliation {
         ? value.operatorContextReason
         : null,
   };
+}
+
+function parseCommentDispositions(
+  value: unknown,
+): SpecReviewCommentDispositionRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((entry) => {
+    if (!isRecord(entry) || typeof entry.id !== "string") {
+      return [];
+    }
+    const disposition =
+      typeof entry.disposition === "string" &&
+      isSpecReviewCommentDisposition(entry.disposition)
+        ? entry.disposition
+        : null;
+    if (disposition === null) {
+      return [];
+    }
+    return [
+      {
+        id: entry.id,
+        disposition,
+        rationale:
+          typeof entry.rationale === "string" && entry.rationale.trim() !== ""
+            ? entry.rationale
+            : null,
+      },
+    ];
+  });
+}
+
+function isSpecReviewCommentDisposition(
+  value: string,
+): value is SpecReviewCommentDisposition {
+  return (SPEC_REVIEW_COMMENT_DISPOSITIONS as readonly string[]).includes(
+    value,
+  );
 }
 
 function readinessStateForReconciliation(
