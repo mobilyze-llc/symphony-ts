@@ -307,7 +307,7 @@ describe("hard-stop policy", () => {
       cachedTokenCostRatio: 0.1,
     };
 
-    // SYMPH-330 unit 3 shape: 1.03M raw, 90% cached — billable ~194K stays
+    // SYMPH-330 unit 3 shape: 1.03M raw, 90% cached — billable ~203K stays
     // under the 250K ceiling instead of pausing at 257K raw.
     expect(
       evaluateBudgetHardStop({
