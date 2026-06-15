@@ -455,7 +455,7 @@ describe("orchestrator core", () => {
         human: "only run ISSUE-2 again",
       },
     });
-    await orchestrator.clearDispatchFence({
+    const activeClear = await orchestrator.clearDispatchFence({
       actor: { kind: "operator", host: "pro14", session: "api" },
       reason: {
         class: "operator_dispatch_unfence",
@@ -472,6 +472,7 @@ describe("orchestrator core", () => {
 
     expect(first.status).toBe("applied");
     expect(second.status).toBe("no_op");
+    expect(activeClear.status).toBe("applied");
     expect(emptyClear.status).toBe("no_op");
     expect(orchestrator.getState().dispatchFence).toBeNull();
   });
