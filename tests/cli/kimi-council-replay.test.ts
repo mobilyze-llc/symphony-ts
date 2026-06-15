@@ -170,7 +170,7 @@ describe("buildComparisonReport", () => {
     expect(report.scoring.artifactContractReason).toContain("malformed");
   });
 
-  it("classifies every non-OK Kimi parse status as malformed", () => {
+  it("classifies malformed Kimi parse status as malformed", () => {
     const report = buildComparisonReport({
       issueId: "SYMPH-689",
       sourceCouncilDir: "/tmp/source-council",
@@ -181,7 +181,7 @@ describe("buildComparisonReport", () => {
         agent: "kimi",
         role: "kimi-k27-shadow-reviewer",
         modelFamily: "moonshot-kimi",
-        parseStatus: "unexpected_status",
+        parseStatus: "malformed",
         artifactPath: "/tmp/kimi-replay/kimi-k27-shadow.structured.json",
       }),
       gateResultPath: "/tmp/kimi-replay/review-result.json",
@@ -189,9 +189,7 @@ describe("buildComparisonReport", () => {
     });
 
     expect(report.scoring.artifactContract).toBe("malformed");
-    expect(report.scoring.artifactContractReason).toContain(
-      "unexpected_status",
-    );
+    expect(report.scoring.artifactContractReason).toContain("malformed");
   });
 
   it("scores blocker recall and classifies missing Kimi artifacts", () => {
@@ -371,6 +369,34 @@ describe("buildComparisonReport", () => {
     });
   });
 
+  it("reports partial source bundle hashes separately from consistency", () => {
+    const report = buildComparisonReport({
+      issueId: "SYMPH-689",
+      sourceCouncilDir: "/tmp/source-council",
+      replayArtifactDir: "/tmp/kimi-replay",
+      sourceLanes: [
+        sourceLane({ reviewBundleCanonicalHash: "a".repeat(64) }),
+        sourceLane({ reviewBundleCanonicalHash: null }),
+      ],
+      kimiLane: sourceLane({
+        laneId: "kimi-k27-shadow",
+        agent: "kimi",
+        role: "kimi-k27-shadow-reviewer",
+        modelFamily: "moonshot-kimi",
+        reviewBundleCanonicalHash: "a".repeat(64),
+      }),
+      gateResultPath: "/tmp/kimi-replay/review-result.json",
+      markdownReportPath: "/tmp/kimi-replay/kimi-replay-comparison.md",
+    });
+
+    expect(report.frozenReviewBundle).toEqual({
+      canonicalHash: null,
+      sourceHashStatus: "partial",
+      sourceHashes: ["a".repeat(64)],
+      usedByKimiReplay: false,
+    });
+  });
+
   it("does not mark the bundle as used when Kimi produced no structured artifact", () => {
     const report = buildComparisonReport({
       issueId: "SYMPH-689",
@@ -476,6 +502,16 @@ describe("runKimiCouncilReplay", () => {
             severity: "P1",
             fingerprint: "closed-source",
             leadDisposition: "refuted",
+          },
+          {
+            severity: "P1",
+            fingerprint: "dismissed-source",
+            leadDisposition: "dismissed",
+          },
+          {
+            severity: "P2",
+            fingerprint: "track-disposition-source",
+            leadDisposition: "track",
           },
           { severity: "Track", fingerprint: "source-track" },
         ],
@@ -635,6 +671,15 @@ describe("runKimiCouncilReplay", () => {
     expect(report.scoring.sourceBlockingFingerprints).not.toContain(
       "prior-shadow-only",
     );
+    expect(report.scoring.sourceBlockingFingerprints).not.toContain(
+      "closed-source",
+    );
+    expect(report.scoring.sourceBlockingFingerprints).not.toContain(
+      "dismissed-source",
+    );
+    expect(report.scoring.sourceBlockingFingerprints).not.toContain(
+      "track-disposition-source",
+    );
     expect(
       report.sourceLanes.find((lane) => lane.laneId === "codex-high-lead")
         ?.sourceRecallExclusionReason,
@@ -649,6 +694,92 @@ describe("runKimiCouncilReplay", () => {
     await expect(
       readFile(join(replayArtifactDir, "kimi-replay-comparison.md"), "utf-8"),
     ).resolves.toContain("Canonical frozen review bundle hash used: yes");
+  });
+
+  it("writes partial source bundle hash status to markdown", async () => {
+    const sourceCouncilDir = await makeTempDir("source-council-");
+    const replayArtifactDir = await makeTempDir("kimi-replay-");
+    await writeFile(
+      join(sourceCouncilDir, "diff.patch"),
+      "diff --git a/x b/x\n",
+    );
+    await writeFile(
+      join(sourceCouncilDir, "opus.structured.json"),
+      JSON.stringify({
+        lane: {
+          laneId: "opus",
+          agent: "claude",
+          role: "legacy-reviewer",
+          modelFamily: "anthropic",
+          mergeAuthoritative: true,
+        },
+        verdict: "pass",
+        parseStatus: "synthesized_from_markdown",
+        reviewBundle: {
+          path: join(sourceCouncilDir, "review-bundle.json"),
+          hash: "b".repeat(64),
+          bundleHash: "a".repeat(64),
+          hashAlgorithm: "sha256",
+        },
+        findings: [],
+      }),
+    );
+    await writeFile(
+      join(sourceCouncilDir, "gemini.structured.json"),
+      JSON.stringify({
+        lane: {
+          laneId: "gemini",
+          agent: "gemini",
+          role: "legacy-reviewer",
+          modelFamily: "google",
+          mergeAuthoritative: true,
+        },
+        verdict: "pass",
+        parseStatus: "synthesized_from_markdown",
+        reviewBundle: null,
+        findings: [],
+      }),
+    );
+    runHeadlessCouncilGateMock.mockResolvedValue({
+      lanes: [
+        {
+          agent: "kimi",
+          structuredArtifact: {
+            lane: {
+              laneId: "kimi-k27-shadow",
+              agent: "kimi",
+              role: "kimi-k27-shadow-reviewer",
+              modelFamily: "moonshot-kimi",
+              mergeAuthoritative: false,
+            },
+            verdict: "pass",
+            parseStatus: "synthesized_from_markdown",
+            reviewBundle: {
+              path: join(replayArtifactDir, "review-bundle.json"),
+              hash: "b".repeat(64),
+              bundleHash: "a".repeat(64),
+              hashAlgorithm: "sha256",
+            },
+            findings: [],
+          },
+        },
+      ],
+      artifactPaths: {
+        resultJson: join(replayArtifactDir, "review-result.json"),
+      },
+    });
+
+    const report = await runKimiCouncilReplay({
+      sourceCouncilDir,
+      replayArtifactDir,
+      workspace: "/repo",
+      issueId: "SYMPH-689",
+    });
+
+    expect(report.frozenReviewBundle.sourceHashStatus).toBe("partial");
+    await expect(
+      readFile(join(replayArtifactDir, "kimi-replay-comparison.md"), "utf-8"),
+    ).resolves.toContain("source hashes incomplete");
   });
 
   it("keeps default Kimi CLI config when replay overrides are omitted", async () => {

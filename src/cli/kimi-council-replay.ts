@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import {
   type HeadlessCouncilGateResult,
   type HeadlessReviewerLaneConfig,
+  type StructuredReviewParseStatus,
   type StructuredReviewerArtifact,
   runHeadlessCouncilGate,
 } from "../review/headless-council-gate.js";
@@ -31,7 +32,7 @@ interface SourceLaneSummary {
   role: string | null;
   modelFamily: string;
   verdict: string;
-  parseStatus: string;
+  parseStatus: StructuredReviewParseStatus;
   sourceRecallEligible: boolean;
   sourceRecallExclusionReason:
     | "lead_artifact"
@@ -64,7 +65,7 @@ interface KimiReplayComparisonReport {
   };
   frozenReviewBundle: {
     canonicalHash: string | null;
-    sourceHashStatus: "absent" | "consistent" | "divergent";
+    sourceHashStatus: "absent" | "consistent" | "divergent" | "partial";
     sourceHashes: string[];
     usedByKimiReplay: boolean;
   };
@@ -271,6 +272,7 @@ function summarizeStructuredArtifact(
   artifactPath: string,
 ): SourceLaneSummary {
   const parseStatus = artifact.parseStatus;
+  const recallExclusionReason = sourceRecallExclusionReason(artifact);
   return {
     laneId: artifact.lane.laneId,
     agent: artifact.lane.agent,
@@ -278,8 +280,8 @@ function summarizeStructuredArtifact(
     modelFamily: artifact.lane.modelFamily,
     verdict: artifact.verdict,
     parseStatus,
-    sourceRecallEligible: sourceRecallExclusionReason(artifact) === null,
-    sourceRecallExclusionReason: sourceRecallExclusionReason(artifact),
+    sourceRecallEligible: recallExclusionReason === null,
+    sourceRecallExclusionReason: recallExclusionReason,
     blockingFingerprints: artifact.findings
       .filter(
         (finding) =>
@@ -394,7 +396,9 @@ function classifyArtifactContract(lane: SourceLaneSummary | null): {
   };
 }
 
-function isOkParseStatus(parseStatus: string): boolean {
+function isOkParseStatus(
+  parseStatus: StructuredReviewParseStatus,
+): parseStatus is "synthesized_from_markdown" {
   return parseStatus === "synthesized_from_markdown";
 }
 
@@ -402,6 +406,9 @@ function summarizeFrozenReviewBundleUse(
   sourceLanes: readonly SourceLaneSummary[],
   kimiLane: SourceLaneSummary | null,
 ): KimiReplayComparisonReport["frozenReviewBundle"] {
+  const sourceHashCount = sourceLanes.filter(
+    (lane) => lane.reviewBundleCanonicalHash !== null,
+  ).length;
   const sourceHashes = uniqueSorted(
     sourceLanes.flatMap((lane) =>
       lane.reviewBundleCanonicalHash === null
@@ -410,13 +417,17 @@ function summarizeFrozenReviewBundleUse(
     ),
   );
   const canonicalHash =
-    sourceHashes.length === 1 ? (sourceHashes[0] ?? null) : null;
+    sourceHashCount === sourceLanes.length && sourceHashes.length === 1
+      ? (sourceHashes[0] ?? null)
+      : null;
   const sourceHashStatus =
     sourceHashes.length === 0
       ? "absent"
-      : sourceHashes.length === 1
-        ? "consistent"
-        : "divergent";
+      : sourceHashCount !== sourceLanes.length
+        ? "partial"
+        : sourceHashes.length === 1
+          ? "consistent"
+          : "divergent";
   return {
     canonicalHash,
     sourceHashStatus,
@@ -470,6 +481,9 @@ function formatFrozenReviewBundleMarkdown(
 ): string {
   if (report.frozenReviewBundle.sourceHashStatus === "divergent") {
     return `Canonical frozen review bundle hash used: no (source hashes diverged: ${report.frozenReviewBundle.sourceHashes.join(", ")})`;
+  }
+  if (report.frozenReviewBundle.sourceHashStatus === "partial") {
+    return `Canonical frozen review bundle hash used: no (source hashes incomplete: ${report.frozenReviewBundle.sourceHashes.join(", ") || "none"})`;
   }
   if (report.frozenReviewBundle.canonicalHash === null) {
     return "Canonical frozen review bundle hash used: no (not available)";
