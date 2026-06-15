@@ -1221,7 +1221,14 @@ export class OrchestratorCore {
           entry.issueId,
           readMetadataString(entry.metadata, "issueState"),
           entry.timestamp,
-          { reason: "operator_input_required", setBySequence: entry.sequence },
+          {
+            reason: "operator_input_required",
+            setBySequence: entry.sequence,
+            parkGeneration: readMetadataNumber(
+              entry.metadata,
+              "parkGeneration",
+            ),
+          },
         );
       }
 
@@ -2017,6 +2024,7 @@ export class OrchestratorCore {
             ? "killed_mid_run"
             : "killed_mid_run_unconfirmed",
           setBySequence: entry.sequence,
+          parkGeneration: readMetadataNumber(entry.metadata, "parkGeneration"),
         },
       );
       if (terminationConfirmed) {
@@ -2047,6 +2055,7 @@ export class OrchestratorCore {
               ? reason
               : `hard_stop:${trigger ?? outcome ?? "unknown"}`,
           setBySequence: entry.sequence,
+          parkGeneration: readMetadataNumber(entry.metadata, "parkGeneration"),
         },
       );
       this.recoverPendingStageSignal(entry);
@@ -6792,7 +6801,11 @@ export class OrchestratorCore {
     issueId: string,
     issueState?: string | null,
     pausedAt?: string | null,
-    mark?: { reason: string; setBySequence: number | null },
+    mark?: {
+      reason: string;
+      setBySequence: number | null;
+      parkGeneration?: number | null;
+    },
   ): void {
     this.recordIssueRequiresExplicitResume(issueId, issueState, pausedAt, mark);
     this.releaseClaim(issueId);
@@ -6802,8 +6815,13 @@ export class OrchestratorCore {
     issueId: string,
     issueState?: string | null,
     pausedAt?: string | null,
-    mark?: { reason: string; setBySequence: number | null },
+    mark?: {
+      reason: string;
+      setBySequence: number | null;
+      parkGeneration?: number | null;
+    },
   ): void {
+    const wasParked = this.isIssueParked(issueId);
     this.state.resumeRequired.add(issueId);
     // Persistable mark surface (SYMPH-406): reason + the journal cursor that
     // set the mark. A re-mark without fresh attribution (e.g. the worker-exit
@@ -6820,14 +6838,18 @@ export class OrchestratorCore {
         ? null
         : normalizeIssueState(issueState);
     const existingGuard = this.resumeRequiredGuards.get(issueId);
-    this.parkSequence += 1;
+    const parkGeneration =
+      mark?.parkGeneration ??
+      (wasParked ? (this.issueParkGenerations.get(issueId) ?? null) : null);
+    const nextParkGeneration = parkGeneration ?? this.parkSequence + 1;
+    this.parkSequence = Math.max(this.parkSequence, nextParkGeneration);
     this.resumeRequiredGuards.set(issueId, {
       pausedState: pausedState === "" ? null : pausedState,
       observedNonResumeState:
         existingGuard?.observedNonResumeState === true ||
         pausedState !== EXPLICIT_RESUME_STATE,
       pausedAt: pausedAt ?? this.now().toISOString(),
-      parkSeq: this.parkSequence,
+      parkSeq: nextParkGeneration,
       ...(existingGuard?.requiresConfirmedEmergencyStop === undefined
         ? {}
         : {
@@ -6838,7 +6860,13 @@ export class OrchestratorCore {
     // Intent-fence generation (SYMPH-399): stop-like pauses and watchdog
     // parks share one monotonic counter so a fenced verb can never act on
     // a park other than the one it was issued against.
-    this.issueParkGenerations.set(issueId, this.parkSequence);
+    this.issueParkGenerations.set(issueId, nextParkGeneration);
+  }
+
+  private nextParkGenerationForJournalKey(issueId: string): number {
+    return this.isIssueParked(issueId)
+      ? (this.issueParkGenerations.get(issueId) ?? this.parkSequence + 1)
+      : this.parkSequence + 1;
   }
 
   private clearResumeRequirement(issueId: string): void {
@@ -9258,8 +9286,9 @@ export class OrchestratorCore {
       pendingStageSignal: PendingStageSignal | null;
     },
   ): Promise<void> {
+    const parkGeneration = this.nextParkGenerationForJournalKey(issueId);
     const hardStopEntry = await this.recordRunJournalEntry({
-      idempotencyKey: `hard_stop:${issueId}:${input.stageName ?? "no-stage"}:${formatAttemptKey(runningEntry.retryAttempt)}:${input.hardStop.trigger}:${input.hardStop.turnCount}`,
+      idempotencyKey: `hard_stop:${issueId}:${input.stageName ?? "no-stage"}:${formatAttemptKey(runningEntry.retryAttempt)}:${input.hardStop.trigger}:${input.hardStop.turnCount}:gen-${parkGeneration}`,
       timestamp: this.now().toISOString(),
       kind: "hard_stop_trigger",
       issueId,
@@ -9282,6 +9311,7 @@ export class OrchestratorCore {
         humanBlockBlockers: input.hardStop.humanBlockBlockers ?? null,
         estimatedCostUsd: input.hardStop.estimatedCostUsd,
         issueState: runningEntry.issue.state,
+        parkGeneration,
         ...pendingStageSignalMetadata(input.pendingStageSignal),
       },
     });
@@ -9300,6 +9330,7 @@ export class OrchestratorCore {
       {
         reason: resumeRequiredReasonForHardStop(input.hardStop),
         setBySequence: hardStopEntry.sequence,
+        parkGeneration,
       },
     );
 
@@ -9357,8 +9388,9 @@ export class OrchestratorCore {
       stageName: string | null;
     },
   ): Promise<void> {
+    const parkGeneration = this.nextParkGenerationForJournalKey(issueId);
     const operatorInputEntry = await this.recordRunJournalEntry({
-      idempotencyKey: `operator_input_required:${issueId}:${input.stageName ?? "no-stage"}:${formatAttemptKey(runningEntry.retryAttempt)}`,
+      idempotencyKey: `operator_input_required:${issueId}:${input.stageName ?? "no-stage"}:${formatAttemptKey(runningEntry.retryAttempt)}:gen-${parkGeneration}`,
       timestamp: this.now().toISOString(),
       kind: "operator_input_required",
       issueId,
@@ -9374,6 +9406,7 @@ export class OrchestratorCore {
         reason: input.reason,
         errorCode: ERROR_CODES.codexUserInputRequired,
         issueState: runningEntry.issue.state,
+        parkGeneration,
       },
     });
 
@@ -9384,6 +9417,7 @@ export class OrchestratorCore {
       {
         reason: "operator_input_required",
         setBySequence: operatorInputEntry.sequence,
+        parkGeneration,
       },
     );
 
