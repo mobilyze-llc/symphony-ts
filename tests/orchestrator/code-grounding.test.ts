@@ -1,5 +1,12 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -8,6 +15,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { BacklogAuditFinding } from "../../src/audit/backlog-audit.js";
 import {
+  resolveCodeGroundingPaths,
   runManagedCodeGrounding,
   sweepCodeGroundingCheckouts,
   validateModelFindingAgainstEvidence,
@@ -126,6 +134,89 @@ describe("managed code grounding (SYMPH-596)", () => {
     await expect(readFile(report.checkout.path!)).rejects.toMatchObject({
       code: "ENOENT",
     });
+  });
+
+  it("verifies exact cited paths even when the scanner would not index the file", async () => {
+    const sourceRepo = await createSourceRepo();
+    await writeFile(
+      join(sourceRepo, "src", "orchestrator", "queue.go"),
+      [
+        "package orchestrator",
+        "",
+        "func RunQueueTriage() string {",
+        '  return "grounded"',
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await git(sourceRepo, ["add", "."]);
+    await git(sourceRepo, ["commit", "-m", "Add Go evidence"]);
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "exact-path-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [
+        backlogFinding({
+          evidence: "Implemented in `src/orchestrator/queue.go`.",
+        }),
+      ],
+    });
+
+    expect(report.status).toBe("verified");
+    expect(report.entries[0]).toMatchObject({
+      status: "verified",
+      missing: [],
+    });
+    expect(report.entries[0]?.citations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ path: "src/orchestrator/queue.go" }),
+      ]),
+    );
+  });
+
+  it("replaces an unusable cached checkout before scanning", async () => {
+    const sourceRepo = await createSourceRepo();
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+    const target = {
+      repoUrl: sourceRepo,
+      sourcePath: sourceRepo,
+      commitSha,
+      repoScope: "symphony" as const,
+    };
+    const paths = resolveCodeGroundingPaths({
+      workspaceRoot,
+      runId: "broken-checkout-run",
+      config: codeGroundingConfig(),
+      target,
+    });
+    await mkdir(paths.checkoutPath, { recursive: true });
+    await writeFile(join(paths.checkoutPath, "partial.txt"), "not a git repo");
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "broken-checkout-run",
+      config: codeGroundingConfig(),
+      target,
+      findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
+    });
+
+    expect(report.status).toBe("verified");
+    await expect(
+      realpath(await git(paths.checkoutPath, ["rev-parse", "--show-toplevel"])),
+    ).resolves.toBe(await realpath(paths.checkoutPath));
+    await expect(
+      readFile(join(paths.checkoutPath, "partial.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("serializes concurrent scans that share the same managed checkout", async () => {
