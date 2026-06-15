@@ -1243,6 +1243,7 @@ export interface OrchestratorState {
   dispatcherLeases: Record<string, DispatcherLease>;
   managerRunJournal: ManagerRunJournal;
   managerRuns: Record<string, ManagerRunState>;
+  pipelinePause: PipelinePauseState | null;
   /**
    * Last failure signature recorded per issue+stage key (`${issueId}:${stage}`).
    * Used by the retry-without-novelty short-circuit (SYMPH-396): if the
@@ -1310,6 +1311,24 @@ export interface PipelineEmergencyStopState {
     codexAppServerPid: string | null;
     codexAppServerIdentity: ProcessIdentitySnapshot | null;
   }>;
+}
+
+export interface PipelinePauseState {
+  active: true;
+  since: string;
+  reason: string;
+  actor: {
+    kind: string;
+    host: string;
+    session: string | null;
+  };
+  setBySequence: number | null;
+  haltView: {
+    status: "created" | "already_paused" | "uncertain";
+    issueIdentifier: string | null;
+    issueTitle: string | null;
+    errorMessage: string | null;
+  };
 }
 
 export const FAILURE_CLASSES = [
@@ -1519,6 +1538,7 @@ export function createInitialOrchestratorState(input: {
     dispatcherLeases: {},
     managerRunJournal: [],
     managerRuns: {},
+    pipelinePause: null,
     issueFailureSignatures: {},
     issueDispositions: {},
     issueReviewFailureStreaks: {},

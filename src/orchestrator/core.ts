@@ -58,6 +58,7 @@ import {
   type OrchestratorState,
   type PendingStageSignal,
   type PipelineEmergencyStopState,
+  type PipelinePauseState,
   type RateLimitAdmissionState,
   type RetryEntry,
   type RightSizingDecision,
@@ -148,6 +149,7 @@ import {
   PIPELINE_INTENT_ISSUE_IDENTIFIER,
   formatIntentActorKey,
   formatIntentAttribution,
+  isIntentActorKind,
 } from "./intent.js";
 import { createRightSizingDecision } from "./right-sizing.js";
 import { SignatureClusterRegistry } from "./signature-cluster.js";
@@ -1136,6 +1138,7 @@ export class OrchestratorCore {
     this.issueAnchorCursors.clear();
     this.anchorCursorSequence = 0;
     this.state.emergencyStop = null;
+    this.state.pipelinePause = null;
     this.state.issuePendingStageSignals = {};
     // Re-invocation safety (council R2): the stage_record reducer is
     // additive, so a replay against a different journal (runtime-host root
@@ -1251,6 +1254,9 @@ export class OrchestratorCore {
           this.recoverEmergencyStopIntent(entry);
         } else if (verb === "pipeline_resume") {
           this.state.emergencyStop = null;
+          this.state.pipelinePause = null;
+        } else if (verb === "pipeline_pause") {
+          this.recoverPipelinePauseIntent(entry);
         } else if (verb === "park" || verb === "halt") {
           this.markIssueRequiresExplicitResume(
             entry.issueId,
@@ -1534,6 +1540,7 @@ export class OrchestratorCore {
       issueAnchors: clonePlain(this.state.issueAnchors),
       computedDispatchOrder: clonePlain(this.state.computedDispatchOrder),
       emergencyStop: clonePlain(this.state.emergencyStop),
+      pipelinePause: clonePlain(this.state.pipelinePause),
       rateLimitAdmission: clonePlain(this.state.rateLimitAdmission),
       issueStages: clonePlain(this.state.issueStages),
       issuePendingStageSignals: clonePlain(this.state.issuePendingStageSignals),
@@ -1638,6 +1645,10 @@ export class OrchestratorCore {
             state.emergencyStop,
             null,
           );
+    this.state.pipelinePause =
+      state.pipelinePause === null
+        ? null
+        : readRecordOr<PipelinePauseState | null>(state.pipelinePause, null);
     this.state.rateLimitAdmission =
       state.rateLimitAdmission === null
         ? null
@@ -2323,6 +2334,19 @@ export class OrchestratorCore {
 
     const emergencyStopResult = this.blockForEmergencyStop(issues.length);
     if (emergencyStopResult !== null) {
+      return {
+        validation,
+        dispatchedIssueIds: [],
+        modeDecisions: [],
+        stopRequests: reconcileResult.stopRequests,
+        trackerFetchFailed: false,
+        reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
+        runningCount: Object.keys(this.state.running).length,
+      };
+    }
+
+    const runtimePauseResult = this.blockForPipelinePause(issues.length);
+    if (runtimePauseResult !== null) {
       return {
         validation,
         dispatchedIssueIds: [],
@@ -4105,6 +4129,24 @@ export class OrchestratorCore {
         retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
           identifier: retryEntry.identifier,
           error: "emergency stop active",
+          delayType: retryEntry.delayType,
+          deferral: true,
+        }),
+      };
+    }
+
+    const runtimePauseResult = this.blockForPipelinePause(1);
+    if (runtimePauseResult !== null) {
+      console.warn(
+        `[orchestrator] Runtime pipeline pause active. Deferring retry for ${retryEntry.identifier ?? issueId}.`,
+      );
+      this.clearRetryEntry(issueId);
+      return {
+        dispatched: false,
+        released: false,
+        retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
+          identifier: retryEntry.identifier,
+          error: "runtime pipeline pause active",
           delayType: retryEntry.delayType,
           deferral: true,
         }),
@@ -7489,10 +7531,10 @@ export class OrchestratorCore {
    * so it cannot ride writeIntent — but it must still be a journal-attributed
    * intent entry recording the ACTUAL outcome: the caller journals `no_op`
    * for already-satisfied or infeasible requests before touching the view,
-   * and `applied` only AFTER the tracker view mutation (the halt-issue
-   * manipulation) succeeded. The verb is namespaced (`pipeline_pause` /
-   * `pipeline_resume`) so issue-verb replay reduction ignores these entries:
-   * the halt-issue view is re-derived from the tracker, not from replay.
+   * and `applied` only AFTER the control effect succeeded: either a Linear
+   * halt-issue mutation or the runtime-local pause gate used when the Linear
+   * halt view is degraded. The verb is namespaced (`pipeline_pause` /
+   * `pipeline_resume`) so issue-verb replay reduction ignores these entries.
    *
    * Every request journals its own audit entry (the journal sequence is the
    * uniqueness discriminator); effect-level idempotency lives in the caller,
@@ -7510,10 +7552,11 @@ export class OrchestratorCore {
   }): Promise<number | null> {
     const verb = `pipeline_${input.action}`;
     const actorKey = formatIntentActorKey(input.actor);
+    const timestamp = this.now().toISOString();
     try {
       const entry = await this.recordRunJournalEntry({
         idempotencyKey: `intent:${verb}:${actorKey}:seq-${this.state.dispatcherRunJournal.length}`,
-        timestamp: this.now().toISOString(),
+        timestamp,
         kind: "intent",
         issueId: PIPELINE_INTENT_ISSUE_ID,
         issueIdentifier: PIPELINE_INTENT_ISSUE_IDENTIFIER,
@@ -7538,11 +7581,33 @@ export class OrchestratorCore {
           ...(input.metadata ?? {}),
         },
       });
+      if (
+        input.status === "applied" &&
+        input.action === "pause" &&
+        input.metadata?.local_pause === true
+      ) {
+        this.state.pipelinePause = this.buildPipelinePauseState({
+          timestamp: entry.timestamp,
+          reason: input.reason,
+          actor: input.actor,
+          haltViewMetadata: readMetadataRecord(entry.metadata, "halt_view"),
+          sequence: entry.sequence,
+        });
+      }
       if (input.status === "applied" && input.action === "resume") {
         this.state.emergencyStop = null;
+        this.state.pipelinePause = null;
       }
       return entry.sequence;
     } catch (error) {
+      this.applyDegradedPipelineIntentLiveEffect({
+        action: input.action,
+        status: input.status,
+        actor: input.actor,
+        reason: input.reason,
+        timestamp,
+        ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
+      });
       console.warn(
         `[orchestrator] failed to journal pipeline intent ${verb}: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -8056,6 +8121,29 @@ export class OrchestratorCore {
     return true;
   }
 
+  private blockForPipelinePause(candidateCount: number): true | null {
+    const pipelinePause = this.state.pipelinePause;
+    if (pipelinePause === null) {
+      return null;
+    }
+    this.recordDispatchVerdict({
+      issueId: PIPELINE_VERDICT_SCOPE_ID,
+      issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
+      disposition: "halt",
+      reasonCode: "runtime_pipeline_pause",
+      remedy:
+        "Run pipeline resume after verifying the halt view and clearing the pause.",
+      details: {
+        since: pipelinePause.since,
+        reason: pipelinePause.reason,
+        actor: pipelinePause.actor,
+        haltView: pipelinePause.haltView,
+      },
+    });
+    this.trackDispatchStarvation(candidateCount, 0);
+    return true;
+  }
+
   private recoverEmergencyStopIntent(entry: DispatcherRunJournalEntry): void {
     const reason = readMetadataRecord(entry.metadata, "reason");
     const actor = readMetadataRecord(entry.metadata, "actor");
@@ -8089,6 +8177,97 @@ export class OrchestratorCore {
         since: entry.timestamp,
       });
     }
+  }
+
+  private recoverPipelinePauseIntent(entry: DispatcherRunJournalEntry): void {
+    if (readMetadataBoolean(entry.metadata, "local_pause") !== true) {
+      return;
+    }
+    this.state.pipelinePause = this.buildPipelinePauseStateFromJournal({
+      entry,
+      sequence: entry.sequence,
+    });
+  }
+
+  private applyDegradedPipelineIntentLiveEffect(input: {
+    action: "pause" | "resume" | "stop";
+    status: "applied" | "no_op";
+    actor: IntentActor;
+    reason: IntentReason;
+    metadata?: Record<string, unknown>;
+    timestamp: string;
+  }): void {
+    if (input.status !== "applied") {
+      return;
+    }
+    if (input.action === "resume") {
+      this.state.emergencyStop = null;
+      this.state.pipelinePause = null;
+      return;
+    }
+    if (input.action === "pause" && input.metadata?.local_pause === true) {
+      this.state.pipelinePause = this.buildPipelinePauseState({
+        timestamp: input.timestamp,
+        reason: input.reason,
+        actor: input.actor,
+        haltViewMetadata: readMetadataRecord(input.metadata, "halt_view"),
+        sequence: null,
+      });
+    }
+  }
+
+  private buildPipelinePauseStateFromJournal(input: {
+    entry: DispatcherRunJournalEntry;
+    sequence: number | null;
+  }): PipelinePauseState {
+    const reason = readMetadataRecord(input.entry.metadata, "reason");
+    const actor = readMetadataRecord(input.entry.metadata, "actor");
+    const actorKind = readRecordString(actor, "kind");
+    return this.buildPipelinePauseState({
+      timestamp: input.entry.timestamp,
+      reason: {
+        class: readRecordString(reason, "class") ?? "operator_pipeline_pause",
+        human: readRecordString(reason, "human") ?? "pipeline pause requested",
+      },
+      actor: {
+        kind: isIntentActorKind(actorKind) ? actorKind : "operator",
+        host: readRecordString(actor, "host") ?? "unknown",
+        session: readRecordString(actor, "session"),
+      },
+      haltViewMetadata: readMetadataRecord(input.entry.metadata, "halt_view"),
+      sequence: input.sequence,
+    });
+  }
+
+  private buildPipelinePauseState(input: {
+    timestamp: string;
+    reason: IntentReason;
+    actor: IntentActor;
+    haltViewMetadata: Record<string, unknown> | null;
+    sequence: number | null;
+  }): PipelinePauseState {
+    const haltView = input.haltViewMetadata;
+    const status = readRecordString(haltView, "status");
+    return {
+      active: true,
+      since: input.timestamp,
+      reason: input.reason.human,
+      actor: {
+        kind: input.actor.kind,
+        host: input.actor.host,
+        session: input.actor.session ?? null,
+      },
+      setBySequence: input.sequence,
+      haltView: {
+        status:
+          status === "created" || status === "already_paused"
+            ? status
+            : "uncertain",
+        issueIdentifier: readRecordString(haltView, "issue_identifier"),
+        issueTitle: readRecordString(haltView, "issue_title"),
+        errorMessage: readRecordString(haltView, "error_message"),
+      },
+    };
   }
 
   private toEmergencyStopInterruptedIssue(
@@ -12081,6 +12260,7 @@ function cloneOrchestratorState(state: OrchestratorState): OrchestratorState {
     issueAnchors: clonePlain(state.issueAnchors),
     computedDispatchOrder: clonePlain(state.computedDispatchOrder),
     emergencyStop: clonePlain(state.emergencyStop),
+    pipelinePause: clonePlain(state.pipelinePause),
     codexTotals: clonePlain(state.codexTotals),
     codexRateLimits: clonePlain(state.codexRateLimits),
     codexRateLimitsObservedAt: state.codexRateLimitsObservedAt,
@@ -12128,6 +12308,7 @@ function restoreOrchestratorState(
   target.issueAnchors = snapshot.issueAnchors;
   target.computedDispatchOrder = snapshot.computedDispatchOrder;
   target.emergencyStop = snapshot.emergencyStop;
+  target.pipelinePause = snapshot.pipelinePause;
   target.codexTotals = snapshot.codexTotals;
   target.codexRateLimits = snapshot.codexRateLimits;
   target.codexRateLimitsObservedAt = snapshot.codexRateLimitsObservedAt;
