@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 
@@ -149,6 +149,10 @@ const DEFAULT_GIT_TIMEOUT_MS = 60_000;
 const MAX_SCAN_FILES = 500;
 const MAX_SCAN_FILE_BYTES = 256_000;
 const MAX_SCAN_DEPTH = 64;
+const FILE_LOCK_TIMEOUT_MS = 120_000;
+const FILE_LOCK_POLL_MS = 50;
+const FILE_LOCK_STALE_MS = 60 * 60_000;
+const FILE_LOCK_OWNER_FILENAME = "owner.json";
 const TEXT_FILE_EXTENSIONS = new Set([
   ".js",
   ".jsx",
@@ -187,7 +191,12 @@ export async function runManagedCodeGrounding(
     paths.workspaceRoot,
     paths.checkoutId,
   ).acquire();
+  let releaseCheckoutFileLock: (() => Promise<void>) | null = null;
   try {
+    releaseCheckoutFileLock = await acquireCodeGroundingFileLock(
+      paths.workspaceRoot,
+      checkoutFileLockPath(paths),
+    );
     await fs.mkdir(paths.runArtifactRoot, { recursive: true });
     await sweepCodeGroundingCheckouts({
       workspaceRoot: input.workspaceRoot,
@@ -249,7 +258,11 @@ export async function runManagedCodeGrounding(
       }
     }
   } finally {
-    releaseCheckout();
+    try {
+      await releaseCheckoutFileLock?.();
+    } finally {
+      releaseCheckout();
+    }
   }
 }
 
@@ -264,8 +277,7 @@ export async function sweepCodeGroundingCheckouts(input: {
     input.config.baseDir,
   );
   const leaseIndexPath = join(baseRoot, "leases.json");
-  const release = await getLeaseMutex(workspaceRoot).acquire();
-  try {
+  await withLeaseIndexLock(workspaceRoot, baseRoot, async () => {
     const index = await readLeaseIndex(leaseIndexPath);
     const now = input.now ?? new Date();
     const byRepo = new Map<string, LeaseRecord[]>();
@@ -293,9 +305,7 @@ export async function sweepCodeGroundingCheckouts(input: {
       }
     }
     await writeLeaseIndex(leaseIndexPath, index);
-  } finally {
-    release();
-  }
+  });
 }
 
 export function resolveCodeGroundingPaths(
@@ -526,6 +536,10 @@ async function readPathCandidateCitation(
   const absolutePath = resolve(paths.checkoutPath, pathCandidate);
   assertWorkspacePathWithinRoot(paths.checkoutPath, absolutePath);
   try {
+    const linkStat = await fs.lstat(absolutePath);
+    if (linkStat.isSymbolicLink()) {
+      return undefined;
+    }
     const stat = await fs.stat(absolutePath);
     if (!stat.isFile() || stat.size > MAX_SCAN_FILE_BYTES) {
       return undefined;
@@ -743,8 +757,7 @@ async function acquireCheckoutLease(
   paths: CodeGroundingPaths,
   input: RunCodeGroundingInput,
 ): Promise<() => Promise<void>> {
-  const releaseMutex = await getLeaseMutex(paths.workspaceRoot).acquire();
-  try {
+  await withLeaseIndexLock(paths.workspaceRoot, paths.baseRoot, async () => {
     const index = await readLeaseIndex(paths.leaseIndexPath);
     const now = new Date().toISOString();
     const existing = index.checkouts[paths.checkoutId];
@@ -759,13 +772,10 @@ async function acquireCheckoutLease(
       activeRunIds: addUnique(existing?.activeRunIds ?? [], input.runId),
     };
     await writeLeaseIndex(paths.leaseIndexPath, index);
-  } finally {
-    releaseMutex();
-  }
+  });
 
   return async () => {
-    const release = await getLeaseMutex(paths.workspaceRoot).acquire();
-    try {
+    await withLeaseIndexLock(paths.workspaceRoot, paths.baseRoot, async () => {
       const index = await readLeaseIndex(paths.leaseIndexPath);
       const existing = index.checkouts[paths.checkoutId];
       if (existing !== undefined) {
@@ -775,9 +785,7 @@ async function acquireCheckoutLease(
         existing.lastUsedAt = new Date().toISOString();
         await writeLeaseIndex(paths.leaseIndexPath, index);
       }
-    } finally {
-      release();
-    }
+    });
   };
 }
 
@@ -801,6 +809,128 @@ async function writeLeaseIndex(path: string, index: LeaseIndex): Promise<void> {
   const tmp = `${path}.${process.pid}.tmp`;
   await fs.writeFile(tmp, `${JSON.stringify(index, null, 2)}\n`);
   await fs.rename(tmp, path);
+}
+
+async function withLeaseIndexLock<T>(
+  workspaceRoot: string,
+  baseRoot: string,
+  action: () => Promise<T>,
+): Promise<T> {
+  const releaseMutex = await getLeaseMutex(workspaceRoot).acquire();
+  let releaseFileLock: (() => Promise<void>) | null = null;
+  try {
+    releaseFileLock = await acquireCodeGroundingFileLock(
+      workspaceRoot,
+      leaseIndexLockPath(baseRoot),
+    );
+    return await action();
+  } finally {
+    try {
+      await releaseFileLock?.();
+    } finally {
+      releaseMutex();
+    }
+  }
+}
+
+async function acquireCodeGroundingFileLock(
+  workspaceRoot: string,
+  lockPath: string,
+): Promise<() => Promise<void>> {
+  assertWorkspacePathWithinRoot(workspaceRoot, lockPath);
+  await fs.mkdir(dirname(lockPath), { recursive: true });
+  const ownerToken = randomUUID();
+  const startedAt = Date.now();
+  while (true) {
+    try {
+      await fs.mkdir(lockPath);
+      await writeCodeGroundingLockOwner(lockPath, ownerToken);
+      return () => releaseCodeGroundingFileLock(lockPath, ownerToken);
+    } catch (error) {
+      if (!isAlreadyExistsPathError(error)) {
+        throw error;
+      }
+      if (await removeAbandonedCodeGroundingFileLock(lockPath)) {
+        continue;
+      }
+      if (Date.now() - startedAt >= FILE_LOCK_TIMEOUT_MS) {
+        throw new Error(
+          `Timed out waiting for code-grounding lock at ${lockPath}`,
+        );
+      }
+      await sleep(FILE_LOCK_POLL_MS);
+    }
+  }
+}
+
+async function writeCodeGroundingLockOwner(
+  lockPath: string,
+  ownerToken: string,
+): Promise<void> {
+  try {
+    await fs.writeFile(
+      join(lockPath, FILE_LOCK_OWNER_FILENAME),
+      `${JSON.stringify({
+        pid: process.pid,
+        ownerToken,
+        acquiredAt: new Date().toISOString(),
+      })}\n`,
+      "utf8",
+    );
+  } catch (error) {
+    await fs.rm(lockPath, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function releaseCodeGroundingFileLock(
+  lockPath: string,
+  ownerToken: string,
+): Promise<void> {
+  try {
+    const raw = await fs.readFile(
+      join(lockPath, FILE_LOCK_OWNER_FILENAME),
+      "utf8",
+    );
+    const parsed = JSON.parse(raw) as { ownerToken?: unknown };
+    if (parsed.ownerToken !== ownerToken) {
+      throw new Error(
+        `Refusing to release code-grounding lock owned by another process at ${lockPath}`,
+      );
+    }
+    await fs.rm(lockPath, { recursive: true, force: true });
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function removeAbandonedCodeGroundingFileLock(
+  lockPath: string,
+): Promise<boolean> {
+  try {
+    const stat = await fs.stat(lockPath);
+    if (Date.now() - stat.mtimeMs < FILE_LOCK_STALE_MS) {
+      return false;
+    }
+    await fs.rm(lockPath, { recursive: true, force: true });
+    return true;
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return true;
+    }
+    throw error;
+  }
+}
+
+function checkoutFileLockPath(paths: CodeGroundingPaths): string {
+  return join(paths.checkoutsRoot, `${paths.checkoutId}.lock`);
+}
+
+function leaseIndexLockPath(baseRoot: string): string {
+  return join(baseRoot, "leases.lock");
 }
 
 function getLeaseMutex(workspaceRoot: string): AsyncMutex {
@@ -1023,4 +1153,26 @@ function toRepoRelativePath(root: string, path: string): string {
 
 function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
+}
+
+function isAlreadyExistsPathError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "EEXIST"
+  );
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "ENOENT"
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 }

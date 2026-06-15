@@ -5,6 +5,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -42,6 +43,7 @@ describe("managed code grounding (SYMPH-596)", () => {
       evidence:
         "Implemented in `src/orchestrator/queue.ts` via `runQueueTriage`.",
     });
+    let lockOwnerSeen = false;
 
     const report = await runManagedCodeGrounding({
       workspaceRoot,
@@ -54,9 +56,24 @@ describe("managed code grounding (SYMPH-596)", () => {
         repoScope: "symphony",
       },
       findings: [finding],
+      afterDeterministicScan: async ({ checkoutId }) => {
+        const owner = await readFile(
+          join(
+            workspaceRoot,
+            ".symphony",
+            "code-grounding",
+            "checkouts",
+            `${checkoutId}.lock`,
+            "owner.json",
+          ),
+          "utf8",
+        );
+        lockOwnerSeen = owner.includes("ownerToken");
+      },
     });
 
     expect(report.status).toBe("verified");
+    expect(lockOwnerSeen).toBe(true);
     expect(report.cleanup.leaseReleased).toBe(true);
     expect(report.checkout.checkoutId).toMatch(/^cg-[a-f0-9]{32}$/);
     expect(report.checkout.path).toContain(
@@ -82,6 +99,22 @@ describe("managed code grounding (SYMPH-596)", () => {
     expect(
       leaseIndex.checkouts[report.checkout.checkoutId!]?.activeRunIds,
     ).toEqual([]);
+    await expect(
+      readFile(
+        join(
+          workspaceRoot,
+          ".symphony",
+          "code-grounding",
+          "checkouts",
+          `${report.checkout.checkoutId}.lock`,
+        ),
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(
+        join(workspaceRoot, ".symphony", "code-grounding", "leases.lock"),
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("returns not_attempted for non-Symphony repositories without checkout side effects", async () => {
@@ -181,6 +214,47 @@ describe("managed code grounding (SYMPH-596)", () => {
         expect.objectContaining({ path: "src/orchestrator/queue.go" }),
       ]),
     );
+  });
+
+  it("rejects exact cited paths that are symlinks out of the checkout", async () => {
+    const sourceRepo = await createSourceRepo();
+    const outsideRoot = await tempRoot("symph-cg-outside-");
+    await writeFile(
+      join(outsideRoot, "escape.ts"),
+      "export const escape = true;\n",
+    );
+    await symlink(
+      join(outsideRoot, "escape.ts"),
+      join(sourceRepo, "src", "orchestrator", "escape.ts"),
+    );
+    await git(sourceRepo, ["add", "."]);
+    await git(sourceRepo, ["commit", "-m", "Add symlink evidence"]);
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "symlink-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [
+        backlogFinding({
+          evidence: "Implemented in `src/orchestrator/escape.ts`.",
+        }),
+      ],
+    });
+
+    expect(report.status).toBe("not_found");
+    expect(report.entries[0]).toMatchObject({
+      status: "not_found",
+      citations: [],
+      missing: ["src/orchestrator/escape.ts"],
+    });
   });
 
   it("replaces an unusable cached checkout before scanning", async () => {
