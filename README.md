@@ -140,6 +140,12 @@ pnpm probe:review-runtime -- --workspace /path/to/product-repo --env-file .env
 The smoke runs `symphony-council-review-gate --help` and
 `cmux-spawn preflight --caffeinate --json`.
 
+For Mobilyze review-substrate deploys, use the repo-owned runbook and helper:
+`docs/operations/cmux-review-substrate-deploy.md` and
+`ops/cmux-review-substrate-deploy`. They make Pro16 the remote-primary CMUX
+substrate, write an evidence bundle, audit stale local CMUX callers, and define
+the lightweight Kimi review loop for deploy/runbook/helper changes.
+
 When a Codex-led workflow runs the council gate for implementation work, pass
 `--author-family codex` or leave the shipped
 `SYMPHONY_COUNCIL_AUTHOR_FAMILY` default as `codex`. Non-Codex-led product
