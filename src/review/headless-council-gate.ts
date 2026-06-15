@@ -6123,6 +6123,12 @@ function summarizeVerdict(
   if (verdict === "pass") {
     return `Headless council review passed with ${lanes.length} lanes.`;
   }
+  const stalledLanes = lanes
+    .filter((lane) => lane.degradedReason === "substrate_stall")
+    .map((lane) => lane.laneId);
+  if (stalledLanes.length > 0) {
+    return `Headless council review emitted partial artifacts; lane(s) never reached a terminal state (substrate stall, not a council FAIL): ${stalledLanes.join(", ")}. Degraded: ${degradedConditions.join("; ")}`;
+  }
   if (
     hasReviewSubstrateDegradation({ lanes, degradedConditions }) &&
     lanes
@@ -6133,12 +6139,6 @@ function summarizeVerdict(
   }
   if (verdict === "fail") {
     return "Headless council review found blocking review findings.";
-  }
-  const stalledLanes = lanes
-    .filter((lane) => lane.degradedReason === "substrate_stall")
-    .map((lane) => lane.laneId);
-  if (stalledLanes.length > 0) {
-    return `Headless council review emitted partial artifacts; lane(s) never reached a terminal state (substrate stall, not a council FAIL): ${stalledLanes.join(", ")}. Degraded: ${degradedConditions.join("; ")}`;
   }
   if (
     lanes.length > 0 &&

@@ -24,6 +24,7 @@ function pass(status, evidence, details = []) {
     prUrl: evidence.prUrl ?? null,
     councilArtifactPath: evidence.councilArtifactPath ?? null,
     degradedReason: evidence.degradedReason ?? null,
+    trivialJustification: evidence.trivialJustification ?? null,
     details,
   };
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -156,7 +157,7 @@ function main() {
     if (isNonEmptyString(args.trivialJustification)) {
       return pass("trivial", {
         reviewedHeadSha: args.reportedHead,
-        degradedReason: args.trivialJustification,
+        trivialJustification: args.trivialJustification,
       });
     }
     return fail("missing review evidence checkpoint", [

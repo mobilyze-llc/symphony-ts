@@ -54,6 +54,7 @@ const HEAD_SHA = "1111111111111111111111111111111111111111";
 function runReviewEvidenceCheckpoint(args: string[]) {
   return spawnSync(process.execPath, [REVIEW_EVIDENCE_CHECKPOINT, ...args], {
     encoding: "utf8",
+    maxBuffer: 1024 * 1024,
   });
 }
 
@@ -668,6 +669,23 @@ describe("session-orchestrator skill", () => {
     );
   });
 
+  it("allows explicit trivial closeout without marking the result degraded", () => {
+    const checkpoint = runReviewEvidenceCheckpoint([
+      "--reported-head",
+      HEAD_SHA,
+      "--trivial-justification",
+      "documentation-only typo fix",
+    ]);
+
+    expect(checkpoint.status).toBe(0);
+    expect(JSON.parse(checkpoint.stdout)).toMatchObject({
+      status: "trivial",
+      reviewedHeadSha: HEAD_SHA,
+      degradedReason: null,
+      trivialJustification: "documentation-only typo fix",
+    });
+  });
+
   it("accepts pass evidence only when it is bound to the reported head", () => {
     const tempDir = mkdtempSync(resolve(tmpdir(), "review-checkpoint-pass-"));
     try {
@@ -698,6 +716,42 @@ describe("session-orchestrator skill", () => {
         status: "pass",
         reviewedHeadSha: HEAD_SHA,
       });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks pass evidence when the clean-pass assertion failed", () => {
+    const tempDir = mkdtempSync(
+      resolve(tmpdir(), "review-checkpoint-clean-pass-failed-"),
+    );
+    try {
+      const councilReport = resolve(tempDir, "council-report.md");
+      const evidencePath = resolve(tempDir, "closeout-review-evidence.json");
+      writeFileSync(councilReport, "# Council report\n");
+      writeFileSync(
+        evidencePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          outcome: "pass",
+          prUrl: "https://github.com/mobilyze-llc/symphony-ts/pull/1",
+          reviewedHeadSha: HEAD_SHA,
+          councilArtifactPath: councilReport,
+          cleanPassAssertionExitCode: 1,
+        }),
+      );
+
+      const checkpoint = runReviewEvidenceCheckpoint([
+        "--evidence",
+        evidencePath,
+        "--reported-head",
+        HEAD_SHA,
+      ]);
+
+      expect(checkpoint.status).toBe(1);
+      expect(checkpoint.stdout).toContain(
+        "cleanPassAssertionExitCode must be 0",
+      );
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }
