@@ -224,7 +224,7 @@ const WORKPAD_COMMENTS_QUERY = `
       id
     }
     issue(id: $issueId) {
-      comments(first: 50) {
+      comments(first: 50, orderBy: updatedAt) {
         nodes {
           id
           body

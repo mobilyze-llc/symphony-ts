@@ -2251,7 +2251,7 @@ function isUnboundedLinearListing(segment: string): boolean {
 }
 
 function isArtifactRedirectedSegment(segment: string): boolean {
-  return /(?:>|1>|2>|&>)\s*['"]?\.symphony\/validation\//.test(segment);
+  return /(?:>>?|1>>?|2>>?|&>>?)\s*['"]?\.symphony\/validation\//.test(segment);
 }
 
 function isClearlyCappedSegment(segment: string): boolean {

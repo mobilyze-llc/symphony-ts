@@ -885,6 +885,11 @@ describe("CodexAppServerClient", () => {
         "gh run view 123456 --log-failed > .symphony/validation/gh.log 2>&1",
       ),
     ).toBeNull();
+    expect(
+      detectHeadlessCommandOutputRisk(
+        "gh run view 123456 --log-failed >> .symphony/validation/gh.log",
+      ),
+    ).toBeNull();
     expect(detectHeadlessCommandOutputRisk("pgrep -fl codex | head -20")).toBe(
       null,
     );

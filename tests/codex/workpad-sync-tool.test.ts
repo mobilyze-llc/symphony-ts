@@ -123,6 +123,9 @@ describe("createWorkpadSyncDynamicTool", () => {
     expect(fetchFn).toHaveBeenCalledTimes(2);
     const searchBody = JSON.parse(fetchFn.mock.calls[0]![1]?.body as string);
     expect(searchBody.query).toContain("WorkpadComments");
+    expect(searchBody.query).toContain(
+      "comments(first: 50, orderBy: updatedAt)",
+    );
     expect(searchBody.variables.issueId).toBe("issue-1");
     const updateBody = JSON.parse(fetchFn.mock.calls[1]![1]?.body as string);
     expect(updateBody.query).toContain("commentUpdate");
