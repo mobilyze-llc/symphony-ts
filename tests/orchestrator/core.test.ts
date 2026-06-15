@@ -6192,6 +6192,48 @@ describe("orchestrator core", () => {
     });
   });
 
+  it("reserves expected burn capacity across multiple admissions in one poll", async () => {
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2" }),
+      ],
+      statesById: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        agent: { maxConcurrentAgents: 2 },
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: null,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 95,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: false,
+      expectedUnitBurnPct: 3,
+      admissionCapacity: 1,
+    });
+  });
+
   it("uses durable stage window telemetry before the fallback expected burn", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
@@ -6248,6 +6290,70 @@ describe("orchestrator core", () => {
       blocked: true,
       expectedUnitBurnPct: 3,
       deferredUntil: new Date(1772760000 * 1000).toISOString(),
+    });
+  });
+
+  it("selects recent burn samples by completion time instead of issue map order", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: null,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 1,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().issueExecutionHistory.recent = Array.from(
+      { length: 20 },
+      (_, index) => ({
+        stageName: "implement",
+        completedAt: new Date(Date.UTC(2026, 2, 6, 1, index)).toISOString(),
+        durationMs: 1,
+        totalTokens: 1,
+        rateLimitWindows: {
+          primary: { startPercent: 10, latestPercent: 12, lastResetsAt: null },
+          secondary: null,
+        },
+        turns: 1,
+        outcome: "normal",
+      }),
+    );
+    orchestrator.getState().issueExecutionHistory.older = Array.from(
+      { length: 20 },
+      (_, index) => ({
+        stageName: "implement",
+        completedAt: new Date(Date.UTC(2026, 2, 6, 0, index)).toISOString(),
+        durationMs: 1,
+        totalTokens: 1,
+        rateLimitWindows: {
+          primary: { startPercent: 10, latestPercent: 20, lastResetsAt: null },
+          secondary: null,
+        },
+        turns: 1,
+        outcome: "normal",
+      }),
+    );
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 97,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: false,
+      expectedUnitBurnPct: 2,
     });
   });
 

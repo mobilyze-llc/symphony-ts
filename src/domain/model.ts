@@ -1044,6 +1044,7 @@ export interface RateLimitAdmissionState {
   secondaryUsedPercent: number | null;
   expectedUnitBurnPct?: number | null;
   deferredUntil?: string | null;
+  admissionCapacity?: number | null;
 }
 
 export interface RunningEntry extends LiveSession {
@@ -1058,6 +1059,7 @@ export interface RunningEntry extends LiveSession {
 
 export interface StageRecord {
   stageName: string;
+  completedAt?: string;
   durationMs: number;
   totalTokens: number;
   inputTokens?: number;

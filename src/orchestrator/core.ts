@@ -2673,6 +2673,12 @@ export class OrchestratorCore {
       if (this.availableSlots() <= 0) {
         break;
       }
+      if (
+        rateLimitGate.admissionCapacity !== null &&
+        dispatchedIssueIds.length >= rateLimitGate.admissionCapacity
+      ) {
+        break;
+      }
 
       if (!this.isDispatchEligible(issue, { blockers: [] })) {
         continue;
@@ -3194,6 +3200,7 @@ export class OrchestratorCore {
     reason: string | null;
     expectedUnitBurnPct: number | null;
     deferredUntil: string | null;
+    admissionCapacity: number | null;
     /** Structured floor violations for verdict reason codes (SYMPH-405). */
     floorViolations: Array<{
       window: "primary" | "secondary";
@@ -3213,6 +3220,7 @@ export class OrchestratorCore {
         reason: null,
         expectedUnitBurnPct: null,
         deferredUntil: null,
+        admissionCapacity: null,
         floorViolations: [],
       };
     }
@@ -3239,7 +3247,8 @@ export class OrchestratorCore {
     const expectedUnitBurnPct = deferUntilReset
       ? this.estimateExpectedUnitBurnPct()
       : null;
-    const hasExpectedUnitBurn = expectedUnitBurnPct !== null;
+    const hasExpectedUnitBurn =
+      expectedUnitBurnPct !== null && expectedUnitBurnPct > 0;
     if (
       floors.minPrimaryHeadroomPct !== null &&
       primary !== null &&
@@ -3299,6 +3308,14 @@ export class OrchestratorCore {
             jitterMs: floors.deferJitterMs ?? 0,
           })
         : null;
+    const admissionCapacity =
+      deferUntilReset && hasExpectedUnitBurn
+        ? computeRateLimitAdmissionCapacity({
+            expectedUnitBurnPct,
+            primary,
+            secondary,
+          })
+        : null;
     const reasonPrefix =
       deferUntilReset && hasExpectedUnitBurn
         ? "Codex rate-limit headroom below expected dispatch burn"
@@ -3319,6 +3336,7 @@ export class OrchestratorCore {
         secondary !== null && !secondary.expired ? secondary.usedPercent : null,
       expectedUnitBurnPct,
       deferredUntil,
+      admissionCapacity,
     };
 
     return {
@@ -3326,6 +3344,7 @@ export class OrchestratorCore {
       reason,
       expectedUnitBurnPct,
       deferredUntil,
+      admissionCapacity,
       floorViolations,
     };
   }
@@ -3354,12 +3373,18 @@ export class OrchestratorCore {
         floorViolations: gate.floorViolations,
         expectedUnitBurnPct: gate.expectedUnitBurnPct,
         deferredUntil: gate.deferredUntil,
+        admissionCapacity: gate.admissionCapacity,
       },
     };
   }
 
   private estimateExpectedUnitBurnPct(): number | null {
-    const observedBurn: number[] = [];
+    const observedBurn: Array<{
+      burnPct: number;
+      completedAtMs: number;
+      insertionIndex: number;
+    }> = [];
+    let insertionIndex = 0;
     for (const history of Object.values(this.state.issueExecutionHistory)) {
       for (const stage of history) {
         const primary = observedWindowDeltaPercent(
@@ -3370,11 +3395,29 @@ export class OrchestratorCore {
         );
         const stageBurn = Math.max(primary, secondary);
         if (stageBurn > 0) {
-          observedBurn.push(stageBurn);
+          const completedAtMs =
+            stage.completedAt === undefined
+              ? insertionIndex
+              : Date.parse(stage.completedAt);
+          observedBurn.push({
+            burnPct: stageBurn,
+            completedAtMs: Number.isFinite(completedAtMs)
+              ? completedAtMs
+              : insertionIndex,
+            insertionIndex,
+          });
         }
+        insertionIndex += 1;
       }
     }
-    const recentBurn = observedBurn.slice(-20);
+    const recentBurn = observedBurn
+      .sort((left, right) =>
+        left.completedAtMs === right.completedAtMs
+          ? left.insertionIndex - right.insertionIndex
+          : left.completedAtMs - right.completedAtMs,
+      )
+      .slice(-20)
+      .map((sample) => sample.burnPct);
     return (
       median(recentBurn) ??
       this.config.rateLimitAdmission.expectedUnitBurnPct ??
@@ -4703,6 +4746,7 @@ export class OrchestratorCore {
     if (stageName !== undefined) {
       const stageRecord: StageRecord = {
         stageName,
+        completedAt: endedAt.toISOString(),
         durationMs: endedAt.getTime() - Date.parse(runningEntry.startedAt),
         totalTokens: runningEntry.totalStageTotalTokens,
         inputTokens: runningEntry.totalStageInputTokens,
@@ -13212,8 +13256,10 @@ function toStageRecordFromMetadata(
   }
   const rateLimitWindows = readStageRateLimitTelemetry(metadata);
   const usageEventCadence = readStageUsageEventCadence(metadata);
+  const completedAt = readMetadataString(metadata, "completedAt");
   return {
     stageName,
+    ...(completedAt === null ? {} : { completedAt }),
     durationMs,
     totalTokens,
     inputTokens: readMetadataNumber(metadata, "inputTokens") ?? 0,
@@ -13646,6 +13692,26 @@ function computeRateLimitDeferredUntil(input: {
   return latestResetMs === null
     ? null
     : new Date(latestResetMs + input.jitterMs).toISOString();
+}
+
+function computeRateLimitAdmissionCapacity(input: {
+  expectedUnitBurnPct: number;
+  primary: ReturnType<typeof evaluateWindowHeadroom>;
+  secondary: ReturnType<typeof evaluateWindowHeadroom>;
+}): number | null {
+  const capacities: number[] = [];
+  for (const headroom of [input.primary, input.secondary]) {
+    if (headroom === null || headroom.expired) {
+      continue;
+    }
+    capacities.push(
+      Math.max(
+        0,
+        Math.floor(headroom.remainingPercent / input.expectedUnitBurnPct),
+      ),
+    );
+  }
+  return capacities.length === 0 ? null : Math.min(...capacities);
 }
 
 function summarizeContinuousFeedbackCheckpoint(
