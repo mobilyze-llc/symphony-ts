@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import {
   type HeadlessCouncilGateResult,
   type HeadlessReviewerLaneConfig,
+  type StructuredReviewParseStatus,
   type StructuredReviewerArtifact,
   runHeadlessCouncilGate,
 } from "../review/headless-council-gate.js";
@@ -28,12 +29,20 @@ interface ParsedArgs {
 interface SourceLaneSummary {
   laneId: string;
   agent: string;
+  role: string | null;
   modelFamily: string;
   verdict: string;
-  parseStatus: string;
+  parseStatus: StructuredReviewParseStatus;
+  sourceRecallEligible: boolean;
+  sourceRecallExclusionReason:
+    | "lead_artifact"
+    | "prior_shadow_artifact"
+    | "non_ok_parse_status"
+    | null;
   blockingFingerprints: string[];
   trackFingerprints: string[];
   artifactPath: string;
+  reviewBundleCanonicalHash: string | null;
 }
 
 interface KimiReplayComparisonReport {
@@ -52,6 +61,13 @@ interface KimiReplayComparisonReport {
     kimiOnlyBlockingFingerprints: string[];
     missingSourceBlockingFingerprints: string[];
     artifactContract: "complete" | "missing" | "malformed";
+    artifactContractReason: string;
+  };
+  frozenReviewBundle: {
+    canonicalHash: string | null;
+    sourceHashStatus: "absent" | "consistent" | "divergent" | "partial";
+    sourceHashes: string[];
+    usedByKimiReplay: boolean;
   };
   gateResultPath: string;
   markdownReportPath: string;
@@ -206,16 +222,30 @@ async function assertReadableSourceDiff(diffPath: string): Promise<void> {
 async function readStructuredLaneSummaries(
   sourceCouncilDir: string,
 ): Promise<SourceLaneSummary[]> {
-  const entries = await readdir(sourceCouncilDir);
+  let entries: string[];
+  try {
+    entries = await readdir(sourceCouncilDir);
+  } catch (error) {
+    throw new UsageError(
+      `Source council dir is not readable: ${sourceCouncilDir}. ${formatError(error)}`,
+    );
+  }
   const structuredPaths = entries
     .filter((entry) => entry.endsWith(".structured.json"))
     .map((entry) => join(sourceCouncilDir, entry))
     .sort();
   const summaries: SourceLaneSummary[] = [];
   for (const artifactPath of structuredPaths) {
-    const artifact = JSON.parse(
-      await readFile(artifactPath, "utf-8"),
-    ) as StructuredReviewerArtifact;
+    let artifact: StructuredReviewerArtifact;
+    try {
+      artifact = JSON.parse(
+        await readFile(artifactPath, "utf-8"),
+      ) as StructuredReviewerArtifact;
+    } catch (error) {
+      throw new Error(
+        `Malformed structured reviewer artifact JSON at ${artifactPath}: ${formatError(error)}`,
+      );
+    }
     summaries.push(summarizeStructuredArtifact(artifact, artifactPath));
   }
   return summaries;
@@ -241,15 +271,23 @@ function summarizeStructuredArtifact(
   artifact: StructuredReviewerArtifact,
   artifactPath: string,
 ): SourceLaneSummary {
+  const parseStatus = artifact.parseStatus;
+  const recallExclusionReason = sourceRecallExclusionReason(artifact);
   return {
     laneId: artifact.lane.laneId,
     agent: artifact.lane.agent,
+    role: artifact.lane.role ?? null,
     modelFamily: artifact.lane.modelFamily,
     verdict: artifact.verdict,
-    parseStatus: artifact.parseStatus,
+    parseStatus,
+    sourceRecallEligible: recallExclusionReason === null,
+    sourceRecallExclusionReason: recallExclusionReason,
     blockingFingerprints: artifact.findings
       .filter(
-        (finding) => finding.severity === "P1" || finding.severity === "P2",
+        (finding) =>
+          (finding.severity === "P1" || finding.severity === "P2") &&
+          (finding.leadDisposition === undefined ||
+            finding.leadDisposition === "open"),
       )
       .map((finding) => finding.fingerprint)
       .sort(),
@@ -258,7 +296,26 @@ function summarizeStructuredArtifact(
       .map((finding) => finding.fingerprint)
       .sort(),
     artifactPath,
+    reviewBundleCanonicalHash: artifact.reviewBundle?.bundleHash ?? null,
   };
+}
+
+function sourceRecallExclusionReason(
+  artifact: StructuredReviewerArtifact,
+): SourceLaneSummary["sourceRecallExclusionReason"] {
+  if (artifact.lane.laneId === "codex-high-lead") {
+    return "lead_artifact";
+  }
+  if (artifact.lane.role === "codex-lead-triage") {
+    return "lead_artifact";
+  }
+  if (artifact.lane.mergeAuthoritative === false) {
+    return "prior_shadow_artifact";
+  }
+  if (!isOkParseStatus(artifact.parseStatus)) {
+    return "non_ok_parse_status";
+  }
+  return null;
 }
 
 export function buildComparisonReport(input: {
@@ -271,7 +328,9 @@ export function buildComparisonReport(input: {
   markdownReportPath: string;
 }): KimiReplayComparisonReport {
   const sourceBlocking = uniqueSorted(
-    input.sourceLanes.flatMap((lane) => lane.blockingFingerprints),
+    input.sourceLanes
+      .filter((lane) => lane.sourceRecallEligible)
+      .flatMap((lane) => lane.blockingFingerprints),
   );
   const kimiBlocking = input.kimiLane?.blockingFingerprints ?? [];
   const matched = sourceBlocking.filter((fingerprint) =>
@@ -282,6 +341,11 @@ export function buildComparisonReport(input: {
   );
   const missing = sourceBlocking.filter(
     (fingerprint) => !kimiBlocking.includes(fingerprint),
+  );
+  const artifactContract = classifyArtifactContract(input.kimiLane);
+  const frozenReviewBundle = summarizeFrozenReviewBundleUse(
+    input.sourceLanes,
+    input.kimiLane,
   );
   return {
     schemaVersion: 1,
@@ -301,15 +365,76 @@ export function buildComparisonReport(input: {
       matchedBlockingFingerprints: matched,
       kimiOnlyBlockingFingerprints: kimiOnly,
       missingSourceBlockingFingerprints: missing,
-      artifactContract:
-        input.kimiLane === null
-          ? "missing"
-          : input.kimiLane.parseStatus === "malformed"
-            ? "malformed"
-            : "complete",
+      artifactContract: artifactContract.state,
+      artifactContractReason: artifactContract.reason,
     },
+    frozenReviewBundle,
     gateResultPath: input.gateResultPath,
     markdownReportPath: input.markdownReportPath,
+  };
+}
+
+function classifyArtifactContract(lane: SourceLaneSummary | null): {
+  state: KimiReplayComparisonReport["scoring"]["artifactContract"];
+  reason: string;
+} {
+  if (lane === null) {
+    return {
+      state: "missing",
+      reason: "No structured Kimi artifact was produced.",
+    };
+  }
+  if (!isOkParseStatus(lane.parseStatus)) {
+    return {
+      state: "malformed",
+      reason: `Kimi structured artifact parse status is ${lane.parseStatus}.`,
+    };
+  }
+  return {
+    state: "complete",
+    reason: `Kimi structured artifact parse status is ${lane.parseStatus}.`,
+  };
+}
+
+function isOkParseStatus(
+  parseStatus: StructuredReviewParseStatus,
+): parseStatus is "synthesized_from_markdown" {
+  return parseStatus === "synthesized_from_markdown";
+}
+
+function summarizeFrozenReviewBundleUse(
+  sourceLanes: readonly SourceLaneSummary[],
+  kimiLane: SourceLaneSummary | null,
+): KimiReplayComparisonReport["frozenReviewBundle"] {
+  const sourceHashCount = sourceLanes.filter(
+    (lane) => lane.reviewBundleCanonicalHash !== null,
+  ).length;
+  const sourceHashes = uniqueSorted(
+    sourceLanes.flatMap((lane) =>
+      lane.reviewBundleCanonicalHash === null
+        ? []
+        : [lane.reviewBundleCanonicalHash],
+    ),
+  );
+  const canonicalHash =
+    sourceHashCount === sourceLanes.length && sourceHashes.length === 1
+      ? (sourceHashes[0] ?? null)
+      : null;
+  const sourceHashStatus =
+    sourceHashes.length === 0
+      ? "absent"
+      : sourceHashCount !== sourceLanes.length
+        ? "partial"
+        : sourceHashes.length === 1
+          ? "consistent"
+          : "divergent";
+  return {
+    canonicalHash,
+    sourceHashStatus,
+    sourceHashes,
+    usedByKimiReplay:
+      canonicalHash !== null &&
+      kimiLane?.reviewBundleCanonicalHash === canonicalHash,
   };
 }
 
@@ -325,6 +450,8 @@ function formatMarkdownReport(report: KimiReplayComparisonReport): string {
     `Source council dir: ${report.sourceCouncilDir}`,
     `Replay artifact dir: ${report.replayArtifactDir}`,
     `Kimi artifact contract: ${report.scoring.artifactContract}`,
+    `Kimi artifact contract reason: ${report.scoring.artifactContractReason}`,
+    formatFrozenReviewBundleMarkdown(report),
     `Blocker recall against source union: ${recall}`,
     "",
     "## Source Lanes",
@@ -347,6 +474,25 @@ function formatMarkdownReport(report: KimiReplayComparisonReport): string {
     `- Kimi-only blockers: ${report.scoring.kimiOnlyBlockingFingerprints.join(", ") || "none"}`,
     "",
   ].join("\n");
+}
+
+function formatFrozenReviewBundleMarkdown(
+  report: KimiReplayComparisonReport,
+): string {
+  if (report.frozenReviewBundle.sourceHashStatus === "divergent") {
+    return `Canonical frozen review bundle hash used: no (source hashes diverged: ${report.frozenReviewBundle.sourceHashes.join(", ")})`;
+  }
+  if (report.frozenReviewBundle.sourceHashStatus === "partial") {
+    return `Canonical frozen review bundle hash used: no (source hashes incomplete: ${report.frozenReviewBundle.sourceHashes.join(", ") || "none"})`;
+  }
+  if (report.frozenReviewBundle.canonicalHash === null) {
+    return "Canonical frozen review bundle hash used: no (not available)";
+  }
+  return `Canonical frozen review bundle hash used: ${report.frozenReviewBundle.usedByKimiReplay ? "yes" : "no"} (${report.frozenReviewBundle.canonicalHash})`;
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function uniqueSorted(values: readonly string[]): string[] {
