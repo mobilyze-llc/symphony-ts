@@ -947,6 +947,10 @@ export class OrchestratorCore {
     { signature: string | null }
   >();
 
+  private readonly pendingDispatcherLeaseIds = new Set<string>();
+
+  private readonly pendingDispatcherLeaseIssueIds = new Set<string>();
+
   constructor(options: OrchestratorCoreOptions) {
     this.config = options.config;
     this.tracker = options.tracker;
@@ -968,7 +972,7 @@ export class OrchestratorCore {
     this.runContinuousFeedback = options.runContinuousFeedback;
     this.timerScheduler = options.timerScheduler ?? defaultTimerScheduler();
     this.now = options.now ?? (() => new Date());
-    this.leaseOwnerId = options.leaseOwnerId ?? "orchestrator-core";
+    this.leaseOwnerId = options.leaseOwnerId ?? createDefaultLeaseOwnerId();
     this.leaseTtlMs = options.leaseTtlMs ?? DEFAULT_DISPATCHER_LEASE_TTL_MS;
     this.writeRunJournalEntry = options.writeRunJournalEntry;
     this.onFailureExhausted = options.onFailureExhausted;
@@ -9077,9 +9081,21 @@ export class OrchestratorCore {
     summary: string;
     metadata?: Record<string, unknown>;
   }): Promise<DispatcherLease | null> {
-    const activeLease = this.getActiveDispatcherLease(input.leaseId);
-    if (activeLease !== null) {
+    const blocksWorkerAdmission =
+      input.operation === "dispatcher" && input.kind === "admission";
+    if (
+      this.getActiveDispatcherLease(input.leaseId) !== null ||
+      this.pendingDispatcherLeaseIds.has(input.leaseId) ||
+      (blocksWorkerAdmission &&
+        (this.hasBlockingDispatcherLease(input.issueId) ||
+          this.pendingDispatcherLeaseIssueIds.has(input.issueId)))
+    ) {
       return null;
+    }
+
+    this.pendingDispatcherLeaseIds.add(input.leaseId);
+    if (blocksWorkerAdmission) {
+      this.pendingDispatcherLeaseIssueIds.add(input.issueId);
     }
 
     const acquiredAt = this.now().toISOString();
@@ -9098,24 +9114,31 @@ export class OrchestratorCore {
       lastJournalSequence: 0,
     };
 
-    const entry = await this.recordRunJournalEntry({
-      idempotencyKey: input.idempotencyKey,
-      timestamp: acquiredAt,
-      kind: input.kind,
-      issueId: input.issueId,
-      issueIdentifier: input.issueIdentifier,
-      operation: input.operation,
-      stage: input.stage,
-      attempt: input.attempt,
-      ownerId: this.leaseOwnerId,
-      lease,
-      summary: input.summary,
-      metadata: {
-        status: "started",
-        ...(input.metadata ?? {}),
-      },
-    });
-    return entry.lease;
+    try {
+      const entry = await this.recordRunJournalEntry({
+        idempotencyKey: input.idempotencyKey,
+        timestamp: acquiredAt,
+        kind: input.kind,
+        issueId: input.issueId,
+        issueIdentifier: input.issueIdentifier,
+        operation: input.operation,
+        stage: input.stage,
+        attempt: input.attempt,
+        ownerId: this.leaseOwnerId,
+        lease,
+        summary: input.summary,
+        metadata: {
+          status: "started",
+          ...(input.metadata ?? {}),
+        },
+      });
+      return entry.lease;
+    } finally {
+      this.pendingDispatcherLeaseIds.delete(input.leaseId);
+      if (blocksWorkerAdmission) {
+        this.pendingDispatcherLeaseIssueIds.delete(input.issueId);
+      }
+    }
   }
 
   private async completeDispatcherLease(input: {
@@ -11588,6 +11611,10 @@ function createDispatcherLeaseId(input: {
   ]
     .map(sanitizeJournalKeyPart)
     .join(":");
+}
+
+function createDefaultLeaseOwnerId(): string {
+  return `orchestrator-core:${hostname()}:${process.pid}`;
 }
 
 function formatAttemptKey(attempt: number | null): string {
