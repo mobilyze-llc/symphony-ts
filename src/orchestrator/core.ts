@@ -9093,6 +9093,10 @@ export class OrchestratorCore {
       return null;
     }
 
+    // Bridge the check-to-commit window until recordRunJournalEntry promotes
+    // the lease into state.dispatcherLeases. The finally below must clear
+    // these markers even when journal persistence rejects, so retries can
+    // reacquire the same lease after rollback.
     this.pendingDispatcherLeaseIds.add(input.leaseId);
     if (blocksWorkerAdmission) {
       this.pendingDispatcherLeaseIssueIds.add(input.issueId);

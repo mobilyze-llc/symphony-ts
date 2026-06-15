@@ -5500,6 +5500,42 @@ describe("orchestrator core", () => {
     expect(orchestrator.getState().running["1"]).toBeDefined();
   });
 
+  it("clears pending admission markers after journal write rollback so the lease can be retried (SYMPH-367)", async () => {
+    let shouldFailFirstAdmissionWrite = true;
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const orchestrator = createOrchestrator({
+      spawnWorker,
+      writeRunJournalEntry: async (entry) => {
+        if (
+          shouldFailFirstAdmissionWrite &&
+          entry.kind === "admission" &&
+          entry.operation === "dispatcher" &&
+          entry.lease?.status === "active"
+        ) {
+          shouldFailFirstAdmissionWrite = false;
+          throw new Error("journal disk unavailable");
+        }
+      },
+    });
+
+    await expect(orchestrator.pollTick()).rejects.toThrow(
+      "journal disk unavailable",
+    );
+
+    expect(spawnWorker).not.toHaveBeenCalled();
+    expect(orchestrator.getState().dispatcherRunJournal).toEqual([]);
+    expect(orchestrator.getState().dispatcherLeases).toEqual({});
+
+    const retry = await orchestrator.pollTick();
+
+    expect(retry.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().running["1"]).toBeDefined();
+  });
+
   it("attributes dispatcher lease ownership to a unique runtime process by default (SYMPH-367)", async () => {
     const orchestrator = createOrchestrator();
 
