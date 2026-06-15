@@ -401,7 +401,7 @@ describe("ClaudeCodeRunner", () => {
     const preToolUseCallback = getLatestPreToolUseCallback();
     const result = await preToolUseCallback({
       tool_name: "Bash",
-      tool_input: { command: "gh pr create --fill" },
+      tool_input: { command: "gh pr create --fill --draft" },
       tool_use_id: "toolu_pr",
     });
 

@@ -618,7 +618,7 @@ async function handleMessage(message) {
                     kind: "command_execution",
                     toolName: "Bash",
                     input: {
-                      command: "gh pr create --fill",
+                      command: "gh pr create --fill --draft",
                     },
                   }
                 : scenario === "broad-rg-denied"
