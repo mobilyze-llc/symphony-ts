@@ -249,6 +249,36 @@ describe("parseSymphonyctlArgs", () => {
     });
   });
 
+  it("parses dispatch fence commands", () => {
+    expect(
+      parseSymphonyctlArgs(
+        ["fence", "SYMPH-624", "SYMPH-625", "--reason", "self-host pilot"],
+        {},
+      ),
+    ).toEqual({
+      command: "fence",
+      baseUrl: DEFAULT_BASE_URL,
+      issueIdentifiers: ["SYMPH-624", "SYMPH-625"],
+      reason: "self-host pilot",
+    });
+    expect(parseSymphonyctlArgs(["unfence"], {})).toEqual({
+      command: "unfence",
+      baseUrl: DEFAULT_BASE_URL,
+    });
+  });
+
+  it("rejects an empty dispatch fence", () => {
+    expect(() => parseSymphonyctlArgs(["fence"], {})).toThrow(
+      SymphonyctlUsageError,
+    );
+  });
+
+  it("rejects a clear reason for dispatch unfence", () => {
+    expect(() =>
+      parseSymphonyctlArgs(["unfence", "--reason", "pilot done"], {}),
+    ).toThrow(SymphonyctlUsageError);
+  });
+
   it("rejects stop without --hard", () => {
     expect(() => parseSymphonyctlArgs(["stop"], {})).toThrow(
       SymphonyctlUsageError,
@@ -378,6 +408,56 @@ describe("runSymphonyctl", () => {
       issueIdentifier: "SYMPH-1",
       reason: "release",
     });
+  });
+
+  it("sets and clears dispatch fences through the operator API", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      requests.push({ url: String(input), init: init ?? {} });
+      return new Response(JSON.stringify({ status: "applied" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    expect(
+      await runSymphonyctl(
+        parseSymphonyctlArgs(
+          ["fence", "SYMPH-624", "--reason", "self-host pilot"],
+          { SYMPHONY_OPERATOR_TOKEN: "env-token" },
+        ),
+        () => undefined,
+      ),
+    ).toBe(0);
+    expect(
+      await runSymphonyctl(
+        parseSymphonyctlArgs(["unfence"], {
+          SYMPHONY_OPERATOR_TOKEN: "env-token",
+        }),
+        () => undefined,
+      ),
+    ).toBe(0);
+
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.url).toBe(`${DEFAULT_BASE_URL}/api/v1/dispatch-fence`);
+    expect(requests[0]?.init.method).toBe("POST");
+    expect(requests[0]?.init.headers).toMatchObject({
+      authorization: "Bearer env-token",
+    });
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
+      issue_identifiers: ["SYMPH-624"],
+      source: "symphonyctl",
+      reason: "self-host pilot",
+    });
+    expect(requests[1]?.url).toBe(`${DEFAULT_BASE_URL}/api/v1/dispatch-fence`);
+    expect(requests[1]?.init.method).toBe("DELETE");
+    expect(requests[1]?.init.headers).toMatchObject({
+      authorization: "Bearer env-token",
+    });
+    expect(requests[1]?.init.body).toBeUndefined();
   });
 });
 

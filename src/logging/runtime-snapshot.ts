@@ -10,6 +10,7 @@ import type {
   ComputedDispatchOrderSnapshot,
   ContinuousFeedbackIssueState,
   DecorrelatedGateOutcome,
+  DispatchFenceState,
   DispatcherDecisionQualitySummary,
   DispatcherOperation,
   DispatcherRunJournal,
@@ -286,6 +287,7 @@ export interface RuntimeSnapshot {
    * hard exclusions, advisory-edge warnings, and hard-cycle refusal status.
    */
   computed_order?: ComputedDispatchOrderSnapshot | null;
+  dispatch_fence?: RuntimeSnapshotDispatchFence | null;
   codex_totals: {
     input_tokens: number;
     output_tokens: number;
@@ -370,6 +372,16 @@ export interface RuntimeSnapshot {
    * element reports {enabled, degraded_reason?}.
    */
   components: Record<string, ComponentStatus>;
+}
+
+export interface RuntimeSnapshotDispatchFence {
+  active: true;
+  issue_identifiers: string[];
+  source: DispatchFenceState["source"];
+  set_at: string;
+  set_by_sequence: number | null;
+  clearing: DispatchFenceState["clearing"];
+  excluded_issue_identifiers: string[];
 }
 
 export interface RuntimeSnapshotIssueCounters {
@@ -774,6 +786,7 @@ export function buildRuntimeSnapshot(
       state.computedDispatchOrder === null
         ? null
         : structuredClone(state.computedDispatchOrder),
+    dispatch_fence: buildDispatchFenceSnapshot(state),
     codex_totals: toSnapshotCodexTotals(
       state.codexTotals,
       getAggregateSecondsRunning(state, now),
@@ -866,6 +879,27 @@ function buildAnchorSnapshots(
       set_at: anchor.setAt,
       set_by_sequence: anchor.setBySequence,
     }));
+}
+
+function buildDispatchFenceSnapshot(
+  state: OrchestratorState,
+): RuntimeSnapshotDispatchFence | null {
+  const fence = state.dispatchFence;
+  if (fence === null) {
+    return null;
+  }
+  const excluded = state.computedDispatchOrder?.exclusions
+    .filter((exclusion) => exclusion.source === "dispatch_fence")
+    .map((exclusion) => exclusion.issue_identifier);
+  return {
+    active: true,
+    issue_identifiers: [...fence.issueIdentifiers],
+    source: fence.source,
+    set_at: fence.setAt,
+    set_by_sequence: fence.setBySequence,
+    clearing: fence.clearing,
+    excluded_issue_identifiers: excluded ?? [],
+  };
 }
 
 function isSnapshotAnchorExpired(

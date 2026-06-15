@@ -93,6 +93,8 @@ describe("dashboard no-bypass boundary (SYMPH-408)", () => {
       "requestPipelinePause",
       "requestPipelineResume",
       "requestEmergencyStop",
+      "requestDispatchFence",
+      "requestDispatchFenceClear",
       "getPipelineStatus",
       "requestAnchorFieldEdit",
     ]);

@@ -109,6 +109,8 @@ import {
   type AnchorFieldEditResult,
   type DashboardServerHost,
   type DashboardServerInstance,
+  type DispatchFenceRequest,
+  type DispatchFenceResponse,
   type EmergencyStopResponse,
   type EmergencyStopStateResponse,
   type IntentRequest,
@@ -2937,6 +2939,34 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       issue_id: resolved.issueId,
       issue_identifier: resolved.issueIdentifier,
     };
+  }
+
+  async requestDispatchFence(
+    input: DispatchFenceRequest & { actor: IntentActor },
+  ): Promise<DispatchFenceResponse> {
+    await this.ensureDispatcherRunJournalLoaded();
+    return await this.orchestrator.setDispatchFence({
+      issueIdentifiers: input.issue_identifiers,
+      source: input.source ?? "api",
+      actor: input.actor,
+      reason: {
+        class: "operator_dispatch_fence",
+        human: input.reason ?? "dispatch fence requested",
+      },
+    });
+  }
+
+  async requestDispatchFenceClear(
+    context: PipelineControlContext,
+  ): Promise<DispatchFenceResponse> {
+    await this.ensureDispatcherRunJournalLoaded();
+    return await this.orchestrator.clearDispatchFence({
+      actor: context.actor,
+      reason: {
+        class: "operator_dispatch_unfence",
+        human: context.reason,
+      },
+    });
   }
 
   /**

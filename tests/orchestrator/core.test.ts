@@ -11,7 +11,10 @@ import type {
 } from "../../src/domain/model.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 import { normalizeErrorSignature } from "../../src/errors/signature.js";
-import { buildStateDelta } from "../../src/logging/runtime-snapshot.js";
+import {
+  buildRuntimeSnapshot,
+  buildStateDelta,
+} from "../../src/logging/runtime-snapshot.js";
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
@@ -207,6 +210,269 @@ describe("orchestrator core", () => {
     } finally {
       console.warn = origWarn;
     }
+  });
+
+  it("intersects dispatch candidates with an active operator allowlist fence", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            priority: 1,
+            createdAt: "2026-03-01T00:00:00.000Z",
+          }),
+          createIssue({
+            id: "2",
+            identifier: "ISSUE-2",
+            priority: 2,
+            createdAt: "2026-03-02T00:00:00.000Z",
+          }),
+        ],
+      }),
+    });
+
+    const fence = await orchestrator.setDispatchFence({
+      issueIdentifiers: ["issue-2"],
+      source: "symphonyctl",
+      actor: { kind: "operator", host: "pro14", session: "self-host-pilot" },
+      reason: {
+        class: "operator_dispatch_fence",
+        human: "only run ISSUE-2",
+      },
+    });
+    const result = await orchestrator.pollTick();
+    const snapshot = buildRuntimeSnapshot(orchestrator.getState());
+
+    expect(fence.status).toBe("applied");
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(orchestrator.getState().computedDispatchOrder).toMatchObject({
+      positions: [
+        expect.objectContaining({
+          issue_identifier: "ISSUE-2",
+        }),
+      ],
+      exclusions: [
+        expect.objectContaining({
+          issue_identifier: "ISSUE-1",
+          source: "dispatch_fence",
+          fence_source: "symphonyctl",
+          operator_remedy:
+            "Clear or update the dispatch fence to allow this issue to dispatch.",
+        }),
+      ],
+    });
+    expect(snapshot.dispatch_fence).toMatchObject({
+      active: true,
+      issue_identifiers: ["ISSUE-2"],
+      source: "symphonyctl",
+      excluded_issue_identifiers: ["ISSUE-1"],
+    });
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "intent" &&
+            entry.metadata.verb === "pipeline_dispatch_fence" &&
+            entry.issueId === "pipeline",
+        ),
+    ).toBe(true);
+  });
+
+  it("fails closed loudly when an active dispatch fence matches no eligible candidates", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1" }),
+          createIssue({ id: "2", identifier: "ISSUE-2" }),
+        ],
+      }),
+    });
+
+    await orchestrator.setDispatchFence({
+      issueIdentifiers: ["SYMPH-999"],
+      source: "api",
+      actor: { kind: "operator", host: "pro14", session: "api" },
+      reason: {
+        class: "operator_dispatch_fence",
+        human: "typo fence",
+      },
+    });
+    const result = await orchestrator.pollTick();
+    const state = orchestrator.getState();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(state.computedDispatchOrder?.positions).toEqual([]);
+    expect(
+      state.computedDispatchOrder?.exclusions.map(
+        (exclusion) => exclusion.source,
+      ),
+    ).toEqual(["dispatch_fence", "dispatch_fence"]);
+    expect(state.issueDispositions.__dispatch__).toMatchObject({
+      disposition: "gate",
+      reasonCode: "dispatch_fence_no_eligible_candidates",
+      remedy:
+        "Clear or update the dispatch fence, or make an allowlisted issue eligible.",
+    });
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "queue_baseline",
+      )?.metadata,
+    ).toMatchObject({
+      computed_order_issue_count: 0,
+      hard_exclusion_count: 2,
+      dispatch_picks: [],
+    });
+  });
+
+  it("replays an active dispatch fence before the first poll", async () => {
+    const initial = createOrchestrator();
+    await initial.setDispatchFence({
+      issueIdentifiers: ["ISSUE-2"],
+      source: "symphonyctl",
+      actor: { kind: "operator", host: "pro14", session: "self-host-pilot" },
+      reason: {
+        class: "operator_dispatch_fence",
+        human: "only run ISSUE-2",
+      },
+    });
+
+    const replayed = createOrchestrator({
+      runJournal: initial.getState().dispatcherRunJournal,
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1" }),
+          createIssue({ id: "2", identifier: "ISSUE-2" }),
+        ],
+      }),
+    });
+    const result = await replayed.pollTick();
+
+    expect(replayed.getState().dispatchFence).toMatchObject({
+      issueIdentifiers: ["ISSUE-2"],
+      setBySequence: expect.any(Number),
+    });
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+  });
+
+  it("keeps dispatch fence live when its journal write degrades", async () => {
+    const orchestrator = createOrchestrator({
+      writeRunJournalEntry: async (entry) => {
+        if (
+          entry.kind === "intent" &&
+          entry.metadata.verb === "pipeline_dispatch_fence"
+        ) {
+          throw new Error("journal disk unavailable");
+        }
+      },
+    });
+
+    const result = await orchestrator.setDispatchFence({
+      issueIdentifiers: ["issue-2"],
+      source: "api",
+      actor: { kind: "operator", host: "pro14", session: "api" },
+      reason: {
+        class: "operator_dispatch_fence",
+        human: "only run ISSUE-2",
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "applied",
+      sequence: null,
+    });
+    expect(orchestrator.getState().dispatchFence).toMatchObject({
+      issueIdentifiers: ["ISSUE-2"],
+      source: "api",
+      actor: { kind: "operator", host: "pro14", session: "api" },
+      reason: {
+        class: "operator_dispatch_fence",
+        human: "only run ISSUE-2",
+      },
+      setBySequence: null,
+    });
+  });
+
+  it("clears dispatch fence live when its journal write degrades", async () => {
+    let rejectClear = false;
+    const orchestrator = createOrchestrator({
+      writeRunJournalEntry: async (entry) => {
+        if (
+          rejectClear &&
+          entry.kind === "intent" &&
+          entry.metadata.verb === "pipeline_dispatch_unfence"
+        ) {
+          throw new Error("journal disk unavailable");
+        }
+      },
+    });
+    await orchestrator.setDispatchFence({
+      issueIdentifiers: ["ISSUE-2"],
+      source: "api",
+      actor: { kind: "operator", host: "pro14", session: "api" },
+      reason: {
+        class: "operator_dispatch_fence",
+        human: "only run ISSUE-2",
+      },
+    });
+    rejectClear = true;
+
+    const result = await orchestrator.clearDispatchFence({
+      actor: { kind: "operator", host: "pro14", session: "api" },
+      reason: {
+        class: "operator_dispatch_unfence",
+        human: "clear fence",
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "applied",
+      sequence: null,
+    });
+    expect(orchestrator.getState().dispatchFence).toBeNull();
+  });
+
+  it("treats identical dispatch fence writes and empty clears as no-ops", async () => {
+    const orchestrator = createOrchestrator();
+
+    const first = await orchestrator.setDispatchFence({
+      issueIdentifiers: ["ISSUE-2"],
+      source: "api",
+      actor: { kind: "operator", host: "pro14", session: "api" },
+      reason: {
+        class: "operator_dispatch_fence",
+        human: "only run ISSUE-2",
+      },
+    });
+    const second = await orchestrator.setDispatchFence({
+      issueIdentifiers: ["issue-2"],
+      source: "api",
+      actor: { kind: "operator", host: "pro14", session: "api" },
+      reason: {
+        class: "operator_dispatch_fence",
+        human: "only run ISSUE-2 again",
+      },
+    });
+    await orchestrator.clearDispatchFence({
+      actor: { kind: "operator", host: "pro14", session: "api" },
+      reason: {
+        class: "operator_dispatch_unfence",
+        human: "clear fence",
+      },
+    });
+    const emptyClear = await orchestrator.clearDispatchFence({
+      actor: { kind: "operator", host: "pro14", session: "api" },
+      reason: {
+        class: "operator_dispatch_unfence",
+        human: "clear fence again",
+      },
+    });
+
+    expect(first.status).toBe("applied");
+    expect(second.status).toBe("no_op");
+    expect(emptyClear.status).toBe("no_op");
+    expect(orchestrator.getState().dispatchFence).toBeNull();
   });
 
   it("does not dispatch issues excluded by legacy hard blockers through pollTick", async () => {
@@ -2261,6 +2527,15 @@ describe("orchestrator core", () => {
       },
     });
 
+    await orchestrator.setDispatchFence({
+      issueIdentifiers: ["ISSUE-1"],
+      source: "symphonyctl",
+      actor: { kind: "operator", host: "pro14", session: "self-host-pilot" },
+      reason: {
+        class: "operator_dispatch_fence",
+        human: "preserve active fence through rollback",
+      },
+    });
     await orchestrator.pollTick();
     await expect(
       orchestrator.onWorkerExit({
@@ -2286,6 +2561,11 @@ describe("orchestrator core", () => {
     expect(state.issuePendingStageSignals["1"]).toMatchObject({
       signal: "complete",
       stageName: "investigate",
+      setBySequence: expect.any(Number),
+    });
+    expect(state.dispatchFence).toMatchObject({
+      issueIdentifiers: ["ISSUE-1"],
+      source: "symphonyctl",
       setBySequence: expect.any(Number),
     });
     expect(state.retryAttempts["1"]).toBeUndefined();

@@ -289,6 +289,18 @@ export interface EmergencyStopResponse {
   stop_requests: StopIssueResponse[];
 }
 
+export interface DispatchFenceRequest {
+  issue_identifiers: string[];
+  source?: "symphonyctl" | "api";
+  reason?: string;
+}
+
+export interface DispatchFenceResponse {
+  status: IntentStatus;
+  detail: string;
+  sequence: number | null;
+}
+
 /**
  * Validated body of POST /api/v1/intents (SYMPH-408b). A thin transport
  * envelope over the orchestrator's writeIntent primitive — the dashboard
@@ -394,6 +406,12 @@ export interface DashboardServerHost {
   requestEmergencyStop?(
     context?: PipelineControlContext,
   ): EmergencyStopResponse | Promise<EmergencyStopResponse>;
+  requestDispatchFence?(
+    input: DispatchFenceRequest & { actor: IntentActor },
+  ): DispatchFenceResponse | Promise<DispatchFenceResponse>;
+  requestDispatchFenceClear?(
+    context: PipelineControlContext,
+  ): DispatchFenceResponse | Promise<DispatchFenceResponse>;
   getPipelineStatus?():
     | PipelineStatusResponse
     | Promise<PipelineStatusResponse>;
@@ -457,6 +475,12 @@ const intentRequestSchema = z
   .refine((value) => value.verb !== "anchor" || value.anchor !== undefined, {
     message: "anchor intent requires anchor placement and expiry.",
   });
+
+const dispatchFenceRequestSchema = z.object({
+  issue_identifiers: z.array(z.string().min(1).max(256)).min(1).max(50),
+  source: z.enum(["symphonyctl", "api"]).default("api"),
+  reason: z.string().min(1).max(2048).optional(),
+});
 
 const anchorFieldEditRequestSchema = z
   .object({
@@ -1249,6 +1273,81 @@ export function createDashboardRequestHandler(
                 ? 409
                 : 200;
         writeJson(response, statusCode, result);
+        return;
+      }
+
+      if (url.pathname === "/api/v1/dispatch-fence") {
+        const operatorActor = requireOperatorAuth(
+          request,
+          response,
+          operatorAuth,
+        );
+        if (operatorActor === null) {
+          return;
+        }
+
+        if (method === "POST") {
+          if (options.host.requestDispatchFence === undefined) {
+            writeJsonError(response, 501, "not_implemented", {
+              message: "Dispatch fences are not supported by this host.",
+            });
+            return;
+          }
+          if (!hasJsonContentType(request)) {
+            writeUnsupportedMediaType(response);
+            return;
+          }
+          const rawBody = await readRequestBodyText(request);
+          let parsedBody: unknown;
+          try {
+            parsedBody = parseJsonBody(rawBody);
+          } catch {
+            writeJsonError(response, 400, "invalid_request", {
+              message: "Request body is not valid JSON.",
+            });
+            return;
+          }
+          const parsed = dispatchFenceRequestSchema.safeParse(parsedBody);
+          if (!parsed.success) {
+            writeJsonError(response, 400, "invalid_request", {
+              message: parsed.error.issues
+                .map((issue) =>
+                  issue.path.length > 0
+                    ? `${issue.path.join(".")}: ${issue.message}`
+                    : issue.message,
+                )
+                .join("; "),
+            });
+            return;
+          }
+          const result = await options.host.requestDispatchFence({
+            issue_identifiers: parsed.data.issue_identifiers,
+            source: parsed.data.source,
+            ...(parsed.data.reason === undefined
+              ? {}
+              : { reason: parsed.data.reason }),
+            actor: operatorActor,
+          });
+          writeJson(response, 200, result);
+          return;
+        }
+
+        if (method === "DELETE") {
+          if (options.host.requestDispatchFenceClear === undefined) {
+            writeJsonError(response, 501, "not_implemented", {
+              message: "Dispatch fences are not supported by this host.",
+            });
+            return;
+          }
+          const result = await options.host.requestDispatchFenceClear({
+            actor: operatorActor,
+            reason: "dispatch fence cleared",
+          });
+          writeJson(response, 200, result);
+          return;
+        }
+
+        writeMethodNotAllowed(response, ["POST", "DELETE"]);
         return;
       }
 

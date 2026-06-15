@@ -34,10 +34,13 @@ export interface SymphonyctlCommand {
     | "pause"
     | "resume"
     | "stop"
+    | "fence"
+    | "unfence"
     | "help";
   baseUrl: string;
   verb?: IntentVerb;
   issue?: string;
+  issueIdentifiers?: string[];
   reason?: string;
   hint?: string;
   fence?: number;
@@ -64,6 +67,9 @@ Commands:
   pause [--reason <text>]        POST /api/v1/pipeline/pause
   resume [--reason <text>]       POST /api/v1/pipeline/resume
   stop --hard [--reason <text>]  POST /api/v1/pipeline/stop (emergency stop)
+  fence <issue> [issue...] [--reason <text>]
+                                 POST /api/v1/dispatch-fence with a positive allowlist
+  unfence                       DELETE /api/v1/dispatch-fence
 
 Cold-shell hard stop:
   curl -fsS -X POST "\${SYMPHONYCTL_BASE_URL:-${DEFAULT_BASE_URL}}/api/v1/pipeline/stop" \\
@@ -130,6 +136,39 @@ export function parseSymphonyctlArgs(
     command === "resume"
   ) {
     const result: SymphonyctlCommand = { command, baseUrl };
+    if (operatorToken !== undefined && operatorToken !== "") {
+      result.operatorToken = operatorToken;
+    }
+    const reason = flags.get("reason");
+    if (reason !== undefined) {
+      result.reason = reason;
+    }
+    return result;
+  }
+
+  if (command === "unfence") {
+    if (flags.has("reason")) {
+      throw new SymphonyctlUsageError("unfence does not accept --reason.");
+    }
+    const result: SymphonyctlCommand = { command, baseUrl };
+    if (operatorToken !== undefined && operatorToken !== "") {
+      result.operatorToken = operatorToken;
+    }
+    return result;
+  }
+
+  if (command === "fence") {
+    const issueIdentifiers = positional.slice(1);
+    if (issueIdentifiers.length === 0) {
+      throw new SymphonyctlUsageError(
+        "fence requires at least one issue identifier.",
+      );
+    }
+    const result: SymphonyctlCommand = {
+      command: "fence",
+      baseUrl,
+      issueIdentifiers,
+    };
     if (operatorToken !== undefined && operatorToken !== "") {
       result.operatorToken = operatorToken;
     }
@@ -303,7 +342,7 @@ function issueBody(issue: string): Record<string, string> {
 }
 
 async function httpJson(
-  method: "GET" | "POST",
+  method: "DELETE" | "GET" | "POST",
   url: string,
   body?: unknown,
   options?: { operatorToken?: string | undefined },
@@ -338,7 +377,9 @@ function requiresOperatorToken(
     command === "unanchor" ||
     command === "pause" ||
     command === "resume" ||
-    command === "stop"
+    command === "stop" ||
+    command === "fence" ||
+    command === "unfence"
   );
 }
 
@@ -579,6 +620,40 @@ export async function runSymphonyctl(
       status === 200
         ? JSON.stringify(payload, null, 2)
         : formatHttpFailure(`/api/v1/pipeline/${action}`, status, payload),
+    );
+    return status === 200 ? 0 : 1;
+  }
+
+  if (parsed.command === "fence") {
+    const { status, payload } = await httpJson(
+      "POST",
+      `${parsed.baseUrl}/api/v1/dispatch-fence`,
+      {
+        issue_identifiers: parsed.issueIdentifiers ?? [],
+        source: "symphonyctl",
+        reason: parsed.reason ?? "dispatch fence via symphonyctl",
+      },
+      { operatorToken: parsed.operatorToken },
+    );
+    log(
+      status === 200
+        ? JSON.stringify(payload, null, 2)
+        : formatHttpFailure("/api/v1/dispatch-fence", status, payload),
+    );
+    return status === 200 ? 0 : 1;
+  }
+
+  if (parsed.command === "unfence") {
+    const { status, payload } = await httpJson(
+      "DELETE",
+      `${parsed.baseUrl}/api/v1/dispatch-fence`,
+      undefined,
+      { operatorToken: parsed.operatorToken },
+    );
+    log(
+      status === 200
+        ? JSON.stringify(payload, null, 2)
+        : formatHttpFailure("/api/v1/dispatch-fence", status, payload),
     );
     return status === 200 ? 0 : 1;
   }
