@@ -156,7 +156,6 @@ interface CodeGroundingPaths {
   checkoutsRoot: string;
   checkoutPath: string;
   artifactsRoot: string;
-  runArtifactRoot: string;
   leaseIndexPath: string;
 }
 
@@ -170,10 +169,14 @@ interface LeaseRecord {
   repoUrl: string;
   commitSha: string;
   checkoutPath: string;
-  artifactRoot: string;
+  artifactRoot?: string;
   createdAt: string;
   lastUsedAt: string;
   activeRunIds: string[];
+}
+
+export interface CodeGroundingSweepResult {
+  warnings: string[];
 }
 
 const DEFAULT_GIT_TIMEOUT_MS = 60_000;
@@ -223,6 +226,10 @@ export async function runManagedCodeGrounding(
       "repository is outside the v1 Symphony grounding scope",
     );
   }
+  const targetWarning = validateCodeGroundingTarget(input.target);
+  if (targetWarning !== null) {
+    return buildNotAttemptedReport(input, targetWarning);
+  }
 
   const paths = resolveCodeGroundingPaths(input);
   const releaseCheckout = await getCheckoutMutex(
@@ -238,7 +245,7 @@ export async function runManagedCodeGrounding(
     const release = await acquireCheckoutLease(paths, input);
     let report: CodeGroundingReport | null = null;
     try {
-      await sweepCodeGroundingCheckouts({
+      const sweepResult = await sweepCodeGroundingCheckouts({
         workspaceRoot: input.workspaceRoot,
         config: input.config,
       });
@@ -247,6 +254,7 @@ export async function runManagedCodeGrounding(
         paths,
         input,
       );
+      const reportWarnings = [...sweepResult.warnings, ...warnings];
       await input.afterDeterministicScan?.({
         checkoutPath: paths.checkoutPath,
         checkoutId: paths.checkoutId,
@@ -271,7 +279,7 @@ export async function runManagedCodeGrounding(
             dirtyState,
           },
           warnings: [
-            ...warnings,
+            ...reportWarnings,
             "code-grounding checkout mutated during scan and was purged",
           ],
         };
@@ -288,7 +296,7 @@ export async function runManagedCodeGrounding(
           checkoutPurged: false,
           dirtyState,
         },
-        warnings,
+        warnings: reportWarnings,
       };
       return report;
     } finally {
@@ -310,7 +318,7 @@ export async function sweepCodeGroundingCheckouts(input: {
   workspaceRoot: string;
   config: CodeGroundingConfig;
   now?: Date;
-}): Promise<void> {
+}): Promise<CodeGroundingSweepResult> {
   const workspaceRoot = resolveWorkspaceRoot(input.workspaceRoot);
   const baseRoot = resolveGroundingBaseRoot(
     workspaceRoot,
@@ -319,6 +327,7 @@ export async function sweepCodeGroundingCheckouts(input: {
   const leaseIndexPath = join(baseRoot, "leases.json");
   const artifactsRoot = join(baseRoot, "artifacts");
   assertWorkspacePathWithinRoot(baseRoot, artifactsRoot);
+  const warnings: string[] = [];
   await withLeaseIndexLock(workspaceRoot, baseRoot, async () => {
     const index = await readLeaseIndex(leaseIndexPath);
     const now = input.now ?? new Date();
@@ -361,11 +370,16 @@ export async function sweepCodeGroundingCheckouts(input: {
         } catch {
           continue;
         }
-        try {
-          await removeArtifactRoot(artifactsRoot, record.artifactRoot);
-        } catch {
-          // Artifact cleanup is best-effort; never let a bad artifact path
-          // preserve a stale checkout lease after the checkout was reaped.
+        if (record.artifactRoot !== undefined) {
+          try {
+            await removeArtifactRoot(artifactsRoot, record.artifactRoot);
+          } catch (error) {
+            warnings.push(
+              `code-grounding artifact cleanup skipped for ${record.checkoutId}: ${boundedErrorCode(error)}`,
+            );
+            // Artifact cleanup is best-effort; never let a bad artifact path
+            // preserve a stale checkout lease after the checkout was reaped.
+          }
         }
         delete index.checkouts[record.checkoutId];
       }
@@ -373,9 +387,11 @@ export async function sweepCodeGroundingCheckouts(input: {
     const referencedArtifactRoots = new Set<string>();
     for (const record of Object.values(index.checkouts)) {
       try {
-        referencedArtifactRoots.add(
-          normalizeArtifactChildPath(artifactsRoot, record.artifactRoot),
-        );
+        if (record.artifactRoot !== undefined) {
+          referencedArtifactRoots.add(
+            normalizeArtifactChildPath(artifactsRoot, record.artifactRoot),
+          );
+        }
       } catch {
         // Malformed lease artifact paths are outside the orphan sweep domain.
       }
@@ -388,6 +404,7 @@ export async function sweepCodeGroundingCheckouts(input: {
     });
     await writeLeaseIndex(leaseIndexPath, index);
   });
+  return { warnings };
 }
 
 export function resolveCodeGroundingPaths(
@@ -405,14 +422,12 @@ export function resolveCodeGroundingPaths(
   const artifactsRoot = join(baseRoot, "artifacts");
   const checkoutId = buildCheckoutId(input.target);
   const checkoutPath = join(checkoutsRoot, checkoutId);
-  const runArtifactRoot = join(artifactsRoot, safePathSegment(input.runId));
   const leaseIndexPath = join(baseRoot, "leases.json");
   for (const path of [
     baseRoot,
     checkoutsRoot,
     artifactsRoot,
     checkoutPath,
-    runArtifactRoot,
     leaseIndexPath,
   ]) {
     assertWorkspacePathWithinRoot(workspaceRoot, path);
@@ -424,7 +439,6 @@ export function resolveCodeGroundingPaths(
     checkoutsRoot,
     checkoutPath,
     artifactsRoot,
-    runArtifactRoot,
     leaseIndexPath,
   };
 }
@@ -1044,7 +1058,7 @@ function stripCommentsAndLiterals(content: string): string {
 
 function canStartRegexLiteral(output: string): boolean {
   const previous = output.trimEnd().at(-1);
-  return previous === undefined || /[=(:,[!&|?{};\n]/.test(previous);
+  return previous === undefined || /[=(:,[!&|?{;\n]/.test(previous);
 }
 
 function lineForMatchIndex(content: string, index: number): number {
@@ -1102,7 +1116,6 @@ async function acquireCheckoutLease(
       repoUrl: input.target.repoUrl,
       commitSha: input.target.commitSha,
       checkoutPath: paths.checkoutPath,
-      artifactRoot: paths.runArtifactRoot,
       createdAt: existing?.createdAt ?? now,
       lastUsedAt: now,
       activeRunIds: addUnique(existing?.activeRunIds ?? [], input.runId),
@@ -1142,6 +1155,48 @@ async function removeArtifactRoot(
     throw error;
   }
   await fs.rm(artifactPath, { recursive: true, force: true });
+}
+
+function validateCodeGroundingTarget(
+  target: CodeGroundingTarget,
+): string | null {
+  if (isOptionShapedGitArgument(target.commitSha)) {
+    return "code-grounding target commitSha is option-shaped and was rejected";
+  }
+  if (target.sourcePath !== undefined) {
+    return null;
+  }
+  if (isOptionShapedGitArgument(target.repoUrl)) {
+    return "code-grounding target repoUrl is option-shaped and was rejected";
+  }
+  if (!isAllowedCodeGroundingRepoUrl(target.repoUrl)) {
+    return "code-grounding target repoUrl uses an unsupported transport";
+  }
+  return null;
+}
+
+function isOptionShapedGitArgument(value: string): boolean {
+  return value.trim().startsWith("-") || /[\0\r\n]/.test(value);
+}
+
+function isAllowedCodeGroundingRepoUrl(value: string): boolean {
+  if (value.startsWith("ext::")) {
+    return false;
+  }
+  try {
+    const parsed = new URL(value);
+    return ["file:", "https:", "ssh:", "git:"].includes(parsed.protocol);
+  } catch {
+    return /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[A-Za-z0-9._~/-]+$/.test(value);
+  }
+}
+
+function boundedErrorCode(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException).code;
+  if (typeof code === "string" && code.length > 0) {
+    return code;
+  }
+  return error instanceof Error ? error.name : "unknown_error";
 }
 
 async function sweepOrphanedArtifactRoots(input: {
@@ -1336,24 +1391,100 @@ async function releaseCodeGroundingFileLock(
   }
 }
 
-async function removeAbandonedCodeGroundingFileLock(
+export async function removeAbandonedCodeGroundingFileLock(
   lockPath: string,
+  options: {
+    beforeRecoveryRename?: () => Promise<void> | void;
+  } = {},
 ): Promise<boolean> {
   try {
-    const stat = await fs.stat(lockPath);
-    if (Date.now() - stat.mtimeMs < FILE_LOCK_STALE_MS) {
+    const staleSnapshot = await readCodeGroundingLockSnapshot(lockPath);
+    if (staleSnapshot === null) {
+      return true;
+    }
+    if (Date.now() - staleSnapshot.mtimeMs < FILE_LOCK_STALE_MS) {
       return false;
     }
-    if (await codeGroundingLockOwnerIsAlive(lockPath)) {
+    if (staleSnapshot.ownerAlive) {
       return false;
     }
-    await fs.rm(lockPath, { recursive: true, force: true });
+    const tombstonePath = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+    await options.beforeRecoveryRename?.();
+    await fs.rename(lockPath, tombstonePath);
+    const tombstoneSnapshot =
+      await readCodeGroundingLockSnapshot(tombstonePath);
+    if (
+      tombstoneSnapshot === null ||
+      !sameCodeGroundingLockSnapshot(staleSnapshot, tombstoneSnapshot) ||
+      tombstoneSnapshot.ownerAlive ||
+      Date.now() - tombstoneSnapshot.mtimeMs < FILE_LOCK_STALE_MS
+    ) {
+      await restoreCodeGroundingLockTombstone(tombstonePath, lockPath);
+      return false;
+    }
+    await fs.rm(tombstonePath, { recursive: true, force: true });
     return true;
   } catch (error) {
     if (isMissingPathError(error)) {
       return true;
     }
     throw error;
+  }
+}
+
+interface CodeGroundingLockSnapshot {
+  mtimeMs: number;
+  ownerRaw: string | null;
+  ownerAlive: boolean;
+}
+
+async function readCodeGroundingLockSnapshot(
+  lockPath: string,
+): Promise<CodeGroundingLockSnapshot | null> {
+  let stat: Awaited<ReturnType<typeof fs.stat>>;
+  try {
+    stat = await fs.stat(lockPath);
+  } catch (error) {
+    if (isMissingPathError(error)) {
+      return null;
+    }
+    throw error;
+  }
+  let ownerRaw: string | null = null;
+  try {
+    ownerRaw = await fs.readFile(
+      join(lockPath, FILE_LOCK_OWNER_FILENAME),
+      "utf8",
+    );
+  } catch (error) {
+    if (!isMissingPathError(error)) {
+      throw error;
+    }
+  }
+  return {
+    mtimeMs: stat.mtimeMs,
+    ownerRaw,
+    ownerAlive: lockOwnerRawIsAlive(ownerRaw),
+  };
+}
+
+function sameCodeGroundingLockSnapshot(
+  left: CodeGroundingLockSnapshot,
+  right: CodeGroundingLockSnapshot,
+): boolean {
+  return left.mtimeMs === right.mtimeMs && left.ownerRaw === right.ownerRaw;
+}
+
+async function restoreCodeGroundingLockTombstone(
+  tombstonePath: string,
+  lockPath: string,
+): Promise<void> {
+  try {
+    await fs.rename(tombstonePath, lockPath);
+  } catch (error) {
+    if (!isAlreadyExistsPathError(error) && !isMissingPathError(error)) {
+      throw error;
+    }
   }
 }
 
@@ -1365,13 +1496,24 @@ async function codeGroundingLockOwnerIsAlive(
       join(lockPath, FILE_LOCK_OWNER_FILENAME),
       "utf8",
     );
-    const parsed = JSON.parse(raw) as { pid?: unknown };
-    return typeof parsed.pid === "number" && isProcessAlive(parsed.pid);
+    return lockOwnerRawIsAlive(raw);
   } catch (error) {
     if (isMissingPathError(error) || error instanceof SyntaxError) {
       return false;
     }
     throw error;
+  }
+}
+
+function lockOwnerRawIsAlive(raw: string | null): boolean {
+  if (raw === null) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(raw) as { pid?: unknown };
+    return typeof parsed.pid === "number" && isProcessAlive(parsed.pid);
+  } catch {
+    return false;
   }
 }
 
@@ -1509,10 +1651,6 @@ function resolveGroundingBaseRoot(
   const resolved = resolve(workspaceRoot, baseDir);
   assertWorkspacePathWithinRoot(workspaceRoot, resolved);
   return resolved;
-}
-
-function safePathSegment(value: string): string {
-  return createHash("sha256").update(value).digest("hex").slice(0, 24);
 }
 
 function checkoutMetadata(
