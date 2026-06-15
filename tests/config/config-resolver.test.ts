@@ -15,6 +15,10 @@ import {
   DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
   DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
   DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
+  DEFAULT_CODE_GROUNDING_BASE_DIR,
+  DEFAULT_CODE_GROUNDING_ENABLED,
+  DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
+  DEFAULT_CODE_GROUNDING_TTL_MS,
   DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
   DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
   DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
@@ -135,6 +139,34 @@ describe("config-resolver", () => {
       serviceAccounts: [],
       fieldName: null,
       ingestSecret: null,
+    });
+    expect(resolved.codeGrounding).toEqual({
+      enabled: DEFAULT_CODE_GROUNDING_ENABLED,
+      baseDir: DEFAULT_CODE_GROUNDING_BASE_DIR,
+      ttlMs: DEFAULT_CODE_GROUNDING_TTL_MS,
+      maxCheckoutsPerRepo: DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
+    });
+  });
+
+  it("resolves managed code-grounding config", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        code_grounding: {
+          enabled: "true",
+          base_dir: ".cache/grounding",
+          ttl_ms: "120000",
+          max_checkouts_per_repo: "2",
+        },
+      },
+    });
+
+    expect(resolved.codeGrounding).toEqual({
+      enabled: true,
+      baseDir: ".cache/grounding",
+      ttlMs: 120_000,
+      maxCheckoutsPerRepo: 2,
     });
   });
 

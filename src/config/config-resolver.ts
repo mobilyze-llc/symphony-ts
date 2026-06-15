@@ -24,6 +24,10 @@ import {
   DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
   DEFAULT_CODEX_SESSION_ROTATION_INPUT_TOKENS,
   DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
+  DEFAULT_CODE_GROUNDING_BASE_DIR,
+  DEFAULT_CODE_GROUNDING_ENABLED,
+  DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
+  DEFAULT_CODE_GROUNDING_TTL_MS,
   DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
   DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
   DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
@@ -114,6 +118,7 @@ export function resolveWorkflowConfig(
   const acGate = asRecord(config.ac_gate);
   const specFidelity = asRecord(config.spec_fidelity);
   const admissionCard = asRecord(config.admission_card);
+  const codeGrounding = asRecord(config.code_grounding);
   const operatorAnchors = asRecord(config.operator_anchors);
   const watchdog = asRecord(config.watchdog);
   const verdicts = asRecord(config.verdicts);
@@ -261,6 +266,18 @@ export function resolveWorkflowConfig(
     },
     admissionCard: {
       enabled: admissionCard.enabled === true,
+    },
+    codeGrounding: {
+      enabled:
+        readBoolean(codeGrounding.enabled) ?? DEFAULT_CODE_GROUNDING_ENABLED,
+      baseDir:
+        readString(codeGrounding.base_dir) ?? DEFAULT_CODE_GROUNDING_BASE_DIR,
+      ttlMs:
+        readPositiveInteger(codeGrounding.ttl_ms) ??
+        DEFAULT_CODE_GROUNDING_TTL_MS,
+      maxCheckoutsPerRepo:
+        readPositiveInteger(codeGrounding.max_checkouts_per_repo) ??
+        DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
     },
     operatorAnchors: {
       operatorAllowlist: readStringList(
