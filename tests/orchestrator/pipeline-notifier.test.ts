@@ -14,6 +14,10 @@ import type {
   SlackBlock,
 } from "../../src/orchestrator/pipeline-notifier.js";
 
+function countUnescapedBackticks(value: string): number {
+  return value.match(/(?<!\\)`/g)?.length ?? 0;
+}
+
 describe("formatDurationMs", () => {
   it("formats seconds only", () => {
     expect(formatDurationMs(45_000)).toBe("45s");
@@ -1002,6 +1006,29 @@ describe("formatNotification", () => {
     expect(result.text).toContain("Watchdog ticket being filed");
   });
 
+  it("escapes backticks in systemic_cluster_alert inline-code values", () => {
+    const result = formatNotification({
+      type: "systemic_cluster_alert",
+      signature: "hash`abc",
+      errorClass: "class`name",
+      stageName: "impl`ement",
+      clusterSize: 3,
+      issueIdentifiers: ["SYMPH-1", "SYMPH-2", "SYMPH-3"],
+      breakerOpened: true,
+      watchdogTicketFiling: false,
+    });
+    const lines = result.text.split("\n");
+    expect(lines[0]).toContain("signature `hash\\`abc`");
+    expect(lines[1]).toContain("Class: `class\\`name`");
+    expect(lines[1]).toContain("stage `impl\\`ement`");
+    expect(lines[3]).toContain(
+      "Circuit breaker OPENED for stage `impl\\`ement`",
+    );
+    expect(countUnescapedBackticks(lines[0] ?? "")).toBe(2);
+    expect(countUnescapedBackticks(lines[1] ?? "")).toBe(4);
+    expect(countUnescapedBackticks(lines[3] ?? "")).toBe(2);
+  });
+
   it("systemic_cluster_alert carries the journal cursor when available (SYMPH-407)", () => {
     const result = formatNotification({
       type: "systemic_cluster_alert",
@@ -1668,6 +1695,26 @@ describe("formatNotification — tracker_write_failed (SYMPH-413)", () => {
     );
     expect(result.text).toContain("GRAPHQL_VALIDATION_FAILED");
     expect(result.text).not.toContain("[object Object]");
+  });
+
+  it("escapes backticks in tracker_write_failed details inline-code span", () => {
+    const result = formatNotification({
+      type: "tracker_write_failed",
+      followUpTitle: "Dispatcher follow-up: branch_divergence for SYMPH-332",
+      sourceIssueIds: ["7fe4ed29-b2ea-492f-9263-25c1e34c43ec"],
+      reason: "Linear API request failed with HTTP 400.",
+      httpStatus: 400,
+      details:
+        '{"errors":[{"message":"title contains `inline code` delimiters"}]}',
+    });
+    const detailsLine = result.text
+      .split("\n")
+      .find((line) => line.startsWith("Details: "));
+    expect(detailsLine).toBeDefined();
+    expect(detailsLine).toContain(
+      'Details: `{"errors":[{"message":"title contains \\`inline code\\` delimiters"}]}`',
+    );
+    expect(countUnescapedBackticks(detailsLine ?? "")).toBe(2);
   });
 
   it("formats tracker_write_failed without status or details", () => {

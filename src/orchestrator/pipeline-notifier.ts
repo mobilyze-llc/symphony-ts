@@ -385,6 +385,10 @@ export function formatStageTimeline(history: ExecutionHistory): string {
     .join("\n");
 }
 
+function escapeSlackInlineCode(value: string): string {
+  return value.replace(/`/g, "\\`");
+}
+
 function formatCompactUnit(value: number, suffix: string): string {
   const rounded = Math.round(value * 10) / 10;
   return `${rounded % 1 === 0 ? rounded.toFixed(0) : rounded.toFixed(1)}${suffix}`;
@@ -579,7 +583,7 @@ export function formatNotification(
         const stageLines = event.executionHistory
           .map(
             (record) =>
-              `\`${record.stageName}\` ${formatDurationMs(record.durationMs)} · ${formatTokensCompact(record.totalTokens)} tokens · ${record.outcome}`,
+              `\`${escapeSlackInlineCode(record.stageName)}\` ${formatDurationMs(record.durationMs)} · ${formatTokensCompact(record.totalTokens)} tokens · ${record.outcome}`,
           )
           .join("\n");
         blocks.push({
@@ -857,7 +861,7 @@ export function formatNotification(
         event.journalSequence !== null
       ) {
         parts.push(
-          `Journal cursor: seq ${event.journalSequence} — \`GET /api/v1/state/delta?since_seq=${Math.max(0, event.journalSequence - 1)}\``,
+          `Journal cursor: seq ${event.journalSequence} — \`GET /api/v1/state/delta?since_seq=${escapeSlackInlineCode(String(Math.max(0, event.journalSequence - 1)))}\``,
         );
       }
       parts.push(version);
@@ -1095,15 +1099,15 @@ export function formatNotification(
     case "systemic_cluster_alert": {
       const stageLabel =
         event.stageName !== null
-          ? `stage \`${event.stageName}\``
+          ? `stage \`${escapeSlackInlineCode(event.stageName)}\``
           : "unknown stage";
       const issueList =
         event.issueIdentifiers.length > 0
           ? event.issueIdentifiers.join(", ")
           : "none";
       const parts: string[] = [
-        `:rotating_light: *SYSTEMIC failure cluster* — signature \`${event.signature}\``,
-        `Class: \`${event.errorClass}\` · ${stageLabel} · ${event.clusterSize} affected issues`,
+        `:rotating_light: *SYSTEMIC failure cluster* — signature \`${escapeSlackInlineCode(event.signature)}\``,
+        `Class: \`${escapeSlackInlineCode(event.errorClass)}\` · ${stageLabel} · ${event.clusterSize} affected issues`,
         `Issues: ${issueList}`,
       ];
       if (event.breakerOpened) {
@@ -1117,7 +1121,7 @@ export function formatNotification(
         event.journalSequence !== null
       ) {
         parts.push(
-          `Journal cursor: seq ${event.journalSequence} — \`GET /api/v1/state/delta?since_seq=${Math.max(0, event.journalSequence - 1)}\``,
+          `Journal cursor: seq ${event.journalSequence} — \`GET /api/v1/state/delta?since_seq=${escapeSlackInlineCode(String(Math.max(0, event.journalSequence - 1)))}\``,
         );
       }
       // The raw normalized error text is deliberately omitted here: it can
@@ -1143,7 +1147,9 @@ export function formatNotification(
       if (event.details !== null) {
         // details carries Linear API error bodies — sanitize like every other
         // free-text egress surface (SYMPH-421).
-        parts.push(`Details: \`${sanitizeForSlack(event.details)}\``);
+        parts.push(
+          `Details: \`${escapeSlackInlineCode(sanitizeForSlack(event.details))}\``,
+        );
       }
       parts.push(version);
       return { text: parts.join("\n") };
@@ -1161,7 +1167,7 @@ export function formatNotification(
           ? ` (${event.issueIdentifier}, seq ${event.sequence})`
           : "";
       const parts: string[] = [
-        `${emoji} *${label}* — ${event.issueIdentifier} (\`${event.reasonCode}\`) by ${event.actor.kind}@${event.actor.host}${cursor}`,
+        `${emoji} *${label}* — ${event.issueIdentifier} (\`${escapeSlackInlineCode(event.reasonCode)}\`) by ${event.actor.kind}@${event.actor.host}${cursor}`,
       ];
       if (event.remedy !== null) {
         parts.push(`Remedy: ${event.remedy}`);
