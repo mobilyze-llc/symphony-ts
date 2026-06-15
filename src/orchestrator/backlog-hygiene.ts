@@ -97,6 +97,7 @@ export interface BuildBacklogHygieneProposalsInput {
   generatedAt?: string;
   modelTierDecision: BacklogHygieneModelTierDecision;
   codeGroundingReport?: CodeGroundingReport | null;
+  proposalCandidates?: readonly BacklogHygieneProposalCandidate[];
 }
 
 export interface RunBacklogHygieneProposalLaneInput
@@ -123,6 +124,11 @@ export type BacklogHygieneProposalDecision = "accepted" | "rejected";
 
 const BACKLOG_HYGIENE_SCOPE_ID = "__backlog_hygiene__";
 const BACKLOG_HYGIENE_SCOPE_IDENTIFIER = "__backlog_hygiene__";
+
+interface BacklogHygieneProposalCandidate {
+  finding: BacklogAuditFinding;
+  issues: Issue[];
+}
 
 export function decideBacklogHygieneModelTier(
   evaluation: QueueTriageEvaluationResult,
@@ -215,12 +221,17 @@ export async function runBacklogHygieneProposalLane(
       ? {}
       : { findingTypes: input.findingTypes }),
   };
-  const proposalFindings = selectBacklogHygieneProposalFindings(proposalInput);
+  const proposalCandidates =
+    selectBacklogHygieneProposalCandidates(proposalInput);
+  const proposalFindings = proposalCandidates.map(
+    (candidate) => candidate.finding,
+  );
   const groundingResult = await runCodeGroundingForProposalLane(
     input,
     proposalFindings,
   );
   proposalInput.codeGroundingReport = groundingResult.report;
+  proposalInput.proposalCandidates = proposalCandidates;
 
   return {
     status: "completed",
@@ -262,9 +273,9 @@ export function buildBacklogHygieneProposals(
   );
 
   const proposals: BacklogHygieneProposal[] = [];
-  for (const { finding, issues } of selectBacklogHygieneProposalCandidates(
-    input,
-  )) {
+  const proposalCandidates =
+    input.proposalCandidates ?? selectBacklogHygieneProposalCandidates(input);
+  for (const { finding, issues } of proposalCandidates) {
     const codeGrounding = codeGroundingByFindingId.get(finding.findingId);
     proposals.push({
       proposalId: `${input.report.generatedAt}:${finding.findingId}`,
@@ -314,7 +325,7 @@ function selectBacklogHygieneProposalCandidates(
     | "findingTypes"
     | "maxProposalsPerProductPerPoll"
   >,
-): Array<{ finding: BacklogAuditFinding; issues: Issue[] }> {
+): BacklogHygieneProposalCandidate[] {
   if (!Number.isInteger(input.maxProposalsPerProductPerPoll)) {
     throw new Error("maxProposalsPerProductPerPoll must be an integer.");
   }
@@ -330,8 +341,7 @@ function selectBacklogHygieneProposalCandidates(
   );
   const activeIssueIds = new Set(input.activeIssueIds ?? []);
   const openParkIssueIds = new Set(input.openParkIssueIds ?? []);
-  const candidates: Array<{ finding: BacklogAuditFinding; issues: Issue[] }> =
-    [];
+  const candidates: BacklogHygieneProposalCandidate[] = [];
   for (const finding of input.report.verdict.findings) {
     if (!allowedTypes.has(finding.type)) {
       continue;

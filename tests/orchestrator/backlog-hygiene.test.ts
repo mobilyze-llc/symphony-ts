@@ -17,6 +17,7 @@ import {
   buildBacklogHygieneProposals,
   decideBacklogHygieneModelTier,
   runBacklogHygieneProposalLane,
+  selectBacklogHygieneProposalFindings,
 } from "../../src/orchestrator/backlog-hygiene.js";
 import { INTENT_VERBS } from "../../src/orchestrator/intent.js";
 
@@ -156,7 +157,7 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
   });
 
   it("applies the per-product poll cap and suppresses active or parked issues", () => {
-    const proposals = buildBacklogHygieneProposals({
+    const input = {
       report: auditReport(),
       candidateIssues: [
         issue({ id: "1", identifier: "SYMPH-1" }),
@@ -167,10 +168,14 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
       openParkIssueIds: ["2"],
       maxProposalsPerProductPerPoll: 1,
       modelTierDecision: decideBacklogHygieneModelTier(passingEvaluation()),
-    });
+    };
+    const proposals = buildBacklogHygieneProposals(input);
 
     expect(proposals).toHaveLength(1);
     expect(proposals[0]?.issueIdentifiers).toEqual(["SYMPH-3"]);
+    expect(selectBacklogHygieneProposalFindings(input)).toEqual([
+      auditReport().verdict.findings[2],
+    ]);
   });
 
   it("attaches code-grounding evidence to generated proposals", () => {

@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { BacklogAuditFinding } from "../../src/audit/backlog-audit.js";
 import {
@@ -25,6 +25,7 @@ import {
   CODE_GROUNDING_SUPPORTED_PATH_PREFIXES,
   CODE_GROUNDING_SYMBOL_PRECISION,
   decideCodeGroundingEvidenceStatus,
+  removeAbandonedCodeGroundingFileLock,
   resolveCodeGroundingPaths,
   runManagedCodeGrounding,
   sweepCodeGroundingCheckouts,
@@ -234,6 +235,48 @@ describe("managed code grounding (SYMPH-596)", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("rejects dangerous git transports and option-shaped revisions before invoking git", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commandRunner = vi.fn();
+
+    const dangerousTransport = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "dangerous-transport-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: "ext::sh -c touch /tmp/symphony-owned",
+        commitSha: "abc123",
+        repoScope: "symphony",
+      },
+      findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
+      commandRunner,
+    });
+    const optionRevision = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "option-revision-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+        commitSha: "--upload-pack=sh",
+        repoScope: "symphony",
+      },
+      findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
+      commandRunner,
+    });
+
+    expect(commandRunner).not.toHaveBeenCalled();
+    expect(dangerousTransport).toMatchObject({
+      status: "not_attempted",
+      warnings: ["code-grounding target repoUrl uses an unsupported transport"],
+    });
+    expect(optionRevision).toMatchObject({
+      status: "not_attempted",
+      warnings: [
+        "code-grounding target commitSha is option-shaped and was rejected",
+      ],
+    });
+  });
+
   it("records the current lease before sweeping stale records for the same checkout", async () => {
     const sourceRepo = await createSourceRepo();
     const workspaceRoot = await tempRoot("symph-cg-workspace-");
@@ -262,7 +305,10 @@ describe("managed code grounding (SYMPH-596)", () => {
               repoUrl: target.repoUrl,
               commitSha,
               checkoutPath: paths.checkoutPath,
-              artifactRoot: paths.runArtifactRoot,
+              artifactRoot: join(
+                paths.artifactsRoot,
+                "same-checkout-sweep-run",
+              ),
               createdAt: "2026-06-13T00:00:00.000Z",
               lastUsedAt: "2026-06-13T00:00:00.000Z",
               activeRunIds: [],
@@ -292,6 +338,38 @@ describe("managed code grounding (SYMPH-596)", () => {
 
     expect(report.status).toBe("verified");
     expect(lockOwnerSeen).toBe(true);
+  });
+
+  it("does not reserve per-run artifact roots for new managed grounding leases", async () => {
+    const sourceRepo = await createSourceRepo();
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "no-artifact-reservation-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
+    });
+    const leaseIndex = JSON.parse(
+      await readFile(
+        join(workspaceRoot, ".symphony", "code-grounding", "leases.json"),
+        "utf8",
+      ),
+    ) as {
+      checkouts: Record<string, { artifactRoot?: unknown }>;
+    };
+
+    expect(report.status).toBe("verified");
+    expect(
+      leaseIndex.checkouts[report.checkout.checkoutId ?? ""]?.artifactRoot,
+    ).toBeUndefined();
   });
 
   it("purges a checkout that becomes dirty during the read-only scan", async () => {
@@ -843,6 +921,47 @@ describe("managed code grounding (SYMPH-596)", () => {
     );
   });
 
+  it("does not treat division after object literals as a regex that hides later declarations", async () => {
+    const sourceRepo = await createSourceRepo();
+    await writeFile(
+      join(sourceRepo, "src", "orchestrator", "division.ts"),
+      [
+        "const denominator = 2;",
+        "const ratio = { value: 8 } / denominator;",
+        "export function AfterObjectDivisionSymbol() {",
+        "  return String(ratio);",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await git(sourceRepo, ["add", "."]);
+    await git(sourceRepo, ["commit", "-m", "Add object division symbol"]);
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "object-division-symbol-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [
+        backlogFinding({
+          evidence: "Implemented via `AfterObjectDivisionSymbol`.",
+        }),
+      ],
+    });
+
+    expect(report.entries[0]).toMatchObject({
+      status: "verified",
+      missing: [],
+    });
+  });
+
   it("replaces an unusable cached checkout before scanning", async () => {
     const sourceRepo = await createSourceRepo();
     const workspaceRoot = await tempRoot("symph-cg-workspace-");
@@ -911,6 +1030,48 @@ describe("managed code grounding (SYMPH-596)", () => {
 
     expect(report.status).toBe("verified");
     expect(report.cleanup.leaseReleased).toBe(true);
+  });
+
+  it("does not delete a fresh lock that replaces a stale owner during recovery", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const lockPath = join(
+      workspaceRoot,
+      ".symphony",
+      "code-grounding",
+      "checkouts",
+      "cg-racy.lock",
+    );
+    await mkdir(lockPath, { recursive: true });
+    await writeFile(
+      join(lockPath, "owner.json"),
+      `${JSON.stringify({
+        pid: 999_999_999,
+        ownerToken: "stale-owner",
+        acquiredAt: "2026-06-15T00:00:00.000Z",
+      })}\n`,
+    );
+    const staleTime = new Date(Date.now() - 2 * 60 * 60_000);
+    await utimes(lockPath, staleTime, staleTime);
+    await expect(
+      removeAbandonedCodeGroundingFileLock(lockPath, {
+        beforeRecoveryRename: async () => {
+          await writeFile(
+            join(lockPath, "owner.json"),
+            `${JSON.stringify({
+              pid: process.pid,
+              ownerToken: "fresh-owner",
+              acquiredAt: new Date().toISOString(),
+            })}\n`,
+          );
+          const freshTime = new Date();
+          await utimes(lockPath, freshTime, freshTime);
+        },
+      }),
+    ).resolves.toBe(false);
+
+    await expect(
+      readFile(join(lockPath, "owner.json"), "utf8"),
+    ).resolves.toContain("fresh-owner");
   });
 
   it("fails loudly instead of resetting malformed lease indexes", async () => {
@@ -1115,6 +1276,59 @@ describe("managed code grounding (SYMPH-596)", () => {
     await expect(
       readFile(join(activeArtifact, "report.json"), "utf8"),
     ).resolves.toBe("{}\n");
+  });
+
+  it("reports artifact cleanup failures without preserving stale leases", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
+    const staleCheckout = join(baseRoot, "checkouts", "cg-stale");
+    const artifactsRoot = join(baseRoot, "artifacts");
+    await mkdir(staleCheckout, { recursive: true });
+    await mkdir(artifactsRoot, { recursive: true });
+    await writeFile(join(staleCheckout, "file.txt"), "stale");
+    const leaseIndexPath = join(baseRoot, "leases.json");
+    await writeFile(
+      leaseIndexPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          checkouts: {
+            "cg-stale": {
+              checkoutId: "cg-stale",
+              repoUrl: "repo",
+              commitSha: "abc",
+              checkoutPath: staleCheckout,
+              artifactRoot: artifactsRoot,
+              createdAt: "2026-06-13T00:00:00.000Z",
+              lastUsedAt: "2026-06-13T00:00:00.000Z",
+              activeRunIds: [],
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    const result = await sweepCodeGroundingCheckouts({
+      workspaceRoot,
+      config: {
+        ...codeGroundingConfig(),
+        ttlMs: 1,
+      },
+      now: new Date("2026-06-15T00:00:00.000Z"),
+    });
+
+    expect(result.warnings).toEqual([
+      "code-grounding artifact cleanup skipped for cg-stale: Error",
+    ]);
+    await expect(
+      readFile(join(staleCheckout, "file.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    const leaseIndex = JSON.parse(await readFile(leaseIndexPath, "utf8")) as {
+      checkouts: Record<string, unknown>;
+    };
+    expect(leaseIndex.checkouts["cg-stale"]).toBeUndefined();
+    await expect(readdir(artifactsRoot)).resolves.toEqual([]);
   });
 
   it("sweeps least-recently-used inactive checkouts over the per-repo cap", async () => {
