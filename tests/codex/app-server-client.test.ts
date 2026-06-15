@@ -855,6 +855,64 @@ describe("CodexAppServerClient", () => {
     ).toBeNull();
   });
 
+  it("declines uncaptured high-volume command families", () => {
+    const riskyCommands = [
+      "pnpm test",
+      "pnpm vitest run tests/agent/runner.test.ts",
+      "vitest run tests/codex/app-server-client.test.ts",
+      "gh run view 123456 --log-failed",
+      "ps aux",
+      "pgrep -fl codex",
+      "tail -n +1 /Users/eric/Library/Logs/symphony/stdout.log",
+      "linear-pp-cli comments list SYMPH-643 --agent",
+    ];
+
+    for (const command of riskyCommands) {
+      expect(detectHeadlessCommandOutputRisk(command), command).toContain(
+        "Headless output guard declined",
+      );
+    }
+    expect(detectHeadlessCommandOutputRisk("pnpm test")).toContain(
+      "Retry exactly: node scripts/symphony-run-logged.mjs --label validation -- pnpm test",
+    );
+  });
+
+  it("allows high-volume commands when output is captured or explicitly capped", () => {
+    expect(
+      detectHeadlessCommandOutputRisk(
+        "node scripts/symphony-run-logged.mjs --label tests -- pnpm test",
+      ),
+    ).toBeNull();
+    expect(
+      detectHeadlessCommandOutputRisk(
+        "gh run view 123456 --log-failed > .symphony/validation/gh.log 2>&1",
+      ),
+    ).toBeNull();
+    expect(
+      detectHeadlessCommandOutputRisk(
+        "gh run view 123456 --log-failed >> .symphony/validation/gh.log",
+      ),
+    ).toBeNull();
+    expect(detectHeadlessCommandOutputRisk("pgrep -fl codex | head -20")).toBe(
+      null,
+    );
+    expect(
+      detectHeadlessCommandOutputRisk(
+        "linear-pp-cli comments list SYMPH-643 --agent --limit 20 --select comments.id,comments.body",
+      ),
+    ).toBeNull();
+    expect(
+      detectHeadlessCommandOutputRisk(
+        "tail -n 80 /Users/eric/Library/Logs/symphony/stdout.log",
+      ),
+    ).toBeNull();
+    expect(
+      detectHeadlessCommandOutputRisk(
+        "node scripts/symphony-run-logged.mjs --label tests -- pnpm test; ps aux",
+      ),
+    ).toContain("uncaptured process listing");
+  });
+
   it("reuses the same thread id across continuation turns", async () => {
     const workspace = await createWorkspace();
     const events: CodexClientEvent[] = [];

@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -305,6 +306,64 @@ describe("prompt builder", () => {
     expect(prompt).toContain("zsh-safe");
     expect(prompt).toContain("cmd_status");
     expect(prompt).toContain("[STAGE_COMPLETE]");
+  });
+
+  it("renders workpad-present retry brake in the actual investigate Liquid template only for retries", async () => {
+    const template = await readFile(
+      "pipeline-config/prompts/investigate.liquid",
+      "utf8",
+    );
+    const retryPrompt = await renderPrompt({
+      workflow: {
+        promptTemplate: template,
+      },
+      issue: ISSUE_FIXTURE,
+      attempt: 2,
+      stageName: "investigate",
+      workpadContext: { present: true, commentId: "comment-workpad-1" },
+    });
+    const firstPrompt = await renderPrompt({
+      workflow: {
+        promptTemplate: template,
+      },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "investigate",
+      workpadContext: { present: false, commentId: null },
+    });
+
+    expect(retryPrompt).toContain("Workpad-Present Retry Brake");
+    expect(retryPrompt).toContain("comment comment-workpad-1");
+    expect(retryPrompt).toContain("must not repeat broad source discovery");
+    expect(retryPrompt).toContain("successful `sync_workpad`");
+    expect(firstPrompt).not.toContain("Workpad-Present Retry Brake");
+    expect(firstPrompt).toContain("Create a brief implementation plan");
+  });
+
+  it("renders workpad-present retry brake in investigate continuation prompts", () => {
+    const retryPrompt = buildContinuationPrompt({
+      issue: ISSUE_FIXTURE,
+      attempt: 2,
+      turnNumber: 2,
+      maxTurns: 5,
+      stageName: "investigate",
+      workpadContext: { present: true, commentId: "comment-workpad-1" },
+    });
+    const firstPrompt = buildContinuationPrompt({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      turnNumber: 2,
+      maxTurns: 5,
+      stageName: "investigate",
+      workpadContext: { present: false, commentId: null },
+    });
+
+    expect(retryPrompt).toContain("WORKPAD-PRESENT RETRY BRAKE");
+    expect(retryPrompt).toContain("comment comment-workpad-1");
+    expect(retryPrompt).toContain("Do not repeat broad source discovery");
+    expect(retryPrompt).toContain("stage-complete-equivalent");
+    expect(firstPrompt).not.toContain("WORKPAD-PRESENT RETRY BRAKE");
+    expect(firstPrompt).toContain("output the exact text [STAGE_COMPLETE]");
   });
 
   it("includes implement constraints and STAGE_COMPLETE in continuation when stageName is implement", () => {

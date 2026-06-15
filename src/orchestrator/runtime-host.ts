@@ -18,6 +18,7 @@ import { runPauseTriage } from "../agent/pause-triage.js";
 import type {
   ImplementationCommentDelta,
   ImplementationCommentDeltaContext,
+  WorkpadRetryContext,
 } from "../agent/prompt-builder.js";
 import type {
   AgentRunInput,
@@ -3592,6 +3593,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         acceptanceCriteria,
         implementationCommentDeltas:
           await this.buildImplementationCommentDeltaContext(issue, stageName),
+        workpadContext: await this.buildWorkpadRetryContext(
+          issue,
+          stageName,
+          attempt,
+        ),
         budgetMultiplier: Math.max(1, budgetMultiplier),
         reasoningEffort,
         modePolicy: createModeScopedPermissionPolicy({
@@ -3737,6 +3743,48 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           ? null
           : `Uncited comments at or before the spec-review cutoff require operator reconciliation: ${operatorContextReasons.join(", ")}.`,
       comments: deltas,
+    };
+  }
+
+  private async buildWorkpadRetryContext(
+    issue: Issue,
+    stageName: string | null,
+    attempt: number | null,
+  ): Promise<WorkpadRetryContext | null> {
+    if (stageName !== "investigate" || attempt === null) {
+      return null;
+    }
+    if (!(this.tracker instanceof LinearTrackerClient)) {
+      return null;
+    }
+
+    let comments: LinearIssueComment[];
+    try {
+      comments = await this.tracker.fetchIssueComments(issue.id, {
+        maxPages: DEFAULT_SPEC_REVIEW_COMMENT_CONFIG.maxCommentPages,
+      });
+    } catch (error) {
+      console.warn(
+        `[orchestrator] ${issue.identifier}: failed to fetch workpad retry context: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+
+    const latestWorkpad = comments
+      .filter((comment) => comment.body.trimStart().startsWith("## Workpad"))
+      .sort(
+        (left, right) =>
+          Date.parse(getEffectiveCommentTimestamp(right)) -
+          Date.parse(getEffectiveCommentTimestamp(left)),
+      )[0];
+
+    if (latestWorkpad === undefined) {
+      return { present: false, commentId: null };
+    }
+
+    return {
+      present: true,
+      commentId: latestWorkpad.id,
     };
   }
 

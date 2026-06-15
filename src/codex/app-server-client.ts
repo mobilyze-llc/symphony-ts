@@ -2109,20 +2109,91 @@ export function detectHeadlessCommandOutputRisk(
     return null;
   }
 
-  const riskyRgSegment = normalized
+  const riskySegment = normalized
     .split(/(?:&&|\|\||;|\n)/)
     .map((segment) => segment.trim())
-    .find(isBroadLineRgSegment);
+    .find((segment) => detectRiskyCommandSegment(segment) !== null);
 
-  if (riskyRgSegment === undefined) {
+  if (riskySegment === undefined) {
+    return null;
+  }
+
+  const risk = detectRiskyCommandSegment(riskySegment);
+  if (risk === null) {
     return null;
   }
 
   return [
-    "Headless output guard declined a broad `rg` line-output command because it is likely to add excessive search results to the Codex thread.",
-    "Use `rg -l` or `rg -c` for broad discovery, then run `rg -n ... -m 20 <specific-file>` on selected files.",
-    `Declined command segment: ${truncateCommandForReason(riskyRgSegment)}`,
+    `Headless output guard declined ${risk.description} because it is likely to add excessive output to the Codex thread.`,
+    risk.remediation,
+    `Declined command segment: ${truncateCommandForReason(riskySegment)}`,
   ].join(" ");
+}
+
+function usesLoggedCommandCapture(command: string): boolean {
+  return /\bscripts\/symphony-run-logged\.mjs\b/.test(command);
+}
+
+function detectRiskyCommandSegment(segment: string): {
+  description: string;
+  remediation: string;
+} | null {
+  if (
+    usesLoggedCommandCapture(segment) ||
+    isArtifactRedirectedSegment(segment) ||
+    isClearlyCappedSegment(segment)
+  ) {
+    return null;
+  }
+
+  if (isBroadLineRgSegment(segment)) {
+    return {
+      description: "a broad `rg` line-output command",
+      remediation:
+        "Use `rg -l` or `rg -c` for broad discovery, then run `rg -n ... -m 20 <specific-file>` on selected files.",
+    };
+  }
+
+  if (isUncapturedValidationCommand(segment)) {
+    return {
+      description: "an uncaptured validation command",
+      remediation: renderLoggedValidationRemediation(segment),
+    };
+  }
+
+  if (isUncapturedGithubFailedLogCommand(segment)) {
+    return {
+      description: "an uncaptured GitHub failed-log dump",
+      remediation:
+        "Redirect `gh run view --log-failed` to `.symphony/validation/` or run it through `scripts/symphony-run-logged.mjs`, then inspect a bounded tail/summary.",
+    };
+  }
+
+  if (isUncapturedProcessListing(segment)) {
+    return {
+      description: "an uncaptured process listing",
+      remediation:
+        "Pipe process scans through `head`, `sed -n`, or `wc`, or write the full output to `.symphony/validation/` and return a bounded summary.",
+    };
+  }
+
+  if (isUncapturedTailLogDump(segment)) {
+    return {
+      description: "an uncaptured log tail/source dump",
+      remediation:
+        "Use `tail -n <small number>` or write the full log to `.symphony/validation/` and return only the artifact path and bounded tail.",
+    };
+  }
+
+  if (isUnboundedLinearListing(segment)) {
+    return {
+      description: "an unbounded `linear-pp-cli` listing",
+      remediation:
+        "Add `--limit` and a narrow `--select`, or write the listing to an artifact and return only metadata plus a bounded summary.",
+    };
+  }
+
+  return null;
 }
 
 function isBroadLineRgSegment(segment: string): boolean {
@@ -2139,6 +2210,58 @@ function isBroadLineRgSegment(segment: string): boolean {
   }
 
   return extractShellWords(segment).some(isBroadSearchPathToken);
+}
+
+function isUncapturedValidationCommand(segment: string): boolean {
+  return /\b(?:pnpm\s+(?:test|vitest)|vitest\s+run|npm\s+test)\b/.test(segment);
+}
+
+function renderLoggedValidationRemediation(segment: string): string {
+  return [
+    "Run validation through the logged runner so full stdout/stderr is preserved as an artifact and only a bounded tail reaches the transcript.",
+    `Retry exactly: node scripts/symphony-run-logged.mjs --label validation -- ${segment}`,
+  ].join(" ");
+}
+
+function isUncapturedGithubFailedLogCommand(segment: string): boolean {
+  return (
+    /\bgh\s+run\s+view\b/.test(segment) &&
+    /(?:^|\s)--log-failed(?:\s|$)/.test(segment)
+  );
+}
+
+function isUncapturedProcessListing(segment: string): boolean {
+  return /(?:^|\s)(?:ps|pgrep)(?:\s|$)/.test(segment);
+}
+
+function isUncapturedTailLogDump(segment: string): boolean {
+  if (!/(?:^|\s)tail(?:\s|$)/.test(segment)) {
+    return false;
+  }
+  if (/\btail\s+-n\s+(?:[1-9][0-9]?|1[0-9]{2}|200)\b/.test(segment)) {
+    return false;
+  }
+  return /(?:\.log\b|\/logs?\/|stdout|stderr|\.jsonl\b)/.test(segment);
+}
+
+function isUnboundedLinearListing(segment: string): boolean {
+  if (!/\blinear-pp-cli\b/.test(segment)) {
+    return false;
+  }
+  if (/(?:\s|^)--limit(?:=|\s)|(?:\s|^)--select(?:=|\s)/.test(segment)) {
+    return false;
+  }
+  return /\b(?:comments\s+list|issues\s+list|today|stale|slipped|blocking)\b/.test(
+    segment,
+  );
+}
+
+function isArtifactRedirectedSegment(segment: string): boolean {
+  return /(?:>>?|1>>?|2>>?|&>>?)\s*['"]?\.symphony\/validation\//.test(segment);
+}
+
+function isClearlyCappedSegment(segment: string): boolean {
+  return /\|\s*(?:head\b|wc\b|sed\s+-n\b)/.test(segment);
 }
 
 function isBroadSearchPathToken(token: string): boolean {

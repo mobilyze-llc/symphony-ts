@@ -20,16 +20,19 @@ describe("createWorkpadSyncDynamicTool", () => {
   });
 
   it("creates a new comment and returns the comment_id", async () => {
-    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
-      jsonResponse({
-        data: {
-          commentCreate: {
-            success: true,
-            comment: { id: "comment-abc-123" },
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(emptyWorkpadSearchResponse())
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "comment-abc-123" },
+            },
           },
-        },
-      }),
-    );
+        }),
+      );
     const tool = createWorkpadSyncDynamicTool({
       apiKey: "linear-token",
       fetchFn,
@@ -43,16 +46,91 @@ describe("createWorkpadSyncDynamicTool", () => {
     expect(result).toEqual({
       success: true,
       comment_id: "comment-abc-123",
+      operation: "created",
     });
 
-    expect(fetchFn).toHaveBeenCalledOnce();
-    const [url, init] = fetchFn.mock.calls[0]!;
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    const [url, init] = fetchFn.mock.calls[1]!;
     expect(url).toBe("https://api.linear.app/graphql");
     expect(init?.method).toBe("POST");
     const body = JSON.parse(init?.body as string);
     expect(body.variables.issueId).toBe("issue-1");
     expect(body.variables.body).toBe("# Workpad\n\n## Status\nIn progress.");
     expect(body.query).toContain("commentCreate");
+  });
+
+  it("updates the most recent runtime-authored Workpad comment when comment_id is omitted", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            viewer: { id: "viewer-1" },
+            issue: {
+              comments: {
+                nodes: [
+                  {
+                    id: "old-workpad",
+                    body: "## Workpad\n\nOld plan",
+                    createdAt: "2026-03-06T00:00:00.000Z",
+                    updatedAt: "2026-03-06T00:00:00.000Z",
+                    user: { id: "viewer-1" },
+                  },
+                  {
+                    id: "operator-workpad",
+                    body: "## Workpad\n\nOperator note",
+                    createdAt: "2026-03-06T00:30:00.000Z",
+                    updatedAt: "2026-03-06T00:30:00.000Z",
+                    user: { id: "operator-1" },
+                  },
+                  {
+                    id: "new-workpad",
+                    body: "  ## Workpad\n\nCurrent plan",
+                    createdAt: "2026-03-06T01:00:00.000Z",
+                    updatedAt: "2026-03-06T01:05:00.000Z",
+                    user: { id: "viewer-1" },
+                  },
+                ],
+              },
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            commentUpdate: {
+              success: true,
+            },
+          },
+        }),
+      );
+    const tool = createWorkpadSyncDynamicTool({
+      apiKey: "linear-token",
+      fetchFn,
+    });
+
+    const result = await tool.execute({
+      issue_id: "issue-1",
+      file_path: workpadPath,
+    });
+
+    expect(result).toEqual({
+      success: true,
+      comment_id: "new-workpad",
+      operation: "updated",
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    const searchBody = JSON.parse(fetchFn.mock.calls[0]![1]?.body as string);
+    expect(searchBody.query).toContain("WorkpadComments");
+    expect(searchBody.query).toContain(
+      "comments(first: 50, orderBy: updatedAt)",
+    );
+    expect(searchBody.variables.issueId).toBe("issue-1");
+    const updateBody = JSON.parse(fetchFn.mock.calls[1]![1]?.body as string);
+    expect(updateBody.query).toContain("commentUpdate");
+    expect(updateBody.query).not.toContain("commentCreate");
+    expect(updateBody.variables.commentId).toBe("new-workpad");
   });
 
   it("updates an existing comment when comment_id is provided", async () => {
@@ -79,6 +157,7 @@ describe("createWorkpadSyncDynamicTool", () => {
     expect(result).toEqual({
       success: true,
       comment_id: "comment-existing-456",
+      operation: "updated",
     });
 
     expect(fetchFn).toHaveBeenCalledOnce();
@@ -125,6 +204,7 @@ describe("createWorkpadSyncDynamicTool", () => {
     expect(result).toEqual({
       success: true,
       comment_id: "comment-existing-456",
+      operation: "updated",
     });
     const body = JSON.parse(fetchFn.mock.calls[0]![1]?.body as string);
     expect(body.variables.body).toBe(expansionHeavyBody);
@@ -276,15 +356,18 @@ describe("createWorkpadSyncDynamicTool", () => {
   });
 
   it("returns error when commentCreate returns no comment id", async () => {
-    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
-      jsonResponse({
-        data: {
-          commentCreate: {
-            success: false,
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(emptyWorkpadSearchResponse())
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            commentCreate: {
+              success: false,
+            },
           },
-        },
-      }),
-    );
+        }),
+      );
     const tool = createWorkpadSyncDynamicTool({
       apiKey: "linear-token",
       fetchFn,
@@ -327,16 +410,19 @@ describe("createWorkpadSyncDynamicTool", () => {
   });
 
   it("uses custom endpoint when provided", async () => {
-    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
-      jsonResponse({
-        data: {
-          commentCreate: {
-            success: true,
-            comment: { id: "comment-999" },
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(emptyWorkpadSearchResponse())
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "comment-999" },
+            },
           },
-        },
-      }),
-    );
+        }),
+      );
     const tool = createWorkpadSyncDynamicTool({
       apiKey: "linear-token",
       endpoint: "https://custom.linear.dev/graphql",
@@ -349,19 +435,23 @@ describe("createWorkpadSyncDynamicTool", () => {
     });
 
     expect(fetchFn.mock.calls[0]![0]).toBe("https://custom.linear.dev/graphql");
+    expect(fetchFn.mock.calls[1]![0]).toBe("https://custom.linear.dev/graphql");
   });
 
   it("returns error when commentCreate has no comment field", async () => {
-    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
-      jsonResponse({
-        data: {
-          commentCreate: {
-            success: true,
-            // no comment field
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(emptyWorkpadSearchResponse())
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            commentCreate: {
+              success: true,
+              // no comment field
+            },
           },
-        },
-      }),
-    );
+        }),
+      );
     const tool = createWorkpadSyncDynamicTool({
       apiKey: "linear-token",
       fetchFn,
@@ -377,16 +467,19 @@ describe("createWorkpadSyncDynamicTool", () => {
   });
 
   it("returns error when commentCreate returns empty comment id", async () => {
-    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
-      jsonResponse({
-        data: {
-          commentCreate: {
-            success: true,
-            comment: { id: "" },
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(emptyWorkpadSearchResponse())
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            commentCreate: {
+              success: true,
+              comment: { id: "" },
+            },
           },
-        },
-      }),
-    );
+        }),
+      );
     const tool = createWorkpadSyncDynamicTool({
       apiKey: "linear-token",
       fetchFn,
@@ -432,6 +525,19 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: {
       "content-type": "application/json",
+    },
+  });
+}
+
+function emptyWorkpadSearchResponse(): Response {
+  return jsonResponse({
+    data: {
+      viewer: { id: "viewer-1" },
+      issue: {
+        comments: {
+          nodes: [],
+        },
+      },
     },
   });
 }
