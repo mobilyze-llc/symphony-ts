@@ -5,6 +5,7 @@ import type {
   ComputedDispatchOrderExclusion,
   ComputedDispatchOrderSnapshot,
   ComputedDispatchOrderSupersededNativeHardBlocker,
+  DispatchFenceState,
   Issue,
   IssueAnchorRecord,
 } from "../domain/model.js";
@@ -27,6 +28,7 @@ export interface ComputeDispatchOrderInput {
   ticketFeatureUnavailableReason?: string | null;
   terminalStates: readonly string[];
   completedIssueIds?: ReadonlySet<string> | undefined;
+  dispatchFence?: DispatchFenceState | null | undefined;
   now: Date;
 }
 
@@ -83,9 +85,14 @@ export function computeDispatchOrder(
     issueByIdentifier,
   );
   const hardCycle = hardCycleDiagnostics.cycles[0] ?? null;
-  const exclusions = hardEdges
+  const hardExclusions = hardEdges
     .filter((edge) => isOpenBlocker(edge.blocker, terminalStates))
     .map(toExclusion);
+  const fenceExclusions = buildDispatchFenceExclusions(
+    baseOrder,
+    input.dispatchFence ?? null,
+  );
+  const exclusions = [...hardExclusions, ...fenceExclusions];
   const hardExclusionPairs = buildExclusionPairKeys(exclusions);
   const excludedIssueIds = new Set(
     exclusions.map((exclusion) => exclusion.issue_id),
@@ -181,6 +188,38 @@ export function computeDispatchOrder(
       ...anchored.warnings,
     ],
   };
+}
+
+function buildDispatchFenceExclusions(
+  baseOrder: readonly Issue[],
+  fence: DispatchFenceState | null,
+): ComputedDispatchOrderExclusion[] {
+  if (fence === null) {
+    return [];
+  }
+  const allowlist = new Set(
+    fence.issueIdentifiers.map(normalizeIssueIdentifier),
+  );
+  return baseOrder.flatMap((issue) => {
+    if (allowlist.has(normalizeIssueIdentifier(issue.identifier))) {
+      return [];
+    }
+    return [
+      {
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        blocker_issue_id: null,
+        blocker_issue_identifier: null,
+        blocker_state: null,
+        edge_trust: "operator_confirmed",
+        source: "dispatch_fence",
+        reason: `Dispatch fence allows only ${fence.issueIdentifiers.join(", ")}; ${issue.identifier} is outside the active operator allowlist.`,
+        fence_source: fence.source,
+        operator_remedy:
+          "Clear or update the dispatch fence to allow this issue to dispatch.",
+      },
+    ];
+  });
 }
 
 function collectDependencyEdges(

@@ -38,6 +38,8 @@ import {
   type ContinuousFeedbackLane,
   type DecorrelatedGateLane,
   type DecorrelatedGateOutcome,
+  type DispatchFenceSource,
+  type DispatchFenceState,
   type DispatcherDecisionCategory,
   type DispatcherDecisionClassification,
   type DispatcherDecisionCostWeight,
@@ -1263,6 +1265,11 @@ export class OrchestratorCore {
           this.state.pipelinePause = null;
         } else if (verb === "pipeline_pause") {
           this.recoverPipelinePauseIntent(entry);
+        } else if (
+          verb === "pipeline_dispatch_fence" ||
+          verb === "pipeline_dispatch_unfence"
+        ) {
+          this.recoverDispatchFenceIntent(entry);
         } else if (verb === "park" || verb === "halt") {
           this.markIssueRequiresExplicitResume(
             entry.issueId,
@@ -1544,6 +1551,7 @@ export class OrchestratorCore {
       resumeRequiredIssueIds: [...this.state.resumeRequired],
       resumeRequiredMarks: clonePlain(this.state.resumeRequiredMarks),
       issueAnchors: clonePlain(this.state.issueAnchors),
+      dispatchFence: clonePlain(this.state.dispatchFence),
       computedDispatchOrder: clonePlain(this.state.computedDispatchOrder),
       emergencyStop: clonePlain(this.state.emergencyStop),
       pipelinePause: clonePlain(this.state.pipelinePause),
@@ -1637,6 +1645,10 @@ export class OrchestratorCore {
       {},
     );
     this.state.issueAnchors = readRecordOr(state.issueAnchors, {});
+    this.state.dispatchFence =
+      state.dispatchFence === null
+        ? null
+        : readRecordOr<DispatchFenceState | null>(state.dispatchFence, null);
     this.state.computedDispatchOrder =
       state.computedDispatchOrder === null
         ? null
@@ -2501,6 +2513,44 @@ export class OrchestratorCore {
         runningCount: Object.keys(this.state.running).length,
       };
     }
+    if (
+      this.state.dispatchFence !== null &&
+      sortedIssues.length === 0 &&
+      computedDispatchOrder.exclusions.some(
+        (exclusion) => exclusion.source === "dispatch_fence",
+      )
+    ) {
+      this.recordDispatchVerdict({
+        issueId: PIPELINE_VERDICT_SCOPE_ID,
+        issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
+        disposition: "gate",
+        reasonCode: "dispatch_fence_no_eligible_candidates",
+        remedy:
+          "Clear or update the dispatch fence, or make an allowlisted issue eligible.",
+        details: {
+          fence_issue_identifiers: this.state.dispatchFence.issueIdentifiers,
+          excluded_issue_identifiers: computedDispatchOrder.exclusions
+            .filter((exclusion) => exclusion.source === "dispatch_fence")
+            .map((exclusion) => exclusion.issue_identifier),
+        },
+      });
+      this.trackDispatchStarvation(issues.length, 0);
+      await this.recordQueueBaselineSample({
+        consideredIssues: [],
+        dispatchPicks: [],
+        computedOrder: computedDispatchOrder,
+        force: true,
+      });
+      return {
+        validation,
+        dispatchedIssueIds: [],
+        modeDecisions: [],
+        stopRequests: reconcileResult.stopRequests,
+        trackerFetchFailed: false,
+        reconciliationFetchFailed: reconcileResult.reconciliationFetchFailed,
+        runningCount: Object.keys(this.state.running).length,
+      };
+    }
     const computedHeadIssue = sortedIssues[0] ?? null;
     let computedHeadReachedDispatchBoundary = false;
     for (const issue of sortedIssues) {
@@ -2659,6 +2709,7 @@ export class OrchestratorCore {
         ticketFeatureUnavailableReason,
         terminalStates: this.config.tracker.terminalStates,
         completedIssueIds: this.state.completed,
+        dispatchFence: this.state.dispatchFence,
         now: this.now(),
       });
     } catch (error) {
@@ -7549,7 +7600,7 @@ export class OrchestratorCore {
    * mutation is the caller's documented warn-only degraded mode.
    */
   async journalPipelineIntent(input: {
-    action: "pause" | "resume" | "stop";
+    action: "pause" | "resume" | "stop" | "dispatch_fence" | "dispatch_unfence";
     status: "applied" | "no_op";
     actor: IntentActor;
     reason: IntentReason;
@@ -7604,6 +7655,15 @@ export class OrchestratorCore {
         this.state.emergencyStop = null;
         this.state.pipelinePause = null;
       }
+      if (input.status === "applied" && input.action === "dispatch_fence") {
+        this.state.dispatchFence = readDispatchFenceMetadata(entry.metadata, {
+          timestamp: entry.timestamp,
+          sequence: entry.sequence,
+        });
+      }
+      if (input.status === "applied" && input.action === "dispatch_unfence") {
+        this.state.dispatchFence = null;
+      }
       return entry.sequence;
     } catch (error) {
       this.applyDegradedPipelineIntentLiveEffect({
@@ -7619,6 +7679,66 @@ export class OrchestratorCore {
       );
       return null;
     }
+  }
+
+  async setDispatchFence(input: {
+    issueIdentifiers: readonly string[];
+    source: DispatchFenceSource;
+    actor: IntentActor;
+    reason: IntentReason;
+  }): Promise<IntentWriteResult> {
+    const issueIdentifiers = normalizeDispatchFenceIdentifiers(
+      input.issueIdentifiers,
+    );
+    if (issueIdentifiers.length === 0) {
+      return {
+        status: "no_op",
+        detail: "dispatch fence requires at least one issue identifier",
+        sequence: null,
+      };
+    }
+    const active = this.state.dispatchFence;
+    const sameFence =
+      active !== null &&
+      active.source === input.source &&
+      arraysEqual(active.issueIdentifiers, issueIdentifiers);
+    const detail = sameFence
+      ? `dispatch fence already active for ${issueIdentifiers.join(", ")}`
+      : `dispatch fence active for ${issueIdentifiers.join(", ")}`;
+    const sequence = await this.journalPipelineIntent({
+      action: "dispatch_fence",
+      status: sameFence ? "no_op" : "applied",
+      actor: input.actor,
+      reason: input.reason,
+      detail,
+      metadata: {
+        dispatchFence: {
+          issueIdentifiers,
+          source: input.source,
+          clearing: "explicit",
+        },
+      },
+    });
+    return { status: sameFence ? "no_op" : "applied", detail, sequence };
+  }
+
+  async clearDispatchFence(input: {
+    actor: IntentActor;
+    reason: IntentReason;
+  }): Promise<IntentWriteResult> {
+    const active = this.state.dispatchFence;
+    const detail =
+      active === null
+        ? "dispatch fence already clear"
+        : `dispatch fence cleared for ${active.issueIdentifiers.join(", ")}`;
+    const sequence = await this.journalPipelineIntent({
+      action: "dispatch_unfence",
+      status: active === null ? "no_op" : "applied",
+      actor: input.actor,
+      reason: input.reason,
+      detail,
+    });
+    return { status: active === null ? "no_op" : "applied", detail, sequence };
   }
 
   private observeResumeRequiredState(
@@ -8195,8 +8315,23 @@ export class OrchestratorCore {
     });
   }
 
+  private recoverDispatchFenceIntent(entry: DispatcherRunJournalEntry): void {
+    const verb = readMetadataString(entry.metadata, "verb");
+    if (verb === "pipeline_dispatch_unfence") {
+      this.state.dispatchFence = null;
+      return;
+    }
+    const fence = readDispatchFenceMetadata(entry.metadata, {
+      timestamp: entry.timestamp,
+      sequence: entry.sequence,
+    });
+    if (fence !== null) {
+      this.state.dispatchFence = fence;
+    }
+  }
+
   private applyDegradedPipelineIntentLiveEffect(input: {
-    action: "pause" | "resume" | "stop";
+    action: "pause" | "resume" | "stop" | "dispatch_fence" | "dispatch_unfence";
     status: "applied" | "no_op";
     actor: IntentActor;
     reason: IntentReason;
@@ -8219,6 +8354,29 @@ export class OrchestratorCore {
         haltViewMetadata: readMetadataRecord(input.metadata, "halt_view"),
         sequence: null,
       });
+      return;
+    }
+    if (input.action === "dispatch_fence") {
+      const metadata = {
+        ...(input.metadata ?? {}),
+        actor: {
+          kind: input.actor.kind,
+          host: input.actor.host,
+          session: input.actor.session ?? null,
+        },
+        reason: {
+          class: input.reason.class,
+          human: input.reason.human,
+        },
+      };
+      this.state.dispatchFence = readDispatchFenceMetadata(metadata, {
+        timestamp: input.timestamp,
+        sequence: null,
+      });
+      return;
+    }
+    if (input.action === "dispatch_unfence") {
+      this.state.dispatchFence = null;
     }
   }
 
@@ -11901,6 +12059,71 @@ function readMetadataRecord(
     : null;
 }
 
+function readDispatchFenceMetadata(
+  metadata: Record<string, unknown>,
+  source: { timestamp: string; sequence: number | null },
+): DispatchFenceState | null {
+  const fence = readMetadataRecord(metadata, "dispatchFence");
+  if (fence === null) {
+    return null;
+  }
+  const issueIdentifiers = normalizeDispatchFenceIdentifiers(
+    readStringArray(fence.issueIdentifiers),
+  );
+  if (issueIdentifiers.length === 0) {
+    return null;
+  }
+  const fenceSource = readRecordString(fence, "source");
+  if (fenceSource !== "symphonyctl" && fenceSource !== "api") {
+    return null;
+  }
+  const actor = readMetadataRecord(metadata, "actor");
+  const reason = readMetadataRecord(metadata, "reason");
+  return {
+    active: true,
+    issueIdentifiers,
+    source: fenceSource,
+    actor: {
+      kind: readRecordString(actor, "kind") ?? "operator",
+      host: readRecordString(actor, "host") ?? "unknown",
+      session: readRecordString(actor, "session"),
+    },
+    reason: {
+      class: readRecordString(reason, "class") ?? "operator_dispatch_fence",
+      human: readRecordString(reason, "human") ?? "dispatch fence requested",
+    },
+    setAt: source.timestamp,
+    setBySequence: source.sequence,
+    clearing: "explicit",
+  };
+}
+
+function normalizeDispatchFenceIdentifiers(
+  issueIdentifiers: readonly string[],
+): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const identifier of issueIdentifiers) {
+    const value = normalizeIssueIdentifier(identifier);
+    if (value === "" || seen.has(value)) {
+      continue;
+    }
+    seen.add(value);
+    normalized.push(value);
+  }
+  return normalized;
+}
+
+function arraysEqual(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
 function readRecordString(
   record: Record<string, unknown> | null,
   key: string,
@@ -12271,6 +12494,7 @@ function cloneOrchestratorState(state: OrchestratorState): OrchestratorState {
     resumeRequired: new Set(state.resumeRequired),
     resumeRequiredMarks: clonePlain(state.resumeRequiredMarks),
     issueAnchors: clonePlain(state.issueAnchors),
+    dispatchFence: clonePlain(state.dispatchFence),
     computedDispatchOrder: clonePlain(state.computedDispatchOrder),
     emergencyStop: clonePlain(state.emergencyStop),
     pipelinePause: clonePlain(state.pipelinePause),
@@ -12319,6 +12543,7 @@ function restoreOrchestratorState(
   target.resumeRequired = snapshot.resumeRequired;
   target.resumeRequiredMarks = snapshot.resumeRequiredMarks;
   target.issueAnchors = snapshot.issueAnchors;
+  target.dispatchFence = snapshot.dispatchFence;
   target.computedDispatchOrder = snapshot.computedDispatchOrder;
   target.emergencyStop = snapshot.emergencyStop;
   target.pipelinePause = snapshot.pipelinePause;

@@ -1120,8 +1120,10 @@ export interface ComputedDispatchOrderExclusion {
   blocker_issue_identifier: string | null;
   blocker_state: string | null;
   edge_trust: Exclude<ComputedDispatchEdgeTrust, "advisory">;
-  source: "ticket_feature" | "issue_blocked_by";
+  source: "ticket_feature" | "issue_blocked_by" | "dispatch_fence";
   reason: string;
+  fence_source?: DispatchFenceSource;
+  operator_remedy?: string;
 }
 
 export interface ComputedDispatchOrderAdvisoryWarning {
@@ -1164,6 +1166,26 @@ export interface ComputedDispatchOrderSnapshot {
   hard_cycle_omitted_count: number;
   superseded_native_hard_blockers: ComputedDispatchOrderSupersededNativeHardBlocker[];
   warnings: string[];
+}
+
+export type DispatchFenceSource = "symphonyctl" | "api";
+
+export interface DispatchFenceState {
+  active: true;
+  issueIdentifiers: string[];
+  source: DispatchFenceSource;
+  actor: {
+    kind: string;
+    host: string;
+    session: string | null;
+  };
+  reason: {
+    class: string;
+    human: string;
+  };
+  setAt: string;
+  setBySequence: number | null;
+  clearing: "explicit";
 }
 
 interface PendingStageSignalBase {
@@ -1210,6 +1232,13 @@ export interface OrchestratorState {
    * computed order back to Linear.
    */
   issueAnchors: Record<string, IssueAnchorRecord>;
+  /**
+   * Active pipeline-scoped operator allowlist fence for self-host pilots
+   * (SYMPH-624). When present, deterministic dispatch intersects eligible
+   * candidates with this identifier set before admission; existing leases are
+   * not retroactively killed.
+   */
+  dispatchFence: DispatchFenceState | null;
   /**
    * Latest deterministic queue order read-model (SYMPH-485). Recomputed from
    * tracker candidates, operator anchors, and ticket-feature dependency edges;
@@ -1557,6 +1586,7 @@ export function createInitialOrchestratorState(input: {
     resumeRequired: new Set<string>(),
     resumeRequiredMarks: {},
     issueAnchors: {},
+    dispatchFence: null,
     computedDispatchOrder: null,
     emergencyStop: null,
     codexTotals: {

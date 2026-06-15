@@ -19,6 +19,8 @@ import {
   type AnchorFieldEditResult,
   type DashboardOperatorAuthOptions,
   type DashboardServerHost,
+  type DispatchFenceRequest,
+  type DispatchFenceResponse,
   type IntentRequest,
   type IntentRequestResult,
   type PipelineControlContext,
@@ -647,6 +649,139 @@ describe("pipeline pause/resume attribution forwarding (SYMPH-408b)", () => {
   });
 });
 
+describe("dispatch fence API (SYMPH-624)", () => {
+  const servers: Array<{ close: () => Promise<void> }> = [];
+
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((server) => server.close()));
+  });
+
+  it("sets a dispatch fence with the authenticated operator actor", async () => {
+    const received: Array<DispatchFenceRequest & { actor: IntentActor }> = [];
+    const server = await startDashboardServer({
+      port: 0,
+      operatorAuth: OPERATOR_AUTH,
+      host: createHost({
+        requestDispatchFence: (input) => {
+          received.push(input);
+          return dispatchFenceResult();
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/dispatch-fence",
+      body: JSON.stringify({
+        issue_identifiers: ["SYMPH-420"],
+        reason: "self-host pilot",
+      }),
+      headers: { "content-type": "application/json", ...AUTH_HEADERS },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(received).toEqual([
+      {
+        issue_identifiers: ["SYMPH-420"],
+        source: "api",
+        reason: "self-host pilot",
+        actor: OPERATOR_AUTH.actor,
+      },
+    ]);
+  });
+
+  it("preserves symphonyctl as the authenticated fence source", async () => {
+    const received: Array<DispatchFenceRequest & { actor: IntentActor }> = [];
+    const server = await startDashboardServer({
+      port: 0,
+      operatorAuth: OPERATOR_AUTH,
+      host: createHost({
+        requestDispatchFence: (input) => {
+          received.push(input);
+          return dispatchFenceResult();
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/dispatch-fence",
+      body: JSON.stringify({
+        issue_identifiers: ["SYMPH-420"],
+        source: "symphonyctl",
+        reason: "self-host pilot",
+      }),
+      headers: { "content-type": "application/json", ...AUTH_HEADERS },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(received).toEqual([
+      {
+        issue_identifiers: ["SYMPH-420"],
+        source: "symphonyctl",
+        reason: "self-host pilot",
+        actor: OPERATOR_AUTH.actor,
+      },
+    ]);
+  });
+
+  it("clears a dispatch fence through the authenticated operator path", async () => {
+    const received: PipelineControlContext[] = [];
+    const server = await startDashboardServer({
+      port: 0,
+      operatorAuth: OPERATOR_AUTH,
+      host: createHost({
+        requestDispatchFenceClear: (context) => {
+          received.push(context);
+          return dispatchFenceResult({ detail: "dispatch fence cleared" });
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "DELETE",
+      path: "/api/v1/dispatch-fence",
+      headers: AUTH_HEADERS,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(received).toEqual([
+      {
+        actor: OPERATOR_AUTH.actor,
+        reason: "dispatch fence cleared",
+      },
+    ]);
+  });
+
+  it("rejects malformed fence requests before host mutation", async () => {
+    const received: Array<DispatchFenceRequest & { actor: IntentActor }> = [];
+    const server = await startDashboardServer({
+      port: 0,
+      operatorAuth: OPERATOR_AUTH,
+      host: createHost({
+        requestDispatchFence: (input) => {
+          received.push(input);
+          return dispatchFenceResult();
+        },
+      }),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "POST",
+      path: "/api/v1/dispatch-fence",
+      body: JSON.stringify({ issue_identifiers: [] }),
+      headers: { "content-type": "application/json", ...AUTH_HEADERS },
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(received).toEqual([]);
+  });
+});
+
 describe("POST /api/v1/anchor-field-edits", () => {
   const servers: Array<{ close: () => Promise<void> }> = [];
 
@@ -1136,6 +1271,17 @@ function anchorFieldEditResult(
     sequence: null,
     issue_id: "1",
     issue_identifier: "ISSUE-1",
+    ...overrides,
+  };
+}
+
+function dispatchFenceResult(
+  overrides: Partial<DispatchFenceResponse> = {},
+): DispatchFenceResponse {
+  return {
+    status: "applied",
+    detail: "dispatch fence active",
+    sequence: 12,
     ...overrides,
   };
 }
