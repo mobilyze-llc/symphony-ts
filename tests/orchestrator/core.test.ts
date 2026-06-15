@@ -4248,6 +4248,69 @@ describe("orchestrator core", () => {
     expect(Object.keys(orchestrator.getState().running)).toEqual([]);
   });
 
+  it("shares rate-limit admission capacity across retry timers", async () => {
+    const timers = createFakeTimerScheduler();
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2" }),
+      ],
+      statesById: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      timerScheduler: timers,
+      config: createConfig({
+        agent: { maxConcurrentAgents: 2 },
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: null,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 95,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+    for (const id of ["1", "2"]) {
+      orchestrator.getState().claimed.add(id);
+      orchestrator.getState().retryAttempts[id] = {
+        issueId: id,
+        identifier: `ISSUE-${id}`,
+        attempt: 1,
+        dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+        timerHandle: null,
+        error: "previous failure",
+        delayType: "failure",
+      };
+    }
+
+    const first = await orchestrator.onRetryTimer("1");
+    const second = await orchestrator.onRetryTimer("2");
+
+    expect(first.dispatched).toBe(true);
+    expect(second.dispatched).toBe(false);
+    expect(second.released).toBe(false);
+    expect(Object.keys(orchestrator.getState().running)).toEqual(["1"]);
+    expect(orchestrator.getState().retryAttempts["2"]).toMatchObject({
+      attempt: 1,
+      error: "rate-limit admission capacity exhausted",
+    });
+    expect(orchestrator.getState().issueDispositions["2"]).toMatchObject({
+      disposition: "gate",
+      reasonCode: "rate_window_admission_capacity",
+    });
+  });
+
   it("resumes once on a pause-triage continue verdict when the ladder is unconfigured", async () => {
     const triageCalls: string[] = [];
     const tracker = createTracker({

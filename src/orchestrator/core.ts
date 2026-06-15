@@ -960,6 +960,11 @@ export class OrchestratorCore {
 
   private readonly pendingDispatcherLeaseIssueIds = new Set<string>();
 
+  private rateLimitRetryAdmissionReservation: {
+    key: string;
+    count: number;
+  } | null = null;
+
   constructor(options: OrchestratorCoreOptions) {
     this.config = options.config;
     this.tracker = options.tracker;
@@ -3378,6 +3383,36 @@ export class OrchestratorCore {
     };
   }
 
+  private reserveRetryRateLimitAdmission(
+    gate: ReturnType<OrchestratorCore["evaluateRateLimitAdmissionGate"]>,
+  ): boolean {
+    if (gate.admissionCapacity === null) {
+      return true;
+    }
+    const reservationKey = JSON.stringify({
+      codexRateLimits: this.state.codexRateLimits,
+      expectedUnitBurnPct: gate.expectedUnitBurnPct,
+      deferredUntil: gate.deferredUntil,
+      admissionCapacity: gate.admissionCapacity,
+    });
+    if (
+      this.rateLimitRetryAdmissionReservation === null ||
+      this.rateLimitRetryAdmissionReservation.key !== reservationKey
+    ) {
+      this.rateLimitRetryAdmissionReservation = {
+        key: reservationKey,
+        count: 0,
+      };
+    }
+    if (
+      this.rateLimitRetryAdmissionReservation.count >= gate.admissionCapacity
+    ) {
+      return false;
+    }
+    this.rateLimitRetryAdmissionReservation.count += 1;
+    return true;
+  }
+
   private estimateExpectedUnitBurnPct(): number | null {
     const observedBurn: Array<{
       burnPct: number;
@@ -4679,6 +4714,33 @@ export class OrchestratorCore {
         retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
           identifier: issue.identifier,
           error: "dispatch paused by deterministic supervision",
+          delayType: retryEntry.delayType,
+          deferral: true,
+        }),
+      };
+    }
+
+    if (!this.reserveRetryRateLimitAdmission(rateLimitGate)) {
+      this.recordDispatchVerdict({
+        issueId,
+        issueIdentifier: issue.identifier,
+        disposition: "gate",
+        reasonCode: "rate_window_admission_capacity",
+        remedy:
+          "Wait for rate-limit usage telemetry to refresh before admitting another retry.",
+        attempt: retryEntry.attempt,
+        details: {
+          expectedUnitBurnPct: rateLimitGate.expectedUnitBurnPct,
+          deferredUntil: rateLimitGate.deferredUntil,
+          admissionCapacity: rateLimitGate.admissionCapacity,
+        },
+      });
+      return {
+        dispatched: false,
+        released: false,
+        retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
+          identifier: issue.identifier,
+          error: "rate-limit admission capacity exhausted",
           delayType: retryEntry.delayType,
           deferral: true,
         }),
