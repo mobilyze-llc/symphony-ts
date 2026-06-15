@@ -960,7 +960,7 @@ export class OrchestratorCore {
 
   private readonly pendingDispatcherLeaseIssueIds = new Set<string>();
 
-  private rateLimitRetryAdmissionReservation: {
+  private rateLimitAdmissionReservation: {
     key: string;
     count: number;
   } | null = null;
@@ -2678,13 +2678,6 @@ export class OrchestratorCore {
       if (this.availableSlots() <= 0) {
         break;
       }
-      if (
-        rateLimitGate.admissionCapacity !== null &&
-        dispatchedIssueIds.length >= rateLimitGate.admissionCapacity
-      ) {
-        break;
-      }
-
       if (!this.isDispatchEligible(issue, { blockers: [] })) {
         continue;
       }
@@ -2745,6 +2738,9 @@ export class OrchestratorCore {
 
       if (computedHeadIssue?.id === issue.id) {
         computedHeadReachedDispatchBoundary = true;
+      }
+      if (!this.reserveRateLimitAdmission(rateLimitGate)) {
+        break;
       }
       const dispatchResult = await this.dispatchIssue(issue, null);
       dispatchAttempts.push({
@@ -3252,21 +3248,20 @@ export class OrchestratorCore {
     const expectedUnitBurnPct = deferUntilReset
       ? this.estimateExpectedUnitBurnPct()
       : null;
-    const hasExpectedUnitBurn =
+    const usesExpectedUnitBurn =
       expectedUnitBurnPct !== null && expectedUnitBurnPct > 0;
     if (
       floors.minPrimaryHeadroomPct !== null &&
       primary !== null &&
-      !primary.expired &&
-      primary.remainingPercent < floors.minPrimaryHeadroomPct
+      !primary.expired
     ) {
-      const shouldBlock =
-        !deferUntilReset ||
-        !hasExpectedUnitBurn ||
-        primary.remainingPercent < expectedUnitBurnPct;
-      if (shouldBlock) {
+      const requiredHeadroomPct =
+        deferUntilReset && usesExpectedUnitBurn
+          ? expectedUnitBurnPct
+          : floors.minPrimaryHeadroomPct;
+      if (primary.remainingPercent < requiredHeadroomPct) {
         violations.push(
-          deferUntilReset && hasExpectedUnitBurn
+          deferUntilReset && usesExpectedUnitBurn
             ? `primary window headroom ${primary.remainingPercent.toFixed(1)}% < ${expectedUnitBurnPct.toFixed(1)}% expected unit burn (floor ${floors.minPrimaryHeadroomPct}%)`
             : `primary window headroom ${primary.remainingPercent.toFixed(1)}% < ${floors.minPrimaryHeadroomPct}% floor`,
         );
@@ -3281,16 +3276,15 @@ export class OrchestratorCore {
     if (
       floors.minSecondaryHeadroomPct !== null &&
       secondary !== null &&
-      !secondary.expired &&
-      secondary.remainingPercent < floors.minSecondaryHeadroomPct
+      !secondary.expired
     ) {
-      const shouldBlock =
-        !deferUntilReset ||
-        !hasExpectedUnitBurn ||
-        secondary.remainingPercent < expectedUnitBurnPct;
-      if (shouldBlock) {
+      const requiredHeadroomPct =
+        deferUntilReset && usesExpectedUnitBurn
+          ? expectedUnitBurnPct
+          : floors.minSecondaryHeadroomPct;
+      if (secondary.remainingPercent < requiredHeadroomPct) {
         violations.push(
-          deferUntilReset && hasExpectedUnitBurn
+          deferUntilReset && usesExpectedUnitBurn
             ? `secondary window headroom ${secondary.remainingPercent.toFixed(1)}% < ${expectedUnitBurnPct.toFixed(1)}% expected unit burn (floor ${floors.minSecondaryHeadroomPct}%)`
             : `secondary window headroom ${secondary.remainingPercent.toFixed(1)}% < ${floors.minSecondaryHeadroomPct}% floor`,
         );
@@ -3314,15 +3308,16 @@ export class OrchestratorCore {
           })
         : null;
     const admissionCapacity =
-      deferUntilReset && hasExpectedUnitBurn
+      deferUntilReset && usesExpectedUnitBurn
         ? computeRateLimitAdmissionCapacity({
             expectedUnitBurnPct,
-            primary,
-            secondary,
+            primary: floors.minPrimaryHeadroomPct === null ? null : primary,
+            secondary:
+              floors.minSecondaryHeadroomPct === null ? null : secondary,
           })
         : null;
     const reasonPrefix =
-      deferUntilReset && hasExpectedUnitBurn
+      deferUntilReset && usesExpectedUnitBurn
         ? "Codex rate-limit headroom below expected dispatch burn"
         : "Codex rate-limit headroom below dispatch floor";
     const reason = blocked
@@ -3383,7 +3378,7 @@ export class OrchestratorCore {
     };
   }
 
-  private reserveRetryRateLimitAdmission(
+  private reserveRateLimitAdmission(
     gate: ReturnType<OrchestratorCore["evaluateRateLimitAdmissionGate"]>,
   ): boolean {
     if (gate.admissionCapacity === null) {
@@ -3396,20 +3391,18 @@ export class OrchestratorCore {
       admissionCapacity: gate.admissionCapacity,
     });
     if (
-      this.rateLimitRetryAdmissionReservation === null ||
-      this.rateLimitRetryAdmissionReservation.key !== reservationKey
+      this.rateLimitAdmissionReservation === null ||
+      this.rateLimitAdmissionReservation.key !== reservationKey
     ) {
-      this.rateLimitRetryAdmissionReservation = {
+      this.rateLimitAdmissionReservation = {
         key: reservationKey,
         count: 0,
       };
     }
-    if (
-      this.rateLimitRetryAdmissionReservation.count >= gate.admissionCapacity
-    ) {
+    if (this.rateLimitAdmissionReservation.count >= gate.admissionCapacity) {
       return false;
     }
-    this.rateLimitRetryAdmissionReservation.count += 1;
+    this.rateLimitAdmissionReservation.count += 1;
     return true;
   }
 
@@ -4720,7 +4713,7 @@ export class OrchestratorCore {
       };
     }
 
-    if (!this.reserveRetryRateLimitAdmission(rateLimitGate)) {
+    if (!this.reserveRateLimitAdmission(rateLimitGate)) {
       this.recordDispatchVerdict({
         issueId,
         issueIdentifier: issue.identifier,
