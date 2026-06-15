@@ -10,6 +10,7 @@ REMOTE_SYMPHONY="${REMOTE_SYMPHONY:-~/projects/symphony-ts}"
 REMOTE_CRUCIBLE="${REMOTE_CRUCIBLE:-~/projects/crucible}"
 EXPECTED_REMOTE_REF="${CMUX_REVIEW_EXPECTED_REMOTE_REF:-origin/main}"
 EXPECTED_REMOTE_BRANCH="${CMUX_REVIEW_EXPECTED_REMOTE_BRANCH:-main}"
+DIRTY_EXCLUDE_REGEX="${CMUX_REVIEW_DIRTY_EXCLUDE_REGEX:-^\\.env\\.enc$}"
 SSH_BIN="${CMUX_REVIEW_SSH_BIN:-ssh}"
 ARTIFACT_DIR=""
 NO_REMOTE=false
@@ -164,6 +165,7 @@ write_metadata() {
     printf 'remote_host=%s\n' "$REMOTE_HOST"
     printf 'expected_remote_ref=%s\n' "$EXPECTED_REMOTE_REF"
     printf 'expected_remote_branch=%s\n' "$EXPECTED_REMOTE_BRANCH"
+    printf 'dirty_exclude_regex=%s\n' "$DIRTY_EXCLUDE_REGEX"
     printf 'effective_runtime_root=%s\n' "$(effective_runtime_root)"
     printf 'route_tier=%s\n' "$(route_tier)"
     printf 'codex_thread_id=%s\n' "${CODEX_THREAD_ID:-}"
@@ -260,6 +262,7 @@ check_checkout() {
   local path="$2"
   local expected_ref="$3"
   local expected_branch="$4"
+  local dirty_exclude_regex="$5"
   path="${path/#\~/$HOME}"
   if ! cd "$path" 2>/dev/null; then
     printf "%s\t%s\tmissing\tmissing\t%s\tmissing\t%s\tmissing\tfalse\tfail\n" "$label" "$path" "$expected_branch" "$expected_ref"
@@ -268,7 +271,14 @@ check_checkout() {
   local head branch tracked_dirty expected_sha contains_expected status
   head="$(git rev-parse HEAD 2>/dev/null || printf missing)"
   branch="$(git branch --show-current 2>/dev/null || true)"
-  tracked_dirty="$(git status --short --untracked-files=no 2>/dev/null | wc -l | tr -d "[:space:]")"
+  tracked_dirty="$(
+    count=0
+    while IFS= read -r status_line; do
+      dirty_path="${status_line:3}"
+      [[ "$dirty_path" =~ $dirty_exclude_regex ]] || count=$((count + 1))
+    done < <(git status --short --untracked-files=no 2>/dev/null)
+    printf "%s" "$count"
+  )"
   expected_sha="$(git rev-parse "$expected_ref" 2>/dev/null || printf unresolved)"
   contains_expected=false
   if [[ "$expected_sha" != "unresolved" ]] && git merge-base --is-ancestor "$expected_sha" HEAD 2>/dev/null; then
@@ -280,16 +290,17 @@ check_checkout() {
   [[ "$contains_expected" == "true" ]] || status=fail
   printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$label" "$path" "$head" "${branch:-DETACHED}" "$expected_branch" "$tracked_dirty" "$expected_ref" "$expected_sha" "$contains_expected" "$status"
 }
-check_checkout symphony "$REMOTE_SYMPHONY" "$EXPECTED_REMOTE_REF" "$EXPECTED_REMOTE_BRANCH"
-check_checkout crucible "$REMOTE_CRUCIBLE" "$EXPECTED_REMOTE_REF" "$EXPECTED_REMOTE_BRANCH"
+check_checkout symphony "$REMOTE_SYMPHONY" "$EXPECTED_REMOTE_REF" "$EXPECTED_REMOTE_BRANCH" "$DIRTY_EXCLUDE_REGEX"
+check_checkout crucible "$REMOTE_CRUCIBLE" "$EXPECTED_REMOTE_REF" "$EXPECTED_REMOTE_BRANCH" "$DIRTY_EXCLUDE_REGEX"
 '
   set +e
   REMOTE_SYMPHONY="$REMOTE_SYMPHONY" \
     REMOTE_CRUCIBLE="$REMOTE_CRUCIBLE" \
     EXPECTED_REMOTE_REF="$EXPECTED_REMOTE_REF" \
     EXPECTED_REMOTE_BRANCH="$EXPECTED_REMOTE_BRANCH" \
+    DIRTY_EXCLUDE_REGEX="$DIRTY_EXCLUDE_REGEX" \
     "$SSH_BIN" -o BatchMode=yes -o ConnectTimeout=8 "$REMOTE_HOST" \
-    "REMOTE_SYMPHONY='$REMOTE_SYMPHONY' REMOTE_CRUCIBLE='$REMOTE_CRUCIBLE' EXPECTED_REMOTE_REF='$EXPECTED_REMOTE_REF' EXPECTED_REMOTE_BRANCH='$EXPECTED_REMOTE_BRANCH' bash -s" \
+    "REMOTE_SYMPHONY='$REMOTE_SYMPHONY' REMOTE_CRUCIBLE='$REMOTE_CRUCIBLE' EXPECTED_REMOTE_REF='$EXPECTED_REMOTE_REF' EXPECTED_REMOTE_BRANCH='$EXPECTED_REMOTE_BRANCH' DIRTY_EXCLUDE_REGEX='$DIRTY_EXCLUDE_REGEX' bash -s" \
     >"$ARTIFACT_DIR/remote-checkout-gates.tsv" \
     2>"$ARTIFACT_DIR/remote-checkout-gates.stderr" <<<"$script"
   local rc=$?
