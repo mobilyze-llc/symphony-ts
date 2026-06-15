@@ -134,6 +134,54 @@ describe("prompt builder", () => {
     expect(explicitNull).toBe("no-acs");
   });
 
+  it("renders comment_deltas with an empty-array default under strictVariables", async () => {
+    const prompt = await renderPrompt({
+      workflow: {
+        promptTemplate:
+          "{% if comment_deltas.size == 0 %}no-deltas{% endif %}|{{ implementation_comment_context.comments.size }}",
+      },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+    });
+
+    expect(prompt).toBe("no-deltas|0");
+  });
+
+  it("renders structured implementation comment deltas on first-turn prompts", async () => {
+    const prompt = await renderPrompt({
+      workflow: {
+        promptTemplate: [
+          "cutoff={{ implementation_comment_context.cutoff }}",
+          "{% for delta in comment_deltas %}{{ delta.id }}:{{ delta.authorClass }}:{{ delta.disposition }}:{{ delta.body }}{% endfor %}",
+        ].join("\n"),
+      },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      implementationCommentDeltas: {
+        sourceIntentHash: "source-hash",
+        cutoff: "2026-03-06T00:10:00.000Z",
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+        comments: [
+          {
+            id: "comment-2",
+            authorClass: "service_account",
+            createdAt: "2026-03-06T00:15:00.000Z",
+            updatedAt: "2026-03-06T00:15:00.000Z",
+            effectiveAt: "2026-03-06T00:15:00.000Z",
+            disposition: "post_cutoff",
+            body: "Agent follow-up",
+          },
+        ],
+      },
+    });
+
+    expect(prompt).toContain("cutoff=2026-03-06T00:10:00.000Z");
+    expect(prompt).toContain(
+      "comment-2:service_account:post_cutoff:Agent follow-up",
+    );
+  });
+
   it("uses the rendered workflow prompt for the first turn and continuation guidance after that", async () => {
     const first = await buildTurnPrompt({
       workflow: {
@@ -274,6 +322,66 @@ describe("prompt builder", () => {
     expect(prompt).toContain("zsh-safe");
     expect(prompt).toContain("cmd_status");
     expect(prompt).toContain("[STAGE_COMPLETE]");
+  });
+
+  it("includes structured comment deltas in continuation prompts", () => {
+    const prompt = buildContinuationPrompt({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      turnNumber: 2,
+      maxTurns: 5,
+      stageName: "implement",
+      implementationCommentDeltas: {
+        sourceIntentHash: "source-hash",
+        cutoff: "2026-03-06T00:10:00.000Z",
+        requiresOperatorContext: false,
+        operatorContextReason: null,
+        comments: [
+          {
+            id: "comment-3",
+            authorClass: "operator",
+            createdAt: "2026-03-06T00:00:00.000Z",
+            updatedAt: "2026-03-06T00:00:00.000Z",
+            effectiveAt: "2026-03-06T00:00:00.000Z",
+            disposition: "carried_forward",
+            body: "Keep this operator directive live.",
+          },
+        ],
+      },
+    });
+
+    expect(prompt).toContain(
+      "Implementation comment deltas since canonical spec review:",
+    );
+    expect(prompt).toContain("Review cutoff: 2026-03-06T00:10:00.000Z.");
+    expect(prompt).toContain(
+      "comment-3 | author=operator | disposition=carried_forward",
+    );
+    expect(prompt).not.toContain("full historical comment thread");
+  });
+
+  it("prepends an operator-context guard when comment dispositions are uncited", async () => {
+    const prompt = await renderPrompt({
+      workflow: {
+        promptTemplate: "Implement {{ issue.identifier }}",
+      },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      implementationCommentDeltas: {
+        sourceIntentHash: "source-hash",
+        cutoff: "2026-03-06T00:10:00.000Z",
+        requiresOperatorContext: true,
+        operatorContextReason: "comment-4 is uncited.",
+        comments: [],
+      },
+    });
+
+    expect(prompt).toContain(
+      "Implementation comment delta guard requires operator context.",
+    );
+    expect(prompt).toContain("Reason: comment-4 is uncited.");
+    expect(prompt).toContain("Do not implement.");
+    expect(prompt).toContain("Implement ABC-123");
   });
 
   it("wraps continuation prompts with full-mode PR allowance but merge/bypass denials", () => {

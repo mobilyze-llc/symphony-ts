@@ -16,6 +16,10 @@ import { promisify } from "node:util";
 import { runAcGate } from "../agent/ac-gate.js";
 import { runPauseTriage } from "../agent/pause-triage.js";
 import type {
+  ImplementationCommentDelta,
+  ImplementationCommentDeltaContext,
+} from "../agent/prompt-builder.js";
+import type {
   AgentRunInput,
   AgentRunResult,
   AgentRunnerEvent,
@@ -140,8 +144,19 @@ import type {
   ProcessIdentitySnapshot,
   ProcessTreeTerminationResult,
 } from "../shared/process-tree.js";
+import {
+  DEFAULT_SPEC_REVIEW_COMMENT_CONFIG,
+  type SpecReviewCommentDisposition,
+} from "../spec-review/spec-review.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
-import { LinearTrackerClient } from "../tracker/linear-client.js";
+import {
+  type LinearIssueComment,
+  LinearTrackerClient,
+} from "../tracker/linear-client.js";
+import {
+  classifyActor,
+  normalizeOperatorConfig,
+} from "../tracker/ticket-feature.js";
 import type { IssueTracker } from "../tracker/tracker.js";
 import { getDisplayVersion } from "../version.js";
 import { WorkspaceHookRunner } from "../workspace/hooks.js";
@@ -3400,6 +3415,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         stageName,
         reworkCount,
         acceptanceCriteria,
+        implementationCommentDeltas:
+          await this.buildImplementationCommentDeltaContext(issue, stageName),
         budgetMultiplier: Math.max(1, budgetMultiplier),
         reasoningEffort,
         modePolicy: createModeScopedPermissionPolicy({
@@ -3448,6 +3465,99 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     return {
       workerHandle: execution,
       monitorHandle: completion,
+    };
+  }
+
+  private async buildImplementationCommentDeltaContext(
+    issue: Issue,
+    stageName: string | null,
+  ): Promise<ImplementationCommentDeltaContext | null> {
+    if (stageName !== "implement") {
+      return null;
+    }
+    if (!(this.tracker instanceof LinearTrackerClient)) {
+      return null;
+    }
+
+    const review = findLatestValidSpecReview(
+      this.orchestrator.getState().dispatcherRunJournal,
+      issue.id,
+    );
+    if (review === null || review.completedAt === null) {
+      return null;
+    }
+
+    let comments: LinearIssueComment[];
+    try {
+      comments = await this.tracker.fetchIssueComments(issue.id, {
+        maxPages: DEFAULT_SPEC_REVIEW_COMMENT_CONFIG.maxCommentPages,
+      });
+    } catch (error) {
+      console.warn(
+        `[orchestrator] ${issue.identifier}: failed to fetch implementation comment deltas: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return null;
+    }
+
+    const accountSets = normalizeOperatorConfig(this.config.operatorAnchors);
+    const dispositionById = new Map(
+      review.commentDispositions.map((record) => [
+        record.id,
+        record.disposition,
+      ]),
+    );
+    const cutoffMs = Date.parse(review.completedAt);
+    let operatorContextReason: string | null = null;
+
+    const deltas: ImplementationCommentDelta[] = [];
+    for (const comment of comments) {
+      const effectiveAt = getEffectiveCommentTimestamp(comment);
+      const effectiveMs = Date.parse(effectiveAt);
+      const actor = comment.botActor ?? comment.user;
+      const authorClass = classifyActor(actor, accountSets);
+      const disposition = dispositionById.get(comment.id);
+      const isPreCutoff =
+        !Number.isNaN(effectiveMs) &&
+        !Number.isNaN(cutoffMs) &&
+        effectiveMs <= cutoffMs;
+      if (
+        disposition === "uncited" &&
+        isPreCutoff &&
+        (authorClass === "operator" || authorClass === "unknown")
+      ) {
+        operatorContextReason = `${comment.id} is an uncited ${authorClass} comment at or before the spec-review cutoff.`;
+      }
+      if (disposition === "carried_forward") {
+        deltas.push({
+          id: comment.id,
+          authorClass,
+          createdAt: comment.createdAt,
+          updatedAt: comment.updatedAt,
+          effectiveAt,
+          disposition: "carried_forward",
+          body: comment.body,
+        });
+        continue;
+      }
+      if (!Number.isNaN(effectiveMs) && effectiveMs > cutoffMs) {
+        deltas.push({
+          id: comment.id,
+          authorClass,
+          createdAt: comment.createdAt,
+          updatedAt: comment.updatedAt,
+          effectiveAt,
+          disposition: "post_cutoff",
+          body: comment.body,
+        });
+      }
+    }
+
+    return {
+      sourceIntentHash: review.sourceIntentHash,
+      cutoff: review.completedAt,
+      requiresOperatorContext: operatorContextReason !== null,
+      operatorContextReason,
+      comments: deltas,
     };
   }
 
@@ -6266,6 +6376,92 @@ function formatWorkerErrorReason(error: unknown): string {
   const message = toErrorMessage(error);
   const code = extractErrorCode(error);
   return code === null ? message : `${code}: ${message}`;
+}
+
+function findLatestValidSpecReview(
+  journal: readonly DispatcherRunJournalEntry[],
+  issueId: string,
+): {
+  sourceIntentHash: string | null;
+  completedAt: string | null;
+  commentDispositions: Array<{
+    id: string;
+    disposition: SpecReviewCommentDisposition;
+  }>;
+} | null {
+  let latest: DispatcherRunJournalEntry | null = null;
+  for (const entry of journal) {
+    if (
+      entry.kind !== "spec_review_result" ||
+      entry.issueId !== issueId ||
+      entry.metadata.readiness_state !== "valid"
+    ) {
+      continue;
+    }
+    if (latest === null || entry.sequence > latest.sequence) {
+      latest = entry;
+    }
+  }
+  if (latest === null) {
+    return null;
+  }
+  return {
+    sourceIntentHash: stringMetadata(latest.metadata.source_intent_hash),
+    completedAt:
+      stringMetadata(latest.metadata.completed_at) ?? latest.timestamp,
+    commentDispositions: parseSpecReviewCommentDispositions(
+      latest.metadata.comment_dispositions,
+    ),
+  };
+}
+
+function parseSpecReviewCommentDispositions(
+  value: unknown,
+): Array<{ id: string; disposition: SpecReviewCommentDisposition }> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry) => {
+    if (
+      typeof entry !== "object" ||
+      entry === null ||
+      !("id" in entry) ||
+      !("disposition" in entry) ||
+      typeof entry.id !== "string" ||
+      typeof entry.disposition !== "string" ||
+      !isSpecReviewCommentDisposition(entry.disposition)
+    ) {
+      return [];
+    }
+    return [{ id: entry.id, disposition: entry.disposition }];
+  });
+}
+
+function isSpecReviewCommentDisposition(
+  value: string,
+): value is SpecReviewCommentDisposition {
+  return (
+    value === "incorporated" ||
+    value === "superseded" ||
+    value === "carried_forward" ||
+    value === "uncited"
+  );
+}
+
+function getEffectiveCommentTimestamp(comment: LinearIssueComment): string {
+  const created = Date.parse(comment.createdAt);
+  const updated = Date.parse(comment.updatedAt);
+  if (Number.isNaN(created)) {
+    return comment.updatedAt;
+  }
+  if (Number.isNaN(updated)) {
+    return comment.createdAt;
+  }
+  return updated > created ? comment.updatedAt : comment.createdAt;
+}
+
+function stringMetadata(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
 }
 
 function delay(ms: number): Promise<void> {
