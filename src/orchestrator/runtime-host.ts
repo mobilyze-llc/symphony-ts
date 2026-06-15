@@ -174,6 +174,7 @@ import type {
   StopRequest,
   StopSignalDelivery,
   StopSignalDeliveryAttempt,
+  StopSignalStatus,
   SupervisionResteerRequest,
   TimerScheduler,
 } from "./core.js";
@@ -237,6 +238,7 @@ export interface WorkerStopSignalDeliveryInput {
   reason: StopReason;
   workspacePath: string | null;
   trackedProcessPid: number | null;
+  trackedProcessIdentity?: ProcessIdentitySnapshot | null;
   attemptedAt: Date;
 }
 
@@ -276,6 +278,7 @@ type ProcessCommandReader = (pid: number) => Promise<string | null>;
 interface TrackedWorkerStopSignalDeliveryOptions {
   readProcessCwd?: ProcessCwdReader;
   readProcessCommand?: ProcessCommandReader;
+  readProcessIdentity?: ProcessIdentityReader;
   sendSignal?: ProcessSignalSender;
   emergencyStopGraceMs?: number;
 }
@@ -375,6 +378,7 @@ interface WorkerExecution {
   issueIdentifier: string;
   stageName: string | null;
   codexAppServerPid: number | null;
+  codexAppServerIdentity: ProcessIdentitySnapshot | null;
   controller: AbortController;
   completion: Promise<void>;
   stopRequest: StopRequest | null;
@@ -626,6 +630,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       const execution = this.workers.get(event.issueId);
       if (execution !== undefined) {
         execution.codexAppServerPid = parseProcessId(event.codexAppServerPid);
+        execution.codexAppServerIdentity =
+          event.codexAppServerIdentity === undefined
+            ? null
+            : event.codexAppServerIdentity;
       }
       void this.enqueue(async () => {
         const codexEventResult = this.orchestrator.onCodexEvent({
@@ -3511,6 +3519,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       issueIdentifier: issue.identifier,
       stageName,
       codexAppServerPid: null,
+      codexAppServerIdentity: null,
       controller,
       stopRequest: null,
       lastResult: null,
@@ -3736,6 +3745,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       reason: input.reason,
       workspacePath,
       trackedProcessPid: execution.codexAppServerPid,
+      trackedProcessIdentity: execution.codexAppServerIdentity,
       attemptedAt: this.now(),
     });
     await this.logStopSignalDelivery(delivery, execution);
@@ -6008,6 +6018,69 @@ export async function deliverTrackedWorkerStopSignal(
     };
   }
 
+  if (
+    input.trackedProcessIdentity !== undefined &&
+    input.trackedProcessIdentity !== null &&
+    input.trackedProcessIdentity.pid === input.trackedProcessPid
+  ) {
+    const termination = await terminateDetachedPidTreeDefault(
+      input.trackedProcessPid,
+      {
+        expectedIdentity: input.trackedProcessIdentity,
+        probeIdentity:
+          options.readProcessIdentity ?? readProcessIdentityDefault,
+        graceMs: options.emergencyStopGraceMs ?? EMERGENCY_STOP_SIGNAL_GRACE_MS,
+        ...(options.sendSignal === undefined
+          ? {}
+          : {
+              kill: (pid, signal) => {
+                if (typeof signal === "string") {
+                  options.sendSignal?.(pid, signal as NodeJS.Signals);
+                }
+                return true;
+              },
+            }),
+      },
+    );
+    const identityWarning = stopSignalDeliveryWarningForIdentity(termination);
+    if (identityWarning !== null) {
+      return {
+        status: "not_attempted",
+        reason: input.reason,
+        attemptedAt: input.attemptedAt.toISOString(),
+        workspacePath: input.workspacePath,
+        attempts: [],
+        warning: `Tracked process PID ${input.trackedProcessPid} was not signaled: ${identityWarning}`,
+      };
+    }
+
+    const attempt = stopSignalDeliveryAttemptFromTermination(
+      input.trackedProcessPid,
+      termination,
+    );
+    const attempts = [attempt];
+    const failedAttempts = getFailedStopSignalDeliveryAttempts(attempts);
+    const status =
+      deriveAttemptedStopSignalDeliveryStatus(attempts) ?? "not_attempted";
+    return {
+      status,
+      reason: input.reason,
+      attemptedAt: input.attemptedAt.toISOString(),
+      workspacePath: input.workspacePath,
+      attempts,
+      warning:
+        failedAttempts.length === 0
+          ? null
+          : input.reason === "emergency_stop"
+            ? `Emergency stop signal proof failed for ${failedAttempts.length} worker process target(s): ${failedAttempts
+                .map((failedAttempt) => `pid=${failedAttempt.pid}`)
+                .join(", ")}`
+            : `SIGTERM and SIGKILL both failed for ${failedAttempts.length} worker process target(s): ${failedAttempts
+                .map((failedAttempt) => `pid=${failedAttempt.pid}`)
+                .join(", ")}`,
+    };
+  }
+
   const ownership = await verifyTrackedProcessSignalTarget({
     pid: input.trackedProcessPid,
     workspacePath: input.workspacePath,
@@ -6128,6 +6201,78 @@ export async function verifyTrackedProcessSignalTarget(input: {
   return { verified: true, failureKind: null, warning: null };
 }
 
+function stopSignalDeliveryWarningForIdentity(
+  termination: ProcessTreeTerminationResult,
+): string | null {
+  switch (termination.identityStatus) {
+    case "missing_expected_identity":
+      return "captured process identity is missing";
+    case "identity_inconclusive":
+      return "current process identity could not be verified";
+    case "identity_mismatch":
+      return "current process identity does not match captured app-server identity";
+    case "not_checked":
+    case "matched":
+    case "absent":
+    case undefined:
+      return null;
+  }
+  return null;
+}
+
+function stopSignalDeliveryAttemptFromTermination(
+  pid: number,
+  termination: ProcessTreeTerminationResult,
+): StopSignalDeliveryAttempt {
+  return {
+    pid,
+    processGroupId: termination.processGroupId ?? null,
+    sigterm: stopSignalStatusFromProcessDelivery(termination.sigterm, {
+      absent: termination.identityStatus === "absent",
+      failed: false,
+    }),
+    sigkill: stopSignalKillStatusFromProcessDelivery(termination),
+  };
+}
+
+function stopSignalStatusFromProcessDelivery(
+  delivery: ProcessTreeTerminationResult["sigterm"] | null | undefined,
+  fallback: { absent: boolean; failed: boolean },
+): Exclude<StopSignalStatus, "not_attempted"> {
+  if (delivery === undefined || delivery === null) {
+    return fallback.absent
+      ? "already_exited"
+      : fallback.failed
+        ? "failed"
+        : "delivered";
+  }
+  switch (delivery.status) {
+    case "delivered":
+      return "delivered";
+    case "absent":
+      return "already_exited";
+    case "failed":
+      return "failed";
+  }
+}
+
+function stopSignalKillStatusFromProcessDelivery(
+  termination: ProcessTreeTerminationResult,
+): StopSignalStatus {
+  if (termination.sigkill === undefined || termination.sigkill === null) {
+    return termination.postGraceIdentityStatus !== undefined &&
+      termination.postGraceIdentityStatus !== null &&
+      termination.postGraceIdentityStatus !== "absent" &&
+      termination.postGraceIdentityStatus !== "matched"
+      ? "failed"
+      : "not_attempted";
+  }
+  return stopSignalStatusFromProcessDelivery(termination.sigkill, {
+    absent: false,
+    failed: false,
+  });
+}
+
 export function signalPid(
   pid: number,
   signal: NodeJS.Signals,
@@ -6142,7 +6287,7 @@ export function signalPid(
     return { status: "delivered", processGroupId: null };
   } catch (error) {
     return {
-      status: isNoSuchProcess(error) ? "delivered" : "failed",
+      status: isNoSuchProcess(error) ? "already_exited" : "failed",
       processGroupId: null,
     };
   }

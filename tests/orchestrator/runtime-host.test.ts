@@ -6046,6 +6046,8 @@ describe("pipeline notifications", () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
     let trackedProcessPid: number | null | undefined;
+    let trackedProcessIdentity: ProcessIdentitySnapshot | null | undefined;
+    const identity = createProcessIdentity(4242);
     const host = new OrchestratorRuntimeHost({
       config: createConfig(),
       tracker,
@@ -6055,6 +6057,7 @@ describe("pipeline notifications", () => {
       },
       deliverWorkerStopSignal: async (input): Promise<StopSignalDelivery> => {
         trackedProcessPid = input.trackedProcessPid;
+        trackedProcessIdentity = input.trackedProcessIdentity;
         return {
           status: "delivered",
           reason: input.reason,
@@ -6082,6 +6085,7 @@ describe("pipeline notifications", () => {
       event: "session_started",
       timestamp: "2026-03-06T00:00:02.000Z",
       codexAppServerPid: "4242",
+      codexAppServerIdentity: identity,
       sessionId: "thread-1-turn-1",
       threadId: "thread-1",
       turnId: "turn-1",
@@ -6092,6 +6096,7 @@ describe("pipeline notifications", () => {
     await host.waitForIdle();
 
     expect(trackedProcessPid).toBe(4242);
+    expect(trackedProcessIdentity).toEqual(identity);
     expect(stopResponse.signal_delivery).toMatchObject({
       status: "delivered",
       attempts: [
@@ -6382,7 +6387,7 @@ describe("pipeline notifications", () => {
     });
 
     expect(result).toEqual({
-      status: "delivered",
+      status: "already_exited",
       processGroupId: null,
     });
   });
@@ -6437,6 +6442,80 @@ describe("pipeline notifications", () => {
       ],
     });
     expect(calls).toEqual([[4242, "SIGTERM"]]);
+  });
+
+  it("uses captured process identity when cwd ownership cannot be read", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const identity = createProcessIdentity(4242);
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "emergency_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        trackedProcessIdentity: identity,
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        emergencyStopGraceMs: 0,
+        readProcessCwd: async () => null,
+        readProcessCommand: async () => null,
+        readProcessIdentity: async () => identity,
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "delivered",
+      warning: null,
+      attempts: [
+        {
+          pid: 4242,
+          processGroupId: 4242,
+          sigterm: "delivered",
+          sigkill: "delivered",
+        },
+      ],
+    });
+    expect(calls).toEqual([
+      [-4242, "SIGTERM"],
+      [-4242, "SIGKILL"],
+    ]);
+  });
+
+  it("does not signal when captured process identity no longer matches", async () => {
+    const calls: Array<[number, NodeJS.Signals]> = [];
+    const delivery = await deliverTrackedWorkerStopSignal(
+      {
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        reason: "emergency_stop",
+        workspacePath: "/tmp/workspaces/1",
+        trackedProcessPid: 4242,
+        trackedProcessIdentity: createProcessIdentity(4242),
+        attemptedAt: new Date("2026-03-06T00:00:05.000Z"),
+      },
+      {
+        emergencyStopGraceMs: 0,
+        readProcessCwd: async () => null,
+        readProcessCommand: async () => null,
+        readProcessIdentity: async () => createProcessIdentity(4243),
+        sendSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+        },
+      },
+    );
+
+    expect(delivery).toMatchObject({
+      status: "not_attempted",
+      attempts: [],
+      warning:
+        "Tracked process PID 4242 was not signaled: current process identity does not match captured app-server identity",
+    });
+    expect(calls).toEqual([]);
   });
 
   it("escalates emergency-stop delivery to SIGKILL after the grace window", async () => {

@@ -279,11 +279,16 @@ export interface StopRequest {
 
 export type StopSignalDeliveryStatus =
   | "not_attempted"
+  | "already_exited"
   | "delivered"
   | "partial"
   | "failed";
 
-export type StopSignalStatus = "delivered" | "failed" | "not_attempted";
+export type StopSignalStatus =
+  | "delivered"
+  | "already_exited"
+  | "failed"
+  | "not_attempted";
 
 export interface StopSignalDeliveryAttempt {
   pid: number;
@@ -12657,13 +12662,20 @@ function isEmergencyStopTerminationConfirmed(value: unknown): boolean {
     return false;
   }
   return (
-    value.status === "delivered" &&
-    value.attempts.length > 0 &&
-    value.attempts.every(
-      (attempt) =>
-        attempt.sigkill !== "failed" &&
-        (attempt.sigterm === "delivered" || attempt.sigkill === "delivered"),
-    )
+    (value.status === "delivered" &&
+      value.attempts.length > 0 &&
+      value.attempts.every(
+        (attempt) =>
+          attempt.sigkill !== "failed" &&
+          (attempt.sigterm === "delivered" || attempt.sigkill === "delivered"),
+      )) ||
+    (value.status === "already_exited" &&
+      value.attempts.length > 0 &&
+      value.attempts.every(
+        (attempt) =>
+          attempt.sigterm === "already_exited" ||
+          attempt.sigkill === "already_exited",
+      ))
   );
 }
 
@@ -12672,6 +12684,7 @@ function isStopSignalDeliveryStatus(
 ): value is StopSignalDeliveryStatus {
   return (
     value === "not_attempted" ||
+    value === "already_exited" ||
     value === "delivered" ||
     value === "partial" ||
     value === "failed"
@@ -12702,7 +12715,8 @@ function isStopSignalDeliveryAttempt(
   ) {
     return false;
   }
-  return candidate.sigterm === "delivered"
+  return candidate.sigterm === "delivered" ||
+    candidate.sigterm === "already_exited"
     ? true
     : candidate.sigkill !== "not_attempted";
 }
@@ -12717,12 +12731,17 @@ function isSignalTargetId(value: unknown): value is number {
 function isAttemptedStopSignalStatus(
   value: unknown,
 ): value is Exclude<StopSignalStatus, "not_attempted"> {
-  return value === "delivered" || value === "failed";
+  return (
+    value === "delivered" || value === "already_exited" || value === "failed"
+  );
 }
 
 function isStopSignalStatus(value: unknown): value is StopSignalStatus {
   return (
-    value === "delivered" || value === "failed" || value === "not_attempted"
+    value === "delivered" ||
+    value === "already_exited" ||
+    value === "failed" ||
+    value === "not_attempted"
   );
 }
 
@@ -12751,7 +12770,12 @@ export function deriveAttemptedStopSignalDeliveryStatus(
   }
   const failedAttempts = getFailedStopSignalDeliveryAttempts(attempts);
   if (failedAttempts.length === 0) {
-    return "delivered";
+    return attempts.some(
+      (attempt) =>
+        attempt.sigterm === "delivered" || attempt.sigkill === "delivered",
+    )
+      ? "delivered"
+      : "already_exited";
   }
   return failedAttempts.length === attempts.length ? "failed" : "partial";
 }

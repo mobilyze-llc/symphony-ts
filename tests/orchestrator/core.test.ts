@@ -2766,6 +2766,110 @@ describe("orchestrator core", () => {
     ).toBe(false);
   });
 
+  it("derives already-exited stop-signal delivery status from benign absent attempts", () => {
+    const alreadyExitedAttempts = [
+      {
+        pid: 4242,
+        processGroupId: null,
+        sigterm: "already_exited" as const,
+        sigkill: "not_attempted" as const,
+      },
+    ];
+    const deliveredAfterAlreadyExited = [
+      ...alreadyExitedAttempts,
+      {
+        pid: 4243,
+        processGroupId: 4243,
+        sigterm: "already_exited" as const,
+        sigkill: "delivered" as const,
+      },
+    ];
+    const failedAfterAlreadyExited = [
+      ...alreadyExitedAttempts,
+      {
+        pid: 4244,
+        processGroupId: 4244,
+        sigterm: "already_exited" as const,
+        sigkill: "failed" as const,
+      },
+    ];
+
+    expect(deriveAttemptedStopSignalDeliveryStatus(alreadyExitedAttempts)).toBe(
+      "already_exited",
+    );
+    expect(
+      deriveAttemptedStopSignalDeliveryStatus(deliveredAfterAlreadyExited),
+    ).toBe("delivered");
+    expect(
+      deriveAttemptedStopSignalDeliveryStatus(failedAfterAlreadyExited),
+    ).toBe("partial");
+    expect(
+      getFailedStopSignalDeliveryAttempts(failedAfterAlreadyExited),
+    ).toEqual([failedAfterAlreadyExited[1]]);
+    expect(
+      isStopSignalDelivery({
+        status: "already_exited",
+        reason: "emergency_stop",
+        attemptedAt: "2026-03-06T00:00:05.000Z",
+        workspacePath: "/tmp/workspaces/1",
+        attempts: alreadyExitedAttempts,
+        warning: null,
+      }),
+    ).toBe(true);
+  });
+
+  it("records already-exited emergency-stop termination proof as confirmed", async () => {
+    const stopRunningIssue = vi.fn(async () => ({
+      status: "already_exited" as const,
+      reason: "emergency_stop" as const,
+      attemptedAt: "2026-03-06T00:00:05.000Z",
+      workspacePath: "/tmp/workspaces/1",
+      attempts: [
+        {
+          pid: 4242,
+          processGroupId: 4242,
+          sigterm: "already_exited" as const,
+          sigkill: "not_attempted" as const,
+        },
+      ],
+      warning: null,
+    }));
+    const orchestrator = createOrchestrator({ stopRunningIssue });
+
+    await orchestrator.pollTick();
+    const stop = await orchestrator.requestEmergencyStop({
+      actor: { kind: "operator", host: "pro14", session: "symphonyctl" },
+      reason: { class: "operator_emergency_stop", human: "stop now" },
+    });
+
+    expect(stop.stopRequests[0]?.signalDelivery).toMatchObject({
+      status: "already_exited",
+      attempts: [
+        {
+          pid: 4242,
+          sigterm: "already_exited",
+          sigkill: "not_attempted",
+        },
+      ],
+    });
+    expect(orchestrator.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "killed_mid_run",
+    });
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.findLast(
+          (entry) =>
+            entry.kind === "hard_stop_trigger" &&
+            entry.issueId === "1" &&
+            entry.metadata.reason === "emergency_stop",
+        )?.metadata,
+    ).toMatchObject({
+      emergencyStopTerminationConfirmed: true,
+      signalDelivery: expect.objectContaining({ status: "already_exited" }),
+    });
+  });
+
   it("does not record a manual-stop resume guard when the stop lease is already active", async () => {
     const timers = createFakeTimerScheduler();
     const stopRunningIssue = vi.fn();

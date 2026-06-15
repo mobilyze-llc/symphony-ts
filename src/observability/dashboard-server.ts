@@ -180,15 +180,20 @@ export interface StopIssueResponse {
 }
 
 export interface StopSignalDeliveryResponse {
-  status: "not_attempted" | "delivered" | "partial" | "failed";
+  status:
+    | "not_attempted"
+    | "already_exited"
+    | "delivered"
+    | "partial"
+    | "failed";
   reason: string;
   attempted_at: string;
   workspace_path: string | null;
   attempts: Array<{
     pid: number;
     process_group_id?: number;
-    sigterm: "delivered" | "failed";
-    sigkill: "delivered" | "failed" | "not_attempted";
+    sigterm: "delivered" | "already_exited" | "failed";
+    sigkill: "delivered" | "already_exited" | "failed" | "not_attempted";
   }>;
   warning: string | null;
 }
