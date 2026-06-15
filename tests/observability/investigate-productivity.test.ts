@@ -46,7 +46,7 @@ function stageEntry(
         maxTotalTokensDelta: 80_000,
       },
       turns: 2,
-      outcome: "completed",
+      outcome: "normal",
       ...metadataOverrides,
     },
     ...entryOverrides,
@@ -73,7 +73,7 @@ function legacyStageEntry(sequence: number): DispatcherRunJournalEntry {
       durationMs: 30_000,
       totalTokens: 50_000,
       turns: 1,
-      outcome: "completed",
+      outcome: "normal",
     },
   };
 }
@@ -120,7 +120,7 @@ describe("investigate productivity report", () => {
           totalTokens: 20_000,
           cacheReadTokens: 10_000,
           turns: 1,
-          outcome: "failed",
+          outcome: "error",
         },
       }),
     ]);
@@ -154,5 +154,57 @@ describe("investigate productivity report", () => {
     });
     expect(legacyUnit?.legacyReasons).toContain("missing_cacheReadTokens");
     expect(legacyUnit?.legacyReasons).toContain("missing_usageEventCadence");
+
+    const firstIssue = report.issues.find(
+      (issue) => issue.issueIdentifier === "SYMPH-700",
+    );
+    expect(firstIssue).toMatchObject({
+      completedUnits: 1,
+      failedUnits: 1,
+      retryAfterWorkpadCount: 1,
+    });
+  });
+
+  it("returns empty rollups for empty or non-investigate journals", () => {
+    expect(buildInvestigateProductivityReport([])).toMatchObject({
+      totalUnits: 0,
+      medianCompletedWorkpadCostUsd: null,
+      p90CompletedWorkpadCostUsd: null,
+      retryAfterWorkpad: {
+        count: 0,
+        totalTokens: 0,
+        billableTokens: 0,
+        estimatedCostUsd: 0,
+      },
+    });
+
+    expect(
+      buildInvestigateProductivityReport([
+        stageEntry(1, { metadata: { stageName: "implement" } }),
+      ]),
+    ).toMatchObject({
+      totalUnits: 0,
+      completedWorkpads: 0,
+    });
+  });
+
+  it("supports custom cost config and stage predicates", () => {
+    const units = collectInvestigateProductivityUnits(
+      [stageEntry(1, { metadata: { stageName: "plan" } })],
+      {
+        stagePredicates: ["plan"],
+        costConfig: {
+          estimatedCostPer1kTokensUsd: 0.01,
+          cachedTokenCostRatio: 0,
+        },
+      },
+    );
+
+    expect(units).toHaveLength(1);
+    expect(units[0]).toMatchObject({
+      stageName: "plan",
+      billableTokens: 60_000,
+      estimatedCostUsd: 0.6,
+    });
   });
 });

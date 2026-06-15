@@ -7,6 +7,7 @@ import type {
   DispatcherRunJournalEntry,
   StageRecord,
 } from "../domain/model.js";
+import type { HardStopOutcome } from "../policy/hard-stops.js";
 import {
   computeBillableTokens,
   estimateCostUsd,
@@ -73,6 +74,25 @@ export interface InvestigateProductivityReport {
 
 export const DEFAULT_INVESTIGATE_STAGE_PREFIXES = ["investigate"] as const;
 
+type StageOutcome =
+  | "normal"
+  | "failed_to_start"
+  | "timed_out"
+  | "error"
+  | "input_required"
+  | "restart_interrupted"
+  | HardStopOutcome
+  | (string & {});
+
+const FAILURE_STAGE_OUTCOMES = new Set<StageOutcome>([
+  "failed_to_start",
+  "timed_out",
+  "error",
+  "STALLED",
+  "PAUSED-budget",
+  "BLOCKED-needs-human",
+]);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -117,6 +137,14 @@ export function isInvestigateStage(
   return prefixes.some(
     (prefix) => stageName === prefix || stageName.startsWith(`${prefix}_`),
   );
+}
+
+export function isCompletedWorkpadOutcome(outcome: string): boolean {
+  return outcome === "normal";
+}
+
+export function isFailedStageOutcome(outcome: string): boolean {
+  return FAILURE_STAGE_OUTCOMES.has(outcome);
 }
 
 function legacyReasonsForMetadata(metadata: Record<string, unknown>): string[] {
@@ -239,7 +267,7 @@ export function collectInvestigateProductivityUnits(
   const firstCompletedSequenceByIssue = new Map<string, number>();
   for (const { entry, stageRecord } of rows) {
     if (
-      stageRecord.outcome === "completed" &&
+      isCompletedWorkpadOutcome(stageRecord.outcome) &&
       !firstCompletedSequenceByIssue.has(entry.issueId)
     ) {
       firstCompletedSequenceByIssue.set(entry.issueId, entry.sequence);
@@ -311,11 +339,11 @@ function summarizeIssues(
     existing.totalTokens += unit.totalTokens;
     existing.billableTokens += unit.billableTokens;
     existing.estimatedCostUsd += unit.estimatedCostUsd;
-    if (unit.outcome === "completed") {
+    if (isCompletedWorkpadOutcome(unit.outcome)) {
       existing.completedUnits += 1;
       existing.firstCompletedAt ??= unit.timestamp;
     }
-    if (unit.outcome === "failed") {
+    if (isFailedStageOutcome(unit.outcome)) {
       existing.failedUnits += 1;
     }
     if (unit.retryAfterWorkpad) {
@@ -362,7 +390,7 @@ export function buildInvestigateProductivityReport(
   const firstCompletedByIssue = new Map<string, InvestigateProductivityUnit>();
   for (const unit of units) {
     if (
-      unit.outcome !== "completed" ||
+      !isCompletedWorkpadOutcome(unit.outcome) ||
       firstCompletedByIssue.has(unit.issueId)
     ) {
       continue;

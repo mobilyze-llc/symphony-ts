@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { writeFileSync } from "node:fs";
+import { realpathSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { readDispatcherRunJournal } from "../logging/run-journal.js";
 import { buildInvestigateProductivityReport } from "../observability/investigate-productivity.js";
@@ -98,6 +99,33 @@ export async function runInvestigateProductivityReportCli(
   return 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
-  process.exitCode = await runInvestigateProductivityReportCli();
+export function isDirectRun(
+  importMetaUrl: string,
+  argvPath: string | undefined,
+): boolean {
+  if (argvPath === undefined) {
+    return false;
+  }
+  try {
+    return importMetaUrl === pathToFileURL(realpathSync(argvPath)).href;
+  } catch {
+    return false;
+  }
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+if (isDirectRun(import.meta.url, process.argv[1])) {
+  runInvestigateProductivityReportCli()
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((error) => {
+      process.stderr.write(
+        `symphony-investigate-productivity-report failed: ${formatError(error)}\n`,
+      );
+      process.exitCode = 1;
+    });
 }
