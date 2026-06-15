@@ -46,7 +46,7 @@ Read these files only when the workflow asks for them:
 | `templates/cross-exam-opus-prompt.md` | Opus Phase 2 cross-exam prompt for Pi findings | During Phase 2 setup |
 | `templates/council-report.md` | Phase 3 report format | During triage |
 | `templates/cycle-report.md` | Final cycle summary format | During closeout |
-| `scripts/assert-clean-pass.py` | Executable closeout assertion over PR/diff provenance and clean-PASS artifacts | During Setup and Closeout |
+| `scripts/assert-clean-pass.py` | Executable setup and closeout assertion over PR/diff provenance and clean-PASS artifacts | During Setup and Closeout |
 | `scripts/write-review-target-artifacts.py` | Executable setup helper that writes PR mode and diff provenance artifacts from `gh`, git, and base-ref facts | During Setup |
 | `scripts/smoke-clean-pass.sh` | Focused smoke matrix for clean draft, mismatch, degraded, and no-PR cases | During skill validation |
 
@@ -375,13 +375,12 @@ If the review is degraded, list staged, unstaged, and untracked-file or
 PR-detection state explicitly.
 
 After reviewer artifacts and `$COUNCIL_DIR/council-report.md` exist,
-rerun `scripts/assert-clean-pass.py` and refresh
+rerun `scripts/assert-clean-pass.py --closeout` and refresh
 `clean-pass-assertion.txt` plus
 `clean-pass-assertion-exit-code.txt`. The setup-time assertion only
 checks PR/diff provenance; the closeout assertion additionally rejects
-completed reviewer lanes whose Markdown artifact is tiny or missing the
-required review sections. Do not report a clean PASS from the
-setup-time assertion alone.
+missing, non-complete, tiny, or malformed Phase 1 reviewer artifacts.
+Do not report a clean PASS from the setup-time assertion alone.
 
 Triage process:
 
@@ -538,10 +537,12 @@ fall back to direct CLI invocations.
 - Prefer clean draft PR review for non-trivial work; dirty working-tree
   review is degraded and must document staged, unstaged, and untracked
   file handling.
-- PR-backed clean PASS requires `scripts/assert-clean-pass.py` to exit
-  0 against `$COUNCIL_DIR`. That helper reads the mechanical draft-state,
-  git-status, PR head/base, local HEAD/base, base-equivalence, and
-  provenance artifacts. The required values include
+- PR-backed clean PASS requires `scripts/assert-clean-pass.py --closeout`
+  to exit 0 against `$COUNCIL_DIR` after reviewer artifacts exist. The
+  helper reads the mechanical draft-state, git-status, PR head/base,
+  local HEAD/base, base-equivalence, provenance artifacts, and at least
+  one contract-valid completed Phase 1 reviewer artifact. The required
+  values include
   `pr-is-draft.txt=true`, `pr-mode.txt=PR-backed draft`,
   `pr-view-exit-code.txt=0`, `pr-diff-provenance.txt=match`, safe base
   equivalence, matching PR/local head SHAs, matching PR/local base SHAs,

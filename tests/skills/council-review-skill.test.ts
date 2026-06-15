@@ -45,8 +45,12 @@ function readArtifact(dir: string, name: string): string {
   return readFileSync(resolve(dir, name), "utf-8").trim();
 }
 
-function runPython(script: string, dir: string) {
-  return spawnSync("python3", [script, dir], { encoding: "utf-8" });
+function runPython(script: string, dir: string, args: string[] = []) {
+  return spawnSync("python3", [script, ...args, dir], { encoding: "utf-8" });
+}
+
+function runCloseoutAssert(dir: string) {
+  return runPython(ASSERT_CLEAN_PASS, dir, ["--closeout"]);
 }
 
 function requiredArtifactsFromAssertScript(): string[] {
@@ -337,11 +341,7 @@ describe("council-review manual skill", () => {
         assertionExit: 0,
         mode: "PR-backed draft",
         provenance: "match",
-        setup: (dir: string) => {
-          writeBaseSetupFacts(dir);
-          writeCompletedLaneStatus(dir, "phase1-opus");
-          writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
-        },
+        setup: (dir: string) => writeBaseSetupFacts(dir),
       },
       {
         assertionExit: 1,
@@ -482,7 +482,7 @@ describe("council-review manual skill", () => {
         "Codex council review ready: P1 test coverage gap + 2 P2 consistency issues identified\n",
       );
 
-      const assertion = runPython(ASSERT_CLEAN_PASS, dir);
+      const assertion = runCloseoutAssert(dir);
       expect(assertion.status).toBe(1);
       expect(assertion.stdout).toContain(
         "phase1-opus: reviewer artifact too thin",
@@ -500,8 +500,24 @@ describe("council-review manual skill", () => {
     withArtifactDir((dir) => {
       writeCleanPassArtifacts(dir);
 
-      const assertion = runPython(ASSERT_CLEAN_PASS, dir);
+      const assertion = runCloseoutAssert(dir);
       expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "at least one phase1 reviewer artifact must satisfy the closeout contract",
+      );
+    });
+  });
+
+  it("rejects orphan reviewer artifacts without completed lane status", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "phase1-opus: reviewer artifact requires complete lane status",
+      );
       expect(assertion.stdout).toContain(
         "at least one phase1 reviewer artifact must satisfy the closeout contract",
       );
@@ -514,7 +530,7 @@ describe("council-review manual skill", () => {
       writeCompletedLaneStatus(dir, "phase1-opus");
       writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
 
-      const assertion = runPython(ASSERT_CLEAN_PASS, dir);
+      const assertion = runCloseoutAssert(dir);
       expect(assertion.status).toBe(0);
       expect(assertion.stdout).toContain(
         "PASS council-review clean PASS assertion",
@@ -530,7 +546,7 @@ describe("council-review manual skill", () => {
       writeCompletedLaneStatus(dir, "phase2-opus");
       writeArtifact(dir, "phase2-opus.md", validPhase2CrossExamArtifact());
 
-      const assertion = runPython(ASSERT_CLEAN_PASS, dir);
+      const assertion = runCloseoutAssert(dir);
       expect(assertion.status).toBe(0);
       expect(assertion.stdout).toContain(
         "PASS council-review clean PASS assertion",
@@ -548,7 +564,7 @@ describe("council-review manual skill", () => {
         malformedReviewArtifactWithContractSubstrings(),
       );
 
-      const assertion = runPython(ASSERT_CLEAN_PASS, dir);
+      const assertion = runCloseoutAssert(dir);
       expect(assertion.status).toBe(1);
       expect(assertion.stdout).toContain(
         "must start with ## Verdict followed by PASS or FINDINGS",

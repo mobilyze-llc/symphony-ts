@@ -93,6 +93,10 @@ def validate_review_artifacts(artifact_dir: Path) -> list[str]:
         if not observed:
             continue
         lane_failure_count = len(failures)
+        if not completed:
+            failures.append(
+                f"{stem}: reviewer artifact requires complete lane status to count as closeout evidence"
+            )
 
         resolved_artifact_path = (
             Path(status_artifact)
@@ -146,7 +150,7 @@ def validate_review_artifacts(artifact_dir: Path) -> list[str]:
             failures.append(
                 f"{stem}: cmux CLI JSON exists but status artifact is missing"
             )
-        if len(failures) == lane_failure_count:
+        if completed and len(failures) == lane_failure_count:
             valid_lane_count += 1
 
     if valid_lane_count == 0:
@@ -158,11 +162,20 @@ def validate_review_artifacts(artifact_dir: Path) -> list[str]:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: assert-clean-pass.py COUNCIL_DIR", file=sys.stderr)
+    if len(sys.argv) not in (2, 3):
+        print("usage: assert-clean-pass.py [--closeout] COUNCIL_DIR", file=sys.stderr)
         return 2
 
-    artifact_dir = Path(sys.argv[1])
+    closeout = False
+    args = sys.argv[1:]
+    if args[0] == "--closeout":
+        closeout = True
+        args = args[1:]
+    if len(args) != 1:
+        print("usage: assert-clean-pass.py [--closeout] COUNCIL_DIR", file=sys.stderr)
+        return 2
+
+    artifact_dir = Path(args[0])
     failures = []
     missing = [name for name in REQUIRED_ARTIFACTS if not (artifact_dir / name).exists()]
 
@@ -211,7 +224,8 @@ def main() -> int:
         if not SHA_RE.fullmatch(value or ""):
             failures.append(f"{label} must be a 7-64 character hex object ID")
 
-    failures.extend(validate_review_artifacts(artifact_dir))
+    if closeout:
+        failures.extend(validate_review_artifacts(artifact_dir))
 
     if failures:
         print("FAIL council-review clean PASS assertion")
