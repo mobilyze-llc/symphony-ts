@@ -22,6 +22,8 @@ type AiSdkWarningGlobal = typeof globalThis & {
   AI_SDK_LOG_WARNINGS?: AiSdkWarningLogger;
 };
 
+let warningPolicyLock: Promise<void> = Promise.resolve();
+
 export interface LocalOpenAICompatibleProviderOptions {
   name: string;
   baseURL: string;
@@ -58,6 +60,16 @@ function isUnsupportedResponseFormatWarning(warning: AiSdkWarning): boolean {
   );
 }
 
+async function acquireWarningPolicyLock(): Promise<() => void> {
+  let releaseLock: () => void = () => undefined;
+  const previousLock = warningPolicyLock;
+  warningPolicyLock = new Promise<void>((resolve) => {
+    releaseLock = resolve;
+  });
+  await previousLock;
+  return releaseLock;
+}
+
 function formatForwardedWarning(
   warning: AiSdkWarning,
   provider: string,
@@ -76,9 +88,12 @@ function formatForwardedWarning(
 export async function withLocalJudgeAiSdkWarningPolicy<T>(
   run: () => Promise<T>,
 ): Promise<T> {
+  const releaseWarningPolicyLock = await acquireWarningPolicyLock();
   const globalRecord = globalThis as AiSdkWarningGlobal;
   const previousLogger = globalRecord.AI_SDK_LOG_WARNINGS;
 
+  // The AI SDK warning hook is process-global, so overlapping local judge calls
+  // must not interleave hook installation and restoration.
   globalRecord.AI_SDK_LOG_WARNINGS = (options: AiSdkWarningOptions) => {
     const forwardedWarnings = options.warnings.filter(
       (warning: AiSdkWarning) => !isUnsupportedResponseFormatWarning(warning),
@@ -105,5 +120,6 @@ export async function withLocalJudgeAiSdkWarningPolicy<T>(
     } else {
       globalRecord.AI_SDK_LOG_WARNINGS = previousLogger;
     }
+    releaseWarningPolicyLock();
   }
 }

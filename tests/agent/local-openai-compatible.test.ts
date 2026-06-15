@@ -76,4 +76,38 @@ describe("local OpenAI-compatible judge policy", () => {
 
     expect(globalRecord.AI_SDK_LOG_WARNINGS).toBe(previous);
   });
+
+  it("serializes overlapping warning hooks before restoring the previous hook", async () => {
+    const previous = () => undefined;
+    globalRecord.AI_SDK_LOG_WARNINGS = previous;
+
+    let releaseFirst: () => void = () => undefined;
+    let markFirstStarted: () => void = () => undefined;
+    const firstStarted = new Promise<void>((resolve) => {
+      markFirstStarted = resolve;
+    });
+    let secondStarted = false;
+
+    const first = withLocalJudgeAiSdkWarningPolicy(async () => {
+      markFirstStarted();
+      await new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+    });
+    await firstStarted;
+
+    const second = withLocalJudgeAiSdkWarningPolicy(async () => {
+      secondStarted = true;
+    });
+
+    await Promise.resolve();
+    expect(secondStarted).toBe(false);
+    expect(globalRecord.AI_SDK_LOG_WARNINGS).not.toBe(previous);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(secondStarted).toBe(true);
+    expect(globalRecord.AI_SDK_LOG_WARNINGS).toBe(previous);
+  });
 });
