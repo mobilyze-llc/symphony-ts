@@ -5,6 +5,7 @@ set -euo pipefail
 #
 # Sequence:
 #   1. fetch origin, resolve expected SHA (origin/main, or --expect)
+#      and capture the full origin/main SHA as a moving-main guard
 #   2. sync + frozen-lockfile install + build the DETACHED runtime checkout
 #      (early failure: a broken build aborts before any service downtime)
 #   3. drain gate — require running_lane_count==0 AND retrying_lane_count==0
@@ -26,6 +27,8 @@ set -euo pipefail
 #   - building the runtime checkout while the service serves the dev checkout
 #   - stash-churn conflict in the dev checkout → silent stale deploy,
 #     restart "succeeded" on the wrong SHA with no version assertion
+#   - origin/main moving after the initial fetch → stale deploy that still
+#     passes the version gate for the old SHA
 #
 # Serve checkout: the LaunchAgent plist currently points ProgramArguments and
 # WorkingDirectory at the dev checkout (/Users/ericlitman/projects/symphony-ts),
@@ -186,6 +189,10 @@ short_sha() {
   git -C "$1" rev-parse --short=7 "$2" 2>/dev/null
 }
 
+full_sha() {
+  git -C "$1" rev-parse "$2^{commit}" 2>/dev/null
+}
+
 same_path() {
   local a b
   a="$(cd "$1" 2>/dev/null && pwd -P)" || return 1
@@ -195,6 +202,27 @@ same_path() {
 
 file_size() {
   stat -f%z "$1" 2>/dev/null || echo 0
+}
+
+assert_origin_main_unchanged() {
+  local checkpoint="$1"
+
+  if [[ -n "$EXPECT_OVERRIDE" ]]; then
+    info "Skipping moving origin/main guard before $checkpoint (--expect pins ${EXPECTED_SHA})"
+    return 0
+  fi
+
+  info "Verifying origin/main has not moved before $checkpoint..."
+  git -C "$RUNTIME_CHECKOUT" fetch origin || die "git fetch failed while checking moving origin/main guard in $RUNTIME_CHECKOUT"
+
+  local current_sha
+  current_sha="$(full_sha "$RUNTIME_CHECKOUT" origin/main)" || die "Could not resolve origin/main while checking moving-main guard"
+
+  if [[ "$current_sha" != "$EXPECTED_FULL_SHA" ]]; then
+    die "origin/main moved during deploy train before $checkpoint: started at ${EXPECTED_FULL_SHA:0:12}, now ${current_sha:0:12}. Aborting instead of deploying a stale build; re-run deploy-train to deploy the new head."
+  fi
+
+  ok "origin/main unchanged (${current_sha:0:7})"
 }
 
 # Restore-on-failure: if the script dies after stopping the service, bring it
@@ -236,7 +264,10 @@ if [[ -n "$EXPECT_OVERRIDE" ]]; then
   [[ "$EXPECT_OVERRIDE" =~ ^[0-9a-f]{7,40}$ ]] || die "--expect must be a 7-40 char lowercase hex SHA, got: $EXPECT_OVERRIDE"
   EXPECTED_SHA="${EXPECT_OVERRIDE:0:7}"
   info "Expected SHA (from --expect): $EXPECTED_SHA"
+  EXPECTED_FULL_SHA=""
 else
+  EXPECTED_FULL_SHA="$(full_sha "$RUNTIME_CHECKOUT" origin/main)" || die "Could not resolve origin/main in $RUNTIME_CHECKOUT"
+  [[ -n "$EXPECTED_FULL_SHA" ]] || die "Could not resolve origin/main in $RUNTIME_CHECKOUT"
   EXPECTED_SHA="$(short_sha "$RUNTIME_CHECKOUT" origin/main)" || die "Could not resolve origin/main in $RUNTIME_CHECKOUT"
   info "Expected SHA (origin/main):   $EXPECTED_SHA"
 fi
@@ -302,6 +333,8 @@ info "Building runtime checkout..."
 pnpm run --dir "$RUNTIME_CHECKOUT" build || die "Build failed in $RUNTIME_CHECKOUT — aborting before touching the service"
 ok "Runtime checkout built"
 
+assert_origin_main_unchanged "drain gate"
+
 # --- Step 3: drain gate ---
 
 echo ""
@@ -346,6 +379,8 @@ else
   done
 fi
 
+assert_origin_main_unchanged "service stop"
+
 # --- Step 4: stop the service ---
 
 echo ""
@@ -364,6 +399,8 @@ echo ""
 if same_path "$SERVE_ROOT" "$RUNTIME_CHECKOUT"; then
   ok "=== Serve checkout is the runtime checkout — already synced and built ==="
 else
+  assert_origin_main_unchanged "serve checkout sync"
+
   info "=== Serve checkout: $SERVE_ROOT ==="
   warn "The service still serves dist/ from this checkout (see SYMPH-346 follow-up to repoint the plist at the runtime checkout)"
 
@@ -393,6 +430,8 @@ else
   pnpm run --dir "$SERVE_ROOT" build || die "Build failed in $SERVE_ROOT"
   ok "Serve checkout built"
 fi
+
+assert_origin_main_unchanged "service start"
 
 # --- Step 6: start the service ---
 
