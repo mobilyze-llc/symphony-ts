@@ -69,7 +69,9 @@ describe("investigate productivity report CLI", () => {
   it("detects direct invocation through symlinked bin paths", () => {
     const realScript = join(workspace, "real.js");
     const symlinkedScript = join(workspace, "linked.js");
+    const differentScript = join(workspace, "other.js");
     writeFileSync(realScript, "");
+    writeFileSync(differentScript, "");
     symlinkSync(realScript, symlinkedScript);
 
     expect(
@@ -78,5 +80,15 @@ describe("investigate productivity report CLI", () => {
         symlinkedScript,
       ),
     ).toBe(true);
+    expect(isDirectRun(pathToFileURL(realScript).href, undefined)).toBe(false);
+    expect(isDirectRun(pathToFileURL(realScript).href, "/missing/bin")).toBe(
+      false,
+    );
+    expect(
+      isDirectRun(
+        pathToFileURL(realpathSync(realScript)).href,
+        differentScript,
+      ),
+    ).toBe(false);
   });
 });
