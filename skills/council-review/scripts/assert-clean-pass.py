@@ -74,6 +74,7 @@ def status_claims_blockers(status_message: str) -> bool:
 
 def validate_review_artifacts(artifact_dir: Path) -> list[str]:
     failures = []
+    valid_lane_count = 0
     expected_head = optional_text(artifact_dir, "pr-head-sha.txt") or optional_text(
         artifact_dir, "local-head-sha.txt"
     )
@@ -91,6 +92,7 @@ def validate_review_artifacts(artifact_dir: Path) -> list[str]:
 
         if not observed:
             continue
+        lane_failure_count = len(failures)
 
         resolved_artifact_path = (
             Path(status_artifact)
@@ -144,6 +146,13 @@ def validate_review_artifacts(artifact_dir: Path) -> list[str]:
             failures.append(
                 f"{stem}: cmux CLI JSON exists but status artifact is missing"
             )
+        if len(failures) == lane_failure_count:
+            valid_lane_count += 1
+
+    if valid_lane_count == 0:
+        failures.append(
+            "at least one phase1 reviewer artifact must satisfy the closeout contract"
+        )
 
     return failures
 

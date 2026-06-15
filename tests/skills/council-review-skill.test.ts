@@ -337,7 +337,11 @@ describe("council-review manual skill", () => {
         assertionExit: 0,
         mode: "PR-backed draft",
         provenance: "match",
-        setup: (dir: string) => writeBaseSetupFacts(dir),
+        setup: (dir: string) => {
+          writeBaseSetupFacts(dir);
+          writeCompletedLaneStatus(dir, "phase1-opus");
+          writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+        },
       },
       {
         assertionExit: 1,
@@ -488,6 +492,18 @@ describe("council-review manual skill", () => {
       );
       expect(assertion.stdout).toContain(
         "missing required heading '## Verdict'",
+      );
+    });
+  });
+
+  it("rejects clean provenance without a contract-valid reviewer artifact", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+
+      const assertion = runPython(ASSERT_CLEAN_PASS, dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "at least one phase1 reviewer artifact must satisfy the closeout contract",
       );
     });
   });
