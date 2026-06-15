@@ -495,15 +495,23 @@ async function verifyFinding(
   for (const pathCandidate of candidates.paths) {
     const citation =
       (await readPathCandidateCitation(paths, pathCandidate)) ??
-      scanIndex.pathCitations.get(pathCandidate);
+      (pathCandidate.line === undefined
+        ? scanIndex.pathCitations.get(pathCandidate.path)
+        : undefined);
     if (citation === undefined) {
-      missing.push(pathCandidate);
+      missing.push(pathCandidate.raw);
     } else {
       citations.push(toCitation(paths, input, citation));
     }
   }
+  const citedPaths = new Set(
+    candidates.paths.map((pathCandidate) => pathCandidate.path),
+  );
   for (const symbol of candidates.symbols) {
-    const citation = scanIndex.symbolCitations.get(symbol);
+    const citation =
+      citedPaths.size === 0
+        ? scanIndex.symbolCitations.get(symbol)
+        : findSymbolCitationInPaths(scanIndex, symbol, citedPaths);
     if (citation === undefined) {
       missing.push(symbol);
     } else {
@@ -536,9 +544,9 @@ async function verifyFinding(
 
 async function readPathCandidateCitation(
   paths: CodeGroundingPaths,
-  pathCandidate: string,
+  pathCandidate: PathEvidenceCandidate,
 ): Promise<ScanCitation | undefined> {
-  const absolutePath = resolve(paths.checkoutPath, pathCandidate);
+  const absolutePath = resolve(paths.checkoutPath, pathCandidate.path);
   assertWorkspacePathWithinRoot(paths.checkoutPath, absolutePath);
   try {
     const linkStat = await fs.lstat(absolutePath);
@@ -556,11 +564,20 @@ async function readPathCandidateCitation(
       return undefined;
     }
     const content = await fs.readFile(absolutePath, "utf8");
+    const lineCount = Math.max(1, content.split("\n").length);
+    if (
+      pathCandidate.line !== undefined &&
+      (pathCandidate.line < 1 || pathCandidate.line > lineCount)
+    ) {
+      return undefined;
+    }
+    const startLine = pathCandidate.line ?? 1;
+    const endLine = pathCandidate.line ?? lineCount;
     return {
-      path: pathCandidate,
-      startLine: 1,
-      endLine: Math.max(1, content.split("\n").length),
-      matchedSpan: pathCandidate,
+      path: pathCandidate.path,
+      startLine,
+      endLine,
+      matchedSpan: pathCandidate.raw,
       contentHash: hashContent(content),
     };
   } catch (error) {
@@ -571,13 +588,19 @@ async function readPathCandidateCitation(
   }
 }
 
+interface PathEvidenceCandidate {
+  raw: string;
+  path: string;
+  line?: number;
+}
+
 interface EvidenceCandidates {
-  paths: string[];
+  paths: PathEvidenceCandidate[];
   symbols: string[];
 }
 
 function extractEvidenceCandidates(text: string): EvidenceCandidates {
-  const paths = new Set<string>();
+  const paths = new Map<string, PathEvidenceCandidate>();
   const symbols = new Set<string>();
   for (const match of text.matchAll(/`([^`]+)`/g)) {
     const value = match[1]?.trim();
@@ -585,18 +608,24 @@ function extractEvidenceCandidates(text: string): EvidenceCandidates {
       continue;
     }
     if (looksLikePath(value)) {
-      paths.add(stripLineSuffix(value));
+      const candidate = parsePathEvidenceCandidate(value);
+      if (candidate !== null) {
+        paths.set(candidate.raw, candidate);
+      }
     } else if (/^[A-Za-z_$][A-Za-z0-9_$]{2,}$/.test(value)) {
       symbols.add(value);
     }
   }
   for (const match of text.matchAll(
-    /\b((?:src|tests|docs|skills|scripts|apps)\/[A-Za-z0-9._/@+-]+(?:\/[A-Za-z0-9._/@+-]+)*)/g,
+    /\b((?:src|tests|docs|skills|scripts|apps)\/[A-Za-z0-9._/@+-]+(?:\/[A-Za-z0-9._/@+-]+)*(?::\d+(?::\d+)?)?)/g,
   )) {
-    paths.add(stripLineSuffix(match[1] ?? ""));
+    const candidate = parsePathEvidenceCandidate(match[1] ?? "");
+    if (candidate !== null) {
+      paths.set(candidate.raw, candidate);
+    }
   }
   return {
-    paths: [...paths],
+    paths: [...paths.values()],
     symbols: [...symbols],
   };
 }
@@ -605,8 +634,17 @@ function looksLikePath(value: string): boolean {
   return /^(src|tests|docs|skills|scripts|apps)\//.test(value);
 }
 
-function stripLineSuffix(value: string): string {
-  return value.replace(/:\d+(?::\d+)?$/, "");
+function parsePathEvidenceCandidate(
+  value: string,
+): PathEvidenceCandidate | null {
+  const match = /^(?<path>.+?)(?::(?<line>\d+)(?::\d+)?)?$/.exec(value);
+  const path = match?.groups?.path;
+  if (path === undefined || !looksLikePath(path)) {
+    return null;
+  }
+  return match?.groups?.line === undefined
+    ? { raw: value, path }
+    : { raw: value, path, line: Number(match.groups.line) };
 }
 
 interface ScanCitation {
@@ -620,11 +658,13 @@ interface ScanCitation {
 interface ScanIndex {
   pathCitations: Map<string, ScanCitation>;
   symbolCitations: Map<string, ScanCitation>;
+  symbolCitationsByPath: Map<string, Map<string, ScanCitation>>;
 }
 
 async function buildScanIndex(checkoutPath: string): Promise<ScanIndex> {
   const pathCitations = new Map<string, ScanCitation>();
   const symbolCitations = new Map<string, ScanCitation>();
+  const symbolCitationsByPath = new Map<string, Map<string, ScanCitation>>();
   let scannedFiles = 0;
   for await (const absolutePath of walkTextFiles(checkoutPath)) {
     if (scannedFiles >= MAX_SCAN_FILES) {
@@ -644,20 +684,38 @@ async function buildScanIndex(checkoutPath: string): Promise<ScanIndex> {
       matchedSpan: relativePath,
       contentHash,
     });
+    const fileSymbols = new Map<string, ScanCitation>();
     for (const [symbol, line] of extractSymbols(content)) {
-      if (symbolCitations.has(symbol)) {
-        continue;
-      }
-      symbolCitations.set(symbol, {
+      const citation = {
         path: relativePath,
         startLine: line,
         endLine: line,
         matchedSpan: symbol,
         contentHash,
-      });
+      };
+      fileSymbols.set(symbol, citation);
+      if (symbolCitations.has(symbol)) {
+        continue;
+      }
+      symbolCitations.set(symbol, citation);
+    }
+    symbolCitationsByPath.set(relativePath, fileSymbols);
+  }
+  return { pathCitations, symbolCitations, symbolCitationsByPath };
+}
+
+function findSymbolCitationInPaths(
+  scanIndex: ScanIndex,
+  symbol: string,
+  citedPaths: Set<string>,
+): ScanCitation | undefined {
+  for (const path of citedPaths) {
+    const citation = scanIndex.symbolCitationsByPath.get(path)?.get(symbol);
+    if (citation !== undefined) {
+      return citation;
     }
   }
-  return { pathCitations, symbolCitations };
+  return undefined;
 }
 
 async function* walkTextFiles(root: string): AsyncGenerator<string> {
@@ -803,16 +861,30 @@ async function acquireCheckoutLease(
 async function readLeaseIndex(path: string): Promise<LeaseIndex> {
   try {
     const raw = await fs.readFile(path, "utf8");
-    const parsed = JSON.parse(raw) as LeaseIndex;
-    if (parsed.version === 1 && typeof parsed.checkouts === "object") {
+    const parsed = JSON.parse(raw) as unknown;
+    if (isLeaseIndex(parsed)) {
       return parsed;
     }
+    throw new Error(`Invalid code-grounding lease index at ${path}`);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-      throw error;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return { version: 1, checkouts: {} };
     }
+    throw error;
   }
-  return { version: 1, checkouts: {} };
+}
+
+function isLeaseIndex(value: unknown): value is LeaseIndex {
+  if (value === null || typeof value !== "object") {
+    return false;
+  }
+  const candidate = value as Partial<LeaseIndex>;
+  return (
+    candidate.version === 1 &&
+    candidate.checkouts !== null &&
+    typeof candidate.checkouts === "object" &&
+    !Array.isArray(candidate.checkouts)
+  );
 }
 
 async function writeLeaseIndex(path: string, index: LeaseIndex): Promise<void> {
