@@ -21,6 +21,7 @@ import {
   CODE_GROUNDING_CLONE_SOURCE_POLICY,
   CODE_GROUNDING_CONTENTION_POLICY,
   CODE_GROUNDING_LOCK_DOMAIN,
+  CODE_GROUNDING_SUPPORTED_PATH_PREFIXES,
   CODE_GROUNDING_SYMBOL_PRECISION,
   decideCodeGroundingEvidenceStatus,
   resolveCodeGroundingPaths,
@@ -44,7 +45,7 @@ afterEach(async () => {
 describe("managed code grounding (SYMPH-596)", () => {
   it("publishes the v1 grounding policy contracts for reviewers and callers", () => {
     expect(CODE_GROUNDING_SYMBOL_PRECISION).toBe(
-      "textual_declaration_regex_scoped_to_cited_path",
+      "textual_declaration_regex_after_comment_literal_stripping_scoped_to_cited_path",
     );
     expect(CODE_GROUNDING_CHECKOUT_RETENTION_POLICY).toBe(
       "delete_expired_or_lru_over_cap_unless_live_lock_owner",
@@ -58,6 +59,14 @@ describe("managed code grounding (SYMPH-596)", () => {
     expect(CODE_GROUNDING_CLONE_SOURCE_POLICY).toBe(
       "clone_from_target_source_path_for_tests_otherwise_repo_url",
     );
+    expect(CODE_GROUNDING_SUPPORTED_PATH_PREFIXES).toEqual([
+      "src",
+      "tests",
+      "docs",
+      "skills",
+      "scripts",
+      "apps",
+    ]);
   });
 
   it("keeps the deterministic and model status decision table explicit", () => {
@@ -191,6 +200,29 @@ describe("managed code grounding (SYMPH-596)", () => {
 
     expect(report.status).toBe("not_attempted");
     expect(report.checkout.checkoutId).toBeNull();
+    await expect(
+      readFile(
+        join(workspaceRoot, ".symphony", "code-grounding", "leases.json"),
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("returns not_attempted when code grounding is disabled without checkout side effects", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "run-disabled",
+      config: { ...codeGroundingConfig(), enabled: false },
+      target: {
+        repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+        commitSha: "abc123",
+        repoScope: "symphony",
+      },
+      findings: [backlogFinding()],
+    });
+
+    expect(report.status).toBe("not_attempted");
+    expect(report.warnings).toEqual(["code grounding disabled"]);
     await expect(
       readFile(
         join(workspaceRoot, ".symphony", "code-grounding", "leases.json"),
@@ -334,6 +366,81 @@ describe("managed code grounding (SYMPH-596)", () => {
     );
   });
 
+  it("verifies supported line-range citation forms", async () => {
+    const sourceRepo = await createSourceRepo();
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "line-range-citations-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [
+        backlogFinding({
+          evidence: [
+            "Implemented in `src/orchestrator/queue.ts:1`.",
+            "Reviewed in `src/orchestrator/queue.ts:1:3`.",
+            "Covered by `src/orchestrator/queue.ts:1-3`.",
+            "Linked at `src/orchestrator/queue.ts#L1`.",
+            "Linked range `src/orchestrator/queue.ts#L1-L3`.",
+          ].join(" "),
+        }),
+      ],
+    });
+
+    expect(report.status).toBe("verified");
+    expect(
+      report.entries[0]?.citations.map((citation) => [
+        citation.matchedSpan,
+        citation.lineRange,
+      ]),
+    ).toEqual(
+      expect.arrayContaining([
+        ["src/orchestrator/queue.ts:1", [1, 1]],
+        ["src/orchestrator/queue.ts:1:3", [1, 3]],
+        ["src/orchestrator/queue.ts:1-3", [1, 3]],
+        ["src/orchestrator/queue.ts#L1", [1, 1]],
+        ["src/orchestrator/queue.ts#L1-L3", [1, 3]],
+      ]),
+    );
+  });
+
+  it("rejects unsupported line citation forms deterministically", async () => {
+    const sourceRepo = await createSourceRepo();
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "invalid-citation-form-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [
+        backlogFinding({
+          evidence: "Malformed citation `src/orchestrator/queue.ts#L1-Lx`.",
+        }),
+      ],
+    });
+
+    expect(report.status).toBe("not_found");
+    expect(report.entries[0]).toMatchObject({
+      status: "not_found",
+      citations: [],
+      missing: ["src/orchestrator/queue.ts#L1-Lx"],
+    });
+  });
+
   it("does not index extensionless files for v1 symbol-only grounding", async () => {
     const sourceRepo = await createSourceRepo();
     await writeFile(
@@ -367,6 +474,40 @@ describe("managed code grounding (SYMPH-596)", () => {
       status: "not_found",
       missing: ["HiddenSymbol"],
     });
+  });
+
+  it("surfaces a warning when the scan index reaches the file cap", async () => {
+    const sourceRepo = await createSourceRepo();
+    await mkdir(join(sourceRepo, "src", "many"), { recursive: true });
+    await Promise.all(
+      Array.from({ length: 501 }, (_, index) =>
+        writeFile(
+          join(sourceRepo, "src", "many", `file-${index}.ts`),
+          `export const cappedSymbol${index} = true;\n`,
+        ),
+      ),
+    );
+    await git(sourceRepo, ["add", "."]);
+    await git(sourceRepo, ["commit", "-m", "Add many scan files"]);
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "scan-cap-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [backlogFinding()],
+    });
+
+    expect(report.warnings).toContain(
+      "code-grounding scan reached 500 file cap; path and symbol index truncated",
+    );
   });
 
   it("rejects line-suffixed path evidence when the cited line is outside the file", async () => {
@@ -424,11 +565,11 @@ describe("managed code grounding (SYMPH-596)", () => {
       ],
     });
 
-    expect(report.status).toBe("model_argued_unverified");
+    expect(report.status).toBe("not_found");
     expect(report.entries[0]).toMatchObject({
-      status: "model_argued_unverified",
+      status: "not_found",
       citations: [],
-      missing: [],
+      missing: ["src/../package.json"],
     });
   });
 
@@ -554,6 +695,123 @@ describe("managed code grounding (SYMPH-596)", () => {
       citations: [],
       missing: ["src/linked/secret.ts"],
     });
+  });
+
+  it("does not index symbols through symlinked directories", async () => {
+    const sourceRepo = await createSourceRepo();
+    const outsideRoot = await tempRoot("symph-cg-outside-");
+    await mkdir(join(outsideRoot, "linked"), { recursive: true });
+    await writeFile(
+      join(outsideRoot, "linked", "secret.ts"),
+      "export const secretSymbol = true;\n",
+    );
+    await symlink(
+      join(outsideRoot, "linked"),
+      join(sourceRepo, "src", "linked"),
+    );
+    await git(sourceRepo, ["add", "."]);
+    await git(sourceRepo, ["commit", "-m", "Add symlink directory symbol"]);
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "symlink-directory-symbol-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [
+        backlogFinding({
+          evidence: "Implemented via `secretSymbol`.",
+        }),
+      ],
+    });
+
+    expect(report.status).toBe("not_found");
+    expect(report.entries[0]).toMatchObject({
+      status: "not_found",
+      citations: [],
+      missing: ["secretSymbol"],
+    });
+  });
+
+  it("does not verify symbols declared only inside comments or string literals", async () => {
+    const sourceRepo = await createSourceRepo();
+    await writeFile(
+      join(sourceRepo, "src", "orchestrator", "symbols.ts"),
+      [
+        "// export function CommentOnlySymbol() {}",
+        'const source = "export class StringOnlySymbol {}";',
+        "const template = `export const TemplateOnlySymbol = true;`;",
+        "export function RealSymbol() {",
+        "  return source + template;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+    await git(sourceRepo, ["add", "."]);
+    await git(sourceRepo, ["commit", "-m", "Add symbol extraction cases"]);
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "symbol-false-positive-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [
+        backlogFinding({
+          findingId: "F-comment",
+          evidence: "Implemented via `CommentOnlySymbol`.",
+        }),
+        backlogFinding({
+          findingId: "F-string",
+          evidence: "Implemented via `StringOnlySymbol`.",
+        }),
+        backlogFinding({
+          findingId: "F-template",
+          evidence: "Implemented via `TemplateOnlySymbol`.",
+        }),
+        backlogFinding({
+          findingId: "F-real",
+          evidence: "Implemented via `RealSymbol`.",
+        }),
+      ],
+    });
+
+    expect(report.entries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          findingId: "F-comment",
+          status: "not_found",
+          missing: ["CommentOnlySymbol"],
+        }),
+        expect.objectContaining({
+          findingId: "F-string",
+          status: "not_found",
+          missing: ["StringOnlySymbol"],
+        }),
+        expect.objectContaining({
+          findingId: "F-template",
+          status: "not_found",
+          missing: ["TemplateOnlySymbol"],
+        }),
+        expect.objectContaining({
+          findingId: "F-real",
+          status: "verified",
+          missing: [],
+        }),
+      ]),
+    );
   });
 
   it("replaces an unusable cached checkout before scanning", async () => {
