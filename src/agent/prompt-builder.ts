@@ -238,13 +238,13 @@ export function buildContinuationPrompt(input: {
         break;
       case "implement":
         lines.push(
-          "You are in the IMPLEMENT stage. Focus on implementing the code changes and running tests. Open a PR only when the Mode Permission Envelope allows PR creation; otherwise stop after verification and report BLOCKED-needs-human if a PR is required. When the permitted implement work is complete and all verify commands pass, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
+          "You are in the IMPLEMENT stage. Focus on implementing the code changes and running tests. Open a PR only when the Mode Permission Envelope allows PR creation; otherwise stop after verification and output [BLOCKED_NEEDS_HUMAN: pr_creation] as the last line if a PR is required. When the permitted implement work is complete and all verify commands pass, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
           "Headless output budget: do not stream high-volume searches, logs, JSON, lockfiles, validation commands, or generated output directly into the turn. Write full stdout/stderr to .symphony/validation/ and return only command metadata, exit code, log path, and a short tail/summary capped near 4 KB.",
         );
         break;
       case "merge":
         lines.push(
-          "You are in the MERGE stage. Verify merge readiness, but do not run PR merge, auto-merge, admin, or bypass commands unless the Mode Permission Envelope explicitly allows them. Current mode policies deny auto-merge and gate bypass; report BLOCKED-needs-human when a denied merge action is required. When the permitted merge-stage work is complete, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
+          "You are in the MERGE stage. Verify merge readiness, but do not run PR merge, auto-merge, admin, or bypass commands unless the Mode Permission Envelope explicitly allows them. Current mode policies deny auto-merge and gate bypass; output [BLOCKED_NEEDS_HUMAN: auto_merge] or [BLOCKED_NEEDS_HUMAN: gate_bypass] as the last line when a denied merge action is required. When the permitted merge-stage work is complete, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
         );
         break;
       default:

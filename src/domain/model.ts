@@ -1325,10 +1325,24 @@ export interface FailureSignal {
   failureClass: FailureClass;
 }
 
+export const HUMAN_BLOCK_OPERATIONS = [
+  "pr_creation",
+  "auto_merge",
+  "gate_bypass",
+  "other",
+] as const;
+export type HumanBlockOperation = (typeof HUMAN_BLOCK_OPERATIONS)[number];
+
+export interface HumanBlockSignal {
+  operation: HumanBlockOperation;
+}
+
 const STAGE_FAILED_REGEX =
   /\[STAGE_FAILED:\s*(verify|review|rebase|spec|infra)\s*\]/;
 
 const STAGE_COMPLETE_REGEX = /(?:^|\n)[ \t]*\[STAGE_COMPLETE\]/;
+const HUMAN_BLOCK_REGEX =
+  /(?:^|\n)[ \t]*(?:\[BLOCKED_NEEDS_HUMAN:\s*([A-Za-z_-]+)\s*\]|BLOCKED-needs-human)[ \t]*(?:$|\n)/;
 
 /**
  * Detect the `[STAGE_COMPLETE]` signal at the start of any line in the
@@ -1364,6 +1378,41 @@ export function parseFailureSignal(
     return null;
   }
   return { failureClass: match[1] as FailureClass };
+}
+
+/**
+ * Parse a terminal human-blocked marker from the agent's final message.
+ * Line anchoring avoids false positives when prompts or workers quote the
+ * marker mid-prose. The bare fallback keeps older workers park-safe, while
+ * the structured marker carries the denied operation for operator comments.
+ */
+export function parseHumanBlockSignal(
+  text: string | null | undefined,
+): HumanBlockSignal | null {
+  if (text === null || text === undefined) {
+    return null;
+  }
+
+  const match = HUMAN_BLOCK_REGEX.exec(text);
+  if (match === null) {
+    return null;
+  }
+
+  const operation = normalizeHumanBlockOperation(match[1] ?? null);
+  return { operation };
+}
+
+function normalizeHumanBlockOperation(
+  rawOperation: string | null,
+): HumanBlockOperation {
+  if (rawOperation === null) {
+    return "other";
+  }
+
+  const normalized = rawOperation.toLowerCase().replaceAll("-", "_");
+  return HUMAN_BLOCK_OPERATIONS.includes(normalized as HumanBlockOperation)
+    ? (normalized as HumanBlockOperation)
+    : "other";
 }
 
 export function normalizeIssueState(state: string): string {

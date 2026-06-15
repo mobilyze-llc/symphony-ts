@@ -8862,6 +8862,8 @@ export class OrchestratorCore {
         reason: input.hardStop.reason,
         turnCount: input.hardStop.turnCount,
         totalTokens: input.hardStop.totalTokens,
+        billableTokens: input.hardStop.billableTokens ?? null,
+        humanBlockOperation: input.hardStop.humanBlockOperation ?? null,
         estimatedCostUsd: input.hardStop.estimatedCostUsd,
         issueState: runningEntry.issue.state,
         ...pendingStageSignalMetadata(input.pendingStageSignal),
@@ -8880,7 +8882,7 @@ export class OrchestratorCore {
       runningEntry.issue.state,
       null,
       {
-        reason: `hard_stop:${input.hardStop.trigger}`,
+        reason: resumeRequiredReasonForHardStop(input.hardStop),
         setBySequence: hardStopEntry.sequence,
       },
     );
@@ -11054,6 +11056,23 @@ export const BUDGET_ESCALATION_TRIGGERS: ReadonlySet<HardStopTrigger> = new Set(
 
 function isBudgetEscalationTrigger(trigger: HardStopTrigger): boolean {
   return BUDGET_ESCALATION_TRIGGERS.has(trigger);
+}
+
+function resumeRequiredReasonForHardStop(hardStop: HardStopDecision): string {
+  if (hardStop.trigger !== "worker_reported_block") {
+    return `hard_stop:${hardStop.trigger}`;
+  }
+
+  switch (hardStop.humanBlockOperation) {
+    case "pr_creation":
+      return "human_blocked:pr_creation_denied";
+    case "auto_merge":
+      return "human_blocked:auto_merge_denied";
+    case "gate_bypass":
+      return "human_blocked:gate_bypass_denied";
+    default:
+      return "human_blocked:mode_permission_denied";
+  }
 }
 
 function nextRetryAttempt(attempt: number | null): number {

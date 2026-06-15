@@ -4,7 +4,7 @@ import type {
   WorkflowHardStopsConfig,
   WorkflowHardStopsConfigOverride,
 } from "../config/types.js";
-import type { RightSizingMode } from "../domain/model.js";
+import type { HumanBlockOperation, RightSizingMode } from "../domain/model.js";
 
 export type HardStopOutcome =
   | "BLOCKED-needs-human"
@@ -18,7 +18,8 @@ export type HardStopTrigger =
   | "dollar_budget"
   | "premium_spend_near_ceiling"
   | "rate_limit_budget"
-  | "permission_denied";
+  | "permission_denied"
+  | "worker_reported_block";
 
 export interface HardStopDecision {
   outcome: HardStopOutcome;
@@ -29,6 +30,8 @@ export interface HardStopDecision {
   totalTokens: number;
   /** Cache-discounted tokens — the measure budget triggers gate on (SYMPH-351). */
   billableTokens?: number;
+  /** Parsed operation for worker-reported human blocks; avoids re-parsing prose. */
+  humanBlockOperation?: HumanBlockOperation;
   estimatedCostUsd: number;
 }
 
@@ -217,7 +220,7 @@ export function describeModePermissionEnvelope(
     pullRequestLine,
     "- Auto-merge: denied. Do NOT run PR merge commands such as `gh pr merge`, including `--auto`.",
     "- Gate bypass: denied. Do NOT pass bypass/admin flags such as `--admin`, `--bypass`, or force-push to get around review, CI, or merge gates.",
-    "If any task, stage, workflow, or prior instruction conflicts with this envelope, obey this envelope. When a denied action is required to finish, stop and report BLOCKED-needs-human instead of running the command.",
+    "If any task, stage, workflow, or prior instruction conflicts with this envelope, obey this envelope. When a denied action is required to finish, stop instead of running the command and put the structured marker `[BLOCKED_NEEDS_HUMAN: pr_creation]`, `[BLOCKED_NEEDS_HUMAN: auto_merge]`, or `[BLOCKED_NEEDS_HUMAN: gate_bypass]` on its own final line.",
   ].join("\n");
 }
 
@@ -418,7 +421,7 @@ export function evaluateNoProgressHardStop(input: {
 // spend by the cached share (~70% on observed worker turns, SYMPH-319).
 // Shared by the dollar estimate and the token trigger (SYMPH-351) so both
 // measure the same scarce resource.
-function computeBillableTokens(input: {
+export function computeBillableTokens(input: {
   totalTokens: number;
   cacheReadTokens: number;
   config: Pick<WorkflowHardStopsConfig, "cachedTokenCostRatio">;
@@ -448,7 +451,7 @@ function costFromBillableTokens(
   return (billableTokens / 1000) * config.estimatedCostPer1kTokensUsd;
 }
 
-function estimateCostUsd(input: {
+export function estimateCostUsd(input: {
   totalTokens: number;
   cacheReadTokens: number;
   config: Pick<
