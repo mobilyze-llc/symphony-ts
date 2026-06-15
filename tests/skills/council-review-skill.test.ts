@@ -540,6 +540,21 @@ describe("council-review manual skill", () => {
     });
   });
 
+  it("rejects attempted lanes that only wrote usage telemetry", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-pi");
+      writeArtifact(dir, "phase1-pi.md", validReviewArtifact());
+      writeArtifact(dir, "phase1-opus.usage.json", "{}\n");
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "phase1-opus: reviewer artifact requires complete lane status",
+      );
+    });
+  });
+
   it("reports malformed reviewer lane status JSON distinctly", () => {
     withArtifactDir((dir) => {
       writeCleanPassArtifacts(dir);
@@ -592,6 +607,20 @@ describe("council-review manual skill", () => {
       writeCleanPassArtifacts(dir);
       writeCompletedLaneStatus(dir, "phase1-opus");
       writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(0);
+      expect(assertion.stdout).toContain(
+        "PASS council-review clean PASS assertion",
+      );
+    });
+  });
+
+  it("accepts completed Pi reviewer artifacts that satisfy the closeout contract", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-pi");
+      writeArtifact(dir, "phase1-pi.md", validReviewArtifact());
 
       const assertion = runCloseoutAssert(dir);
       expect(assertion.status).toBe(0);

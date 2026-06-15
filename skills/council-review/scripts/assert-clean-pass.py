@@ -46,14 +46,6 @@ def optional_text(artifact_dir: Path, name: str) -> str | None:
     return path.read_text(encoding="utf-8").strip()
 
 
-def read_json_object(path: Path) -> dict:
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
 def read_json_object_with_error(path: Path) -> tuple[dict, str | None]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -100,6 +92,7 @@ def validate_review_artifacts(artifact_dir: Path) -> list[str]:
             artifact_path,
             status_path,
             cli_json_path,
+            artifact_dir / f"{stem}.usage.json",
             artifact_dir / f"{stem}.cli.stderr",
             artifact_dir / f"{stem}.events.jsonl",
             artifact_dir / f"{stem}.pane.log",
