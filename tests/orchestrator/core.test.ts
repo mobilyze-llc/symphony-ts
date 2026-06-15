@@ -4276,7 +4276,7 @@ describe("orchestrator core", () => {
     });
     orchestrator.getState().codexRateLimits = {
       primary: {
-        used_percent: 95,
+        used_percent: 87,
         window_minutes: 300,
         resets_at: 1772760000,
       },
@@ -4339,7 +4339,7 @@ describe("orchestrator core", () => {
     });
     orchestrator.getState().codexRateLimits = {
       primary: {
-        used_percent: 95,
+        used_percent: 87,
         window_minutes: 300,
         resets_at: 1772760000,
       },
@@ -4404,7 +4404,7 @@ describe("orchestrator core", () => {
     });
     orchestrator.getState().codexRateLimits = {
       primary: {
-        used_percent: 95,
+        used_percent: 87,
         window_minutes: 300,
         resets_at: 1772760000,
       },
@@ -6388,11 +6388,11 @@ describe("orchestrator core", () => {
       deferredUntil: new Date(1772800000 * 1000 + 30_000).toISOString(),
     });
     expect(orchestrator.getState().rateLimitAdmission?.reason).toContain(
-      "secondary window headroom 2.0% < 3.0% expected unit burn",
+      "secondary window headroom 2.0% < 8.0% required for 3.0% expected unit burn above 5% floor",
     );
   });
 
-  it("admits below-floor headroom when expected burn still fits", async () => {
+  it("blocks below-floor headroom even when expected burn still fits", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
       statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
@@ -6419,12 +6419,15 @@ describe("orchestrator core", () => {
 
     const result = await orchestrator.pollTick();
 
-    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(result.dispatchedIssueIds).toEqual([]);
     expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
-      blocked: false,
+      blocked: true,
       expectedUnitBurnPct: 3,
-      deferredUntil: null,
+      deferredUntil: new Date(1772760000 * 1000).toISOString(),
     });
+    expect(orchestrator.getState().rateLimitAdmission?.reason).toContain(
+      "primary window headroom 8.0% < 13.0% required for 3.0% expected unit burn above 10% floor",
+    );
   });
 
   it("reserves expected burn capacity across multiple admissions in one poll", async () => {
@@ -6453,7 +6456,7 @@ describe("orchestrator core", () => {
     });
     orchestrator.getState().codexRateLimits = {
       primary: {
-        used_percent: 95,
+        used_percent: 87,
         window_minutes: 300,
         resets_at: 1772760000,
       },
@@ -6620,7 +6623,7 @@ describe("orchestrator core", () => {
     );
     orchestrator.getState().codexRateLimits = {
       primary: {
-        used_percent: 97,
+        used_percent: 88,
         window_minutes: 300,
         resets_at: 1772760000,
       },

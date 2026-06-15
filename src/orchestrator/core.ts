@@ -3261,12 +3261,12 @@ export class OrchestratorCore {
     ) {
       const requiredHeadroomPct =
         deferUntilReset && usesExpectedUnitBurn
-          ? expectedUnitBurnPct
+          ? floors.minPrimaryHeadroomPct + expectedUnitBurnPct
           : floors.minPrimaryHeadroomPct;
       if (primary.remainingPercent < requiredHeadroomPct) {
         violations.push(
           deferUntilReset && usesExpectedUnitBurn
-            ? `primary window headroom ${primary.remainingPercent.toFixed(1)}% < ${expectedUnitBurnPct.toFixed(1)}% expected unit burn (floor ${floors.minPrimaryHeadroomPct}%)`
+            ? `primary window headroom ${primary.remainingPercent.toFixed(1)}% < ${requiredHeadroomPct.toFixed(1)}% required for ${expectedUnitBurnPct.toFixed(1)}% expected unit burn above ${floors.minPrimaryHeadroomPct}% floor`
             : `primary window headroom ${primary.remainingPercent.toFixed(1)}% < ${floors.minPrimaryHeadroomPct}% floor`,
         );
         floorViolations.push({
@@ -3284,12 +3284,12 @@ export class OrchestratorCore {
     ) {
       const requiredHeadroomPct =
         deferUntilReset && usesExpectedUnitBurn
-          ? expectedUnitBurnPct
+          ? floors.minSecondaryHeadroomPct + expectedUnitBurnPct
           : floors.minSecondaryHeadroomPct;
       if (secondary.remainingPercent < requiredHeadroomPct) {
         violations.push(
           deferUntilReset && usesExpectedUnitBurn
-            ? `secondary window headroom ${secondary.remainingPercent.toFixed(1)}% < ${expectedUnitBurnPct.toFixed(1)}% expected unit burn (floor ${floors.minSecondaryHeadroomPct}%)`
+            ? `secondary window headroom ${secondary.remainingPercent.toFixed(1)}% < ${requiredHeadroomPct.toFixed(1)}% required for ${expectedUnitBurnPct.toFixed(1)}% expected unit burn above ${floors.minSecondaryHeadroomPct}% floor`
             : `secondary window headroom ${secondary.remainingPercent.toFixed(1)}% < ${floors.minSecondaryHeadroomPct}% floor`,
         );
         floorViolations.push({
@@ -3315,9 +3315,20 @@ export class OrchestratorCore {
       deferUntilReset && usesExpectedUnitBurn
         ? computeRateLimitAdmissionCapacity({
             expectedUnitBurnPct,
-            primary: floors.minPrimaryHeadroomPct === null ? null : primary,
+            primary:
+              floors.minPrimaryHeadroomPct === null
+                ? null
+                : {
+                    headroom: primary,
+                    floorPct: floors.minPrimaryHeadroomPct,
+                  },
             secondary:
-              floors.minSecondaryHeadroomPct === null ? null : secondary,
+              floors.minSecondaryHeadroomPct === null
+                ? null
+                : {
+                    headroom: secondary,
+                    floorPct: floors.minSecondaryHeadroomPct,
+                  },
           })
         : null;
     const reasonPrefix =
@@ -13800,19 +13811,30 @@ function computeRateLimitDeferredUntil(input: {
 
 function computeRateLimitAdmissionCapacity(input: {
   expectedUnitBurnPct: number;
-  primary: ReturnType<typeof evaluateWindowHeadroom>;
-  secondary: ReturnType<typeof evaluateWindowHeadroom>;
+  primary: {
+    headroom: ReturnType<typeof evaluateWindowHeadroom>;
+    floorPct: number;
+  } | null;
+  secondary: {
+    headroom: ReturnType<typeof evaluateWindowHeadroom>;
+    floorPct: number;
+  } | null;
 }): number | null {
   const capacities: number[] = [];
-  for (const headroom of [input.primary, input.secondary]) {
+  for (const window of [input.primary, input.secondary]) {
+    if (window === null) {
+      continue;
+    }
+    const headroom = window.headroom;
     if (headroom === null || headroom.expired) {
       continue;
     }
+    const spendableHeadroomPct = Math.max(
+      0,
+      headroom.remainingPercent - window.floorPct,
+    );
     capacities.push(
-      Math.max(
-        0,
-        Math.floor(headroom.remainingPercent / input.expectedUnitBurnPct),
-      ),
+      Math.max(0, Math.floor(spendableHeadroomPct / input.expectedUnitBurnPct)),
     );
   }
   return capacities.length === 0 ? null : Math.min(...capacities);
