@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { captureDeployDrift } from "../../src/observability/deploy-drift.js";
+import {
+  captureDeployDrift,
+  qualifyDeployDriftFreshness,
+} from "../../src/observability/deploy-drift.js";
 
 const NOW = () => new Date("2026-06-12T10:00:00.000Z");
 
@@ -30,6 +33,50 @@ describe("captureDeployDrift (SYMPH-407)", () => {
       execGit: async () => "abc1234\n",
     });
     expect(status.drift).toBe(false);
+  });
+
+  it("qualifies stale aligned captures without changing the raw drift boolean", () => {
+    const status = qualifyDeployDriftFreshness(
+      {
+        running_commit: "abc1234",
+        origin_main_commit: "abc1234",
+        drift: false,
+        captured_at: "2026-06-12T10:00:00.000Z",
+        note: "captured once at startup",
+      },
+      {
+        now: new Date("2026-06-12T10:15:01.000Z"),
+        freshnessWindowSeconds: 600,
+      },
+    );
+
+    expect(status.drift).toBe(false);
+    expect(status.qualified_status).toBe("aligned_stale");
+    expect(status.freshness).toEqual({
+      status: "stale",
+      captured_age_seconds: 901,
+      threshold_seconds: 600,
+    });
+  });
+
+  it("leaves stale positive drift as a drift signal", () => {
+    const status = qualifyDeployDriftFreshness(
+      {
+        running_commit: "abc1234",
+        origin_main_commit: "def5678",
+        drift: true,
+        captured_at: "2026-06-12T10:00:00.000Z",
+        note: "captured once at startup",
+      },
+      {
+        now: new Date("2026-06-12T10:15:01.000Z"),
+        freshnessWindowSeconds: 600,
+      },
+    );
+
+    expect(status.drift).toBe(true);
+    expect(status.qualified_status).toBe("drift");
+    expect(status.freshness?.status).toBe("stale");
   });
 
   it("degrades to nulls when git fails (best-effort, never throws)", async () => {

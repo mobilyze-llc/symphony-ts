@@ -8396,6 +8396,12 @@ describe("state-document enrichment wiring (SYMPH-407)", () => {
       drift: true,
       captured_at: "2026-06-12T10:00:00.000Z",
       note: "captured once at startup",
+      freshness: {
+        status: "fresh",
+        captured_age_seconds: 5,
+        threshold_seconds: 600,
+      },
+      qualified_status: "drift",
     });
   });
 

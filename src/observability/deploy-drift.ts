@@ -27,7 +27,29 @@ export interface DeployDriftStatus {
   captured_at: string;
   /** Human-readable staleness contract for one-read diagnosis. */
   note: string;
+  /** Freshness of the captured refs at the time this status was projected. */
+  freshness?: DeployDriftFreshness;
+  /**
+   * Operator-facing status after applying freshness. Raw `drift` remains the
+   * compatibility field; stale aligned captures must not be rendered as fresh.
+   */
+  qualified_status?: DeployDriftQualifiedStatus;
 }
+
+export type DeployDriftQualifiedStatus =
+  | "drift"
+  | "aligned"
+  | "aligned_stale"
+  | "unknown"
+  | "unknown_stale";
+
+export interface DeployDriftFreshness {
+  status: "fresh" | "stale" | "unknown";
+  captured_age_seconds: number | null;
+  threshold_seconds: number;
+}
+
+export const DEFAULT_DEPLOY_DRIFT_FRESHNESS_WINDOW_SECONDS = 10 * 60;
 
 const STALENESS_NOTE =
   "captured once at startup; origin_main_commit is the local ref (no fetch) — redeploy/restart to refresh";
@@ -77,6 +99,53 @@ export async function captureDeployDrift(input: {
     captured_at: now().toISOString(),
     note: STALENESS_NOTE,
   };
+}
+
+export function qualifyDeployDriftFreshness(
+  status: DeployDriftStatus,
+  input?: {
+    now?: Date;
+    freshnessWindowSeconds?: number;
+  },
+): DeployDriftStatus {
+  const now = input?.now ?? new Date();
+  const freshnessWindowSeconds =
+    input?.freshnessWindowSeconds ??
+    DEFAULT_DEPLOY_DRIFT_FRESHNESS_WINDOW_SECONDS;
+  const capturedAtMs = Date.parse(status.captured_at);
+  const capturedAgeSeconds = Number.isFinite(capturedAtMs)
+    ? Math.max(0, Math.floor((now.getTime() - capturedAtMs) / 1000))
+    : null;
+  const freshnessStatus =
+    capturedAgeSeconds === null
+      ? "unknown"
+      : capturedAgeSeconds > freshnessWindowSeconds
+        ? "stale"
+        : "fresh";
+  const qualifiedStatus = qualifyRawDrift(status.drift, freshnessStatus);
+
+  return {
+    ...status,
+    freshness: {
+      status: freshnessStatus,
+      captured_age_seconds: capturedAgeSeconds,
+      threshold_seconds: freshnessWindowSeconds,
+    },
+    qualified_status: qualifiedStatus,
+  };
+}
+
+function qualifyRawDrift(
+  drift: DeployDriftStatus["drift"],
+  freshnessStatus: DeployDriftFreshness["status"],
+): DeployDriftQualifiedStatus {
+  if (drift === true) {
+    return "drift";
+  }
+  if (drift === false) {
+    return freshnessStatus === "stale" ? "aligned_stale" : "aligned";
+  }
+  return freshnessStatus === "stale" ? "unknown_stale" : "unknown";
 }
 
 async function revParse(
