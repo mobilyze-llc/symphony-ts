@@ -912,10 +912,14 @@ export interface RightSizingModelRouting {
 
 export interface ReasoningEffortDecision {
   configuredEffort: ReasoningEffort | null;
+  stageEffort?: ReasoningEffort | null;
+  modeEffort?: ReasoningEffort | null;
   selectedEffort: ReasoningEffort | null;
   escalated: boolean;
   reason:
     | "not_configured"
+    | "stage_config"
+    | "mode_mapping"
     | "stage_not_eligible"
     | "no_risk_match"
     | "risk_predicate"
@@ -1038,6 +1042,9 @@ export interface RateLimitAdmissionState {
   minSecondaryHeadroomPct: number | null;
   primaryUsedPercent: number | null;
   secondaryUsedPercent: number | null;
+  expectedUnitBurnPct?: number | null;
+  deferredUntil?: string | null;
+  admissionCapacity?: number | null;
 }
 
 export interface RunningEntry extends LiveSession {
@@ -1052,6 +1059,7 @@ export interface RunningEntry extends LiveSession {
 
 export interface StageRecord {
   stageName: string;
+  completedAt?: string;
   durationMs: number;
   totalTokens: number;
   inputTokens?: number;

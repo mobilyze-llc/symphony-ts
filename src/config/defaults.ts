@@ -48,6 +48,9 @@ export const DEFAULT_HARD_STOP_MAX_SECONDARY_WINDOW_PCT_PER_UNIT:
 export const DEFAULT_RATE_LIMIT_MIN_PRIMARY_HEADROOM_PCT: number | null = null;
 export const DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT: number | null =
   null;
+export const DEFAULT_RATE_LIMIT_DEFER_UNTIL_RESET = false;
+export const DEFAULT_RATE_LIMIT_EXPECTED_UNIT_BURN_PCT: number | null = null;
+export const DEFAULT_RATE_LIMIT_DEFER_JITTER_MS = 0;
 // Budget-escalation ladder is opt-in (SYMPH-337): null max_steps keeps every
 // budget pause operator-gated as before.
 export const DEFAULT_BUDGET_ESCALATION_MAX_STEPS: number | null = null;

@@ -334,6 +334,85 @@ describe("deterministic right-sizing", () => {
     });
   });
 
+  it("keeps reasoning effort at command defaults until a stage opts in", () => {
+    const decision = createRightSizingDecision({
+      issue: createIssue({
+        labels: ["mode:full"],
+        description: "## Declared file scope\n- src/features/copy.ts\n",
+      }),
+      config: createConfig({
+        stages: createStages({
+          initialStage: "implement",
+          stages: {
+            implement: createAgentStage({
+              maxTurns: 30,
+              onComplete: "done",
+            }),
+            done: createTerminalStage(),
+          },
+        }),
+      }),
+      stageName: "implement",
+      attempt: null,
+    });
+
+    expect(decision.mode).toBe("full");
+    expect(decision.reasoningEffort).toMatchObject({
+      stageEffort: null,
+      modeEffort: null,
+      selectedEffort: null,
+      reason: "not_configured",
+    });
+  });
+
+  it("adjusts opted-in implement reasoning effort by right-sizing mode", () => {
+    const config = createConfig({
+      stages: createStages({
+        initialStage: "implement",
+        stages: {
+          implement: createAgentStage({
+            maxTurns: 30,
+            onComplete: "done",
+            reasoningEffort: "medium",
+          }),
+          done: createTerminalStage(),
+        },
+      }),
+    });
+
+    const prototype = createRightSizingDecision({
+      issue: createIssue({
+        labels: ["mode:prototype"],
+        description: "## Declared file scope\n- src/features/copy.ts\n",
+      }),
+      config,
+      stageName: "implement",
+      attempt: null,
+    });
+    const full = createRightSizingDecision({
+      issue: createIssue({
+        labels: ["mode:full"],
+        description: "## Declared file scope\n- src/features/copy.ts\n",
+      }),
+      config,
+      stageName: "implement",
+      attempt: null,
+    });
+
+    expect(prototype.reasoningEffort).toMatchObject({
+      stageEffort: "medium",
+      modeEffort: "low",
+      selectedEffort: "low",
+      reason: "mode_mapping",
+    });
+    expect(full.reasoningEffort).toMatchObject({
+      stageEffort: "medium",
+      modeEffort: "high",
+      selectedEffort: "high",
+      reason: "mode_mapping",
+    });
+  });
+
   it("leaves benign ordinary source files outside the risk predicate", () => {
     const decision = createRightSizingDecision({
       issue: createIssue({
@@ -535,11 +614,13 @@ function createStages(overrides: Partial<StagesConfig>): StagesConfig {
 function createAgentStage(input: {
   maxTurns: number;
   onComplete: string | null;
+  reasoningEffort?: "low" | "medium" | "high";
 }) {
   return {
     type: "agent" as const,
     runner: "codex",
     model: "gpt-5.3-codex",
+    reasoningEffort: input.reasoningEffort ?? null,
     prompt: null,
     maxTurns: input.maxTurns,
     timeoutMs: null,

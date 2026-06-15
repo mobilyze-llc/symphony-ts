@@ -58,6 +58,9 @@ import {
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
   DEFAULT_PAUSE_TRIAGE_MAX_RESUMES,
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_RATE_LIMIT_DEFER_JITTER_MS,
+  DEFAULT_RATE_LIMIT_DEFER_UNTIL_RESET,
+  DEFAULT_RATE_LIMIT_EXPECTED_UNIT_BURN_PCT,
   DEFAULT_RATE_LIMIT_MIN_PRIMARY_HEADROOM_PCT,
   DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT,
   DEFAULT_READ_TIMEOUT_MS,
@@ -241,6 +244,15 @@ export function resolveWorkflowConfig(
       minSecondaryHeadroomPct:
         readPercentPoints(rateLimitAdmission.min_secondary_headroom_pct) ??
         DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT,
+      deferUntilReset:
+        readBoolean(rateLimitAdmission.defer_until_reset) ??
+        DEFAULT_RATE_LIMIT_DEFER_UNTIL_RESET,
+      expectedUnitBurnPct:
+        readPercentPoints(rateLimitAdmission.expected_unit_burn_pct) ??
+        DEFAULT_RATE_LIMIT_EXPECTED_UNIT_BURN_PCT,
+      deferJitterMs:
+        readNonNegativeInteger(rateLimitAdmission.defer_jitter_ms) ??
+        DEFAULT_RATE_LIMIT_DEFER_JITTER_MS,
     },
     budgetEscalation: {
       maxSteps:
@@ -899,6 +911,7 @@ export function resolveStagesConfig(value: unknown): StagesConfig | null {
       type: stageType,
       runner: readString(stageRecord.runner),
       model: readString(stageRecord.model),
+      reasoningEffort: readReasoningEffort(stageRecord.reasoning_effort),
       prompt: readString(stageRecord.prompt),
       maxTurns: readPositiveInteger(stageRecord.max_turns),
       timeoutMs: readPositiveInteger(stageRecord.timeout_ms),

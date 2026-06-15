@@ -77,6 +77,9 @@ export type WorkflowHardStopsConfigOverride = Partial<WorkflowHardStopsConfig>;
 export interface WorkflowRateLimitAdmissionConfig {
   minPrimaryHeadroomPct: number | null;
   minSecondaryHeadroomPct: number | null;
+  deferUntilReset?: boolean;
+  expectedUnitBurnPct?: number | null;
+  deferJitterMs?: number;
 }
 
 /**
@@ -313,6 +316,7 @@ export interface StageDefinition {
   type: StageType;
   runner: string | null;
   model: string | null;
+  reasoningEffort?: ReasoningEffort | null;
   prompt: string | null;
   maxTurns: number | null;
   timeoutMs: number | null;

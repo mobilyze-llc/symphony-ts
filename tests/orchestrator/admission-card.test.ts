@@ -98,7 +98,9 @@ describe("formatAdmissionCard (SYMPH-379)", () => {
     expect(card).toContain("admit → initial stage");
     expect(card).toContain("× 2 (escalated)");
     expect(card).toContain("(+4 more)");
-    expect(card).toContain("model consult allowed: risk trigger");
+    expect(card).toContain(
+      "advisory: model consult recommended because a risk trigger matched",
+    );
     expect(card).toContain(
       "**Risk surface:** touches high-risk files — src/orchestrator/core.ts",
     );
@@ -122,7 +124,7 @@ describe("formatAdmissionCard (SYMPH-379)", () => {
     });
 
     expect(card).toContain(
-      "model consult allowed: deterministic signals were ambiguous",
+      "advisory: model consult recommended because deterministic signals were ambiguous",
     );
     expect(card).toContain("**Risk surface:**");
     expect(card).toContain("src/r7.ts (+2 more)");

@@ -16,11 +16,11 @@ function describeModelRouting(
 ): string {
   switch (reason) {
     case "not_needed":
-      return "deterministic route sufficed (no model consult)";
+      return "advisory: deterministic route sufficed (no model consult)";
     case "ambiguous_routing":
-      return "model consult allowed: deterministic signals were ambiguous";
+      return "advisory: model consult recommended because deterministic signals were ambiguous";
     case "risk_trigger":
-      return "model consult allowed: risk trigger";
+      return "advisory: model consult recommended because a risk trigger matched";
     default: {
       // Exhaustiveness guard: a new routing reason must be described here
       // rather than silently rendering as some other reason's label.
@@ -78,7 +78,7 @@ export function formatAdmissionCard(input: AdmissionCardInput): string {
     `**Decision:** admit → ${input.stageName ?? "initial stage"}`,
     "**Eligibility:** passed deterministic eligibility and disjointness checks",
     `**Right-sizing:** \`${decision.mode}\` via \`${decision.classifier}\` — ${decision.reason}`,
-    `**Model routing:** ${modelRoutingLine}`,
+    `**Model routing (advisory):** ${modelRoutingLine}`,
     `**Budget:** ${budgetLine}`,
     `**Declared scope:** ${scopeLine}`,
     ...riskLines,

@@ -30,6 +30,10 @@ const PIPELINE_WORKFLOW_PATH = resolve(
   import.meta.dirname,
   "../../pipeline-config/WORKFLOW.md",
 );
+const WORKFLOW_TEMPLATE_PATH = resolve(
+  import.meta.dirname,
+  "../../pipeline-config/templates/WORKFLOW-template.md",
+);
 const CODEX_LOW_APP_SERVER_COMMAND =
   "codex --disable plugins --disable hooks --disable plugin_hooks --disable apps --disable browser_use --disable browser_use_external --disable computer_use --disable multi_agent --disable goals --disable memories --disable tool_call_mcp_elicitation --config 'model_reasoning_effort=\"low\"' --config 'project_doc_max_bytes=0' --config 'features.codex_hooks=false' app-server";
 const SHIPPED_CODEX_WORKFLOW_CONFIGS = [
@@ -190,6 +194,16 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       expect(config).toContain("ephemeral_home: true");
       expect(config).toContain("disable_skills: true");
     }
+  });
+
+  it("documents scheduler and per-stage reasoning knobs in the workflow template", async () => {
+    const config = await readFile(WORKFLOW_TEMPLATE_PATH, "utf8");
+
+    expect(config).toContain("defer_until_reset: false");
+    expect(config).toContain("expected_unit_burn_pct: 1");
+    expect(config).toContain("defer_jitter_ms: 30000");
+    expect(config).toContain("reasoning_effort: low");
+    expect(config).toContain("reasoning_effort: medium");
   });
 
   it("exposes the CI-safe live Codex headless smoke command", async () => {

@@ -4248,6 +4248,241 @@ describe("orchestrator core", () => {
     expect(Object.keys(orchestrator.getState().running)).toEqual([]);
   });
 
+  it("shares rate-limit admission capacity across retry timers", async () => {
+    const timers = createFakeTimerScheduler();
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2" }),
+      ],
+      statesById: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      timerScheduler: timers,
+      config: createConfig({
+        agent: { maxConcurrentAgents: 2 },
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: null,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 87,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+    for (const id of ["1", "2"]) {
+      orchestrator.getState().claimed.add(id);
+      orchestrator.getState().retryAttempts[id] = {
+        issueId: id,
+        identifier: `ISSUE-${id}`,
+        attempt: 1,
+        dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+        timerHandle: null,
+        error: "previous failure",
+        delayType: "failure",
+      };
+    }
+
+    const first = await orchestrator.onRetryTimer("1");
+    const second = await orchestrator.onRetryTimer("2");
+
+    expect(first.dispatched).toBe(true);
+    expect(second.dispatched).toBe(false);
+    expect(second.released).toBe(false);
+    expect(Object.keys(orchestrator.getState().running)).toEqual(["1"]);
+    expect(orchestrator.getState().retryAttempts["2"]).toMatchObject({
+      attempt: 1,
+      error: "rate-limit admission capacity exhausted",
+    });
+    expect(orchestrator.getState().issueDispositions["2"]).toMatchObject({
+      disposition: "gate",
+      reasonCode: "rate_window_admission_capacity",
+    });
+  });
+
+  it("shares rate-limit admission capacity between poll and retry dispatch", async () => {
+    const timers = createFakeTimerScheduler();
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2" }),
+      ],
+      statesById: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      timerScheduler: timers,
+      config: createConfig({
+        agent: { maxConcurrentAgents: 2 },
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: null,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 87,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const poll = await orchestrator.pollTick();
+    orchestrator.getState().claimed.add("2");
+    orchestrator.getState().retryAttempts["2"] = {
+      issueId: "2",
+      identifier: "ISSUE-2",
+      attempt: 1,
+      dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+      timerHandle: null,
+      error: "previous failure",
+      delayType: "failure",
+    };
+
+    const retry = await orchestrator.onRetryTimer("2");
+
+    expect(poll.dispatchedIssueIds).toEqual(["1"]);
+    expect(retry.dispatched).toBe(false);
+    expect(Object.keys(orchestrator.getState().running)).toEqual(["1"]);
+    expect(orchestrator.getState().retryAttempts["2"]).toMatchObject({
+      attempt: 1,
+      error: "rate-limit admission capacity exhausted",
+    });
+  });
+
+  it("refunds rate-limit admission capacity when poll dispatch does not launch", async () => {
+    const spawnWorker = vi.fn(async ({ issue }) => {
+      if (issue.id === "1") {
+        throw new Error("workspace init failed");
+      }
+      return {
+        workerHandle: { pid: 1002 },
+        monitorHandle: { ref: "monitor-2" },
+      };
+    });
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2" }),
+      ],
+      statesById: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      spawnWorker,
+      config: createConfig({
+        agent: { maxConcurrentAgents: 2 },
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: null,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 87,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(2);
+    expect(Object.keys(orchestrator.getState().running)).toEqual(["2"]);
+  });
+
+  it("rechecks retry rate-limit admission after fetching candidates", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const harness: { orchestrator?: OrchestratorCore } = {};
+    const baseTracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const baseFetch = baseTracker.fetchCandidateIssues.bind(baseTracker);
+    const tracker = {
+      ...baseTracker,
+      fetchCandidateIssues: async () => {
+        harness.orchestrator!.getState().codexRateLimits = {
+          primary: {
+            used_percent: 98,
+            window_minutes: 300,
+            resets_at: 1772760000,
+          },
+        };
+        return baseFetch();
+      },
+    };
+    const orchestrator = createOrchestrator({
+      tracker,
+      spawnWorker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 1,
+          minSecondaryHeadroomPct: null,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    harness.orchestrator = orchestrator;
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 95,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+    orchestrator.getState().claimed.add("1");
+    orchestrator.getState().retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+      timerHandle: null,
+      error: "previous failure",
+      delayType: "failure",
+    };
+
+    const result = await orchestrator.onRetryTimer("1");
+
+    expect(result.dispatched).toBe(false);
+    expect(result.retryEntry).toMatchObject({
+      attempt: 1,
+      error: "rate-limit admission floor active",
+    });
+    expect(spawnWorker).not.toHaveBeenCalled();
+  });
+
   it("resumes once on a pause-triage continue verdict when the ladder is unconfigured", async () => {
     const triageCalls: string[] = [];
     const tracker = createTracker({
@@ -6112,6 +6347,330 @@ describe("orchestrator core", () => {
     expect(orchestrator.getState().rateLimitAdmission?.reason).toContain(
       "secondary window headroom 2.0% < 5% floor",
     );
+  });
+
+  it("records a next-admission ETA when defer-until-reset blocks on expected burn", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 30_000,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 40,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: true,
+      expectedUnitBurnPct: 3,
+      deferredUntil: new Date(1772800000 * 1000 + 30_000).toISOString(),
+    });
+    expect(orchestrator.getState().rateLimitAdmission?.reason).toContain(
+      "secondary window headroom 2.0% < 8.0% required for 3.0% expected unit burn above 5% floor",
+    );
+  });
+
+  it("blocks below-floor headroom even when expected burn still fits", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 92,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: true,
+      expectedUnitBurnPct: 3,
+      deferredUntil: new Date(1772760000 * 1000).toISOString(),
+    });
+    expect(orchestrator.getState().rateLimitAdmission?.reason).toContain(
+      "primary window headroom 8.0% < 13.0% required for 3.0% expected unit burn above 10% floor",
+    );
+  });
+
+  it("reserves expected burn capacity across multiple admissions in one poll", async () => {
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2" }),
+      ],
+      statesById: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        agent: { maxConcurrentAgents: 2 },
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: null,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 87,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+      secondary: {
+        used_percent: 100,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: false,
+      expectedUnitBurnPct: 3,
+      admissionCapacity: 1,
+    });
+  });
+
+  it("blocks defer admission when expected burn exceeds configured headroom", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 1,
+          minSecondaryHeadroomPct: null,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 98,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: true,
+      expectedUnitBurnPct: 3,
+      admissionCapacity: 0,
+    });
+    expect(orchestrator.getState().rateLimitAdmission?.reason).toContain(
+      "below expected dispatch burn",
+    );
+  });
+
+  it("uses durable stage window telemetry before the fallback expected burn", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 1,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().issueExecutionHistory.done = [
+      {
+        stageName: "investigate",
+        durationMs: 1,
+        totalTokens: 1,
+        rateLimitWindows: {
+          primary: { startPercent: 10, latestPercent: 12, lastResetsAt: null },
+          secondary: null,
+        },
+        turns: 1,
+        outcome: "normal",
+      },
+      {
+        stageName: "implement",
+        durationMs: 1,
+        totalTokens: 1,
+        rateLimitWindows: {
+          primary: { startPercent: 20, latestPercent: 24, lastResetsAt: null },
+          secondary: null,
+        },
+        turns: 1,
+        outcome: "normal",
+      },
+    ];
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 98,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: true,
+      expectedUnitBurnPct: 3,
+      deferredUntil: new Date(1772760000 * 1000).toISOString(),
+    });
+  });
+
+  it("selects recent burn samples by completion time instead of issue map order", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: null,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 1,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().issueExecutionHistory.recent = Array.from(
+      { length: 20 },
+      (_, index) => ({
+        stageName: "implement",
+        completedAt: new Date(Date.UTC(2026, 2, 6, 1, index)).toISOString(),
+        durationMs: 1,
+        totalTokens: 1,
+        rateLimitWindows: {
+          primary: { startPercent: 10, latestPercent: 12, lastResetsAt: null },
+          secondary: null,
+        },
+        turns: 1,
+        outcome: "normal",
+      }),
+    );
+    orchestrator.getState().issueExecutionHistory.older = Array.from(
+      { length: 20 },
+      (_, index) => ({
+        stageName: "implement",
+        completedAt: new Date(Date.UTC(2026, 2, 6, 0, index)).toISOString(),
+        durationMs: 1,
+        totalTokens: 1,
+        rateLimitWindows: {
+          primary: { startPercent: 10, latestPercent: 20, lastResetsAt: null },
+          secondary: null,
+        },
+        turns: 1,
+        outcome: "normal",
+      }),
+    );
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 88,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: false,
+      expectedUnitBurnPct: 2,
+    });
+  });
+
+  it("falls back to the configured floor when defer-until-reset has no expected-burn data", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+          deferUntilReset: true,
+          expectedUnitBurnPct: null,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 99,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: true,
+      expectedUnitBurnPct: null,
+      deferredUntil: new Date(1772760000 * 1000).toISOString(),
+    });
   });
 
   it("dispatches when a low-headroom snapshot has expired past resets_at", async () => {

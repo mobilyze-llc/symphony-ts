@@ -691,6 +691,8 @@ describe("runtime snapshot", () => {
       minSecondaryHeadroomPct: 5,
       primaryUsedPercent: 39,
       secondaryUsedPercent: 98,
+      expectedUnitBurnPct: 3,
+      deferredUntil: "2026-03-06T12:00:00.000Z",
     };
     const gated = buildRuntimeSnapshot(state, {
       now: new Date("2026-03-06T10:00:10.000Z"),
@@ -703,6 +705,8 @@ describe("runtime snapshot", () => {
       min_secondary_headroom_pct: 5,
       primary_used_pct: 39,
       secondary_used_pct: 98,
+      expected_unit_burn_pct: 3,
+      deferred_until: "2026-03-06T12:00:00.000Z",
     });
   });
 
@@ -2996,6 +3000,8 @@ describe("state-document enrichment (SYMPH-407)", () => {
       minSecondaryHeadroomPct: 5,
       primaryUsedPercent: 39,
       secondaryUsedPercent: 98,
+      expectedUnitBurnPct: 3,
+      deferredUntil: "2026-06-12T12:00:00.000Z",
     };
     const snapshot = buildRuntimeSnapshot(state, {
       enrichment: {

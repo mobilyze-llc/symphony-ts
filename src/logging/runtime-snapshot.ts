@@ -126,6 +126,8 @@ export interface RuntimeSnapshotRateLimitAdmission {
   min_secondary_headroom_pct: number | null;
   primary_used_pct: number | null;
   secondary_used_pct: number | null;
+  expected_unit_burn_pct: number | null;
+  deferred_until: string | null;
 }
 
 export interface RuntimeSnapshotContinuousFeedback {
@@ -429,6 +431,8 @@ export interface RuntimeSnapshotRateLimitGateView
   evaluated_at: string;
   blocked: boolean;
   reason: string | null;
+  expected_unit_burn_pct: number | null;
+  deferred_until: string | null;
 }
 
 export interface RuntimeSnapshotRateLimitLiveView
@@ -819,6 +823,9 @@ export function buildRuntimeSnapshot(
               state.rateLimitAdmission.minSecondaryHeadroomPct,
             primary_used_pct: state.rateLimitAdmission.primaryUsedPercent,
             secondary_used_pct: state.rateLimitAdmission.secondaryUsedPercent,
+            expected_unit_burn_pct:
+              state.rateLimitAdmission.expectedUnitBurnPct ?? null,
+            deferred_until: state.rateLimitAdmission.deferredUntil ?? null,
           },
     decorrelated_gates: buildDecorrelatedGateSnapshots(state),
     decision_quality: evaluateDispatcherDecisionQuality(
@@ -1607,6 +1614,8 @@ function buildRateLimitViews(
           reason: admission.reason,
           primary_used_pct: admission.primaryUsedPercent,
           secondary_used_pct: admission.secondaryUsedPercent,
+          expected_unit_burn_pct: admission.expectedUnitBurnPct ?? null,
+          deferred_until: admission.deferredUntil ?? null,
         };
 
   let liveTelemetry: RuntimeSnapshotRateLimitLiveView | null = null;
