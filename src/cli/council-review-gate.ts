@@ -34,6 +34,7 @@ interface ParsedArgs {
   codexExcavationTimeoutSeconds?: number;
   codexExcavationToolOutputTokenLimit?: number;
   codexExcavationModelAutoCompactTokenLimit?: number;
+  kimiShadow?: boolean;
   round?: number;
   mode?: CouncilReviewMode;
   routingMode?: CouncilRoutingMode;
@@ -181,6 +182,10 @@ export function parseCouncilReviewGateArgs(
       parsed.codexExcavation = false;
       continue;
     }
+    if (token === "--kimi-shadow") {
+      parsed.kimiShadow = true;
+      continue;
+    }
     if (token === "--codex-excavation-sweep") {
       parsed.codexExcavationSweep = readCodexExcavationSweep(
         readValue(argv, ++index, token),
@@ -294,10 +299,11 @@ export function parseCouncilReviewGateArgs(
       parsed.codexExcavationModelAutoCompactTokenLimit !== undefined ||
       parsed.routingMode !== undefined ||
       parsed.operatorOverrideReason !== undefined ||
-      parsed.provenance !== undefined)
+      parsed.provenance !== undefined ||
+      parsed.kimiShadow !== undefined)
   ) {
     throw new UsageError(
-      "Codex lane and routing flags are only valid when running a council review, not with --assert-fresh-review.",
+      "Reviewer lane, shadow lane, and routing flags are only valid when running a council review, not with --assert-fresh-review.",
     );
   }
   if (
@@ -507,6 +513,7 @@ function renderUsage(): string {
     "  --timeout-seconds N           Per-lane timeout in seconds",
     "  --no-codex-lead               Skip Codex lead triage and mark degraded",
     "  --no-codex-excavation         Skip the default Codex edge-case excavation reviewer lane",
+    "  --kimi-shadow                 Add optional Kimi K2.7 shadow reviewer lane; not merge-authoritative",
     "  --codex-excavation-sweep standard|high-risk  Codex excavation preset (default: standard; high-risk uses a longer bounded sweep)",
     "  --codex-excavation-timeout-seconds N          Override Codex excavation lane timeout",
     "  --codex-excavation-tool-output-token-limit N  Override Codex excavation per-tool output cap",

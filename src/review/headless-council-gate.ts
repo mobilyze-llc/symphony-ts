@@ -35,6 +35,8 @@ const DEFAULT_CODEX_EXCAVATION_MODEL_AUTO_COMPACT_TOKEN_LIMIT = 40_000;
 const HIGH_RISK_CODEX_EXCAVATION_TIMEOUT_SECONDS = 3_600;
 const HIGH_RISK_CODEX_EXCAVATION_TOOL_OUTPUT_TOKEN_LIMIT = 4_000;
 const HIGH_RISK_CODEX_EXCAVATION_MODEL_AUTO_COMPACT_TOKEN_LIMIT = 80_000;
+const DEFAULT_KIMI_LANE_ID = "kimi-k27-shadow";
+const DEFAULT_KIMI_ROLE = "kimi-k27-shadow-reviewer";
 const DEFAULT_LANE_STALL_GRACE_SECONDS = 60;
 const DEFAULT_LEAD_CONFIDENCE_THRESHOLD = 0.7;
 const ARTIFACT_SECTION_HEADINGS = [
@@ -151,6 +153,7 @@ export type CouncilTerminationAction =
 export type CouncilTerminationAlertLevel = "ok" | "warning" | "operator";
 export type CodexExcavationSweep = "standard" | "high-risk";
 export type CodexReasoningEffort = "low" | "medium" | "high";
+export type HeadlessReviewerAgent = "claude" | "pi" | "codex" | "kimi";
 export type CouncilEscalationPredicate =
   | "missing_required_lane"
   | "malformed_required_lane"
@@ -245,12 +248,13 @@ export interface StructuredReviewerArtifact {
   kind: "symphony-headless-council-reviewer-artifact";
   lane: {
     laneId: string;
-    agent: "claude" | "pi" | "codex";
+    agent: HeadlessReviewerAgent;
     role: string;
     model: string;
     modelFamily: string;
     reasoningEffort: string | null;
     independentReviewer: boolean;
+    mergeAuthoritative: boolean;
   };
   routing: {
     mode: CouncilReviewMode;
@@ -334,9 +338,9 @@ export type CommandRunner = (
 
 export interface HeadlessReviewerLaneConfig {
   laneId: string;
-  agent: "claude" | "pi" | "codex";
+  agent: HeadlessReviewerAgent;
   role: string;
-  model: string;
+  model?: string;
   profile?: string;
   provider?: string;
   thinking?: "low" | "medium" | "high";
@@ -349,11 +353,13 @@ export interface HeadlessReviewerLaneConfig {
   readOnly?: boolean;
   slim?: boolean;
   independentReviewer?: boolean;
+  mergeAuthoritative?: boolean;
+  binary?: string;
 }
 
 export interface CouncilRoutingLaneSelection {
   laneId: string;
-  agent: "claude" | "pi" | "codex";
+  agent: HeadlessReviewerAgent;
   role: string;
   required: boolean;
   decorrelatedSignal: boolean;
@@ -363,13 +369,13 @@ export interface CouncilRoutingLaneSelection {
 
 export interface CouncilRoutingSkippedLane {
   laneId: string;
-  agent: "claude" | "pi" | "codex";
+  agent: HeadlessReviewerAgent;
   reason: string;
 }
 
 export interface CouncilDecorrelatedReviewerArtifact {
   laneId: string;
-  agent: "claude" | "pi" | "codex";
+  agent: HeadlessReviewerAgent;
   modelFamily: string;
 }
 
@@ -413,6 +419,7 @@ export interface HeadlessCouncilGateInput {
   codexExcavationTimeoutSeconds?: number;
   codexExcavationToolOutputTokenLimit?: number;
   codexExcavationModelAutoCompactTokenLimit?: number;
+  kimiShadow?: boolean;
   round?: number;
   mode?: CouncilReviewMode;
   routingMode?: CouncilRoutingMode;
@@ -436,6 +443,7 @@ interface DefaultReviewerLaneOptions {
   routingMode?: CouncilRoutingMode | undefined;
   acceptsNarrowerRisk?: boolean | undefined;
   requiresPiAuthorRecovery?: boolean | undefined;
+  kimiShadow?: boolean | undefined;
 }
 
 export interface ReviewContext {
@@ -558,7 +566,7 @@ export interface HeadlessWorkspaceIntegrityEvidence {
 
 export interface HeadlessLaneResult {
   laneId: string;
-  agent: "claude" | "pi" | "codex";
+  agent: HeadlessReviewerAgent;
   role: string;
   model: string;
   state: HeadlessLaneState;
@@ -569,6 +577,7 @@ export interface HeadlessLaneResult {
   cliJsonPath: string | null;
   reasoningEffort: string | null;
   independentReviewer: boolean;
+  mergeAuthoritative: boolean;
   message: string | null;
   degradedReason: LaneDegradedReason | null;
   reviewBundle: ReviewBundleReference | null;
@@ -894,6 +903,7 @@ export async function runHeadlessCouncilGate(
           input.codexExcavationToolOutputTokenLimit,
         codexExcavationModelAutoCompactTokenLimit:
           input.codexExcavationModelAutoCompactTokenLimit,
+        kimiShadow: input.kimiShadow,
         routingMode: reviewRouting.mode,
         acceptsNarrowerRisk: operatorAcceptedNarrowerRisk(reviewRouting),
         requiresPiAuthorRecovery: reviewRouting.escalationPredicates.includes(
@@ -1028,9 +1038,10 @@ export async function runHeadlessCouncilGate(
       laneId: lane.laneId,
       agent: lane.agent,
       role: lane.role,
-      model: lane.model,
+      model: reviewerLaneModel(lane),
       reasoningEffort: laneReasoningEffort(lane),
       independentReviewer: independentReviewerForLane(lane),
+      mergeAuthoritative: mergeAuthoritativeForLane(lane),
     };
     if (budget.stallDeadlineMs <= 0) {
       progress(
@@ -1143,6 +1154,7 @@ export async function runHeadlessCouncilGate(
       model: CODEX_LEAD_MODEL,
       reasoningEffort: DEFAULT_CODEX_EXCAVATION_REASONING_EFFORT,
       independentReviewer: false,
+      mergeAuthoritative: true,
     };
     if (codexLeadBudget.stallDeadlineMs <= 0) {
       progress(
@@ -1658,6 +1670,9 @@ function councilRoutingEvidenceError(
     ) {
       return `Council review artifact required reviewer lane ${laneId} is not a clean completed independent PASS.`;
     }
+    if (lane.mergeAuthoritative === false) {
+      return `Council review artifact required reviewer lane ${laneId} is not merge-authoritative.`;
+    }
     const artifact = lane.structuredArtifact;
     if (artifact === undefined || artifact === null) {
       return `Council review artifact required reviewer lane ${laneId} lacks a structured reviewer artifact.`;
@@ -1669,6 +1684,9 @@ function councilRoutingEvidenceError(
       !artifact.lane.independentReviewer
     ) {
       return `Council review artifact required reviewer lane ${laneId} has inconsistent structured artifact evidence.`;
+    }
+    if (!isMergeAuthoritativeArtifact(artifact)) {
+      return `Council review artifact required reviewer lane ${laneId} has non-merge-authoritative structured artifact evidence.`;
     }
     if (
       routing.decorrelationBasis.authorFamilies.includes(
@@ -1731,6 +1749,9 @@ export function defaultReviewerLanes(
   if (codexExcavationEnabled(env, options.codexExcavation)) {
     lanes.push(codexExcavationLane(env, options));
   }
+  if (kimiShadowEnabled(env, options.kimiShadow)) {
+    lanes.push(kimiReviewerLane(env));
+  }
   return lanes;
 }
 
@@ -1757,6 +1778,57 @@ function piReviewerLane(env: NodeJS.ProcessEnv): HeadlessReviewerLaneConfig {
     thinking: parseThinkingEffort(env.SYMPHONY_COUNCIL_PI_THINKING, "high"),
     tools: env.SYMPHONY_COUNCIL_PI_TOOLS ?? "read,grep,find,ls",
   };
+}
+
+function kimiReviewerLane(env: NodeJS.ProcessEnv): HeadlessReviewerLaneConfig {
+  return {
+    laneId: env.SYMPHONY_COUNCIL_KIMI_LANE_ID ?? DEFAULT_KIMI_LANE_ID,
+    agent: "kimi",
+    role: env.SYMPHONY_COUNCIL_KIMI_ROLE ?? DEFAULT_KIMI_ROLE,
+    ...(env.SYMPHONY_COUNCIL_KIMI_MODEL === undefined
+      ? {}
+      : { model: env.SYMPHONY_COUNCIL_KIMI_MODEL }),
+    ...(env.KIMI_CLI_BIN === undefined ? {} : { binary: env.KIMI_CLI_BIN }),
+    independentReviewer: false,
+    mergeAuthoritative: false,
+  };
+}
+
+function reviewerLaneModel(lane: { model?: string }): string {
+  return lane.model ?? "configured-default";
+}
+
+function requiredReviewerLaneModel(lane: HeadlessReviewerLaneConfig): string {
+  if (lane.model === undefined) {
+    throw new Error(
+      `${lane.agent} reviewer lane ${lane.laneId} requires a model.`,
+    );
+  }
+  return lane.model;
+}
+
+function mergeAuthoritativeForLane(lane: {
+  mergeAuthoritative?: boolean;
+}): boolean {
+  return lane.mergeAuthoritative ?? true;
+}
+
+function isMergeAuthoritativeArtifact(
+  artifact: StructuredReviewerArtifact,
+): boolean {
+  return artifact.lane.mergeAuthoritative !== false;
+}
+
+function mergeAuthoritativeArtifacts(
+  artifacts: readonly StructuredReviewerArtifact[],
+): StructuredReviewerArtifact[] {
+  return artifacts.filter(isMergeAuthoritativeArtifact);
+}
+
+function mergeAuthoritativeLanes(
+  lanes: readonly HeadlessLaneResult[],
+): HeadlessLaneResult[] {
+  return lanes.filter((lane) => lane.mergeAuthoritative !== false);
 }
 
 function buildInitialCouncilRouting(args: {
@@ -1830,6 +1902,7 @@ function buildInitialCouncilRouting(args: {
           codexLeadEnabled: args.codexLeadEnabled,
           codexExcavation: gateInput.codexExcavation,
           codexExcavationSweep: gateInput.codexExcavationSweep,
+          kimiShadow: gateInput.kimiShadow,
           acceptsNarrowerRisk: acceptsNarrowerRiskForHighRisk,
           requiresPiAuthorRecovery: piAuthored,
         })
@@ -1872,6 +1945,7 @@ function defaultSelectedLanesForRouting(input: {
   codexLeadEnabled: boolean;
   codexExcavation: boolean | undefined;
   codexExcavationSweep: CodexExcavationSweep | undefined;
+  kimiShadow: boolean | undefined;
   acceptsNarrowerRisk: boolean;
   requiresPiAuthorRecovery: boolean;
 }): CouncilRoutingLaneSelection[] {
@@ -1905,6 +1979,9 @@ function defaultSelectedLanesForRouting(input: {
       ),
     );
   }
+  if (kimiShadowEnabled(input.env, input.kimiShadow)) {
+    selections.push(shadowLaneSelection(kimiReviewerLane(input.env)));
+  }
   if (input.codexLeadEnabled) {
     selections.push({
       laneId: CODEX_LEAD_LANE_ID,
@@ -1923,16 +2000,19 @@ function explicitSelectedLanesForRouting(input: {
   codexLeadEnabled: boolean;
   requiresPiAuthorRecovery: boolean;
 }): CouncilRoutingLaneSelection[] {
-  const selections = input.lanes.map((lane) =>
-    laneSelection(
+  const selections = input.lanes.map((lane) => {
+    if (!mergeAuthoritativeForLane(lane)) {
+      return shadowLaneSelection(lane);
+    }
+    return laneSelection(
       lane,
       input.requiresPiAuthorRecovery && lane.agent === "pi"
         ? false
         : independentReviewerForLane(lane),
       lane.agent !== "codex" &&
         !(input.requiresPiAuthorRecovery && lane.agent === "pi"),
-    ),
-  );
+    );
+  });
   if (input.codexLeadEnabled) {
     selections.push({
       laneId: CODEX_LEAD_LANE_ID,
@@ -1965,6 +2045,19 @@ function laneSelection(
         : !decorrelatedSignal
           ? "same_family_author_signal"
           : "non_author_family_reviewer_artifact",
+  };
+}
+
+function shadowLaneSelection(
+  lane: HeadlessReviewerLaneConfig,
+): CouncilRoutingLaneSelection {
+  return {
+    laneId: lane.laneId,
+    agent: lane.agent,
+    role: lane.role,
+    required: false,
+    decorrelatedSignal: false,
+    reason: "shadow_calibration_signal",
   };
 }
 
@@ -2053,7 +2146,9 @@ function finalizeCouncilRouting(
         lane.state !== "complete" ||
         lane.verdict !== "pass" ||
         lane.degradedReason !== null ||
-        !lane.independentReviewer
+        !lane.independentReviewer ||
+        lane.mergeAuthoritative === false ||
+        !isMergeAuthoritativeArtifact(artifact)
       ) {
         return [];
       }
@@ -2197,7 +2292,7 @@ function collectDisagreementEscalationPredicates(
   if (leadArtifact.confidence < leadConfidenceThreshold) {
     predicates.push("lead_confidence_below_threshold");
   }
-  const laneP1s = lanes.flatMap((lane) => {
+  const laneP1s = mergeAuthoritativeLanes(lanes).flatMap((lane) => {
     if (lane.laneId === CODEX_LEAD_LANE_ID) {
       return [];
     }
@@ -2430,6 +2525,16 @@ function codexExcavationEnabled(
   }
   const value = env.SYMPHONY_COUNCIL_CODEX_EXCAVATION_ENABLED;
   return value !== "0" && value !== "false" && value !== "no";
+}
+
+function kimiShadowEnabled(
+  env: NodeJS.ProcessEnv,
+  override: boolean | undefined,
+): boolean {
+  if (override !== undefined) {
+    return override;
+  }
+  return envFlag(env.SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED);
 }
 
 function codexExcavationLane(
@@ -2724,7 +2829,7 @@ async function buildTargetedConvergenceHypothesis(input: {
   env: NodeJS.ProcessEnv;
 }): Promise<TargetedConvergenceHypothesis | null> {
   const family = selectTargetedConvergenceFamily(
-    input.priorStructuredArtifacts,
+    mergeAuthoritativeArtifacts(input.priorStructuredArtifacts),
   );
   if (family === null) {
     return null;
@@ -3436,9 +3541,10 @@ async function runReviewerLane(input: {
       laneId: input.lane.laneId,
       agent: input.lane.agent,
       role: input.lane.role,
-      model: input.lane.model,
+      model: reviewerLaneModel(input.lane),
       reasoningEffort: laneReasoningEffort(input.lane),
       independentReviewer: independentReviewerForLane(input.lane),
+      mergeAuthoritative: mergeAuthoritativeForLane(input.lane),
       promptPath,
       cliJsonPath,
       stderrPath,
@@ -3485,9 +3591,10 @@ async function runReviewerLane(input: {
     laneId: input.lane.laneId,
     agent: input.lane.agent,
     role: input.lane.role,
-    model: input.lane.model,
+    model: reviewerLaneModel(input.lane),
     reasoningEffort: laneReasoningEffort(input.lane),
     independentReviewer: independentReviewerForLane(input.lane),
+    mergeAuthoritative: mergeAuthoritativeForLane(input.lane),
     promptPath,
     cliJsonPath,
     stderrPath,
@@ -3567,6 +3674,7 @@ async function runCodexLeadLane(input: {
       model: CODEX_LEAD_MODEL,
       reasoningEffort: DEFAULT_CODEX_EXCAVATION_REASONING_EFFORT,
       independentReviewer: false,
+      mergeAuthoritative: true,
       promptPath,
       cliJsonPath,
       stderrPath,
@@ -3620,6 +3728,7 @@ async function runCodexLeadLane(input: {
     model: CODEX_LEAD_MODEL,
     reasoningEffort: DEFAULT_CODEX_EXCAVATION_REASONING_EFFORT,
     independentReviewer: false,
+    mergeAuthoritative: true,
     promptPath,
     cliJsonPath,
     stderrPath,
@@ -3745,11 +3854,12 @@ function applyWorkspaceIntegrityGuard(
 
 function workspaceIntegrityCheckFailedLaneResult(input: {
   laneId: string;
-  agent: "claude" | "pi" | "codex";
+  agent: HeadlessReviewerAgent;
   role: string;
   model: string;
   reasoningEffort: string | null;
   independentReviewer: boolean;
+  mergeAuthoritative: boolean;
   promptPath: string;
   cliJsonPath: string;
   stderrPath: string;
@@ -3764,6 +3874,7 @@ function workspaceIntegrityCheckFailedLaneResult(input: {
     model: input.model,
     reasoningEffort: input.reasoningEffort,
     independentReviewer: input.independentReviewer,
+    mergeAuthoritative: input.mergeAuthoritative,
     state: "error",
     verdict: "error",
     artifactPath: null,
@@ -3852,7 +3963,7 @@ function laneAgentArgs(
   if (lane.agent === "claude") {
     return [
       "--model",
-      lane.model,
+      requiredReviewerLaneModel(lane),
       "--profile",
       lane.profile ?? "legacy",
       "--allowed-tools",
@@ -3871,11 +3982,18 @@ function laneAgentArgs(
     ];
   }
 
+  if (lane.agent === "kimi") {
+    return [
+      ...(lane.binary === undefined ? [] : ["--binary", lane.binary]),
+      ...(lane.model === undefined ? [] : ["--model", lane.model]),
+    ];
+  }
+
   return [
     "--provider",
     lane.provider ?? "deepseek",
     "--model",
-    lane.model,
+    requiredReviewerLaneModel(lane),
     "--thinking",
     lane.thinking ?? "high",
     "--tools",
@@ -3885,7 +4003,7 @@ function laneAgentArgs(
 
 function codexConfigArgsForLane(lane: HeadlessReviewerLaneConfig): string[] {
   const config = [
-    `model=${tomlString(lane.model)}`,
+    `model=${tomlString(requiredReviewerLaneModel(lane))}`,
     `model_reasoning_effort=${tomlString(laneReasoningEffort(lane) ?? "high")}`,
     `tool_output_token_limit=${positiveIntegerForConfig(lane.toolOutputTokenLimit, DEFAULT_CODEX_EXCAVATION_TOOL_OUTPUT_TOKEN_LIMIT)}`,
     `model_auto_compact_token_limit=${positiveIntegerForConfig(lane.modelAutoCompactTokenLimit, DEFAULT_CODEX_EXCAVATION_MODEL_AUTO_COMPACT_TOKEN_LIMIT)}`,
@@ -4003,6 +4121,7 @@ async function withLaneStallDeadline(
           model: "unknown",
           reasoningEffort: null,
           independentReviewer: false,
+          mergeAuthoritative: true,
           state: "timed_out",
           verdict: "error",
           degradedReason: "substrate_stall",
@@ -4101,11 +4220,12 @@ function formatLaneProgress(
 function laneStallResult(
   identity: {
     laneId: string;
-    agent: "claude" | "pi" | "codex";
+    agent: HeadlessReviewerAgent;
     role: string;
     model: string;
     reasoningEffort: string | null;
     independentReviewer: boolean;
+    mergeAuthoritative: boolean;
   },
   artifactDir: string,
   deadlineMs: number,
@@ -4138,9 +4258,10 @@ function reviewerLaneExecutionErrorResult(
     laneId: lane.laneId,
     agent: lane.agent,
     role: lane.role,
-    model: lane.model,
+    model: reviewerLaneModel(lane),
     reasoningEffort: laneReasoningEffort(lane),
     independentReviewer: independentReviewerForLane(lane),
+    mergeAuthoritative: mergeAuthoritativeForLane(lane),
     state: "error",
     verdict: "error",
     artifactPath: null,
@@ -4167,6 +4288,7 @@ function codexLeadExecutionErrorResult(
     model: CODEX_LEAD_MODEL,
     reasoningEffort: DEFAULT_CODEX_EXCAVATION_REASONING_EFFORT,
     independentReviewer: false,
+    mergeAuthoritative: true,
     state: "error",
     verdict: "error",
     artifactPath: null,
@@ -4183,11 +4305,12 @@ function codexLeadExecutionErrorResult(
 
 async function parseLaneResult(input: {
   laneId: string;
-  agent: "claude" | "pi" | "codex";
+  agent: HeadlessReviewerAgent;
   role: string;
   model: string;
   reasoningEffort: string | null;
   independentReviewer: boolean;
+  mergeAuthoritative: boolean;
   promptPath: string;
   cliJsonPath: string;
   stderrPath: string;
@@ -4602,10 +4725,14 @@ function buildStructuredReviewerArtifact(input: {
       laneId: input.lane.laneId,
       agent: input.lane.agent,
       role: input.lane.role,
-      model: input.lane.model,
-      modelFamily: modelFamilyForLane(input.lane.agent, input.lane.model),
+      model: reviewerLaneModel(input.lane),
+      modelFamily: modelFamilyForLane(
+        input.lane.agent,
+        reviewerLaneModel(input.lane),
+      ),
       reasoningEffort: reasoningEffortForLane(input.lane),
       independentReviewer: input.lane.independentReviewer,
+      mergeAuthoritative: input.lane.mergeAuthoritative,
     },
     routing: {
       mode: input.mode,
@@ -4632,7 +4759,7 @@ function buildStructuredReviewerArtifact(input: {
 }
 
 function modelFamilyForLane(
-  agent: "claude" | "pi" | "codex",
+  agent: HeadlessReviewerAgent,
   model: string,
 ): string {
   if (agent === "claude") {
@@ -4641,6 +4768,9 @@ function modelFamilyForLane(
   if (agent === "codex") {
     return "openai-codex";
   }
+  if (agent === "kimi") {
+    return "moonshot-kimi";
+  }
   const [family] = model.split("/");
   return model.includes("/") && family !== undefined && family !== ""
     ? family
@@ -4648,7 +4778,7 @@ function modelFamilyForLane(
 }
 
 function reasoningEffortForLane(input: {
-  agent: "claude" | "pi" | "codex";
+  agent: HeadlessReviewerAgent;
   reasoningEffort: string | null;
 }): string | null {
   if (input.agent === "codex") {
@@ -5822,13 +5952,14 @@ function isEmptySectionMarker(line: string): boolean {
 function aggregateHeadlessVerdict(
   lanes: readonly HeadlessLaneResult[],
 ): HeadlessGateVerdict {
-  if (lanes.length === 0) {
+  const authoritativeLanes = mergeAuthoritativeLanes(lanes);
+  if (authoritativeLanes.length === 0) {
     return "error";
   }
-  if (lanes.some((lane) => lane.verdict === "error")) {
+  if (authoritativeLanes.some((lane) => lane.verdict === "error")) {
     return "error";
   }
-  if (lanes.some((lane) => lane.verdict === "fail")) {
+  if (authoritativeLanes.some((lane) => lane.verdict === "fail")) {
     return "fail";
   }
   return "pass";
@@ -5842,9 +5973,10 @@ function assessCouncilTermination(input: {
   degradedConditions: readonly string[];
   priorStructuredArtifacts: readonly StructuredReviewerArtifact[];
 }): CouncilTerminationAssessment {
+  const terminationLanes = mergeAuthoritativeLanes(input.lanes);
   const currentArtifacts = currentTerminationArtifacts({
     verdict: input.verdict,
-    lanes: input.lanes,
+    lanes: terminationLanes,
   });
   const currentFindings = currentArtifacts.flatMap(
     (artifact) => artifact.findings,
@@ -5861,7 +5993,7 @@ function assessCouncilTermination(input: {
   );
   const tripwireFamilyNames = sameFamilyReopenNames(
     blockingFindings,
-    input.priorStructuredArtifacts,
+    mergeAuthoritativeArtifacts(input.priorStructuredArtifacts),
     input.thresholds.sameFamilyReopenLimit,
   );
   const baseAlertLevel = roundAlertLevel(input.round, input.thresholds);
@@ -5876,7 +6008,10 @@ function assessCouncilTermination(input: {
   let reason: CouncilTerminationReason;
   let action: CouncilTerminationAction;
   let alertLevel = baseAlertLevel;
-  const reviewSubstrateDegraded = hasReviewSubstrateDegradation(input);
+  const reviewSubstrateDegraded = hasReviewSubstrateDegradation({
+    lanes: terminationLanes,
+    degradedConditions: input.degradedConditions,
+  });
 
   if (
     input.verdict === "error" ||
@@ -6098,6 +6233,9 @@ function collectDegradedConditions(
 ): string[] {
   const conditions: string[] = [];
   for (const lane of lanes) {
+    if (lane.mergeAuthoritative === false) {
+      continue;
+    }
     if (lane.verdict !== "pass") {
       const detail =
         lane.message === null ? lane.state : `${lane.state}:${lane.message}`;
@@ -6407,14 +6545,15 @@ function hasTerminationSubstrateOrProvenanceDegradation(
   result: HeadlessCouncilGateResult,
   termination: CouncilTerminationAssessment,
 ): boolean {
+  const authoritativeLanes = mergeAuthoritativeLanes(result.lanes);
   return (
     hasReviewSubstrateDegradation({
-      lanes: result.lanes,
+      lanes: authoritativeLanes,
       degradedConditions: result.degradedConditions,
     }) ||
     isRoutingOnlyProcedureStop({
       verdict: result.verdict,
-      lanes: result.lanes,
+      lanes: authoritativeLanes,
       degradedConditions: result.degradedConditions,
       blockingFindingCount: termination.blockingFindingCount,
     })
@@ -6648,6 +6787,7 @@ function buildCodexLeadPrompt(
         `- Role: ${lane.role}`,
         `- State: ${lane.state}`,
         `- Verdict: ${lane.verdict}`,
+        `- Merge-authoritative: ${lane.mergeAuthoritative ? "yes" : "no"}`,
         `- Artifact: ${lane.artifactPath ?? "n/a"}`,
         `- Structured artifact: ${lane.structuredArtifactPath ?? "n/a"}`,
         `- Review bundle file SHA-256: ${lane.reviewBundle?.hash ?? "n/a"}`,
@@ -6680,7 +6820,7 @@ function buildCodexLeadPrompt(
     `Review bundle file SHA-256: ${promptHeaderValue(reviewBundle.hash, "unknown")}`,
     `Review bundle canonical hash: ${promptHeaderValue(reviewBundle.bundleHash, "unknown")}`,
     "",
-    "Read the frozen review bundle and reviewer artifacts named below. Fail if any P1/P2 code finding survives or if a reviewer artifact is missing/malformed.",
+    "Read the frozen review bundle and reviewer artifacts named below. Fail if any P1/P2 code finding survives or if a merge-authoritative reviewer artifact is missing/malformed. Non-merge-authoritative shadow lanes are calibration diagnostics only: cite malformed or failing shadow output as Track/diagnostic evidence when useful, but do not convert it into a P1/P2 product blocker or merge-blocking triage verdict.",
     riskContractArtifactBlock,
     targetedConvergenceBlock,
     "Do not convert degraded reviewer infrastructure into blocking code FINDINGS. If a lane reports substrate_stall and no P1/P2 code finding survives, output PASS for triage; the gate aggregate will still fail closed from the lane state and expose degradedReason: substrate_stall for the review-stage router.",
@@ -6717,7 +6857,7 @@ function buildCodexLeadPrompt(
 
 function formatTargetedConvergencePromptBlock(
   targetedConvergence: TargetedConvergenceHypothesis | null,
-  laneAgent: "claude" | "pi" | "codex",
+  laneAgent: HeadlessReviewerAgent,
 ): string {
   if (targetedConvergence === null) {
     return "";
