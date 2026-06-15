@@ -45,8 +45,12 @@ function readArtifact(dir: string, name: string): string {
   return readFileSync(resolve(dir, name), "utf-8").trim();
 }
 
-function runPython(script: string, dir: string) {
-  return spawnSync("python3", [script, dir], { encoding: "utf-8" });
+function runPython(script: string, dir: string, args: string[] = []) {
+  return spawnSync("python3", [script, ...args, dir], { encoding: "utf-8" });
+}
+
+function runCloseoutAssert(dir: string) {
+  return runPython(ASSERT_CLEAN_PASS, dir, ["--closeout"]);
 }
 
 function requiredArtifactsFromAssertScript(): string[] {
@@ -111,6 +115,78 @@ function writeCleanPassArtifacts(dir: string): void {
     "resolved-base-sha.txt",
     "2222222222222222222222222222222222222222\n",
   );
+}
+
+function writeCompletedLaneStatus(
+  dir: string,
+  stem: string,
+  message = "Review complete",
+): void {
+  writeArtifact(
+    dir,
+    `${stem}.status.json`,
+    JSON.stringify({
+      schema: "agent-harness.lane-status.v1",
+      agent: "claude",
+      lane: stem,
+      phase: stem,
+      state: "complete",
+      message,
+      artifact: resolve(dir, `${stem}.md`),
+    }),
+  );
+}
+
+function validReviewArtifact(): string {
+  return [
+    "## Verdict",
+    "PASS",
+    "",
+    "## Artifact Quality",
+    "Current head SHA: 1111111111111111111111111111111111111111.",
+    "Reviewed the current PR-backed draft artifact and found the evidence surface complete.",
+    "The cmux status message was treated as diagnostic; this Markdown body is the authority.",
+    "",
+    "## No Findings",
+    "No P1/P2 findings. I inspected the reviewed diff against the current head and found no merge-blocking correctness, security, API-contract, or test-proof gaps.",
+    "",
+    "## P1 Must Fix",
+    "None",
+    "",
+    "## P2 Should Fix",
+    "None",
+    "",
+    "## Track",
+    "None",
+    "",
+  ].join("\n");
+}
+
+function validPhase2CrossExamArtifact(): string {
+  return [
+    "### Reviewer Alpha Finding: Example edge-case claim",
+    "",
+    "**Verdict**: REFUTE",
+    "**Evidence**: Current head SHA 1111111111111111111111111111111111111111 was inspected. The alleged failure is not reachable because the guarded branch returns before artifact validation.",
+    "",
+    "### Reviewer Beta Finding: Example follow-up claim",
+    "",
+    "**Verdict**: CONFIRM",
+    "**Evidence**: The cross-exam lane is intentionally shaped around finding-by-finding confirmation, not the phase-1 reviewer artifact contract.",
+    "",
+  ].join("\n");
+}
+
+function malformedReviewArtifactWithContractSubstrings(): string {
+  return [
+    "Council status summary for current head SHA 1111111111111111111111111111111111111111.",
+    "This summary mentions ## Verdict and PASS in prose, but it does not start with the required verdict section.",
+    "It also mentions ## Artifact Quality and ## P1 Must Fix inline while avoiding real Markdown section headings.",
+    "The remaining text is padded so it is comfortably over the minimum byte threshold without becoming contract-valid review evidence.",
+    "A compliant artifact needs actual headings and either a No Findings section or the full structured finding surface.",
+    "This document is deliberately malformed and must fail closed even though it contains all of the important words.",
+    "",
+  ].join("\n");
 }
 
 describe("council-review manual skill", () => {
@@ -390,5 +466,207 @@ describe("council-review manual skill", () => {
         expect(assertion.stdout).not.toContain("must be");
       });
     }
+  });
+
+  it("rejects completed Opus lanes whose artifact is a thin status summary", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(
+        dir,
+        "phase1-opus",
+        "Opus review complete: 1 P1 and 2 P2s, artifact quality sound",
+      );
+      writeArtifact(
+        dir,
+        "phase1-opus.md",
+        "Codex council review ready: P1 test coverage gap + 2 P2 consistency issues identified\n",
+      );
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "phase1-opus: reviewer artifact too thin",
+      );
+      expect(assertion.stdout).toContain(
+        "status-message-only P1/P2 claims are non-authoritative",
+      );
+      expect(assertion.stdout).toContain(
+        "missing required heading '## Verdict'",
+      );
+    });
+  });
+
+  it("rejects clean provenance without a contract-valid reviewer artifact", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "at least one phase1 reviewer artifact must satisfy the closeout contract",
+      );
+    });
+  });
+
+  it("rejects orphan reviewer artifacts without completed lane status", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "phase1-opus: reviewer artifact requires complete lane status",
+      );
+      expect(assertion.stdout).toContain(
+        "at least one phase1 reviewer artifact must satisfy the closeout contract",
+      );
+    });
+  });
+
+  it("rejects attempted lanes that only wrote cmux sidecars", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeArtifact(dir, "phase1-opus.cli.json", "{}\n");
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "phase1-opus: reviewer artifact requires complete lane status",
+      );
+      expect(assertion.stdout).toContain(
+        "phase1-opus: reviewer artifact path does not exist:",
+      );
+    });
+  });
+
+  it("rejects attempted lanes that only wrote usage telemetry", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-pi");
+      writeArtifact(dir, "phase1-pi.md", validReviewArtifact());
+      writeArtifact(dir, "phase1-opus.usage.json", "{}\n");
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "phase1-opus: reviewer artifact requires complete lane status",
+      );
+    });
+  });
+
+  it("reports malformed reviewer lane status JSON distinctly", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeArtifact(dir, "phase1-opus.status.json", "{not-json\n");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "phase1-opus: status JSON is unreadable or malformed",
+      );
+      expect(assertion.stdout).toContain(
+        "phase1-opus: reviewer artifact requires complete lane status",
+      );
+    });
+  });
+
+  it("rejects completed lanes whose canonical artifact is missing", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      const externalArtifact = resolve(dir, "external-opus.md");
+      writeArtifact(dir, "external-opus.md", validReviewArtifact());
+      writeArtifact(
+        dir,
+        "phase1-opus.status.json",
+        JSON.stringify({
+          schema: "agent-harness.lane-status.v1",
+          agent: "claude",
+          lane: "phase1-opus",
+          phase: "phase1-opus",
+          state: "complete",
+          message: "Review complete",
+          artifact: externalArtifact,
+        }),
+      );
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "phase1-opus: status is complete but reviewer artifact is missing",
+      );
+      expect(assertion.stdout).toContain(
+        "at least one phase1 reviewer artifact must satisfy the closeout contract",
+      );
+    });
+  });
+
+  it("accepts completed reviewer artifacts that satisfy the closeout contract", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(0);
+      expect(assertion.stdout).toContain(
+        "PASS council-review clean PASS assertion",
+      );
+    });
+  });
+
+  it("accepts completed Pi reviewer artifacts that satisfy the closeout contract", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-pi");
+      writeArtifact(dir, "phase1-pi.md", validReviewArtifact());
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(0);
+      expect(assertion.stdout).toContain(
+        "PASS council-review clean PASS assertion",
+      );
+    });
+  });
+
+  it("does not validate phase2-opus cross-exam artifacts as phase1 reviewer evidence", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+      writeCompletedLaneStatus(dir, "phase2-opus");
+      writeArtifact(dir, "phase2-opus.md", validPhase2CrossExamArtifact());
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(0);
+      expect(assertion.stdout).toContain(
+        "PASS council-review clean PASS assertion",
+      );
+    });
+  });
+
+  it("rejects malformed reviewer artifacts that only mention contract strings", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(
+        dir,
+        "phase1-opus.md",
+        malformedReviewArtifactWithContractSubstrings(),
+      );
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "must start with ## Verdict followed by PASS or FINDINGS",
+      );
+      expect(assertion.stdout).toContain(
+        "missing required heading '## Verdict'",
+      );
+      expect(assertion.stdout).toContain(
+        "reviewer artifact must include No Findings or structured finding sections",
+      );
+    });
   });
 });
