@@ -10,15 +10,22 @@ import sys
 PASS_MODE = "PR-backed draft"
 SAFE_BASE_EQUIVALENCE = {"exact", "origin-prefix-equivalent"}
 SHA_RE = re.compile(r"[0-9a-fA-F]{7,64}")
-# Keep this in sync with the Phase 1 external reviewer lanes spawned by
-# the council-review skill. Unknown stems fail closed because they cannot
-# satisfy the required known-lane evidence count.
+# Keep this in sync with the Phase 1 external reviewer artifact names spawned
+# by the council-review skill before its Phase 2 section. Phase 2 cross-exam
+# artifacts are deliberately excluded from closeout reviewer evidence.
 LANE_ARTIFACT_STEMS = ("phase1-opus", "phase1-pi")
+# Contract note: this is a fail-closed heuristic floor. One-line cmux status
+# summaries are usually ~100-200 bytes, while a contract-valid reviewer artifact
+# with required headings plus a no-findings or structured findings surface
+# comfortably exceeds 400 bytes. Rare terse-but-valid false negatives are
+# acceptable because closeout must prefer real evidence over status summaries.
 MIN_REVIEW_ARTIFACT_BYTES = 400
 REQUIRED_REVIEW_HEADINGS = (
     "## Verdict",
     "## Artifact Quality",
 )
+# A FINDINGS verdict is contract-valid evidence. Phase 3 triage, not this
+# helper, decides which reviewer findings survive as merge blockers.
 VERDICT_RE = re.compile(r"\A\s*## Verdict\s*\n\s*(PASS|FINDINGS)\s*(?:\n|\Z)")
 REQUIRED_ARTIFACTS = (
     "pr-mode.txt",
@@ -74,6 +81,9 @@ def has_findings_surface(text: str) -> bool:
 
 
 def status_claims_blockers(status_message: str) -> bool:
+    # Diagnostic only: the sole call site is gated behind the byte-floor
+    # failure, so this loose regex can add context to an already-invalid thin
+    # artifact but can never independently block a contract-valid artifact.
     return re.search(r"\bP[12]s?\b", status_message, re.IGNORECASE) is not None
 
 

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   existsSync,
   lstatSync,
@@ -24,6 +24,10 @@ const GLOBAL_SKILL_PATH = resolve(
   ".codex/skills/session-orchestrator/SKILL.md",
 );
 const SKILL_PATH = resolve(SKILL_DIR, "SKILL.md");
+const REVIEW_EVIDENCE_CHECKPOINT = resolve(
+  SKILL_DIR,
+  "scripts/assert-review-evidence-checkpoint.mjs",
+);
 const workerPrompts = readFileSync(
   resolve(SKILL_DIR, "references/worker-prompts.md"),
   "utf-8",
@@ -45,6 +49,13 @@ const oldDisplayName = ["Symphony", "Session", "Orchestrator"].join(" ");
 const packageJson = JSON.parse(
   readFileSync(resolve(__dirname, "../../package.json"), "utf-8"),
 ) as { scripts?: Record<string, string> };
+const HEAD_SHA = "1111111111111111111111111111111111111111";
+
+function runReviewEvidenceCheckpoint(args: string[]) {
+  return spawnSync(process.execPath, [REVIEW_EVIDENCE_CHECKPOINT, ...args], {
+    encoding: "utf8",
+  });
+}
 
 describe("session-orchestrator skill", () => {
   it("has trigger metadata for temporary Symphony session orchestration work", () => {
@@ -629,6 +640,139 @@ describe("session-orchestrator skill", () => {
     expect(skillContent).toContain(
       "do not launch another product-code review loop",
     );
+  });
+
+  it("requires an executable review-evidence checkpoint before completion reporting", () => {
+    expect(skillContent).toContain(
+      "scripts/assert-review-evidence-checkpoint.mjs",
+    );
+    expect(skillContent).toContain("--reported-head <head-sha>");
+    expect(skillContent).toContain(
+      "pass` with PR URL, reviewed head SHA, council artifact path",
+    );
+    expect(skillContent).toContain("evidence remains operator-visible");
+    expect(skillContent).toContain("distinct from spec-time");
+    expect(skillContent).toContain("review readiness");
+  });
+
+  it("blocks non-trivial closeout when review evidence is missing", () => {
+    const checkpoint = runReviewEvidenceCheckpoint([
+      "--reported-head",
+      HEAD_SHA,
+    ]);
+
+    expect(checkpoint.status).toBe(1);
+    expect(checkpoint.stdout).toContain("missing review evidence checkpoint");
+    expect(checkpoint.stdout).toContain(
+      "default classification is non-trivial",
+    );
+  });
+
+  it("accepts pass evidence only when it is bound to the reported head", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "review-checkpoint-pass-"));
+    try {
+      const councilReport = resolve(tempDir, "council-report.md");
+      const evidencePath = resolve(tempDir, "closeout-review-evidence.json");
+      writeFileSync(councilReport, "# Council report\n");
+      writeFileSync(
+        evidencePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          outcome: "pass",
+          prUrl: "https://github.com/mobilyze-llc/symphony-ts/pull/1",
+          reviewedHeadSha: HEAD_SHA,
+          councilArtifactPath: councilReport,
+          cleanPassAssertionExitCode: 0,
+        }),
+      );
+
+      const checkpoint = runReviewEvidenceCheckpoint([
+        "--evidence",
+        evidencePath,
+        "--reported-head",
+        HEAD_SHA,
+      ]);
+
+      expect(checkpoint.status).toBe(0);
+      expect(JSON.parse(checkpoint.stdout)).toMatchObject({
+        status: "pass",
+        reviewedHeadSha: HEAD_SHA,
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks pass evidence from a stale reviewed head", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "review-checkpoint-stale-"));
+    try {
+      const councilReport = resolve(tempDir, "council-report.md");
+      const evidencePath = resolve(tempDir, "closeout-review-evidence.json");
+      writeFileSync(councilReport, "# Council report\n");
+      writeFileSync(
+        evidencePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          outcome: "pass",
+          prUrl: "https://github.com/mobilyze-llc/symphony-ts/pull/1",
+          reviewedHeadSha: "2222222222222222222222222222222222222222",
+          councilArtifactPath: councilReport,
+          cleanPassAssertionExitCode: 0,
+        }),
+      );
+
+      const checkpoint = runReviewEvidenceCheckpoint([
+        "--evidence",
+        evidencePath,
+        "--reported-head",
+        HEAD_SHA,
+      ]);
+
+      expect(checkpoint.status).toBe(1);
+      expect(checkpoint.stdout).toContain("does not match reported head");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("allows explicitly degraded evidence without rendering it as clean pass", () => {
+    const tempDir = mkdtempSync(
+      resolve(tmpdir(), "review-checkpoint-degraded-"),
+    );
+    try {
+      const evidencePath = resolve(tempDir, "closeout-review-evidence.json");
+      writeFileSync(
+        evidencePath,
+        JSON.stringify({
+          schemaVersion: 1,
+          outcome: "degraded",
+          reviewedHeadSha: HEAD_SHA,
+          degradedReason:
+            "PR-backed council review unavailable; dirty worktree reviewed",
+          dirtyState:
+            "staged: none; unstaged: src/review/headless-council-gate.ts; untracked: none; included: unstaged diff; excluded: none",
+        }),
+      );
+
+      const checkpoint = runReviewEvidenceCheckpoint([
+        "--evidence",
+        evidencePath,
+        "--reported-head",
+        HEAD_SHA,
+      ]);
+
+      expect(checkpoint.status).toBe(0);
+      expect(JSON.parse(checkpoint.stdout)).toMatchObject({
+        status: "degraded",
+        degradedReason:
+          "PR-backed council review unavailable; dirty worktree reviewed",
+      });
+      expect(checkpoint.stdout).toContain(
+        "must not be reported as a clean done",
+      );
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("keeps durable follow-up in Linear through live discovery", () => {

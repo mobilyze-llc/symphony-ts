@@ -6123,6 +6123,14 @@ function summarizeVerdict(
   if (verdict === "pass") {
     return `Headless council review passed with ${lanes.length} lanes.`;
   }
+  if (
+    hasReviewSubstrateDegradation({ lanes, degradedConditions }) &&
+    lanes
+      .flatMap((lane) => lane.structuredArtifact?.findings ?? [])
+      .filter(isOpenBlockingFinding).length === 0
+  ) {
+    return `Headless council review has no parsed product blockers, but failed closed on review-substrate/provenance degradation: ${degradedConditions.join("; ")}`;
+  }
   if (verdict === "fail") {
     return "Headless council review found blocking review findings.";
   }

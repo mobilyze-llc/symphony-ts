@@ -48,6 +48,7 @@ Read these references only when needed:
 | --- | --- | --- |
 | `references/worker-prompts.md` | Copy-ready prompts for implementation, continuation, and read-only review/triage workers. | Before delegating, refreshing, rotating, or forward-testing worker instructions. |
 | `references/operator-decision-brief.md` | Cap-hit and operator decision brief template. | When a ticket reaches review cap, budget cap, substrate degradation, unclear split/merge choice, or a non-autonomous decision boundary. |
+| `scripts/assert-review-evidence-checkpoint.mjs` | Executable closeout checkpoint guard for pass/degraded/blocked review evidence. | Before publishing a completion report for non-trivial code, skill, or review-substrate changes. |
 
 ## Session Start Checklist
 
@@ -323,8 +324,20 @@ Use the repo's PR-backed pattern for non-trivial changes:
 5. File or update Track findings in Linear before naming them in prose.
 6. Rerun scoped convergence until no verifiable P1/P2 remains and any P3 is
    either genuinely useful for merge or filed/dismissed.
-7. Mark ready, merge through the repo's normal method, verify `origin/main`,
-   close Linear, and publish the completion report.
+7. Run the review-evidence checkpoint before any final completion report for
+   non-trivial code, skill, or review-substrate changes:
+   `skills/session-orchestrator/scripts/assert-review-evidence-checkpoint.mjs --evidence <closeout-review-evidence.json> --reported-head <head-sha>`.
+   The checkpoint defaults to non-trivial and must return one machine outcome:
+   `pass` with PR URL, reviewed head SHA, council artifact path, and a
+   successful clean-pass assertion; `degraded` with the reviewed head SHA,
+   reason PR-backed review was impossible, and dirty/untracked state included
+   or excluded; or `blocked`, which prevents a "done" closeout. Degraded
+   evidence remains operator-visible and must not be rendered as a clean done
+   state. This implementation/closeout checkpoint is distinct from spec-time
+   review readiness and does not write `spec_review_result` journal rows.
+8. Mark ready, merge through the repo's normal method, verify `origin/main`,
+   close Linear, and publish the completion report only after the checkpoint
+   emits `pass` or an explicitly reported `degraded` outcome.
 
 Important guard: before treating headless Claude/Codex reviewer lanes against
 mutable PR worktrees as trusted review evidence, live-discover the current

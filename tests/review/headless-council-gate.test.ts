@@ -3077,6 +3077,9 @@ describe("runHeadlessCouncilGate", () => {
     );
 
     expect(result.verdict).toBe("fail");
+    expect(result.summary).toContain(
+      "no parsed product blockers, but failed closed on review-substrate/provenance degradation",
+    );
     expect(result.degradedConditions).toContain(
       "routing_required_lane_malformed:claude-opus",
     );
@@ -3099,6 +3102,11 @@ describe("runHeadlessCouncilGate", () => {
     const rawArtifact = await readFile(lane.rawArtifactPath!, "utf-8");
     expect(rawArtifact).toContain("daemon salvaged summary: VERDICT PASS");
     const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain(
+      "no parsed product blockers, but failed closed on review-substrate/provenance degradation",
+    );
+    expect(report).toContain("- Product blockers present: no");
+    expect(report).toContain("- Substrate/provenance degraded: yes");
     expect(report).toContain("routing_required_lane_malformed:claude-opus");
     expect(report).toContain(
       `malformed_artifact:claude-opus:${lane.artifactPath}`,

@@ -62,6 +62,28 @@ function requiredArtifactsFromAssertScript(): string[] {
     .filter((artifact): artifact is string => artifact !== undefined);
 }
 
+function laneArtifactStemsFromAssertScript(): string[] {
+  const source = readFileSync(ASSERT_CLEAN_PASS, "utf-8");
+  const match = /LANE_ARTIFACT_STEMS = \(([\s\S]*?)\)/.exec(source);
+  expect(match).not.toBeNull();
+  return [...(match?.[1] ?? "").matchAll(/"([^"]+)"/g)]
+    .map((artifactMatch) => artifactMatch[1])
+    .filter((artifact): artifact is string => artifact !== undefined);
+}
+
+function phase1ArtifactNamesFromSkill(skill: string): string[] {
+  const phase1End = skill.indexOf("### Phase 2: Cross-Examination");
+  expect(phase1End).toBeGreaterThan(0);
+  const phase1 = skill.slice(0, phase1End);
+  return [
+    ...new Set(
+      [...phase1.matchAll(/--artifact-name\s+([A-Za-z0-9-]+)/g)]
+        .map((match) => match[1])
+        .filter((artifact): artifact is string => artifact !== undefined),
+    ),
+  ].sort();
+}
+
 function writeBaseSetupFacts(dir: string): void {
   writeArtifact(dir, "pr-view-exit-code.txt", "0\n");
   writeArtifact(dir, "git-status-short.txt", "");
@@ -335,6 +357,30 @@ describe("council-review manual skill", () => {
     );
   });
 
+  it("keeps closeout reviewer stems in sync with Phase 1 spawn artifacts only", () => {
+    expect(phase1ArtifactNamesFromSkill(skill)).toEqual(
+      laneArtifactStemsFromAssertScript().sort(),
+    );
+    expect(skill).toContain("--artifact-name phase2-opus");
+    expect(laneArtifactStemsFromAssertScript()).not.toContain("phase2-opus");
+  });
+
+  it("documents closeout evidence as provenance rather than reviewer PASS", () => {
+    const assertSource = readFileSync(ASSERT_CLEAN_PASS, "utf-8");
+
+    expectAll(skill, [
+      "validates reviewer evidence quality and",
+      "a Phase 1 artifact whose verdict is `FINDINGS` can still be",
+      "Phase 3 triage remains the authority",
+    ]);
+    expectAll(assertSource, [
+      "A FINDINGS verdict is contract-valid evidence",
+      "fail-closed heuristic floor",
+      "Diagnostic only",
+      "can never independently block a contract-valid artifact",
+    ]);
+  });
+
   it("classifies review-target modes and clean-pass outcomes", () => {
     const cases = [
       {
@@ -606,6 +652,42 @@ describe("council-review manual skill", () => {
     withArtifactDir((dir) => {
       writeCleanPassArtifacts(dir);
       writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(0);
+      expect(assertion.stdout).toContain(
+        "PASS council-review clean PASS assertion",
+      );
+    });
+  });
+
+  it("accepts valid FINDINGS artifacts because closeout validates evidence quality", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(
+        dir,
+        "phase1-opus.md",
+        validReviewArtifact().replace("PASS", "FINDINGS"),
+      );
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(0);
+      expect(assertion.stdout).toContain(
+        "PASS council-review clean PASS assertion",
+      );
+    });
+  });
+
+  it("keeps status blocker claims diagnostic-only for valid artifacts", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(
+        dir,
+        "phase1-opus",
+        "Review complete: 2 P1s mentioned in status diagnostics",
+      );
       writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
 
       const assertion = runCloseoutAssert(dir);
