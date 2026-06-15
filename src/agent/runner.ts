@@ -1732,16 +1732,15 @@ function createWorkerReportedBlockHardStop(input: {
   billableTokens: number;
   estimatedCostUsd: number;
 }): HardStopDecision {
-  const blockers = input.signal.blockers;
   return {
     outcome: "BLOCKED-needs-human",
     trigger: "worker_reported_block",
-    reason: `${describeHumanBlockOperation(input.signal.operation)}${formatHumanBlockBlockers(blockers)}. ${describeHumanBlockOperatorAction(input.signal.operation)}`,
+    reason: `${describeHumanBlockOperation(input.signal.operation)}. ${describeHumanBlockOperatorAction(input.signal.operation)}`,
     turnCount: input.turnCount,
     totalTokens: input.totalTokens,
     billableTokens: input.billableTokens,
     humanBlockOperation: input.signal.operation,
-    humanBlockBlockers: blockers,
+    humanBlockBlockers: input.signal.blockers,
     estimatedCostUsd: input.estimatedCostUsd,
   };
 }
@@ -1759,12 +1758,6 @@ function describeHumanBlockOperation(
     case "other":
       return "Worker reported BLOCKED-needs-human at a mode-permission boundary";
   }
-}
-
-function formatHumanBlockBlockers(blockers: string | null): string {
-  return blockers === null || blockers.length === 0
-    ? ""
-    : ` with blockers ${blockers}`;
 }
 
 function describeHumanBlockOperatorAction(

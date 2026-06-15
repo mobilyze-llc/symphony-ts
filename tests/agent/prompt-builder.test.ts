@@ -435,6 +435,7 @@ describe("prompt builder", () => {
     expect(prompt).toContain(
       "gh pr view --json mergeStateStatus,statusCheckRollup,reviewDecision,mergeable,state,isDraft",
     );
+    expect(prompt).toContain("gh pr checks --required");
     expect(prompt).toContain(
       "Evaluate readiness before any merge permission boundary",
     );

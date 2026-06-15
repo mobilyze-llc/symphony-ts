@@ -1361,10 +1361,8 @@ const STAGE_FAILED_REGEX =
   /\[STAGE_FAILED:\s*(verify|review|rebase|spec|infra)\s*\]/;
 
 const STAGE_COMPLETE_REGEX = /(?:^|\n)[ \t]*\[STAGE_COMPLETE\]/;
-const HUMAN_BLOCK_BLOCKERS_REGEX =
-  /(?:^|\n)[ \t]*\[BLOCKED_NEEDS_HUMAN_BLOCKERS:\s*([^\n]+?)\s*\][ \t]*(?:$|\n)/;
 const HUMAN_BLOCK_REGEX =
-  /(?:^|\n)[ \t]*(?:\[BLOCKED_NEEDS_HUMAN:\s*([A-Za-z_-]+)\s*\]|BLOCKED-needs-human)[ \t]*(?:$|\n)/;
+  /(?:^|\n)[ \t]*(?:\[BLOCKED_NEEDS_HUMAN_BLOCKERS:\s*([^\n]+?)\s*\][ \t]*\n[ \t]*)?(?:\[BLOCKED_NEEDS_HUMAN:\s*([A-Za-z_-]+)\s*\]|BLOCKED-needs-human)[ \t]*(?=$|\n)/g;
 
 /**
  * Detect the `[STAGE_COMPLETE]` signal at the start of any line in the
@@ -1418,13 +1416,21 @@ export function parseHumanBlockSignal(
     return null;
   }
 
-  const match = HUMAN_BLOCK_REGEX.exec(text);
-  if (match === null) {
+  HUMAN_BLOCK_REGEX.lastIndex = 0;
+  let signalMatch: RegExpExecArray | null = null;
+  let match = HUMAN_BLOCK_REGEX.exec(text);
+  while (match !== null) {
+    signalMatch = match;
+    match = HUMAN_BLOCK_REGEX.exec(text);
+  }
+  HUMAN_BLOCK_REGEX.lastIndex = 0;
+
+  if (signalMatch === null) {
     return null;
   }
 
-  const operation = normalizeHumanBlockOperation(match[1] ?? null);
-  const blockers = HUMAN_BLOCK_BLOCKERS_REGEX.exec(text)?.[1]?.trim() ?? null;
+  const operation = normalizeHumanBlockOperation(signalMatch[2] ?? null);
+  const blockers = signalMatch[1]?.trim() ?? null;
   return { operation, blockers };
 }
 
