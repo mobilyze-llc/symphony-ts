@@ -306,6 +306,39 @@ describe("managed code grounding (SYMPH-596)", () => {
     });
   });
 
+  it("does not verify noncanonical repo-relative path evidence after filesystem resolution", async () => {
+    const sourceRepo = await createSourceRepo();
+    await writeFile(join(sourceRepo, "package.json"), '{"private":true}\n');
+    await git(sourceRepo, ["add", "."]);
+    await git(sourceRepo, ["commit", "-m", "Add package manifest"]);
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "noncanonical-path-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [
+        backlogFinding({
+          evidence: "Implemented in `src/../package.json`.",
+        }),
+      ],
+    });
+
+    expect(report.status).toBe("model_argued_unverified");
+    expect(report.entries[0]).toMatchObject({
+      status: "model_argued_unverified",
+      citations: [],
+      missing: [],
+    });
+  });
+
   it("keeps symbol verification scoped to cited paths when both are claimed", async () => {
     const sourceRepo = await createSourceRepo();
     await writeFile(
