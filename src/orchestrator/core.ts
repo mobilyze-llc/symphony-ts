@@ -1246,6 +1246,8 @@ export class OrchestratorCore {
 
       if (isDispatcherAdmissionEntry(entry)) {
         this.clearResumeRequirement(entry.issueId);
+        this.clearRetryEntry(entry.issueId);
+        this.state.claimed.delete(entry.issueId);
       }
 
       // Intent events replay through the same reducer (SYMPH-399): a
@@ -1361,6 +1363,18 @@ export class OrchestratorCore {
               this.state.issueStages[entry.issueId] = grantedStage;
               this.clearStageFailureSignature(entry.issueId, grantedStage);
             }
+          }
+
+          if (verb === "retry_once" || verb === "rework_with_hint") {
+            // Applied retry/rework intents release a park and schedule exactly
+            // one continuation live. Rebuild that timer on replay so a restart
+            // between the intent write and retry admission does not strand the
+            // issue until an unrelated poll happens to notice it.
+            this.scheduleRetry(entry.issueId, 1, {
+              identifier: entry.issueIdentifier,
+              error: null,
+              delayType: "continuation",
+            });
           }
         }
         if (verb === "escalate_human") {

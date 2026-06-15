@@ -7576,6 +7576,140 @@ describe("dispatcher run journal restart recovery", () => {
     expect(spawnWorker).toHaveBeenCalledTimes(1);
   });
 
+  it("restart recovery rebuilds a retry-once continuation after the release intent", async () => {
+    const config = createInvestigateImplementConfig();
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "Todo" }],
+    });
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+    orchestrator.getState().failed.add("1");
+    orchestrator.getState().issueStages["1"] = "investigate";
+
+    const retryIntent = await orchestrator.writeIntent({
+      verb: "retry_once",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "watchdog-l2", host: "test-host", session: null },
+      reason: {
+        class: "stuck_triage_retry_once",
+        human: "retry the same stage once",
+      },
+      stage: "investigate",
+      grantSignature: "transient:network",
+      renderComment: false,
+    });
+    expect(retryIntent.status).toBe("applied");
+
+    const spawnedStageNames: Array<string | null> = [];
+    const restarted = new OrchestratorCore({
+      config,
+      tracker,
+      spawnWorker: async ({ stageName }) => {
+        spawnedStageNames.push(stageName);
+        return {
+          workerHandle: { pid: 1002 },
+          monitorHandle: { ref: "monitor-2" },
+        };
+      },
+      now: () => new Date("2026-03-06T01:00:00.000Z"),
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+
+    expect(restarted.getState().retryAttempts["1"]).toMatchObject({
+      delayType: "continuation",
+      identifier: "ISSUE-1",
+      attempt: 1,
+    });
+    expect(restarted.getState().issueStages["1"]).toBe("investigate");
+    const retry = await restarted.onRetryTimer("1");
+    expect(retry.dispatched).toBe(true);
+    expect(spawnedStageNames).toEqual(["investigate"]);
+
+    const replayedAfterAdmission = new OrchestratorCore({
+      config,
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1003 },
+        monitorHandle: { ref: "monitor-3" },
+      }),
+      now: () => new Date("2026-03-06T02:00:00.000Z"),
+      runJournal: restarted.getState().dispatcherRunJournal,
+    });
+    expect(
+      replayedAfterAdmission.getState().retryAttempts["1"],
+    ).toBeUndefined();
+    expect(replayedAfterAdmission.getState().claimed.has("1")).toBe(false);
+  });
+
+  it("restart recovery rebuilds a rework-with-hint continuation after the release intent", async () => {
+    const config = createReviewFailureReworkConfig();
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "Todo" }],
+    });
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+    orchestrator.getState().failed.add("1");
+    orchestrator.getState().issueStages["1"] = "review";
+
+    const reworkIntent = await orchestrator.writeIntent({
+      verb: "rework_with_hint",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "watchdog-l2", host: "test-host", session: null },
+      reason: {
+        class: "stuck_triage_rework",
+        human: "apply reviewer feedback",
+      },
+      stage: "review",
+      hint: "Tighten the failing assertion.",
+      renderComment: false,
+    });
+    expect(reworkIntent.status).toBe("applied");
+
+    const spawnedStageNames: Array<string | null> = [];
+    const restarted = new OrchestratorCore({
+      config,
+      tracker,
+      spawnWorker: async ({ stageName }) => {
+        spawnedStageNames.push(stageName);
+        return {
+          workerHandle: { pid: 1002 },
+          monitorHandle: { ref: "monitor-2" },
+        };
+      },
+      now: () => new Date("2026-03-06T01:00:00.000Z"),
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+
+    expect(restarted.getState().retryAttempts["1"]).toMatchObject({
+      delayType: "continuation",
+      identifier: "ISSUE-1",
+      attempt: 1,
+    });
+    expect(restarted.getState().issueStages["1"]).toBe("implement");
+    expect(restarted.getState().issueReworkCounts["1"]).toBe(1);
+    const retry = await restarted.onRetryTimer("1");
+    expect(retry.dispatched).toBe(true);
+    expect(spawnedStageNames).toEqual(["implement"]);
+  });
+
   it("restart recovery preserves input-required pause until explicit Resume", async () => {
     const spawnWorker = vi.fn(async () => ({
       workerHandle: { pid: 1001 },
