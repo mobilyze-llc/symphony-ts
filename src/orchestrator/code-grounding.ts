@@ -38,7 +38,7 @@ export interface CodeGroundingStatusDecision {
 }
 
 export const CODE_GROUNDING_SYMBOL_PRECISION =
-  "textual_declaration_regex_scoped_to_cited_path" as const;
+  "textual_declaration_regex_after_comment_literal_stripping_scoped_to_cited_path" as const;
 export const CODE_GROUNDING_CHECKOUT_RETENTION_POLICY =
   "delete_expired_or_lru_over_cap_unless_live_lock_owner" as const;
 export const CODE_GROUNDING_CONTENTION_POLICY =
@@ -47,6 +47,14 @@ export const CODE_GROUNDING_LOCK_DOMAIN =
   "code_grounding_separate_from_dispatcher_journal" as const;
 export const CODE_GROUNDING_CLONE_SOURCE_POLICY =
   "clone_from_target_source_path_for_tests_otherwise_repo_url" as const;
+export const CODE_GROUNDING_SUPPORTED_PATH_PREFIXES = [
+  "src",
+  "tests",
+  "docs",
+  "skills",
+  "scripts",
+  "apps",
+] as const;
 
 export interface CodeGroundingConfig {
   enabled: boolean;
@@ -171,6 +179,7 @@ const DEFAULT_GIT_TIMEOUT_MS = 60_000;
 const MAX_SCAN_FILES = 500;
 const MAX_SCAN_FILE_BYTES = 256_000;
 const MAX_SCAN_DEPTH = 64;
+const SCAN_CAP_WARNING = `code-grounding scan reached ${MAX_SCAN_FILES} file cap; path and symbol index truncated`;
 const FILE_LOCK_TIMEOUT_MS = 120_000;
 const FILE_LOCK_POLL_MS = 50;
 const FILE_LOCK_STALE_MS = 60 * 60_000;
@@ -192,6 +201,12 @@ const MODEL_VALIDATED_STATUSES = new Set<CodeGroundingVerificationStatus>([
   "verified",
   "model_suggested_verified",
 ]);
+const SUPPORTED_PATH_PREFIX_PATTERN =
+  CODE_GROUNDING_SUPPORTED_PATH_PREFIXES.join("|");
+const PATH_EVIDENCE_PATTERN = new RegExp(
+  `\\b((?:${SUPPORTED_PATH_PREFIX_PATTERN})/[A-Za-z0-9._/@+-]+(?:/[A-Za-z0-9._/@+-]+)*(?:(?::\\d+(?::\\d+|-\\d+)?)|(?:#L\\d+(?:-L\\d+)?))?)(?=$|\\s|[),;])`,
+  "g",
+);
 const leaseMutexes = new Map<string, AsyncMutex>();
 const checkoutMutexes = new Map<string, AsyncMutex>();
 
@@ -228,7 +243,10 @@ export async function runManagedCodeGrounding(
         config: input.config,
       });
       await prepareManagedCheckout(paths, input);
-      const entries = await verifyFindingsAgainstCheckout(paths, input);
+      const { entries, warnings } = await verifyFindingsAgainstCheckout(
+        paths,
+        input,
+      );
       await input.afterDeterministicScan?.({
         checkoutPath: paths.checkoutPath,
         checkoutId: paths.checkoutId,
@@ -253,6 +271,7 @@ export async function runManagedCodeGrounding(
             dirtyState,
           },
           warnings: [
+            ...warnings,
             "code-grounding checkout mutated during scan and was purged",
           ],
         };
@@ -269,7 +288,7 @@ export async function runManagedCodeGrounding(
           checkoutPurged: false,
           dirtyState,
         },
-        warnings: [],
+        warnings,
       };
       return report;
     } finally {
@@ -501,12 +520,15 @@ async function isUsableCheckout(
 async function verifyFindingsAgainstCheckout(
   paths: CodeGroundingPaths,
   input: RunCodeGroundingInput,
-): Promise<CodeGroundingEvidenceEntry[]> {
+): Promise<{
+  entries: CodeGroundingEvidenceEntry[];
+  warnings: string[];
+}> {
   const scanIndex = await buildScanIndex(paths.checkoutPath);
   const modelByFinding = new Map(
     (input.modelFindings ?? []).map((finding) => [finding.findingId, finding]),
   );
-  return Promise.all(
+  const entries = await Promise.all(
     input.findings.map(async (finding) => {
       const deterministic = await verifyFinding(
         paths,
@@ -523,6 +545,10 @@ async function verifyFindingsAgainstCheckout(
           });
     }),
   );
+  return {
+    entries,
+    warnings: scanIndex.truncated ? [SCAN_CAP_WARNING] : [],
+  };
 }
 
 async function verifyFinding(
@@ -535,11 +561,11 @@ async function verifyFinding(
     `${finding.summary}\n${finding.evidence}`,
   );
   const citations: EvidenceCitation[] = [];
-  const missing: string[] = [];
+  const missing: string[] = [...candidates.invalidPaths];
   for (const pathCandidate of candidates.paths) {
     const citation =
       (await readPathCandidateCitation(paths, pathCandidate)) ??
-      (pathCandidate.line === undefined
+      (pathCandidate.lineRange === undefined
         ? scanIndex.pathCitations.get(pathCandidate.path)
         : undefined);
     if (citation === undefined) {
@@ -604,19 +630,24 @@ async function readPathCandidateCitation(
       return undefined;
     }
     const stat = await fs.stat(absolutePath);
-    if (!stat.isFile() || stat.size > MAX_SCAN_FILE_BYTES) {
+    if (!stat.isFile()) {
       return undefined;
     }
-    const content = await fs.readFile(absolutePath, "utf8");
+    const content = await readTextFileBounded(absolutePath);
+    if (content === null) {
+      return undefined;
+    }
     const lineCount = Math.max(1, content.split("\n").length);
     if (
-      pathCandidate.line !== undefined &&
-      (pathCandidate.line < 1 || pathCandidate.line > lineCount)
+      pathCandidate.lineRange !== undefined &&
+      (pathCandidate.lineRange[0] < 1 ||
+        pathCandidate.lineRange[1] > lineCount ||
+        pathCandidate.lineRange[0] > pathCandidate.lineRange[1])
     ) {
       return undefined;
     }
-    const startLine = pathCandidate.line ?? 1;
-    const endLine = pathCandidate.line ?? lineCount;
+    const startLine = pathCandidate.lineRange?.[0] ?? 1;
+    const endLine = pathCandidate.lineRange?.[1] ?? lineCount;
     return {
       path: pathCandidate.path,
       startLine,
@@ -635,16 +666,18 @@ async function readPathCandidateCitation(
 interface PathEvidenceCandidate {
   raw: string;
   path: string;
-  line?: number;
+  lineRange?: [number, number];
 }
 
 interface EvidenceCandidates {
   paths: PathEvidenceCandidate[];
+  invalidPaths: string[];
   symbols: string[];
 }
 
 function extractEvidenceCandidates(text: string): EvidenceCandidates {
   const paths = new Map<string, PathEvidenceCandidate>();
+  const invalidPaths = new Set<string>();
   const symbols = new Set<string>();
   for (const match of text.matchAll(/`([^`]+)`/g)) {
     const value = match[1]?.trim();
@@ -655,14 +688,14 @@ function extractEvidenceCandidates(text: string): EvidenceCandidates {
       const candidate = parsePathEvidenceCandidate(value);
       if (candidate !== null) {
         paths.set(candidate.raw, candidate);
+      } else {
+        invalidPaths.add(value);
       }
     } else if (/^[A-Za-z_$][A-Za-z0-9_$]{2,}$/.test(value)) {
       symbols.add(value);
     }
   }
-  for (const match of text.matchAll(
-    /\b((?:src|tests|docs|skills|scripts|apps)\/[A-Za-z0-9._/@+-]+(?:\/[A-Za-z0-9._/@+-]+)*(?::\d+(?::\d+)?)?)/g,
-  )) {
+  for (const match of text.matchAll(PATH_EVIDENCE_PATTERN)) {
     const candidate = parsePathEvidenceCandidate(match[1] ?? "");
     if (candidate !== null) {
       paths.set(candidate.raw, candidate);
@@ -670,29 +703,49 @@ function extractEvidenceCandidates(text: string): EvidenceCandidates {
   }
   return {
     paths: [...paths.values()],
+    invalidPaths: [...invalidPaths],
     symbols: [...symbols],
   };
 }
 
 function looksLikePath(value: string): boolean {
-  return /^(src|tests|docs|skills|scripts|apps)\//.test(value);
+  return new RegExp(`^(?:${SUPPORTED_PATH_PREFIX_PATTERN})/`).test(value);
 }
 
 function parsePathEvidenceCandidate(
   value: string,
 ): PathEvidenceCandidate | null {
-  const match = /^(?<path>.+?)(?::(?<line>\d+)(?::\d+)?)?$/.exec(value);
-  const path = match?.groups?.path;
+  const match =
+    /^(?<path>.+?)(?:(?::(?<colonStart>\d+)(?::(?<colonEnd>\d+)|-(?<dashEnd>\d+))?)|(?:#L(?<hashStart>\d+)(?:-L(?<hashEnd>\d+))?))?$/.exec(
+      value,
+    );
+  const groups = match?.groups;
+  const path = groups?.path;
   if (
+    groups === undefined ||
     path === undefined ||
     !looksLikePath(path) ||
     !isCanonicalRepoRelativePath(path)
   ) {
     return null;
   }
-  return match?.groups?.line === undefined
-    ? { raw: value, path }
-    : { raw: value, path, line: Number(match.groups.line) };
+  const startText =
+    groups.colonStart === undefined ? groups.hashStart : groups.colonStart;
+  if (startText === undefined) {
+    return { raw: value, path };
+  }
+  const start = Number(startText);
+  const colonEnd =
+    groups.colonEnd === undefined ? undefined : Number(groups.colonEnd);
+  const rangeEnd =
+    groups.dashEnd ??
+    groups.hashEnd ??
+    (colonEnd !== undefined && colonEnd >= start ? groups.colonEnd : undefined);
+  return {
+    raw: value,
+    path,
+    lineRange: [start, Number(rangeEnd ?? start)],
+  };
 }
 
 function isCanonicalRepoRelativePath(path: string): boolean {
@@ -715,6 +768,7 @@ interface ScanIndex {
   pathCitations: Map<string, ScanCitation>;
   symbolCitations: Map<string, ScanCitation>;
   symbolCitationsByPath: Map<string, Map<string, ScanCitation>>;
+  truncated: boolean;
 }
 
 async function buildScanIndex(checkoutPath: string): Promise<ScanIndex> {
@@ -722,8 +776,10 @@ async function buildScanIndex(checkoutPath: string): Promise<ScanIndex> {
   const symbolCitations = new Map<string, ScanCitation>();
   const symbolCitationsByPath = new Map<string, Map<string, ScanCitation>>();
   let scannedFiles = 0;
+  let truncated = false;
   for await (const absolutePath of walkTextFiles(checkoutPath)) {
     if (scannedFiles >= MAX_SCAN_FILES) {
+      truncated = true;
       break;
     }
     scannedFiles++;
@@ -757,7 +813,7 @@ async function buildScanIndex(checkoutPath: string): Promise<ScanIndex> {
     }
     symbolCitationsByPath.set(relativePath, fileSymbols);
   }
-  return { pathCitations, symbolCitations, symbolCitationsByPath };
+  return { pathCitations, symbolCitations, symbolCitationsByPath, truncated };
 }
 
 function findSymbolCitationInPaths(
@@ -790,6 +846,9 @@ async function* walkTextFiles(root: string): AsyncGenerator<string> {
         entry.name === "node_modules" ||
         entry.name === "dist"
       ) {
+        continue;
+      }
+      if (entry.isSymbolicLink()) {
         continue;
       }
       const absolutePath = join(current.path, entry.name);
@@ -833,8 +892,9 @@ const SYMBOL_DECLARATION_PATTERNS = [
 
 function extractSymbols(content: string): Map<string, number> {
   const symbols = new Map<string, number>();
+  const searchableContent = stripCommentsAndLiterals(content);
   for (const pattern of SYMBOL_DECLARATION_PATTERNS) {
-    for (const match of content.matchAll(pattern)) {
+    for (const match of searchableContent.matchAll(pattern)) {
       const symbol = match[1];
       if (symbol !== undefined && !symbols.has(symbol)) {
         symbols.set(symbol, lineForMatchIndex(content, match.index ?? 0));
@@ -842,6 +902,121 @@ function extractSymbols(content: string): Map<string, number> {
     }
   }
   return symbols;
+}
+
+function stripCommentsAndLiterals(content: string): string {
+  let output = "";
+  let state:
+    | "code"
+    | "lineComment"
+    | "blockComment"
+    | "single"
+    | "double"
+    | "template"
+    | "regex" = "code";
+  let escaped = false;
+  let inRegexCharacterClass = false;
+  for (let index = 0; index < content.length; index++) {
+    const char = content[index] ?? "";
+    const next = content[index + 1] ?? "";
+    if (state === "code") {
+      if (char === "/" && next === "/") {
+        output += "  ";
+        index++;
+        state = "lineComment";
+        continue;
+      }
+      if (char === "/" && next === "*") {
+        output += "  ";
+        index++;
+        state = "blockComment";
+        continue;
+      }
+      if (
+        char === "/" &&
+        next !== "/" &&
+        next !== "*" &&
+        canStartRegexLiteral(output)
+      ) {
+        output += " ";
+        state = "regex";
+        escaped = false;
+        inRegexCharacterClass = false;
+        continue;
+      }
+      if (char === "'") {
+        output += " ";
+        state = "single";
+        escaped = false;
+        continue;
+      }
+      if (char === '"') {
+        output += " ";
+        state = "double";
+        escaped = false;
+        continue;
+      }
+      if (char === "`") {
+        output += " ";
+        state = "template";
+        escaped = false;
+        continue;
+      }
+      output += char;
+      continue;
+    }
+
+    output += char === "\n" ? "\n" : " ";
+    if (state === "lineComment") {
+      if (char === "\n") {
+        state = "code";
+      }
+      continue;
+    }
+    if (state === "blockComment") {
+      if (char === "*" && next === "/") {
+        output += " ";
+        index++;
+        state = "code";
+      }
+      continue;
+    }
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (state === "regex") {
+      if (char === "[") {
+        inRegexCharacterClass = true;
+        continue;
+      }
+      if (char === "]") {
+        inRegexCharacterClass = false;
+        continue;
+      }
+      if (char === "/" && !inRegexCharacterClass) {
+        state = "code";
+      }
+      continue;
+    }
+    if (
+      (state === "single" && char === "'") ||
+      (state === "double" && char === '"') ||
+      (state === "template" && char === "`")
+    ) {
+      state = "code";
+    }
+  }
+  return output;
+}
+
+function canStartRegexLiteral(output: string): boolean {
+  const previous = output.trimEnd().at(-1);
+  return previous === undefined || /[=(:,[!&|?{};\n]/.test(previous);
 }
 
 function lineForMatchIndex(content: string, index: number): number {
