@@ -70,6 +70,9 @@ Before promotion:
 - Record current heads and dirty status for each target checkout.
 - Fail closed, or require explicit override, if a default deploy checkout is
   detached, dirty in relevant files, or behind the expected merged ref.
+- Treat `.env.enc` as an expected host-local encrypted environment file by
+  default. Override `CMUX_REVIEW_DIRTY_EXCLUDE_REGEX` when a deploy needs a
+  stricter or different dirty-file policy.
 - Distinguish staged worktree mode from stable promotion mode. Staged worktrees
   are allowed for pre-merge proof only; default deploy paths must return to
   merged `origin/main` after PRs land.
