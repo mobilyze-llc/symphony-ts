@@ -132,6 +132,28 @@ describe("parseCouncilReviewGateArgs", () => {
     });
   });
 
+  it("parses Kimi shadow lane control", () => {
+    expect(
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "SYMPH-689",
+          "--artifact-dir",
+          "/tmp/review",
+          "--kimi-shadow",
+        ],
+        "/cwd",
+      ),
+    ).toEqual({
+      issueId: "SYMPH-689",
+      artifactDir: "/tmp/review",
+      workspace: "/cwd",
+      kimiShadow: true,
+      riskContractArtifactPaths: [],
+      allowedChangePatterns: [],
+    });
+  });
+
   it("parses Council v2 routing controls", () => {
     expect(
       parseCouncilReviewGateArgs(
@@ -383,7 +405,7 @@ describe("parseCouncilReviewGateArgs", () => {
         ],
         "/cwd",
       ),
-    ).toThrow("Codex lane and routing flags are only valid");
+    ).toThrow("Reviewer lane, shadow lane, and routing flags are only valid");
   });
 
   it("rejects routing flags in freshness assertion mode", () => {
@@ -403,7 +425,7 @@ describe("parseCouncilReviewGateArgs", () => {
         ],
         "/cwd",
       ),
-    ).toThrow("Codex lane and routing flags are only valid");
+    ).toThrow("Reviewer lane, shadow lane, and routing flags are only valid");
   });
 
   it("rejects journal metadata without journal append root", () => {

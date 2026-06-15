@@ -63,10 +63,13 @@ export function buildReviewJournalEntries(
   const context = buildJournalContext(result, options);
   const entries: ReviewJournalEntryDraft[] = [];
   const structuredArtifacts = collectStructuredArtifacts(result);
+  const authoritativeStructuredArtifacts =
+    collectMergeAuthoritativeStructuredArtifacts(result);
   const contractVersion =
     structuredArtifacts.length > 0 ? "structured_v1" : "markdown_v0";
-  const findings = structuredArtifacts.flatMap(({ lane, artifact }) =>
-    artifact.findings.map((finding) => ({ lane, artifact, finding })),
+  const findings = authoritativeStructuredArtifacts.flatMap(
+    ({ lane, artifact }) =>
+      artifact.findings.map((finding) => ({ lane, artifact, finding })),
   );
   const termination = result.termination ?? null;
 
@@ -173,7 +176,7 @@ export function buildReviewJournalEntries(
     );
   }
 
-  for (const { lane, artifact } of structuredArtifacts) {
+  for (const { lane, artifact } of authoritativeStructuredArtifacts) {
     for (const synthesis of artifact.familySyntheses) {
       entries.push(
         entryFor(context, {
@@ -277,6 +280,16 @@ function collectStructuredArtifacts(
     lane.structuredArtifact === undefined || lane.structuredArtifact === null
       ? []
       : [{ lane, artifact: lane.structuredArtifact }],
+  );
+}
+
+function collectMergeAuthoritativeStructuredArtifacts(
+  result: HeadlessCouncilGateResult,
+): StructuredLaneArtifact[] {
+  return collectStructuredArtifacts(result).filter(
+    ({ lane, artifact }) =>
+      lane.mergeAuthoritative !== false &&
+      artifact.lane.mergeAuthoritative !== false,
   );
 }
 

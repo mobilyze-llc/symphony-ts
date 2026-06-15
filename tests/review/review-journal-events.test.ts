@@ -125,6 +125,53 @@ describe("review journal events", () => {
     });
   });
 
+  it("excludes non-authoritative shadow findings from journal escalation", () => {
+    const result = reviewResult({ verdict: "pass" });
+    const shadowArtifact = structuredArtifact({
+      verdict: "fail",
+      findingIntroducedIn: "fix_round_4",
+    });
+    shadowArtifact.lane = {
+      ...shadowArtifact.lane,
+      laneId: "kimi-k27-shadow",
+      agent: "kimi",
+      role: "kimi-k27-shadow-reviewer",
+      mergeAuthoritative: false,
+    };
+    result.lanes.push({
+      ...result.lanes[0]!,
+      laneId: "kimi-k27-shadow",
+      agent: "kimi",
+      role: "kimi-k27-shadow-reviewer",
+      model: "configured-default",
+      verdict: "fail",
+      independentReviewer: false,
+      mergeAuthoritative: false,
+      structuredArtifact: shadowArtifact,
+      structuredArtifactPath: "/tmp/kimi.structured.json",
+    });
+
+    const entries = buildReviewJournalEntries(result, {
+      issueIdentifier: "SYMPH-689",
+      ownerId: "worker-1",
+      source: "pipeline",
+    });
+
+    expect(entries).toContainEqual(
+      expect.objectContaining({
+        kind: "review_lane",
+        metadata: expect.objectContaining({ lane_id: "kimi-k27-shadow" }),
+      }),
+    );
+    expect(entries.map((entry) => entry.kind)).not.toContain("review_finding");
+    expect(entries.map((entry) => entry.kind)).not.toContain(
+      "review_escalation",
+    );
+    expect(entries[0]?.metadata).toMatchObject({
+      finding_count: 0,
+    });
+  });
+
   it("appends, replays, and projects safe review metadata through state delta", async () => {
     const workspaceRoot = await mkdtemp(
       join(tmpdir(), "symphony-review-journal-"),
@@ -766,6 +813,7 @@ function reviewResult(input: {
         cliJsonPath: "/tmp/claude.json",
         reasoningEffort: null,
         independentReviewer: true,
+        mergeAuthoritative: true,
         message: "SECRET lane message with diff --git data",
         degradedReason: null,
         reviewBundle: {
@@ -976,6 +1024,7 @@ function structuredArtifact(input: {
       modelFamily: "claude",
       reasoningEffort: "high",
       independentReviewer: true,
+      mergeAuthoritative: true,
     },
     routing: {
       mode: "full",

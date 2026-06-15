@@ -78,6 +78,216 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("adds Kimi only as an explicit shadow reviewer lane", async () => {
+    expect(defaultReviewerLanes({}).map((lane) => lane.laneId)).not.toContain(
+      "kimi-k27-shadow",
+    );
+    expect(
+      defaultReviewerLanes({
+        SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED: "true",
+        SYMPHONY_COUNCIL_KIMI_MODEL: "kimi-test",
+        KIMI_CLI_BIN: "/opt/kimi/bin/kimi",
+      }),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          laneId: "kimi-k27-shadow",
+          agent: "kimi",
+          role: "kimi-k27-shadow-reviewer",
+          model: "kimi-test",
+          binary: "/opt/kimi/bin/kimi",
+          independentReviewer: false,
+        }),
+      ]),
+    );
+
+    const harness = await createHarness();
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-689",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        kimiShadow: true,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const kimiCommand = harness.commands.find(
+      (command) =>
+        command.args[0] === "run" &&
+        readFlag(command.args, "--lane-id") === "kimi-k27-shadow",
+    )!;
+    expect(kimiCommand.args).toEqual(
+      expect.arrayContaining(["--agent", "kimi"]),
+    );
+    expect(kimiCommand.args).not.toContain("--model");
+    expect(result.lanes.map((lane) => lane.laneId)).toContain(
+      "kimi-k27-shadow",
+    );
+    expect(result.review_routing?.selectedLanes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          laneId: "kimi-k27-shadow",
+          agent: "kimi",
+          required: false,
+          decorrelatedSignal: false,
+          reason: "shadow_calibration_signal",
+        }),
+      ]),
+    );
+    expect(
+      result.review_routing?.decorrelationBasis.requiredReviewerLaneIds,
+    ).not.toContain("kimi-k27-shadow");
+  });
+
+  it("keeps malformed Kimi shadow artifacts from blocking the merge-authoritative gate", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "kimi-k27-shadow": {
+          artifact: "• ## Verdict\n  PASS\n",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-689",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        reviewerLanes: [
+          opusLane(),
+          {
+            laneId: "kimi-k27-shadow",
+            agent: "kimi",
+            role: "kimi-k27-shadow-reviewer",
+            mergeAuthoritative: false,
+          },
+        ],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    const kimiLane = result.lanes.find(
+      (lane) => lane.laneId === "kimi-k27-shadow",
+    );
+    expect(result.verdict).toBe("pass");
+    expect(kimiLane).toMatchObject({
+      verdict: "fail",
+      degradedReason: "malformed_artifact",
+      mergeAuthoritative: false,
+    });
+    expect(result.termination?.status).toBe("converged");
+    expect(result.degradedConditions).not.toContainEqual(
+      expect.stringContaining("kimi-k27-shadow"),
+    );
+    expect(result.degradedConditions).not.toContainEqual(
+      expect.stringContaining("malformed_artifact:kimi-k27-shadow"),
+    );
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain("- Substrate/provenance degraded: no");
+    expect(report).toContain("- Stop rule: continue pipeline");
+    expect(report).not.toContain("stop for review-substrate/provenance repair");
+  });
+
+  it("keeps Kimi shadow P1s from escalating merge-authoritative routing", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "kimi-k27-shadow": {
+          artifact:
+            "## Verdict\nFINDINGS\n\n## P1 Must Fix\n- src/review/headless-council-gate.ts:1 shadow-only concern. confidence: 0.95\n",
+        },
+        "codex-high-lead": {
+          artifact: "## Verdict\nPASS\n\n## Triage\nNone\n\n## Track\nNone\n",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-689",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        reviewerLanes: [
+          piLane(),
+          {
+            laneId: "kimi-k27-shadow",
+            agent: "kimi",
+            role: "kimi-k27-shadow-reviewer",
+            mergeAuthoritative: false,
+          },
+        ],
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.review_routing?.escalationPredicates).not.toContain(
+      "p1_verdict_disagreement",
+    );
+    expect(result.review_routing?.selectedLanes).not.toContainEqual(
+      expect.objectContaining({ laneId: "claude-opus" }),
+    );
+    expect(result.lanes.map((lane) => lane.laneId)).not.toContain(
+      "claude-opus",
+    );
+    expect(result.verdict).toBe("pass");
+  });
+
+  it("keeps non-authoritative reviewer artifacts from satisfying merge eligibility", async () => {
+    const harness = await createHarness();
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-689",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        cmuxSpawnBin: "/tmp/cmux-spawn",
+        reviewerLanes: [
+          {
+            laneId: "claude-shadow",
+            agent: "claude",
+            role: "shadow-opus-reviewer",
+            model: "opus",
+            independentReviewer: true,
+            mergeAuthoritative: false,
+          },
+        ],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.review_routing?.decorrelationBasis).toMatchObject({
+      requiredReviewerLaneIds: [],
+      decorrelatedReviewerArtifacts: [],
+      mergeEligible: false,
+    });
+    expect(result.review_routing?.decorrelationBasis.summary).toBe(
+      "Review is not merge-eligible: no completed non-author-family reviewer artifact was recorded.",
+    );
+    expect(result.review_routing?.selectedLanes).toEqual([
+      expect.objectContaining({
+        laneId: "claude-shadow",
+        required: false,
+        decorrelatedSignal: false,
+        reason: "shadow_calibration_signal",
+      }),
+    ]);
+    expect(result.lanes[0]).toMatchObject({
+      laneId: "claude-shadow",
+      independentReviewer: true,
+      mergeAuthoritative: false,
+      verdict: "pass",
+    });
+  });
+
   it("configures Codex excavation timeout and budget presets explicitly", async () => {
     expect(
       defaultReviewerLanes({
@@ -5988,6 +6198,54 @@ describe("runHeadlessCouncilGate", () => {
     );
   });
 
+  it("rejects Council v2 routing evidence backed by a non-authoritative required lane", async () => {
+    const harness = await createHarness({
+      ghPrViewFreshness: {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          baseRefOid: "base-sha",
+          headRefOid: "head-sha",
+        }),
+        stderr: "",
+      },
+    });
+    const reviewResult = cleanReviewResult({ reviewedHeadSha: "head-sha" });
+    reviewResult.lanes[0]!.mergeAuthoritative = false;
+    reviewResult.lanes[0]!.structuredArtifact!.lane.mergeAuthoritative = false;
+    const reviewResultPath = join(
+      harness.artifactDir,
+      "shadow-backed-routing.json",
+    );
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      reviewResultPath,
+      `${JSON.stringify(reviewResult, null, 2)}\n`,
+    );
+
+    const result = await assertFreshCouncilReview(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        reviewResultPath,
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 282,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result).toMatchObject({
+      verdict: "error",
+      code: "invalid_review_artifact",
+      reviewedHeadSha: "head-sha",
+      currentHeadSha: null,
+      guidance: "rerun convergence review against HEAD.",
+    });
+    expect(result.summary).toContain(
+      "required reviewer lane pi-deepseek is not merge-authoritative",
+    );
+  });
+
   it("rejects Council v2 routing evidence with an empty required lane set", async () => {
     const harness = await createHarness({
       ghPrViewFreshness: {
@@ -7763,6 +8021,7 @@ function cleanPiLaneResult() {
     cliJsonPath: "/tmp/council/phase1-pi.cli.json",
     reasoningEffort: "high",
     independentReviewer: true,
+    mergeAuthoritative: true,
     message: null,
     degradedReason: null,
     reviewBundle: null,
@@ -7781,6 +8040,7 @@ function cleanPiLaneResult() {
         modelFamily: "pi",
         reasoningEffort: "high",
         independentReviewer: true,
+        mergeAuthoritative: true,
       },
       routing: {
         mode: "full",

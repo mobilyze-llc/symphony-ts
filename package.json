@@ -19,6 +19,7 @@
     "symphony-calibration-digest": "./dist/src/calibration/cli.js",
     "claude-runner": "./dist/src/cli/claude-runner.js",
     "symphony-council-review-gate": "./dist/src/cli/council-review-gate.js",
+    "symphony-kimi-council-replay": "./dist/src/cli/kimi-council-replay.js",
     "symphony-manager-run-import": "./dist/src/cli/manager-run-import.js",
     "symphony-review-runtime-preflight": "./dist/src/cli/review-runtime-preflight.js",
     "symphony-spec-review-watch": "./dist/src/cli/spec-review-watch.js",
