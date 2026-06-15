@@ -177,8 +177,9 @@ describe("formatNotification", () => {
       text: { type: string; text: string };
     };
     expect(stageBlock.type).toBe("section");
-    expect(stageBlock.text.text).toContain("`investigate\\`phase`");
+    expect(stageBlock.text.text).toContain("`investigate'phase`");
     expect(stageBlock.text.text).toContain("`implement`");
+    expect(stageBlock.text.text.match(/`/g)).toHaveLength(4);
     // totals section includes rework count
     expect(blocks[4]?.type).toBe("divider");
     const totalsBlock = blocks[5] as {
@@ -1348,7 +1349,8 @@ describe("PipelineNotifier", () => {
           : undefined,
       )
       .find((text): text is string => text !== undefined);
-    expect(stageText).toContain("`imple\\`ment` 2m");
+    expect(stageText).toContain("`imple'ment` 2m");
+    expect(stageText?.match(/`/g)).toHaveLength(2);
   });
 
   it("delivers right-sizing details through the notifier post payload", async () => {
@@ -1711,8 +1713,10 @@ describe("formatNotification — tracker_write_failed (SYMPH-413)", () => {
     );
     expect(result.text).toContain("GRAPHQL_VALIDATION_FAILED");
     expect(result.text).toContain(
-      'Details: `{"errors":[{"message":"Title has \\`inline\\` and slash\\\\\\\\\\`tick","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`',
+      'Details: `{"errors":[{"message":"Title has \'inline\' and slash\\\\\\\'tick","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`',
     );
+    const detailsMatch = result.text.match(/^Details: (`.*`)$/m);
+    expect(detailsMatch?.[1]?.match(/`/g)).toHaveLength(2);
     expect(result.text).not.toContain("[object Object]");
   });
 
