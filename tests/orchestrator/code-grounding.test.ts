@@ -521,6 +521,68 @@ describe("managed code grounding (SYMPH-596)", () => {
       readFile(join(activeCheckout, "file.txt"), "utf8"),
     ).resolves.toBe("active");
   });
+
+  it("does not sweep an inactive checkout while its lock owner is alive", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
+    const lockedCheckout = join(baseRoot, "checkouts", "cg-locked");
+    const lockedCheckoutLock = join(baseRoot, "checkouts", "cg-locked.lock");
+    await mkdir(lockedCheckout, { recursive: true });
+    await mkdir(lockedCheckoutLock, { recursive: true });
+    await writeFile(join(lockedCheckout, "file.txt"), "locked");
+    await writeFile(
+      join(lockedCheckoutLock, "owner.json"),
+      `${JSON.stringify({
+        pid: process.pid,
+        ownerToken: "live-owner",
+        acquiredAt: "2026-06-13T00:00:00.000Z",
+      })}\n`,
+    );
+    await mkdir(baseRoot, { recursive: true });
+    const leaseIndexPath = join(baseRoot, "leases.json");
+    await writeFile(
+      leaseIndexPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          checkouts: {
+            "cg-locked": {
+              checkoutId: "cg-locked",
+              repoUrl: "repo",
+              commitSha: "abc",
+              checkoutPath: lockedCheckout,
+              artifactRoot: join(baseRoot, "artifacts", "locked"),
+              createdAt: "2026-06-13T00:00:00.000Z",
+              lastUsedAt: "2026-06-13T00:00:00.000Z",
+              activeRunIds: [],
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    await sweepCodeGroundingCheckouts({
+      workspaceRoot,
+      config: {
+        ...codeGroundingConfig(),
+        ttlMs: 1,
+      },
+      now: new Date("2026-06-15T00:00:00.000Z"),
+    });
+
+    await expect(
+      readFile(join(lockedCheckout, "file.txt"), "utf8"),
+    ).resolves.toBe("locked");
+    await expect(
+      readFile(join(lockedCheckoutLock, "owner.json"), "utf8"),
+    ).resolves.toContain("live-owner");
+    const leaseIndex = JSON.parse(await readFile(leaseIndexPath, "utf8")) as {
+      checkouts: Record<string, unknown>;
+    };
+    expect(leaseIndex.checkouts["cg-locked"]).toBeDefined();
+  });
 });
 
 function backlogFinding(
