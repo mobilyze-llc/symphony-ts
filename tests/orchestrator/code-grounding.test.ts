@@ -257,6 +257,48 @@ describe("managed code grounding (SYMPH-596)", () => {
     });
   });
 
+  it("rejects exact cited paths that escape through symlinked directories", async () => {
+    const sourceRepo = await createSourceRepo();
+    const outsideRoot = await tempRoot("symph-cg-outside-");
+    await mkdir(join(outsideRoot, "linked"), { recursive: true });
+    await writeFile(
+      join(outsideRoot, "linked", "secret.ts"),
+      "export const secret = true;\n",
+    );
+    await symlink(
+      join(outsideRoot, "linked"),
+      join(sourceRepo, "src", "linked"),
+    );
+    await git(sourceRepo, ["add", "."]);
+    await git(sourceRepo, ["commit", "-m", "Add symlink directory evidence"]);
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "symlink-directory-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [
+        backlogFinding({
+          evidence: "Implemented in `src/linked/secret.ts`.",
+        }),
+      ],
+    });
+
+    expect(report.status).toBe("not_found");
+    expect(report.entries[0]).toMatchObject({
+      status: "not_found",
+      citations: [],
+      missing: ["src/linked/secret.ts"],
+    });
+  });
+
   it("replaces an unusable cached checkout before scanning", async () => {
     const sourceRepo = await createSourceRepo();
     const workspaceRoot = await tempRoot("symph-cg-workspace-");
