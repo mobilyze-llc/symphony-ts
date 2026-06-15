@@ -18,6 +18,7 @@ import {
 import {
   OrchestratorCore,
   type OrchestratorCoreOptions,
+  SERVICE_SHUTDOWN_ABORT_REASON,
   type SupervisionResteerRequest,
   classifyExitOutcome,
   computeFailureRetryDelayMs,
@@ -1434,6 +1435,131 @@ describe("orchestrator core", () => {
     // breakerOpened is false here only because this fixture runs without
     // stages (stageName === null); per-stage breaker opening for transient
     // signatures is covered by the signature-cluster registry tests.
+  });
+
+  it("service shutdown aborts release claims without opening the review circuit breaker (SYMPH-651)", async () => {
+    const calls: Array<{ clusterSize: number; breakerOpened: boolean }> = [];
+    const config = createConfig({
+      agent: { maxConcurrentAgents: 2 },
+      watchdog: {
+        systemicThreshold: 2,
+        circuitBreaker: true,
+        maxFilingsPerHour: 3,
+      },
+    });
+    config.stages = {
+      initialStage: "review",
+      fastTrack: null,
+      stages: {
+        review: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "done",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: "Done",
+        },
+      },
+    };
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2" }),
+      ],
+      statesById: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      config,
+      tracker,
+      timerScheduler: createFakeTimerScheduler(),
+      onSystemicCluster: (input) => {
+        calls.push({
+          clusterSize: input.clusterSize,
+          breakerOpened: input.breakerOpened,
+        });
+      },
+    });
+
+    const dispatch = await orchestrator.pollTick();
+    expect(dispatch.dispatchedIssueIds).toEqual(["1", "2"]);
+    expect(orchestrator.getState().issueStages).toMatchObject({
+      "1": "review",
+      "2": "review",
+    });
+
+    const reason = SERVICE_SHUTDOWN_ABORT_REASON;
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "abnormal",
+      reason,
+      endedAt: new Date("2026-03-06T00:00:05.000Z"),
+    });
+    await orchestrator.onWorkerExit({
+      issueId: "2",
+      outcome: "abnormal",
+      reason,
+      endedAt: new Date("2026-03-06T00:00:06.000Z"),
+    });
+
+    expect(calls).toHaveLength(0);
+    expect(orchestrator.getState().claimed.has("1")).toBe(false);
+    expect(orchestrator.getState().claimed.has("2")).toBe(false);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().failed.has("2")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("2")).toBe(false);
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(orchestrator.getState().retryAttempts["2"]).toBeUndefined();
+    expect(orchestrator.getState().issueStages).toMatchObject({
+      "1": "review",
+      "2": "review",
+    });
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) =>
+            entry.kind === "cluster_transition" ||
+            entry.kind === "breaker_transition",
+        ),
+    ).toBe(false);
+    expect(
+      orchestrator
+        .getState()
+        .issueExecutionHistory["1"]?.map((record) => record.outcome),
+    ).toEqual(["restart_interrupted"]);
+    expect(
+      orchestrator
+        .getState()
+        .issueExecutionHistory["2"]?.map((record) => record.outcome),
+    ).toEqual(["restart_interrupted"]);
   });
 
   it("recordWatchdogFiling feeds the rate limiter so subsequent alerts report canFile=false (SYMPH-398)", async () => {
@@ -6510,6 +6636,226 @@ describe("dispatcher run journal restart recovery", () => {
     expect(resumed.dispatchedIssueIds).toEqual(["1"]);
     expect(spawnWorker).toHaveBeenCalledTimes(1);
     expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("restart recovery resumes a worker-reported merge block at the recorded stage (SYMPH-644)", async () => {
+    const spawnedStageNames: Array<string | null> = [];
+    const spawnWorker = vi.fn(async ({ stageName }) => {
+      spawnedStageNames.push(stageName);
+      return {
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      };
+    });
+    const config = createConfig();
+    config.tracker.activeStates = ["Todo", "Resume"];
+    config.stages = {
+      initialStage: "investigate",
+      fastTrack: null,
+      stages: {
+        investigate: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "implement",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        implement: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "review",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        review: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "merge",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        merge: {
+          type: "agent",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: {
+            onComplete: "done",
+            onApprove: null,
+            onRework: null,
+          },
+          linearState: null,
+        },
+        done: {
+          type: "terminal",
+          runner: null,
+          model: null,
+          prompt: null,
+          maxTurns: null,
+          timeoutMs: null,
+          concurrency: null,
+          gateType: null,
+          maxRework: null,
+          reviewers: [],
+          transitions: { onComplete: null, onApprove: null, onRework: null },
+          linearState: "Done",
+        },
+      },
+    };
+    let issueState = "Todo";
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidatesFn: () => [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            state: issueState,
+            branchName: "agents/symph-420-runtime-pilot",
+          }),
+        ],
+      }),
+      spawnWorker,
+      runJournal: [
+        createJournalEntry({
+          sequence: 1,
+          idempotencyKey: "stage_record:1:investigate:initial:1",
+          kind: "stage_record",
+          operation: "dispatcher",
+          leaseId: "stage_record:1:investigate:initial:1",
+          leaseStatus: "completed",
+          stage: "investigate",
+          metadata: {
+            schema_version: 1,
+            status: "completed",
+            stageName: "investigate",
+            durationMs: 10_000,
+            totalTokens: 100,
+            turns: 1,
+            outcome: "normal",
+          },
+        }),
+        createJournalEntry({
+          sequence: 2,
+          idempotencyKey: "stage_record:1:implement:initial:2",
+          kind: "stage_record",
+          operation: "dispatcher",
+          leaseId: "stage_record:1:implement:initial:2",
+          leaseStatus: "completed",
+          stage: "implement",
+          metadata: {
+            schema_version: 1,
+            status: "completed",
+            stageName: "implement",
+            durationMs: 20_000,
+            totalTokens: 200,
+            turns: 2,
+            outcome: "normal",
+          },
+        }),
+        createJournalEntry({
+          sequence: 3,
+          idempotencyKey: "stage_record:1:review:initial:3",
+          kind: "stage_record",
+          operation: "dispatcher",
+          leaseId: "stage_record:1:review:initial:3",
+          leaseStatus: "completed",
+          stage: "review",
+          metadata: {
+            schema_version: 1,
+            status: "completed",
+            stageName: "review",
+            durationMs: 30_000,
+            totalTokens: 300,
+            turns: 3,
+            outcome: "normal",
+          },
+        }),
+        createJournalEntry({
+          sequence: 4,
+          idempotencyKey: "hard_stop:1:merge:initial:worker_reported_block:4",
+          kind: "hard_stop_trigger",
+          operation: "dispatcher",
+          leaseId: "hard_stop:1:merge:initial:worker_reported_block:4",
+          leaseStatus: "completed",
+          stage: "merge",
+          metadata: {
+            status: "completed",
+            outcome: "BLOCKED-needs-human",
+            trigger: "worker_reported_block",
+            reason: "Worker reported human blocker.",
+            humanBlockOperation: "auto_merge",
+            issueState: "Todo",
+            passedStages: ["investigate", "implement", "review"],
+          },
+        }),
+      ],
+    });
+
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(orchestrator.getState().issueStages["1"]).toBe("merge");
+    expect(orchestrator.getState().issuePassedStages["1"]).toEqual([
+      "investigate",
+      "implement",
+      "review",
+    ]);
+    expect(
+      orchestrator
+        .getState()
+        .issueExecutionHistory["1"]?.map((record) => record.stageName),
+    ).toEqual(["investigate", "implement", "review"]);
+
+    const stillTodo = await orchestrator.pollTick();
+    expect(stillTodo.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+
+    issueState = "Resume";
+    const resumed = await orchestrator.pollTick();
+    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+    expect(spawnedStageNames).toEqual(["merge"]);
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+    expect(orchestrator.getState().issueStages["1"]).toBe("merge");
   });
 
   it("restart recovery does not let prior hard-stop proof confirm a later emergency stop", async () => {

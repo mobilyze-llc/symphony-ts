@@ -2059,6 +2059,7 @@ export class OrchestratorCore {
       outcome !== null
     ) {
       const trigger = readMetadataString(entry.metadata, "trigger");
+      this.recoverHardStopStage(entry);
       this.markIssueRequiresExplicitResume(
         entry.issueId,
         readMetadataString(entry.metadata, "issueState"),
@@ -2073,6 +2074,16 @@ export class OrchestratorCore {
         },
       );
       this.recoverPendingStageSignal(entry);
+    }
+  }
+
+  private recoverHardStopStage(entry: DispatcherRunJournalEntry): void {
+    if (entry.stage !== null) {
+      this.state.issueStages[entry.issueId] = entry.stage;
+    }
+    const passedStages = readStringArray(entry.metadata.passedStages);
+    if (passedStages.length > 0) {
+      this.state.issuePassedStages[entry.issueId] = passedStages;
     }
   }
 
@@ -4689,6 +4700,11 @@ export class OrchestratorCore {
         input.issueId,
         runningEntry.issue.state,
       );
+      return null;
+    }
+
+    if (isServiceShutdownAbortReason(input.reason)) {
+      this.releaseClaim(input.issueId);
       return null;
     }
 
@@ -9330,6 +9346,7 @@ export class OrchestratorCore {
         estimatedCostUsd: input.hardStop.estimatedCostUsd,
         issueState: runningEntry.issue.state,
         parkGeneration,
+        passedStages: [...(this.state.issuePassedStages[issueId] ?? [])],
         ...pendingStageSignalMetadata(input.pendingStageSignal),
       },
     });
@@ -12151,6 +12168,9 @@ export function classifyExitOutcome(
   if (isCodexUserInputRequiredReason(reason)) {
     return "input_required";
   }
+  if (isServiceShutdownAbortReason(reason)) {
+    return "restart_interrupted";
+  }
   if (turnCount === 0) {
     return "failed_to_start";
   }
@@ -12169,6 +12189,16 @@ function isCodexUserInputRequiredReason(reason: string | undefined): boolean {
     reason.includes("turn_input_required") ||
     reason.includes("Codex requested operator input")
   );
+}
+
+export const SERVICE_SHUTDOWN_ABORT_REASON =
+  "Shutdown: aborting running workers.";
+
+function isServiceShutdownAbortReason(reason: string | undefined): boolean {
+  if (reason === undefined) {
+    return false;
+  }
+  return reason.trim() === SERVICE_SHUTDOWN_ABORT_REASON;
 }
 
 function parseStoppedAfterReason(

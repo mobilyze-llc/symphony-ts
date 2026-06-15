@@ -32,7 +32,10 @@ import {
   type StructuredLogEntry,
   StructuredLogger,
 } from "../../src/logging/structured-logger.js";
-import type { StopSignalDelivery } from "../../src/orchestrator/core.js";
+import {
+  SERVICE_SHUTDOWN_ABORT_REASON,
+  type StopSignalDelivery,
+} from "../../src/orchestrator/core.js";
 import type { PipelineNotificationEvent } from "../../src/orchestrator/pipeline-notifier.js";
 import {
   loadPersistedRateLimitSnapshot,
@@ -1123,6 +1126,10 @@ describe("OrchestratorRuntimeHost", () => {
         },
       },
     ]);
+    const writtenEntries: DispatcherRunJournalEntry[] = [];
+    const terminateDetachedPidTree = vi.fn(async (pid: number) =>
+      createProcessTreeTerminationResult({ pid }),
+    );
     const listWorkspaceCwdProcessIds = vi.fn(
       async (
         _workspacePath: string,
@@ -1162,7 +1169,11 @@ describe("OrchestratorRuntimeHost", () => {
         return fakeRunner;
       },
       readDispatcherRunJournal: async () => journal,
+      writeDispatcherRunJournalEntry: async (_workspaceRoot, entry) => {
+        writtenEntries.push(entry);
+      },
       listWorkspaceCwdProcessIds,
+      terminateDetachedPidTree,
       now: () => new Date("2026-03-06T00:02:00.000Z"),
     });
 
@@ -1191,6 +1202,24 @@ describe("OrchestratorRuntimeHost", () => {
       (entry) => entry.event === "workspace_cwd_recheck_skipped",
     );
     expect(logEntry?.skipped_rechecks).toHaveLength(20);
+    expect(terminateDetachedPidTree).toHaveBeenCalledWith(1001, {
+      graceMs: 1_000,
+      expectedIdentity: createProcessIdentity(1001),
+    });
+    expect(writtenEntries).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "hard_stop_trigger",
+          issueId: "1",
+          metadata: expect.objectContaining({
+            status: "completed",
+            reason: "emergency_stop",
+            recovery: "journal_hydration",
+            sourceSequence: 1,
+          }),
+        }),
+      ]),
+    );
 
     await vi.waitFor(() => {
       expect(fakeRunner.runs.has("1")).toBe(true);
@@ -4734,9 +4763,7 @@ describe("startRuntimeService shutdown", () => {
     // Call shutdown — should abort all workers
     await service.shutdown();
 
-    expect(fakeRunner.abortReasons).toContain(
-      "Shutdown: aborting running workers.",
-    );
+    expect(fakeRunner.abortReasons).toContain(SERVICE_SHUTDOWN_ABORT_REASON);
   });
 
   it("proceeds with exit after shutdown timeout if waitForIdle hangs", async () => {
