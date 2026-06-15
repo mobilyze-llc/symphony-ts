@@ -346,6 +346,7 @@ describe("ClaudeCodeRunner", () => {
       model: "sonnet",
       modePolicy: createModeScopedPermissionPolicy({
         mode: "thin",
+        stageName: "implement",
         configuredApprovalPolicy: "full-auto",
         configuredThreadSandbox: "workspace-write",
         configuredTurnSandboxPolicy: { type: "workspace-write" },
@@ -365,11 +366,12 @@ describe("ClaudeCodeRunner", () => {
     );
     const prompt = String(mockGenerateText.mock.calls.at(-1)![0]!.prompt);
     expect(prompt).toContain("Mode: thin");
-    expect(prompt).toContain("Pull requests: denied");
+    expect(prompt).toContain("Stage: implement");
+    expect(prompt).toContain("Pull requests: allowed");
     expect(prompt).toContain("Implement and open a PR.");
   });
 
-  it("denies prototype and thin PR creation in the claude-code PreToolUse hook", async () => {
+  it("allows thin implement PR creation in the claude-code PreToolUse hook", async () => {
     mockGenerateText.mockResolvedValueOnce({
       text: "Done",
       usage: {
@@ -386,6 +388,7 @@ describe("ClaudeCodeRunner", () => {
       onEvent: (event) => events.push(event),
       modePolicy: createModeScopedPermissionPolicy({
         mode: "thin",
+        stageName: "implement",
         configuredApprovalPolicy: "full-auto",
         configuredThreadSandbox: "workspace-write",
         configuredTurnSandboxPolicy: { type: "workspace-write" },
@@ -402,18 +405,10 @@ describe("ClaudeCodeRunner", () => {
       tool_use_id: "toolu_pr",
     });
 
-    expect(result).toMatchObject({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: "deny",
-        permissionDecisionReason: expect.stringContaining(
-          "open_pull_request is not allowed in thin mode",
-        ),
-      },
-    });
+    expect(result).toEqual({});
     expect(events).toContainEqual(
       expect.objectContaining({
-        event: "unsupported_tool_call",
+        event: "approval_auto_approved",
         toolName: "Bash",
       } satisfies Partial<CodexClientEvent>),
     );
@@ -434,6 +429,7 @@ describe("ClaudeCodeRunner", () => {
       model: "sonnet",
       modePolicy: createModeScopedPermissionPolicy({
         mode: "full",
+        stageName: "merge",
         configuredApprovalPolicy: "full-auto",
         configuredThreadSandbox: "workspace-write",
         configuredTurnSandboxPolicy: { type: "workspace-write" },

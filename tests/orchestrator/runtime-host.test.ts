@@ -4949,6 +4949,7 @@ describe("pipeline notifications", () => {
       ],
     });
     const notifier = createMockNotifier();
+    const fakeRunner = new FakeAgentRunner();
     const host = new OrchestratorRuntimeHost({
       config: createStagedConfig({
         stages: {
@@ -5039,7 +5040,7 @@ describe("pipeline notifications", () => {
       }),
       tracker,
       notifier,
-      agentRunner: new FakeAgentRunner(),
+      agentRunner: fakeRunner,
       now: () => new Date("2026-03-06T00:00:05.000Z"),
     });
 
@@ -5057,6 +5058,15 @@ describe("pipeline notifications", () => {
         },
       },
     });
+    expect(fakeRunner.runInputs[0]?.modePolicy).toMatchObject({
+      mode: "thin",
+      stageName: "implement",
+      canOpenPullRequest: true,
+      canAutoMerge: false,
+      canBypassGates: false,
+    });
+    fakeRunner.resolve("1", createNormalResult());
+    await host.waitForIdle();
   });
 
   it("includes full right-sizing on issue_dispatched for a high-risk unit", async () => {

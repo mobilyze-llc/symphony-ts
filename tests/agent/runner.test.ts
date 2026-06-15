@@ -1478,6 +1478,7 @@ describe("AgentRunner", () => {
       attempt: null,
       modePolicy: {
         mode: "prototype",
+        stageName: "implement",
         approvalPolicy: "never",
         threadSandbox: "workspace-write",
         turnSandboxPolicy: { type: "workspace-write", networkAccess: false },

@@ -408,7 +408,7 @@ describe("prompt builder", () => {
     );
   });
 
-  it("wraps continuation prompts with full-mode PR allowance but merge/bypass denials", () => {
+  it("wraps merge continuation prompts with PR, merge, and bypass denials", () => {
     const prompt = buildContinuationPrompt({
       issue: ISSUE_FIXTURE,
       attempt: null,
@@ -417,6 +417,7 @@ describe("prompt builder", () => {
       stageName: "merge",
       modePolicy: createModeScopedPermissionPolicy({
         mode: "full",
+        stageName: "merge",
         configuredApprovalPolicy: "full-auto",
         configuredThreadSandbox: "workspace-write",
         configuredTurnSandboxPolicy: { type: "workspace-write" },
@@ -425,7 +426,8 @@ describe("prompt builder", () => {
     });
 
     expect(prompt).toContain("Mode: full");
-    expect(prompt).toContain("Pull requests: allowed");
+    expect(prompt).toContain("Stage: merge");
+    expect(prompt).toContain("Pull requests: denied");
     expect(prompt).toContain("Auto-merge: denied");
     expect(prompt).toContain("Gate bypass: denied");
     expect(prompt).toContain("You are in the MERGE stage");

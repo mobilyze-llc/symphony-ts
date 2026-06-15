@@ -47,6 +47,7 @@ export type ClaudePermissionMode =
 
 export interface ModeScopedPermissionPolicy {
   mode: RightSizingMode;
+  stageName: string | null;
   approvalPolicy: unknown;
   threadSandbox: unknown;
   turnSandboxPolicy: unknown;
@@ -86,15 +87,22 @@ export function resolveHardStopsConfig(
 
 export function createModeScopedPermissionPolicy(input: {
   mode: RightSizingMode;
+  stageName?: string | null;
   configuredApprovalPolicy: unknown;
   configuredThreadSandbox: unknown;
   configuredTurnSandboxPolicy: unknown;
   maxBudgetUsd: number;
 }): ModeScopedPermissionPolicy {
+  const stageName = input.stageName ?? null;
+  const canOpenPullRequest =
+    stageName === "implement" &&
+    (input.mode === "thin" || input.mode === "full");
+
   switch (input.mode) {
     case "prototype":
       return {
         mode: "prototype",
+        stageName,
         approvalPolicy: "never",
         threadSandbox: "workspace-write",
         turnSandboxPolicy: {
@@ -102,7 +110,7 @@ export function createModeScopedPermissionPolicy(input: {
           networkAccess: false,
         },
         claudePermissionMode: "acceptEdits",
-        canOpenPullRequest: false,
+        canOpenPullRequest,
         canAutoMerge: false,
         canBypassGates: false,
         maxBudgetUsd: Math.min(input.maxBudgetUsd, 5),
@@ -111,13 +119,14 @@ export function createModeScopedPermissionPolicy(input: {
     case "thin":
       return {
         mode: "thin",
+        stageName,
         approvalPolicy: input.configuredApprovalPolicy ?? "on-request",
         threadSandbox: input.configuredThreadSandbox ?? "workspace-write",
         turnSandboxPolicy: input.configuredTurnSandboxPolicy ?? {
           type: "workspace-write",
         },
         claudePermissionMode: "acceptEdits",
-        canOpenPullRequest: false,
+        canOpenPullRequest,
         canAutoMerge: false,
         canBypassGates: false,
         maxBudgetUsd: Math.min(input.maxBudgetUsd, 20),
@@ -126,13 +135,14 @@ export function createModeScopedPermissionPolicy(input: {
     case "full":
       return {
         mode: "full",
+        stageName,
         approvalPolicy: input.configuredApprovalPolicy ?? "on-request",
         threadSandbox: input.configuredThreadSandbox ?? "workspace-write",
         turnSandboxPolicy: input.configuredTurnSandboxPolicy ?? {
           type: "workspace-write",
         },
         claudePermissionMode: "bypassPermissions",
-        canOpenPullRequest: true,
+        canOpenPullRequest,
         canAutoMerge: false,
         canBypassGates: false,
         maxBudgetUsd: input.maxBudgetUsd,
@@ -211,12 +221,13 @@ export function describeModePermissionEnvelope(
   policy: ModeScopedPermissionPolicy,
 ): string {
   const pullRequestLine = policy.canOpenPullRequest
-    ? "- Pull requests: allowed to open a PR when the issue requires one."
-    : "- Pull requests: denied. Do NOT run PR creation commands such as `gh pr create` or `hub pull-request`.";
+    ? "- Pull requests: allowed to open a PR after required local validation passes when the issue requires one."
+    : "- Pull requests: denied for this mode/stage. Do NOT run PR creation commands such as `gh pr create` or `hub pull-request`.";
 
   return [
     "## Mode Permission Envelope",
     `Mode: ${policy.mode}`,
+    `Stage: ${policy.stageName ?? "unknown"}`,
     pullRequestLine,
     "- Auto-merge: denied. Do NOT run PR merge commands such as `gh pr merge`, including `--auto`.",
     "- Gate bypass: denied. Do NOT pass bypass/admin flags such as `--admin`, `--bypass`, or force-push to get around review, CI, or merge gates.",
