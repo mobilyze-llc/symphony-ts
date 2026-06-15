@@ -22,6 +22,7 @@ import type { Issue } from "../../src/domain/model.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
 import {
   AgentRunner,
+  type AgentRunnerCodexClient,
   type AgentRunnerCodexClientFactoryInput,
   type AgentRunnerError,
   WorkspaceHookError,
@@ -40,6 +41,10 @@ const fixturePath = join(
 const execFileAsync = promisify(execFile);
 
 const roots: string[] = [];
+
+function createCloseMock() {
+  return vi.fn<AgentRunnerCodexClient["close"]>().mockResolvedValue(undefined);
+}
 
 afterEach(async () => {
   await Promise.allSettled(
@@ -1517,7 +1522,7 @@ describe("AgentRunner", () => {
           };
         },
         continueTurn: vi.fn(),
-        close: vi.fn().mockResolvedValue(undefined),
+        close: createCloseMock(),
       }),
     });
 
@@ -1647,7 +1652,7 @@ describe("AgentRunner", () => {
               message: "still no completion signal",
             };
           },
-          close: vi.fn().mockResolvedValue(undefined),
+          close: createCloseMock(),
         };
       },
     });
@@ -2461,7 +2466,7 @@ describe("AgentRunner", () => {
               message: `turn ${turn}`,
             };
           },
-          close: vi.fn().mockResolvedValue(undefined),
+          close: createCloseMock(),
         };
       },
     });
@@ -2532,7 +2537,7 @@ describe("AgentRunner", () => {
           };
         },
         continueTurn,
-        close: vi.fn().mockResolvedValue(undefined),
+        close: createCloseMock(),
       }),
     });
 
@@ -2592,7 +2597,7 @@ describe("AgentRunner", () => {
           };
         },
         continueTurn,
-        close: vi.fn().mockResolvedValue(undefined),
+        close: createCloseMock(),
       }),
     });
 
@@ -2661,7 +2666,7 @@ describe("AgentRunner", () => {
               message: `turn ${turn}`,
             };
           },
-          close: vi.fn().mockResolvedValue(undefined),
+          close: createCloseMock(),
         };
       },
     });
@@ -2861,7 +2866,7 @@ function createStubCodexClient(
   prompts: string[],
   input: AgentRunnerCodexClientFactoryInput,
   overrides?: Partial<{
-    close: ReturnType<typeof vi.fn>;
+    close: AgentRunnerCodexClient["close"];
     statuses: Array<"completed" | "failed" | "cancelled">;
     messages: Array<string | null>;
     startSession: (input: { prompt: string; title: string }) => Promise<{
@@ -2946,7 +2951,7 @@ function createStubCodexClient(
           : `turn ${turn}`,
       };
     },
-    close: overrides?.close ?? vi.fn().mockResolvedValue(undefined),
+    close: overrides?.close ?? createCloseMock(),
   };
 }
 
@@ -3271,7 +3276,7 @@ describe("AgentRunner session rotation (SYMPH-412)", () => {
             throw midTurnClosureError();
           },
           continueTurn: vi.fn(),
-          close: vi.fn().mockResolvedValue(undefined),
+          close: createCloseMock(),
         };
       },
     });
@@ -3345,7 +3350,7 @@ describe("AgentRunner session rotation (SYMPH-412)", () => {
             continueTurnCalls.push(clientIndex);
             return makeTurn("turn-2");
           },
-          close: vi.fn().mockResolvedValue(undefined),
+          close: createCloseMock(),
         };
       },
     });
@@ -3388,7 +3393,7 @@ describe("AgentRunner session rotation (SYMPH-412)", () => {
             throw midTurnClosureError();
           },
           continueTurn: vi.fn(),
-          close: vi.fn().mockResolvedValue(undefined),
+          close: createCloseMock(),
         };
       },
     });
@@ -3481,7 +3486,7 @@ describe("AgentRunner session rotation (SYMPH-412)", () => {
             emitStarted("turn-2");
             return completed("turn-2");
           },
-          close: vi.fn().mockResolvedValue(undefined),
+          close: createCloseMock(),
         };
       },
     });

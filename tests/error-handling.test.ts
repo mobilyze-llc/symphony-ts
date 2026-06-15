@@ -10,10 +10,12 @@ vi.mock("ai-sdk-provider-claude-code", () => ({
 }));
 
 vi.mock("../src/slack-bot/stream-consumer.js", () => ({
-  StreamConsumer: vi.fn().mockImplementation(() => ({
-    append: vi.fn().mockResolvedValue(undefined),
-    finish: vi.fn().mockResolvedValue(undefined),
-  })),
+  StreamConsumer: vi.fn().mockImplementation(function StreamConsumerMock() {
+    return {
+      append: vi.fn().mockResolvedValue(undefined),
+      finish: vi.fn().mockResolvedValue(undefined),
+    };
+  }),
 }));
 
 import { streamText } from "ai";
@@ -77,13 +79,13 @@ function createMockBoltArgs(
 
 describe("Error handling", () => {
   beforeEach(() => {
-    vi.mocked(StreamConsumer).mockImplementation(
-      () =>
-        ({
-          append: vi.fn().mockResolvedValue(undefined),
-          finish: vi.fn().mockResolvedValue(undefined),
-        }) as unknown as StreamConsumer,
-    );
+    vi.clearAllMocks();
+    vi.mocked(StreamConsumer).mockImplementation(function StreamConsumerMock() {
+      return {
+        append: vi.fn().mockResolvedValue(undefined),
+        finish: vi.fn().mockResolvedValue(undefined),
+      } as unknown as StreamConsumer;
+    });
   });
 
   afterEach(() => {

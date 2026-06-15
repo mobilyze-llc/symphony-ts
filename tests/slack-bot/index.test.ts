@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 // Mock @slack/bolt before importing
 vi.mock("@slack/bolt", () => ({
-  App: vi.fn().mockImplementation(() => ({
-    message: vi.fn(),
-    start: vi.fn().mockResolvedValue(undefined),
-  })),
+  App: vi.fn().mockImplementation(function AppMock() {
+    return {
+      message: vi.fn(),
+      start: vi.fn().mockResolvedValue(undefined),
+    };
+  }),
 }));
 
 import { App } from "@slack/bolt";

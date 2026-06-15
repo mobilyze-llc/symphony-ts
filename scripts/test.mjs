@@ -6,6 +6,8 @@
  * - derives the exit code from vitest's structured JSON report (SYMPH-389):
  *   unhandled teardown errors flip vitest's exit to 1 even when every test
  *   passes, so an all-green summary wins over the raw exit status.
+ * - uses Vitest's agent reporter instead of verbose when explicitly opted in
+ *   for coding-agent runs, while still requesting the JSON report.
  */
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -16,12 +18,18 @@ import { deriveExitCode } from "./test-exit.mjs";
 
 const args = process.argv.slice(2);
 const translated = [];
+let agentReporterRequested =
+  hasTruthyEnv("AI_AGENT") || hasTruthyEnv("SYMPHONY_TEST_AGENT");
 
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--grep" && i + 1 < args.length) {
-    translated.push("-t", args[++i]);
-  } else {
-    translated.push(args[i]);
+  if (args[i] === "--symphony-agent") {
+    agentReporterRequested = true;
+  } else if (args[i] !== "--") {
+    if (args[i] === "--grep" && i + 1 < args.length) {
+      translated.push("-t", args[++i]);
+    } else {
+      translated.push(args[i]);
+    }
   }
 }
 
@@ -37,8 +45,9 @@ let reportPath = null;
 if (!callerControlsReporters) {
   reportDir = mkdtempSync(join(tmpdir(), "symphony-test-"));
   reportPath = join(reportDir, "vitest-report.json");
+  const primaryReporter = agentReporterRequested ? "agent" : "verbose";
   translated.push(
-    "--reporter=verbose",
+    `--reporter=${primaryReporter}`,
     "--reporter=json",
     `--outputFile.json=${reportPath}`,
   );
@@ -69,3 +78,13 @@ if (note !== null) {
   console.error(note);
 }
 process.exit(code);
+
+function hasTruthyEnv(name) {
+  const value = process.env[name];
+  return (
+    value !== undefined &&
+    value !== "" &&
+    value !== "0" &&
+    value.toLowerCase() !== "false"
+  );
+}

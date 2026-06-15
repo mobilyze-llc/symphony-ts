@@ -321,6 +321,17 @@ pnpm lint           # Biome lint check
 pnpm format         # Biome auto-format
 ```
 
+For coding-agent transcripts, prefer the quiet reporter path while keeping the JSON report that
+`scripts/test.mjs` uses for exit-code derivation:
+
+```bash
+AI_AGENT=codex pnpm test
+# or, when env wiring is inconvenient:
+pnpm test -- --symphony-agent
+```
+
+`pnpm test:watch` keeps the normal local Vitest watch behavior.
+
 ---
 
 ## Key Concepts for Development

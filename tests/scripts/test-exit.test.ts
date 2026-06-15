@@ -1,5 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -86,11 +92,13 @@ describe("scripts/test.mjs wiring", () => {
   const testDir = dirname(fileURLToPath(import.meta.url));
   const wrapperPath = resolve(testDir, "../../scripts/test.mjs");
   let fakeBinDir: string | null = null;
+  let fakeArgsPath: string | null = null;
 
   afterEach(() => {
     if (fakeBinDir !== null) {
       rmSync(fakeBinDir, { recursive: true, force: true });
       fakeBinDir = null;
+      fakeArgsPath = null;
     }
   });
 
@@ -104,6 +112,9 @@ describe("scripts/test.mjs wiring", () => {
     const script = [
       "#!/usr/bin/env node",
       'import { writeFileSync } from "node:fs";',
+      "if (process.env.SYMPHONY_FAKE_VITEST_ARGS_PATH !== undefined) {",
+      "  writeFileSync(process.env.SYMPHONY_FAKE_VITEST_ARGS_PATH, JSON.stringify(process.argv.slice(2)));",
+      "}",
       `const report = ${reportLiteral};`,
       "const outputArg = process.argv.find((arg) => arg.startsWith('--outputFile.json='));",
       "if (report !== null && outputArg !== undefined) {",
@@ -113,17 +124,40 @@ describe("scripts/test.mjs wiring", () => {
       `process.exit(${input.exitCode});`,
     ].join("\n");
     const fakePath = join(fakeBinDir, "vitest");
+    fakeArgsPath = join(fakeBinDir, "vitest-args.json");
     writeFileSync(fakePath, script);
     chmodSync(fakePath, 0o755);
   }
 
-  function runWrapper(extraArgs: string[] = []) {
+  function readFakeVitestArgs(): string[] {
+    if (fakeArgsPath === null) {
+      throw new Error("installFakeVitest must run first");
+    }
+    return JSON.parse(readFileSync(fakeArgsPath, "utf8")) as string[];
+  }
+
+  function runWrapper(
+    extraArgs: string[] = [],
+    extraEnv: NodeJS.ProcessEnv = {},
+  ) {
     if (fakeBinDir === null) {
       throw new Error("installFakeVitest must run first");
     }
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      ...extraEnv,
+      PATH: `${fakeBinDir}:${process.env.PATH}`,
+      SYMPHONY_FAKE_VITEST_ARGS_PATH: fakeArgsPath ?? "",
+    };
+    if (!("AI_AGENT" in extraEnv)) {
+      env.AI_AGENT = undefined;
+    }
+    if (!("SYMPHONY_TEST_AGENT" in extraEnv)) {
+      env.SYMPHONY_TEST_AGENT = undefined;
+    }
     return spawnSync(process.execPath, [wrapperPath, ...extraArgs], {
       encoding: "utf8",
-      env: { ...process.env, PATH: `${fakeBinDir}:${process.env.PATH}` },
+      env,
     });
   }
 
@@ -132,6 +166,48 @@ describe("scripts/test.mjs wiring", () => {
     const result = runWrapper();
     expect(result.status).toBe(0);
     expect(result.stderr).toContain("all-green summary");
+  });
+
+  it("wires verbose and JSON reporters by default", () => {
+    installFakeVitest({ exitCode: 0, report: greenReport });
+    const result = runWrapper();
+    expect(result.status).toBe(0);
+    const vitestArgs = readFakeVitestArgs();
+    expect(vitestArgs).toContain("--reporter=verbose");
+    expect(vitestArgs).toContain("--reporter=json");
+    expect(vitestArgs.some((arg) => arg.startsWith("--outputFile.json="))).toBe(
+      true,
+    );
+  });
+
+  it("wires agent and JSON reporters when an agent env var is set", () => {
+    installFakeVitest({ exitCode: 0, report: greenReport });
+    const result = runWrapper([], { AI_AGENT: "codex" });
+    expect(result.status).toBe(0);
+    const vitestArgs = readFakeVitestArgs();
+    expect(vitestArgs).toContain("--reporter=agent");
+    expect(vitestArgs).toContain("--reporter=json");
+    expect(vitestArgs).not.toContain("--reporter=verbose");
+  });
+
+  it("wires agent and JSON reporters when the repo flag is set", () => {
+    installFakeVitest({ exitCode: 0, report: greenReport });
+    const result = runWrapper(["--symphony-agent"]);
+    expect(result.status).toBe(0);
+    const vitestArgs = readFakeVitestArgs();
+    expect(vitestArgs).toContain("--reporter=agent");
+    expect(vitestArgs).toContain("--reporter=json");
+    expect(vitestArgs).not.toContain("--reporter=verbose");
+    expect(vitestArgs).not.toContain("--symphony-agent");
+  });
+
+  it("strips the package-manager separator before forwarding file filters", () => {
+    installFakeVitest({ exitCode: 0, report: greenReport });
+    const result = runWrapper(["--", "tests/scripts/test-exit.test.ts"]);
+    expect(result.status).toBe(0);
+    const vitestArgs = readFakeVitestArgs();
+    expect(vitestArgs).toContain("tests/scripts/test-exit.test.ts");
+    expect(vitestArgs).not.toContain("--");
   });
 
   it("propagates a failing exit when the report shows failures", () => {
