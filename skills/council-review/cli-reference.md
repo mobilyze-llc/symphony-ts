@@ -9,28 +9,48 @@ pane logs, and cross-process concurrency caps.
 Codex is the lead in the current session, so this skill does not spawn a
 separate Codex lane.
 
-See `~/.codex/skills/cmux-spawn/SKILL.md` for the full CLI surface.
+See `~/.agents/skills/cmux-spawn/SKILL.md` for the full CLI surface.
 Reference source: `/Users/ericlitman/projects/crucible/docs/cmux-spawn.md`.
 
 ### Setup
 
 ```bash
-CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn}"
-test -x "$CMUX_SPAWN_BIN" || {
-  echo "cmux-spawn not installed at $CMUX_SPAWN_BIN" >&2
+CMUX_SPAWN_LOCAL_BIN="${CMUX_SPAWN_LOCAL_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn}"
+CMUX_SPAWN_REMOTE_BIN="${CMUX_SPAWN_REMOTE_SHIM_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn-remote}"
+CMUX_SPAWN_REMOTE_HOST="${CMUX_SPAWN_REMOTE_HOST:-clawdilize@pro16.local}"
+CMUX_SPAWN_LOCAL_HOST="${CMUX_SPAWN_LOCAL_HOST:-pro14}"
+
+test -x "$CMUX_SPAWN_REMOTE_BIN" || {
+  echo "cmux-spawn-remote not installed at $CMUX_SPAWN_REMOTE_BIN" >&2
+  exit 1
+}
+test -x "$CMUX_SPAWN_LOCAL_BIN" || {
+  echo "cmux-spawn not installed at $CMUX_SPAWN_LOCAL_BIN" >&2
   exit 1
 }
 
-"$CMUX_SPAWN_BIN" preflight --caffeinate --json > "$COUNCIL_DIR/preflight.json"
-if [ $? -ne 0 ]; then
-  echo "cmux-spawn preflight failed:" >&2
-  cat "$COUNCIL_DIR/preflight.json" >&2
+if CMUX_SPAWN_REMOTE_HOST="$CMUX_SPAWN_REMOTE_HOST" "$CMUX_SPAWN_REMOTE_BIN" preflight --json > "$COUNCIL_DIR/preflight-remote.json" 2> "$COUNCIL_DIR/preflight-remote.stderr"; then
+  export CMUX_SPAWN_BIN="$CMUX_SPAWN_REMOTE_BIN"
+  export CMUX_SPAWN_REMOTE_HOST
+  export CMUX_SPAWN_SUBSTRATE_TIER=remote-pro16
+  export CMUX_SPAWN_SUBSTRATE_HOST="$CMUX_SPAWN_REMOTE_HOST"
+  cp "$COUNCIL_DIR/preflight-remote.json" "$COUNCIL_DIR/preflight.json"
+elif "$CMUX_SPAWN_LOCAL_BIN" preflight --caffeinate --json > "$COUNCIL_DIR/preflight-local.json" 2> "$COUNCIL_DIR/preflight-local.stderr"; then
+  export CMUX_SPAWN_BIN="$CMUX_SPAWN_LOCAL_BIN"
+  export CMUX_SPAWN_SUBSTRATE_TIER=degraded-local-pro14
+  export CMUX_SPAWN_SUBSTRATE_HOST="$CMUX_SPAWN_LOCAL_HOST"
+  cp "$COUNCIL_DIR/preflight-local.json" "$COUNCIL_DIR/preflight.json"
+  echo "cmux-spawn remote preflight failed; degraded to local pro14. See $COUNCIL_DIR/preflight-remote.*" >&2
+else
+  echo "cmux-spawn preflight failed for remote pro16 and local pro14" >&2
   exit 1
 fi
 ```
 
-If preflight fails, stop. Do not fall back to direct `claude`, `pi`, or
-`codex` subprocesses.
+Default routing is `remote-pro16`; `degraded-local-pro14` is an
+explicit fallback after remote preflight fails. If both preflights fail,
+stop. Do not fall back to direct `claude`, `pi`, or `codex`
+subprocesses.
 
 ### Artifact Convention
 
@@ -50,6 +70,7 @@ The substrate writes:
 | `$COUNCIL_DIR/<artifact-name>.usage.json` | Token/cost telemetry when available |
 | `$COUNCIL_DIR/<artifact-name>.events.jsonl` | One cmux lifecycle event per line |
 | `$COUNCIL_DIR/<artifact-name>.pane.log` | Captured pane scrollback |
+| `$COUNCIL_DIR/<artifact-name>.provenance.json` | Substrate host/tier and native workspace provenance |
 | `$COUNCIL_DIR/<artifact-name>.cli.json` | cmux-spawn stdout final JSON |
 | `$COUNCIL_DIR/<artifact-name>.cli.stderr` | cmux-spawn stderr diagnostics |
 

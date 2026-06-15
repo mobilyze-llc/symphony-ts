@@ -83,9 +83,12 @@ describe("session-orchestrator skill", () => {
     expect(validationScript).toContain(".agents/skills");
     expect(validationScript).toContain('"spec-review-lane"');
     expect(validationScript).toContain('"claude-runner"');
+    expect(validationScript).toContain('"cmux-spawn"');
+    expect(validationScript).toContain("SYMPHONY_CMUX_SPAWN_SKILL_SOURCE");
     expect(validationScript).toContain("~/.agents/skills/<name>");
     expect(validationScript).toContain("--user-installs");
     expect(validationScript).toContain(".codex/skills");
+    expect(validationScript).toContain(".claude/skills");
     expect(validationScript).toContain(
       "Canonical source: repo-local skills/<name>/SKILL.md",
     );
@@ -101,10 +104,21 @@ describe("session-orchestrator skill", () => {
       const repoRoot = resolve(tempDir, "repo");
       const userSkillsRoot = resolve(tempDir, "home/.agents/skills");
       const codexSkillsRoot = resolve(tempDir, "home/.codex/skills");
+      const claudeSkillsRoot = resolve(tempDir, "home/.claude/skills");
+      const cmuxSpawnSource = resolve(
+        tempDir,
+        "claude-config/skills/cmux-spawn",
+      );
       mkdirSync(resolve(repoRoot, "skills"), { recursive: true });
       mkdirSync(resolve(repoRoot, ".agents/skills"), { recursive: true });
       mkdirSync(userSkillsRoot, { recursive: true });
       mkdirSync(codexSkillsRoot, { recursive: true });
+      mkdirSync(claudeSkillsRoot, { recursive: true });
+      mkdirSync(cmuxSpawnSource, { recursive: true });
+      writeFileSync(
+        resolve(cmuxSpawnSource, "SKILL.md"),
+        "---\nname: cmux-spawn\n---\n",
+      );
 
       for (const skillName of [
         "session-orchestrator",
@@ -123,6 +137,7 @@ describe("session-orchestrator skill", () => {
         );
         symlinkSync(skillDir, resolve(userSkillsRoot, skillName));
       }
+      symlinkSync(cmuxSpawnSource, resolve(userSkillsRoot, "cmux-spawn"));
 
       const output = execFileSync(
         process.execPath,
@@ -138,6 +153,8 @@ describe("session-orchestrator skill", () => {
             SYMPHONY_STABLE_ROOT: repoRoot,
             SYMPHONY_USER_SKILLS_DIR: userSkillsRoot,
             SYMPHONY_CODEX_SKILLS_DIR: codexSkillsRoot,
+            SYMPHONY_CLAUDE_SKILLS_DIR: claudeSkillsRoot,
+            SYMPHONY_CMUX_SPAWN_SKILL_SOURCE: cmuxSpawnSource,
           },
         },
       );
@@ -157,10 +174,21 @@ describe("session-orchestrator skill", () => {
       const repoRoot = resolve(tempDir, "repo");
       const userSkillsRoot = resolve(tempDir, "home/.agents/skills");
       const codexSkillsRoot = resolve(tempDir, "home/.codex/skills");
+      const claudeSkillsRoot = resolve(tempDir, "home/.claude/skills");
+      const cmuxSpawnSource = resolve(
+        tempDir,
+        "claude-config/skills/cmux-spawn",
+      );
       mkdirSync(resolve(repoRoot, "skills"), { recursive: true });
       mkdirSync(resolve(repoRoot, ".agents/skills"), { recursive: true });
       mkdirSync(userSkillsRoot, { recursive: true });
       mkdirSync(codexSkillsRoot, { recursive: true });
+      mkdirSync(claudeSkillsRoot, { recursive: true });
+      mkdirSync(cmuxSpawnSource, { recursive: true });
+      writeFileSync(
+        resolve(cmuxSpawnSource, "SKILL.md"),
+        "---\nname: cmux-spawn\n---\n",
+      );
 
       for (const skillName of [
         "session-orchestrator",
@@ -179,6 +207,7 @@ describe("session-orchestrator skill", () => {
         );
         symlinkSync(skillDir, resolve(userSkillsRoot, skillName));
       }
+      symlinkSync(cmuxSpawnSource, resolve(userSkillsRoot, "cmux-spawn"));
 
       rmSync(resolve(userSkillsRoot, "session-orchestrator"));
       mkdirSync(resolve(userSkillsRoot, "session-orchestrator"));
@@ -197,6 +226,8 @@ describe("session-orchestrator skill", () => {
         SYMPHONY_STABLE_ROOT: repoRoot,
         SYMPHONY_USER_SKILLS_DIR: userSkillsRoot,
         SYMPHONY_CODEX_SKILLS_DIR: codexSkillsRoot,
+        SYMPHONY_CLAUDE_SKILLS_DIR: claudeSkillsRoot,
+        SYMPHONY_CMUX_SPAWN_SKILL_SOURCE: cmuxSpawnSource,
       };
 
       const warnOutput = execFileSync(process.execPath, [script], {
@@ -241,6 +272,11 @@ describe("session-orchestrator skill", () => {
       const featureRoot = resolve(tempDir, "feature");
       const userSkillsRoot = resolve(tempDir, "home/.agents/skills");
       const codexSkillsRoot = resolve(tempDir, "home/.codex/skills");
+      const claudeSkillsRoot = resolve(tempDir, "home/.claude/skills");
+      const cmuxSpawnSource = resolve(
+        tempDir,
+        "claude-config/skills/cmux-spawn",
+      );
 
       execFileSync("git", ["init", "--initial-branch=main", stableRoot]);
       execFileSync("git", [
@@ -273,6 +309,12 @@ describe("session-orchestrator skill", () => {
       mkdirSync(resolve(featureRoot, ".agents/skills"), { recursive: true });
       mkdirSync(userSkillsRoot, { recursive: true });
       mkdirSync(codexSkillsRoot, { recursive: true });
+      mkdirSync(claudeSkillsRoot, { recursive: true });
+      mkdirSync(cmuxSpawnSource, { recursive: true });
+      writeFileSync(
+        resolve(cmuxSpawnSource, "SKILL.md"),
+        "---\nname: cmux-spawn\n---\n",
+      );
 
       for (const skillName of [
         "session-orchestrator",
@@ -296,6 +338,7 @@ describe("session-orchestrator skill", () => {
           resolve(userSkillsRoot, skillName),
         );
       }
+      symlinkSync(cmuxSpawnSource, resolve(userSkillsRoot, "cmux-spawn"));
 
       const output = execFileSync(
         process.execPath,
@@ -311,6 +354,8 @@ describe("session-orchestrator skill", () => {
             SYMPHONY_SKILL_REPO_ROOT: featureRoot,
             SYMPHONY_USER_SKILLS_DIR: userSkillsRoot,
             SYMPHONY_CODEX_SKILLS_DIR: codexSkillsRoot,
+            SYMPHONY_CLAUDE_SKILLS_DIR: claudeSkillsRoot,
+            SYMPHONY_CMUX_SPAWN_SKILL_SOURCE: cmuxSpawnSource,
           },
         },
       );
@@ -331,9 +376,11 @@ describe("session-orchestrator skill", () => {
       const repoRoot = resolve(tempDir, "repo");
       const userSkillsRoot = resolve(tempDir, "home/.agents/skills");
       const codexSkillsRoot = resolve(tempDir, "home/.codex/skills");
+      const claudeSkillsRoot = resolve(tempDir, "home/.claude/skills");
       mkdirSync(resolve(repoRoot, ".agents/skills"), { recursive: true });
       mkdirSync(userSkillsRoot, { recursive: true });
       mkdirSync(resolve(codexSkillsRoot, "claude-runner"), { recursive: true });
+      mkdirSync(claudeSkillsRoot, { recursive: true });
       writeFileSync(
         resolve(codexSkillsRoot, "claude-runner/SKILL.md"),
         "---\nname: claude-runner\n---\n",
@@ -372,6 +419,7 @@ describe("session-orchestrator skill", () => {
               SYMPHONY_STABLE_ROOT: repoRoot,
               SYMPHONY_USER_SKILLS_DIR: userSkillsRoot,
               SYMPHONY_CODEX_SKILLS_DIR: codexSkillsRoot,
+              SYMPHONY_CLAUDE_SKILLS_DIR: claudeSkillsRoot,
             },
           },
         );
@@ -387,6 +435,90 @@ describe("session-orchestrator skill", () => {
               ? error.message
               : String(error);
         expect(stderr).toMatch(/active global copy|stale skill name/);
+      }
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects duplicate active cmux-spawn installs outside ~/.agents/skills", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "cmux-spawn-install-drift-"));
+    try {
+      const repoRoot = resolve(tempDir, "repo");
+      const userSkillsRoot = resolve(tempDir, "home/.agents/skills");
+      const codexSkillsRoot = resolve(tempDir, "home/.codex/skills");
+      const claudeSkillsRoot = resolve(tempDir, "home/.claude/skills");
+      const cmuxSpawnSource = resolve(
+        tempDir,
+        "claude-config/skills/cmux-spawn",
+      );
+      mkdirSync(resolve(repoRoot, ".agents/skills"), { recursive: true });
+      mkdirSync(userSkillsRoot, { recursive: true });
+      mkdirSync(resolve(codexSkillsRoot, "cmux-spawn"), { recursive: true });
+      mkdirSync(claudeSkillsRoot, { recursive: true });
+      mkdirSync(cmuxSpawnSource, { recursive: true });
+      writeFileSync(
+        resolve(cmuxSpawnSource, "SKILL.md"),
+        "---\nname: cmux-spawn\n---\n",
+      );
+      writeFileSync(
+        resolve(codexSkillsRoot, "cmux-spawn/SKILL.md"),
+        "---\nname: cmux-spawn\n---\ncopy\n",
+      );
+      symlinkSync(cmuxSpawnSource, resolve(userSkillsRoot, "cmux-spawn"));
+      symlinkSync(cmuxSpawnSource, resolve(claudeSkillsRoot, "cmux-spawn"));
+
+      for (const skillName of [
+        "session-orchestrator",
+        "spec-review-lane",
+        "claude-runner",
+      ]) {
+        const skillDir = resolve(repoRoot, "skills", skillName);
+        mkdirSync(skillDir, { recursive: true });
+        writeFileSync(
+          resolve(skillDir, "SKILL.md"),
+          `---\nname: ${skillName}\n---\n`,
+        );
+        symlinkSync(
+          `../../skills/${skillName}`,
+          resolve(repoRoot, ".agents/skills", skillName),
+        );
+      }
+
+      try {
+        execFileSync(
+          process.execPath,
+          [
+            resolve(__dirname, "../../scripts/validate-skill-installs.mjs"),
+            "--user-installs",
+          ],
+          {
+            encoding: "utf8",
+            env: {
+              ...process.env,
+              SYMPHONY_SKILL_REPO_ROOT: repoRoot,
+              SYMPHONY_STABLE_ROOT: repoRoot,
+              SYMPHONY_USER_SKILLS_DIR: userSkillsRoot,
+              SYMPHONY_CODEX_SKILLS_DIR: codexSkillsRoot,
+              SYMPHONY_CLAUDE_SKILLS_DIR: claudeSkillsRoot,
+              SYMPHONY_CMUX_SPAWN_SKILL_SOURCE: cmuxSpawnSource,
+            },
+          },
+        );
+        throw new Error("Expected validation to fail");
+      } catch (error) {
+        const stderr =
+          typeof error === "object" &&
+          error !== null &&
+          "stderr" in error &&
+          Buffer.isBuffer(error.stderr)
+            ? error.stderr.toString("utf8")
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        expect(stderr).toContain("active duplicate cmux-spawn skill install");
+        expect(stderr).toContain("home/.codex/skills/cmux-spawn/SKILL.md");
+        expect(stderr).toContain("home/.claude/skills/cmux-spawn/SKILL.md");
       }
     } finally {
       rmSync(tempDir, { recursive: true, force: true });

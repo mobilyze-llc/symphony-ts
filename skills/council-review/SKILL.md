@@ -23,14 +23,19 @@ already-obvious mechanical edits.
 
 ## Runtime Contract
 
-All external CLIs go through Crucible's `cmux-spawn` CLI at
-`/Users/ericlitman/projects/crucible/bin/cmux-spawn` unless
-`CMUX_SPAWN_BIN` overrides it. Do **not** shell out directly to
+All external CLIs go through Crucible's `cmux-spawn` substrate. By
+default, reviewer lanes run remotely on `pro16` through
+`/Users/ericlitman/projects/crucible/bin/cmux-spawn-remote` with
+`CMUX_SPAWN_REMOTE_HOST=clawdilize@pro16.local`. If the remote
+substrate fails preflight, degrade explicitly to local `pro14` through
+`/Users/ericlitman/projects/crucible/bin/cmux-spawn` and record the
+degradation. `CMUX_SPAWN_BIN` may override this selection. Do **not**
+shell out directly to
 `claude -p`, `claude --bg`, `pi --print`, or `codex exec` from this
 skill. If cmux-spawn is unavailable or unhealthy, fail closed; do not
 invent a direct-subprocess fallback.
 
-Read `~/.codex/skills/cmux-spawn/SKILL.md` if you need the full
+Read `~/.agents/skills/cmux-spawn/SKILL.md` if you need the full
 substrate contract.
 
 ## Skill Contents
@@ -107,8 +112,6 @@ the council report.
 Read `cli-reference.md`, then run preflight from the repo under review:
 
 ```bash
-CMUX_SPAWN_BIN="${CMUX_SPAWN_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn}"
-test -x "$CMUX_SPAWN_BIN" || { echo "cmux-spawn not installed at $CMUX_SPAWN_BIN" >&2; exit 1; }
 COUNCIL_REVIEW_SKILL_DIR="${COUNCIL_REVIEW_SKILL_DIR:-$HOME/.codex/skills/council-review}"
 
 BASE_BRANCH=$(git rev-parse --abbrev-ref HEAD@{upstream} 2>/dev/null | sed 's|origin/||' || echo main)
@@ -134,18 +137,62 @@ REVIEW_ROUND="${REVIEW_ROUND:-1}"
 PREVIOUS_REVIEWED_HEAD_SHA="${PREVIOUS_REVIEWED_HEAD_SHA:-n/a}"
 ARTIFACT_STATUS="${ARTIFACT_STATUS:-complete}"
 
-"$CMUX_SPAWN_BIN" preflight --caffeinate --json > "$COUNCIL_DIR/preflight.json"
-if [ $? -ne 0 ]; then
-  echo "cmux-spawn preflight failed:" >&2
-  cat "$COUNCIL_DIR/preflight.json" >&2
-  exit 1
+CMUX_SPAWN_LOCAL_BIN="${CMUX_SPAWN_LOCAL_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn}"
+CMUX_SPAWN_REMOTE_BIN="${CMUX_SPAWN_REMOTE_SHIM_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn-remote}"
+CMUX_SPAWN_REMOTE_HOST="${CMUX_SPAWN_REMOTE_HOST:-clawdilize@pro16.local}"
+CMUX_SPAWN_LOCAL_HOST="${CMUX_SPAWN_LOCAL_HOST:-pro14}"
+SUBSTRATE_TIER=unknown
+SUBSTRATE_HOST=unknown
+
+if [ -n "${CMUX_SPAWN_BIN+x}" ]; then
+  test -x "$CMUX_SPAWN_BIN" || { echo "cmux-spawn not installed at $CMUX_SPAWN_BIN" >&2; exit 1; }
+  if "$CMUX_SPAWN_BIN" preflight --caffeinate --json > "$COUNCIL_DIR/preflight.json" 2> "$COUNCIL_DIR/preflight.stderr"; then
+    SUBSTRATE_TIER="${CMUX_SPAWN_SUBSTRATE_TIER:-operator-override}"
+    SUBSTRATE_HOST="${CMUX_SPAWN_SUBSTRATE_HOST:-operator-override}"
+  else
+    echo "cmux-spawn preflight failed for operator override $CMUX_SPAWN_BIN:" >&2
+    cat "$COUNCIL_DIR/preflight.json" >&2
+    exit 1
+  fi
+else
+  test -x "$CMUX_SPAWN_REMOTE_BIN" || { echo "cmux-spawn-remote not installed at $CMUX_SPAWN_REMOTE_BIN" >&2; exit 1; }
+  test -x "$CMUX_SPAWN_LOCAL_BIN" || { echo "cmux-spawn not installed at $CMUX_SPAWN_LOCAL_BIN" >&2; exit 1; }
+  if CMUX_SPAWN_REMOTE_HOST="$CMUX_SPAWN_REMOTE_HOST" "$CMUX_SPAWN_REMOTE_BIN" preflight --json > "$COUNCIL_DIR/preflight-remote.json" 2> "$COUNCIL_DIR/preflight-remote.stderr"; then
+    export CMUX_SPAWN_BIN="$CMUX_SPAWN_REMOTE_BIN"
+    export CMUX_SPAWN_REMOTE_HOST
+    export CMUX_SPAWN_SUBSTRATE_TIER=remote-pro16
+    export CMUX_SPAWN_SUBSTRATE_HOST="$CMUX_SPAWN_REMOTE_HOST"
+    SUBSTRATE_TIER=remote-pro16
+    SUBSTRATE_HOST="$CMUX_SPAWN_REMOTE_HOST"
+    cp "$COUNCIL_DIR/preflight-remote.json" "$COUNCIL_DIR/preflight.json"
+  elif "$CMUX_SPAWN_LOCAL_BIN" preflight --caffeinate --json > "$COUNCIL_DIR/preflight-local.json" 2> "$COUNCIL_DIR/preflight-local.stderr"; then
+    export CMUX_SPAWN_BIN="$CMUX_SPAWN_LOCAL_BIN"
+    export CMUX_SPAWN_SUBSTRATE_TIER=degraded-local-pro14
+    export CMUX_SPAWN_SUBSTRATE_HOST="$CMUX_SPAWN_LOCAL_HOST"
+    SUBSTRATE_TIER=degraded-local-pro14
+    SUBSTRATE_HOST="$CMUX_SPAWN_LOCAL_HOST"
+    cp "$COUNCIL_DIR/preflight-local.json" "$COUNCIL_DIR/preflight.json"
+    echo "cmux-spawn remote preflight failed; degraded to local pro14. See $COUNCIL_DIR/preflight-remote.*" >&2
+  else
+    echo "cmux-spawn preflight failed for remote pro16 and local pro14:" >&2
+    cat "$COUNCIL_DIR/preflight-remote.stderr" "$COUNCIL_DIR/preflight-local.stderr" >&2
+    exit 1
+  fi
 fi
 
 CLAUDE_AVAILABLE=false
 PI_AVAILABLE=false
 DIRTY=false
-command -v claude >/dev/null 2>&1 && CLAUDE_AVAILABLE=true
-command -v pi >/dev/null 2>&1 && PI_AVAILABLE=true
+printf '%s\n' "$SUBSTRATE_TIER" > "$COUNCIL_DIR/substrate-tier.txt"
+printf '%s\n' "$SUBSTRATE_HOST" > "$COUNCIL_DIR/substrate-host.txt"
+printf '%s\n' "$CMUX_SPAWN_BIN" > "$COUNCIL_DIR/cmux-spawn-bin.txt"
+if [ "$SUBSTRATE_TIER" = remote-pro16 ]; then
+  CLAUDE_AVAILABLE=true
+  PI_AVAILABLE=true
+else
+  command -v claude >/dev/null 2>&1 && CLAUDE_AVAILABLE=true
+  command -v pi >/dev/null 2>&1 && PI_AVAILABLE=true
+fi
 
 PR_VIEW_STATUS=0
 if command -v gh >/dev/null 2>&1; then
@@ -523,7 +570,9 @@ explicitly excluded.
 | Pi only | Pi review | Codex cross-examines Pi; skip Opus | Triage with partial evidence |
 | None | Fail closed | - | - |
 
-If cmux-spawn preflight fails, the entire council fails closed. Do not
+If remote pro16 and local pro14 cmux-spawn preflights both fail, the
+entire council fails closed. A remote preflight failure with a healthy
+local preflight is `degraded-local-pro14`, not silent success. Do not
 fall back to direct CLI invocations.
 
 ## Important Rules
@@ -584,6 +633,6 @@ failures require user action; do not retry blindly.
 
 ## Related Skills
 
-- `~/.codex/skills/cmux-spawn/` - the lane spawn substrate contract.
+- `~/.agents/skills/cmux-spawn/` - the lane spawn substrate contract.
 - Claude-side `/council-review` - same process with Opus as lead and
   Codex as the external lane.
