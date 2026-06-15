@@ -593,7 +593,7 @@ describe("dispatch comparator", () => {
     ).toEqual(["ISSUE-2"]);
   });
 
-  it("preserves TicketFeature-supported hard-blocker discovery when native relations are truncated", () => {
+  it("preserves TicketFeature-supported eligibility when matched relation page is complete", () => {
     const candidate = createIssue({
       id: "1",
       identifier: "ISSUE-1",
@@ -619,6 +619,46 @@ describe("dispatch comparator", () => {
     expect(
       order.positions.map((position) => position.issue_identifier),
     ).toEqual(["ISSUE-1", "ISSUE-2"]);
+  });
+
+  it("fails closed when matched TicketFeature relation page is truncated", () => {
+    const candidate = createIssue({
+      id: "1",
+      identifier: "ISSUE-1",
+    });
+    const other = createIssue({
+      id: "2",
+      identifier: "ISSUE-2",
+    });
+
+    const order = computeDispatchOrder({
+      issues: [candidate, other],
+      anchors: {},
+      ticketFeatures: [
+        createFeature(candidate, [], { relationPageTruncated: true }),
+        createFeature(other),
+      ],
+      terminalStates: TERMINAL_STATES,
+      now: NOW,
+    });
+
+    expect(order.exclusions).toMatchObject([
+      {
+        issue_identifier: "ISSUE-1",
+        blocker_issue_id: null,
+        blocker_issue_identifier: null,
+        edge_trust: "legacy_hard",
+        source: "ticket_feature",
+        reason:
+          "TicketFeature blockedBy relation page was truncated; treating candidate as possibly blocked.",
+      },
+    ]);
+    expect(order.warnings).toContain(
+      "Dispatch comparator detected truncated TicketFeature blockedBy relation page for ISSUE-1; held candidate as possibly blocked.",
+    );
+    expect(
+      order.positions.map((position) => position.issue_identifier),
+    ).toEqual(["ISSUE-2"]);
   });
 
   it("warns and skips identifier-only ordering refs when candidate identifiers collide", () => {
@@ -1112,6 +1152,7 @@ function createAnchor(
 function createFeature(
   issue: Issue,
   blockedBy: TicketFeatureTrustedEdge[] = [],
+  options: { relationPageTruncated?: boolean } = {},
 ): TicketFeature {
   return {
     issue: {
@@ -1145,7 +1186,7 @@ function createFeature(
       historyTruncatedEdges: 0,
     },
     sourceVisibility: {
-      relationPageTruncated: false,
+      relationPageTruncated: options.relationPageTruncated ?? false,
       relationHistoryTruncated: false,
     },
     components: {

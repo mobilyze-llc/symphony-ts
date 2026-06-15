@@ -3827,6 +3827,61 @@ describe("runHeadlessCouncilGate", () => {
     expect(report).toContain("- Track findings to file: 1");
   });
 
+  it("keeps PASS triage rows with track disposition as non-blocking", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact: [
+            "## Verdict",
+            "PASS",
+            "",
+            "## Triage",
+            "- P2 | track | 71c6507aa5c92114 | Existing parser ambiguity remains outside this PR. | src/review/headless-council-gate.ts:10 | confidence: 0.60",
+            "",
+            "## Track",
+            "None",
+          ].join("\n"),
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "SYMPH-638",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.termination).toMatchObject({
+      status: "converged",
+      reason: "disposition_exit",
+      blockingFindingCount: 0,
+      trackFindingCount: 1,
+    });
+    const findings = result.lanes[0]!.structuredArtifact!.findings;
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({
+      severity: "P2",
+      emittedSeverity: "P2",
+      leadDisposition: "track",
+      repeatOf: "71c6507aa5c92114",
+      confidence: 0.6,
+      evidence: [
+        {
+          path: "src/review/headless-council-gate.ts",
+          lineStart: 10,
+          lineEnd: 10,
+        },
+      ],
+    });
+  });
+
   it("trips the termination ladder on a second same-family reopen", async () => {
     const artifact = [
       "## Verdict",
@@ -5517,7 +5572,7 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
-  it("does not pass when a PASS artifact contains triage findings", async () => {
+  it("does not pass when a PASS artifact contains malformed triage findings", async () => {
     const harness = await createHarness({
       laneBehavior: {
         "claude-opus": {
@@ -5544,7 +5599,38 @@ describe("runHeadlessCouncilGate", () => {
     ).toMatchObject({
       verdict: "fail",
       message:
-        "Artifact verdict was PASS but the Triage section was not empty.",
+        "Artifact verdict was PASS but the Triage section contained open or malformed findings.",
+    });
+  });
+
+  it("does not pass when a PASS artifact contains open triage findings", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## Triage\n- P2 | open | new | src/review/headless-council-gate.ts:10 remains blocking.\n\n## Track\nNone",
+        },
+      },
+    });
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("fail");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "fail",
+      message:
+        "Artifact verdict was PASS but the Triage section contained open or malformed findings.",
     });
   });
 

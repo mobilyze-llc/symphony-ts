@@ -5378,12 +5378,14 @@ function parseArtifactVerdict(artifact: string): ParsedArtifactVerdict {
       };
     }
     if (artifactSectionHasContent(trimmedArtifact, "Triage")) {
-      return {
-        verdict: "fail",
-        message:
-          "Artifact verdict was PASS but the Triage section was not empty.",
-        degradedReason: null,
-      };
+      if (!passArtifactTriageSectionIsNonBlocking(trimmedArtifact)) {
+        return {
+          verdict: "fail",
+          message:
+            "Artifact verdict was PASS but the Triage section contained open or malformed findings.",
+          degradedReason: null,
+        };
+      }
     }
     return { verdict: "pass", message: null, degradedReason: null };
   }
@@ -5419,6 +5421,24 @@ function artifactHasNonBlockingFindings(artifact: string): boolean {
     artifactSectionHasContent(artifact, "Track") ||
     artifactSectionHasContent(artifact, "Dismissed Or Theoretical")
   );
+}
+
+function passArtifactTriageSectionIsNonBlocking(artifact: string): boolean {
+  return sectionFindingEntries(
+    artifactSectionContent(artifact, "Triage"),
+  ).every((entry) => {
+    const cells = entry
+      .replace(/^\|/, "")
+      .replace(/\|$/, "")
+      .split("|")
+      .map((cell) => cell.trim());
+    const severityCell = cells[0];
+    const dispositionCell = cells[1];
+    return (
+      /^(P1|P2)$/i.test(severityCell ?? "") &&
+      /^(track|dismissed|refuted)$/i.test(dispositionCell ?? "")
+    );
+  });
 }
 
 function artifactSectionHasContent(artifact: string, heading: string): boolean {
