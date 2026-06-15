@@ -639,12 +639,24 @@ function parsePathEvidenceCandidate(
 ): PathEvidenceCandidate | null {
   const match = /^(?<path>.+?)(?::(?<line>\d+)(?::\d+)?)?$/.exec(value);
   const path = match?.groups?.path;
-  if (path === undefined || !looksLikePath(path)) {
+  if (
+    path === undefined ||
+    !looksLikePath(path) ||
+    !isCanonicalRepoRelativePath(path)
+  ) {
     return null;
   }
   return match?.groups?.line === undefined
     ? { raw: value, path }
     : { raw: value, path, line: Number(match.groups.line) };
+}
+
+function isCanonicalRepoRelativePath(path: string): boolean {
+  return path
+    .split("/")
+    .every(
+      (segment) => segment.length > 0 && segment !== "." && segment !== "..",
+    );
 }
 
 interface ScanCitation {
