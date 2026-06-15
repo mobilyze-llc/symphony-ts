@@ -355,19 +355,34 @@ export async function sweepCodeGroundingCheckouts(input: {
         if (lockOwnerAlive) {
           continue;
         }
-        await fs.rm(record.checkoutPath, { recursive: true, force: true });
-        await fs.rm(checkoutLockPath, { recursive: true, force: true });
-        await removeArtifactRoot(artifactsRoot, record.artifactRoot);
+        try {
+          await fs.rm(record.checkoutPath, { recursive: true, force: true });
+          await fs.rm(checkoutLockPath, { recursive: true, force: true });
+        } catch {
+          continue;
+        }
+        try {
+          await removeArtifactRoot(artifactsRoot, record.artifactRoot);
+        } catch {
+          // Artifact cleanup is best-effort; never let a bad artifact path
+          // preserve a stale checkout lease after the checkout was reaped.
+        }
         delete index.checkouts[record.checkoutId];
+      }
+    }
+    const referencedArtifactRoots = new Set<string>();
+    for (const record of Object.values(index.checkouts)) {
+      try {
+        referencedArtifactRoots.add(
+          normalizeArtifactChildPath(artifactsRoot, record.artifactRoot),
+        );
+      } catch {
+        // Malformed lease artifact paths are outside the orphan sweep domain.
       }
     }
     await sweepOrphanedArtifactRoots({
       artifactsRoot,
-      referencedArtifactRoots: new Set(
-        Object.values(index.checkouts).map((record) =>
-          normalizeArtifactChildPath(artifactsRoot, record.artifactRoot),
-        ),
-      ),
+      referencedArtifactRoots,
       retentionMs: input.config.ttlMs,
       now,
     });
@@ -1156,7 +1171,15 @@ async function sweepOrphanedArtifactRoots(input: {
     if (input.referencedArtifactRoots.has(artifactPath)) {
       continue;
     }
-    const stat = await fs.lstat(artifactPath);
+    let stat: Awaited<ReturnType<typeof fs.lstat>>;
+    try {
+      stat = await fs.lstat(artifactPath);
+    } catch (error) {
+      if (isMissingPathError(error)) {
+        continue;
+      }
+      throw error;
+    }
     if (
       stat.isSymbolicLink() ||
       !stat.isDirectory() ||

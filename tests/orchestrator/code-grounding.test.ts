@@ -1333,11 +1333,98 @@ describe("managed code grounding (SYMPH-596)", () => {
     ).resolves.toBe("{}\n");
   });
 
-  it("refuses artifact cleanup paths outside the artifacts root", async () => {
+  it("skips orphaned artifact symlinks without deleting their targets", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const outsideRoot = await tempRoot("symph-cg-outside-");
+    const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
+    const artifactsRoot = join(baseRoot, "artifacts");
+    const outsideArtifact = join(outsideRoot, "artifact");
+    const artifactLink = join(artifactsRoot, "linked-artifact");
+    await mkdir(artifactsRoot, { recursive: true });
+    await mkdir(outsideArtifact, { recursive: true });
+    await writeFile(join(outsideArtifact, "report.json"), "{}\n");
+    await symlink(outsideArtifact, artifactLink);
+
+    await sweepCodeGroundingCheckouts({
+      workspaceRoot,
+      config: codeGroundingConfig(),
+      now: new Date("2026-06-15T00:00:00.000Z"),
+    });
+
+    await expect(
+      readFile(join(outsideArtifact, "report.json"), "utf8"),
+    ).resolves.toBe("{}\n");
+    await expect(
+      readFile(join(artifactLink, "report.json"), "utf8"),
+    ).resolves.toBe("{}\n");
+  });
+
+  it("skips symlink artifact roots while reaping stale leases", async () => {
     const workspaceRoot = await tempRoot("symph-cg-workspace-");
     const outsideRoot = await tempRoot("symph-cg-outside-");
     const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
     const staleCheckout = join(baseRoot, "checkouts", "cg-stale");
+    const artifactsRoot = join(baseRoot, "artifacts");
+    const outsideArtifact = join(outsideRoot, "artifact");
+    const artifactLink = join(artifactsRoot, "linked-artifact");
+    await mkdir(staleCheckout, { recursive: true });
+    await mkdir(artifactsRoot, { recursive: true });
+    await mkdir(outsideArtifact, { recursive: true });
+    await writeFile(join(staleCheckout, "file.txt"), "stale");
+    await writeFile(join(outsideArtifact, "report.json"), "{}\n");
+    await symlink(outsideArtifact, artifactLink);
+    await writeFile(
+      join(baseRoot, "leases.json"),
+      `${JSON.stringify(
+        {
+          version: 1,
+          checkouts: {
+            "cg-stale": {
+              checkoutId: "cg-stale",
+              repoUrl: "repo",
+              commitSha: "abc",
+              checkoutPath: staleCheckout,
+              artifactRoot: artifactLink,
+              createdAt: "2026-06-13T00:00:00.000Z",
+              lastUsedAt: "2026-06-13T00:00:00.000Z",
+              activeRunIds: [],
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    await sweepCodeGroundingCheckouts({
+      workspaceRoot,
+      config: {
+        ...codeGroundingConfig(),
+        ttlMs: 1,
+      },
+      now: new Date("2026-06-15T00:00:00.000Z"),
+    });
+
+    await expect(
+      readFile(join(staleCheckout, "file.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(join(outsideArtifact, "report.json"), "utf8"),
+    ).resolves.toBe("{}\n");
+    const leaseIndex = JSON.parse(
+      await readFile(join(baseRoot, "leases.json"), "utf8"),
+    ) as {
+      checkouts: Record<string, unknown>;
+    };
+    expect(leaseIndex.checkouts["cg-stale"]).toBeUndefined();
+  });
+
+  it("ignores artifact cleanup paths outside the artifacts root while reaping stale leases", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const outsideRoot = await tempRoot("symph-cg-outside-");
+    const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
+    const staleCheckout = join(baseRoot, "checkouts", "cg-stale");
+    const leaseIndexPath = join(baseRoot, "leases.json");
     const outsideArtifact = join(outsideRoot, "artifact");
     await mkdir(staleCheckout, { recursive: true });
     await mkdir(outsideArtifact, { recursive: true });
@@ -1345,7 +1432,7 @@ describe("managed code grounding (SYMPH-596)", () => {
     await writeFile(join(outsideArtifact, "report.json"), "{}\n");
     await mkdir(baseRoot, { recursive: true });
     await writeFile(
-      join(baseRoot, "leases.json"),
+      leaseIndexPath,
       `${JSON.stringify(
         {
           version: 1,
@@ -1367,19 +1454,33 @@ describe("managed code grounding (SYMPH-596)", () => {
       )}\n`,
     );
 
+    await sweepCodeGroundingCheckouts({
+      workspaceRoot,
+      config: {
+        ...codeGroundingConfig(),
+        ttlMs: 1,
+      },
+      now: new Date("2026-06-15T00:00:00.000Z"),
+    });
+    await sweepCodeGroundingCheckouts({
+      workspaceRoot,
+      config: {
+        ...codeGroundingConfig(),
+        ttlMs: 1,
+      },
+      now: new Date("2026-06-15T00:00:00.000Z"),
+    });
+
     await expect(
-      sweepCodeGroundingCheckouts({
-        workspaceRoot,
-        config: {
-          ...codeGroundingConfig(),
-          ttlMs: 1,
-        },
-        now: new Date("2026-06-15T00:00:00.000Z"),
-      }),
-    ).rejects.toThrow("Workspace path escapes configured root");
+      readFile(join(staleCheckout, "file.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
     await expect(
       readFile(join(outsideArtifact, "report.json"), "utf8"),
     ).resolves.toBe("{}\n");
+    const leaseIndex = JSON.parse(await readFile(leaseIndexPath, "utf8")) as {
+      checkouts: Record<string, unknown>;
+    };
+    expect(leaseIndex.checkouts["cg-stale"]).toBeUndefined();
   });
 });
 
