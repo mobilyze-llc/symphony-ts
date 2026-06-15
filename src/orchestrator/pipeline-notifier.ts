@@ -860,8 +860,9 @@ export function formatNotification(
         event.journalSequence !== undefined &&
         event.journalSequence !== null
       ) {
+        const deltaEndpoint = `GET /api/v1/state/delta?since_seq=${Math.max(0, event.journalSequence - 1)}`;
         parts.push(
-          `Journal cursor: seq ${event.journalSequence} — \`GET /api/v1/state/delta?since_seq=${Math.max(0, event.journalSequence - 1)}\``,
+          `Journal cursor: seq ${event.journalSequence} — ${formatInlineCode(deltaEndpoint)}`,
         );
       }
       parts.push(version);
@@ -1120,8 +1121,9 @@ export function formatNotification(
         event.journalSequence !== undefined &&
         event.journalSequence !== null
       ) {
+        const deltaEndpoint = `GET /api/v1/state/delta?since_seq=${Math.max(0, event.journalSequence - 1)}`;
         parts.push(
-          `Journal cursor: seq ${event.journalSequence} — \`GET /api/v1/state/delta?since_seq=${Math.max(0, event.journalSequence - 1)}\``,
+          `Journal cursor: seq ${event.journalSequence} — ${formatInlineCode(deltaEndpoint)}`,
         );
       }
       // The raw normalized error text is deliberately omitted here: it can

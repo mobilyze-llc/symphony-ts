@@ -1308,6 +1308,49 @@ describe("PipelineNotifier", () => {
     expect(Array.isArray(poster.calls[0]?.blocks)).toBe(true);
   });
 
+  it("escapes backticks in issue_completed stage inline code", async () => {
+    const poster = createMockPoster();
+    const notifier = new PipelineNotifier({
+      channel: "C12345",
+      poster,
+    });
+
+    notifier.notify({
+      type: "issue_completed",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      executionHistory: [
+        {
+          stageName: "imple`ment",
+          durationMs: 120_000,
+          totalTokens: 15000,
+          turns: 5,
+          outcome: "completed",
+        },
+      ],
+      reworkCount: 0,
+      totalTokens: 15000,
+      totalDurationMs: 120_000,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const blocks = poster.calls[0]?.blocks;
+    expect(blocks).toBeDefined();
+    const stageText = blocks
+      ?.map((block) =>
+        block.type === "section" &&
+        "text" in block &&
+        block.text.type === "mrkdwn" &&
+        block.text.text.includes("tokens")
+          ? block.text.text
+          : undefined,
+      )
+      .find((text): text is string => text !== undefined);
+    expect(stageText).toContain("`imple\\`ment` 2m");
+  });
+
   it("delivers right-sizing details through the notifier post payload", async () => {
     const poster = createMockPoster();
     const notifier = new PipelineNotifier({
@@ -1645,7 +1688,7 @@ describe("PipelineNotifier — fail-open contract (SYMPH-397)", () => {
 });
 
 describe("formatNotification — tracker_write_failed (SYMPH-413)", () => {
-  it("formats tracker_write_failed with status, sources, and serialized details", () => {
+  it("escapes backticks in tracker_write_failed details inline code", () => {
     const result = formatNotification({
       type: "tracker_write_failed",
       followUpTitle: "Dispatcher follow-up: branch_divergence for SYMPH-332",
