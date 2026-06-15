@@ -1361,8 +1361,10 @@ const STAGE_FAILED_REGEX =
   /\[STAGE_FAILED:\s*(verify|review|rebase|spec|infra)\s*\]/;
 
 const STAGE_COMPLETE_REGEX = /(?:^|\n)[ \t]*\[STAGE_COMPLETE\]/;
-const HUMAN_BLOCK_REGEX =
-  /(?:^|\n)[ \t]*(?:\[BLOCKED_NEEDS_HUMAN_BLOCKERS:\s*([^\n]+?)\s*\][ \t]*\n[ \t]*)?(?:\[BLOCKED_NEEDS_HUMAN:\s*([A-Za-z_-]+)\s*\]|BLOCKED-needs-human)[ \t]*(?=$|\n)/g;
+const HUMAN_BLOCK_PREFIX = "[BLOCKED_NEEDS_HUMAN:";
+const HUMAN_BLOCKERS_PREFIX = "[BLOCKED_NEEDS_HUMAN_BLOCKERS:";
+const HUMAN_BLOCK_SUFFIX = "]";
+const LEGACY_HUMAN_BLOCK_MARKER = "BLOCKED-needs-human";
 
 /**
  * Detect the `[STAGE_COMPLETE]` signal at the start of any line in the
@@ -1416,22 +1418,58 @@ export function parseHumanBlockSignal(
     return null;
   }
 
-  HUMAN_BLOCK_REGEX.lastIndex = 0;
-  let signalMatch: RegExpExecArray | null = null;
-  let match = HUMAN_BLOCK_REGEX.exec(text);
-  while (match !== null) {
-    signalMatch = match;
-    match = HUMAN_BLOCK_REGEX.exec(text);
-  }
-  HUMAN_BLOCK_REGEX.lastIndex = 0;
+  let signal: HumanBlockSignal | null = null;
+  const lines = text.split("\n");
+  for (const [index, line] of lines.entries()) {
+    const operation = parseHumanBlockOperationLine(line);
+    if (operation === null) {
+      continue;
+    }
 
-  if (signalMatch === null) {
+    signal = {
+      operation,
+      blockers: parseHumanBlockersLine(lines[index - 1] ?? null),
+    };
+  }
+
+  return signal;
+}
+
+function parseHumanBlockOperationLine(
+  line: string,
+): HumanBlockOperation | null {
+  const trimmed = line.trim();
+  if (trimmed === LEGACY_HUMAN_BLOCK_MARKER) {
+    return "other";
+  }
+  if (
+    !trimmed.startsWith(HUMAN_BLOCK_PREFIX) ||
+    !trimmed.endsWith(HUMAN_BLOCK_SUFFIX)
+  ) {
     return null;
   }
 
-  const operation = normalizeHumanBlockOperation(signalMatch[2] ?? null);
-  const blockers = signalMatch[1]?.trim() ?? null;
-  return { operation, blockers };
+  return normalizeHumanBlockOperation(
+    trimmed.slice(HUMAN_BLOCK_PREFIX.length, -HUMAN_BLOCK_SUFFIX.length).trim(),
+  );
+}
+
+function parseHumanBlockersLine(line: string | null): string | null {
+  if (line === null) {
+    return null;
+  }
+
+  const trimmed = line.trim();
+  if (
+    !trimmed.startsWith(HUMAN_BLOCKERS_PREFIX) ||
+    !trimmed.endsWith(HUMAN_BLOCK_SUFFIX)
+  ) {
+    return null;
+  }
+
+  return trimmed
+    .slice(HUMAN_BLOCKERS_PREFIX.length, -HUMAN_BLOCK_SUFFIX.length)
+    .trim();
 }
 
 function normalizeHumanBlockOperation(
