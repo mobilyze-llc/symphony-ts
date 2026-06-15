@@ -47,6 +47,7 @@ export interface RenderPromptInput {
    */
   acceptanceCriteria?: string | null;
   implementationCommentDeltas?: ImplementationCommentDeltaContext | null;
+  workpadContext?: WorkpadRetryContext | null;
   modePolicy?: ModeScopedPermissionPolicy | null;
 }
 
@@ -83,6 +84,11 @@ export interface ImplementationCommentDeltaContext {
   comments: readonly ImplementationCommentDelta[];
 }
 
+export interface WorkpadRetryContext {
+  present: boolean;
+  commentId: string | null;
+}
+
 export function getEffectivePromptTemplate(promptTemplate: string): string {
   const trimmed = promptTemplate.trim();
 
@@ -105,6 +111,9 @@ export async function renderPrompt(input: RenderPromptInput): Promise<string> {
       comment_deltas: normalizeImplementationCommentDeltas(
         input.implementationCommentDeltas,
       ).comments,
+      workpad_present: normalizeWorkpadContext(input.workpadContext).present,
+      workpad_comment_id: normalizeWorkpadContext(input.workpadContext)
+        .commentId,
       implementation_comment_context: toTemplateImplementationCommentContext(
         input.implementationCommentDeltas,
       ),
@@ -194,6 +203,7 @@ export async function buildTurnPrompt(
     stageName: input.stageName ?? null,
     modePolicy: input.modePolicy ?? null,
     implementationCommentDeltas: input.implementationCommentDeltas ?? null,
+    workpadContext: input.workpadContext ?? null,
   });
 }
 
@@ -205,7 +215,13 @@ export function buildContinuationPrompt(input: {
   stageName?: string | null;
   modePolicy?: ModeScopedPermissionPolicy | null;
   implementationCommentDeltas?: ImplementationCommentDeltaContext | null;
+  workpadContext?: WorkpadRetryContext | null;
 }): string {
+  const workpadContext = normalizeWorkpadContext(input.workpadContext);
+  const isWorkpadPresentInvestigateRetry =
+    input.stageName === "investigate" &&
+    input.attempt !== null &&
+    workpadContext.present;
   const attemptLine =
     input.attempt === null
       ? "This worker session started from the initial dispatch."
@@ -233,8 +249,17 @@ export function buildContinuationPrompt(input: {
         lines.push(
           "CONSTRAINT: You are in the INVESTIGATE stage. Do NOT implement code, create branches, or open PRs. Investigation and planning only.",
           "Investigation Token Brake: first inspect latest Linear issue comments/workpad/resume notes. Do not trust repo-root scratch files such as `workpad.md` or `INVESTIGATION-BRIEF.md` unless they explicitly name the current issue and stage. If the Linear context already identifies the next implementation move, reuse that plan instead of rediscovering the repo. Spend at most 6 shell/tool calls before posting the workpad unless a command fails and one retry is necessary. Use `max_output_tokens` of 800 or less. Do not run multi-file `sed` batches, broad `rg -n` over multiple top-level directories, full docs scans, or source dumps.",
-          "If more discovery is truly required, write the open questions into the workpad and output [STAGE_COMPLETE]; the implement stage can do targeted reads while making changes. When you have posted your investigation findings, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
         );
+        if (isWorkpadPresentInvestigateRetry) {
+          lines.push(
+            `WORKPAD-PRESENT RETRY BRAKE: a current Linear workpad already exists${workpadContext.commentId === null ? "" : ` at comment ${workpadContext.commentId}`}. Do not repeat broad source discovery. Limit this retry to verifying the existing plan, recording open questions, or updating the same workpad comment with bounded deltas.`,
+            "After you successfully update the existing workpad, stop; the runtime treats successful `sync_workpad` during a workpad-present investigate retry as stage-complete-equivalent.",
+          );
+        } else {
+          lines.push(
+            "If more discovery is truly required, write the open questions into the workpad and output [STAGE_COMPLETE]; the implement stage can do targeted reads while making changes. When you have posted your investigation findings, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
+          );
+        }
         break;
       case "implement":
         lines.push(
@@ -266,6 +291,22 @@ export function buildContinuationPrompt(input: {
     prompt: lines.join("\n"),
     policy: input.modePolicy ?? null,
   });
+}
+
+function normalizeWorkpadContext(
+  context: WorkpadRetryContext | null | undefined,
+): WorkpadRetryContext {
+  if (context === null || context === undefined || context.present !== true) {
+    return { present: false, commentId: null };
+  }
+
+  return {
+    present: true,
+    commentId:
+      typeof context.commentId === "string" && context.commentId.length > 0
+        ? context.commentId
+        : null,
+  };
 }
 
 export function renderImplementationCommentDeltaLines(

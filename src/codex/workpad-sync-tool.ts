@@ -6,6 +6,7 @@ const WORKPAD_SYNC_DESCRIPTION =
   "Create or update a workpad comment on a Linear issue. Reads body from a local file to keep conversation context small.";
 
 const LINEAR_GRAPHQL_ENDPOINT = "https://api.linear.app/graphql";
+const WORKPAD_MARKER = "## Workpad";
 
 type JsonObject = Record<string, unknown>;
 
@@ -18,6 +19,7 @@ export interface WorkpadSyncToolInput {
 export interface WorkpadSyncToolResult {
   success: boolean;
   comment_id?: string;
+  operation?: "created" | "updated";
   error?: {
     code: string;
     message: string;
@@ -118,6 +120,47 @@ export function createWorkpadSyncDynamicTool(
           return {
             success: true,
             comment_id: normalized.comment_id,
+            operation: "updated",
+          };
+        }
+
+        const existingComment = await findExistingWorkpadComment({
+          endpoint,
+          apiKey: options.apiKey,
+          networkTimeoutMs,
+          fetchFn,
+          issueId: normalized.issue_id,
+        });
+        if (existingComment !== null) {
+          const response = await executeGraphql(
+            endpoint,
+            options.apiKey,
+            networkTimeoutMs,
+            fetchFn,
+            COMMENT_UPDATE_MUTATION,
+            { commentId: existingComment.id, body },
+          );
+          const update = response.commentUpdate;
+          if (
+            update === null ||
+            typeof update !== "object" ||
+            Array.isArray(update) ||
+            (update as Record<string, unknown>).success !== true
+          ) {
+            return {
+              success: false,
+              error: {
+                code: "linear_response_malformed",
+                message: "Linear commentUpdate did not return success.",
+                details: response,
+              },
+            };
+          }
+
+          return {
+            success: true,
+            comment_id: existingComment.id,
+            operation: "updated",
           };
         }
 
@@ -146,6 +189,7 @@ export function createWorkpadSyncDynamicTool(
         return {
           success: true,
           comment_id: commentId,
+          operation: "created",
         };
       } catch (error) {
         return {
@@ -169,6 +213,27 @@ const COMMENT_CREATE_MUTATION = `
       success
       comment {
         id
+      }
+    }
+  }
+`;
+
+const WORKPAD_COMMENTS_QUERY = `
+  query WorkpadComments($issueId: String!) {
+    viewer {
+      id
+    }
+    issue(id: $issueId) {
+      comments(first: 50) {
+        nodes {
+          id
+          body
+          createdAt
+          updatedAt
+          user {
+            id
+          }
+        }
       }
     }
   }
@@ -269,6 +334,98 @@ async function executeGraphql(
   }
 
   return data as JsonObject;
+}
+
+async function findExistingWorkpadComment(input: {
+  endpoint: string;
+  apiKey: string;
+  networkTimeoutMs: number;
+  fetchFn: typeof fetch;
+  issueId: string;
+}): Promise<{ id: string } | null> {
+  const response = await executeGraphql(
+    input.endpoint,
+    input.apiKey,
+    input.networkTimeoutMs,
+    input.fetchFn,
+    WORKPAD_COMMENTS_QUERY,
+    { issueId: input.issueId },
+  );
+
+  const viewerId = extractViewerId(response);
+  if (viewerId === null) {
+    return null;
+  }
+
+  return extractMostRecentRuntimeWorkpadComment(response, viewerId);
+}
+
+function extractViewerId(data: JsonObject): string | null {
+  const viewer = data.viewer;
+  if (viewer === null || typeof viewer !== "object" || Array.isArray(viewer)) {
+    return null;
+  }
+
+  const id = (viewer as JsonObject).id;
+  return typeof id === "string" && id.length > 0 ? id : null;
+}
+
+function extractMostRecentRuntimeWorkpadComment(
+  data: JsonObject,
+  viewerId: string,
+): { id: string } | null {
+  const issue = data.issue;
+  if (issue === null || typeof issue !== "object" || Array.isArray(issue)) {
+    return null;
+  }
+
+  const comments = (issue as JsonObject).comments;
+  if (
+    comments === null ||
+    typeof comments !== "object" ||
+    Array.isArray(comments)
+  ) {
+    return null;
+  }
+
+  const nodes = (comments as JsonObject).nodes;
+  if (!Array.isArray(nodes)) {
+    return null;
+  }
+
+  let selected: { id: string; timestamp: string } | null = null;
+  for (const node of nodes) {
+    if (node === null || typeof node !== "object" || Array.isArray(node)) {
+      continue;
+    }
+    const comment = node as JsonObject;
+    const id = comment.id;
+    const body = comment.body;
+    const user = comment.user;
+    if (
+      typeof id !== "string" ||
+      typeof body !== "string" ||
+      !body.trimStart().startsWith(WORKPAD_MARKER) ||
+      user === null ||
+      typeof user !== "object" ||
+      Array.isArray(user) ||
+      (user as JsonObject).id !== viewerId
+    ) {
+      continue;
+    }
+
+    const timestamp =
+      typeof comment.updatedAt === "string"
+        ? comment.updatedAt
+        : typeof comment.createdAt === "string"
+          ? comment.createdAt
+          : "";
+    if (selected === null || timestamp > selected.timestamp) {
+      selected = { id, timestamp };
+    }
+  }
+
+  return selected === null ? null : { id: selected.id };
 }
 
 function extractCommentId(data: JsonObject): string | null {

@@ -75,6 +75,17 @@ Labels: {{ issue.labels | join: ", " }}
 
 This is the **investigation stage only**. Do NOT implement anything.
 
+{% if attempt != nil and workpad_present %}
+## Workpad-Present Retry Brake
+
+A current Linear workpad already exists{% if workpad_comment_id %} at comment {{ workpad_comment_id }}{% endif %}. This retry must not repeat broad source discovery.
+
+- Verify the existing plan, record open questions, or update the same workpad comment with bounded deltas.
+- Do not perform broad repo rediscovery, full docs scans, multi-file source dumps, or high-volume command output.
+- After a successful `sync_workpad` update, stop; the runtime treats successful `sync_workpad` during a workpad-present investigate retry as stage-complete-equivalent.
+
+{% endif %}
+
 1. Read the issue description carefully and understand what is being asked.
 2. Check the latest Linear comments/workpad/resume notes before source search. If a current implementation plan already exists, reuse it and do not repeat broad repo discovery.
 3. Explore only the minimal source needed to identify relevant files, modules, and dependencies. Stay within the Investigation Token Brake.

@@ -1456,6 +1456,218 @@ describe("AgentRunner", () => {
     expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
   });
 
+  it("treats successful sync_workpad as stage-complete-equivalent for workpad-present investigate retries", async () => {
+    const root = await createRoot();
+    const workpadPath = join(root, "workpad.md");
+    await writeFile(workpadPath, "## Workpad\n\nUpdated plan.");
+    const events: Array<{ event: string; raw?: unknown }> = [];
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          commentUpdate: {
+            success: true,
+          },
+        },
+      }),
+    );
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker,
+      fetchFn,
+      onEvent: (event) => {
+        events.push({ event: event.event, raw: event.raw });
+      },
+      createCodexClient: (input) => ({
+        async startSession() {
+          input.onEvent({
+            event: "session_started",
+            timestamp: new Date("2026-03-06T00:00:00.000Z").toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+          });
+          const tool = input.dynamicTools.find(
+            (candidate) => candidate.name === "sync_workpad",
+          );
+          expect(tool).toBeDefined();
+          await tool?.execute({
+            issue_id: "issue-1",
+            file_path: workpadPath,
+            comment_id: "comment-workpad-1",
+          });
+
+          return {
+            status: "completed" as const,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            sessionId: "thread-1-turn-1",
+            usage: {
+              inputTokens: 10,
+              outputTokens: 5,
+              totalTokens: 15,
+            },
+            rateLimits: null,
+            message: "workpad updated without textual completion",
+          };
+        },
+        continueTurn: vi.fn(),
+        close: vi.fn().mockResolvedValue(undefined),
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: 1,
+      stageName: "investigate",
+      workpadContext: { present: true, commentId: "comment-workpad-1" },
+    });
+
+    expect(result.runAttempt.status).toBe("succeeded");
+    expect(result.turnsCompleted).toBe(1);
+    expect(result.hardStop).toBeNull();
+    expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        event: "notification",
+        raw: expect.objectContaining({
+          reason: "workpad_present_retry_brake",
+          workpadCommentId: "comment-workpad-1",
+        }),
+      }),
+    );
+  });
+
+  it("does not complete investigate when sync_workpad fails during a workpad-present retry", async () => {
+    const root = await createRoot();
+    const prompts: string[] = [];
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          commentUpdate: {
+            success: false,
+          },
+        },
+      }),
+    );
+    const tracker = createTracker({
+      refreshStates: [
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        agent: {
+          ...createConfig(root, "unused").agent,
+          maxTurns: 2,
+        },
+        hardStops: {
+          maxIterations: 2,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 10_000,
+          maxDollarBudgetUsd: 100,
+          premiumBudgetPauseRatio: 0.9,
+          liveBudgetGraceRatio: 0.1,
+          estimatedCostPer1kTokensUsd: 0.01,
+          cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
+        },
+      },
+      tracker,
+      fetchFn,
+      createCodexClient: (input) => {
+        let turn = 0;
+        return {
+          async startSession({ prompt }: { prompt: string; title: string }) {
+            prompts.push(prompt);
+            turn += 1;
+            input.onEvent({
+              event: "session_started",
+              timestamp: new Date("2026-03-06T00:00:00.000Z").toISOString(),
+              codexAppServerPid: "1001",
+              sessionId: `thread-1-turn-${turn}`,
+              threadId: "thread-1",
+              turnId: `turn-${turn}`,
+            });
+            const tool = input.dynamicTools.find(
+              (candidate) => candidate.name === "sync_workpad",
+            );
+            expect(tool).toBeDefined();
+            await tool?.execute({
+              issue_id: "issue-1",
+              file_path: join(root, "missing-workpad.md"),
+              comment_id: "comment-workpad-1",
+            });
+
+            return {
+              status: "completed" as const,
+              threadId: "thread-1",
+              turnId: `turn-${turn}`,
+              sessionId: `thread-1-turn-${turn}`,
+              usage: {
+                inputTokens: 10,
+                outputTokens: 5,
+                totalTokens: 15,
+              },
+              rateLimits: null,
+              message: "sync failed; no completion signal",
+            };
+          },
+          async continueTurn(prompt: string) {
+            prompts.push(prompt);
+            turn += 1;
+            input.onEvent({
+              event: "session_started",
+              timestamp: new Date("2026-03-06T00:00:00.000Z").toISOString(),
+              codexAppServerPid: "1001",
+              sessionId: `thread-1-turn-${turn}`,
+              threadId: "thread-1",
+              turnId: `turn-${turn}`,
+            });
+            return {
+              status: "completed" as const,
+              threadId: "thread-1",
+              turnId: `turn-${turn}`,
+              sessionId: `thread-1-turn-${turn}`,
+              usage: {
+                inputTokens: 20,
+                outputTokens: 10,
+                totalTokens: 30,
+              },
+              rateLimits: null,
+              message: "still no completion signal",
+            };
+          },
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+      },
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: 1,
+      stageName: "investigate",
+      workpadContext: { present: true, commentId: "comment-workpad-1" },
+    });
+
+    expect(prompts).toHaveLength(2);
+    expect(result.hardStop).toMatchObject({
+      trigger: "iteration_cap",
+      turnCount: 2,
+    });
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(tracker.fetchIssueStatesByIds).toHaveBeenCalledTimes(2);
+  });
+
   it("passes mode-scoped approval and sandbox policy to the Codex client", async () => {
     const root = await createRoot();
     const prompts: string[] = [];

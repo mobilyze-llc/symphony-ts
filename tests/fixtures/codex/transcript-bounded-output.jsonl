@@ -1,0 +1,1 @@
+{"type":"response_item","payload":{"type":"tool_call_output","tool_name":"exec_command","output":"[symphony-run-logged] command: pnpm test\n[symphony-run-logged] exit_code: 0\n[symphony-run-logged] log: .symphony/validation/tests.log\n[symphony-run-logged] output_bytes: 122000\n[symphony-run-logged] tail_bytes: 120"}}

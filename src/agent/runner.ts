@@ -155,6 +155,14 @@ export interface AgentRunInput {
    */
   acceptanceCriteria?: string | null;
   implementationCommentDeltas?: ImplementationCommentDeltaContext | null;
+  /**
+   * Current Linear workpad context carried from issue comments. When present
+   * on an investigate retry, successful sync_workpad bounds the retry.
+   */
+  workpadContext?: {
+    present: boolean;
+    commentId?: string | null;
+  } | null;
   modePolicy?: ModeScopedPermissionPolicy;
   /**
    * Budget-escalation multiplier for this unit (SYMPH-337): scales the
@@ -327,6 +335,12 @@ export class AgentRunner {
     const rateLimitBudgetConfigured =
       hardStops.maxPrimaryWindowPctPerUnit !== null ||
       hardStops.maxSecondaryWindowPctPerUnit !== null;
+    const workpadRetryContext = resolveWorkpadRetryContext(input);
+    const workpadPresentInvestigateRetry =
+      input.stageName === "investigate" &&
+      input.attempt !== null &&
+      workpadRetryContext.present;
+    let successfulWorkpadSyncThisTurn = false;
     const requestLiveBudgetStop = (decision: HardStopDecision): void => {
       if (hardStop !== null) {
         return;
@@ -462,7 +476,13 @@ export class AgentRunner {
             this.config.workspace.root,
             workspaceKey,
           ),
-          dynamicTools: this.createDynamicTools(),
+          dynamicTools: this.createDynamicTools({
+            onWorkpadSyncResult: (result) => {
+              if (isSuccessfulDynamicToolResult(result)) {
+                successfulWorkpadSyncThisTurn = true;
+              }
+            },
+          }),
           ...(input.modePolicy === undefined
             ? {}
             : { modePolicy: input.modePolicy }),
@@ -592,6 +612,7 @@ export class AgentRunner {
           acceptanceCriteria: input.acceptanceCriteria ?? null,
           implementationCommentDeltas:
             input.implementationCommentDeltas ?? null,
+          workpadContext: workpadRetryContext,
           modePolicy: input.modePolicy ?? null,
           turnNumber,
           maxTurns: effectiveMaxTurns,
@@ -604,6 +625,7 @@ export class AgentRunner {
           ? "initializing_session"
           : "streaming_turn";
         lastTurn = null;
+        successfulWorkpadSyncThisTurn = false;
         try {
           lastTurn = clientFreshSession
             ? await client.startSession({ prompt, title })
@@ -674,6 +696,8 @@ export class AgentRunner {
           lastTurn.message !== null &&
           parseFailureSignal(lastTurn.message) !== null;
         const humanBlockSignal = parseHumanBlockSignal(lastTurn.message);
+        const hasWorkpadRetryBrakeCompletion =
+          workpadPresentInvestigateRetry && successfulWorkpadSyncThisTurn;
 
         // Early exit: agent signaled stage completion or failure.
         if (hardStop !== null) {
@@ -731,7 +755,37 @@ export class AgentRunner {
           });
           break;
         }
-        if (hasStageCompleteSignal || hasFailureSignal) {
+        if (
+          hasStageCompleteSignal ||
+          hasFailureSignal ||
+          hasWorkpadRetryBrakeCompletion
+        ) {
+          if (hasWorkpadRetryBrakeCompletion && !hasStageCompleteSignal) {
+            this.onEvent?.({
+              event: "notification",
+              timestamp: formatEasternTimestamp(new Date()),
+              codexAppServerPid: liveSession.codexAppServerPid,
+              sessionId: lastTurn.sessionId,
+              threadId: lastTurn.threadId,
+              turnId: lastTurn.turnId,
+              message:
+                "workpad_present_retry_brake completed investigate after successful sync_workpad",
+              raw: {
+                reason: "workpad_present_retry_brake",
+                stageName: input.stageName,
+                attempt: input.attempt,
+                workpadCommentId: workpadRetryContext.commentId,
+                turnCount: realTurnCount,
+                totalTokens: liveSession.totalStageTotalTokens,
+                cacheReadTokens: liveSession.totalStageCacheReadTokens,
+              },
+              issueId: issue.id,
+              issueIdentifier: issue.identifier,
+              attempt: input.attempt,
+              workspacePath,
+              turnCount: realTurnCount,
+            });
+          }
           break;
         }
         hardStop = postTurnBudgetStop;
@@ -848,7 +902,9 @@ export class AgentRunner {
     }
   }
 
-  private createDynamicTools(): CodexDynamicTool[] {
+  private createDynamicTools(input?: {
+    onWorkpadSyncResult?: (result: object) => void;
+  }): CodexDynamicTool[] {
     if (normalizeIssueState(this.config.tracker.kind ?? "") !== "linear") {
       return [];
     }
@@ -863,11 +919,14 @@ export class AgentRunner {
 
     if (this.config.tracker.apiKey !== null) {
       tools.push(
-        createWorkpadSyncDynamicTool({
-          apiKey: this.config.tracker.apiKey,
-          endpoint: this.config.tracker.endpoint,
-          ...(this.fetchFn === undefined ? {} : { fetchFn: this.fetchFn }),
-        }),
+        withDynamicToolResultHook(
+          createWorkpadSyncDynamicTool({
+            apiKey: this.config.tracker.apiKey,
+            endpoint: this.config.tracker.endpoint,
+            ...(this.fetchFn === undefined ? {} : { fetchFn: this.fetchFn }),
+          }),
+          input?.onWorkpadSyncResult,
+        ),
       );
     }
 
@@ -1784,6 +1843,57 @@ function estimateHumanBlockCostUsd(
 
 function formatLiveBudgetGracePct(ratio: number): string {
   return `${(ratio * 100).toFixed(1).replace(/\.0$/, "")}%`;
+}
+
+function resolveWorkpadRetryContext(input: AgentRunInput): {
+  present: boolean;
+  commentId: string | null;
+} {
+  if (input.workpadContext?.present === true) {
+    return {
+      present: true,
+      commentId:
+        input.workpadContext.commentId === undefined
+          ? null
+          : input.workpadContext.commentId,
+    };
+  }
+
+  const comment = input.implementationCommentDeltas?.comments.find((delta) =>
+    delta.body.trimStart().startsWith("## Workpad"),
+  );
+  if (comment === undefined) {
+    return { present: false, commentId: null };
+  }
+
+  return {
+    present: true,
+    commentId: comment.id,
+  };
+}
+
+function withDynamicToolResultHook(
+  tool: CodexDynamicTool,
+  onResult: ((result: object) => void) | undefined,
+): CodexDynamicTool {
+  if (onResult === undefined) {
+    return tool;
+  }
+
+  return {
+    ...tool,
+    async execute(input: unknown): Promise<object> {
+      const result = await tool.execute(input);
+      onResult(result);
+      return result;
+    },
+  };
+}
+
+function isSuccessfulDynamicToolResult(
+  result: object,
+): result is { success: true } {
+  return "success" in result && result.success === true;
 }
 
 function isLiveUsageEvent(event: CodexClientEvent): boolean {
