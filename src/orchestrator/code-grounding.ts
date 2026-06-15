@@ -295,13 +295,21 @@ export async function sweepCodeGroundingCheckouts(input: {
         const expired =
           now.getTime() - Date.parse(record.lastUsedAt) > input.config.ttlMs;
         const overCap = indexWithinRepo >= input.config.maxCheckoutsPerRepo;
-        if (record.activeRunIds.length > 0 || (!expired && !overCap)) {
-          continue;
-        }
         assertWorkspacePathWithinRoot(baseRoot, record.checkoutPath);
         const checkoutLockPath = `${record.checkoutPath}.lock`;
         assertWorkspacePathWithinRoot(baseRoot, checkoutLockPath);
-        if (await codeGroundingLockOwnerIsAlive(checkoutLockPath)) {
+        const lockOwnerAlive =
+          await codeGroundingLockOwnerIsAlive(checkoutLockPath);
+        if (record.activeRunIds.length > 0) {
+          if (lockOwnerAlive) {
+            continue;
+          }
+          record.activeRunIds = [];
+        }
+        if (!expired && !overCap) {
+          continue;
+        }
+        if (lockOwnerAlive) {
           continue;
         }
         await fs.rm(record.checkoutPath, { recursive: true, force: true });
@@ -1034,7 +1042,7 @@ async function codeGroundingLockOwnerIsAlive(
     const parsed = JSON.parse(raw) as { pid?: unknown };
     return typeof parsed.pid === "number" && isProcessAlive(parsed.pid);
   } catch (error) {
-    if (isMissingPathError(error)) {
+    if (isMissingPathError(error) || error instanceof SyntaxError) {
       return false;
     }
     throw error;
