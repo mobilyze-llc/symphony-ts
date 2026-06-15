@@ -14,8 +14,8 @@ import type {
   SlackBlock,
 } from "../../src/orchestrator/pipeline-notifier.js";
 
-function countUnescapedBackticks(value: string): number {
-  return value.match(/(?<!\\)`/g)?.length ?? 0;
+function countBackticks(value: string): number {
+  return value.match(/`/g)?.length ?? 0;
 }
 
 describe("formatDurationMs", () => {
@@ -1018,15 +1018,13 @@ describe("formatNotification", () => {
       watchdogTicketFiling: false,
     });
     const lines = result.text.split("\n");
-    expect(lines[0]).toContain("signature `hash\\`abc`");
-    expect(lines[1]).toContain("Class: `class\\`name`");
-    expect(lines[1]).toContain("stage `impl\\`ement`");
-    expect(lines[3]).toContain(
-      "Circuit breaker OPENED for stage `impl\\`ement`",
-    );
-    expect(countUnescapedBackticks(lines[0] ?? "")).toBe(2);
-    expect(countUnescapedBackticks(lines[1] ?? "")).toBe(4);
-    expect(countUnescapedBackticks(lines[3] ?? "")).toBe(2);
+    expect(lines[0]).toContain("signature `hash'abc`");
+    expect(lines[1]).toContain("Class: `class'name`");
+    expect(lines[1]).toContain("stage `impl'ement`");
+    expect(lines[3]).toContain("Circuit breaker OPENED for stage `impl'ement`");
+    expect(countBackticks(lines[0] ?? "")).toBe(2);
+    expect(countBackticks(lines[1] ?? "")).toBe(4);
+    expect(countBackticks(lines[3] ?? "")).toBe(2);
   });
 
   it("systemic_cluster_alert carries the journal cursor when available (SYMPH-407)", () => {
@@ -1712,9 +1710,9 @@ describe("formatNotification — tracker_write_failed (SYMPH-413)", () => {
       .find((line) => line.startsWith("Details: "));
     expect(detailsLine).toBeDefined();
     expect(detailsLine).toContain(
-      'Details: `{"errors":[{"message":"title contains \\`inline code\\` delimiters"}]}`',
+      'Details: `{"errors":[{"message":"title contains \'inline code\' delimiters"}]}`',
     );
-    expect(countUnescapedBackticks(detailsLine ?? "")).toBe(2);
+    expect(countBackticks(detailsLine ?? "")).toBe(2);
   });
 
   it("formats tracker_write_failed without status or details", () => {

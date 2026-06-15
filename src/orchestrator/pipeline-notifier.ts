@@ -386,7 +386,7 @@ export function formatStageTimeline(history: ExecutionHistory): string {
 }
 
 function escapeSlackInlineCode(value: string): string {
-  return value.replace(/`/g, "\\`");
+  return value.replace(/`/g, "'");
 }
 
 function formatCompactUnit(value: number, suffix: string): string {
