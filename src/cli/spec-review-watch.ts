@@ -13,13 +13,17 @@ import { loadWorkflowDefinition } from "../config/workflow-loader.js";
 import type { DispatcherRunJournalEntry, Issue } from "../domain/model.js";
 import { readDispatcherRunJournal } from "../logging/run-journal.js";
 import {
+  DEFAULT_SPEC_REVIEW_COMMENT_CONFIG,
   DEFAULT_SPEC_REVIEW_SOURCE_REF,
   SPEC_REVIEW_SOURCE_REF_MAX_CHARS,
   type SpecReviewDocumentPublisher,
   type SpecReviewMode,
   type SpecReviewRunIssueResult,
+  type SpecReviewSourceIntentComment,
   type SpecReviewSourceOfTruthRef,
   appendSpecReviewResultJournal,
+  buildSpecReviewSourceIntentComments,
+  isSpecReviewPrivacySensitiveIssue,
   runSpecReviewForIssue,
   selectSpecReviewCandidates,
 } from "../spec-review/spec-review.js";
@@ -331,10 +335,21 @@ export async function runSpecReviewWatchCli(
       : await tracker.fetchTicketFeatureIssuesByStates(states);
   const ticketFeatures = extractTicketFeatures({ issues: featureIssues });
   const specReviewJournal = await readJournal(parsed.workspaceRoot);
+  const sourceIntentCommentsByIssueId =
+    await fetchSelectionSourceIntentComments({
+      issues,
+      tracker,
+      operatorConfig: config.operatorAnchors,
+      stderr,
+    });
   const decisions = selectSpecReviewCandidates({
     issues,
     ticketFeatures,
     specReviewJournal,
+    sourceIntentCommentsByIssueId:
+      sourceIntentCommentsByIssueId.commentsByIssueId,
+    sourceIntentUnavailableIssueIds:
+      sourceIntentCommentsByIssueId.unavailableIssueIds,
     forceReview: parsed.forceReview,
   });
   const selected = decisions.filter(
@@ -621,6 +636,60 @@ function dedupeIssuesById(issues: readonly Issue[]): Issue[] {
     deduped.push(issue);
   }
   return deduped;
+}
+
+async function fetchSelectionSourceIntentComments(input: {
+  issues: readonly Issue[];
+  tracker: SpecReviewWatchTracker;
+  operatorConfig: ResolvedWorkflowConfig["operatorAnchors"];
+  stderr: (text: string) => void;
+}): Promise<{
+  commentsByIssueId: ReadonlyMap<
+    string,
+    readonly SpecReviewSourceIntentComment[]
+  >;
+  unavailableIssueIds: ReadonlySet<string>;
+}> {
+  const empty = {
+    commentsByIssueId: new Map<
+      string,
+      readonly SpecReviewSourceIntentComment[]
+    >(),
+    unavailableIssueIds: new Set<string>(),
+  };
+  if (input.tracker.fetchIssueComments === undefined) {
+    return empty;
+  }
+  const commentsByIssueId = new Map<
+    string,
+    readonly SpecReviewSourceIntentComment[]
+  >();
+  const unavailableIssueIds = new Set<string>();
+  for (const issue of input.issues) {
+    if (isSpecReviewPrivacySensitiveIssue(issue)) {
+      continue;
+    }
+    try {
+      const comments = await input.tracker.fetchIssueComments(issue.id, {
+        maxPages: DEFAULT_SPEC_REVIEW_COMMENT_CONFIG.maxCommentPages,
+      });
+      commentsByIssueId.set(
+        issue.id,
+        buildSpecReviewSourceIntentComments({
+          comments,
+          ...(input.operatorConfig === undefined
+            ? {}
+            : { operatorConfig: input.operatorConfig }),
+        }),
+      );
+    } catch (error) {
+      unavailableIssueIds.add(issue.id);
+      input.stderr(
+        `Spec review comment context unavailable for ${issue.identifier}: ${errorMessage(error)}\n`,
+      );
+    }
+  }
+  return { commentsByIssueId, unavailableIssueIds };
 }
 
 function isSuccessfulReadinessState(
