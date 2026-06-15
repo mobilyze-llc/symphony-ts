@@ -353,7 +353,19 @@ describe("session-orchestrator skill", () => {
     expect(skillContent).toContain("before implementation");
     expect(skillContent).toContain("--mode observe");
     expect(skillContent).toContain("--force");
+    expect(skillContent).toContain("--watcher-runtime-root");
+    expect(skillContent).toContain("SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT");
+    expect(skillContent).toContain("source-only");
+    expect(skillContent).toContain(
+      "do not point `--workspace` at the stable checkout",
+    );
     expect(skillContent).toContain("dispatcher journal row");
+  });
+
+  it("distinguishes interactive spec-review intake from autonomous Symphony worker review", () => {
+    expect(skillContent).toContain("interactive Codex-led session");
+    expect(skillContent).toContain("autonomous Symphony worker ticket review");
+    expect(skillContent).toContain("out-of-band");
   });
 
   it("defines the requested risk taxonomy and high-risk state contract", () => {

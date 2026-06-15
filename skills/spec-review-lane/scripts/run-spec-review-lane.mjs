@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 
 const WATCHER_PREFLIGHT_TIMEOUT_MS = 10_000;
@@ -103,6 +103,9 @@ function parseArgs(argv) {
     artifactRoot: null,
     cmuxSpawnBin: null,
     watcherBin: stringOrNull(process.env.SYMPHONY_SPEC_REVIEW_WATCH_BIN),
+    watcherRuntimeRoot: stringOrNull(
+      process.env.SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT,
+    ),
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -151,6 +154,10 @@ function parseArgs(argv) {
       parsed.watcherBin = readValue(argv, ++index, token);
       continue;
     }
+    if (token === "--watcher-runtime-root") {
+      parsed.watcherRuntimeRoot = readValue(argv, ++index, token);
+      continue;
+    }
     throw new Error(`Unknown option: ${token}`);
   }
   return parsed;
@@ -166,6 +173,12 @@ function resolveWatcherInvocation(args) {
       source: "override",
     };
   }
+  if (args.watcherRuntimeRoot !== null) {
+    return resolveBuiltWatcherAtRoot(
+      resolvePathLikeOverride(args.watcherRuntimeRoot, args.workspace),
+      "runtime_root_dist",
+    );
+  }
   const workspaceBuiltWatcher = resolve(
     args.workspace,
     "dist/src/cli/spec-review-watch.js",
@@ -178,12 +191,72 @@ function resolveWatcherInvocation(args) {
       source: "workspace_dist",
     };
   }
+  const linkedMainWorktree = discoverLinkedMainWorktree(args.workspace);
+  if (linkedMainWorktree !== null) {
+    const linkedMainWatcher = resolveBuiltWatcherAtRoot(
+      linkedMainWorktree,
+      "linked_main_dist",
+    );
+    if (existsSync(linkedMainWatcher.displayName)) {
+      return linkedMainWatcher;
+    }
+  }
   return {
     file: "symphony-spec-review-watch",
     prefixArgs: [],
     displayName: "symphony-spec-review-watch",
     source: "path",
   };
+}
+
+function resolveBuiltWatcherAtRoot(root, source) {
+  const watcherPath = resolve(root, "dist/src/cli/spec-review-watch.js");
+  if (!existsSync(watcherPath)) {
+    return {
+      file: watcherPath,
+      prefixArgs: [],
+      displayName: watcherPath,
+      source,
+    };
+  }
+  return {
+    file: process.execPath,
+    prefixArgs: [watcherPath],
+    displayName: watcherPath,
+    source,
+  };
+}
+
+function discoverLinkedMainWorktree(workspace) {
+  try {
+    const workspaceRealpath = realpathOrResolve(workspace);
+    const output = execFileSync("git", ["worktree", "list", "--porcelain"], {
+      cwd: workspace,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      timeout: WATCHER_PREFLIGHT_TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    for (const line of output.split(/\r?\n/)) {
+      if (line.startsWith("worktree ")) {
+        const worktree = resolve(line.slice("worktree ".length));
+        if (realpathOrResolve(worktree) !== workspaceRealpath) {
+          return worktree;
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function realpathOrResolve(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
 }
 
 function resolvePathLikeOverride(value, workspace) {
@@ -265,10 +338,13 @@ function isMissingExecutableError(error) {
 }
 
 function missingWatcherMessage(watcher) {
-  if (watcher.source === "path") {
-    return "Spec review watcher is not available: no repo-local built watcher exists at dist/src/cli/spec-review-watch.js and symphony-spec-review-watch is not on PATH. Run `pnpm build` from the workspace or pass --symphony-spec-review-watch-bin.";
+  if (watcher.source === "runtime_root_dist") {
+    return `Spec review runtime root is not built: expected ${watcher.displayName}. Run \`pnpm build\` once in the configured runtime checkout, then rerun.`;
   }
-  return "Spec review watcher override could not be launched. Check --symphony-spec-review-watch-bin or SYMPHONY_SPEC_REVIEW_WATCH_BIN, or run `pnpm build` and use the workspace default.";
+  if (watcher.source === "override") {
+    return "Spec review watcher override could not be launched. Point --symphony-spec-review-watch-bin or SYMPHONY_SPEC_REVIEW_WATCH_BIN at an executable watcher command, then rerun.";
+  }
+  return "Spec review watcher is not available. Build the durable runtime once and set SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT to that checkout before rerunning.";
 }
 
 function errorMessage(error) {
@@ -422,7 +498,8 @@ function usage() {
     "  --source-ref <path>                       Source-of-truth file (repeatable)",
     "  --artifact-root <dir>                     Artifact root",
     "  --cmux-spawn-bin <path>                   cmux-spawn override",
-    "  --symphony-spec-review-watch-bin <path>   Watcher binary override (default: workspace dist, then PATH)",
+    "  --symphony-spec-review-watch-bin <path>   Watcher command override",
+    "  --watcher-runtime-root <dir>              Built Symphony checkout to use when <workspace> has no dist",
     "  --dry-run                                 Selection only",
   ].join("\n");
 }

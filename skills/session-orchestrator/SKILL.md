@@ -33,8 +33,9 @@ Ground decisions in current truth, not in memory:
 - `SPEC.mobilyze.md` for fork-specific behavior and `SPEC.upstream.md` for
   upstream compatibility.
 - The repo-local `spec-review-lane` skill before implementation of each newly
-  picked ticket, so spec-time review is moved upstream while the autonomous
-  watcher is still being bootstrapped.
+  picked ticket in this interactive Codex-led session. This is distinct from
+  autonomous Symphony worker ticket review, which uses Symphony's out-of-band
+  review process.
 - Live Linear discovery instead of hardcoded ticket memory. Search for active
   issues and docs by current labels, keywords, project membership, and recent
   comments before creating or prioritizing process work.
@@ -98,6 +99,14 @@ skills/spec-review-lane/scripts/run-spec-review-lane.mjs \
   --mode observe \
   --force
 ```
+
+The target `--workspace` is always the implementation workspace whose source
+should be reviewed. If that workspace is source-only, let the wrapper resolve a
+built watcher from `--watcher-runtime-root` /
+`SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT`, linked-main discovery, or PATH. Do not
+install dependencies in a throwaway implementation worktree merely to launch
+spec review, and do not point `--workspace` at the stable checkout unless the
+stable checkout is the source being implemented.
 
 Use `--dry-run` first when checking selection only. Treat prompt-only Claude
 runner fallback artifacts as manual reconciliation evidence, not durable

@@ -8,6 +8,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,6 +32,9 @@ describe("spec-review-lane skill", () => {
     expect(skillContent).toContain("--issue-direct");
     expect(skillContent).toContain("--force");
     expect(skillContent).toContain("durable watcher path");
+    expect(skillContent).toContain("--watcher-runtime-root");
+    expect(skillContent).toContain("SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT");
+    expect(skillContent).toContain("git worktree list");
   });
 
   it("documents the stable source and user-level symlink install model", () => {
@@ -55,10 +59,21 @@ describe("spec-review-lane skill", () => {
     expect(skillContent).toContain("generated readiness marker");
   });
 
+  it("distinguishes interactive session review from autonomous Symphony worker review", () => {
+    expect(skillContent).toContain("interactive session");
+    expect(skillContent).toContain("not the autonomous Symphony worker");
+    expect(skillContent).toContain("out-of-band review process");
+    expect(skillContent).toContain("session-scoped");
+  });
+
   it("wraps the watcher and derives deterministic next actions", () => {
     expect(scriptContent).toContain("symphony-spec-review-watch");
     expect(scriptContent).toContain("--issue-direct");
+    expect(scriptContent).toContain("watcherRuntimeRoot");
+    expect(scriptContent).toContain("SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT");
+    expect(scriptContent).toContain("runtime_root_dist");
     expect(scriptContent).toContain("workspace_dist");
+    expect(scriptContent).toContain("linked_main_dist");
     expect(scriptContent).toContain("stale_watcher");
     expect(scriptContent).toContain("missing_executable");
     expect(scriptContent).toContain("nextActionForReadiness");
@@ -185,6 +200,7 @@ describe("spec-review-lane skill", () => {
             ...process.env,
             PATH: "",
             SYMPHONY_SPEC_REVIEW_WATCH_BIN: "",
+            SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT: "",
           },
         },
       );
@@ -206,6 +222,367 @@ describe("spec-review-lane skill", () => {
       expect(seenArgs).toContain("--dry-run");
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a configured runtime root for source-only workspaces and preserves workspace artifact grounding", () => {
+    const workspaceDir = mkdtempSync(
+      resolve(tmpdir(), "spec-review-lane-work-"),
+    );
+    const runtimeDir = mkdtempSync(
+      resolve(tmpdir(), "spec-review-lane-runtime-"),
+    );
+    try {
+      const watcherPath = resolve(
+        runtimeDir,
+        "dist/src/cli/spec-review-watch.js",
+      );
+      mkdirSync(resolve(runtimeDir, "dist/src/cli"), { recursive: true });
+      writeFileSync(resolve(workspaceDir, "artifact.md"), "review");
+      writeFileSync(resolve(workspaceDir, "selection.json"), "{}");
+      writeFileSync(
+        watcherPath,
+        [
+          "#!/usr/bin/env node",
+          'const { writeFileSync } = require("node:fs");',
+          'const { resolve } = require("node:path");',
+          'if (process.argv.includes("--help")) {',
+          '  process.stdout.write("--issue-direct\\n--ticket\\n");',
+          "  process.exit(0);",
+          "}",
+          'writeFileSync(resolve(process.cwd(), "runtime-root-seen.json"), JSON.stringify(process.argv.slice(2)));',
+          "process.stdout.write(JSON.stringify({",
+          "  selectedCount: 1,",
+          "  selectionArtifactPath: 'selection.json',",
+          "  decisions: [],",
+          "  summary: { validCount: 1, exitCode: 0 },",
+          "  results: [{",
+          "    issueIdentifier: 'SYMPH-1',",
+          "    readinessState: 'valid',",
+          "    verdict: 'ready_as_written',",
+          "    artifactPath: 'artifact.md',",
+          "    linearDocUrl: null",
+          "  }]",
+          "}));",
+          "",
+        ].join("\n"),
+      );
+
+      const output = execFileSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          workspaceDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(workspaceDir, "WORKFLOW.md"),
+          "--watcher-runtime-root",
+          runtimeDir,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            SYMPHONY_SPEC_REVIEW_WATCH_BIN: "",
+            SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT: "",
+          },
+        },
+      );
+
+      const summary = JSON.parse(output) as {
+        status: string;
+        watcherSource: string;
+        selectionArtifactPath: string | null;
+        results: Array<{ artifactPath: string | null }>;
+      };
+      const seenArgs = JSON.parse(
+        readFileSync(resolve(workspaceDir, "runtime-root-seen.json"), "utf-8"),
+      ) as string[];
+      expect(summary.status).toBe("completed");
+      expect(summary.watcherSource).toBe("runtime_root_dist");
+      expect(summary.selectionArtifactPath).toBe(
+        resolve(workspaceDir, "selection.json"),
+      );
+      expect(summary.results[0]?.artifactPath).toBe(
+        resolve(workspaceDir, "artifact.md"),
+      );
+      expect(seenArgs).toContain("--workspace");
+      expect(seenArgs).toContain(workspaceDir);
+      expect(seenArgs).not.toContain(runtimeDir);
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+      rmSync(runtimeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT when no runtime-root flag is passed", () => {
+    const workspaceDir = mkdtempSync(
+      resolve(tmpdir(), "spec-review-lane-work-"),
+    );
+    const runtimeDir = mkdtempSync(
+      resolve(tmpdir(), "spec-review-lane-runtime-"),
+    );
+    try {
+      const watcherPath = resolve(
+        runtimeDir,
+        "dist/src/cli/spec-review-watch.js",
+      );
+      mkdirSync(resolve(runtimeDir, "dist/src/cli"), { recursive: true });
+      writeFileSync(
+        watcherPath,
+        [
+          "#!/usr/bin/env node",
+          'if (process.argv.includes("--help")) {',
+          '  process.stdout.write("--issue-direct\\n--ticket\\n");',
+          "  process.exit(0);",
+          "}",
+          "process.stdout.write(JSON.stringify({",
+          "  selectedCount: 0,",
+          "  decisions: [],",
+          "  summary: { exitCode: 0 }",
+          "}));",
+          "",
+        ].join("\n"),
+      );
+
+      const output = execFileSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          workspaceDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(workspaceDir, "WORKFLOW.md"),
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: "",
+            SYMPHONY_SPEC_REVIEW_WATCH_BIN: "",
+            SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT: runtimeDir,
+          },
+        },
+      );
+
+      const summary = JSON.parse(output) as {
+        status: string;
+        watcherSource: string;
+      };
+      expect(summary.status).toBe("completed");
+      expect(summary.watcherSource).toBe("runtime_root_dist");
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+      rmSync(runtimeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails with one deterministic remediation when a configured runtime root is not built", () => {
+    const workspaceDir = mkdtempSync(
+      resolve(tmpdir(), "spec-review-lane-work-"),
+    );
+    const runtimeDir = mkdtempSync(
+      resolve(tmpdir(), "spec-review-lane-runtime-"),
+    );
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          workspaceDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(workspaceDir, "WORKFLOW.md"),
+          "--watcher-runtime-root",
+          runtimeDir,
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            SYMPHONY_SPEC_REVIEW_WATCH_BIN: "",
+            SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT: "",
+          },
+        },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Spec review runtime root is not built");
+      expect(result.stderr).toContain("Run `pnpm build` once");
+      expect(result.stderr).not.toContain("or pass");
+      expect(result.stderr).not.toContain("PATH");
+      const summary = JSON.parse(result.stdout) as {
+        diagnostic: { kind: string };
+        watcherSource: string;
+      };
+      expect(summary.diagnostic.kind).toBe("missing_executable");
+      expect(summary.watcherSource).toBe("runtime_root_dist");
+    } finally {
+      rmSync(workspaceDir, { recursive: true, force: true });
+      rmSync(runtimeDir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to a linked main worktree built watcher for source-only git worktrees", () => {
+    const parentDir = mkdtempSync(
+      resolve(tmpdir(), "spec-review-lane-linked-"),
+    );
+    const repoDir = resolve(parentDir, "repo");
+    const worktreeDir = resolve(parentDir, "linked-worktree");
+    try {
+      mkdirSync(repoDir);
+      execFileSync("git", ["init", "-q"], { cwd: repoDir });
+      execFileSync("git", ["config", "user.email", "test@example.com"], {
+        cwd: repoDir,
+      });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: repoDir });
+      writeFileSync(resolve(repoDir, "README.md"), "root\n");
+      execFileSync("git", ["add", "README.md"], { cwd: repoDir });
+      execFileSync("git", ["commit", "-qm", "initial"], { cwd: repoDir });
+
+      const watcherPath = resolve(repoDir, "dist/src/cli/spec-review-watch.js");
+      mkdirSync(resolve(repoDir, "dist/src/cli"), { recursive: true });
+      writeFileSync(
+        watcherPath,
+        [
+          "#!/usr/bin/env node",
+          'if (process.argv.includes("--help")) {',
+          '  process.stdout.write("--issue-direct\\n--ticket\\n");',
+          "  process.exit(0);",
+          "}",
+          "process.stdout.write(JSON.stringify({",
+          "  selectedCount: 0,",
+          "  decisions: [],",
+          "  summary: { exitCode: 0 }",
+          "}));",
+          "",
+        ].join("\n"),
+      );
+
+      execFileSync(
+        "git",
+        ["worktree", "add", "-q", worktreeDir, "-b", "impl"],
+        {
+          cwd: repoDir,
+        },
+      );
+
+      const output = execFileSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          worktreeDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(worktreeDir, "WORKFLOW.md"),
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            SYMPHONY_SPEC_REVIEW_WATCH_BIN: "",
+            SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT: "",
+          },
+        },
+      );
+
+      const summary = JSON.parse(output) as {
+        status: string;
+        watcherSource: string;
+      };
+      expect(summary.status).toBe("completed");
+      expect(summary.watcherSource).toBe("linked_main_dist");
+    } finally {
+      rmSync(parentDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not mistake a symlinked current worktree for the linked main runtime", () => {
+    const parentDir = mkdtempSync(
+      resolve(tmpdir(), "spec-review-lane-linked-"),
+    );
+    const repoDir = resolve(parentDir, "repo");
+    const worktreeDir = resolve(parentDir, "linked-worktree");
+    const symlinkedWorktreeDir = resolve(parentDir, "symlinked-worktree");
+    try {
+      mkdirSync(repoDir);
+      execFileSync("git", ["init", "-q"], { cwd: repoDir });
+      execFileSync("git", ["config", "user.email", "test@example.com"], {
+        cwd: repoDir,
+      });
+      execFileSync("git", ["config", "user.name", "Test"], { cwd: repoDir });
+      writeFileSync(resolve(repoDir, "README.md"), "root\n");
+      execFileSync("git", ["add", "README.md"], { cwd: repoDir });
+      execFileSync("git", ["commit", "-qm", "initial"], { cwd: repoDir });
+
+      const watcherPath = resolve(repoDir, "dist/src/cli/spec-review-watch.js");
+      mkdirSync(resolve(repoDir, "dist/src/cli"), { recursive: true });
+      writeFileSync(
+        watcherPath,
+        [
+          "#!/usr/bin/env node",
+          'if (process.argv.includes("--help")) {',
+          '  process.stdout.write("--issue-direct\\n--ticket\\n");',
+          "  process.exit(0);",
+          "}",
+          "process.stdout.write(JSON.stringify({",
+          "  selectedCount: 0,",
+          "  decisions: [],",
+          "  summary: { exitCode: 0 }",
+          "}));",
+          "",
+        ].join("\n"),
+      );
+
+      execFileSync(
+        "git",
+        ["worktree", "add", "-q", worktreeDir, "-b", "impl"],
+        {
+          cwd: repoDir,
+        },
+      );
+      symlinkSync(worktreeDir, symlinkedWorktreeDir);
+
+      // Git currently lists the main worktree before linked worktrees, so this
+      // test pins the behavioral contract: a symlinked current workspace must
+      // still resolve the built watcher from the true linked main checkout.
+      const output = execFileSync(
+        process.execPath,
+        [
+          SCRIPT_PATH,
+          "--workspace",
+          symlinkedWorktreeDir,
+          "--issue",
+          "SYMPH-1",
+          "--workflow",
+          resolve(symlinkedWorktreeDir, "WORKFLOW.md"),
+        ],
+        {
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            SYMPHONY_SPEC_REVIEW_WATCH_BIN: "",
+            SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT: "",
+          },
+        },
+      );
+
+      const summary = JSON.parse(output) as {
+        status: string;
+        watcherSource: string;
+      };
+      expect(summary.status).toBe("completed");
+      expect(summary.watcherSource).toBe("linked_main_dist");
+    } finally {
+      rmSync(parentDir, { recursive: true, force: true });
     }
   });
 
@@ -319,7 +696,11 @@ describe("spec-review-lane skill", () => {
         ],
         {
           encoding: "utf8",
-          env: { ...process.env, PATH: "" },
+          env: {
+            ...process.env,
+            PATH: "",
+            SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT: "",
+          },
         },
       );
 
