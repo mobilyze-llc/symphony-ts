@@ -373,7 +373,7 @@ export function formatDurationMs(ms: number): string {
 }
 
 function formatInlineCode(value: string): string {
-  return `\`${value.replaceAll("`", "\\`")}\``;
+  return `\`${value.replaceAll("`", "")}\``;
 }
 
 export function formatStageTimeline(history: ExecutionHistory): string {

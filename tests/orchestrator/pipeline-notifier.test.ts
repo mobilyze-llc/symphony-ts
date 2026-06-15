@@ -199,7 +199,7 @@ describe("formatNotification", () => {
       issueUrl: null,
       executionHistory: [
         {
-          stageName: "imple`ment",
+          stageName: String.raw`imple\`ment`,
           durationMs: 120_000,
           totalTokens: 15000,
           turns: 5,
@@ -215,7 +215,7 @@ describe("formatNotification", () => {
       type: "section";
       text: { type: string; text: string };
     };
-    expect(stageBlock.text.text).toContain("`imple\\`ment` 2m");
+    expect(stageBlock.text.text).toContain("`imple\\ment` 2m");
   });
 
   it("formats issue_completed without rework", () => {
@@ -1704,11 +1704,11 @@ describe("formatNotification — tracker_write_failed (SYMPH-413)", () => {
       sourceIssueIds: ["issue-1"],
       reason: "Linear API request failed with HTTP 400.",
       httpStatus: 400,
-      details: '{"title":"Fix `quoted` formatter"}',
+      details: String.raw`{"title":"Fix \`quoted\` formatter"}`,
     });
 
     expect(result.text).toContain(
-      'Details: `{"title":"Fix \\`quoted\\` formatter"}`',
+      'Details: `{"title":"Fix \\quoted\\ formatter"}`',
     );
   });
 
