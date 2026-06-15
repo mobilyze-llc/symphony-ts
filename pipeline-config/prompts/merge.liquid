@@ -49,14 +49,19 @@ You are merging the PR for Linear issue {{ issue.identifier }}.
    ```
    gh pr merge "$PR_NUMBER" --auto
    ```
+   Command success means the PR was enqueued or auto-merge was enabled; it does not prove the PR has merged. After enqueue succeeds, wait for the merge queue to finish and then prove the PR actually merged:
+   ```bash
+   gh pr checks "$PR_NUMBER" --watch --required --fail-fast
+   gh pr view "$PR_NUMBER" --json state,mergedAt,mergeCommit --jq '{state, mergedAt, mergeCommit: .mergeCommit.oid}'
+   ```
+   Proceed only when `state` is `MERGED`, `mergedAt` is non-null, and `mergeCommit` is non-null. If the merge queue rejects the PR, required checks fail, or the PR remains open after the queue run, do not mark Linear Done; return the issue to In Progress with the failing check/status evidence.
 5. If readiness is green and PR merge-queue enqueue is denied by the Mode Permission Envelope, do not run merge commands. Put:
    ```
    [BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":[],"permission":["auto_merge_permission_denied"],"mergeStateStatus":"CLEAN","failingChecks":[],"pendingChecks":[]}]
    [BLOCKED_NEEDS_HUMAN: auto_merge]
    ```
    This is the operator-controlled resume path: an operator can enqueue once readiness is green without editing worker code or reinterpreting raw logs.
-6. Update the Linear issue state to "Done" using the `linear_graphql` tool only after a permitted merge succeeds.
-7. Verify the merge was successful by checking the PR status.
+6. Update the Linear issue state to "Done" using the `linear_graphql` tool only after the merge proof in step 4 shows the PR is merged.
 
 ## Important
 

@@ -902,10 +902,10 @@ If the Mode Permission Envelope explicitly allows PR merge-queue enqueue, merge:
 ```
 gh pr merge $PR_NUMBER --auto
 ```
-This single command is sufficient. The merge queue controls the merge strategy (squash) and branch cleanup.
+This is the only merge command to run. The merge queue controls the merge strategy (squash) and branch cleanup; the next step waits for completion proof.
 
 Do NOT pass `--squash`, `--delete-branch`, `--repo`, or `--admin` — the merge queue controls these. Do NOT:
-- Retry the merge command if you see a "merge queue" or "auto-merge" response — that IS success
+- Retry the merge command if you see a "merge queue" or "auto-merge" response — that is enqueue success; proceed to the wait/proof step
 - Run `gh pr merge` with `--admin` to bypass the queue
 - Modify any code in this stage
 
@@ -922,9 +922,9 @@ gh pr checks --watch --required --fail-fast
 ```
 This blocks until all checks complete (including merge queue CI). Then confirm the PR merged:
 ```
-gh pr view --json state --jq '.state'
+gh pr view $PR_NUMBER --json state,mergedAt,mergeCommit --jq '{state, mergedAt, mergeCommit: .mergeCommit.oid}'
 ```
-Expected: `MERGED`. If the state is `MERGED`, proceed to workpad update.
+Expected: `state` is `MERGED`, `mergedAt` is non-null, and `mergeCommit` is non-null. If all three are true, proceed to workpad update.
 
 If the merge queue rejects the PR (check failures on rebased code):
 1. Run `gh pr view --json state,statusCheckRollup` to identify which check failed and why
