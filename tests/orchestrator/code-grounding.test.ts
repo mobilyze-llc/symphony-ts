@@ -17,6 +17,12 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { BacklogAuditFinding } from "../../src/audit/backlog-audit.js";
 import {
+  CODE_GROUNDING_CHECKOUT_RETENTION_POLICY,
+  CODE_GROUNDING_CLONE_SOURCE_POLICY,
+  CODE_GROUNDING_CONTENTION_POLICY,
+  CODE_GROUNDING_LOCK_DOMAIN,
+  CODE_GROUNDING_SYMBOL_PRECISION,
+  decideCodeGroundingEvidenceStatus,
   resolveCodeGroundingPaths,
   runManagedCodeGrounding,
   sweepCodeGroundingCheckouts,
@@ -36,6 +42,57 @@ afterEach(async () => {
 });
 
 describe("managed code grounding (SYMPH-596)", () => {
+  it("publishes the v1 grounding policy contracts for reviewers and callers", () => {
+    expect(CODE_GROUNDING_SYMBOL_PRECISION).toBe(
+      "textual_declaration_regex_scoped_to_cited_path",
+    );
+    expect(CODE_GROUNDING_CHECKOUT_RETENTION_POLICY).toBe(
+      "delete_expired_or_lru_over_cap_unless_live_lock_owner",
+    );
+    expect(CODE_GROUNDING_CONTENTION_POLICY).toBe(
+      "serialize_same_process_wait_cross_process_file_lock_then_timeout",
+    );
+    expect(CODE_GROUNDING_LOCK_DOMAIN).toBe(
+      "code_grounding_separate_from_dispatcher_journal",
+    );
+    expect(CODE_GROUNDING_CLONE_SOURCE_POLICY).toBe(
+      "clone_from_target_source_path_for_tests_otherwise_repo_url",
+    );
+  });
+
+  it("keeps the deterministic and model status decision table explicit", () => {
+    expect(
+      decideCodeGroundingEvidenceStatus({
+        deterministicStatus: "verified",
+        modelClaimStatus: "absent",
+      }),
+    ).toBe("verified");
+    expect(
+      decideCodeGroundingEvidenceStatus({
+        deterministicStatus: "verified",
+        modelClaimStatus: "verified",
+      }),
+    ).toBe("model_suggested_verified");
+    expect(
+      decideCodeGroundingEvidenceStatus({
+        deterministicStatus: "verified",
+        modelClaimStatus: "unverified",
+      }),
+    ).toBe("model_argued_unverified");
+    expect(
+      decideCodeGroundingEvidenceStatus({
+        deterministicStatus: "not_found",
+        modelClaimStatus: "verified",
+      }),
+    ).toBe("model_argued_unverified");
+    expect(
+      decideCodeGroundingEvidenceStatus({
+        deterministicStatus: "contradicted",
+        modelClaimStatus: "verified",
+      }),
+    ).toBe("model_argued_unverified");
+  });
+
   it("verifies extracted path and symbol evidence in a managed checkout", async () => {
     const sourceRepo = await createSourceRepo();
     const workspaceRoot = await tempRoot("symph-cg-workspace-");
@@ -275,6 +332,41 @@ describe("managed code grounding (SYMPH-596)", () => {
         expect.objectContaining({ path: "src/orchestrator/queue.go" }),
       ]),
     );
+  });
+
+  it("does not index extensionless files for v1 symbol-only grounding", async () => {
+    const sourceRepo = await createSourceRepo();
+    await writeFile(
+      join(sourceRepo, "src", "orchestrator", "Makefile"),
+      "export const HiddenSymbol = true;\n",
+    );
+    await git(sourceRepo, ["add", "."]);
+    await git(sourceRepo, ["commit", "-m", "Add extensionless evidence"]);
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "extensionless-symbol-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: sourceRepo,
+        sourcePath: sourceRepo,
+        commitSha,
+        repoScope: "symphony",
+      },
+      findings: [
+        backlogFinding({
+          evidence: "Implemented via `HiddenSymbol`.",
+        }),
+      ],
+    });
+
+    expect(report.status).toBe("not_found");
+    expect(report.entries[0]).toMatchObject({
+      status: "not_found",
+      missing: ["HiddenSymbol"],
+    });
   });
 
   it("rejects line-suffixed path evidence when the cited line is outside the file", async () => {
@@ -630,6 +722,26 @@ describe("managed code grounding (SYMPH-596)", () => {
     );
   });
 
+  it("downgrades model disagreement even when deterministic evidence verified", () => {
+    const downgraded = validateModelFindingAgainstEvidence({
+      deterministic: {
+        findingId: "F-1",
+        status: "verified",
+        summary: "Path exists",
+        citations: [],
+        missing: [],
+      },
+      modelFinding: {
+        findingId: "F-1",
+        status: "unverified",
+        summary: "Model argues this is not proven",
+      },
+    });
+
+    expect(downgraded.status).toBe("model_argued_unverified");
+    expect(downgraded.summary).toBe("Model argues this is not proven");
+  });
+
   it("sweeps expired inactive checkouts while preserving active leases", async () => {
     const workspaceRoot = await tempRoot("symph-cg-workspace-");
     const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
@@ -704,6 +816,72 @@ describe("managed code grounding (SYMPH-596)", () => {
     await expect(
       readFile(join(activeCheckout, "file.txt"), "utf8"),
     ).resolves.toBe("active");
+  });
+
+  it("sweeps least-recently-used inactive checkouts over the per-repo cap", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
+    const firstCheckout = join(baseRoot, "checkouts", "cg-first");
+    const secondCheckout = join(baseRoot, "checkouts", "cg-second");
+    await mkdir(firstCheckout, { recursive: true });
+    await mkdir(secondCheckout, { recursive: true });
+    await writeFile(join(firstCheckout, "file.txt"), "first");
+    await writeFile(join(secondCheckout, "file.txt"), "second");
+    await mkdir(baseRoot, { recursive: true });
+    const leaseIndexPath = join(baseRoot, "leases.json");
+    await writeFile(
+      leaseIndexPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          checkouts: {
+            "cg-first": {
+              checkoutId: "cg-first",
+              repoUrl: "repo",
+              commitSha: "abc",
+              checkoutPath: firstCheckout,
+              artifactRoot: join(baseRoot, "artifacts", "first"),
+              createdAt: "2026-06-13T00:00:00.000Z",
+              lastUsedAt: "2026-06-13T00:00:00.000Z",
+              activeRunIds: [],
+            },
+            "cg-second": {
+              checkoutId: "cg-second",
+              repoUrl: "repo",
+              commitSha: "def",
+              checkoutPath: secondCheckout,
+              artifactRoot: join(baseRoot, "artifacts", "second"),
+              createdAt: "2026-06-14T00:00:00.000Z",
+              lastUsedAt: "2026-06-14T00:00:00.000Z",
+              activeRunIds: [],
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    await sweepCodeGroundingCheckouts({
+      workspaceRoot,
+      config: {
+        ...codeGroundingConfig(),
+        maxCheckoutsPerRepo: 1,
+      },
+      now: new Date("2026-06-15T00:00:00.000Z"),
+    });
+
+    await expect(
+      readFile(join(firstCheckout, "file.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(join(secondCheckout, "file.txt"), "utf8"),
+    ).resolves.toBe("second");
+    const leaseIndex = JSON.parse(await readFile(leaseIndexPath, "utf8")) as {
+      checkouts: Record<string, unknown>;
+    };
+    expect(leaseIndex.checkouts["cg-first"]).toBeUndefined();
+    expect(leaseIndex.checkouts["cg-second"]).toBeDefined();
   });
 
   it("sweeps expired checkouts with stale active run ids when no lock owner is alive", async () => {

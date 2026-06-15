@@ -27,6 +27,27 @@ export const CODE_GROUNDING_VERIFICATION_STATUSES = [
 export type CodeGroundingVerificationStatus =
   (typeof CODE_GROUNDING_VERIFICATION_STATUSES)[number];
 
+export type CodeGroundingModelClaimStatus =
+  | CodeGroundingModelFinding["status"]
+  | "absent";
+
+export interface CodeGroundingStatusDecision {
+  deterministicStatus: CodeGroundingVerificationStatus;
+  modelClaimStatus: CodeGroundingModelClaimStatus;
+  finalStatus: CodeGroundingVerificationStatus;
+}
+
+export const CODE_GROUNDING_SYMBOL_PRECISION =
+  "textual_declaration_regex_scoped_to_cited_path" as const;
+export const CODE_GROUNDING_CHECKOUT_RETENTION_POLICY =
+  "delete_expired_or_lru_over_cap_unless_live_lock_owner" as const;
+export const CODE_GROUNDING_CONTENTION_POLICY =
+  "serialize_same_process_wait_cross_process_file_lock_then_timeout" as const;
+export const CODE_GROUNDING_LOCK_DOMAIN =
+  "code_grounding_separate_from_dispatcher_journal" as const;
+export const CODE_GROUNDING_CLONE_SOURCE_POLICY =
+  "clone_from_target_source_path_for_tests_otherwise_repo_url" as const;
+
 export interface CodeGroundingConfig {
   enabled: boolean;
   baseDir: string;
@@ -38,6 +59,7 @@ export interface CodeGroundingTarget {
   repoUrl: string;
   commitSha: string;
   repoScope: "symphony" | "non_symphony";
+  /** Test-fixture clone source override. Product callers should use repoUrl provenance. */
   sourcePath?: string;
 }
 
@@ -364,26 +386,40 @@ export function validateModelFindingAgainstEvidence(input: {
   deterministic: CodeGroundingEvidenceEntry;
   modelFinding: CodeGroundingModelFinding;
 }): CodeGroundingEvidenceEntry {
-  if (input.modelFinding.status !== "verified") {
+  const finalStatus = decideCodeGroundingEvidenceStatus({
+    deterministicStatus: input.deterministic.status,
+    modelClaimStatus: input.modelFinding.status,
+  });
+  if (finalStatus === "model_suggested_verified") {
     return {
       ...input.deterministic,
-      status: "model_argued_unverified",
-      summary: input.modelFinding.summary,
-    };
-  }
-  if (input.deterministic.status === "verified") {
-    return {
-      ...input.deterministic,
-      status: "model_suggested_verified",
+      status: finalStatus,
       summary: input.modelFinding.summary,
     };
   }
   return {
     ...input.deterministic,
-    status: "model_argued_unverified",
+    status: finalStatus,
     summary:
-      "Model claimed verification without matching deterministic citation; downgraded to unverified.",
+      input.modelFinding.status === "verified"
+        ? "Model claimed verification without matching deterministic citation; downgraded to unverified."
+        : input.modelFinding.summary,
   };
+}
+
+export function decideCodeGroundingEvidenceStatus(
+  input: Omit<CodeGroundingStatusDecision, "finalStatus">,
+): CodeGroundingVerificationStatus {
+  if (input.modelClaimStatus === "absent") {
+    return input.deterministicStatus;
+  }
+  if (
+    input.modelClaimStatus === "verified" &&
+    input.deterministicStatus === "verified"
+  ) {
+    return "model_suggested_verified";
+  }
+  return "model_argued_unverified";
 }
 
 async function prepareManagedCheckout(
@@ -769,7 +805,11 @@ async function* walkTextFiles(root: string): AsyncGenerator<string> {
 }
 
 function isTextFile(name: string): boolean {
-  const extension = name.slice(name.lastIndexOf("."));
+  const dotIndex = name.lastIndexOf(".");
+  if (dotIndex <= 0) {
+    return false;
+  }
+  const extension = name.slice(dotIndex);
   return TEXT_FILE_EXTENSIONS.has(extension);
 }
 
@@ -778,7 +818,11 @@ async function readTextFileBounded(path: string): Promise<string | null> {
   if (stat.size > MAX_SCAN_FILE_BYTES) {
     return null;
   }
-  return fs.readFile(path, "utf8");
+  const content = await fs.readFile(path);
+  if (content.byteLength > MAX_SCAN_FILE_BYTES) {
+    return null;
+  }
+  return content.toString("utf8");
 }
 
 const SYMBOL_DECLARATION_PATTERNS = [
