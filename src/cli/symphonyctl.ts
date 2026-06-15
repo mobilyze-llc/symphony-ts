@@ -27,6 +27,7 @@ export const DEFAULT_BASE_URL = "http://127.0.0.1:4321";
 export interface SymphonyctlCommand {
   command:
     | "state"
+    | "preflight"
     | "intent"
     | "anchor"
     | "unanchor"
@@ -53,6 +54,7 @@ const USAGE = `Usage: symphonyctl <command> [options]
 
 Commands:
   state                          Pretty summary of GET /api/v1/state
+  preflight                      Verify operator bearer auth with GET /api/v1/operator/whoami
   intent <verb> --issue <id> --reason <text> [--hint <text>] [--fence <seq>] [--stage <stage>]
                                  POST /api/v1/intents (verbs: ${INTENT_VERBS.join(", ")})
   anchor <issue> (--top|--above <ref>|--below <ref>) (--until-merged|--until <iso-timestamp>) [--reason <text>]
@@ -121,7 +123,12 @@ export function parseSymphonyctlArgs(
     return { command: "help", baseUrl };
   }
 
-  if (command === "state" || command === "pause" || command === "resume") {
+  if (
+    command === "state" ||
+    command === "preflight" ||
+    command === "pause" ||
+    command === "resume"
+  ) {
     const result: SymphonyctlCommand = { command, baseUrl };
     if (operatorToken !== undefined && operatorToken !== "") {
       result.operatorToken = operatorToken;
@@ -321,6 +328,80 @@ async function httpJson(
   return { status: response.status, payload };
 }
 
+function requiresOperatorToken(
+  command: SymphonyctlCommand["command"],
+): boolean {
+  return (
+    command === "preflight" ||
+    command === "intent" ||
+    command === "anchor" ||
+    command === "unanchor" ||
+    command === "pause" ||
+    command === "resume" ||
+    command === "stop"
+  );
+}
+
+function formatAuthPreflightMissing(): string {
+  return [
+    "operator token missing: pass --operator-token or set SYMPHONY_OPERATOR_TOKEN.",
+    "symphonyctl does not read secret files; source the existing operator environment before running mutating commands.",
+  ].join(" ");
+}
+
+function errorCodeFromPayload(payload: unknown): string | null {
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    return null;
+  }
+  const error = (payload as Record<string, unknown>).error;
+  if (error === null || typeof error !== "object" || Array.isArray(error)) {
+    return null;
+  }
+  const code = (error as Record<string, unknown>).code;
+  return typeof code === "string" ? code : null;
+}
+
+function formatHttpFailure(
+  path: string,
+  status: number,
+  payload: unknown,
+): string {
+  const code = errorCodeFromPayload(payload);
+  if (status === 403 && code === "operator_auth_unconfigured") {
+    return `${path} failed (403 operator_auth_unconfigured): dashboard operator auth is not configured; set SYMPHONY_OPERATOR_TOKEN or operatorAuth.token on the dashboard host.`;
+  }
+  if (status === 401 && code === "unauthorized") {
+    return `${path} failed (401 unauthorized): invalid operator bearer token; check --operator-token or SYMPHONY_OPERATOR_TOKEN.`;
+  }
+  return `${path} failed (${status}): ${JSON.stringify(payload)}`;
+}
+
+function formatOperatorActor(payload: unknown): string {
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload)
+  ) {
+    return "operator auth ok";
+  }
+  const actor = (payload as Record<string, unknown>).actor;
+  if (actor === null || typeof actor !== "object" || Array.isArray(actor)) {
+    return "operator auth ok";
+  }
+  const record = actor as Record<string, unknown>;
+  const kind = String(record.kind ?? "operator");
+  const host = String(record.host ?? "unknown");
+  const session =
+    record.session === undefined || record.session === null
+      ? ""
+      : `#${String(record.session)}`;
+  return `operator auth ok: ${kind}@${host}${session}`;
+}
+
 export function formatStateSummary(snapshot: Record<string, unknown>): string {
   const lines: string[] = [];
   const counts = snapshot.counts as Record<string, number> | undefined;
@@ -439,6 +520,14 @@ export async function runSymphonyctl(
     return 0;
   }
 
+  if (
+    requiresOperatorToken(parsed.command) &&
+    (parsed.operatorToken === undefined || parsed.operatorToken === "")
+  ) {
+    log(formatAuthPreflightMissing());
+    return 2;
+  }
+
   if (parsed.command === "state") {
     const { status, payload } = await httpJson(
       "GET",
@@ -449,6 +538,22 @@ export async function runSymphonyctl(
       return 1;
     }
     log(formatStateSummary(payload as Record<string, unknown>));
+    return 0;
+  }
+
+  if (parsed.command === "preflight") {
+    const path = "/api/v1/operator/whoami";
+    const { status, payload } = await httpJson(
+      "GET",
+      `${parsed.baseUrl}${path}`,
+      undefined,
+      { operatorToken: parsed.operatorToken },
+    );
+    if (status !== 200) {
+      log(formatHttpFailure(path, status, payload));
+      return 1;
+    }
+    log(formatOperatorActor(payload));
     return 0;
   }
 
@@ -470,7 +575,11 @@ export async function runSymphonyctl(
       },
       { operatorToken: parsed.operatorToken },
     );
-    log(JSON.stringify(payload, null, 2));
+    log(
+      status === 200
+        ? JSON.stringify(payload, null, 2)
+        : formatHttpFailure(`/api/v1/pipeline/${action}`, status, payload),
+    );
     return status === 200 ? 0 : 1;
   }
 
@@ -497,7 +606,11 @@ export async function runSymphonyctl(
       },
       { operatorToken: parsed.operatorToken },
     );
-    log(JSON.stringify(payload, null, 2));
+    log(
+      status === 200
+        ? JSON.stringify(payload, null, 2)
+        : formatHttpFailure("/api/v1/intents", status, payload),
+    );
     return status === 200 ? 0 : 1;
   }
 
@@ -517,7 +630,11 @@ export async function runSymphonyctl(
     },
     { operatorToken: parsed.operatorToken },
   );
-  log(JSON.stringify(payload, null, 2));
+  log(
+    status === 200
+      ? JSON.stringify(payload, null, 2)
+      : formatHttpFailure("/api/v1/intents", status, payload),
+  );
   return status === 200 ? 0 : 1;
 }
 

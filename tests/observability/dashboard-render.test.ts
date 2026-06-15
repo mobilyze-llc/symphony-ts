@@ -313,6 +313,33 @@ describe("Dashboard Pipeline column", () => {
     );
   });
 
+  it("qualifies stale aligned deploy drift instead of rendering bare alignment", () => {
+    const snapshot: RuntimeSnapshot = {
+      ...buildSnapshot({}),
+      deploy_drift: {
+        running_commit: "aaa111",
+        origin_main_commit: "aaa111",
+        drift: false,
+        captured_at: "2026-06-12T10:00:00.000Z",
+        note: "captured once at startup; origin_main_commit is the local ref",
+        freshness: {
+          status: "stale",
+          captured_age_seconds: 901,
+          threshold_seconds: 600,
+        },
+        qualified_status: "aligned_stale",
+      },
+    };
+
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: true });
+
+    expect(html).toContain("aligned (stale local ref)");
+    expect(html).toContain("Freshness");
+    expect(html).toContain("stale");
+    expect(html).toContain("age 901s / window 600s");
+    expect(html).toContain("aligned_stale");
+  });
+
   it("renders live rate-view freshness and refreshes it in live updates", () => {
     const snapshot: RuntimeSnapshot = {
       ...buildSnapshot({}),

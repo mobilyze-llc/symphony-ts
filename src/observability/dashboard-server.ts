@@ -1161,6 +1161,25 @@ export function createDashboardRequestHandler(
         return;
       }
 
+      if (url.pathname === "/api/v1/operator/whoami") {
+        if (method !== "GET") {
+          writeMethodNotAllowed(response, ["GET"]);
+          return;
+        }
+
+        const operatorActor = requireOperatorAuth(
+          request,
+          response,
+          operatorAuth,
+        );
+        if (operatorActor === null) {
+          return;
+        }
+
+        writeJson(response, 200, { status: "ok", actor: operatorActor });
+        return;
+      }
+
       if (url.pathname === "/api/v1/intents") {
         if (method !== "POST") {
           writeMethodNotAllowed(response, ["POST"]);

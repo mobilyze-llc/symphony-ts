@@ -1,11 +1,14 @@
 import { setDefaultAutoSelectFamilyAttemptTimeout } from "node:net";
 
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateObject } from "ai";
 import { z } from "zod";
 
 import type { WorkflowPauseTriageConfig } from "../config/types.js";
 import type { HardStopDecision } from "../policy/hard-stops.js";
+import {
+  createLocalOpenAICompatibleProvider,
+  withLocalJudgeAiSdkWarningPolicy,
+} from "./local-openai-compatible.js";
 import { fencePauseTriageBoundaryTags } from "./prompt-fence.js";
 
 /**
@@ -112,26 +115,28 @@ export async function runPauseTriage(
   ensureLanTolerantNetworking();
 
   try {
-    const provider = createOpenAICompatible({
+    const provider = createLocalOpenAICompatibleProvider({
       name: "pause-triage-local",
       // isPauseTriageConfigured guarantees these are non-null.
       baseURL: config.baseUrl as string,
-      ...(config.apiKey === null ? {} : { apiKey: config.apiKey }),
-      ...(input.fetchFn === undefined ? {} : { fetch: input.fetchFn }),
+      apiKey: config.apiKey ?? undefined,
+      fetch: input.fetchFn,
     });
 
-    const { object } = await generateObject({
-      model: provider(config.model as string),
-      schema: VERDICT_SCHEMA,
-      temperature: 0,
-      // Fail fast to the operator pause — a flaky local endpoint must not
-      // hold the worker-exit path hostage with retry backoff.
-      maxRetries: 0,
-      abortSignal: AbortSignal.timeout(
-        input.timeoutMs ?? DEFAULT_TRIAGE_TIMEOUT_MS,
-      ),
-      prompt: buildTriagePrompt(evidence),
-    });
+    const { object } = await withLocalJudgeAiSdkWarningPolicy(() =>
+      generateObject({
+        model: provider(config.model as string),
+        schema: VERDICT_SCHEMA,
+        temperature: 0,
+        // Fail fast to the operator pause — a flaky local endpoint must not
+        // hold the worker-exit path hostage with retry backoff.
+        maxRetries: 0,
+        abortSignal: AbortSignal.timeout(
+          input.timeoutMs ?? DEFAULT_TRIAGE_TIMEOUT_MS,
+        ),
+        prompt: buildTriagePrompt(evidence),
+      }),
+    );
 
     return object;
   } catch (error) {

@@ -346,6 +346,69 @@ describe("dashboard server", () => {
     expect(refreshCalls).toEqual([]);
   });
 
+  it("serves a read-only operator auth probe", async () => {
+    const server = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+    });
+    servers.push(server);
+
+    const response = await sendRequest(server.port, {
+      method: "GET",
+      path: "/api/v1/operator/whoami",
+      headers: AUTH_HEADERS,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({
+      status: "ok",
+      actor: {
+        kind: "operator",
+      },
+    });
+  });
+
+  it("distinguishes unconfigured operator auth from invalid probe tokens", async () => {
+    Reflect.deleteProperty(process.env, "SYMPHONY_OPERATOR_TOKEN");
+    const unconfigured = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+      operatorAuth: {
+        token: null,
+      },
+    });
+    servers.push(unconfigured);
+
+    const unconfiguredResponse = await sendRequest(unconfigured.port, {
+      method: "GET",
+      path: "/api/v1/operator/whoami",
+      headers: AUTH_HEADERS,
+    });
+    expect(unconfiguredResponse.statusCode).toBe(403);
+    expect(JSON.parse(unconfiguredResponse.body).error.code).toBe(
+      "operator_auth_unconfigured",
+    );
+
+    const configured = await startDashboardServer({
+      port: 0,
+      host: createHost(),
+      operatorAuth: {
+        token: OPERATOR_TOKEN,
+      },
+    });
+    servers.push(configured);
+
+    const invalidResponse = await sendRequest(configured.port, {
+      method: "GET",
+      path: "/api/v1/operator/whoami",
+      headers: {
+        authorization: "Bearer wrong-token",
+      },
+    });
+    expect(invalidResponse.statusCode).toBe(401);
+    expect(JSON.parse(invalidResponse.body).error.code).toBe("unauthorized");
+  });
+
   it("accepts bearer operator auth with mixed case and extra horizontal whitespace", async () => {
     const refreshCalls: RefreshResponse[] = [];
     const server = await startDashboardServer({

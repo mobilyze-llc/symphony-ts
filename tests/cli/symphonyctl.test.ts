@@ -226,6 +226,18 @@ describe("parseSymphonyctlArgs", () => {
     });
   });
 
+  it("parses operator preflight with a token", () => {
+    expect(
+      parseSymphonyctlArgs(["preflight"], {
+        SYMPHONY_OPERATOR_TOKEN: "env-token",
+      }),
+    ).toEqual({
+      command: "preflight",
+      baseUrl: DEFAULT_BASE_URL,
+      operatorToken: "env-token",
+    });
+  });
+
   it("parses hard emergency stop with a reason", () => {
     expect(
       parseSymphonyctlArgs(["stop", "--hard", "--reason", "runaway spend"], {}),
@@ -245,6 +257,95 @@ describe("parseSymphonyctlArgs", () => {
 });
 
 describe("runSymphonyctl", () => {
+  it("rejects mutating requests locally when operator auth is missing", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      requests.push({ url: String(input), init: init ?? {} });
+      return new Response(JSON.stringify({ status: "applied" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    const lines: string[] = [];
+
+    const exitCode = await runSymphonyctl(
+      parseSymphonyctlArgs(["pause"], {}),
+      (line) => lines.push(line),
+    );
+
+    expect(exitCode).toBe(2);
+    expect(requests).toEqual([]);
+    expect(lines.join("\n")).toContain("operator token missing");
+    expect(lines.join("\n")).toContain("does not read secret files");
+  });
+
+  it("checks operator auth with the read-only preflight endpoint", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    globalThis.fetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      requests.push({ url: String(input), init: init ?? {} });
+      return new Response(
+        JSON.stringify({
+          status: "ok",
+          actor: { kind: "operator", host: "studio1", session: "manual" },
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      );
+    }) as typeof fetch;
+    const lines: string[] = [];
+
+    const exitCode = await runSymphonyctl(
+      parseSymphonyctlArgs(["preflight"], {
+        SYMPHONY_OPERATOR_TOKEN: "env-token",
+      }),
+      (line) => lines.push(line),
+    );
+
+    expect(exitCode).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.url).toBe(`${DEFAULT_BASE_URL}/api/v1/operator/whoami`);
+    expect(requests[0]?.init.method).toBe("GET");
+    expect(requests[0]?.init.headers).toMatchObject({
+      authorization: "Bearer env-token",
+    });
+    expect(lines).toEqual(["operator auth ok: operator@studio1#manual"]);
+  });
+
+  it("maps invalid operator auth distinctly from server-side auth setup", async () => {
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          error: { code: "operator_auth_unconfigured" },
+        }),
+        {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        },
+      )) as typeof fetch;
+    const lines: string[] = [];
+
+    const exitCode = await runSymphonyctl(
+      parseSymphonyctlArgs(["preflight"], {
+        SYMPHONY_OPERATOR_TOKEN: "env-token",
+      }),
+      (line) => lines.push(line),
+    );
+
+    expect(exitCode).toBe(1);
+    expect(lines.join("\n")).toContain("operator_auth_unconfigured");
+    expect(lines.join("\n")).toContain(
+      "dashboard operator auth is not configured",
+    );
+  });
+
   it("sends operator bearer auth and omits body actor on mutating requests", async () => {
     const requests: Array<{ url: string; init: RequestInit }> = [];
     globalThis.fetch = (async (

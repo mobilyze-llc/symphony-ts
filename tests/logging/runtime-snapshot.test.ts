@@ -1212,6 +1212,42 @@ describe("runtime snapshot", () => {
     expect(snapshot.running[0]!.health_reason).toContain("token");
   });
 
+  it("does not mark cache-dominant low-rate-window turns yellow on burn alone", () => {
+    const state = createInitialOrchestratorState({
+      pollIntervalMs: 30_000,
+      maxConcurrentAgents: 2,
+    });
+    const now = new Date("2026-06-14T23:05:49.000Z");
+    const entry = createRunningEntry({
+      issueId: "issue-294",
+      identifier: "SYMPH-294",
+      startedAt: new Date(now.getTime() - 60_000).toISOString(),
+      sessionId: "thread-a-turn-1",
+      lastCodexEvent: "turn_completed",
+      lastCodexTimestamp: new Date(now.getTime() - 10_000).toISOString(),
+      lastCodexMessage: "Working",
+      turnCount: 1,
+      codexInputTokens: 122_456,
+      codexOutputTokens: 1_518,
+      codexTotalTokens: 123_974,
+    });
+    entry.totalStageInputTokens = 122_456;
+    entry.totalStageOutputTokens = 1_518;
+    entry.totalStageTotalTokens = 123_974;
+    entry.totalStageCacheReadTokens = 102_016;
+    entry.rateLimitWindows = {
+      primary: { startPercent: 10, latestPercent: 10, lastResetsAt: null },
+      secondary: { startPercent: 23, latestPercent: 23, lastResetsAt: null },
+    };
+    state.running["issue-294"] = entry;
+
+    const snapshot = buildRuntimeSnapshot(state, { now });
+
+    expect(snapshot.running[0]!.tokens_per_turn).toBe(123_974);
+    expect(snapshot.running[0]!.health).toBe("green");
+    expect(snapshot.running[0]!.health_reason).toBeNull();
+  });
+
   it("exposes resolved output caps and compactions per stage", () => {
     const state = createInitialOrchestratorState({
       pollIntervalMs: 30_000,
