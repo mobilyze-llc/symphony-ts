@@ -6,6 +6,7 @@ import {
   type RunBacklogAuditInput,
   runBacklogAudit,
 } from "../audit/backlog-audit.js";
+import type { ResolvedWorkflowConfig } from "../config/types.js";
 import type {
   DispatcherRunJournalEntry,
   Issue,
@@ -13,6 +14,7 @@ import type {
 } from "../domain/model.js";
 import {
   type CodeGroundingReport,
+  type CodeGroundingTarget,
   type CodeGroundingVerificationStatus,
   type RunCodeGroundingInput,
   runManagedCodeGrounding,
@@ -108,6 +110,15 @@ export interface RunBacklogHygieneProposalLaneInput
   codeGrounding?: Omit<RunCodeGroundingInput, "findings"> | null;
 }
 
+export interface BuildBacklogHygieneCodeGroundingInput {
+  workflowConfig: Pick<ResolvedWorkflowConfig, "codeGrounding" | "workspace">;
+  runId: string;
+  target: CodeGroundingTarget;
+  workspaceRoot?: string;
+  commandRunner?: RunCodeGroundingInput["commandRunner"];
+  afterDeterministicScan?: RunCodeGroundingInput["afterDeterministicScan"];
+}
+
 export type BacklogHygieneProposalDecision = "accepted" | "rejected";
 
 const BACKLOG_HYGIENE_SCOPE_ID = "__backlog_hygiene__";
@@ -189,14 +200,11 @@ export async function runBacklogHygieneProposalLane(
     };
   }
 
-  const groundingResult = await runCodeGroundingForProposalLane(input, report);
-
   const proposalInput: BuildBacklogHygieneProposalsInput = {
     report,
     candidateIssues: input.issues,
     maxProposalsPerProductPerPoll: input.maxProposalsPerProductPerPoll,
     modelTierDecision,
-    codeGroundingReport: groundingResult.report,
     ...(input.activeIssueIds === undefined
       ? {}
       : { activeIssueIds: input.activeIssueIds }),
@@ -207,6 +215,12 @@ export async function runBacklogHygieneProposalLane(
       ? {}
       : { findingTypes: input.findingTypes }),
   };
+  const proposalFindings = selectBacklogHygieneProposalFindings(proposalInput);
+  const groundingResult = await runCodeGroundingForProposalLane(
+    input,
+    proposalFindings,
+  );
+  proposalInput.codeGroundingReport = groundingResult.report;
 
   return {
     status: "completed",
@@ -216,9 +230,91 @@ export async function runBacklogHygieneProposalLane(
   };
 }
 
+export function buildBacklogHygieneCodeGroundingInput(
+  input: BuildBacklogHygieneCodeGroundingInput,
+): Omit<RunCodeGroundingInput, "findings"> | null {
+  if (input.workflowConfig.codeGrounding?.enabled !== true) {
+    return null;
+  }
+  return {
+    workspaceRoot: input.workspaceRoot ?? input.workflowConfig.workspace.root,
+    runId: input.runId,
+    config: input.workflowConfig.codeGrounding,
+    target: input.target,
+    ...(input.commandRunner === undefined
+      ? {}
+      : { commandRunner: input.commandRunner }),
+    ...(input.afterDeterministicScan === undefined
+      ? {}
+      : { afterDeterministicScan: input.afterDeterministicScan }),
+  };
+}
+
 export function buildBacklogHygieneProposals(
   input: BuildBacklogHygieneProposalsInput,
 ): BacklogHygieneProposal[] {
+  const generatedAt = input.generatedAt ?? input.report.generatedAt;
+  const codeGroundingByFindingId = new Map(
+    (input.codeGroundingReport?.entries ?? []).map((entry) => [
+      entry.findingId,
+      entry,
+    ]),
+  );
+
+  const proposals: BacklogHygieneProposal[] = [];
+  for (const { finding, issues } of selectBacklogHygieneProposalCandidates(
+    input,
+  )) {
+    const codeGrounding = codeGroundingByFindingId.get(finding.findingId);
+    proposals.push({
+      proposalId: `${input.report.generatedAt}:${finding.findingId}`,
+      findingId: finding.findingId,
+      findingType: finding.type,
+      issueIds: issues.map((issue) => issue.id),
+      issueIdentifiers: issues.map((issue) => issue.identifier),
+      summary: finding.summary,
+      evidence: finding.evidence,
+      confidence: finding.confidence,
+      codeGroundingStatus: codeGrounding?.status ?? null,
+      codeGroundingEvidence:
+        codeGrounding === undefined
+          ? null
+          : summarizeCodeGroundingEvidence(codeGrounding),
+      generatedAt,
+      modelTier: input.modelTierDecision.tier,
+    });
+  }
+
+  return proposals;
+}
+
+export function selectBacklogHygieneProposalFindings(
+  input: Pick<
+    BuildBacklogHygieneProposalsInput,
+    | "report"
+    | "candidateIssues"
+    | "activeIssueIds"
+    | "openParkIssueIds"
+    | "findingTypes"
+    | "maxProposalsPerProductPerPoll"
+  >,
+): BacklogAuditFinding[] {
+  return selectBacklogHygieneProposalCandidates(input).map(
+    (candidate) => candidate.finding,
+  );
+}
+
+function selectBacklogHygieneProposalCandidates(
+  input: Pick<
+    BuildBacklogHygieneProposalsInput,
+    | "report"
+    | "candidateIssues"
+    | "activeIssueIds"
+    | "openParkIssueIds"
+    | "findingTypes"
+    | "maxProposalsPerProductPerPoll"
+  >,
+): Array<{ finding: BacklogAuditFinding; issues: Issue[] }> {
   if (!Number.isInteger(input.maxProposalsPerProductPerPoll)) {
     throw new Error("maxProposalsPerProductPerPoll must be an integer.");
   }
@@ -234,15 +330,8 @@ export function buildBacklogHygieneProposals(
   );
   const activeIssueIds = new Set(input.activeIssueIds ?? []);
   const openParkIssueIds = new Set(input.openParkIssueIds ?? []);
-  const generatedAt = input.generatedAt ?? input.report.generatedAt;
-  const codeGroundingByFindingId = new Map(
-    (input.codeGroundingReport?.entries ?? []).map((entry) => [
-      entry.findingId,
-      entry,
-    ]),
-  );
-
-  const proposals: BacklogHygieneProposal[] = [];
+  const candidates: Array<{ finding: BacklogAuditFinding; issues: Issue[] }> =
+    [];
   for (const finding of input.report.verdict.findings) {
     if (!allowedTypes.has(finding.type)) {
       continue;
@@ -262,30 +351,12 @@ export function buildBacklogHygieneProposals(
     ) {
       continue;
     }
-    const codeGrounding = codeGroundingByFindingId.get(finding.findingId);
-    proposals.push({
-      proposalId: `${input.report.generatedAt}:${finding.findingId}`,
-      findingId: finding.findingId,
-      findingType: finding.type,
-      issueIds: issues.map((issue) => issue.id),
-      issueIdentifiers: issues.map((issue) => issue.identifier),
-      summary: finding.summary,
-      evidence: finding.evidence,
-      confidence: finding.confidence,
-      codeGroundingStatus: codeGrounding?.status ?? null,
-      codeGroundingEvidence:
-        codeGrounding === undefined
-          ? null
-          : summarizeCodeGroundingEvidence(codeGrounding),
-      generatedAt,
-      modelTier: input.modelTierDecision.tier,
-    });
-    if (proposals.length >= input.maxProposalsPerProductPerPoll) {
+    candidates.push({ finding, issues });
+    if (candidates.length >= input.maxProposalsPerProductPerPoll) {
       break;
     }
   }
-
-  return proposals;
+  return candidates;
 }
 
 export function buildBacklogHygieneProposalJournalEntry(input: {
@@ -404,7 +475,7 @@ function summarizeCodeGroundingEvidence(
 
 async function runCodeGroundingForProposalLane(
   input: RunBacklogHygieneProposalLaneInput,
-  report: BacklogAuditReport,
+  findings: readonly BacklogAuditFinding[],
 ): Promise<{
   report: CodeGroundingReport | null;
   warnings: string[];
@@ -412,10 +483,13 @@ async function runCodeGroundingForProposalLane(
   if (input.codeGrounding === null || input.codeGrounding === undefined) {
     return { report: null, warnings: [] };
   }
+  if (findings.length === 0) {
+    return { report: null, warnings: [] };
+  }
   try {
     const groundingReport = await runManagedCodeGrounding({
       ...input.codeGrounding,
-      findings: report.verdict.findings,
+      findings,
     });
     return {
       report: groundingReport,
