@@ -201,7 +201,7 @@ describe("buildComparisonReport", () => {
       replayArtifactDir: "/tmp/kimi-replay",
       sourceLanes: [
         sourceLane({
-          parseStatus: "parsed",
+          parseStatus: "synthesized_from_markdown",
           blockingFingerprints: ["b", "a"],
           trackFingerprints: ["t"],
         }),
@@ -284,7 +284,109 @@ describe("buildComparisonReport", () => {
 
     expect(report.frozenReviewBundle).toEqual({
       canonicalHash: "a".repeat(64),
+      sourceHashStatus: "consistent",
+      sourceHashes: ["a".repeat(64)],
       usedByKimiReplay: true,
+    });
+  });
+
+  it("reports when Kimi used a different frozen review bundle hash", () => {
+    const report = buildComparisonReport({
+      issueId: "SYMPH-689",
+      sourceCouncilDir: "/tmp/source-council",
+      replayArtifactDir: "/tmp/kimi-replay",
+      sourceLanes: [sourceLane({ reviewBundleCanonicalHash: "a".repeat(64) })],
+      kimiLane: sourceLane({
+        laneId: "kimi-k27-shadow",
+        agent: "kimi",
+        role: "kimi-k27-shadow-reviewer",
+        modelFamily: "moonshot-kimi",
+        reviewBundleCanonicalHash: "b".repeat(64),
+      }),
+      gateResultPath: "/tmp/kimi-replay/review-result.json",
+      markdownReportPath: "/tmp/kimi-replay/kimi-replay-comparison.md",
+    });
+
+    expect(report.frozenReviewBundle).toEqual({
+      canonicalHash: "a".repeat(64),
+      sourceHashStatus: "consistent",
+      sourceHashes: ["a".repeat(64)],
+      usedByKimiReplay: false,
+    });
+  });
+
+  it("reports divergent source frozen review bundle hashes distinctly", () => {
+    const report = buildComparisonReport({
+      issueId: "SYMPH-689",
+      sourceCouncilDir: "/tmp/source-council",
+      replayArtifactDir: "/tmp/kimi-replay",
+      sourceLanes: [
+        sourceLane({ reviewBundleCanonicalHash: "b".repeat(64) }),
+        sourceLane({ reviewBundleCanonicalHash: "a".repeat(64) }),
+      ],
+      kimiLane: sourceLane({
+        laneId: "kimi-k27-shadow",
+        agent: "kimi",
+        role: "kimi-k27-shadow-reviewer",
+        modelFamily: "moonshot-kimi",
+        reviewBundleCanonicalHash: "a".repeat(64),
+      }),
+      gateResultPath: "/tmp/kimi-replay/review-result.json",
+      markdownReportPath: "/tmp/kimi-replay/kimi-replay-comparison.md",
+    });
+
+    expect(report.frozenReviewBundle).toEqual({
+      canonicalHash: null,
+      sourceHashStatus: "divergent",
+      sourceHashes: ["a".repeat(64), "b".repeat(64)],
+      usedByKimiReplay: false,
+    });
+  });
+
+  it("reports unavailable source bundle hashes separately from divergence", () => {
+    const report = buildComparisonReport({
+      issueId: "SYMPH-689",
+      sourceCouncilDir: "/tmp/source-council",
+      replayArtifactDir: "/tmp/kimi-replay",
+      sourceLanes: [
+        sourceLane({ reviewBundleCanonicalHash: null }),
+        sourceLane({ reviewBundleCanonicalHash: null }),
+      ],
+      kimiLane: sourceLane({
+        laneId: "kimi-k27-shadow",
+        agent: "kimi",
+        role: "kimi-k27-shadow-reviewer",
+        modelFamily: "moonshot-kimi",
+        reviewBundleCanonicalHash: "a".repeat(64),
+      }),
+      gateResultPath: "/tmp/kimi-replay/review-result.json",
+      markdownReportPath: "/tmp/kimi-replay/kimi-replay-comparison.md",
+    });
+
+    expect(report.frozenReviewBundle).toEqual({
+      canonicalHash: null,
+      sourceHashStatus: "absent",
+      sourceHashes: [],
+      usedByKimiReplay: false,
+    });
+  });
+
+  it("does not mark the bundle as used when Kimi produced no structured artifact", () => {
+    const report = buildComparisonReport({
+      issueId: "SYMPH-689",
+      sourceCouncilDir: "/tmp/source-council",
+      replayArtifactDir: "/tmp/kimi-replay",
+      sourceLanes: [sourceLane({ reviewBundleCanonicalHash: "a".repeat(64) })],
+      kimiLane: null,
+      gateResultPath: "/tmp/kimi-replay/review-result.json",
+      markdownReportPath: "/tmp/kimi-replay/kimi-replay-comparison.md",
+    });
+
+    expect(report.frozenReviewBundle).toEqual({
+      canonicalHash: "a".repeat(64),
+      sourceHashStatus: "consistent",
+      sourceHashes: ["a".repeat(64)],
+      usedByKimiReplay: false,
     });
   });
 });
@@ -379,6 +481,60 @@ describe("runKimiCouncilReplay", () => {
         ],
       }),
     );
+    await writeFile(
+      join(sourceCouncilDir, "codex-high-lead.structured.json"),
+      JSON.stringify({
+        lane: {
+          laneId: "codex-high-lead",
+          agent: "codex",
+          role: "codex-lead-triage",
+          modelFamily: "openai",
+          mergeAuthoritative: true,
+        },
+        verdict: "fail",
+        parseStatus: "synthesized_from_markdown",
+        reviewBundle: {
+          path: join(sourceCouncilDir, "review-bundle.json"),
+          hash: "b".repeat(64),
+          bundleHash: "a".repeat(64),
+          hashAlgorithm: "sha256",
+        },
+        findings: [
+          {
+            severity: "P1",
+            fingerprint: "lead-only",
+            leadDisposition: "open",
+          },
+        ],
+      }),
+    );
+    await writeFile(
+      join(sourceCouncilDir, "kimi-prior-shadow.structured.json"),
+      JSON.stringify({
+        lane: {
+          laneId: "kimi-k27-shadow",
+          agent: "kimi",
+          role: "kimi-k27-shadow-reviewer",
+          modelFamily: "moonshot-kimi",
+          mergeAuthoritative: false,
+        },
+        verdict: "fail",
+        parseStatus: "synthesized_from_markdown",
+        reviewBundle: {
+          path: join(sourceCouncilDir, "review-bundle.json"),
+          hash: "b".repeat(64),
+          bundleHash: "a".repeat(64),
+          hashAlgorithm: "sha256",
+        },
+        findings: [
+          {
+            severity: "P2",
+            fingerprint: "prior-shadow-only",
+            leadDisposition: "open",
+          },
+        ],
+      }),
+    );
     runHeadlessCouncilGateMock.mockResolvedValue({
       lanes: [
         {
@@ -468,7 +624,25 @@ describe("runKimiCouncilReplay", () => {
     expect(report.scoring.matchedBlockingFingerprints).toEqual([
       "shared-blocker",
     ]);
+    expect(report.scoring.sourceBlockingFingerprints).toEqual([
+      "opus-only",
+      "shared-blocker",
+    ]);
     expect(report.scoring.kimiOnlyBlockingFingerprints).toEqual(["kimi-only"]);
+    expect(report.scoring.sourceBlockingFingerprints).not.toContain(
+      "lead-only",
+    );
+    expect(report.scoring.sourceBlockingFingerprints).not.toContain(
+      "prior-shadow-only",
+    );
+    expect(
+      report.sourceLanes.find((lane) => lane.laneId === "codex-high-lead")
+        ?.sourceRecallExclusionReason,
+    ).toBe("lead_artifact");
+    expect(
+      report.sourceLanes.find((lane) => lane.laneId === "kimi-k27-shadow")
+        ?.sourceRecallExclusionReason,
+    ).toBe("prior_shadow_artifact");
     await expect(
       readFile(join(replayArtifactDir, "kimi-replay-comparison.json"), "utf-8"),
     ).resolves.toContain('"artifactContract": "complete"');

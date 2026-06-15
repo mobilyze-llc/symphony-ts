@@ -64,6 +64,8 @@ interface KimiReplayComparisonReport {
   };
   frozenReviewBundle: {
     canonicalHash: string | null;
+    sourceHashStatus: "absent" | "consistent" | "divergent";
+    sourceHashes: string[];
     usedByKimiReplay: boolean;
   };
   gateResultPath: string;
@@ -393,9 +395,7 @@ function classifyArtifactContract(lane: SourceLaneSummary | null): {
 }
 
 function isOkParseStatus(parseStatus: string): boolean {
-  return (
-    parseStatus === "synthesized_from_markdown" || parseStatus === "parsed"
-  );
+  return parseStatus === "synthesized_from_markdown";
 }
 
 function summarizeFrozenReviewBundleUse(
@@ -411,8 +411,16 @@ function summarizeFrozenReviewBundleUse(
   );
   const canonicalHash =
     sourceHashes.length === 1 ? (sourceHashes[0] ?? null) : null;
+  const sourceHashStatus =
+    sourceHashes.length === 0
+      ? "absent"
+      : sourceHashes.length === 1
+        ? "consistent"
+        : "divergent";
   return {
     canonicalHash,
+    sourceHashStatus,
+    sourceHashes,
     usedByKimiReplay:
       canonicalHash !== null &&
       kimiLane?.reviewBundleCanonicalHash === canonicalHash,
@@ -432,9 +440,7 @@ function formatMarkdownReport(report: KimiReplayComparisonReport): string {
     `Replay artifact dir: ${report.replayArtifactDir}`,
     `Kimi artifact contract: ${report.scoring.artifactContract}`,
     `Kimi artifact contract reason: ${report.scoring.artifactContractReason}`,
-    report.frozenReviewBundle.canonicalHash === null
-      ? "Canonical frozen review bundle hash used: no (not available)"
-      : `Canonical frozen review bundle hash used: ${report.frozenReviewBundle.usedByKimiReplay ? "yes" : "no"} (${report.frozenReviewBundle.canonicalHash})`,
+    formatFrozenReviewBundleMarkdown(report),
     `Blocker recall against source union: ${recall}`,
     "",
     "## Source Lanes",
@@ -457,6 +463,18 @@ function formatMarkdownReport(report: KimiReplayComparisonReport): string {
     `- Kimi-only blockers: ${report.scoring.kimiOnlyBlockingFingerprints.join(", ") || "none"}`,
     "",
   ].join("\n");
+}
+
+function formatFrozenReviewBundleMarkdown(
+  report: KimiReplayComparisonReport,
+): string {
+  if (report.frozenReviewBundle.sourceHashStatus === "divergent") {
+    return `Canonical frozen review bundle hash used: no (source hashes diverged: ${report.frozenReviewBundle.sourceHashes.join(", ")})`;
+  }
+  if (report.frozenReviewBundle.canonicalHash === null) {
+    return "Canonical frozen review bundle hash used: no (not available)";
+  }
+  return `Canonical frozen review bundle hash used: ${report.frozenReviewBundle.usedByKimiReplay ? "yes" : "no"} (${report.frozenReviewBundle.canonicalHash})`;
 }
 
 function formatError(error: unknown): string {
