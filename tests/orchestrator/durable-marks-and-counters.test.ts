@@ -40,6 +40,18 @@ const BUDGET_PAUSE = {
   estimatedCostUsd: 5.2,
 };
 
+const HUMAN_BLOCK_PAUSE = {
+  outcome: "BLOCKED-needs-human" as const,
+  trigger: "worker_reported_block" as const,
+  reason:
+    "Worker reported BLOCKED-needs-human because PR creation is denied by the Mode Permission Envelope. Manual operator action required: open the PR manually or redispatch in a mode that permits the denied operation.",
+  turnCount: 3,
+  totalTokens: 2_085_402,
+  billableTokens: 2_085_402,
+  humanBlockOperation: "pr_creation" as const,
+  estimatedCostUsd: 22.05,
+};
+
 describe("SYMPH-406: requires-explicit-resume marks are persistent and visible", () => {
   it("surfaces the mark in the snapshot with reason + event cursor, and the skip emits a deduped verdict", async () => {
     const orchestrator = createOrchestrator();
@@ -122,6 +134,67 @@ describe("SYMPH-406: requires-explicit-resume marks are persistent and visible",
         (entry) => entry.metadata.reason_code === "requires_explicit_resume",
       ),
     ).toHaveLength(1);
+  });
+
+  it("parks terminal human-blocked workers without consuming budget escalation", async () => {
+    const comments: string[] = [];
+    const orchestrator = createOrchestrator({
+      config: createConfig({
+        budgetEscalation: {
+          maxSteps: 2,
+          multiplier: 2,
+        },
+      }),
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Implementation complete; validation passed; PR creation denied.\n[BLOCKED_NEEDS_HUMAN: pr_creation]",
+      hardStop: HUMAN_BLOCK_PAUSE,
+    });
+
+    expect(retry).toBeNull();
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(orchestrator.getState().issueBudgetEscalations["1"]).toBeUndefined();
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) => entry.kind === "budget_escalation",
+        ),
+    ).toBe(false);
+
+    const hardStopEntry = orchestrator
+      .getState()
+      .dispatcherRunJournal.find(
+        (entry) =>
+          entry.kind === "hard_stop_trigger" &&
+          entry.metadata.trigger === "worker_reported_block",
+      );
+    expect(hardStopEntry).toBeDefined();
+    expect(hardStopEntry?.metadata).toMatchObject({
+      billableTokens: 2_085_402,
+      humanBlockOperation: "pr_creation",
+    });
+
+    const snapshot = buildRuntimeSnapshot(orchestrator.getState(), {
+      now: NOW,
+    });
+    expect(snapshot.explicit_resume_required?.["1"]).toMatchObject({
+      reason: "human_blocked:pr_creation_denied",
+      set_by_sequence: hardStopEntry?.sequence,
+    });
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toContain("PR creation is denied");
+    expect(comments[0]).toContain("open the PR manually");
+    expect(comments[0]).toContain("Trigger: worker_reported_block");
+    expect(comments[0]).not.toContain("premium spend near ceiling");
   });
 
   it("clears the mark only via the fenced release verb with actor attribution in the Linear comment", async () => {

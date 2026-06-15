@@ -12,6 +12,7 @@ import {
   createInitialOrchestratorState,
   normalizeIssueState,
   parseFailureSignal,
+  parseHumanBlockSignal,
   toSessionId,
   toWorkspaceKey,
 } from "../../src/domain/model.js";
@@ -309,6 +310,42 @@ describe("containsStageCompleteSignal", () => {
     expect(containsStageCompleteSignal("")).toBe(false);
     expect(containsStageCompleteSignal("STAGE_COMPLETE")).toBe(false);
     expect(containsStageCompleteSignal("[STAGE_FAILED: verify]")).toBe(false);
+  });
+});
+
+describe("parseHumanBlockSignal", () => {
+  it("parses structured terminal human-block markers from their own line", () => {
+    expect(parseHumanBlockSignal("[BLOCKED_NEEDS_HUMAN: pr_creation]")).toEqual(
+      { operation: "pr_creation" },
+    );
+    expect(
+      parseHumanBlockSignal(
+        "Verification passed.\n[BLOCKED_NEEDS_HUMAN: auto-merge]\n",
+      ),
+    ).toEqual({ operation: "auto_merge" });
+    expect(
+      parseHumanBlockSignal("Done.\n  [BLOCKED_NEEDS_HUMAN: gate_bypass]"),
+    ).toEqual({ operation: "gate_bypass" });
+  });
+
+  it("keeps a bare BLOCKED-needs-human line as a legacy safe fallback", () => {
+    expect(
+      parseHumanBlockSignal("Verification passed.\nBLOCKED-needs-human"),
+    ).toEqual({ operation: "other" });
+  });
+
+  it("does not fire on instruction echoes or mid-prose mentions", () => {
+    expect(
+      parseHumanBlockSignal(
+        "If denied, report BLOCKED-needs-human instead of running the command.",
+      ),
+    ).toBeNull();
+    expect(
+      parseHumanBlockSignal(
+        "When done, output [BLOCKED_NEEDS_HUMAN: pr_creation] on its own line.",
+      ),
+    ).toBeNull();
+    expect(parseHumanBlockSignal(null)).toBeNull();
   });
 });
 

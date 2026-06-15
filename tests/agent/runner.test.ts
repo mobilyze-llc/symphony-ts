@@ -2266,6 +2266,83 @@ describe("AgentRunner", () => {
     expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
   });
 
+  it("parks terminal human-blocked worker output before budget escalation", async () => {
+    const root = await createRoot();
+    const tracker = createTracker({
+      refreshStates: [
+        // Would keep going if the terminal block were missed.
+        { id: "issue-1", identifier: "ABC-123", state: "In Progress" },
+      ],
+    });
+    const continueTurn = vi.fn();
+    const runner = new AgentRunner({
+      config: {
+        ...createConfig(root, "unused"),
+        hardStops: {
+          maxIterations: 5,
+          noProgressTurns: 10,
+          maxTokensPerUnit: 1_000_000,
+          maxDollarBudgetUsd: 50,
+          premiumBudgetPauseRatio: 0.8,
+          liveBudgetGraceRatio: 0.1,
+          estimatedCostPer1kTokensUsd: 0.01,
+          cachedTokenCostRatio: 0.1,
+          maxPrimaryWindowPctPerUnit: null,
+          maxSecondaryWindowPctPerUnit: null,
+        },
+      },
+      tracker,
+      createCodexClient: (input) => ({
+        async startSession() {
+          input.onEvent({
+            event: "session_started",
+            timestamp: new Date().toISOString(),
+            codexAppServerPid: "1001",
+            sessionId: "thread-1-turn-1",
+            threadId: "thread-1",
+            turnId: "turn-1",
+          });
+          return {
+            status: "completed" as const,
+            threadId: "thread-1",
+            turnId: "turn-1",
+            sessionId: "thread-1-turn-1",
+            usage: {
+              inputTokens: 4_900_000,
+              outputTokens: 1_000,
+              totalTokens: 4_901_000,
+              cacheReadTokens: 3_400_000,
+            },
+            rateLimits: null,
+            message:
+              "Implementation complete; tests pass. PR creation is denied.\n[BLOCKED_NEEDS_HUMAN: pr_creation]",
+          };
+        },
+        continueTurn,
+        close: vi.fn().mockResolvedValue(undefined),
+      }),
+    });
+
+    const result = await runner.run({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "implement",
+    });
+
+    expect(result.turnsCompleted).toBe(1);
+    expect(continueTurn).not.toHaveBeenCalled();
+    expect(tracker.fetchIssueStatesByIds).not.toHaveBeenCalled();
+    expect(result.hardStop).toMatchObject({
+      outcome: "BLOCKED-needs-human",
+      trigger: "worker_reported_block",
+      reason: expect.stringContaining("PR creation is denied"),
+      totalTokens: 4_901_000,
+      billableTokens: 1_841_000,
+      humanBlockOperation: "pr_creation",
+      estimatedCostUsd: expect.closeTo(18.41, 2),
+    });
+  });
+
   it("breaks the turn loop when [STAGE_COMPLETE] leads the final message", async () => {
     const root = await createRoot();
     const tracker = createTracker({

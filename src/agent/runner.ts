@@ -34,6 +34,7 @@ import type {
   WorkflowHardStopsConfig,
 } from "../config/types.js";
 import {
+  type HumanBlockSignal,
   type Issue,
   type LiveSession,
   type ReasoningEffort,
@@ -44,6 +45,7 @@ import {
   createEmptyLiveSession,
   normalizeIssueState,
   parseFailureSignal,
+  parseHumanBlockSignal,
 } from "../domain/model.js";
 import { ERROR_CODES } from "../errors/codes.js";
 import { formatEasternTimestamp } from "../logging/format-timestamp.js";
@@ -51,6 +53,8 @@ import { applyCodexEventToSession } from "../logging/session-metrics.js";
 import {
   type HardStopDecision,
   type ModeScopedPermissionPolicy,
+  computeBillableTokens,
+  estimateCostUsd,
   evaluateBudgetHardStop,
   evaluateIterationHardStop,
   evaluateNoProgressHardStop,
@@ -669,6 +673,7 @@ export class AgentRunner {
         const hasFailureSignal =
           lastTurn.message !== null &&
           parseFailureSignal(lastTurn.message) !== null;
+        const humanBlockSignal = parseHumanBlockSignal(lastTurn.message);
 
         // Early exit: agent signaled stage completion or failure.
         if (hardStop !== null) {
@@ -702,6 +707,28 @@ export class AgentRunner {
               ? `Live token telemetry crossed the budget during an in-flight turn; paused after the turn finished within ${formatLiveBudgetGracePct(hardStops.liveBudgetGraceRatio)} grace.`
               : `Live token telemetry crossed the budget during an in-flight turn; final completed-turn usage exceeded the ${formatLiveBudgetGracePct(hardStops.liveBudgetGraceRatio)} grace ceiling before another live update interrupted it.`,
           );
+          break;
+        }
+        if (humanBlockSignal !== null) {
+          hardStop = createWorkerReportedBlockHardStop({
+            signal: humanBlockSignal,
+            turnCount: realTurnCount,
+            totalTokens: liveSession.totalStageTotalTokens,
+            estimatedCostUsd:
+              postTurnBudgetStop?.estimatedCostUsd ??
+              estimateHumanBlockCostUsd(
+                liveSession.totalStageTotalTokens,
+                liveSession.totalStageCacheReadTokens,
+                hardStops,
+              ),
+            billableTokens:
+              postTurnBudgetStop?.billableTokens ??
+              computeBillableTokens({
+                totalTokens: liveSession.totalStageTotalTokens,
+                cacheReadTokens: liveSession.totalStageCacheReadTokens,
+                config: hardStops,
+              }),
+          });
           break;
         }
         if (hasStageCompleteSignal || hasFailureSignal) {
@@ -1696,6 +1723,48 @@ function addLiveBudgetStopReason(
     ...decision,
     reason: `${decision.reason} ${suffix}`,
   };
+}
+
+function createWorkerReportedBlockHardStop(input: {
+  signal: HumanBlockSignal;
+  turnCount: number;
+  totalTokens: number;
+  billableTokens: number;
+  estimatedCostUsd: number;
+}): HardStopDecision {
+  return {
+    outcome: "BLOCKED-needs-human",
+    trigger: "worker_reported_block",
+    reason: `${describeHumanBlockOperation(input.signal.operation)}. Manual operator action required: open the PR manually or redispatch in a mode that permits the denied operation.`,
+    turnCount: input.turnCount,
+    totalTokens: input.totalTokens,
+    billableTokens: input.billableTokens,
+    humanBlockOperation: input.signal.operation,
+    estimatedCostUsd: input.estimatedCostUsd,
+  };
+}
+
+function describeHumanBlockOperation(
+  operation: HumanBlockSignal["operation"],
+): string {
+  switch (operation) {
+    case "pr_creation":
+      return "Worker reported BLOCKED-needs-human because PR creation is denied by the Mode Permission Envelope";
+    case "auto_merge":
+      return "Worker reported BLOCKED-needs-human because auto-merge is denied by the Mode Permission Envelope";
+    case "gate_bypass":
+      return "Worker reported BLOCKED-needs-human because gate bypass is denied by the Mode Permission Envelope";
+    case "other":
+      return "Worker reported BLOCKED-needs-human at a mode-permission boundary";
+  }
+}
+
+function estimateHumanBlockCostUsd(
+  totalTokens: number,
+  cacheReadTokens: number,
+  config: WorkflowHardStopsConfig,
+): number {
+  return estimateCostUsd({ totalTokens, cacheReadTokens, config });
 }
 
 function formatLiveBudgetGracePct(ratio: number): string {

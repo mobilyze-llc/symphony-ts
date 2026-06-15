@@ -32,7 +32,7 @@ You are merging the PR for Linear issue {{ issue.identifier }}.
    ```
    gh pr merge --squash --delete-branch --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")
    ```
-5. If PR merge, auto-merge, admin, or bypass actions are denied by the Mode Permission Envelope, do not run merge commands. Report `BLOCKED-needs-human` and stop.
+5. If PR merge, auto-merge, admin, or bypass actions are denied by the Mode Permission Envelope, do not run merge commands. Put `[BLOCKED_NEEDS_HUMAN: auto_merge]` or `[BLOCKED_NEEDS_HUMAN: gate_bypass]` on its own final line and stop.
 6. Update the Linear issue state to "Done" using the `linear_graphql` tool only after a permitted merge succeeds.
 7. Verify the merge was successful by checking the PR status.
 
