@@ -172,17 +172,28 @@ export function evaluateModePermission(input: {
     return { allowed: true };
   }
 
+  const reason =
+    input.action === "open_pull_request"
+      ? `${input.action} is not allowed in ${input.policy.mode} mode${formatStageDenialContext(input.policy.stageName)}.`
+      : `${input.action} is not allowed in ${input.policy.mode} mode.`;
+
   return {
     allowed: false,
     hardStop: {
       outcome: "BLOCKED-needs-human",
       trigger: "permission_denied",
-      reason: `${input.action} is not allowed in ${input.policy.mode} mode.`,
+      reason,
       turnCount: 0,
       totalTokens: 0,
       estimatedCostUsd: 0,
     },
   };
+}
+
+function formatStageDenialContext(stageName: string | null): string {
+  return stageName === null
+    ? " without an active stage"
+    : ` during the ${stageName} stage`;
 }
 
 export function detectModePermissionAction(input: {

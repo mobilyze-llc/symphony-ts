@@ -515,10 +515,58 @@ describe("hard-stop policy", () => {
       hardStop: {
         outcome: "BLOCKED-needs-human",
         trigger: "permission_denied",
+        reason:
+          "open_pull_request is not allowed in thin mode during the merge stage.",
       },
     });
 
-    const fullPolicy = createModeScopedPermissionPolicy({
+    const fullMergePolicy = createModeScopedPermissionPolicy({
+      mode: "full",
+      stageName: "merge",
+      configuredApprovalPolicy: "full-auto",
+      configuredThreadSandbox: { type: "fullAccess" },
+      configuredTurnSandboxPolicy: { type: "fullAccess" },
+      maxBudgetUsd: 50,
+    });
+    expect(
+      evaluateModePermission({
+        policy: fullMergePolicy,
+        action: "open_pull_request",
+      }),
+    ).toMatchObject({
+      allowed: false,
+      hardStop: {
+        outcome: "BLOCKED-needs-human",
+        trigger: "permission_denied",
+        reason:
+          "open_pull_request is not allowed in full mode during the merge stage.",
+      },
+    });
+
+    const unscopedFullPolicy = createModeScopedPermissionPolicy({
+      mode: "full",
+      configuredApprovalPolicy: "full-auto",
+      configuredThreadSandbox: { type: "fullAccess" },
+      configuredTurnSandboxPolicy: { type: "fullAccess" },
+      maxBudgetUsd: 50,
+    });
+    expect(unscopedFullPolicy.canOpenPullRequest).toBe(false);
+    expect(
+      evaluateModePermission({
+        policy: unscopedFullPolicy,
+        action: "open_pull_request",
+      }),
+    ).toMatchObject({
+      allowed: false,
+      hardStop: {
+        outcome: "BLOCKED-needs-human",
+        trigger: "permission_denied",
+        reason:
+          "open_pull_request is not allowed in full mode without an active stage.",
+      },
+    });
+
+    const fullImplementPolicy = createModeScopedPermissionPolicy({
       mode: "full",
       stageName: "implement",
       configuredApprovalPolicy: "full-auto",
@@ -527,7 +575,10 @@ describe("hard-stop policy", () => {
       maxBudgetUsd: 50,
     });
     expect(
-      evaluateModePermission({ policy: fullPolicy, action: "auto_merge" }),
+      evaluateModePermission({
+        policy: fullImplementPolicy,
+        action: "auto_merge",
+      }),
     ).toMatchObject({
       allowed: false,
       hardStop: {
@@ -536,7 +587,10 @@ describe("hard-stop policy", () => {
       },
     });
     expect(
-      evaluateModePermission({ policy: fullPolicy, action: "bypass_gates" }),
+      evaluateModePermission({
+        policy: fullImplementPolicy,
+        action: "bypass_gates",
+      }),
     ).toMatchObject({
       allowed: false,
       hardStop: {
