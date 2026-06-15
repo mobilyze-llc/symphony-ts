@@ -729,16 +729,22 @@ function parsePathEvidenceCandidate(
   ) {
     return null;
   }
-  const start =
+  const startText =
     groups.colonStart === undefined ? groups.hashStart : groups.colonStart;
-  if (start === undefined) {
+  if (startText === undefined) {
     return { raw: value, path };
   }
-  const end = groups.colonEnd ?? groups.dashEnd ?? groups.hashEnd;
+  const start = Number(startText);
+  const colonEnd =
+    groups.colonEnd === undefined ? undefined : Number(groups.colonEnd);
+  const rangeEnd =
+    groups.dashEnd ??
+    groups.hashEnd ??
+    (colonEnd !== undefined && colonEnd >= start ? groups.colonEnd : undefined);
   return {
     raw: value,
     path,
-    lineRange: [Number(start), Number(end ?? start)],
+    lineRange: [start, Number(rangeEnd ?? start)],
   };
 }
 
@@ -906,8 +912,10 @@ function stripCommentsAndLiterals(content: string): string {
     | "blockComment"
     | "single"
     | "double"
-    | "template" = "code";
+    | "template"
+    | "regex" = "code";
   let escaped = false;
+  let inRegexCharacterClass = false;
   for (let index = 0; index < content.length; index++) {
     const char = content[index] ?? "";
     const next = content[index + 1] ?? "";
@@ -922,6 +930,18 @@ function stripCommentsAndLiterals(content: string): string {
         output += "  ";
         index++;
         state = "blockComment";
+        continue;
+      }
+      if (
+        char === "/" &&
+        next !== "/" &&
+        next !== "*" &&
+        canStartRegexLiteral(output)
+      ) {
+        output += " ";
+        state = "regex";
+        escaped = false;
+        inRegexCharacterClass = false;
         continue;
       }
       if (char === "'") {
@@ -969,6 +989,20 @@ function stripCommentsAndLiterals(content: string): string {
       escaped = true;
       continue;
     }
+    if (state === "regex") {
+      if (char === "[") {
+        inRegexCharacterClass = true;
+        continue;
+      }
+      if (char === "]") {
+        inRegexCharacterClass = false;
+        continue;
+      }
+      if (char === "/" && !inRegexCharacterClass) {
+        state = "code";
+      }
+      continue;
+    }
     if (
       (state === "single" && char === "'") ||
       (state === "double" && char === '"') ||
@@ -978,6 +1012,11 @@ function stripCommentsAndLiterals(content: string): string {
     }
   }
   return output;
+}
+
+function canStartRegexLiteral(output: string): boolean {
+  const previous = output.trimEnd().at(-1);
+  return previous === undefined || /[=(:,[!&|?{};\n]/.test(previous);
 }
 
 function lineForMatchIndex(content: string, index: number): number {

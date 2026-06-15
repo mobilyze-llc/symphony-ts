@@ -386,6 +386,7 @@ describe("managed code grounding (SYMPH-596)", () => {
           evidence: [
             "Implemented in `src/orchestrator/queue.ts:1`.",
             "Reviewed in `src/orchestrator/queue.ts:1:3`.",
+            "Column form `src/orchestrator/queue.ts:2:1`.",
             "Covered by `src/orchestrator/queue.ts:1-3`.",
             "Linked at `src/orchestrator/queue.ts#L1`.",
             "Linked range `src/orchestrator/queue.ts#L1-L3`.",
@@ -404,6 +405,7 @@ describe("managed code grounding (SYMPH-596)", () => {
       expect.arrayContaining([
         ["src/orchestrator/queue.ts:1", [1, 1]],
         ["src/orchestrator/queue.ts:1:3", [1, 3]],
+        ["src/orchestrator/queue.ts:2:1", [2, 2]],
         ["src/orchestrator/queue.ts:1-3", [1, 3]],
         ["src/orchestrator/queue.ts#L1", [1, 1]],
         ["src/orchestrator/queue.ts#L1-L3", [1, 3]],
@@ -745,10 +747,15 @@ describe("managed code grounding (SYMPH-596)", () => {
       join(sourceRepo, "src", "orchestrator", "symbols.ts"),
       [
         "// export function CommentOnlySymbol() {}",
+        "/* export function BlockCommentOnlySymbol() {} */",
         'const source = "export class StringOnlySymbol {}";',
         "const template = `export const TemplateOnlySymbol = true;`;",
+        "const matcher = /['\"]/;",
+        "export function AfterRegexSymbol() {",
+        "  return matcher.test(source);",
+        "}",
         "export function RealSymbol() {",
-        "  return source + template;",
+        "  return source + template + String(AfterRegexSymbol);",
         "}",
         "",
       ].join("\n"),
@@ -778,8 +785,16 @@ describe("managed code grounding (SYMPH-596)", () => {
           evidence: "Implemented via `StringOnlySymbol`.",
         }),
         backlogFinding({
+          findingId: "F-block-comment",
+          evidence: "Implemented via `BlockCommentOnlySymbol`.",
+        }),
+        backlogFinding({
           findingId: "F-template",
           evidence: "Implemented via `TemplateOnlySymbol`.",
+        }),
+        backlogFinding({
+          findingId: "F-after-regex",
+          evidence: "Implemented via `AfterRegexSymbol`.",
         }),
         backlogFinding({
           findingId: "F-real",
@@ -801,9 +816,19 @@ describe("managed code grounding (SYMPH-596)", () => {
           missing: ["StringOnlySymbol"],
         }),
         expect.objectContaining({
+          findingId: "F-block-comment",
+          status: "not_found",
+          missing: ["BlockCommentOnlySymbol"],
+        }),
+        expect.objectContaining({
           findingId: "F-template",
           status: "not_found",
           missing: ["TemplateOnlySymbol"],
+        }),
+        expect.objectContaining({
+          findingId: "F-after-regex",
+          status: "verified",
+          missing: [],
         }),
         expect.objectContaining({
           findingId: "F-real",
