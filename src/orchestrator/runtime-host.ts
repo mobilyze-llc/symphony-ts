@@ -3507,7 +3507,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       ]),
     );
     const cutoffMs = Date.parse(review.completedAt);
-    let operatorContextReason: string | null = null;
+    const operatorContextReasons: string[] = [];
 
     const deltas: ImplementationCommentDelta[] = [];
     for (const comment of comments) {
@@ -3525,7 +3525,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         isPreCutoff &&
         (authorClass === "operator" || authorClass === "unknown")
       ) {
-        operatorContextReason = `${comment.id} is an uncited ${authorClass} comment at or before the spec-review cutoff.`;
+        operatorContextReasons.push(`${comment.id} (${authorClass})`);
       }
       if (disposition === "carried_forward") {
         deltas.push({
@@ -3555,8 +3555,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     return {
       sourceIntentHash: review.sourceIntentHash,
       cutoff: review.completedAt,
-      requiresOperatorContext: operatorContextReason !== null,
-      operatorContextReason,
+      requiresOperatorContext: operatorContextReasons.length > 0,
+      operatorContextReason:
+        operatorContextReasons.length === 0
+          ? null
+          : `Uncited comments at or before the spec-review cutoff require operator reconciliation: ${operatorContextReasons.join(", ")}.`,
       comments: deltas,
     };
   }

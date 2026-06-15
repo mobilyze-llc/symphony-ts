@@ -1497,7 +1497,7 @@ describe("OrchestratorRuntimeHost", () => {
         },
       },
       {
-        id: "comment-uncited",
+        id: "comment-uncited-a",
         body: "This older human comment was missed.",
         createdAt: "2026-03-06T00:02:00.000Z",
         updatedAt: "2026-03-06T00:02:00.000Z",
@@ -1507,6 +1507,22 @@ describe("OrchestratorRuntimeHost", () => {
           name: "Reviewer",
           displayName: "Reviewer",
           email: "reviewer@example.com",
+          botType: null,
+          botSubType: null,
+        },
+        botActor: null,
+      },
+      {
+        id: "comment-uncited-b",
+        body: "This older operator comment was also missed.",
+        createdAt: "2026-03-06T00:02:30.000Z",
+        updatedAt: "2026-03-06T00:02:30.000Z",
+        user: {
+          kind: "user",
+          id: "user-operator",
+          name: "Eric",
+          displayName: "Eric",
+          email: "eric@example.com",
           botType: null,
           botSubType: null,
         },
@@ -1562,7 +1578,12 @@ describe("OrchestratorRuntimeHost", () => {
                 rationale: "Still required.",
               },
               {
-                id: "comment-uncited",
+                id: "comment-uncited-a",
+                disposition: "uncited",
+                rationale: "Not covered by the body.",
+              },
+              {
+                id: "comment-uncited-b",
                 disposition: "uncited",
                 rationale: "Not covered by the body.",
               },
@@ -1581,7 +1602,7 @@ describe("OrchestratorRuntimeHost", () => {
       cutoff: "2026-03-06T00:03:00.000Z",
       requiresOperatorContext: true,
       operatorContextReason:
-        "comment-uncited is an uncited unknown comment at or before the spec-review cutoff.",
+        "Uncited comments at or before the spec-review cutoff require operator reconciliation: comment-uncited-a (unknown), comment-uncited-b (unknown).",
       comments: [
         expect.objectContaining({
           id: "comment-post-cutoff",

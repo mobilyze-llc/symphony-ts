@@ -96,9 +96,6 @@ export async function renderPrompt(input: RenderPromptInput): Promise<string> {
   try {
     const parsedTemplate = engine.parse(template);
 
-    const commentDeltaLines = renderImplementationCommentDeltaLines(
-      input.implementationCommentDeltas,
-    );
     const rendered = await engine.render(parsedTemplate, {
       issue: toTemplateIssue(input.issue),
       attempt: input.attempt,
@@ -112,10 +109,17 @@ export async function renderPrompt(input: RenderPromptInput): Promise<string> {
         input.implementationCommentDeltas,
       ),
     });
+    const normalizedDeltas = normalizeImplementationCommentDeltas(
+      input.implementationCommentDeltas,
+    );
+    const commentDeltaLines =
+      renderImplementationCommentDeltaLines(normalizedDeltas);
     const prompt =
       commentDeltaLines.length === 0
         ? rendered
-        : `${commentDeltaLines.join("\n")}\n\n${rendered}`;
+        : normalizedDeltas.requiresOperatorContext
+          ? `${rendered}\n\n${commentDeltaLines.join("\n")}`
+          : `${commentDeltaLines.join("\n")}\n\n${rendered}`;
 
     return withModePermissionEnvelope({
       prompt,
@@ -221,13 +225,6 @@ export function buildContinuationPrompt(input: {
     "Make the next best progress on the issue, then stop when this session has no further useful work to do.",
   ];
 
-  const commentDeltaLines = renderImplementationCommentDeltaLines(
-    input.implementationCommentDeltas,
-  );
-  if (commentDeltaLines.length > 0) {
-    lines.push(...commentDeltaLines);
-  }
-
   if (input.stageName) {
     lines.push(`Current stage: ${input.stageName}.`);
 
@@ -256,6 +253,13 @@ export function buildContinuationPrompt(input: {
         );
         break;
     }
+  }
+
+  const commentDeltaLines = renderImplementationCommentDeltaLines(
+    input.implementationCommentDeltas,
+  );
+  if (commentDeltaLines.length > 0) {
+    lines.push(...commentDeltaLines);
   }
 
   return withModePermissionEnvelope({

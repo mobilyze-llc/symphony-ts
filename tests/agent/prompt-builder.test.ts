@@ -382,6 +382,30 @@ describe("prompt builder", () => {
     expect(prompt).toContain("Reason: comment-4 is uncited.");
     expect(prompt).toContain("Do not implement.");
     expect(prompt).toContain("Implement ABC-123");
+    expect(prompt.indexOf("Do not implement.")).toBeGreaterThan(
+      prompt.indexOf("Implement ABC-123"),
+    );
+  });
+
+  it("keeps continuation operator-context guards after implement-stage guidance", () => {
+    const prompt = buildContinuationPrompt({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      turnNumber: 2,
+      maxTurns: 5,
+      stageName: "implement",
+      implementationCommentDeltas: {
+        sourceIntentHash: "source-hash",
+        cutoff: "2026-03-06T00:10:00.000Z",
+        requiresOperatorContext: true,
+        operatorContextReason: "comment-4 is uncited.",
+        comments: [],
+      },
+    });
+
+    expect(prompt.indexOf("Do not implement.")).toBeGreaterThan(
+      prompt.indexOf("You are in the IMPLEMENT stage."),
+    );
   });
 
   it("wraps continuation prompts with full-mode PR allowance but merge/bypass denials", () => {
