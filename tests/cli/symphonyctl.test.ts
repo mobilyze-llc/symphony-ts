@@ -465,7 +465,13 @@ describe("formatStateSummary", () => {
   it("summarizes counts, running lanes, and parked issues", () => {
     const summary = formatStateSummary({
       counts: { running: 1, retrying: 0, completed: 3, failed: 1 },
-      running: [{ issue_identifier: "SYMPH-7", state: "working" }],
+      running: [
+        {
+          issue_identifier: "SYMPH-7",
+          pipeline_stage: "implement",
+          state: "Resume",
+        },
+      ],
       explicit_resume_required: {
         "9": { reason: "intent:park:operator_pause" },
       },
@@ -485,12 +491,27 @@ describe("formatStateSummary", () => {
       ],
     });
     expect(summary).toContain("running=1");
-    expect(summary).toContain("SYMPH-7 working");
+    expect(summary).toContain("SYMPH-7 stage=implement tracker=Resume");
     expect(summary).toContain("9 intent:park:operator_pause");
     expect(summary).toContain("SYMPH-8 below SYMPH-7 until merged");
     expect(summary).toContain(
       "operator@pro14#symphonyctl · linear_field_edit · operator@mobilyze.com · Queue Anchor · field edit",
     );
+  });
+
+  it("uses explicit fallbacks for blank running stage and tracker state", () => {
+    const summary = formatStateSummary({
+      counts: { running: 1, retrying: 0, completed: 0, failed: 0 },
+      running: [
+        {
+          issue_identifier: "SYMPH-9",
+          pipeline_stage: "",
+          state: "",
+        },
+      ],
+    });
+
+    expect(summary).toContain("SYMPH-9 stage=running tracker=unknown");
   });
 
   it("reports an idle runtime", () => {

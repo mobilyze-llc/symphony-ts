@@ -455,8 +455,18 @@ export function formatStateSummary(snapshot: Record<string, unknown>): string {
   if (Array.isArray(running) && running.length > 0) {
     lines.push("running:");
     for (const entry of running as Array<Record<string, unknown>>) {
+      const stage =
+        entry.pipeline_stage === null ||
+        entry.pipeline_stage === undefined ||
+        entry.pipeline_stage === ""
+          ? "running"
+          : String(entry.pipeline_stage);
+      const trackerState =
+        entry.state === null || entry.state === undefined || entry.state === ""
+          ? "unknown"
+          : String(entry.state);
       lines.push(
-        `  ${String(entry.issue_identifier ?? entry.identifier ?? "?")} ${String(entry.state ?? "")}`,
+        `  ${String(entry.issue_identifier ?? entry.identifier ?? "?")} stage=${stage} tracker=${trackerState}`,
       );
     }
   }

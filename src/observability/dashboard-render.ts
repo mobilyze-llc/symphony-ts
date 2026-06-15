@@ -1220,6 +1220,8 @@ function renderDashboardClientScript(
             const reworkHtml = (row.rework_count != null && row.rework_count > 0)
               ? '<span class="state-badge state-badge-warning">Rework \xD7' + escapeHtml(row.rework_count) + '</span>'
               : '';
+            const stageLabel = row.pipeline_stage ? 'Stage: ' + String(row.pipeline_stage) : 'Stage: running';
+            const trackerLabel = row.state ? 'Tracker: ' + String(row.state) : 'Tracker: unknown';
             const healthLabel = row.health === 'red' ? '\uD83D\uDD34 Red' : row.health === 'yellow' ? '\uD83D\uDFE1 Yellow' : '\uD83D\uDFE2 Green';
             const healthClass = 'health-badge health-badge-' + (row.health || 'green');
             const healthTitle = row.health_reason ? ' title="' + escapeHtml(row.health_reason) + '"' : '';
@@ -1231,7 +1233,7 @@ function renderDashboardClientScript(
 
             return '<tr class="session-row">' +
               '<td><div class="issue-stack"><span class="issue-id">' + escapeHtml(row.issue_identifier) + '</span><span class="muted issue-title">' + escapeHtml(row.issue_title) + '</span>' + expandToggle + '</div></td>' +
-              '<td><div class="detail-stack"><span class="' + stateBadgeClass(row.state) + '">' + escapeHtml(row.state) + '</span>' + failureHtml + reworkHtml + healthHtml + '</div></td>' +
+              '<td><div class="detail-stack"><span class="state-badge state-badge-active">' + escapeHtml(stageLabel) + '</span><span class="muted event-meta">' + escapeHtml(trackerLabel) + '</span>' + failureHtml + reworkHtml + healthHtml + '</div></td>' +
               '<td><div class="session-stack">' + sessionCell + '</div></td>' +
               '<td class="numeric">' + formatRuntimeAndTurns(row, next.generated_at) + '</td>' +
               '<td class="numeric">' + formatPipelineTime(row, next.generated_at) + '</td>' +
@@ -1506,6 +1508,12 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
     .map((row) => {
       const detailId = `detail-${row.issue_identifier.replace(/[^a-zA-Z0-9]/g, "-")}`;
       const detailPanel = renderDetailPanel(row);
+      const stageLabel = row.pipeline_stage
+        ? `Stage: ${row.pipeline_stage}`
+        : "Stage: running";
+      const trackerLabel = row.state
+        ? `Tracker: ${row.state}`
+        : "Tracker: unknown";
       return `
             <tr class="session-row">
               <td>
@@ -1517,7 +1525,8 @@ function renderRunningRows(snapshot: RuntimeSnapshot): string {
               </td>
               <td>
                 <div class="detail-stack">
-                  <span class="${stateBadgeClass(row.state)}">${escapeHtml(row.state)}</span>
+                  <span class="state-badge state-badge-active">${escapeHtml(stageLabel)}</span>
+                  <span class="muted event-meta">${escapeHtml(trackerLabel)}</span>
                   ${row.failure_reason != null ? `<span class="state-badge state-badge-danger" title="${escapeHtml(row.failure_reason)}">${escapeHtml(row.failure_reason)}</span>` : ""}
                   ${row.rework_count !== undefined && row.rework_count > 0 ? `<span class="state-badge state-badge-warning">Rework ×${escapeHtml(row.rework_count)}</span>` : ""}
                   ${renderHealthBadge(row.health, row.health_reason)}

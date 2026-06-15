@@ -1,8 +1,22 @@
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 import type { RuntimeSnapshot } from "../../src/logging/runtime-snapshot.js";
 import { renderDashboardHtml } from "../../src/observability/dashboard-render.js";
 import { getDisplayVersion } from "../../src/version.js";
+
+const require = createRequire(import.meta.url);
+const { JSDOM } = require("jsdom") as {
+  JSDOM: new (
+    ...args: unknown[]
+  ) => {
+    window: {
+      document: {
+        getElementById(id: string): { textContent: string | null } | null;
+      };
+    };
+  };
+};
 
 const BASE_ROW: RuntimeSnapshot["running"][number] = {
   issue_id: "issue-1",
@@ -83,6 +97,40 @@ function buildSnapshot(
   };
 }
 
+function renderLiveRunningRowsText(
+  rowOverrides: Partial<RuntimeSnapshot["running"][number]>,
+): string {
+  const html = renderDashboardHtml(buildSnapshot({}), {
+    liveUpdatesEnabled: true,
+  });
+  const listeners: Record<string, (event: { data: string }) => void> = {};
+
+  const dom = new JSDOM(html, {
+    runScripts: "dangerously",
+    beforeParse(window: { EventSource?: unknown }) {
+      class FakeEventSource {
+        addEventListener(
+          type: string,
+          handler: (event: { data: string }) => void,
+        ) {
+          listeners[type] = handler;
+        }
+      }
+
+      Object.defineProperty(window, "EventSource", {
+        configurable: true,
+        value: FakeEventSource,
+      });
+    },
+  });
+
+  listeners.snapshot?.({
+    data: JSON.stringify(buildSnapshot(rowOverrides)),
+  });
+
+  return dom.window.document.getElementById("running-rows")?.textContent ?? "";
+}
+
 describe("Dashboard Pipeline column", () => {
   it("shows 'Pipeline' column header in the running table", () => {
     const snapshot = buildSnapshot({});
@@ -124,10 +172,53 @@ describe("Dashboard Pipeline column", () => {
     expect(pipelineContent?.trim()).toBe("—");
   });
 
+  it("leads running rows with orchestrator stage when tracker state is Resume", () => {
+    const snapshot = buildSnapshot({
+      state: "Resume",
+      pipeline_stage: "implement",
+    });
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+
+    expect(html).toContain("Stage: implement");
+    expect(html).toContain("Tracker: Resume");
+    expect(html.indexOf("Stage: implement")).toBeLessThan(
+      html.indexOf("Tracker: Resume"),
+    );
+  });
+
   it("includes formatPipelineTime in client-side JavaScript", () => {
     const snapshot = buildSnapshot({});
     const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: true });
     expect(html).toContain("formatPipelineTime");
+  });
+
+  it("keeps client-side live updates stage-first for active Resume rows", () => {
+    const renderedText = renderLiveRunningRowsText({
+      state: "Resume",
+      pipeline_stage: "review",
+    });
+    expect(renderedText).toContain("Stage: review");
+    expect(renderedText).toContain("Tracker: Resume");
+    expect(renderedText.indexOf("Stage: review")).toBeLessThan(
+      renderedText.indexOf("Tracker: Resume"),
+    );
+  });
+
+  it("uses matching stage and tracker fallbacks in static and live running rows", () => {
+    const snapshot = buildSnapshot({
+      state: "",
+      pipeline_stage: null,
+    });
+    const html = renderDashboardHtml(snapshot, { liveUpdatesEnabled: false });
+    const liveText = renderLiveRunningRowsText({
+      state: "",
+      pipeline_stage: null,
+    });
+
+    expect(html).toContain("Stage: running");
+    expect(html).toContain("Tracker: unknown");
+    expect(liveText).toContain("Stage: running");
+    expect(liveText).toContain("Tracker: unknown");
   });
 
   it("renders computed dispatch order status and rationale", () => {
