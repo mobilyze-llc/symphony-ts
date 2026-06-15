@@ -10,13 +10,13 @@ Codex is the lead in the current session, so this skill does not spawn a
 separate Codex lane.
 
 See `~/.agents/skills/cmux-spawn/SKILL.md` for the full CLI surface.
-Reference source: `/Users/ericlitman/projects/crucible/docs/cmux-spawn.md`.
+Reference source: `$HOME/projects/crucible/docs/cmux-spawn.md`.
 
 ### Setup
 
 ```bash
-CMUX_SPAWN_LOCAL_BIN="${CMUX_SPAWN_LOCAL_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn}"
-CMUX_SPAWN_REMOTE_BIN="${CMUX_SPAWN_REMOTE_SHIM_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn-remote}"
+CMUX_SPAWN_LOCAL_BIN="${CMUX_SPAWN_LOCAL_BIN:-$HOME/projects/crucible/bin/cmux-spawn}"
+CMUX_SPAWN_REMOTE_BIN="${CMUX_SPAWN_REMOTE_BIN:-$HOME/projects/crucible/bin/cmux-spawn-remote}"
 CMUX_SPAWN_REMOTE_HOST="${CMUX_SPAWN_REMOTE_HOST:-clawdilize@pro16.local}"
 CMUX_SPAWN_LOCAL_HOST="${CMUX_SPAWN_LOCAL_HOST:-pro14}"
 

@@ -25,10 +25,10 @@ already-obvious mechanical edits.
 
 All external CLIs go through Crucible's `cmux-spawn` substrate. By
 default, reviewer lanes run remotely on `pro16` through
-`/Users/ericlitman/projects/crucible/bin/cmux-spawn-remote` with
+`$HOME/projects/crucible/bin/cmux-spawn-remote` with
 `CMUX_SPAWN_REMOTE_HOST=clawdilize@pro16.local`. If the remote
 substrate fails preflight, degrade explicitly to local `pro14` through
-`/Users/ericlitman/projects/crucible/bin/cmux-spawn` and record the
+`$HOME/projects/crucible/bin/cmux-spawn` and record the
 degradation. `CMUX_SPAWN_BIN` may override this selection. Do **not**
 shell out directly to
 `claude -p`, `claude --bg`, `pi --print`, or `codex exec` from this
@@ -137,8 +137,8 @@ REVIEW_ROUND="${REVIEW_ROUND:-1}"
 PREVIOUS_REVIEWED_HEAD_SHA="${PREVIOUS_REVIEWED_HEAD_SHA:-n/a}"
 ARTIFACT_STATUS="${ARTIFACT_STATUS:-complete}"
 
-CMUX_SPAWN_LOCAL_BIN="${CMUX_SPAWN_LOCAL_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn}"
-CMUX_SPAWN_REMOTE_BIN="${CMUX_SPAWN_REMOTE_SHIM_BIN:-/Users/ericlitman/projects/crucible/bin/cmux-spawn-remote}"
+CMUX_SPAWN_LOCAL_BIN="${CMUX_SPAWN_LOCAL_BIN:-$HOME/projects/crucible/bin/cmux-spawn}"
+CMUX_SPAWN_REMOTE_BIN="${CMUX_SPAWN_REMOTE_BIN:-$HOME/projects/crucible/bin/cmux-spawn-remote}"
 CMUX_SPAWN_REMOTE_HOST="${CMUX_SPAWN_REMOTE_HOST:-clawdilize@pro16.local}"
 CMUX_SPAWN_LOCAL_HOST="${CMUX_SPAWN_LOCAL_HOST:-pro14}"
 SUBSTRATE_TIER=unknown
