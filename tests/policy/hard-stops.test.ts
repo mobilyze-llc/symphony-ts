@@ -494,6 +494,21 @@ describe("hard-stop policy", () => {
         ),
       },
     });
+    expect(
+      evaluateModePermission({
+        policy: thinPolicy,
+        action: "mark_pull_request_ready",
+      }),
+    ).toMatchObject({
+      allowed: false,
+      hardStop: {
+        outcome: "BLOCKED-needs-human",
+        trigger: "permission_denied",
+        reason: expect.stringContaining(
+          "marking a pipeline-owned pull request ready is not allowed",
+        ),
+      },
+    });
 
     const fullPolicy = createModeScopedPermissionPolicy({
       mode: "full",
@@ -555,6 +570,21 @@ describe("hard-stop policy", () => {
         trigger: "permission_denied",
         reason:
           "open_pull_request is not allowed in full mode during the merge stage.",
+      },
+    });
+    expect(
+      evaluateModePermission({
+        policy: fullMergePolicy,
+        action: "mark_pull_request_ready",
+      }),
+    ).toMatchObject({
+      allowed: false,
+      hardStop: {
+        outcome: "BLOCKED-needs-human",
+        trigger: "permission_denied",
+        reason: expect.stringContaining(
+          "marking a pipeline-owned pull request ready is not allowed",
+        ),
       },
     });
 
@@ -667,7 +697,25 @@ describe("hard-stop policy", () => {
     expect(
       detectModePermissionAction({
         toolName: "Bash",
+        toolInput: { command: "gh pr create --Draft --fill" },
+      }),
+    ).toBe("open_pull_request");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
         toolInput: { command: "gh pr create --fill" },
+      }),
+    ).toBe("open_ready_pull_request");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "gh pr create --draft=false" },
+      }),
+    ).toBe("open_ready_pull_request");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "gh pr create --draft false" },
       }),
     ).toBe("open_ready_pull_request");
     expect(
@@ -706,6 +754,18 @@ describe("hard-stop policy", () => {
         toolInput: { command: "gh pr edit 270 --draft false" },
       }),
     ).toBe("mark_pull_request_ready");
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "gh pr edit 270 --draft" },
+      }),
+    ).toBeNull();
+    expect(
+      detectModePermissionAction({
+        toolName: "Bash",
+        toolInput: { command: "gh pr edit 270 --draft=true" },
+      }),
+    ).toBeNull();
     expect(
       detectModePermissionAction({
         toolName: "Bash",

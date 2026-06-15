@@ -255,8 +255,14 @@ export function detectModePermissionAction(input: {
 function hasDraftFlag(tokens: string[]): boolean {
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (token === "-d" || token === "--draft" || token === "--draft=true") {
+    if (token === "-d" || token === "--draft=true") {
       return true;
+    }
+    if (token === "--draft=false") {
+      return false;
+    }
+    if (token === "--draft") {
+      return tokens[index + 1] !== "false";
     }
   }
   return false;
