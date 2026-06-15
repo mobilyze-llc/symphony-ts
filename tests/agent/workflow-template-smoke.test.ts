@@ -706,6 +706,11 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain("--assert-fresh-review");
     expect(output).toContain('code: "stale_review"');
     expect(output).toContain("rerun convergence review against HEAD.");
+    expect(output).toContain(
+      "gh pr view --json number,state,isDraft,mergeStateStatus,mergeable,reviewDecision,statusCheckRollup",
+    );
+    expect(output).toContain("[BLOCKED_NEEDS_HUMAN_BLOCKERS:");
+    expect(output).toContain("auto_merge_permission_denied");
   });
 
   it("null stageName renders without error (backward compat)", async () => {

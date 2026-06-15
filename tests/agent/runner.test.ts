@@ -2316,7 +2316,7 @@ describe("AgentRunner", () => {
             },
             rateLimits: null,
             message:
-              "Implementation complete; tests pass. PR creation is denied.\n[BLOCKED_NEEDS_HUMAN: pr_creation]",
+              'Implementation complete; tests pass. PR creation is denied.\n[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"permission":["pr_creation_denied"]}]\n[BLOCKED_NEEDS_HUMAN: pr_creation]',
           };
         },
         continueTurn,
@@ -2340,6 +2340,7 @@ describe("AgentRunner", () => {
       totalTokens: 4_901_000,
       billableTokens: 1_841_000,
       humanBlockOperation: "pr_creation",
+      humanBlockBlockers: '{"permission":["pr_creation_denied"]}',
       estimatedCostUsd: expect.closeTo(18.41, 2),
     });
   });

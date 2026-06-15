@@ -316,22 +316,34 @@ describe("containsStageCompleteSignal", () => {
 describe("parseHumanBlockSignal", () => {
   it("parses structured terminal human-block markers from their own line", () => {
     expect(parseHumanBlockSignal("[BLOCKED_NEEDS_HUMAN: pr_creation]")).toEqual(
-      { operation: "pr_creation" },
+      { operation: "pr_creation", blockers: null },
     );
     expect(
       parseHumanBlockSignal(
         "Verification passed.\n[BLOCKED_NEEDS_HUMAN: auto-merge]\n",
       ),
-    ).toEqual({ operation: "auto_merge" });
+    ).toEqual({ operation: "auto_merge", blockers: null });
     expect(
       parseHumanBlockSignal("Done.\n  [BLOCKED_NEEDS_HUMAN: gate_bypass]"),
-    ).toEqual({ operation: "gate_bypass" });
+    ).toEqual({ operation: "gate_bypass", blockers: null });
+  });
+
+  it("parses structured blocker context from its own line", () => {
+    expect(
+      parseHumanBlockSignal(
+        'Readiness blocked.\n[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":["behind_base"],"permission":["auto_merge_denied"]}]\n[BLOCKED_NEEDS_HUMAN: auto_merge]',
+      ),
+    ).toEqual({
+      operation: "auto_merge",
+      blockers:
+        '{"readiness":["behind_base"],"permission":["auto_merge_denied"]}',
+    });
   });
 
   it("keeps a bare BLOCKED-needs-human line as a legacy safe fallback", () => {
     expect(
       parseHumanBlockSignal("Verification passed.\nBLOCKED-needs-human"),
-    ).toEqual({ operation: "other" });
+    ).toEqual({ operation: "other", blockers: null });
   });
 
   it("does not fire on instruction echoes or mid-prose mentions", () => {

@@ -9043,6 +9043,7 @@ export class OrchestratorCore {
         totalTokens: input.hardStop.totalTokens,
         billableTokens: input.hardStop.billableTokens ?? null,
         humanBlockOperation: input.hardStop.humanBlockOperation ?? null,
+        humanBlockBlockers: input.hardStop.humanBlockBlockers ?? null,
         estimatedCostUsd: input.hardStop.estimatedCostUsd,
         issueState: runningEntry.issue.state,
         ...pendingStageSignalMetadata(input.pendingStageSignal),
@@ -9073,6 +9074,12 @@ export class OrchestratorCore {
       // stay under the choke-point cap so a long reason can never truncate
       // the deterministic resume instruction below (SYMPH-421).
       `Reason: ${sanitizeForLinear(input.hardStop.reason, { maxLen: 1500 })}`,
+      ...(input.hardStop.humanBlockBlockers === undefined ||
+      input.hardStop.humanBlockBlockers === null
+        ? []
+        : [
+            `Blockers: ${sanitizeForLinear(input.hardStop.humanBlockBlockers, { maxLen: 1500 })}`,
+          ]),
       `Turns: ${input.hardStop.turnCount}`,
       `Total tokens: ${input.hardStop.totalTokens}`,
       `Estimated cost: $${input.hardStop.estimatedCostUsd.toFixed(2)}`,

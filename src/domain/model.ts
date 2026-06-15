@@ -1354,12 +1354,15 @@ export type HumanBlockOperation = (typeof HUMAN_BLOCK_OPERATIONS)[number];
 
 export interface HumanBlockSignal {
   operation: HumanBlockOperation;
+  blockers: string | null;
 }
 
 const STAGE_FAILED_REGEX =
   /\[STAGE_FAILED:\s*(verify|review|rebase|spec|infra)\s*\]/;
 
 const STAGE_COMPLETE_REGEX = /(?:^|\n)[ \t]*\[STAGE_COMPLETE\]/;
+const HUMAN_BLOCK_BLOCKERS_REGEX =
+  /(?:^|\n)[ \t]*\[BLOCKED_NEEDS_HUMAN_BLOCKERS:\s*([^\n]+?)\s*\][ \t]*(?:$|\n)/;
 const HUMAN_BLOCK_REGEX =
   /(?:^|\n)[ \t]*(?:\[BLOCKED_NEEDS_HUMAN:\s*([A-Za-z_-]+)\s*\]|BLOCKED-needs-human)[ \t]*(?:$|\n)/;
 
@@ -1404,6 +1407,9 @@ export function parseFailureSignal(
  * Line anchoring avoids false positives when prompts or workers quote the
  * marker mid-prose. The bare fallback keeps older workers park-safe, while
  * the structured marker carries the denied operation for operator comments.
+ * Workers may also emit a separate blockers line before the marker; the
+ * orchestrator records it verbatim so readiness and permission blockers are
+ * not collapsed into a single opaque human block.
  */
 export function parseHumanBlockSignal(
   text: string | null | undefined,
@@ -1418,7 +1424,8 @@ export function parseHumanBlockSignal(
   }
 
   const operation = normalizeHumanBlockOperation(match[1] ?? null);
-  return { operation };
+  const blockers = HUMAN_BLOCK_BLOCKERS_REGEX.exec(text)?.[1]?.trim() ?? null;
+  return { operation, blockers };
 }
 
 function normalizeHumanBlockOperation(

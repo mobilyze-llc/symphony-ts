@@ -1732,14 +1732,16 @@ function createWorkerReportedBlockHardStop(input: {
   billableTokens: number;
   estimatedCostUsd: number;
 }): HardStopDecision {
+  const blockers = input.signal.blockers;
   return {
     outcome: "BLOCKED-needs-human",
     trigger: "worker_reported_block",
-    reason: `${describeHumanBlockOperation(input.signal.operation)}. Manual operator action required: open the PR manually or redispatch in a mode that permits the denied operation.`,
+    reason: `${describeHumanBlockOperation(input.signal.operation)}${formatHumanBlockBlockers(blockers)}. ${describeHumanBlockOperatorAction(input.signal.operation)}`,
     turnCount: input.turnCount,
     totalTokens: input.totalTokens,
     billableTokens: input.billableTokens,
     humanBlockOperation: input.signal.operation,
+    humanBlockBlockers: blockers,
     estimatedCostUsd: input.estimatedCostUsd,
   };
 }
@@ -1756,6 +1758,26 @@ function describeHumanBlockOperation(
       return "Worker reported BLOCKED-needs-human because gate bypass is denied by the Mode Permission Envelope";
     case "other":
       return "Worker reported BLOCKED-needs-human at a mode-permission boundary";
+  }
+}
+
+function formatHumanBlockBlockers(blockers: string | null): string {
+  return blockers === null || blockers.length === 0
+    ? ""
+    : ` with blockers ${blockers}`;
+}
+
+function describeHumanBlockOperatorAction(
+  operation: HumanBlockSignal["operation"],
+): string {
+  switch (operation) {
+    case "auto_merge":
+      return "Manual operator action required: address any readiness blockers first; when readiness is green, use the operator-controlled merge/resume path instead of editing worker code or reinterpreting raw logs.";
+    case "gate_bypass":
+      return "Manual operator action required: do not bypass gates; address the gate or use an explicitly approved operator path.";
+    case "pr_creation":
+    case "other":
+      return "Manual operator action required: open the PR manually or redispatch in a mode that permits the denied operation.";
   }
 }
 

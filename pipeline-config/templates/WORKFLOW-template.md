@@ -841,11 +841,32 @@ This repo uses GitHub's merge queue. When you run `gh pr merge`, GitHub will:
 
 In BOTH cases, the merge is not immediate — GitHub queues it, rebases, runs CI on the rebased version, then merges. This is normal behavior. Do NOT interpret it as a failure.
 
-### Step 1: Merge the PR
+### Step 1: Check PR Readiness
 First, get the PR number for the current branch:
 ```
 PR_NUMBER=$(gh pr view --json number --jq '.number')
 ```
+Then compute readiness deterministically before attempting any merge action:
+```
+gh pr view --json number,state,isDraft,mergeStateStatus,mergeable,reviewDecision,statusCheckRollup
+gh pr checks --required
+```
+Name every active blocker in one summary:
+- `behind_base` when `mergeStateStatus` says the branch is behind or otherwise not current with base
+- `failing_checks` with failing required check names
+- `pending_checks` with pending required check names
+- `missing_required_review` when `reviewDecision` is not approved
+- `draft_pr` or `closed_pr` when the PR is not an open ready PR
+- `mergeability_unknown` or `merge_conflict` when mergeability is not green
+- `auto_merge_permission_denied` when readiness is green but the Mode Permission Envelope denies worker merge-queue enqueue
+
+If readiness is not green, do NOT merge. Report all blockers and stop:
+```
+[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":["behind_base","failing_checks"],"permission":[],"mergeStateStatus":"BEHIND","failingChecks":["test"],"pendingChecks":[]}]
+[BLOCKED_NEEDS_HUMAN: auto_merge]
+```
+Adjust the JSON values to match the live PR. The blockers line must appear immediately before the terminal marker.
+
 Then assert the latest clean council artifact still covers the current PR head. Use the `review-result.json` path from the last successful review-stage workpad note:
 ```
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
@@ -876,7 +897,8 @@ run_council_gate \
 ```
 If this emits `code: "stale_review"` or the guidance `rerun convergence review against HEAD.`, do NOT merge. Move the issue back to review/rework, run a convergence review against HEAD, and only return to merge after the refreshed artifact is clean.
 
-Then merge:
+### Step 1b: Merge Only If Explicitly Permitted
+If the Mode Permission Envelope explicitly allows PR merge-queue enqueue, merge:
 ```
 gh pr merge $PR_NUMBER --auto
 ```
@@ -886,6 +908,12 @@ Do NOT pass `--squash`, `--delete-branch`, `--repo`, or `--admin` — the merge 
 - Retry the merge command if you see a "merge queue" or "auto-merge" response — that IS success
 - Run `gh pr merge` with `--admin` to bypass the queue
 - Modify any code in this stage
+
+If readiness is green and the Mode Permission Envelope denies worker merge-queue enqueue, do not run merge commands. Report the operator-resume path and stop:
+```
+[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":[],"permission":["auto_merge_permission_denied"],"mergeStateStatus":"CLEAN","failingChecks":[],"pendingChecks":[]}]
+[BLOCKED_NEEDS_HUMAN: auto_merge]
+```
 
 ### Step 2: Wait for Merge to Complete
 After the merge command succeeds, wait for the merge queue to finish:

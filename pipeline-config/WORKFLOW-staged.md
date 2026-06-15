@@ -446,8 +446,9 @@ If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/mal
 {% if stageName == "merge" %}
 ## Stage: Merge
 You are in the MERGE stage. The PR has been reviewed and approved.
+- First compute PR readiness with `gh pr view --json number,state,isDraft,mergeStateStatus,mergeable,reviewDecision,statusCheckRollup` and `gh pr checks --required`. If the PR is behind base, has failing/pending required checks, lacks required review, is draft/closed, or is not mergeable, do not merge; report every blocker in `[BLOCKED_NEEDS_HUMAN_BLOCKERS: {...}]` immediately before `[BLOCKED_NEEDS_HUMAN: auto_merge]`.
 - Before merging, assert the latest clean council artifact still covers the current PR head with `symphony-council-review-gate --assert-fresh-review <path-to-latest-clean-review-result.json> --issue-id {{ issue.identifier }} --artifact-dir "$ARTIFACT_DIR" --workspace "$PWD" --repo "$REPO" --pr "$PR_NUMBER"`. If it emits `code: "stale_review"` or `rerun convergence review against HEAD.`, do not merge; return to review and run convergence against HEAD.
-- Merge the PR via `gh pr merge --squash --delete-branch --repo $(git remote get-url origin | sed "s|.*github.com/||;s|\.git$||")`
+- Enqueue the PR with `gh pr merge "$PR_NUMBER" --auto` only if the Mode Permission Envelope explicitly allows worker merge-queue enqueue. If readiness is green but the envelope denies enqueue, do not merge; report `auto_merge_permission_denied` in `[BLOCKED_NEEDS_HUMAN_BLOCKERS: {...}]` immediately before `[BLOCKED_NEEDS_HUMAN: auto_merge]`.
 - Verify the merge succeeded on the main branch
 - Do NOT modify code in this stage
 

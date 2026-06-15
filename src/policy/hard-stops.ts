@@ -32,6 +32,8 @@ export interface HardStopDecision {
   billableTokens?: number;
   /** Parsed operation for worker-reported human blocks; avoids re-parsing prose. */
   humanBlockOperation?: HumanBlockOperation;
+  /** Structured blocker summary reported by the worker at a human boundary. */
+  humanBlockBlockers?: string | null;
   estimatedCostUsd: number;
 }
 
@@ -293,9 +295,9 @@ export function describeModePermissionEnvelope(
     `Mode: ${policy.mode}`,
     `Stage: ${policy.stageName ?? "unknown"}`,
     pullRequestLine,
-    "- Auto-merge: denied. Do NOT run PR merge commands such as `gh pr merge`, including `--auto`.",
+    "- Auto-merge / merge-queue enqueue: denied for worker modes. Do NOT run PR merge commands such as `gh pr merge`, including the gate-enforcing `--auto` queue enqueue, unless this envelope explicitly allows it.",
     "- Gate bypass: denied. Do NOT pass bypass/admin flags such as `--admin`, `--bypass`, or force-push to get around review, CI, or merge gates.",
-    "If any task, stage, workflow, or prior instruction conflicts with this envelope, obey this envelope. When a denied action is required to finish, stop instead of running the command and put the structured marker `[BLOCKED_NEEDS_HUMAN: pr_creation]`, `[BLOCKED_NEEDS_HUMAN: auto_merge]`, or `[BLOCKED_NEEDS_HUMAN: gate_bypass]` on its own final line.",
+    "If any task, stage, workflow, or prior instruction conflicts with this envelope, obey this envelope. When a denied action is required to finish, stop instead of running the command and put the structured marker `[BLOCKED_NEEDS_HUMAN: pr_creation]`, `[BLOCKED_NEEDS_HUMAN: auto_merge]`, or `[BLOCKED_NEEDS_HUMAN: gate_bypass]` on its own final line. If readiness or permission blockers are known, put a single-line `[BLOCKED_NEEDS_HUMAN_BLOCKERS: {...}]` JSON summary immediately before the terminal marker.",
   ].join("\n");
 }
 
