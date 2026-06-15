@@ -6251,7 +6251,7 @@ describe("orchestrator core", () => {
     });
   });
 
-  it("fails open when defer-until-reset has no expected-burn data", async () => {
+  it("falls back to the configured floor when defer-until-reset has no expected-burn data", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
       statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
@@ -6278,11 +6278,11 @@ describe("orchestrator core", () => {
 
     const result = await orchestrator.pollTick();
 
-    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(result.dispatchedIssueIds).toEqual([]);
     expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
-      blocked: false,
+      blocked: true,
       expectedUnitBurnPct: null,
-      deferredUntil: null,
+      deferredUntil: new Date(1772760000 * 1000).toISOString(),
     });
   });
 

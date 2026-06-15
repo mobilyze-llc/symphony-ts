@@ -3239,6 +3239,7 @@ export class OrchestratorCore {
     const expectedUnitBurnPct = deferUntilReset
       ? this.estimateExpectedUnitBurnPct()
       : null;
+    const hasExpectedUnitBurn = expectedUnitBurnPct !== null;
     if (
       floors.minPrimaryHeadroomPct !== null &&
       primary !== null &&
@@ -3247,11 +3248,11 @@ export class OrchestratorCore {
     ) {
       const shouldBlock =
         !deferUntilReset ||
-        (expectedUnitBurnPct !== null &&
-          primary.remainingPercent < expectedUnitBurnPct);
+        !hasExpectedUnitBurn ||
+        primary.remainingPercent < expectedUnitBurnPct;
       if (shouldBlock) {
         violations.push(
-          deferUntilReset && expectedUnitBurnPct !== null
+          deferUntilReset && hasExpectedUnitBurn
             ? `primary window headroom ${primary.remainingPercent.toFixed(1)}% < ${expectedUnitBurnPct.toFixed(1)}% expected unit burn (floor ${floors.minPrimaryHeadroomPct}%)`
             : `primary window headroom ${primary.remainingPercent.toFixed(1)}% < ${floors.minPrimaryHeadroomPct}% floor`,
         );
@@ -3271,11 +3272,11 @@ export class OrchestratorCore {
     ) {
       const shouldBlock =
         !deferUntilReset ||
-        (expectedUnitBurnPct !== null &&
-          secondary.remainingPercent < expectedUnitBurnPct);
+        !hasExpectedUnitBurn ||
+        secondary.remainingPercent < expectedUnitBurnPct;
       if (shouldBlock) {
         violations.push(
-          deferUntilReset && expectedUnitBurnPct !== null
+          deferUntilReset && hasExpectedUnitBurn
             ? `secondary window headroom ${secondary.remainingPercent.toFixed(1)}% < ${expectedUnitBurnPct.toFixed(1)}% expected unit burn (floor ${floors.minSecondaryHeadroomPct}%)`
             : `secondary window headroom ${secondary.remainingPercent.toFixed(1)}% < ${floors.minSecondaryHeadroomPct}% floor`,
         );
@@ -3298,9 +3299,10 @@ export class OrchestratorCore {
             jitterMs: floors.deferJitterMs ?? 0,
           })
         : null;
-    const reasonPrefix = deferUntilReset
-      ? "Codex rate-limit headroom below expected dispatch burn"
-      : "Codex rate-limit headroom below dispatch floor";
+    const reasonPrefix =
+      deferUntilReset && hasExpectedUnitBurn
+        ? "Codex rate-limit headroom below expected dispatch burn"
+        : "Codex rate-limit headroom below dispatch floor";
     const reason = blocked
       ? `${reasonPrefix}: ${violations.join("; ")}. New dispatches refused${deferredUntil !== null ? ` until the window resets at ${deferredUntil}` : ""}.`
       : null;
