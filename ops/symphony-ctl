@@ -5,14 +5,14 @@ set -euo pipefail
 # Usage: symphony-ctl {install|uninstall|start|stop|restart|status|logs|tail|cleanup}
 
 SCRIPT_DIR="$(cd "$(dirname "$(realpath "${BASH_SOURCE[0]}")")" && pwd)"
-DEFAULT_RUNTIME_CHECKOUT="$HOME/.codex/worktrees/symphony-ts-runtime-main"
+DEFAULT_SERVICE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Defaults — override via environment or .env
 SYMPHONY_PROJECT="${SYMPHONY_PROJECT:-symphony}"
 SERVICE_LABEL="com.symphony.${SYMPHONY_PROJECT}"
 PLIST_PATH="$HOME/Library/LaunchAgents/${SERVICE_LABEL}.plist"
 LOG_DIR="$HOME/Library/Logs/symphony/${SYMPHONY_PROJECT}"
-SYMPHONY_ROOT="${SYMPHONY_ROOT:-${SYMPHONY_SERVICE_ROOT:-${SYMPHONY_RUNTIME_CHECKOUT:-$DEFAULT_RUNTIME_CHECKOUT}}}"
+SYMPHONY_ROOT="${SYMPHONY_ROOT:-${SYMPHONY_SERVICE_ROOT:-${SYMPHONY_RUNTIME_CHECKOUT:-$DEFAULT_SERVICE_ROOT}}}"
 ENV_FILE="${SYMPHONY_ENV_FILE:-$SYMPHONY_ROOT/.env}"
 WORKFLOW_PATH="${SYMPHONY_WORKFLOW:-$SYMPHONY_ROOT/pipeline-config/workflows/WORKFLOW-${SYMPHONY_PROJECT}.md}"
 NODE_BIN="${SYMPHONY_NODE:-$(which node 2>/dev/null || echo /opt/homebrew/bin/node)}"
@@ -46,6 +46,16 @@ check_env_file() {
 
 check_workflow() {
   [[ -f "$WORKFLOW_PATH" ]] || die "WORKFLOW.md not found at $WORKFLOW_PATH. Set SYMPHONY_WORKFLOW to override."
+}
+
+check_service_root_not_worktree() {
+  [[ "${SYMPHONY_ALLOW_WORKTREE_ROOT:-}" == "1" ]] && return 0
+
+  case "$SYMPHONY_ROOT" in
+    */.codex/worktrees/*|*/.claude/worktrees/*|*/worktrees/*)
+      die "Refusing to install from worktree root: $SYMPHONY_ROOT. Re-run from the stable checkout or set SYMPHONY_ALLOW_WORKTREE_ROOT=1 to override."
+      ;;
+  esac
 }
 
 check_not_installed() {
@@ -165,6 +175,7 @@ PLIST
 
 cmd_install() {
   check_node
+  check_service_root_not_worktree
   check_built
   check_env_file
   check_workflow
@@ -1186,9 +1197,12 @@ Environment:
   SYMPHONY_PROJECT           Project name for label/logs (default: symphony)
   SYMPHONY_ROOT              Service checkout root (default: SYMPHONY_SERVICE_ROOT,
                              then SYMPHONY_RUNTIME_CHECKOUT, then
-                             ~/.codex/worktrees/symphony-ts-runtime-main)
+                             the checkout containing ops/symphony-ctl)
   SYMPHONY_SERVICE_ROOT      Alias for the service checkout root
-  SYMPHONY_RUNTIME_CHECKOUT  Detached runtime checkout root
+  SYMPHONY_RUNTIME_CHECKOUT  Explicit runtime checkout root override
+  SYMPHONY_ALLOW_WORKTREE_ROOT
+                             Allow install when the resolved service root is
+                             under a worktree path (default: refuse)
   SYMPHONY_ENV_FILE          Path to .env file (default: <symphony-root>/.env)
   SYMPHONY_WORKFLOW          Path to WORKFLOW.md
                              (default: pipeline-config/workflows/WORKFLOW-\$SYMPHONY_PROJECT.md)

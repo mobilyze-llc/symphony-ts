@@ -1,5 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -63,12 +70,12 @@ it("renders export-style dotenv keys as launchd environment keys", async () => {
   expect(result.stdout).not.toContain("not a dotenv assignment");
 });
 
-it("defaults the service root to the detached runtime checkout", async () => {
+it("defaults the service root to the checkout containing symphony-ctl", async () => {
   const root = await createTempDir("symphony-ctl-default-root-");
   const home = join(root, "home");
   const result = await runRootProbe(root, { HOME: home });
 
-  const runtimeRoot = `${home}/.codex/worktrees/symphony-ts-runtime-main`;
+  const runtimeRoot = await realpath(join(root, "checkout"));
   expect(result.status).toBe(0);
   expect(result.stderr).toBe("");
   expect(result.stdout).toContain(`root=${runtimeRoot}`);
@@ -77,6 +84,58 @@ it("defaults the service root to the detached runtime checkout", async () => {
     `workflow=${runtimeRoot}/pipeline-config/workflows/WORKFLOW-symphony.md`,
   );
   expect(result.stdout).toContain(`cli=${runtimeRoot}/dist/src/cli/main.js`);
+});
+
+it("refuses install from worktree roots unless explicitly allowed", async () => {
+  const ctl = await readFile("ops/symphony-ctl", "utf8");
+  const guard = extractShellFunction(ctl, "check_service_root_not_worktree");
+  const install = extractShellFunction(ctl, "cmd_install");
+
+  expect(
+    install.indexOf("check_service_root_not_worktree"),
+  ).toBeGreaterThanOrEqual(0);
+  expect(install.indexOf("check_service_root_not_worktree")).toBeLessThan(
+    install.indexOf("check_built"),
+  );
+
+  const denied = spawnSync(
+    "bash",
+    [
+      "-c",
+      [
+        'die() { echo "$*" >&2; exit 1; }',
+        guard,
+        'SYMPHONY_ROOT="$1"',
+        "check_service_root_not_worktree",
+      ].join("\n"),
+      "bash",
+      "/tmp/.codex/worktrees/symphony-ts-runtime-main",
+    ],
+    { encoding: "utf8" },
+  );
+
+  expect(denied.status).toBe(1);
+  expect(denied.stderr).toContain("Refusing to install from worktree root");
+
+  const allowed = spawnSync(
+    "bash",
+    [
+      "-c",
+      [
+        'die() { echo "$*" >&2; exit 1; }',
+        guard,
+        "SYMPHONY_ALLOW_WORKTREE_ROOT=1",
+        'SYMPHONY_ROOT="$1"',
+        "check_service_root_not_worktree",
+      ].join("\n"),
+      "bash",
+      "/tmp/.codex/worktrees/symphony-ts-runtime-main",
+    ],
+    { encoding: "utf8" },
+  );
+
+  expect(allowed.status).toBe(0);
+  expect(allowed.stderr).toBe("");
 });
 
 it("resolves service root overrides in documented precedence order", async () => {
@@ -187,7 +246,10 @@ async function runRootProbe(
   root: string,
   env: Record<string, string>,
 ): Promise<ReturnType<typeof spawnSync>> {
-  const probe = join(root, `probe-${Math.random().toString(16).slice(2)}.sh`);
+  const checkoutRoot = join(root, "checkout");
+  const opsDir = join(checkoutRoot, "ops");
+  await mkdir(opsDir, { recursive: true });
+  const probe = join(opsDir, "symphony-ctl");
   const ctl = await readFile("ops/symphony-ctl", "utf8");
   const preamble = ctl.split("\n# Colors")[0];
 
