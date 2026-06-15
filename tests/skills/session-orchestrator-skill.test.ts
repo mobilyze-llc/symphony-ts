@@ -151,6 +151,89 @@ describe("session-orchestrator skill", () => {
     }
   });
 
+  it("warns by default and fails enforcement on byte-divergent user-level skill copies", () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), "skill-install-copy-drift-"));
+    try {
+      const repoRoot = resolve(tempDir, "repo");
+      const userSkillsRoot = resolve(tempDir, "home/.agents/skills");
+      const codexSkillsRoot = resolve(tempDir, "home/.codex/skills");
+      mkdirSync(resolve(repoRoot, "skills"), { recursive: true });
+      mkdirSync(resolve(repoRoot, ".agents/skills"), { recursive: true });
+      mkdirSync(userSkillsRoot, { recursive: true });
+      mkdirSync(codexSkillsRoot, { recursive: true });
+
+      for (const skillName of [
+        "session-orchestrator",
+        "spec-review-lane",
+        "claude-runner",
+      ]) {
+        const skillDir = resolve(repoRoot, "skills", skillName);
+        mkdirSync(skillDir, { recursive: true });
+        writeFileSync(
+          resolve(skillDir, "SKILL.md"),
+          `---\nname: ${skillName}\n---\ncanonical\n`,
+        );
+        symlinkSync(
+          `../../skills/${skillName}`,
+          resolve(repoRoot, ".agents/skills", skillName),
+        );
+        symlinkSync(skillDir, resolve(userSkillsRoot, skillName));
+      }
+
+      rmSync(resolve(userSkillsRoot, "session-orchestrator"));
+      mkdirSync(resolve(userSkillsRoot, "session-orchestrator"));
+      writeFileSync(
+        resolve(userSkillsRoot, "session-orchestrator/SKILL.md"),
+        "---\nname: session-orchestrator\n---\nstale copy\n",
+      );
+
+      const script = resolve(
+        __dirname,
+        "../../scripts/validate-skill-installs.mjs",
+      );
+      const env = {
+        ...process.env,
+        SYMPHONY_SKILL_REPO_ROOT: repoRoot,
+        SYMPHONY_STABLE_ROOT: repoRoot,
+        SYMPHONY_USER_SKILLS_DIR: userSkillsRoot,
+        SYMPHONY_CODEX_SKILLS_DIR: codexSkillsRoot,
+      };
+
+      const warnOutput = execFileSync(process.execPath, [script], {
+        encoding: "utf8",
+        env,
+      });
+      expect(JSON.parse(warnOutput)).toMatchObject({
+        ok: true,
+        requireUserInstalls: false,
+        warnings: [expect.stringContaining("byte-divergent SKILL.md")],
+      });
+
+      try {
+        execFileSync(process.execPath, [script, "--user-installs"], {
+          encoding: "utf8",
+          env,
+        });
+        throw new Error("Expected user-install enforcement to fail");
+      } catch (error) {
+        const stderr =
+          typeof error === "object" &&
+          error !== null &&
+          "stderr" in error &&
+          Buffer.isBuffer(error.stderr)
+            ? error.stderr.toString("utf8")
+            : error instanceof Error
+              ? error.message
+              : String(error);
+        expect(stderr).toContain("session-orchestrator");
+        expect(stderr).toContain("not a symlink");
+        expect(stderr).toContain("byte-divergent SKILL.md");
+      }
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("discovers the stable main worktree for user-level install targets", () => {
     const tempDir = mkdtempSync(resolve(tmpdir(), "skill-install-main-"));
     try {
