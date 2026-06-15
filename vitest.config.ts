@@ -15,8 +15,7 @@ export default defineConfig({
       // coverage in scripts/ci/diff-coverage.mjs instead.
       enabled: false,
       provider: "v8",
-      // Include untested src files so diff coverage sees 0%-covered new files.
-      all: true,
+      // Include src files so diff coverage sees source-file coverage.
       include: ["src/**/*.ts"],
       reporter: ["json"],
       reportsDirectory: "coverage",
