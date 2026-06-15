@@ -10,6 +10,9 @@ import sys
 PASS_MODE = "PR-backed draft"
 SAFE_BASE_EQUIVALENCE = {"exact", "origin-prefix-equivalent"}
 SHA_RE = re.compile(r"[0-9a-fA-F]{7,64}")
+# Keep this in sync with the Phase 1 external reviewer lanes spawned by
+# the council-review skill. Unknown stems fail closed because they cannot
+# satisfy the required known-lane evidence count.
 LANE_ARTIFACT_STEMS = ("phase1-opus", "phase1-pi")
 MIN_REVIEW_ARTIFACT_BYTES = 400
 REQUIRED_REVIEW_HEADINGS = (
@@ -49,6 +52,16 @@ def read_json_object(path: Path) -> dict:
     except Exception:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def read_json_object_with_error(path: Path) -> tuple[dict, str | None]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return {}, str(exc)
+    if not isinstance(value, dict):
+        return {}, "JSON value is not an object"
+    return value, None
 
 
 def has_heading(text: str, heading: str) -> bool:
@@ -91,7 +104,11 @@ def validate_review_artifacts(artifact_dir: Path) -> list[str]:
             artifact_dir / f"{stem}.events.jsonl",
             artifact_dir / f"{stem}.pane.log",
         )
-        status = read_json_object(status_path) if status_path.exists() else {}
+        status_error = None
+        if status_path.exists():
+            status, status_error = read_json_object_with_error(status_path)
+        else:
+            status = {}
         status_state = str(status.get("state") or "").strip().lower()
         status_message = str(status.get("message") or "").strip()
         completed = status_state == "complete"
@@ -100,6 +117,8 @@ def validate_review_artifacts(artifact_dir: Path) -> list[str]:
         if not observed:
             continue
         lane_failure_count = len(failures)
+        if status_error:
+            failures.append(f"{stem}: status JSON is unreadable or malformed: {status_error}")
         if not completed:
             failures.append(
                 f"{stem}: reviewer artifact requires complete lane status to count as closeout evidence"

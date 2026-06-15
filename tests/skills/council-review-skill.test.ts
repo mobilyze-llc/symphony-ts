@@ -540,6 +540,23 @@ describe("council-review manual skill", () => {
     });
   });
 
+  it("reports malformed reviewer lane status JSON distinctly", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeArtifact(dir, "phase1-opus.status.json", "{not-json\n");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "phase1-opus: status JSON is unreadable or malformed",
+      );
+      expect(assertion.stdout).toContain(
+        "phase1-opus: reviewer artifact requires complete lane status",
+      );
+    });
+  });
+
   it("rejects completed lanes whose canonical artifact is missing", () => {
     withArtifactDir((dir) => {
       writeCleanPassArtifacts(dir);

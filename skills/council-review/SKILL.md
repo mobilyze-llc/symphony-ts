@@ -293,7 +293,12 @@ message claims P1/P2 findings. Status messages are diagnostic only; the
 Markdown artifact body is the authoritative evidence surface. Record
 the artifact path, byte count, status message, and validation reason in
 the council report, then continue only if at least one external
-reviewer produced a contract-valid artifact.
+reviewer produced a contract-valid artifact. That continuation rule
+allows degraded triage to proceed after a failed or unavailable lane; it
+does not make the run a compliant clean PASS. A PR-backed clean PASS is
+only available when the closeout assertion passes after all observed
+attempted Phase 1 lanes are either absent or complete with canonical,
+contract-valid Markdown artifacts.
 
 ### Phase 2: Cross-Examination
 
