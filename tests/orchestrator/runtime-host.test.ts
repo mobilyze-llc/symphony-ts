@@ -5785,9 +5785,9 @@ describe("pipeline notifications", () => {
       now: () => new Date("2026-03-06T00:00:05.000Z"),
     });
 
-    const tick = await host.pollOnce();
+    const tick = await host.runRetryTimer("1");
 
-    expect(tick.dispatchedIssueIds).toEqual(["1"]);
+    expect(tick.dispatched).toBe(true);
     expect(host.getState().issueReworkCounts["1"]).toBe(1);
     expect(notifier.events).not.toContainEqual(
       expect.objectContaining({ type: "resumed_existing_active" }),

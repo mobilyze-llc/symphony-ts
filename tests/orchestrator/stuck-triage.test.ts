@@ -920,10 +920,11 @@ describe("council R3: retry_once replay restores the granted stage", () => {
     expect(replayed.getState().resumeRequired.has("1")).toBe(false);
     expect(replayed.getState().failed.has("1")).toBe(false);
 
-    // Post-restart dispatch runs at the restored stage: after pollTick the
-    // issue is running and the cached stage is still "implement", not the
-    // workflow initial stage it would have fallen back to pre-fix.
-    await replayed.pollTick();
+    // Post-restart dispatch runs at the restored stage: after the replayed
+    // retry timer fires, the issue is running and the cached stage is still
+    // "implement", not the workflow initial stage it would have fallen back
+    // to pre-fix.
+    await replayed.onRetryTimer("1");
     expect(replayed.getState().running["1"]).toBeDefined();
     expect(replayed.getState().issueStages["1"]).toBe("implement");
   });
@@ -998,10 +999,10 @@ describe("council R1 fix 4: retryOnceGrant survives restart", () => {
     // The grant must be present on the replayed orchestrator.
     const replayedState = replayed.getState();
     expect(replayedState.failed.has("1")).toBe(false);
-    // Confirm the grant is set by checking that pollTick → onWorkerExit
+    // Confirm the grant is set by checking that retry timer → onWorkerExit
     // with the SAME signature parks (grant consumed, identical-sig re-park)
     // rather than re-triaging. After replay, retryAttempts is not restored
-    // (timer is transient); pollTick re-dispatches the unparked issue.
+    // from a snapshot; the journal replay rebuilds it from the applied intent.
     const postComment = vi.fn().mockResolvedValue(undefined);
     const replayedWithComment = createOrchestrator({
       runStuckTriage: vi.fn(),
@@ -1009,8 +1010,8 @@ describe("council R1 fix 4: retryOnceGrant survives restart", () => {
       postComment,
       runJournal: orchestrator.getState().dispatcherRunJournal,
     });
-    // pollTick dispatches the unparked issue (it is not in failed/resumeRequired).
-    await replayedWithComment.pollTick();
+    // The replayed retry timer dispatches the unparked issue.
+    await replayedWithComment.onRetryTimer("1");
     expect(replayedWithComment.getState().running["1"]).toBeDefined();
     await replayedWithComment.onWorkerExit({
       issueId: "1",
