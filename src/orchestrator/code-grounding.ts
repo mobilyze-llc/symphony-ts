@@ -368,21 +368,27 @@ async function prepareManagedCheckout(
   input: RunCodeGroundingInput,
 ): Promise<void> {
   await fs.mkdir(paths.checkoutsRoot, { recursive: true });
-  const exists = await directoryExists(paths.checkoutPath);
-  if (!exists) {
-    const source = input.target.sourcePath ?? input.target.repoUrl;
-    await runGit(
-      paths,
-      input,
-      ["clone", "--no-checkout", source, paths.checkoutPath],
-      {
-        cwd: paths.checkoutsRoot,
-      },
-    );
+  if (
+    (await directoryExists(paths.checkoutPath)) &&
+    !(await isUsableCheckout(paths, input))
+  ) {
+    await fs.rm(paths.checkoutPath, { recursive: true, force: true });
   }
-  await runGit(paths, input, ["checkout", "--detach", input.target.commitSha]);
-  await runGit(paths, input, ["reset", "--hard", input.target.commitSha]);
-  await runGit(paths, input, ["clean", "-fdx"]);
+  if (!(await directoryExists(paths.checkoutPath))) {
+    await cloneManagedCheckout(paths, input);
+  }
+  try {
+    await runGit(paths, input, [
+      "checkout",
+      "--detach",
+      input.target.commitSha,
+    ]);
+    await runGit(paths, input, ["reset", "--hard", input.target.commitSha]);
+    await runGit(paths, input, ["clean", "-fdx"]);
+  } catch (error) {
+    await fs.rm(paths.checkoutPath, { recursive: true, force: true });
+    throw error;
+  }
   const toplevel = (
     await runGit(paths, input, ["rev-parse", "--show-toplevel"])
   ).stdout.trim();
@@ -396,6 +402,43 @@ async function prepareManagedCheckout(
   }
 }
 
+async function cloneManagedCheckout(
+  paths: CodeGroundingPaths,
+  input: RunCodeGroundingInput,
+): Promise<void> {
+  const source = input.target.sourcePath ?? input.target.repoUrl;
+  try {
+    await runGit(
+      paths,
+      input,
+      ["clone", "--no-checkout", source, paths.checkoutPath],
+      {
+        cwd: paths.checkoutsRoot,
+      },
+    );
+  } catch (error) {
+    await fs.rm(paths.checkoutPath, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+async function isUsableCheckout(
+  paths: CodeGroundingPaths,
+  input: RunCodeGroundingInput,
+): Promise<boolean> {
+  try {
+    const toplevel = (
+      await runGit(paths, input, ["rev-parse", "--show-toplevel"])
+    ).stdout.trim();
+    return (
+      (await realpathOrResolve(toplevel)) ===
+      (await realpathOrResolve(paths.checkoutPath))
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function verifyFindingsAgainstCheckout(
   paths: CodeGroundingPaths,
   input: RunCodeGroundingInput,
@@ -404,31 +447,40 @@ async function verifyFindingsAgainstCheckout(
   const modelByFinding = new Map(
     (input.modelFindings ?? []).map((finding) => [finding.findingId, finding]),
   );
-  return input.findings.map((finding) => {
-    const deterministic = verifyFinding(paths, input, scanIndex, finding);
-    const modelFinding = modelByFinding.get(finding.findingId);
-    return modelFinding === undefined
-      ? deterministic
-      : validateModelFindingAgainstEvidence({
-          deterministic,
-          modelFinding,
-        });
-  });
+  return Promise.all(
+    input.findings.map(async (finding) => {
+      const deterministic = await verifyFinding(
+        paths,
+        input,
+        scanIndex,
+        finding,
+      );
+      const modelFinding = modelByFinding.get(finding.findingId);
+      return modelFinding === undefined
+        ? deterministic
+        : validateModelFindingAgainstEvidence({
+            deterministic,
+            modelFinding,
+          });
+    }),
+  );
 }
 
-function verifyFinding(
+async function verifyFinding(
   paths: CodeGroundingPaths,
   input: RunCodeGroundingInput,
   scanIndex: ScanIndex,
   finding: BacklogAuditFinding,
-): CodeGroundingEvidenceEntry {
+): Promise<CodeGroundingEvidenceEntry> {
   const candidates = extractEvidenceCandidates(
     `${finding.summary}\n${finding.evidence}`,
   );
   const citations: EvidenceCitation[] = [];
   const missing: string[] = [];
   for (const pathCandidate of candidates.paths) {
-    const citation = scanIndex.pathCitations.get(pathCandidate);
+    const citation =
+      (await readPathCandidateCitation(paths, pathCandidate)) ??
+      scanIndex.pathCitations.get(pathCandidate);
     if (citation === undefined) {
       missing.push(pathCandidate);
     } else {
@@ -465,6 +517,33 @@ function verifyFinding(
     citations: dedupeCitations(citations),
     missing,
   };
+}
+
+async function readPathCandidateCitation(
+  paths: CodeGroundingPaths,
+  pathCandidate: string,
+): Promise<ScanCitation | undefined> {
+  const absolutePath = resolve(paths.checkoutPath, pathCandidate);
+  assertWorkspacePathWithinRoot(paths.checkoutPath, absolutePath);
+  try {
+    const stat = await fs.stat(absolutePath);
+    if (!stat.isFile() || stat.size > MAX_SCAN_FILE_BYTES) {
+      return undefined;
+    }
+    const content = await fs.readFile(absolutePath, "utf8");
+    return {
+      path: pathCandidate,
+      startLine: 1,
+      endLine: Math.max(1, content.split("\n").length),
+      matchedSpan: pathCandidate,
+      contentHash: hashContent(content),
+    };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return undefined;
+    }
+    throw error;
+  }
 }
 
 interface EvidenceCandidates {
