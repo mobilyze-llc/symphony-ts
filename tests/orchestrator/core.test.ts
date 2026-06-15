@@ -1560,6 +1560,13 @@ describe("orchestrator core", () => {
         .getState()
         .issueExecutionHistory["2"]?.map((record) => record.outcome),
     ).toEqual(["restart_interrupted"]);
+
+    const redispatch = await orchestrator.pollTick();
+    expect(redispatch.dispatchedIssueIds).toEqual(["1", "2"]);
+    expect(orchestrator.getState().issueStages).toMatchObject({
+      "1": "review",
+      "2": "review",
+    });
   });
 
   it("recordWatchdogFiling feeds the rate limiter so subsequent alerts report canFile=false (SYMPH-398)", async () => {

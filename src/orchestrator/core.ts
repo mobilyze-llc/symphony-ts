@@ -1105,7 +1105,9 @@ export class OrchestratorCore {
         metadata: {
           status: "completed",
           // Recovery cleanup only proves the detached process tree is gone;
-          // preserving the workspace keeps post-mortem state available.
+          // preserving the workspace keeps post-mortem state available. The
+          // owning hard-stop entry, not this cleanup proof, carries stage and
+          // passed-stage continuity during journal replay.
           cleanupWorkspace: false,
           reason: "emergency_stop",
           recovery: "journal_hydration",
