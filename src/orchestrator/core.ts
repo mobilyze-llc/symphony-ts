@@ -14,6 +14,7 @@ import type {
 import type { CodexClientEvent } from "../codex/app-server-client.js";
 import {
   evaluateWindowHeadroom,
+  observedWindowDeltaPercent,
   parseRateLimitSnapshot,
 } from "../codex/rate-limits.js";
 import { validateDispatchConfig } from "../config/config-resolver.js";
@@ -3191,11 +3192,14 @@ export class OrchestratorCore {
   private evaluateRateLimitAdmissionGate(): {
     blocked: boolean;
     reason: string | null;
+    expectedUnitBurnPct: number | null;
+    deferredUntil: string | null;
     /** Structured floor violations for verdict reason codes (SYMPH-405). */
     floorViolations: Array<{
       window: "primary" | "secondary";
       floorPct: number;
       headroomPct: number;
+      expectedUnitBurnPct: number | null;
     }>;
   } {
     const floors = this.config.rateLimitAdmission;
@@ -3204,7 +3208,13 @@ export class OrchestratorCore {
       floors.minSecondaryHeadroomPct === null
     ) {
       this.state.rateLimitAdmission = null;
-      return { blocked: false, reason: null, floorViolations: [] };
+      return {
+        blocked: false,
+        reason: null,
+        expectedUnitBurnPct: null,
+        deferredUntil: null,
+        floorViolations: [],
+      };
     }
 
     const now = this.now();
@@ -3223,21 +3233,35 @@ export class OrchestratorCore {
       window: "primary" | "secondary";
       floorPct: number;
       headroomPct: number;
+      expectedUnitBurnPct: number | null;
     }> = [];
+    const deferUntilReset = floors.deferUntilReset === true;
+    const expectedUnitBurnPct = deferUntilReset
+      ? this.estimateExpectedUnitBurnPct()
+      : null;
     if (
       floors.minPrimaryHeadroomPct !== null &&
       primary !== null &&
       !primary.expired &&
       primary.remainingPercent < floors.minPrimaryHeadroomPct
     ) {
-      violations.push(
-        `primary window headroom ${primary.remainingPercent.toFixed(1)}% < ${floors.minPrimaryHeadroomPct}% floor`,
-      );
-      floorViolations.push({
-        window: "primary",
-        floorPct: floors.minPrimaryHeadroomPct,
-        headroomPct: primary.remainingPercent,
-      });
+      const shouldBlock =
+        !deferUntilReset ||
+        (expectedUnitBurnPct !== null &&
+          primary.remainingPercent < expectedUnitBurnPct);
+      if (shouldBlock) {
+        violations.push(
+          deferUntilReset && expectedUnitBurnPct !== null
+            ? `primary window headroom ${primary.remainingPercent.toFixed(1)}% < ${expectedUnitBurnPct.toFixed(1)}% expected unit burn (floor ${floors.minPrimaryHeadroomPct}%)`
+            : `primary window headroom ${primary.remainingPercent.toFixed(1)}% < ${floors.minPrimaryHeadroomPct}% floor`,
+        );
+        floorViolations.push({
+          window: "primary",
+          floorPct: floors.minPrimaryHeadroomPct,
+          headroomPct: primary.remainingPercent,
+          expectedUnitBurnPct,
+        });
+      }
     }
     if (
       floors.minSecondaryHeadroomPct !== null &&
@@ -3245,19 +3269,40 @@ export class OrchestratorCore {
       !secondary.expired &&
       secondary.remainingPercent < floors.minSecondaryHeadroomPct
     ) {
-      violations.push(
-        `secondary window headroom ${secondary.remainingPercent.toFixed(1)}% < ${floors.minSecondaryHeadroomPct}% floor`,
-      );
-      floorViolations.push({
-        window: "secondary",
-        floorPct: floors.minSecondaryHeadroomPct,
-        headroomPct: secondary.remainingPercent,
-      });
+      const shouldBlock =
+        !deferUntilReset ||
+        (expectedUnitBurnPct !== null &&
+          secondary.remainingPercent < expectedUnitBurnPct);
+      if (shouldBlock) {
+        violations.push(
+          deferUntilReset && expectedUnitBurnPct !== null
+            ? `secondary window headroom ${secondary.remainingPercent.toFixed(1)}% < ${expectedUnitBurnPct.toFixed(1)}% expected unit burn (floor ${floors.minSecondaryHeadroomPct}%)`
+            : `secondary window headroom ${secondary.remainingPercent.toFixed(1)}% < ${floors.minSecondaryHeadroomPct}% floor`,
+        );
+        floorViolations.push({
+          window: "secondary",
+          floorPct: floors.minSecondaryHeadroomPct,
+          headroomPct: secondary.remainingPercent,
+          expectedUnitBurnPct,
+        });
+      }
     }
 
     const blocked = violations.length > 0;
+    const deferredUntil =
+      blocked && deferUntilReset
+        ? computeRateLimitDeferredUntil({
+            violations: floorViolations,
+            primary,
+            secondary,
+            jitterMs: floors.deferJitterMs ?? 0,
+          })
+        : null;
+    const reasonPrefix = deferUntilReset
+      ? "Codex rate-limit headroom below expected dispatch burn"
+      : "Codex rate-limit headroom below dispatch floor";
     const reason = blocked
-      ? `Codex rate-limit headroom below dispatch floor: ${violations.join("; ")}. New dispatches refused until the window resets.`
+      ? `${reasonPrefix}: ${violations.join("; ")}. New dispatches refused${deferredUntil !== null ? ` until the window resets at ${deferredUntil}` : ""}.`
       : null;
 
     this.state.rateLimitAdmission = {
@@ -3270,9 +3315,17 @@ export class OrchestratorCore {
         primary !== null && !primary.expired ? primary.usedPercent : null,
       secondaryUsedPercent:
         secondary !== null && !secondary.expired ? secondary.usedPercent : null,
+      expectedUnitBurnPct,
+      deferredUntil,
     };
 
-    return { blocked, reason, floorViolations };
+    return {
+      blocked,
+      reason,
+      expectedUnitBurnPct,
+      deferredUntil,
+      floorViolations,
+    };
   }
 
   /**
@@ -3295,8 +3348,36 @@ export class OrchestratorCore {
     return {
       reasonCode,
       remedy,
-      details: { floorViolations: gate.floorViolations },
+      details: {
+        floorViolations: gate.floorViolations,
+        expectedUnitBurnPct: gate.expectedUnitBurnPct,
+        deferredUntil: gate.deferredUntil,
+      },
     };
+  }
+
+  private estimateExpectedUnitBurnPct(): number | null {
+    const observedBurn: number[] = [];
+    for (const history of Object.values(this.state.issueExecutionHistory)) {
+      for (const stage of history) {
+        const primary = observedWindowDeltaPercent(
+          stage.rateLimitWindows?.primary ?? null,
+        );
+        const secondary = observedWindowDeltaPercent(
+          stage.rateLimitWindows?.secondary ?? null,
+        );
+        const stageBurn = Math.max(primary, secondary);
+        if (stageBurn > 0) {
+          observedBurn.push(stageBurn);
+        }
+      }
+    }
+    const recentBurn = observedBurn.slice(-20);
+    return (
+      median(recentBurn) ??
+      this.config.rateLimitAdmission.expectedUnitBurnPct ??
+      null
+    );
   }
 
   budgetMultiplierForIssue(issueId: string): number {
@@ -13527,6 +13608,42 @@ function trimReviewSubstrateLane(value: string): string {
 
 function hashReviewInfrastructureSignature(source: string): string {
   return createHash("sha1").update(source).digest("hex").slice(0, 7);
+}
+
+function median(values: readonly number[]): number | null {
+  if (values.length === 0) {
+    return null;
+  }
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) {
+    return sorted[middle] ?? null;
+  }
+  const left = sorted[middle - 1];
+  const right = sorted[middle];
+  return left === undefined || right === undefined ? null : (left + right) / 2;
+}
+
+function computeRateLimitDeferredUntil(input: {
+  violations: ReadonlyArray<{ window: "primary" | "secondary" }>;
+  primary: ReturnType<typeof evaluateWindowHeadroom>;
+  secondary: ReturnType<typeof evaluateWindowHeadroom>;
+  jitterMs: number;
+}): string | null {
+  let latestResetMs: number | null = null;
+  for (const violation of input.violations) {
+    const headroom =
+      violation.window === "primary" ? input.primary : input.secondary;
+    if (headroom === null || headroom.expired || headroom.resetsAt === null) {
+      return null;
+    }
+    const resetMs = headroom.resetsAt * 1000;
+    latestResetMs =
+      latestResetMs === null ? resetMs : Math.max(latestResetMs, resetMs);
+  }
+  return latestResetMs === null
+    ? null
+    : new Date(latestResetMs + input.jitterMs).toISOString();
 }
 
 function summarizeContinuousFeedbackCheckpoint(

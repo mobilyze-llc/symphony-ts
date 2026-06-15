@@ -1452,7 +1452,8 @@ function renderDashboardClientScript(
             return 'Dispatch headroom floor: not configured.';
           }
           if (admission.blocked) {
-            return 'Dispatch blocked: ' + (admission.reason || 'rate-limit headroom below the configured floor.');
+            var eta = admission.deferred_until ? ' Next admission ETA ' + admission.deferred_until + '.' : '';
+            return 'Dispatch blocked: ' + (admission.reason || 'rate-limit headroom below the configured floor.') + eta;
           }
           var parts = [];
           if (admission.primary_used_pct != null) {
@@ -1931,7 +1932,11 @@ function renderRateLimitAdmissionLabel(
     return "Dispatch headroom floor: not configured.";
   }
   if (admission.blocked) {
-    return `Dispatch blocked: ${admission.reason ?? "rate-limit headroom below the configured floor."}`;
+    const eta =
+      admission.deferred_until !== null
+        ? ` Next admission ETA ${admission.deferred_until}.`
+        : "";
+    return `Dispatch blocked: ${admission.reason ?? "rate-limit headroom below the configured floor."}${eta}`;
   }
   const parts: string[] = [];
   if (admission.primary_used_pct !== null) {

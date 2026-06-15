@@ -397,7 +397,7 @@ export function formatTokensCompact(tokens: number): string {
 }
 
 function formatRightSizingRouting(decision: RightSizingDecision): string {
-  const prefix = decision.modelRouting.allowed ? "allowed" : "off";
+  const prefix = decision.modelRouting.allowed ? "recommended" : "off";
   return `${prefix} (${decision.modelRouting.reason})`;
 }
 
@@ -407,7 +407,7 @@ function buildRightSizingLines(decision: RightSizingDecision): {
 } {
   const textLines = [
     `Mode: ${decision.mode}`,
-    `Model routing: ${formatRightSizingRouting(decision)}`,
+    `Model routing (advisory): ${formatRightSizingRouting(decision)}`,
   ];
   const fields: SlackTextObject[] = [
     {
@@ -416,7 +416,7 @@ function buildRightSizingLines(decision: RightSizingDecision): {
     },
     {
       type: "mrkdwn",
-      text: `:compass: *Model routing: ${formatRightSizingRouting(decision)}*`,
+      text: `:compass: *Model routing (advisory): ${formatRightSizingRouting(decision)}*`,
     },
   ];
 

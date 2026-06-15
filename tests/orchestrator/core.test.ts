@@ -6114,6 +6114,178 @@ describe("orchestrator core", () => {
     );
   });
 
+  it("records a next-admission ETA when defer-until-reset blocks on expected burn", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 30_000,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 40,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: true,
+      expectedUnitBurnPct: 3,
+      deferredUntil: new Date(1772800000 * 1000 + 30_000).toISOString(),
+    });
+    expect(orchestrator.getState().rateLimitAdmission?.reason).toContain(
+      "secondary window headroom 2.0% < 3.0% expected unit burn",
+    );
+  });
+
+  it("admits below-floor headroom when expected burn still fits", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 92,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: false,
+      expectedUnitBurnPct: 3,
+      deferredUntil: null,
+    });
+  });
+
+  it("uses durable stage window telemetry before the fallback expected burn", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 1,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().issueExecutionHistory.done = [
+      {
+        stageName: "investigate",
+        durationMs: 1,
+        totalTokens: 1,
+        rateLimitWindows: {
+          primary: { startPercent: 10, latestPercent: 12, lastResetsAt: null },
+          secondary: null,
+        },
+        turns: 1,
+        outcome: "normal",
+      },
+      {
+        stageName: "implement",
+        durationMs: 1,
+        totalTokens: 1,
+        rateLimitWindows: {
+          primary: { startPercent: 20, latestPercent: 24, lastResetsAt: null },
+          secondary: null,
+        },
+        turns: 1,
+        outcome: "normal",
+      },
+    ];
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 98,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: true,
+      expectedUnitBurnPct: 3,
+      deferredUntil: new Date(1772760000 * 1000).toISOString(),
+    });
+  });
+
+  it("fails open when defer-until-reset has no expected-burn data", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: 5,
+          deferUntilReset: true,
+          expectedUnitBurnPct: null,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 99,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: false,
+      expectedUnitBurnPct: null,
+      deferredUntil: null,
+    });
+  });
+
   it("dispatches when a low-headroom snapshot has expired past resets_at", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],

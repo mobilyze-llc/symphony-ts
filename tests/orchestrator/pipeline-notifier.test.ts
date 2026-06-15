@@ -345,7 +345,9 @@ describe("formatNotification", () => {
     });
 
     expect(result.text).toContain("Mode: thin");
-    expect(result.text).toContain("Model routing: allowed (ambiguous_routing)");
+    expect(result.text).toContain(
+      "Model routing (advisory): recommended (ambiguous_routing)",
+    );
     expect(result.text).toContain("Triggers: merge_path, scope_overlap");
   });
 
@@ -724,7 +726,7 @@ describe("formatNotification", () => {
         }),
         expect.objectContaining({
           text: expect.stringContaining(
-            "Model routing: allowed (risk_trigger)",
+            "Model routing (advisory): recommended (risk_trigger)",
           ),
         }),
         expect.objectContaining({
@@ -1336,7 +1338,9 @@ describe("PipelineNotifier", () => {
 
     expect(poster.calls).toHaveLength(1);
     expect(poster.calls[0]?.text).toContain("Mode: prototype");
-    expect(poster.calls[0]?.text).toContain("Model routing: off (not_needed)");
+    expect(poster.calls[0]?.text).toContain(
+      "Model routing (advisory): off (not_needed)",
+    );
     expect(JSON.stringify(poster.calls[0]?.blocks ?? [])).toContain(
       "Mode: prototype",
     );

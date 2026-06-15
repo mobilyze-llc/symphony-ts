@@ -96,6 +96,9 @@ describe("config-resolver", () => {
     expect(resolved.rateLimitAdmission).toEqual({
       minPrimaryHeadroomPct: null,
       minSecondaryHeadroomPct: null,
+      deferUntilReset: false,
+      expectedUnitBurnPct: null,
+      deferJitterMs: 0,
     });
     expect(resolved.riskPredicateReasoning).toEqual({
       effort: DEFAULT_RISK_PREDICATE_REASONING_EFFORT,
@@ -1134,6 +1137,9 @@ describe("config-resolver fast_track", () => {
     expect(resolved.rateLimitAdmission).toEqual({
       minPrimaryHeadroomPct: 10,
       minSecondaryHeadroomPct: 5,
+      deferUntilReset: false,
+      expectedUnitBurnPct: null,
+      deferJitterMs: 0,
     });
 
     const unset = resolveWorkflowConfig({
@@ -1144,6 +1150,31 @@ describe("config-resolver fast_track", () => {
     expect(unset.rateLimitAdmission).toEqual({
       minPrimaryHeadroomPct: null,
       minSecondaryHeadroomPct: null,
+      deferUntilReset: false,
+      expectedUnitBurnPct: null,
+      deferJitterMs: 0,
+    });
+  });
+
+  it("parses rate_limit_admission deferral settings", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        rate_limit_admission: {
+          defer_until_reset: true,
+          expected_unit_burn_pct: "1.5",
+          defer_jitter_ms: 30000,
+        },
+      },
+    });
+
+    expect(resolved.rateLimitAdmission).toEqual({
+      minPrimaryHeadroomPct: null,
+      minSecondaryHeadroomPct: null,
+      deferUntilReset: true,
+      expectedUnitBurnPct: 1.5,
+      deferJitterMs: 30000,
     });
   });
 

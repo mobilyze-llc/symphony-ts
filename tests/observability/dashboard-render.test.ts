@@ -449,6 +449,8 @@ describe("Dashboard Pipeline column", () => {
           reason: "secondary window headroom 2.0% < 5% floor",
           primary_used_pct: 39,
           secondary_used_pct: 98,
+          expected_unit_burn_pct: null,
+          deferred_until: null,
         },
         live_telemetry: {
           source: "in-memory runner telemetry (orchestrator state)",
@@ -746,6 +748,8 @@ describe("Dashboard Pipeline column", () => {
         min_secondary_headroom_pct: 5,
         primary_used_pct: 40,
         secondary_used_pct: 98,
+        expected_unit_burn_pct: 3,
+        deferred_until: "2026-03-21T12:00:00.000Z",
       },
     };
     const blockedHtml = renderDashboardHtml(blocked, {
@@ -753,6 +757,9 @@ describe("Dashboard Pipeline column", () => {
     });
     expect(blockedHtml).toContain(
       "Dispatch blocked: secondary window headroom 2.0% &lt; 5% floor",
+    );
+    expect(blockedHtml).toContain(
+      "Next admission ETA 2026-03-21T12:00:00.000Z.",
     );
 
     const ok = {
@@ -765,6 +772,8 @@ describe("Dashboard Pipeline column", () => {
         min_secondary_headroom_pct: 5,
         primary_used_pct: 40,
         secondary_used_pct: 91.5,
+        expected_unit_burn_pct: null,
+        deferred_until: null,
       },
     };
     expect(renderDashboardHtml(ok, { liveUpdatesEnabled: false })).toContain(

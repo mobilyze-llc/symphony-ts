@@ -46,6 +46,7 @@ describe("resolveStagesConfig", () => {
     expect(implement.type).toBe("agent");
     expect(implement.runner).toBe("claude-code");
     expect(implement.model).toBe("claude-sonnet-4-5");
+    expect(implement.reasoningEffort).toBeNull();
     expect(implement.maxTurns).toBe(30);
     expect(implement.prompt).toBe("implement.liquid");
     expect(implement.transitions.onComplete).toBe("done");
@@ -134,6 +135,21 @@ describe("resolveStagesConfig", () => {
 
     expect(result!.stages.investigate!.concurrency).toBe(2);
     expect(result!.stages.investigate!.timeoutMs).toBe(60000);
+  });
+
+  it("parses stage-level reasoning_effort overrides", () => {
+    const result = resolveStagesConfig({
+      investigate: {
+        type: "agent",
+        reasoning_effort: "MEDIUM",
+        on_complete: "done",
+      },
+      done: {
+        type: "terminal",
+      },
+    });
+
+    expect(result!.stages.investigate!.reasoningEffort).toBe("medium");
   });
 
   it("parses linear_state from stage definition", () => {

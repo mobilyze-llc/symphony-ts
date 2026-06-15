@@ -56,6 +56,12 @@ hard_stops:
 rate_limit_admission:
   min_primary_headroom_pct: 10
   min_secondary_headroom_pct: 5
+  # SYMPH-339: when enabled, low-headroom refusals include a deterministic
+  # next-admission ETA at the binding window reset. The gate still evaluates
+  # every poll tick; this is not an admission queue.
+  defer_until_reset: false
+  expected_unit_burn_pct: 1
+  defer_jitter_ms: 30000
 
 # SYMPH-337: deterministic budget-escalation ladder. A budget hard stop
 # auto-resumes the unit with a multiplied budget (base * multiplier^step)
@@ -98,9 +104,10 @@ spec_fidelity:
 admission_card:
   enabled: true
 
-# Override reasoning effort only for journal-risk investigate/implement and
-# repeated same-family rework turns; the primary app-server command below
-# remains low effort by default.
+# Global upward override for journal-risk investigate/implement and repeated
+# same-family rework turns. Per-stage `reasoning_effort` below opts a stage into
+# deterministic mode adjustment; the primary app-server command remains low
+# effort by default when no override is selected.
 risk_predicate_reasoning_effort: high
 
 codex:
@@ -366,6 +373,9 @@ stages:
   investigate:
     type: agent
     runner: codex
+    # Investigate stays cheap; risk-predicate escalation can still raise it
+    # when configured globally above.
+    reasoning_effort: low
     max_turns: 8
     hard_stops:
       max_iterations: 4
@@ -389,6 +399,9 @@ stages:
   implement:
     type: agent
     runner: codex
+    # Opts implement into deterministic mode adjustment: prototype -> low,
+    # thin -> medium, full -> high. Omit to preserve command-default low.
+    reasoning_effort: medium
     max_turns: 30
     # Without this, issues admitted from Todo/Resume keep that stale state
     # for the whole implement run — dashboards show running work as queued.
