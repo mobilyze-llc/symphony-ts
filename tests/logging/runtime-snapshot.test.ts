@@ -2848,7 +2848,35 @@ describe("state-document enrichment (SYMPH-407)", () => {
         stageName: "investigate",
         durationMs: 1_800_000,
         totalTokens: 40_000,
+        rateLimitWindows: {
+          primary: { startPercent: 10, latestPercent: 12.5, lastResetsAt: 1 },
+          secondary: { startPercent: 90, latestPercent: 91, lastResetsAt: 2 },
+        },
+        usageEventCadence: {
+          observedCount: 4,
+          retainedCount: 3,
+          truncated: true,
+          maxTotalTokensDelta: 8_000,
+        },
         turns: 12,
+        outcome: "completed",
+      },
+      {
+        stageName: "implement",
+        durationMs: 600_000,
+        totalTokens: 0,
+        turns: 3,
+        outcome: "completed",
+      },
+      {
+        stageName: "review",
+        durationMs: 300_000,
+        totalTokens: 0,
+        rateLimitWindows: {
+          primary: { startPercent: 20.2, latestPercent: 19.1, lastResetsAt: 3 },
+          secondary: { startPercent: 91, latestPercent: 90, lastResetsAt: 4 },
+        },
+        turns: 1,
         outcome: "completed",
       },
     ];
@@ -2866,7 +2894,49 @@ describe("state-document enrichment (SYMPH-407)", () => {
       codexTotalTokens: 0,
     });
     running.totalStageTotalTokens = 5_000;
+    running.rateLimitWindows.primary = {
+      startPercent: 12.5,
+      latestPercent: 13,
+      lastResetsAt: 1,
+    };
+    running.tokenTelemetryObservedCount = 2;
+    running.tokenTelemetry = [
+      {
+        timestamp: "2026-06-12T10:00:30.000Z",
+        event: "turn_completed",
+        sessionId: "thread-a-turn-1",
+        turnId: "turn-2",
+        inputTokens: 1_000,
+        outputTokens: 500,
+        totalTokens: 1_500,
+        cacheReadTokens: null,
+        cacheWriteTokens: null,
+        noCacheTokens: null,
+        reasoningTokens: null,
+        inputTokensDelta: 1_000,
+        outputTokensDelta: 500,
+        totalTokensDelta: 1_500,
+        cacheReadTokensDelta: 0,
+        cacheWriteTokensDelta: 0,
+        noCacheTokensDelta: 0,
+        reasoningTokensDelta: 0,
+      },
+    ];
     state.running["issue-1"] = running;
+    state.issueBudgetEscalations["issue-3"] = 1;
+    state.running["issue-3"] = createRunningEntry({
+      issueId: "issue-3",
+      identifier: "ABC-3",
+      startedAt: "2026-06-12T10:00:00.000Z",
+      sessionId: "thread-c-turn-1",
+      lastCodexEvent: null,
+      lastCodexTimestamp: null,
+      lastCodexMessage: null,
+      turnCount: 1,
+      codexInputTokens: 0,
+      codexOutputTokens: 0,
+      codexTotalTokens: 0,
+    });
     // issue with no non-zero counters must not appear
     state.issueExecutionHistory["issue-2"] = [];
 
@@ -2881,6 +2951,31 @@ describe("state-document enrichment (SYMPH-407)", () => {
         total_tokens: 45_000,
         completed_stage_tokens: 40_000,
         live_stage_tokens: 5_000,
+        rate_limit_window_delta_pct: {
+          primary: 3,
+          secondary: 1,
+        },
+        usage_events: {
+          observed: 6,
+          retained: 4,
+          truncated: true,
+          max_total_tokens_delta: 8_000,
+        },
+      },
+    });
+    expect(snapshot.counters["issue-3"]).toMatchObject({
+      escalation_steps: 1,
+      spend: {
+        rate_limit_window_delta_pct: {
+          primary: 0,
+          secondary: 0,
+        },
+        usage_events: {
+          observed: 0,
+          retained: 0,
+          truncated: false,
+          max_total_tokens_delta: 0,
+        },
       },
     });
     expect(snapshot.counters["issue-2"]).toBeUndefined();

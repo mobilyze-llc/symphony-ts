@@ -21,6 +21,7 @@ import type {
   IssueDispositionRecord,
   OrchestratorState,
   RecentActivityEntry,
+  RunningEntry,
   SessionRateLimitTelemetry,
   SessionRateLimitWindowTelemetry,
   StageRecord,
@@ -395,6 +396,16 @@ export interface RuntimeSnapshotIssueCounters {
     total_tokens: number;
     completed_stage_tokens: number;
     live_stage_tokens: number;
+    rate_limit_window_delta_pct: {
+      primary: number;
+      secondary: number;
+    };
+    usage_events: {
+      observed: number;
+      retained: number;
+      truncated: boolean;
+      max_total_tokens_delta: number;
+    };
   };
 }
 
@@ -1454,6 +1465,14 @@ function buildIssueCounters(
       state.issueExecutionHistory[issueId] ?? []
     ).reduce((sum, stage) => sum + stage.totalTokens, 0);
     const liveStageTokens = state.running[issueId]?.totalStageTotalTokens ?? 0;
+    const rateLimitWindowDeltaPct = sumRateLimitWindowDeltaPct(
+      state.issueExecutionHistory[issueId] ?? [],
+      state.running[issueId] ?? null,
+    );
+    const usageEvents = sumStageUsageEvents(
+      state.issueExecutionHistory[issueId] ?? [],
+      state.running[issueId] ?? null,
+    );
     const entry: RuntimeSnapshotIssueCounters = {
       escalation_steps: state.issueBudgetEscalations[issueId] ?? 0,
       triage_resumes: state.issuePauseTriageResumes[issueId] ?? 0,
@@ -1462,6 +1481,8 @@ function buildIssueCounters(
         total_tokens: completedStageTokens + liveStageTokens,
         completed_stage_tokens: completedStageTokens,
         live_stage_tokens: liveStageTokens,
+        rate_limit_window_delta_pct: rateLimitWindowDeltaPct,
+        usage_events: usageEvents,
       },
     };
     if (
@@ -1474,6 +1495,86 @@ function buildIssueCounters(
     }
   }
   return counters;
+}
+
+function sumRateLimitWindowDeltaPct(
+  history: StageRecord[],
+  running: RunningEntry | null,
+): { primary: number; secondary: number } {
+  const totals = history.reduce(
+    (sum, stage) => ({
+      primary:
+        sum.primary + rateLimitWindowDeltaPct(stage.rateLimitWindows?.primary),
+      secondary:
+        sum.secondary +
+        rateLimitWindowDeltaPct(stage.rateLimitWindows?.secondary),
+    }),
+    { primary: 0, secondary: 0 },
+  );
+  if (running !== null) {
+    totals.primary += rateLimitWindowDeltaPct(running.rateLimitWindows.primary);
+    totals.secondary += rateLimitWindowDeltaPct(
+      running.rateLimitWindows.secondary,
+    );
+  }
+  return {
+    primary: roundRateLimitDeltaPct(totals.primary),
+    secondary: roundRateLimitDeltaPct(totals.secondary),
+  };
+}
+
+function rateLimitWindowDeltaPct(
+  window: SessionRateLimitWindowTelemetry | null | undefined,
+): number {
+  return window === null || window === undefined
+    ? 0
+    : Math.max(0, window.latestPercent - window.startPercent);
+}
+
+function roundRateLimitDeltaPct(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function sumStageUsageEvents(
+  history: StageRecord[],
+  running: RunningEntry | null,
+): RuntimeSnapshotIssueCounters["spend"]["usage_events"] {
+  const totals = history.reduce(
+    (sum, stage) => {
+      const cadence = stage.usageEventCadence;
+      if (cadence === undefined) {
+        return sum;
+      }
+      return {
+        observed: sum.observed + cadence.observedCount,
+        retained: sum.retained + cadence.retainedCount,
+        truncated: sum.truncated || cadence.truncated,
+        max_total_tokens_delta: Math.max(
+          sum.max_total_tokens_delta,
+          cadence.maxTotalTokensDelta,
+        ),
+      };
+    },
+    {
+      observed: 0,
+      retained: 0,
+      truncated: false,
+      max_total_tokens_delta: 0,
+    },
+  );
+  if (running !== null) {
+    totals.observed += running.tokenTelemetryObservedCount;
+    totals.retained += running.tokenTelemetry.length;
+    totals.truncated =
+      totals.truncated ||
+      running.tokenTelemetryObservedCount > running.tokenTelemetry.length;
+    totals.max_total_tokens_delta = Math.max(
+      totals.max_total_tokens_delta,
+      ...running.tokenTelemetry.map((entry) => entry.totalTokensDelta),
+      0,
+    );
+  }
+  return totals;
 }
 
 const RATE_VIEW_DISAGREEMENT_THRESHOLD_PCT = 1;
