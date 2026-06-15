@@ -1354,14 +1354,17 @@ export type HumanBlockOperation = (typeof HUMAN_BLOCK_OPERATIONS)[number];
 
 export interface HumanBlockSignal {
   operation: HumanBlockOperation;
+  blockers: string | null;
 }
 
 const STAGE_FAILED_REGEX =
   /\[STAGE_FAILED:\s*(verify|review|rebase|spec|infra)\s*\]/;
 
 const STAGE_COMPLETE_REGEX = /(?:^|\n)[ \t]*\[STAGE_COMPLETE\]/;
-const HUMAN_BLOCK_REGEX =
-  /(?:^|\n)[ \t]*(?:\[BLOCKED_NEEDS_HUMAN:\s*([A-Za-z_-]+)\s*\]|BLOCKED-needs-human)[ \t]*(?:$|\n)/;
+const HUMAN_BLOCK_PREFIX = "[BLOCKED_NEEDS_HUMAN:";
+const HUMAN_BLOCKERS_PREFIX = "[BLOCKED_NEEDS_HUMAN_BLOCKERS:";
+const HUMAN_BLOCK_SUFFIX = "]";
+const LEGACY_HUMAN_BLOCK_MARKER = "BLOCKED-needs-human";
 
 /**
  * Detect the `[STAGE_COMPLETE]` signal at the start of any line in the
@@ -1404,6 +1407,9 @@ export function parseFailureSignal(
  * Line anchoring avoids false positives when prompts or workers quote the
  * marker mid-prose. The bare fallback keeps older workers park-safe, while
  * the structured marker carries the denied operation for operator comments.
+ * Workers may also emit a separate blockers line before the marker; the
+ * orchestrator records it verbatim so readiness and permission blockers are
+ * not collapsed into a single opaque human block.
  */
 export function parseHumanBlockSignal(
   text: string | null | undefined,
@@ -1412,13 +1418,58 @@ export function parseHumanBlockSignal(
     return null;
   }
 
-  const match = HUMAN_BLOCK_REGEX.exec(text);
-  if (match === null) {
+  let signal: HumanBlockSignal | null = null;
+  const lines = text.split("\n");
+  for (const [index, line] of lines.entries()) {
+    const operation = parseHumanBlockOperationLine(line);
+    if (operation === null) {
+      continue;
+    }
+
+    signal = {
+      operation,
+      blockers: parseHumanBlockersLine(lines[index - 1] ?? null),
+    };
+  }
+
+  return signal;
+}
+
+function parseHumanBlockOperationLine(
+  line: string,
+): HumanBlockOperation | null {
+  const trimmed = line.trim();
+  if (trimmed === LEGACY_HUMAN_BLOCK_MARKER) {
+    return "other";
+  }
+  if (
+    !trimmed.startsWith(HUMAN_BLOCK_PREFIX) ||
+    !trimmed.endsWith(HUMAN_BLOCK_SUFFIX)
+  ) {
     return null;
   }
 
-  const operation = normalizeHumanBlockOperation(match[1] ?? null);
-  return { operation };
+  return normalizeHumanBlockOperation(
+    trimmed.slice(HUMAN_BLOCK_PREFIX.length, -HUMAN_BLOCK_SUFFIX.length).trim(),
+  );
+}
+
+function parseHumanBlockersLine(line: string | null): string | null {
+  if (line === null) {
+    return null;
+  }
+
+  const trimmed = line.trim();
+  if (
+    !trimmed.startsWith(HUMAN_BLOCKERS_PREFIX) ||
+    !trimmed.endsWith(HUMAN_BLOCK_SUFFIX)
+  ) {
+    return null;
+  }
+
+  return trimmed
+    .slice(HUMAN_BLOCKERS_PREFIX.length, -HUMAN_BLOCK_SUFFIX.length)
+    .trim();
 }
 
 function normalizeHumanBlockOperation(
