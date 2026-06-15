@@ -4368,6 +4368,121 @@ describe("orchestrator core", () => {
     });
   });
 
+  it("refunds rate-limit admission capacity when poll dispatch does not launch", async () => {
+    const spawnWorker = vi.fn(async ({ issue }) => {
+      if (issue.id === "1") {
+        throw new Error("workspace init failed");
+      }
+      return {
+        workerHandle: { pid: 1002 },
+        monitorHandle: { ref: "monitor-2" },
+      };
+    });
+    const tracker = createTracker({
+      candidates: [
+        createIssue({ id: "1", identifier: "ISSUE-1" }),
+        createIssue({ id: "2", identifier: "ISSUE-2" }),
+      ],
+      statesById: [
+        { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+        { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+      ],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      spawnWorker,
+      config: createConfig({
+        agent: { maxConcurrentAgents: 2 },
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 10,
+          minSecondaryHeadroomPct: null,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 95,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual(["2"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(2);
+    expect(Object.keys(orchestrator.getState().running)).toEqual(["2"]);
+  });
+
+  it("rechecks retry rate-limit admission after fetching candidates", async () => {
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const harness: { orchestrator?: OrchestratorCore } = {};
+    const baseTracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const baseFetch = baseTracker.fetchCandidateIssues.bind(baseTracker);
+    const tracker = {
+      ...baseTracker,
+      fetchCandidateIssues: async () => {
+        harness.orchestrator!.getState().codexRateLimits = {
+          primary: {
+            used_percent: 98,
+            window_minutes: 300,
+            resets_at: 1772760000,
+          },
+        };
+        return baseFetch();
+      },
+    };
+    const orchestrator = createOrchestrator({
+      tracker,
+      spawnWorker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: 1,
+          minSecondaryHeadroomPct: null,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+        },
+      }),
+    });
+    harness.orchestrator = orchestrator;
+    orchestrator.getState().codexRateLimits = {
+      primary: {
+        used_percent: 95,
+        window_minutes: 300,
+        resets_at: 1772760000,
+      },
+    };
+    orchestrator.getState().claimed.add("1");
+    orchestrator.getState().retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+      timerHandle: null,
+      error: "previous failure",
+      delayType: "failure",
+    };
+
+    const result = await orchestrator.onRetryTimer("1");
+
+    expect(result.dispatched).toBe(false);
+    expect(result.retryEntry).toMatchObject({
+      attempt: 1,
+      error: "rate-limit admission floor active",
+    });
+    expect(spawnWorker).not.toHaveBeenCalled();
+  });
+
   it("resumes once on a pause-triage continue verdict when the ladder is unconfigured", async () => {
     const triageCalls: string[] = [];
     const tracker = createTracker({

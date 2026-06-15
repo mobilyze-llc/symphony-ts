@@ -2739,10 +2739,14 @@ export class OrchestratorCore {
       if (computedHeadIssue?.id === issue.id) {
         computedHeadReachedDispatchBoundary = true;
       }
-      if (!this.reserveRateLimitAdmission(rateLimitGate)) {
+      const reservationKey = this.reserveRateLimitAdmission(rateLimitGate);
+      if (reservationKey === false) {
         break;
       }
       const dispatchResult = await this.dispatchIssue(issue, null);
+      if (!dispatchResult.dispatched) {
+        this.releaseRateLimitAdmissionReservation(reservationKey);
+      }
       dispatchAttempts.push({
         issueId: issue.id,
         issueIdentifier: issue.identifier,
@@ -3380,9 +3384,9 @@ export class OrchestratorCore {
 
   private reserveRateLimitAdmission(
     gate: ReturnType<OrchestratorCore["evaluateRateLimitAdmissionGate"]>,
-  ): boolean {
+  ): string | false | null {
     if (gate.admissionCapacity === null) {
-      return true;
+      return null;
     }
     const reservationKey = JSON.stringify({
       codexRateLimits: this.state.codexRateLimits,
@@ -3403,7 +3407,21 @@ export class OrchestratorCore {
       return false;
     }
     this.rateLimitAdmissionReservation.count += 1;
-    return true;
+    return reservationKey;
+  }
+
+  private releaseRateLimitAdmissionReservation(
+    reservationKey: string | null,
+  ): void {
+    if (
+      reservationKey === null ||
+      this.rateLimitAdmissionReservation === null ||
+      this.rateLimitAdmissionReservation.key !== reservationKey ||
+      this.rateLimitAdmissionReservation.count <= 0
+    ) {
+      return;
+    }
+    this.rateLimitAdmissionReservation.count -= 1;
   }
 
   private estimateExpectedUnitBurnPct(): number | null {
@@ -4713,7 +4731,35 @@ export class OrchestratorCore {
       };
     }
 
-    if (!this.reserveRateLimitAdmission(rateLimitGate)) {
+    const currentRateLimitGate = this.evaluateRateLimitAdmissionGate();
+    if (currentRateLimitGate.blocked) {
+      console.warn(
+        `[orchestrator] ${currentRateLimitGate.reason} Deferring retry for ${issue.identifier}.`,
+      );
+      const gateVerdict = this.buildRateLimitGateVerdict(currentRateLimitGate);
+      this.recordDispatchVerdict({
+        issueId,
+        issueIdentifier: issue.identifier,
+        disposition: "gate",
+        reasonCode: gateVerdict.reasonCode,
+        remedy: gateVerdict.remedy,
+        attempt: retryEntry.attempt,
+        details: gateVerdict.details,
+      });
+      return {
+        dispatched: false,
+        released: false,
+        retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
+          identifier: issue.identifier,
+          error: "rate-limit admission floor active",
+          delayType: retryEntry.delayType,
+          deferral: true,
+        }),
+      };
+    }
+
+    const reservationKey = this.reserveRateLimitAdmission(currentRateLimitGate);
+    if (reservationKey === false) {
       this.recordDispatchVerdict({
         issueId,
         issueIdentifier: issue.identifier,
@@ -4723,9 +4769,9 @@ export class OrchestratorCore {
           "Wait for rate-limit usage telemetry to refresh before admitting another retry.",
         attempt: retryEntry.attempt,
         details: {
-          expectedUnitBurnPct: rateLimitGate.expectedUnitBurnPct,
-          deferredUntil: rateLimitGate.deferredUntil,
-          admissionCapacity: rateLimitGate.admissionCapacity,
+          expectedUnitBurnPct: currentRateLimitGate.expectedUnitBurnPct,
+          deferredUntil: currentRateLimitGate.deferredUntil,
+          admissionCapacity: currentRateLimitGate.admissionCapacity,
         },
       });
       return {
@@ -4741,6 +4787,9 @@ export class OrchestratorCore {
     }
 
     const dispatchResult = await this.dispatchIssue(issue, retryEntry.attempt);
+    if (!dispatchResult.dispatched) {
+      this.releaseRateLimitAdmissionReservation(reservationKey);
+    }
     return {
       dispatched: dispatchResult.dispatched,
       released: false,
