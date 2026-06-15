@@ -5438,6 +5438,123 @@ describe("orchestrator core", () => {
     ).toHaveLength(1);
   });
 
+  it("rejects a duplicate admission while the first dispatcher lease is still flushing (SYMPH-367)", async () => {
+    const persistedJournal: DispatcherRunJournal = [];
+    let releaseFirstAdmission: () => void = () => {};
+    const firstAdmissionFlush = new Promise<void>((resolve) => {
+      releaseFirstAdmission = resolve;
+    });
+    let heldFirstAdmission = false;
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const tracker = createTracker({
+      candidatesFn: () => [
+        createIssue({ id: "1", identifier: "ISSUE-1", state: "In Progress" }),
+      ],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      spawnWorker,
+      writeRunJournalEntry: async (entry) => {
+        persistedJournal.push(entry);
+        if (
+          !heldFirstAdmission &&
+          entry.kind === "admission" &&
+          entry.operation === "dispatcher" &&
+          entry.lease?.status === "active"
+        ) {
+          heldFirstAdmission = true;
+          await firstAdmissionFlush;
+        }
+      },
+    });
+
+    const firstPoll = orchestrator.pollTick();
+    await waitForCondition(() => heldFirstAdmission);
+
+    const overlappingPoll = orchestrator.pollTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(spawnWorker).not.toHaveBeenCalled();
+    expect(
+      persistedJournal.filter(
+        (entry) =>
+          entry.kind === "admission" &&
+          entry.operation === "dispatcher" &&
+          entry.lease?.status === "active",
+      ),
+    ).toHaveLength(1);
+
+    releaseFirstAdmission();
+    const [firstResult, overlappingResult] = await Promise.all([
+      firstPoll,
+      overlappingPoll,
+    ]);
+
+    expect(firstResult.dispatchedIssueIds).toEqual(["1"]);
+    expect(overlappingResult.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().running["1"]).toBeDefined();
+  });
+
+  it("clears pending admission markers after journal write rollback so the lease can be retried (SYMPH-367)", async () => {
+    let shouldFailFirstAdmissionWrite = true;
+    const spawnWorker = vi.fn(async () => ({
+      workerHandle: { pid: 1001 },
+      monitorHandle: { ref: "monitor-1" },
+    }));
+    const orchestrator = createOrchestrator({
+      spawnWorker,
+      writeRunJournalEntry: async (entry) => {
+        if (
+          shouldFailFirstAdmissionWrite &&
+          entry.kind === "admission" &&
+          entry.operation === "dispatcher" &&
+          entry.lease?.status === "active"
+        ) {
+          shouldFailFirstAdmissionWrite = false;
+          throw new Error("journal disk unavailable");
+        }
+      },
+    });
+
+    await expect(orchestrator.pollTick()).rejects.toThrow(
+      "journal disk unavailable",
+    );
+
+    expect(spawnWorker).not.toHaveBeenCalled();
+    expect(orchestrator.getState().dispatcherRunJournal).toEqual([]);
+    expect(orchestrator.getState().dispatcherLeases).toEqual({});
+
+    const retry = await orchestrator.pollTick();
+
+    expect(retry.dispatchedIssueIds).toEqual(["1"]);
+    expect(spawnWorker).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().running["1"]).toBeDefined();
+  });
+
+  it("attributes dispatcher lease ownership to a unique runtime process by default (SYMPH-367)", async () => {
+    const orchestrator = createOrchestrator();
+
+    await orchestrator.pollTick();
+
+    const admission = orchestrator
+      .getState()
+      .dispatcherRunJournal.find(
+        (entry) =>
+          entry.kind === "admission" &&
+          entry.operation === "dispatcher" &&
+          entry.lease?.status === "active",
+      );
+
+    expect(admission?.ownerId).toMatch(/^orchestrator-core:.+:\d+$/);
+    expect(admission?.ownerId).not.toBe("orchestrator-core");
+    expect(admission?.lease?.ownerId).toBe(admission?.ownerId);
+  });
+
   it("rehydrates gate-passed AC snapshots from the run journal (SYMPH-374)", () => {
     const journalEntry = (
       sequence: number,
