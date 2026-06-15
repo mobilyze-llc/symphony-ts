@@ -101,6 +101,16 @@ export const DEFAULT_VERDICTS_PAGE_AFTER_TICKS = 10;
 export const DEFAULT_STUCK_TRIAGE_ENABLED = false;
 export const DEFAULT_STUCK_TRIAGE_TIMEOUT_MS = 600_000;
 
+// Managed code-grounding defaults (SYMPH-596). Default-disabled until a
+// product opts in, with checkouts kept under the configured workspace root.
+export const DEFAULT_CODE_GROUNDING_ENABLED = false;
+export const DEFAULT_CODE_GROUNDING_BASE_DIR = join(
+  ".symphony",
+  "code-grounding",
+);
+export const DEFAULT_CODE_GROUNDING_TTL_MS = 86_400_000;
+export const DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO = 5;
+
 export const SPEC_DEFAULTS = Object.freeze({
   tracker: {
     kind: DEFAULT_TRACKER_KIND,
@@ -160,6 +170,12 @@ export const SPEC_DEFAULTS = Object.freeze({
   },
   admissionCard: {
     enabled: false,
+  },
+  codeGrounding: {
+    enabled: DEFAULT_CODE_GROUNDING_ENABLED,
+    baseDir: DEFAULT_CODE_GROUNDING_BASE_DIR,
+    ttlMs: DEFAULT_CODE_GROUNDING_TTL_MS,
+    maxCheckoutsPerRepo: DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
   },
   runner: {
     kind: DEFAULT_RUNNER_KIND,

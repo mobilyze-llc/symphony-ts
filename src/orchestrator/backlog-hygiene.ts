@@ -11,6 +11,12 @@ import type {
   Issue,
   VerdictActor,
 } from "../domain/model.js";
+import {
+  type CodeGroundingReport,
+  type CodeGroundingVerificationStatus,
+  type RunCodeGroundingInput,
+  runManagedCodeGrounding,
+} from "./code-grounding.js";
 
 export const BACKLOG_HYGIENE_PROPOSAL_LABELS = {
   proposed: "hygiene:proposed",
@@ -66,6 +72,8 @@ export interface BacklogHygieneProposal {
   summary: string;
   evidence: string;
   confidence: BacklogAuditFinding["confidence"];
+  codeGroundingStatus: CodeGroundingVerificationStatus | null;
+  codeGroundingEvidence: string | null;
   generatedAt: string;
   modelTier: BacklogHygieneModelTier;
 }
@@ -86,6 +94,7 @@ export interface BuildBacklogHygieneProposalsInput {
   maxProposalsPerProductPerPoll: number;
   generatedAt?: string;
   modelTierDecision: BacklogHygieneModelTierDecision;
+  codeGroundingReport?: CodeGroundingReport | null;
 }
 
 export interface RunBacklogHygieneProposalLaneInput
@@ -96,6 +105,7 @@ export interface RunBacklogHygieneProposalLaneInput
   openParkIssueIds?: Iterable<string>;
   evaluation: QueueTriageEvaluationResult;
   allowFrontierRecommendations?: boolean;
+  codeGrounding?: Omit<RunCodeGroundingInput, "findings"> | null;
 }
 
 export type BacklogHygieneProposalDecision = "accepted" | "rejected";
@@ -179,11 +189,20 @@ export async function runBacklogHygieneProposalLane(
     };
   }
 
+  const codeGroundingReport =
+    input.codeGrounding === null || input.codeGrounding === undefined
+      ? null
+      : await runManagedCodeGrounding({
+          ...input.codeGrounding,
+          findings: report.verdict.findings,
+        });
+
   const proposalInput: BuildBacklogHygieneProposalsInput = {
     report,
     candidateIssues: input.issues,
     maxProposalsPerProductPerPoll: input.maxProposalsPerProductPerPoll,
     modelTierDecision,
+    codeGroundingReport,
     ...(input.activeIssueIds === undefined
       ? {}
       : { activeIssueIds: input.activeIssueIds }),
@@ -222,6 +241,12 @@ export function buildBacklogHygieneProposals(
   const activeIssueIds = new Set(input.activeIssueIds ?? []);
   const openParkIssueIds = new Set(input.openParkIssueIds ?? []);
   const generatedAt = input.generatedAt ?? input.report.generatedAt;
+  const codeGroundingByFindingId = new Map(
+    (input.codeGroundingReport?.entries ?? []).map((entry) => [
+      entry.findingId,
+      entry,
+    ]),
+  );
 
   const proposals: BacklogHygieneProposal[] = [];
   for (const finding of input.report.verdict.findings) {
@@ -243,6 +268,7 @@ export function buildBacklogHygieneProposals(
     ) {
       continue;
     }
+    const codeGrounding = codeGroundingByFindingId.get(finding.findingId);
     proposals.push({
       proposalId: `${input.report.generatedAt}:${finding.findingId}`,
       findingId: finding.findingId,
@@ -252,6 +278,11 @@ export function buildBacklogHygieneProposals(
       summary: finding.summary,
       evidence: finding.evidence,
       confidence: finding.confidence,
+      codeGroundingStatus: codeGrounding?.status ?? null,
+      codeGroundingEvidence:
+        codeGrounding === undefined
+          ? null
+          : summarizeCodeGroundingEvidence(codeGrounding),
       generatedAt,
       modelTier: input.modelTierDecision.tier,
     });
@@ -293,6 +324,8 @@ export function buildBacklogHygieneProposalJournalEntry(input: {
       issue_identifiers: input.proposal.issueIdentifiers,
       confidence: input.proposal.confidence,
       evidence: input.proposal.evidence,
+      code_grounding_status: input.proposal.codeGroundingStatus,
+      code_grounding_evidence: input.proposal.codeGroundingEvidence,
       model_tier: input.proposal.modelTier,
       label: BACKLOG_HYGIENE_PROPOSAL_LABELS.proposed,
       actor: actorMetadata(input.actor),
@@ -354,6 +387,25 @@ function actorMetadata(actor: VerdictActor): {
     host: actor.host,
     session: actor.session ?? null,
   };
+}
+
+function summarizeCodeGroundingEvidence(
+  entry: CodeGroundingReport["entries"][number],
+): string {
+  const citations = entry.citations
+    .slice(0, 5)
+    .map(
+      (citation) =>
+        `${citation.path}:${citation.lineRange[0]}-${citation.lineRange[1]}#${citation.contentHash.slice(0, 12)}`,
+    );
+  const missing = entry.missing.slice(0, 5);
+  return [
+    entry.summary,
+    citations.length === 0 ? null : `citations=${citations.join(", ")}`,
+    missing.length === 0 ? null : `missing=${missing.join(", ")}`,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(" ");
 }
 
 function toErrorMessage(error: unknown, seen = new WeakSet<object>()): string {
