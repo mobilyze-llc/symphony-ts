@@ -4572,6 +4572,10 @@ export class OrchestratorCore {
         cacheReadTokens: runningEntry.totalStageCacheReadTokens,
         cacheWriteTokens: runningEntry.totalStageCacheWriteTokens,
         compactions: runningEntry.totalStageCompactions ?? 0,
+        rateLimitWindows: cloneRateLimitTelemetry(
+          runningEntry.rateLimitWindows,
+        ),
+        usageEventCadence: buildStageUsageEventCadence(runningEntry),
         turns: runningEntry.turnCount,
         outcome: classifiedOutcome,
       };
@@ -12210,17 +12214,23 @@ function readMetadataString(
 }
 
 function readMetadataNumber(
-  metadata: Record<string, unknown>,
+  metadata: Record<string, unknown> | null,
   key: string,
 ): number | null {
+  if (metadata === null) {
+    return null;
+  }
   const value = metadata[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 function readMetadataBoolean(
-  metadata: Record<string, unknown>,
+  metadata: Record<string, unknown> | null,
   key: string,
 ): boolean | null {
+  if (metadata === null) {
+    return null;
+  }
   const value = metadata[key];
   return typeof value === "boolean" ? value : null;
 }
@@ -13014,6 +13024,8 @@ function toStageRecordFromMetadata(
   ) {
     return null;
   }
+  const rateLimitWindows = readStageRateLimitTelemetry(metadata);
+  const usageEventCadence = readStageUsageEventCadence(metadata);
   return {
     stageName,
     durationMs,
@@ -13023,8 +13035,103 @@ function toStageRecordFromMetadata(
     cacheReadTokens: readMetadataNumber(metadata, "cacheReadTokens") ?? 0,
     cacheWriteTokens: readMetadataNumber(metadata, "cacheWriteTokens") ?? 0,
     compactions: readMetadataNumber(metadata, "compactions") ?? 0,
+    ...(rateLimitWindows === undefined ? {} : { rateLimitWindows }),
+    ...(usageEventCadence === undefined ? {} : { usageEventCadence }),
     turns,
     outcome,
+  };
+}
+
+function cloneRateLimitTelemetry(
+  value: StageRecord["rateLimitWindows"],
+): NonNullable<StageRecord["rateLimitWindows"]> {
+  return {
+    primary:
+      value?.primary === null || value?.primary === undefined
+        ? null
+        : { ...value.primary },
+    secondary:
+      value?.secondary === null || value?.secondary === undefined
+        ? null
+        : { ...value.secondary },
+  };
+}
+
+function buildStageUsageEventCadence(
+  runningEntry: RunningEntry,
+): NonNullable<StageRecord["usageEventCadence"]> {
+  return {
+    observedCount: runningEntry.tokenTelemetryObservedCount,
+    retainedCount: runningEntry.tokenTelemetry.length,
+    truncated:
+      runningEntry.tokenTelemetryObservedCount >
+      runningEntry.tokenTelemetry.length,
+    maxTotalTokensDelta: runningEntry.tokenTelemetry.reduce(
+      (max, entry) => Math.max(max, entry.totalTokensDelta),
+      0,
+    ),
+  };
+}
+
+function readStageRateLimitTelemetry(
+  metadata: Record<string, unknown>,
+): StageRecord["rateLimitWindows"] {
+  const windows = readMetadataRecord(metadata, "rateLimitWindows");
+  if (windows === null) {
+    return undefined;
+  }
+  return {
+    primary: readStageRateLimitWindow(windows.primary),
+    secondary: readStageRateLimitWindow(windows.secondary),
+  };
+}
+
+function readStageRateLimitWindow(
+  value: unknown,
+): NonNullable<StageRecord["rateLimitWindows"]>["primary"] {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  const startPercent = readMetadataNumber(record, "startPercent");
+  const latestPercent = readMetadataNumber(record, "latestPercent");
+  if (startPercent === null || latestPercent === null) {
+    return null;
+  }
+  return {
+    startPercent,
+    latestPercent,
+    lastResetsAt: readMetadataNumber(record, "lastResetsAt"),
+  };
+}
+
+function readStageUsageEventCadence(
+  metadata: Record<string, unknown>,
+): StageRecord["usageEventCadence"] {
+  const cadence = readMetadataRecord(metadata, "usageEventCadence");
+  if (cadence === null) {
+    return undefined;
+  }
+  const observedCount = readMetadataNumber(cadence, "observedCount");
+  const retainedCount = readMetadataNumber(cadence, "retainedCount");
+  const truncated = readMetadataBoolean(cadence, "truncated");
+  const maxTotalTokensDelta = readMetadataNumber(
+    cadence,
+    "maxTotalTokensDelta",
+  );
+  if (
+    observedCount === null ||
+    retainedCount === null ||
+    truncated === null ||
+    maxTotalTokensDelta === null
+  ) {
+    return undefined;
+  }
+  return {
+    observedCount,
+    retainedCount,
+    truncated,
+    maxTotalTokensDelta,
   };
 }
 

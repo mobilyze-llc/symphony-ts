@@ -10632,6 +10632,94 @@ describe("execution history stage records", () => {
     expect(record.totalTokens).toBe(5000);
   });
 
+  it("StageRecord captures durable rate-limit windows and usage cadence", async () => {
+    const config = createStageConfig();
+    const orchestrator = createOrchestrator({
+      config,
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await orchestrator.pollTick();
+    orchestrator.getState().issueStages["1"] = "investigate";
+
+    orchestrator.onCodexEvent({
+      issueId: "1",
+      event: {
+        event: "turn_completed",
+        timestamp: "2026-03-06T00:00:06.000Z",
+        codexAppServerPid: "1001",
+        sessionId: "s1",
+        threadId: "t1",
+        turnId: "turn-1",
+        usage: { inputTokens: 1000, outputTokens: 500, totalTokens: 1500 },
+        rateLimits: {
+          primary: { used_percent: 10, window_minutes: 300, resets_at: 1000 },
+          secondary: {
+            used_percent: 90,
+            window_minutes: 10080,
+            resets_at: 2000,
+          },
+        },
+        message: "first",
+      },
+    });
+    orchestrator.onCodexEvent({
+      issueId: "1",
+      event: {
+        event: "turn_completed",
+        timestamp: "2026-03-06T00:00:07.000Z",
+        codexAppServerPid: "1001",
+        sessionId: "s1",
+        threadId: "t1",
+        turnId: "turn-1",
+        usage: { inputTokens: 2500, outputTokens: 1000, totalTokens: 3500 },
+        rateLimits: {
+          primary: { used_percent: 12, window_minutes: 300, resets_at: 1000 },
+          secondary: {
+            used_percent: 91.5,
+            window_minutes: 10080,
+            resets_at: 2000,
+          },
+        },
+        message: "second",
+      },
+    });
+
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const record = orchestrator.getState().issueExecutionHistory["1"]?.[0];
+    expect(record?.rateLimitWindows).toEqual({
+      primary: { startPercent: 10, latestPercent: 12, lastResetsAt: 1000 },
+      secondary: { startPercent: 90, latestPercent: 91.5, lastResetsAt: 2000 },
+    });
+    expect(record?.usageEventCadence).toEqual({
+      observedCount: 2,
+      retainedCount: 2,
+      truncated: false,
+      maxTotalTokensDelta: 2000,
+    });
+
+    const replayed = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    expect(replayed.getState().issueExecutionHistory["1"]?.[0]).toMatchObject({
+      rateLimitWindows: record?.rateLimitWindows,
+      usageEventCadence: record?.usageEventCadence,
+    });
+  });
+
   it("accumulates records across multiple stages", async () => {
     const config = createStageConfig();
     const orchestrator = createOrchestrator({ config });

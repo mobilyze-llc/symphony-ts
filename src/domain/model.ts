@@ -828,6 +828,13 @@ export interface SessionRateLimitTelemetry {
   secondary: SessionRateLimitWindowTelemetry | null;
 }
 
+export interface StageUsageEventCadence {
+  observedCount: number;
+  retainedCount: number;
+  truncated: boolean;
+  maxTotalTokensDelta: number;
+}
+
 export interface RetryEntry {
   issueId: string;
   identifier: string | null;
@@ -1052,6 +1059,8 @@ export interface StageRecord {
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
   compactions?: number;
+  rateLimitWindows?: SessionRateLimitTelemetry;
+  usageEventCadence?: StageUsageEventCadence;
   turns: number;
   outcome: string;
 }
