@@ -711,6 +711,10 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     );
     expect(output).toContain("state,mergedAt,mergeCommit");
     expect(output).toContain("mergedAt");
+    expect(output).toContain("Do not use `gh pr checks --watch`");
+    expect(output).toContain("queued/waiting");
+    expect(output).toContain("merge_queue_pending");
+    expect(output).not.toContain("gh pr checks --watch --required --fail-fast");
     expect(output).toContain("[BLOCKED_NEEDS_HUMAN_BLOCKERS:");
     expect(output).toContain("auto_merge_permission_denied");
   });

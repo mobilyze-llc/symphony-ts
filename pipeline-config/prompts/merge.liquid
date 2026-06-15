@@ -49,12 +49,12 @@ You are merging the PR for Linear issue {{ issue.identifier }}.
    ```
    gh pr merge "$PR_NUMBER" --auto
    ```
-   Command success means the PR was enqueued or auto-merge was enabled; it does not prove the PR has merged. After enqueue succeeds, wait for the merge queue to finish and then prove the PR actually merged:
+   Command success means the PR was enqueued or auto-merge was enabled; it does not prove the PR has merged. After enqueue succeeds, wait for the merge queue to finish and then prove the PR actually merged. Do not use `gh pr checks --watch` as merge completion proof: PR checks can be green before GitHub creates or finishes the merge-queue run.
    ```bash
-   gh pr checks "$PR_NUMBER" --watch --required --fail-fast
    gh pr view "$PR_NUMBER" --json state,mergedAt,mergeCommit --jq '{state, mergedAt, mergeCommit: .mergeCommit.oid}'
+   gh pr checks "$PR_NUMBER" --required
    ```
-   Proceed only when `state` is `MERGED`, `mergedAt` is non-null, and `mergeCommit` is non-null. If the merge queue rejects the PR, required checks fail, or the PR remains open after the queue run, do not mark Linear Done; return the issue to In Progress with the failing check/status evidence.
+   Proceed only when `state` is `MERGED`, `mergedAt` is non-null, and `mergeCommit` is non-null. If `state` is still `OPEN` and required checks are pending or passing, keep waiting; an open PR after enqueue is queued/waiting, not failure evidence. If the merge queue explicitly rejects the PR, required checks fail, or the PR closes unmerged, do not mark Linear Done; return the issue to In Progress with the failing check/status evidence. If worker budget or time stops before merge proof and no explicit rejection exists, emit `[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":["merge_queue_pending"],"permission":[],"mergeStateStatus":"OPEN","failingChecks":[],"pendingChecks":[]}]` immediately before `[BLOCKED_NEEDS_HUMAN: auto_merge]`.
 5. If readiness is green and PR merge-queue enqueue is denied by the Mode Permission Envelope, do not run merge commands. Put:
    ```
    [BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":[],"permission":["auto_merge_permission_denied"],"mergeStateStatus":"CLEAN","failingChecks":[],"pendingChecks":[]}]
