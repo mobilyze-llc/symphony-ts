@@ -7261,6 +7261,272 @@ describe("continuous feedback lane", () => {
     });
   });
 
+  it("records provider failure as unavailable instead of a feedback pass", async () => {
+    const runContinuousFeedback = vi.fn(() => ({
+      summary:
+        'Continuous feedback provider exited with 1: Error: Model "local-flash" not found.',
+      findings: [],
+      status: "unavailable" as const,
+    }));
+    const orchestrator = createOrchestrator({ runContinuousFeedback });
+
+    await orchestrator.pollTick();
+    const result = await orchestrator.runContinuousFeedbackCheckpoint({
+      issueId: "1",
+      event: "checkpoint",
+    });
+
+    expect(result).toMatchObject({
+      ran: true,
+      status: "unavailable",
+      findingSignatures: [],
+    });
+    expect(orchestrator.getState().continuousFeedback["1"]).toMatchObject({
+      status: "unavailable",
+      findings: [],
+    });
+    const journalEntry = orchestrator.getState().dispatcherRunJournal.at(-1);
+    expect(journalEntry).toMatchObject({
+      kind: "continuous_feedback",
+      operation: "feedback_lane",
+      summary:
+        'Continuous feedback unavailable for ISSUE-1. Continuous feedback provider exited with 1: Error: Model "local-flash" not found.',
+      metadata: {
+        status: "unavailable",
+        continuousFeedbackStatusVersion: 2,
+        summary:
+          'Continuous feedback provider exited with 1: Error: Model "local-flash" not found.',
+        authoritative: false,
+      },
+    });
+  });
+
+  it("keeps prior findings open when malformed provider output is unavailable", async () => {
+    const runContinuousFeedback = vi
+      .fn()
+      .mockResolvedValueOnce({
+        summary: "One issue found.",
+        findings: [
+          {
+            signature: "src/core.ts:null-check",
+            title: "Missing null check",
+            detail: "Guard the optional reviewer output before dereferencing.",
+            severity: "blocking" as const,
+            file: "src/core.ts",
+            line: 42,
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        summary: "Continuous feedback output was not parseable.",
+        findings: [],
+        status: "unavailable" as const,
+      });
+    let nowTick = 0;
+    const orchestrator = createOrchestrator({
+      runContinuousFeedback,
+      now: () =>
+        new Date(Date.parse("2026-03-06T00:00:05.000Z") + nowTick++ * 1000),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.runContinuousFeedbackCheckpoint({
+      issueId: "1",
+      event: "checkpoint",
+    });
+    const result = await orchestrator.runContinuousFeedbackCheckpoint({
+      issueId: "1",
+      event: "checkpoint",
+    });
+
+    expect(result).toMatchObject({
+      ran: true,
+      status: "unavailable",
+      findingSignatures: [],
+    });
+    expect(orchestrator.getState().continuousFeedback["1"]).toMatchObject({
+      status: "unavailable",
+      summary: "Continuous feedback output was not parseable.",
+      findings: [
+        expect.objectContaining({
+          signature: "src/core.ts:null-check",
+          status: "open",
+        }),
+      ],
+    });
+    expect(orchestrator.getState().dispatcherRunJournal.at(-1)).toMatchObject({
+      kind: "continuous_feedback",
+      operation: "feedback_lane",
+      summary:
+        "Continuous feedback unavailable for ISSUE-1. Continuous feedback output was not parseable.",
+      metadata: {
+        status: "unavailable",
+        summary: "Continuous feedback output was not parseable.",
+      },
+    });
+  });
+
+  it("projects legacy provider-failure pass journal entries as unavailable during replay", () => {
+    const summary =
+      'Continuous feedback provider exited with 1: Error: Model "local-flash" not found.';
+    const runJournal: DispatcherRunJournal = [
+      {
+        sequence: 1,
+        idempotencyKey: "continuous_feedback:1:checkpoint:legacy",
+        timestamp: "2026-03-06T00:00:04.000Z",
+        kind: "continuous_feedback",
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        operation: "feedback_lane",
+        stage: "implement",
+        attempt: 0,
+        ownerId: "previous-runtime",
+        lease: null,
+        summary: "Continuous feedback passed for ISSUE-1.",
+        metadata: {
+          event: "checkpoint",
+          status: "pass",
+          reviewerLane: {
+            runner: "pi",
+            model: "local-flash",
+            role: "continuous-feedback",
+          },
+          workerLane: {
+            runner: "codex",
+            model: null,
+            role: "worker",
+          },
+          findingSignatures: [],
+          suppressedSignatures: [],
+          summary,
+          authoritative: false,
+        },
+      },
+    ];
+
+    const orchestrator = createOrchestrator({ runJournal });
+
+    expect(orchestrator.getState().continuousFeedback["1"]).toMatchObject({
+      status: "unavailable",
+      summary,
+      lastEvent: "checkpoint",
+      reviewerLane: {
+        runner: "pi",
+        model: "local-flash",
+        role: "continuous-feedback",
+      },
+      workerLane: {
+        runner: "codex",
+        model: null,
+        role: "worker",
+      },
+      findings: [],
+    });
+  });
+
+  it("keeps versioned clean-pass journal entries pass even when model summary resembles provider failure", () => {
+    const summary = "Continuous feedback provider exited with 0 after retry.";
+    const runJournal: DispatcherRunJournal = [
+      {
+        sequence: 1,
+        idempotencyKey: "continuous_feedback:1:checkpoint:versioned",
+        timestamp: "2026-03-06T00:00:04.000Z",
+        kind: "continuous_feedback",
+        issueId: "1",
+        issueIdentifier: "ISSUE-1",
+        operation: "feedback_lane",
+        stage: "implement",
+        attempt: 0,
+        ownerId: "previous-runtime",
+        lease: null,
+        summary: "Continuous feedback passed for ISSUE-1.",
+        metadata: {
+          event: "checkpoint",
+          status: "pass",
+          continuousFeedbackStatusVersion: 2,
+          reviewerLane: {
+            runner: "pi",
+            model: "local-flash",
+            role: "continuous-feedback",
+          },
+          workerLane: {
+            runner: "codex",
+            model: null,
+            role: "worker",
+          },
+          findingSignatures: [],
+          suppressedSignatures: [],
+          summary,
+          authoritative: false,
+        },
+      },
+    ];
+
+    const orchestrator = createOrchestrator({ runJournal });
+
+    expect(orchestrator.getState().continuousFeedback["1"]).toMatchObject({
+      status: "pass",
+      summary,
+      lastEvent: "checkpoint",
+      findings: [],
+    });
+  });
+
+  it("keeps checkpoint state pass when only model-authored summary text resembles provider failure", () => {
+    const summary = "Continuous feedback provider exited with 0 after retry.";
+    const runJournal: DispatcherRunJournal = [
+      {
+        sequence: 2,
+        idempotencyKey: "journal_checkpoint:1",
+        timestamp: "2026-03-06T00:00:05.000Z",
+        kind: "journal_checkpoint",
+        issueId: "__dispatcher__",
+        issueIdentifier: "DISPATCHER",
+        operation: "dispatcher",
+        stage: null,
+        attempt: null,
+        ownerId: "previous-runtime",
+        lease: null,
+        summary: "Dispatcher run-journal checkpoint through seq 1.",
+        metadata: {
+          schema_version: 1,
+          checkpoint_type: "dispatcher_run_journal",
+          coveredThroughSequence: 1,
+          state: {
+            continuousFeedback: {
+              "1": {
+                status: "pass",
+                summary,
+                lastEvent: "checkpoint",
+                lastCheckedAt: "2026-03-06T00:00:04.000Z",
+                reviewerLane: {
+                  runner: "pi",
+                  model: "local-flash",
+                  role: "continuous-feedback",
+                },
+                workerLane: {
+                  runner: "codex",
+                  model: null,
+                  role: "worker",
+                },
+                findings: [],
+              },
+            },
+          },
+        },
+      },
+    ];
+
+    const orchestrator = createOrchestrator({ runJournal });
+
+    expect(orchestrator.getState().continuousFeedback["1"]).toMatchObject({
+      status: "pass",
+      summary,
+      lastEvent: "checkpoint",
+      findings: [],
+    });
+  });
+
   it("dedupes repeated findings and bounces the worker for inner-loop rework", async () => {
     const comments: string[] = [];
     const runContinuousFeedback = vi.fn(() => ({

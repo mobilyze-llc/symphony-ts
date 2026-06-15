@@ -84,7 +84,7 @@ interface LoopTraceFileDeltaResponse {
 
 interface LoopTraceContinuousFeedbackResponse {
   event: "commit" | "diff" | "checkpoint";
-  status: "pass" | "finding";
+  status: "pass" | "finding" | "unavailable";
   reviewer_runner: string;
   reviewer_model: string | null;
   finding_signatures: string[];
@@ -627,7 +627,9 @@ function isLoopTraceContinuousFeedback(
     (value.event === "commit" ||
       value.event === "diff" ||
       value.event === "checkpoint") &&
-    (value.status === "pass" || value.status === "finding") &&
+    (value.status === "pass" ||
+      value.status === "finding" ||
+      value.status === "unavailable") &&
     typeof value.reviewerRunner === "string" &&
     (value.reviewerModel === null || typeof value.reviewerModel === "string") &&
     Array.isArray(value.findingSignatures) &&

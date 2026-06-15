@@ -3210,6 +3210,65 @@ describe("OrchestratorRuntimeHost", () => {
     });
   });
 
+  it("projects failed continuous-feedback provider runs as unavailable in snapshot and loop trace", async () => {
+    const tracker = createTracker();
+    const fakeRunner = new FakeAgentRunner();
+    const config = createConfig();
+    config.continuousFeedback = {
+      enabled: true,
+      events: ["checkpoint"],
+      runner: "pi",
+      model: "local-flash",
+      role: "continuous-feedback",
+      bounceOnFinding: true,
+    };
+    const host = new OrchestratorRuntimeHost({
+      config,
+      tracker,
+      runContinuousFeedbackCommand: async () => ({
+        exitCode: 1,
+        stderr: 'Error: Model "local-flash" not found.',
+        stdout: "",
+      }),
+      createAgentRunner: ({ onEvent }) => {
+        fakeRunner.onEvent = onEvent;
+        return fakeRunner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    fakeRunner.emit("1", {
+      event: "turn_completed",
+      timestamp: "2026-03-06T00:00:02.000Z",
+      codexAppServerPid: "1001",
+      sessionId: "thread-1-turn-1",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      message: "turn completed",
+    });
+    await host.flushEvents();
+
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.running[0]?.continuous_feedback).toMatchObject({
+      status: "unavailable",
+      summary:
+        'Continuous feedback provider exited with 1: Error: Model "local-flash" not found.',
+      findings: [],
+    });
+
+    const details = await host.getIssueDetails("ISSUE-1");
+    expect(details?.loop_trace_journal.entries.at(-1)).toMatchObject({
+      kind: "continuous_feedback",
+      summary:
+        'Continuous feedback unavailable. Continuous feedback provider exited with 1: Error: Model "local-flash" not found.',
+      continuous_feedback: {
+        status: "unavailable",
+        finding_signatures: [],
+      },
+    });
+  });
+
   it("keeps structured agent-event logging when loop trace persistence fails", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();

@@ -9,6 +9,7 @@ import type {
   CodexTotals,
   ComputedDispatchOrderSnapshot,
   ContinuousFeedbackIssueState,
+  ContinuousFeedbackStatus,
   DecorrelatedGateOutcome,
   DispatcherDecisionQualitySummary,
   DispatcherOperation,
@@ -126,7 +127,8 @@ export interface RuntimeSnapshotRateLimitAdmission {
 }
 
 export interface RuntimeSnapshotContinuousFeedback {
-  status: "pass" | "finding";
+  status: ContinuousFeedbackStatus;
+  summary: string | null;
   last_event: "commit" | "diff" | "checkpoint";
   last_checked_at: string;
   reviewer_lane: {
@@ -2089,6 +2091,7 @@ function toSnapshotContinuousFeedback(
 ): RuntimeSnapshotContinuousFeedback {
   return {
     status: feedback.status,
+    summary: feedback.summary,
     last_event: feedback.lastEvent,
     last_checked_at: feedback.lastCheckedAt,
     reviewer_lane: { ...feedback.reviewerLane },

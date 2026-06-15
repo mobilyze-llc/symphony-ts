@@ -2564,13 +2564,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         attempt: event.attempt,
         sessionId: event.sessionId ?? null,
         kind: "continuous_feedback",
-        summary:
-          result.status === "pass"
-            ? "Continuous feedback passed."
-            : `Continuous feedback found ${result.findingSignatures.length} issue(s).`,
+        summary: summarizeContinuousFeedbackLoopTrace(result),
         continuousFeedback: {
           event: result.event,
-          status: result.status === "finding" ? "finding" : "pass",
+          status:
+            result.status === "unavailable"
+              ? "unavailable"
+              : result.status === "finding"
+                ? "finding"
+                : "pass",
           reviewerRunner: result.reviewerLane?.runner ?? "unknown",
           reviewerModel: result.reviewerLane?.model ?? null,
           findingSignatures: result.findingSignatures,
@@ -6466,6 +6468,26 @@ function getEffectiveCommentTimestamp(comment: LinearIssueComment): string {
 
 function stringMetadata(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+function summarizeContinuousFeedbackLoopTrace(
+  result: ContinuousFeedbackCheckpointResult,
+): string {
+  switch (result.status) {
+    case "pass":
+      return "Continuous feedback passed.";
+    case "finding":
+      return `Continuous feedback found ${result.findingSignatures.length} issue(s).`;
+    case "unavailable": {
+      const detail =
+        result.summary === null || result.summary.trim() === ""
+          ? ""
+          : ` ${result.summary.trim()}`;
+      return `Continuous feedback unavailable.${detail}`;
+    }
+    case "skipped":
+      return "Continuous feedback skipped.";
+  }
 }
 
 function delay(ms: number): Promise<void> {

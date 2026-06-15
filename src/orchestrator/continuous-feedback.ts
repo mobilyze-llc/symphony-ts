@@ -3,7 +3,11 @@ import type {
   ContinuousFeedbackFinding,
   ContinuousFeedbackIssueState,
   ContinuousFeedbackLane,
+  ContinuousFeedbackStatus,
 } from "../domain/model.js";
+
+export const CONTINUOUS_FEEDBACK_PROVIDER_FAILURE_SUMMARY_PREFIX =
+  "Continuous feedback provider exited";
 
 export interface ContinuousFeedbackFindingInput {
   signature?: string | null;
@@ -17,6 +21,7 @@ export interface ContinuousFeedbackFindingInput {
 export interface ContinuousFeedbackReviewResult {
   summary?: string | null;
   findings: ContinuousFeedbackFindingInput[];
+  status?: ContinuousFeedbackStatus;
 }
 
 export interface ContinuousFeedbackCheckpointInput {
@@ -27,6 +32,8 @@ export interface ContinuousFeedbackCheckpointInput {
   workerLane: ContinuousFeedbackLane;
   reviewerLane: ContinuousFeedbackLane;
   findings: ContinuousFeedbackFindingInput[];
+  status?: ContinuousFeedbackStatus;
+  summary?: string | null;
 }
 
 export function ensureDecorrelatedFeedbackLane(
@@ -71,6 +78,8 @@ export function mergeContinuousFeedbackCheckpoint(
   previous: ContinuousFeedbackIssueState | undefined,
   input: ContinuousFeedbackCheckpointInput,
 ): ContinuousFeedbackIssueState {
+  const checkpointStatus = input.status ?? "pass";
+  const unavailable = checkpointStatus === "unavailable";
   const existing = new Map(
     (previous?.findings ?? []).map((finding) => [finding.signature, finding]),
   );
@@ -81,7 +90,7 @@ export function mergeContinuousFeedbackCheckpoint(
   // them (council R1 — the only-new-signal prompt changed what an empty
   // array means, so emptiness and suppressed-only must diverge).
   const nextFindings =
-    input.findings.length === 0
+    input.findings.length === 0 && !unavailable
       ? (previous?.findings ?? []).map((finding) =>
           finding.status === "open"
             ? {
@@ -147,9 +156,12 @@ export function mergeContinuousFeedbackCheckpoint(
     // residual opens from prior checkpoints keep the state at "finding"
     // even when the current arrivals were all suppressed (council R1:
     // the journal must never say pass while a bounce can still fire).
-    status: nextFindings.some((finding) => finding.status === "open")
-      ? "finding"
-      : "pass",
+    status: unavailable
+      ? "unavailable"
+      : nextFindings.some((finding) => finding.status === "open")
+        ? "finding"
+        : "pass",
+    summary: input.summary ?? null,
     lastEvent: input.event,
     lastCheckedAt: input.checkedAt,
     reviewerLane: input.reviewerLane,

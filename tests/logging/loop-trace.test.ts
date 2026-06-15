@@ -104,6 +104,43 @@ describe("loop trace journal", () => {
     }
   });
 
+  it("preserves unavailable continuous-feedback entries after persistence", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-loop-trace-"));
+    try {
+      const entry: LoopTraceJournal[number] = {
+        ...seedEntry(1),
+        sequence: 1,
+        kind: "continuous_feedback",
+        summary:
+          'Continuous feedback unavailable. Continuous feedback provider exited with 1: Error: Model "local-flash" not found.',
+        continuousFeedback: {
+          event: "checkpoint",
+          status: "unavailable",
+          reviewerRunner: "pi",
+          reviewerModel: "local-flash",
+          findingSignatures: [],
+        },
+      };
+
+      await writeLoopTraceJournal(
+        {
+          workspaceRoot,
+          workspaceKey: "issue-1",
+        },
+        [entry],
+      );
+
+      await expect(
+        readLoopTraceJournal({
+          workspaceRoot,
+          workspaceKey: "issue-1",
+        }),
+      ).resolves.toEqual([entry]);
+    } finally {
+      rmSync(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
   it("uses the issue index for cold identifier lookup", async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-loop-index-"));
     try {
