@@ -97,6 +97,14 @@ describe("runtime snapshot", () => {
           codexAppServerIdentity: processIdentity,
         },
         {
+          issueId: "resumed-without-confirmed-mark",
+          issueIdentifier: "ISSUE-RESUMED-WITHOUT-CONFIRMED-MARK",
+          stage: "review",
+          attempt: 2,
+          codexAppServerPid: "1001",
+          codexAppServerIdentity: processIdentity,
+        },
+        {
           issueId: "missing",
           issueIdentifier: "ISSUE-MISSING",
           stage: null,
@@ -141,6 +149,11 @@ describe("runtime snapshot", () => {
       }),
       expect.objectContaining({
         issue_identifier: "ISSUE-UNCONFIRMED",
+        identity_status: "present",
+        cleanup_status: "unconfirmed",
+      }),
+      expect.objectContaining({
+        issue_identifier: "ISSUE-RESUMED-WITHOUT-CONFIRMED-MARK",
         identity_status: "present",
         cleanup_status: "unconfirmed",
       }),

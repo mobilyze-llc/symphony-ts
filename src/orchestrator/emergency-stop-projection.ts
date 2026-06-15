@@ -46,7 +46,7 @@ type EmergencyStopInterruptedIssue =
 
 export function projectEmergencyStopInterruptedIssue(
   issue: EmergencyStopInterruptedIssue,
-  state: Pick<OrchestratorState, "resumeRequired" | "resumeRequiredMarks">,
+  state: Pick<OrchestratorState, "resumeRequiredMarks">,
 ): PublicEmergencyStopInterruptedIssue {
   const identityStatus = getEmergencyStopIdentityStatus(issue);
   const cleanupStatus = getEmergencyStopCleanupStatus(issue, state);
@@ -100,13 +100,10 @@ function getEmergencyStopIdentityStatus(
 
 function getEmergencyStopCleanupStatus(
   issue: EmergencyStopInterruptedIssue,
-  state: Pick<OrchestratorState, "resumeRequired" | "resumeRequiredMarks">,
+  state: Pick<OrchestratorState, "resumeRequiredMarks">,
 ): EmergencyStopCleanupStatus {
   const mark = state.resumeRequiredMarks[issue.issueId];
-  if (
-    mark?.reason === "killed_mid_run" ||
-    !state.resumeRequired.has(issue.issueId)
-  ) {
+  if (mark?.reason === "killed_mid_run") {
     return "confirmed";
   }
 
