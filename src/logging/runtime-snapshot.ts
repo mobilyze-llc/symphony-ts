@@ -619,6 +619,17 @@ export function buildRuntimeSnapshot(
         : 0;
       const tokensPerTurn =
         entry.turnCount > 0 ? entry.totalStageTotalTokens / entry.turnCount : 0;
+      const freshTokensPerTurn =
+        entry.turnCount > 0
+          ? Math.max(
+              0,
+              entry.totalStageTotalTokens - entry.totalStageCacheReadTokens,
+            ) / entry.turnCount
+          : 0;
+      const cacheReadShare =
+        entry.totalStageTotalTokens > 0
+          ? entry.totalStageCacheReadTokens / entry.totalStageTotalTokens
+          : 0;
       const executionHistory =
         state.issueExecutionHistory[entry.issue.id] ?? [];
       const continuousFeedback = state.continuousFeedback[entry.issue.id];
@@ -656,7 +667,12 @@ export function buildRuntimeSnapshot(
       );
       const { health, health_reason } = classifyHealth(
         entry.lastCodexTimestamp,
-        tokensPerTurn,
+        {
+          totalTokensPerTurn: tokensPerTurn,
+          freshTokensPerTurn,
+          cacheReadShare,
+          rateLimitWindows: entry.rateLimitWindows,
+        },
         entry.totalStageCompactions ?? 0,
         codexCaps.maxHealthyCompactionsPerStage,
         now,
@@ -2149,7 +2165,12 @@ export function getStallThreshold(stageName: string | null): number {
 
 function classifyHealth(
   lastEventAt: string | null,
-  tokensPerTurn: number,
+  tokenBurn: {
+    totalTokensPerTurn: number;
+    freshTokensPerTurn: number;
+    cacheReadShare: number;
+    rateLimitWindows: SessionRateLimitTelemetry;
+  },
   currentStageCompactions: number,
   maxHealthyCompactionsPerStage: number,
   now: Date,
@@ -2178,9 +2199,12 @@ function classifyHealth(
   }
 
   const yellowReasons: string[] = [];
-  if (tokensPerTurn > HIGH_TOKEN_BURN_THRESHOLD) {
+  if (
+    tokenBurn.freshTokensPerTurn > HIGH_TOKEN_BURN_THRESHOLD &&
+    !isCacheDominantLowPressureBurn(tokenBurn)
+  ) {
     yellowReasons.push(
-      `high token burn: ${Math.round(tokensPerTurn).toLocaleString("en-US")} tokens/turn`,
+      `high token burn: ${Math.round(tokenBurn.freshTokensPerTurn).toLocaleString("en-US")} fresh tokens/turn (${Math.round(tokenBurn.totalTokensPerTurn).toLocaleString("en-US")} total, ${Math.round(tokenBurn.cacheReadShare * 100)}% cache-read)`,
     );
   }
 
@@ -2199,6 +2223,33 @@ function classifyHealth(
   }
 
   return { health: "green", health_reason: null };
+}
+
+function isCacheDominantLowPressureBurn(input: {
+  freshTokensPerTurn: number;
+  cacheReadShare: number;
+  rateLimitWindows: SessionRateLimitTelemetry;
+}): boolean {
+  if (input.cacheReadShare < 0.75) {
+    return false;
+  }
+  if (input.freshTokensPerTurn > HIGH_TOKEN_BURN_THRESHOLD * 2) {
+    return false;
+  }
+  const windows = [
+    input.rateLimitWindows.primary,
+    input.rateLimitWindows.secondary,
+  ].filter(
+    (window): window is SessionRateLimitWindowTelemetry => window !== null,
+  );
+  if (windows.length === 0) {
+    return false;
+  }
+  return windows.every(
+    (window) =>
+      window.latestPercent <= 25 &&
+      window.latestPercent - window.startPercent <= 5,
+  );
 }
 
 function buildCompactionsPerStage(

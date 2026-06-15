@@ -1301,12 +1301,15 @@ function renderDashboardClientScript(
           if (!drift) {
             return '<p class="empty-state">Deploy drift has not been captured yet.</p>';
           }
-          var status = drift.drift === true ? 'drift' : drift.drift === false ? 'aligned' : 'unknown';
+          var status = drift.qualified_status || (drift.drift === true ? 'drift' : drift.drift === false ? 'aligned' : 'unknown');
+          var statusLabel = status === 'aligned_stale' ? 'aligned (stale local ref)' : status === 'unknown_stale' ? 'unknown (stale local ref)' : status;
+          var freshness = drift.freshness || null;
           return '<div class="detail-grid">' +
-            '<div><span class="detail-kv-label">Status</span><span class="detail-kv-value">' + escapeHtml(status) + '</span></div>' +
+            '<div><span class="detail-kv-label">Status</span><span class="detail-kv-value">' + escapeHtml(statusLabel) + '</span></div>' +
             '<div><span class="detail-kv-label">Running commit</span><span class="detail-kv-value mono">' + escapeHtml(drift.running_commit || 'unknown') + '</span></div>' +
             '<div><span class="detail-kv-label">origin/main commit</span><span class="detail-kv-value mono">' + escapeHtml(drift.origin_main_commit || 'unknown') + '</span></div>' +
             '<div><span class="detail-kv-label">Captured at</span><span class="detail-kv-value mono">' + escapeHtml(drift.captured_at || 'unknown') + '</span></div>' +
+            (freshness ? '<div><span class="detail-kv-label">Freshness</span><span class="detail-kv-value">' + escapeHtml(freshness.status + ' · age ' + (freshness.captured_age_seconds === null ? 'unknown' : String(freshness.captured_age_seconds) + 's') + ' / window ' + String(freshness.threshold_seconds) + 's') + '</span></div>' : '') +
             '<div><span class="detail-kv-label">Note</span><span class="detail-kv-value">' + escapeHtml(drift.note || '') + '</span></div>' +
           '</div>';
         }
@@ -1957,16 +1960,29 @@ function renderDeployDrift(snapshot: RuntimeSnapshot): string {
     return '<p class="empty-state">Deploy drift has not been captured yet.</p>';
   }
   const status =
-    drift.drift === true
+    drift.qualified_status ??
+    (drift.drift === true
       ? "drift"
       : drift.drift === false
         ? "aligned"
-        : "unknown";
+        : "unknown");
+  const statusLabel =
+    status === "aligned_stale"
+      ? "aligned (stale local ref)"
+      : status === "unknown_stale"
+        ? "unknown (stale local ref)"
+        : status;
+  const freshness = drift.freshness;
+  const freshnessLabel =
+    freshness === undefined
+      ? null
+      : `${freshness.status} · age ${freshness.captured_age_seconds === null ? "unknown" : `${freshness.captured_age_seconds}s`} / window ${freshness.threshold_seconds}s`;
   return `<div class="detail-grid">
-    <div><span class="detail-kv-label">Status</span><span class="detail-kv-value">${escapeHtml(status)}</span></div>
+    <div><span class="detail-kv-label">Status</span><span class="detail-kv-value">${escapeHtml(statusLabel)}</span></div>
     <div><span class="detail-kv-label">Running commit</span><span class="detail-kv-value mono">${escapeHtml(drift.running_commit ?? "unknown")}</span></div>
     <div><span class="detail-kv-label">origin/main commit</span><span class="detail-kv-value mono">${escapeHtml(drift.origin_main_commit ?? "unknown")}</span></div>
     <div><span class="detail-kv-label">Captured at</span><span class="detail-kv-value mono">${escapeHtml(drift.captured_at)}</span></div>
+    ${freshnessLabel === null ? "" : `<div><span class="detail-kv-label">Freshness</span><span class="detail-kv-value">${escapeHtml(freshnessLabel)}</span></div>`}
     <div><span class="detail-kv-label">Note</span><span class="detail-kv-value">${escapeHtml(drift.note)}</span></div>
   </div>`;
 }

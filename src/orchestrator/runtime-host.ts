@@ -121,6 +121,7 @@ import {
 import {
   type DeployDriftStatus,
   captureDeployDrift,
+  qualifyDeployDriftFreshness,
 } from "../observability/deploy-drift.js";
 import {
   createModeScopedPermissionPolicy,
@@ -1407,7 +1408,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           return null;
         });
     }
-    return this.deployDrift;
+    return this.deployDrift === null
+      ? null
+      : qualifyDeployDriftFreshness(this.deployDrift, { now: this.now() });
   }
 
   async getIssueDetails(issueKey: string): Promise<IssueDetailResponse | null> {

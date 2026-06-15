@@ -1,8 +1,11 @@
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import { generateObject } from "ai";
 import { z } from "zod";
 
 import type { WorkflowPauseTriageConfig } from "../config/types.js";
+import {
+  createLocalOpenAICompatibleProvider,
+  withLocalJudgeAiSdkWarningPolicy,
+} from "./local-openai-compatible.js";
 import { fenceJudgeBoundaryTags } from "./prompt-fence.js";
 
 /**
@@ -203,7 +206,9 @@ export async function runAcGate(
   input: AcGateRunInput,
 ): Promise<AcGateVerdict | null> {
   const { config, evidence } = input;
-  if (config.baseUrl === null || config.model === null) {
+  const baseUrl = config.baseUrl;
+  const model = config.model;
+  if (baseUrl === null || model === null) {
     return null;
   }
   if (
@@ -214,23 +219,25 @@ export async function runAcGate(
   }
 
   try {
-    const provider = createOpenAICompatible({
+    const provider = createLocalOpenAICompatibleProvider({
       name: "ac-gate-local",
-      baseURL: config.baseUrl,
-      ...(config.apiKey === null ? {} : { apiKey: config.apiKey }),
-      ...(input.fetchFn === undefined ? {} : { fetch: input.fetchFn }),
+      baseURL: baseUrl,
+      apiKey: config.apiKey ?? undefined,
+      fetch: input.fetchFn,
     });
 
-    const { object } = await generateObject({
-      model: provider(config.model),
-      schema: VERDICT_SCHEMA,
-      temperature: 0,
-      maxRetries: 0,
-      abortSignal: AbortSignal.timeout(
-        input.timeoutMs ?? DEFAULT_AC_GATE_TIMEOUT_MS,
-      ),
-      prompt: buildAcGatePrompt(evidence),
-    });
+    const { object } = await withLocalJudgeAiSdkWarningPolicy(() =>
+      generateObject({
+        model: provider(model),
+        schema: VERDICT_SCHEMA,
+        temperature: 0,
+        maxRetries: 0,
+        abortSignal: AbortSignal.timeout(
+          input.timeoutMs ?? DEFAULT_AC_GATE_TIMEOUT_MS,
+        ),
+        prompt: buildAcGatePrompt(evidence),
+      }),
+    );
 
     return object;
   } catch (error) {
