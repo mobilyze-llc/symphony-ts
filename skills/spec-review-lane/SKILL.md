@@ -5,9 +5,13 @@ description: Run Symphony's durable spec-time review lane for a targeted Linear 
 
 # Symphony Spec Review Lane
 
-Use this skill when Codex is acting as the temporary Symphony orchestrator and
-needs to ask the durable spec-time review lane to review a specific Linear
-ticket before implementation.
+Use this skill when Codex is acting as the temporary Symphony orchestrator in an
+interactive session and needs to ask the spec-time review lane to review a
+specific Linear ticket before implementation.
+
+This is not the autonomous Symphony worker ticket-review path. Symphony workers
+use Symphony's out-of-band review process; this skill exists for interactive
+Codex-led orchestration sessions.
 
 This skill is the spec-review wrapper. For general Claude calls unrelated to
 durable ticket review, use the separate Claude-runner skill when it exists.
@@ -36,11 +40,26 @@ skills/spec-review-lane/scripts/run-spec-review-lane.mjs \
 
 The wrapper calls the durable watcher with `--issue-direct` so the ticket does
 not need to be in the watcher's active states or Pipeline project. By default it
-uses the built watcher in the target workspace at
-`dist/src/cli/spec-review-watch.js`; if that file does not exist, it falls back
-to `symphony-spec-review-watch` on `PATH`. Run `pnpm build` in the same checkout
-before using the default path, or pass `--symphony-spec-review-watch-bin` for an
-explicit watcher binary.
+resolves a ready watcher without requiring the target implementation worktree to
+have `node_modules` or `dist`:
+
+1. explicit `--symphony-spec-review-watch-bin` /
+   `SYMPHONY_SPEC_REVIEW_WATCH_BIN`;
+2. `--watcher-runtime-root` / `SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT`, resolved to
+   `dist/src/cli/spec-review-watch.js`;
+3. the target workspace's `dist/src/cli/spec-review-watch.js`;
+4. best-effort linked-main worktree discovery via `git worktree list
+   --porcelain`;
+5. `symphony-spec-review-watch` on `PATH`.
+
+The wrapper never auto-builds a checkout. A watcher is usable only when its
+`--help` output lists `--issue-direct` and `--ticket`.
+
+When the watcher runtime comes from a separate checkout, `--workspace` remains
+the review target. Source refs, selection artifacts, journal rows, and readiness
+markers continue to resolve under `--workspace`. For transient implementation
+worktrees, that direct-ticket readiness is session-scoped; durable autonomous
+readiness remains Symphony's out-of-band review responsibility.
 
 Before launching a review, the wrapper preflights watcher `--help` and fails
 with an actionable diagnostic if the watcher is missing or stale enough not to
@@ -73,8 +92,11 @@ skills/spec-review-lane/scripts/run-spec-review-lane.mjs \
 - `--artifact-root`: optional artifact directory.
 - `--cmux-spawn-bin`: optional cmux-spawn override.
 - `--symphony-spec-review-watch-bin`: optional watcher binary override. Without
-  this, the wrapper uses workspace `dist/src/cli/spec-review-watch.js`, then
-  `symphony-spec-review-watch` from `PATH`.
+  this, the wrapper uses the runtime-root/workspace/link/PATH resolution order
+  above.
+- `--watcher-runtime-root`: optional built Symphony checkout to use when the
+  target workspace is source-only. Equivalent env:
+  `SYMPHONY_SPEC_REVIEW_RUNTIME_ROOT`.
 
 ## Operator Summary
 
