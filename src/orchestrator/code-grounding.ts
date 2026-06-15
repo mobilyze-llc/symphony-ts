@@ -198,14 +198,13 @@ export async function runManagedCodeGrounding(
       checkoutFileLockPath(paths),
     );
     await fs.mkdir(paths.runArtifactRoot, { recursive: true });
-    await sweepCodeGroundingCheckouts({
-      workspaceRoot: input.workspaceRoot,
-      config: input.config,
-    });
-
     const release = await acquireCheckoutLease(paths, input);
     let report: CodeGroundingReport | null = null;
     try {
+      await sweepCodeGroundingCheckouts({
+        workspaceRoot: input.workspaceRoot,
+        config: input.config,
+      });
       await prepareManagedCheckout(paths, input);
       const entries = await verifyFindingsAgainstCheckout(paths, input);
       await input.afterDeterministicScan?.({

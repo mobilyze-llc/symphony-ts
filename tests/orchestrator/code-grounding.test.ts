@@ -140,6 +140,66 @@ describe("managed code grounding (SYMPH-596)", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("records the current lease before sweeping stale records for the same checkout", async () => {
+    const sourceRepo = await createSourceRepo();
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+    const target = {
+      repoUrl: sourceRepo,
+      sourcePath: sourceRepo,
+      commitSha,
+      repoScope: "symphony" as const,
+    };
+    const paths = resolveCodeGroundingPaths({
+      workspaceRoot,
+      runId: "same-checkout-sweep-run",
+      config: codeGroundingConfig(),
+      target,
+    });
+    await mkdir(paths.baseRoot, { recursive: true });
+    await writeFile(
+      paths.leaseIndexPath,
+      `${JSON.stringify(
+        {
+          version: 1,
+          checkouts: {
+            [paths.checkoutId]: {
+              checkoutId: paths.checkoutId,
+              repoUrl: target.repoUrl,
+              commitSha,
+              checkoutPath: paths.checkoutPath,
+              artifactRoot: paths.runArtifactRoot,
+              createdAt: "2026-06-13T00:00:00.000Z",
+              lastUsedAt: "2026-06-13T00:00:00.000Z",
+              activeRunIds: [],
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    let lockOwnerSeen = false;
+
+    const report = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "same-checkout-sweep-run",
+      config: { ...codeGroundingConfig(), ttlMs: 1 },
+      target,
+      findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
+      afterDeterministicScan: async ({ checkoutId }) => {
+        const owner = await readFile(
+          join(paths.checkoutsRoot, `${checkoutId}.lock`, "owner.json"),
+          "utf8",
+        );
+        lockOwnerSeen = owner.includes("ownerToken");
+      },
+    });
+
+    expect(report.status).toBe("verified");
+    expect(lockOwnerSeen).toBe(true);
+  });
+
   it("purges a checkout that becomes dirty during the read-only scan", async () => {
     const sourceRepo = await createSourceRepo();
     const workspaceRoot = await tempRoot("symph-cg-workspace-");
