@@ -130,7 +130,7 @@ describe("formatNotification", () => {
       issueUrl: "https://linear.app/mobilyze-llc/issue/SYMPH-42",
       executionHistory: [
         {
-          stageName: "investigate",
+          stageName: "investigate`phase",
           durationMs: 60_000,
           totalTokens: 5000,
           turns: 2,
@@ -177,7 +177,7 @@ describe("formatNotification", () => {
       text: { type: string; text: string };
     };
     expect(stageBlock.type).toBe("section");
-    expect(stageBlock.text.text).toContain("`investigate`");
+    expect(stageBlock.text.text).toContain("`investigate\\`phase`");
     expect(stageBlock.text.text).toContain("`implement`");
     // totals section includes rework count
     expect(blocks[4]?.type).toBe("divider");
@@ -1653,7 +1653,7 @@ describe("formatNotification — tracker_write_failed (SYMPH-413)", () => {
       reason: "Linear API request failed with HTTP 400.",
       httpStatus: 400,
       details:
-        '{"errors":[{"extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}',
+        '{"errors":[{"message":"Title has `inline` and slash\\\\`tick","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}',
     });
     expect(result.text).toContain("Tracker follow-up write failed");
     expect(result.text).toContain("(HTTP 400)");
@@ -1667,6 +1667,9 @@ describe("formatNotification — tracker_write_failed (SYMPH-413)", () => {
       "Reason: Linear API request failed with HTTP 400.",
     );
     expect(result.text).toContain("GRAPHQL_VALIDATION_FAILED");
+    expect(result.text).toContain(
+      'Details: `{"errors":[{"message":"Title has \\`inline\\` and slash\\\\\\\\\\`tick","extensions":{"code":"GRAPHQL_VALIDATION_FAILED"}}]}`',
+    );
     expect(result.text).not.toContain("[object Object]");
   });
 

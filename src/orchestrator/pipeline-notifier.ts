@@ -372,6 +372,10 @@ export function formatDurationMs(ms: number): string {
   return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
 }
 
+function formatInlineCode(value: string): string {
+  return `\`${value.replace(/\\/g, "\\\\").replace(/`/g, "\\`")}\``;
+}
+
 export function formatStageTimeline(history: ExecutionHistory): string {
   if (history.length === 0) {
     return "_No stage data_";
@@ -579,7 +583,7 @@ export function formatNotification(
         const stageLines = event.executionHistory
           .map(
             (record) =>
-              `\`${record.stageName}\` ${formatDurationMs(record.durationMs)} · ${formatTokensCompact(record.totalTokens)} tokens · ${record.outcome}`,
+              `${formatInlineCode(record.stageName)} ${formatDurationMs(record.durationMs)} · ${formatTokensCompact(record.totalTokens)} tokens · ${record.outcome}`,
           )
           .join("\n");
         blocks.push({
@@ -1095,15 +1099,15 @@ export function formatNotification(
     case "systemic_cluster_alert": {
       const stageLabel =
         event.stageName !== null
-          ? `stage \`${event.stageName}\``
+          ? `stage ${formatInlineCode(event.stageName)}`
           : "unknown stage";
       const issueList =
         event.issueIdentifiers.length > 0
           ? event.issueIdentifiers.join(", ")
           : "none";
       const parts: string[] = [
-        `:rotating_light: *SYSTEMIC failure cluster* — signature \`${event.signature}\``,
-        `Class: \`${event.errorClass}\` · ${stageLabel} · ${event.clusterSize} affected issues`,
+        `:rotating_light: *SYSTEMIC failure cluster* — signature ${formatInlineCode(event.signature)}`,
+        `Class: ${formatInlineCode(event.errorClass)} · ${stageLabel} · ${event.clusterSize} affected issues`,
         `Issues: ${issueList}`,
       ];
       if (event.breakerOpened) {
@@ -1143,7 +1147,9 @@ export function formatNotification(
       if (event.details !== null) {
         // details carries Linear API error bodies — sanitize like every other
         // free-text egress surface (SYMPH-421).
-        parts.push(`Details: \`${sanitizeForSlack(event.details)}\``);
+        parts.push(
+          `Details: ${formatInlineCode(sanitizeForSlack(event.details))}`,
+        );
       }
       parts.push(version);
       return { text: parts.join("\n") };
@@ -1161,7 +1167,7 @@ export function formatNotification(
           ? ` (${event.issueIdentifier}, seq ${event.sequence})`
           : "";
       const parts: string[] = [
-        `${emoji} *${label}* — ${event.issueIdentifier} (\`${event.reasonCode}\`) by ${event.actor.kind}@${event.actor.host}${cursor}`,
+        `${emoji} *${label}* — ${event.issueIdentifier} (${formatInlineCode(event.reasonCode)}) by ${event.actor.kind}@${event.actor.host}${cursor}`,
       ];
       if (event.remedy !== null) {
         parts.push(`Remedy: ${event.remedy}`);
