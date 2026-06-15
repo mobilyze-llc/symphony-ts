@@ -3,8 +3,10 @@
 Use this template when a session-orchestrated ticket hits a non-autonomous boundary:
 review round cap, budget cap, repeated same-family reopen, degraded review
 substrate, missing live proof, unclear split/merge decision, or conflicting
-ownership. This is the pause point for operator judgment instead of another
-automatic round.
+ownership. Also use it when the context firewall cannot safely build a bounded
+packet, when a tripwire requires judgment, or when raw evidence must be
+inspected beyond the packet/closeout contract. This is the pause point for
+operator judgment instead of another automatic round.
 
 ```markdown
 # Operator Decision Brief - [issue identifier / PR #123]
@@ -20,9 +22,18 @@ automatic round.
 - Linear state: [state]
 - CI/local validation: [commands and results]
 - Live proof: [evidence or exact blocker]
+- Packet identity:
+- Context packet: [path/URL @ hash, or why unavailable]
+- Closeout packet: [path/URL @ hash, if any]
 
 ## Why This Needs A Decision
 [Name the cap, repeated finding family, degraded lane, missing credential, or product choice.]
+
+## Context Firewall State
+- Packet freshness: [issue updatedAt, comment cutoff, base SHA, head SHA]
+- Tripwire: [none | threshold name and observed tier]
+- Raw evidence inspected: [no | yes, reason, path/URL, hash/excerpt]
+- Continuation safety: [safe same-worktree rotation | unsafe/stale/ownership conflict | needs operator judgment]
 
 ## Work Completed
 - [change/fix]

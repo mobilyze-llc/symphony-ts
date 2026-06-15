@@ -650,6 +650,9 @@ describe("session-orchestrator skill", () => {
       "You are a bounded Symphony implementation worker.",
     );
     expect(workerPrompts).toContain(
+      "You are a fresh bounded Symphony implementation worker continuing an existing branch.",
+    );
+    expect(workerPrompts).toContain(
       "You are a read-only Symphony review/triage worker.",
     );
     expect(workerPrompts).toContain(
@@ -659,6 +662,79 @@ describe("session-orchestrator skill", () => {
     expect(workerPrompts).toContain("current origin/main");
     expect(workerPrompts).toContain("Live proof:");
     expect(workerPrompts).toContain("Stop conditions:");
+  });
+
+  it("defines a bounded context firewall for worker delegation and rotation", () => {
+    expect(skillContent).toContain("## Context Firewall");
+    expect(skillContent).toContain("### Default Packet Budgets");
+    expect(skillContent).toContain("Issue body inline limit");
+    expect(skillContent).toContain("<= 4,000");
+    expect(skillContent).toContain("Total worker packet budget");
+    expect(skillContent).toContain("### Worker Packet Contract");
+    expect(skillContent).toContain("### Comment Preservation");
+    expect(skillContent).toContain("authorClass: unknown");
+    expect(skillContent).toContain("### Worker Closeout Contract");
+    expect(skillContent).toContain("### Rotation And Tripwires");
+    expect(skillContent).toContain(">= 100");
+    expect(skillContent).toContain("> 2");
+    expect(skillContent).toContain(">= 50M");
+    expect(skillContent).toContain("### Fresh-Worker Continuation");
+    expect(skillContent).toContain("same worktree/branch");
+  });
+
+  it("extends checkpoints and decision briefs with context-firewall evidence", () => {
+    expect(skillContent).toContain(
+      "| Issue | Worker/branch | PR | State | Packet | Closeout | Stop condition |",
+    );
+    expect(skillContent).toContain("## Context Firewall");
+    expect(skillContent).toContain("Packet freshness: per-issue");
+    expect(skillContent).toContain("Raw evidence inspected");
+    expect(skillContent).toContain("Rotation chain");
+
+    expect(decisionBrief).toContain("## Context Firewall State");
+    expect(decisionBrief).toContain("Packet identity");
+    expect(decisionBrief).toContain("Context packet:");
+    expect(decisionBrief).toContain("Closeout packet:");
+    expect(decisionBrief).toContain("Continuation safety");
+  });
+
+  it("keeps implementation workers packet-first without weakening current-head proof", () => {
+    expect(workerPrompts).toContain("Worker packet: [path/URL] @ [hash]");
+    expect(workerPrompts).toContain("Packet freshness: Linear updatedAt");
+    expect(workerPrompts).toContain("Read the worker packet first.");
+    expect(workerPrompts).toContain(
+      "Verify current branch/base/head before editing",
+    );
+    expect(workerPrompts).toContain(
+      "Do not paste raw long logs, raw transcripts",
+    );
+    expect(workerPrompts).toContain("needs_operator_context");
+    expect(workerPrompts).toContain("Return a compact closeout packet only");
+  });
+
+  it("keeps continuation workers bounded by freshness and tripwire stops", () => {
+    const continuationSection = workerPrompts.slice(
+      workerPrompts.indexOf("## Continuation Implementation Worker"),
+      workerPrompts.indexOf("## Read-Only Review Or Triage Worker"),
+    );
+
+    expect(continuationSection).toContain("Verified worktree");
+    expect(continuationSection).toContain("Current head:");
+    expect(continuationSection).toContain("Continuation packet:");
+    expect(continuationSection).toContain("Packet freshness:");
+    expect(continuationSection).toContain("Stop conditions:");
+    expect(continuationSection).toContain(
+      "Stop and report if path, branch, head, or base verification fails.",
+    );
+    expect(continuationSection).toContain(
+      "Stop and emit a compact closeout packet when any packet tripwire fires",
+    );
+    expect(continuationSection).toContain(">=100");
+    expect(continuationSection).toContain(">2");
+    expect(continuationSection).toContain(
+      "Do not ingest the prior worker transcript.",
+    );
+    expect(continuationSection).toContain("Handoff expectation:");
   });
 
   it("lets the orchestrator proactively use bounded subagents or threads", () => {
@@ -689,6 +765,12 @@ describe("session-orchestrator skill", () => {
     );
     expect(workerPrompts).toContain("risk classification");
     expect(workerPrompts).toContain("review-loop discipline");
+    expect(workerPrompts).toContain("Context-firewall scenarios");
+    expect(workerPrompts).toContain("authorClass: unknown");
+    expect(workerPrompts).toContain("same-worktree continuation worker packet");
+    expect(workerPrompts).toContain("SYMPH-E");
+    expect(workerPrompts).toContain("operator decision brief");
+    expect(workerPrompts).toContain("do not authorize blind implementation");
   });
 
   it("includes an operator decision brief", () => {

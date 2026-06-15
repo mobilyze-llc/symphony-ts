@@ -46,7 +46,7 @@ Read these references only when needed:
 
 | File | Contents | When to read |
 | --- | --- | --- |
-| `references/worker-prompts.md` | Copy-ready prompts for implementation workers and read-only review/triage workers. | Before delegating, refreshing, or forward-testing worker instructions. |
+| `references/worker-prompts.md` | Copy-ready prompts for implementation, continuation, and read-only review/triage workers. | Before delegating, refreshing, rotating, or forward-testing worker instructions. |
 | `references/operator-decision-brief.md` | Cap-hit and operator decision brief template. | When a ticket reaches review cap, budget cap, substrate degradation, unclear split/merge choice, or a non-autonomous decision boundary. |
 
 ## Session Start Checklist
@@ -79,11 +79,15 @@ Read these references only when needed:
    condition. Do not add orchestrator-run tickets to the `Pipeline` project unless
    the intent is automated Symphony pickup.
 8. Decide whether to work in the orchestrator thread or delegate. Keep the
-   orchestrator lightweight by default.
+   orchestrator lightweight by default. Before launching any non-trivial
+   implementation worker, create a bounded worker packet using the context
+   firewall below; small work may stay in the orchestrator thread only when the
+   scope and evidence fit without raw transcript ingestion.
 9. Write or update a compact persistent checkpoint after material decisions:
    current head, active tickets, active workers, PRs, review state, blocked
-   decisions, and next poll time. Prefer Linear Docs for durable session docs;
-   use `handoffs/` at the stable root only for local fallback handoffs.
+   decisions, context-firewall state, and next poll time. Prefer Linear Docs for
+   durable session docs; use `handoffs/` at the stable root only for local
+   fallback handoffs.
 
 ## Spec Review Intake
 
@@ -129,6 +133,140 @@ merge, Linear closeout, new follow-up filing, or scope split. The plan is not a
 ceremonial TODO list; it is how the orchestrator keeps the operator aware of how
 work is structured and how much remains.
 
+## Context Firewall
+
+The root orchestrator is a dispatcher and decision surface, not a long-lived
+worker transcript. It may keep queue state, priorities, dependencies, active
+worker state, PR/review status, and operator decisions. It must not routinely
+ingest full worker transcripts, raw long logs, full council artifacts, or broad
+source-search output as closeout evidence.
+
+The dispatcher may inspect raw evidence only for named exceptions:
+
+- Validate a blocker, degraded substrate, or degraded review artifact.
+- Resolve a security, ownership, or wrong-workspace risk.
+- Verify a closeout claim when compact evidence is insufficient.
+- Prepare an operator decision brief.
+
+Record every raw-evidence exception in the checkpoint with the reason, path or
+URL, and a compact excerpt or hash. Do not paste raw long logs, full private
+comments, or full transcripts into Linear, the checkpoint, or worker prompts.
+
+### Default Packet Budgets
+
+These defaults are conservative, operator-tunable starting points. They sit well
+below the observed June 15 burn-session magnitudes: about `4,433`, `1,247`, and
+`1,087` tool calls; about `27`, `8`, and `6` compactions; and p90 request sizes
+around `354k` to `449k` tokens. Recalibrate after another measured batch.
+
+| Budget | Default |
+| --- | --- |
+| Issue body inline limit | Include verbatim when `<= 4,000` characters; otherwise summarize to `<= 1,500` characters and keep source refs. |
+| Per-comment excerpt cap | `<= 500` characters per selected comment unless the full body is material and still fits the total packet. |
+| Total worker packet budget | Target `<= 12,000` characters, hard pause at `> 16,000` characters unless the operator authorizes a larger packet. |
+| Comment cutoff | Use the previous packet cutoff when continuing; otherwise use issue `updatedAt`, last state transition, and all comments newer than the last packet or claim comment. |
+| Raw artifact excerpt cap | `<= 1,000` characters per artifact, with local path or URL plus hash when useful. |
+
+### Worker Packet Contract
+
+Before delegation, emit a bounded packet containing:
+
+- Issue identifier, title, URL, current Linear state, project membership, and
+  `updatedAt`.
+- Linear comment freshness metadata: selected comment IDs, actor names or
+  emails when available, timestamps, hashes, and the cutoff used.
+- Canonical issue body, or a bounded issue-body summary when the body exceeds
+  the packet budget.
+- Selected comment summaries with short excerpts. Include full comment bodies
+  only when material and still under budget.
+- Operator/course-changing comment preservation status.
+- Source refs, files, or symbols known so far, with hashes when cheap.
+- Spec-review readiness, verdict, artifact path, and hash when present.
+- GitHub/repo freshness metadata: branch/worktree, base ref and SHA, head SHA
+  when known, and whether the worker must refresh before editing.
+- Scope, non-goals, expected files/modules, risk class, validation plan,
+  live-proof requirement, stop conditions, and no-subdelegation rule.
+- Raw-artifact policy: link raw logs or artifacts, include selected excerpts
+  only, and explain when the worker may inspect raw evidence.
+- Sufficiency check: what the worker should do if the packet is incomplete,
+  stale, contradictory, missing material evidence, or too large.
+
+The packet is a bounded starting contract, not a substitute for live truth.
+Workers still verify current branch/base/head and inspect the code, tests, docs,
+and artifacts needed for correctness.
+
+### Comment Preservation
+
+Separate deterministic preservation from semantic judgment:
+
+- Deterministically preserve comments whose actor identity is the operator by
+  stable actor ID or email, not display name alone. Agent comments may post from
+  a service account, so `authorClass: unknown` is not safely droppable.
+- Preserve comments newer than the prior packet cutoff or newer than the last
+  state transition.
+- Preserve comments matching scope, acceptance-criteria, review, blocker,
+  operator-decision, merge, or validation keywords.
+- The orchestrator must semantically check whether any remaining comment changes
+  course, scope, acceptance criteria, ownership, or stop conditions.
+
+If the packet budget would force dropping any comment that is not safely
+droppable, fail into `needs_operator_context` or an operator decision brief. Do
+not silently summarize away course-changing material to satisfy a size cap.
+
+### Worker Closeout Contract
+
+Workers return a compact closeout packet only:
+
+- Branch, PR URL, head SHA, and base SHA.
+- Files changed and concise behavior summary.
+- Validation commands and results.
+- Review artifacts and verdicts by path, URL, and hash when available.
+- Linear comments or Track issues created or updated.
+- Remaining blockers and exact next action.
+- Token/session notes when observable: approximate requests, tool calls,
+  compactions, and whether any threshold was crossed.
+- Raw-evidence exceptions used by the worker: why, where the raw artifact lives,
+  and the excerpt or hash.
+
+The root orchestrator stores or summarizes this closeout. It must not paste or
+absorb full worker transcripts.
+
+### Rotation And Tripwires
+
+Tripwires are mandatory pause-and-decide boundaries, not proof of failure. For
+continueable work, the normal action is a fresh worker in the same branch or
+worktree, using a new packet plus the previous closeout. Unsafe state, stale
+base, conflicting ownership, degraded substrate, or product judgment boundaries
+route to the existing operator decision brief.
+
+| Tripwire | Default | Observability |
+| --- | --- | --- |
+| Worker tool calls | `>= 100` in one worker context | Worker-self-attested at closeout; exact counts may be post-hoc only. |
+| Ticket/session tokens | `>= 50M` attributed tokens | Heuristic or post-hoc only until token telemetry is live. |
+| Compactions | `> 2` in one worker context | Orchestrator-observable when the active thread reports them; otherwise worker-self-attested. |
+| p90 request size | `> 250k` tokens | Heuristic or post-hoc only until token telemetry is live; fires on the next check after enough requests make the distribution meaningful. |
+| Adjacent ticket bleed | More than two adjacent tickets repeatedly appear in one context | Orchestrator-observable from prompts, closeouts, and visible transcript shape. |
+| Broad raw output | Logs, searches, tests, or artifacts enter context without compression | Orchestrator-observable in the current transcript or closeout. |
+| Review/process repeat | Budget cap, third same-family reopen, or third failed review turn | Orchestrator-observable from review and plan state. |
+
+### Fresh-Worker Continuation
+
+When a worker hits a tripwire and the ticket remains safely continueable:
+
+1. The current worker writes a compact closeout packet and stops.
+2. The root orchestrator records closeout path/hash, tripwire reason, and raw
+   evidence exceptions in the checkpoint.
+3. The root orchestrator refreshes live Linear issue/comment metadata, GitHub
+   PR/branch state, current worktree path, base SHA, and head SHA.
+4. The root orchestrator launches a fresh worker in the same worktree/branch
+   with a continuation packet containing the original packet, previous closeout
+   path/hash, refreshed truth, exact continuation scope, and stop condition.
+5. The new worker continues from the verified branch/worktree state without
+   inheriting the previous worker transcript.
+
+If multiple rotations happen for one issue, the checkpoint must show the
+rotation chain and why each continuation remained scoped and safe.
+
 ## Risk Taxonomy
 
 Classify every ticket before execution:
@@ -165,8 +303,8 @@ For `high-risk invariant`, write this state contract before code:
   separable.
 - Put the no-subdelegation rule in every worker prompt.
 - Assign one bounded issue or cluster per worker. Include source of truth,
-  authorization boundary, current-head proof, review plan, live-proof
-  expectation, stop conditions, and handoff expectations.
+  worker packet path/hash, authorization boundary, current-head proof, review
+  plan, live-proof expectation, stop conditions, and closeout expectations.
 - Before steering an existing worker, read its latest state. Intervene only for
   explicit blockers, completed work needing the next assignment, repeated
   no-progress failure, wrong repository or issue, unauthorized mutation,
@@ -279,12 +417,19 @@ Use this shape for Linear Docs or local handoffs:
 - Linear scope: <issues and state>
 
 ## Active Work
-| Issue | Worker/branch | PR | State | Stop condition |
-| --- | --- | --- | --- | --- |
+| Issue | Worker/branch | PR | State | Packet | Closeout | Stop condition |
+| --- | --- | --- | --- | --- | --- | --- |
 
 ## Review Evidence
 | PR | Reviewed head | Lanes | Verdict | Council dir/report |
 | --- | --- | --- | --- | --- |
+
+## Context Firewall
+- Packet freshness: per-issue issue updatedAt/comment cutoff/base SHA/head SHA;
+  keep per-worker packet identity in the Active Work table
+- Tripwire status: <none | threshold | rotation | decision brief>
+- Raw evidence inspected: <no | yes, reason, path/URL, hash/excerpt>
+- Rotation chain: <worker -> closeout -> fresh worker, if any>
 
 ## Decisions Needed
 | Issue/PR | Question | Recommendation | Options |
