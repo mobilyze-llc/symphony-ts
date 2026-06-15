@@ -148,6 +148,7 @@ interface LeaseRecord {
 const DEFAULT_GIT_TIMEOUT_MS = 60_000;
 const MAX_SCAN_FILES = 500;
 const MAX_SCAN_FILE_BYTES = 256_000;
+const MAX_SCAN_DEPTH = 64;
 const TEXT_FILE_EXTENSIONS = new Set([
   ".js",
   ".jsx",
@@ -166,6 +167,7 @@ const MODEL_VALIDATED_STATUSES = new Set<CodeGroundingVerificationStatus>([
   "model_suggested_verified",
 ]);
 const leaseMutexes = new Map<string, AsyncMutex>();
+const checkoutMutexes = new Map<string, AsyncMutex>();
 
 export async function runManagedCodeGrounding(
   input: RunCodeGroundingInput,
@@ -181,65 +183,73 @@ export async function runManagedCodeGrounding(
   }
 
   const paths = resolveCodeGroundingPaths(input);
-  await fs.mkdir(paths.runArtifactRoot, { recursive: true });
-  await sweepCodeGroundingCheckouts({
-    workspaceRoot: input.workspaceRoot,
-    config: input.config,
-  });
-
-  const release = await acquireCheckoutLease(paths, input);
-  let report: CodeGroundingReport | null = null;
+  const releaseCheckout = await getCheckoutMutex(
+    paths.workspaceRoot,
+    paths.checkoutId,
+  ).acquire();
   try {
-    await prepareManagedCheckout(paths, input);
-    const entries = await verifyFindingsAgainstCheckout(paths, input);
-    await input.afterDeterministicScan?.({
-      checkoutPath: paths.checkoutPath,
-      checkoutId: paths.checkoutId,
+    await fs.mkdir(paths.runArtifactRoot, { recursive: true });
+    await sweepCodeGroundingCheckouts({
+      workspaceRoot: input.workspaceRoot,
+      config: input.config,
     });
-    const dirtyState = await getCheckoutDirtyState(paths, input);
-    if (dirtyState.dirty) {
-      await fs.rm(paths.checkoutPath, { recursive: true, force: true });
+
+    const release = await acquireCheckoutLease(paths, input);
+    let report: CodeGroundingReport | null = null;
+    try {
+      await prepareManagedCheckout(paths, input);
+      const entries = await verifyFindingsAgainstCheckout(paths, input);
+      await input.afterDeterministicScan?.({
+        checkoutPath: paths.checkoutPath,
+        checkoutId: paths.checkoutId,
+      });
+      const dirtyState = await getCheckoutDirtyState(paths, input);
+      if (dirtyState.dirty) {
+        await fs.rm(paths.checkoutPath, { recursive: true, force: true });
+        report = {
+          generatedAt: new Date().toISOString(),
+          status: "contaminated",
+          checkout: checkoutMetadata(paths, input),
+          entries: entries.map((entry) => ({
+            ...entry,
+            status: "contaminated",
+            summary:
+              "Code-grounding checkout became dirty during read-only scan; evidence discarded.",
+            citations: [],
+          })),
+          cleanup: {
+            leaseReleased: false,
+            checkoutPurged: true,
+            dirtyState,
+          },
+          warnings: [
+            "code-grounding checkout mutated during scan and was purged",
+          ],
+        };
+        return report;
+      }
+
       report = {
         generatedAt: new Date().toISOString(),
-        status: "contaminated",
+        status: summarizeEntries(entries),
         checkout: checkoutMetadata(paths, input),
-        entries: entries.map((entry) => ({
-          ...entry,
-          status: "contaminated",
-          summary:
-            "Code-grounding checkout became dirty during read-only scan; evidence discarded.",
-          citations: [],
-        })),
+        entries,
         cleanup: {
           leaseReleased: false,
-          checkoutPurged: true,
+          checkoutPurged: false,
           dirtyState,
         },
-        warnings: [
-          "code-grounding checkout mutated during scan and was purged",
-        ],
+        warnings: [],
       };
       return report;
+    } finally {
+      await release();
+      if (report !== null) {
+        report.cleanup.leaseReleased = true;
+      }
     }
-
-    report = {
-      generatedAt: new Date().toISOString(),
-      status: summarizeEntries(entries),
-      checkout: checkoutMetadata(paths, input),
-      entries,
-      cleanup: {
-        leaseReleased: false,
-        checkoutPurged: false,
-        dirtyState,
-      },
-      warnings: [],
-    };
-    return report;
   } finally {
-    await release();
-    if (report !== null) {
-      report.cleanup.leaseReleased = true;
-    }
+    releaseCheckout();
   }
 }
 
@@ -530,11 +540,10 @@ async function buildScanIndex(checkoutPath: string): Promise<ScanIndex> {
       matchedSpan: relativePath,
       contentHash,
     });
-    for (const symbol of extractSymbols(content)) {
+    for (const [symbol, line] of extractSymbols(content)) {
       if (symbolCitations.has(symbol)) {
         continue;
       }
-      const line = findLineForSymbol(content, symbol);
       symbolCitations.set(symbol, {
         path: relativePath,
         startLine: line,
@@ -548,22 +557,31 @@ async function buildScanIndex(checkoutPath: string): Promise<ScanIndex> {
 }
 
 async function* walkTextFiles(root: string): AsyncGenerator<string> {
-  const entries = await fs.readdir(root, { withFileTypes: true });
-  for (const entry of entries) {
-    if (
-      entry.name === ".git" ||
-      entry.name === "node_modules" ||
-      entry.name === "dist"
-    ) {
+  const stack: Array<{ path: string; depth: number }> = [
+    { path: root, depth: 0 },
+  ];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === undefined || current.depth > MAX_SCAN_DEPTH) {
       continue;
     }
-    const absolutePath = join(root, entry.name);
-    if (entry.isDirectory()) {
-      yield* walkTextFiles(absolutePath);
-      continue;
-    }
-    if (entry.isFile() && isTextFile(entry.name)) {
-      yield absolutePath;
+    const entries = await fs.readdir(current.path, { withFileTypes: true });
+    for (const entry of entries) {
+      if (
+        entry.name === ".git" ||
+        entry.name === "node_modules" ||
+        entry.name === "dist"
+      ) {
+        continue;
+      }
+      const absolutePath = join(current.path, entry.name);
+      if (entry.isDirectory()) {
+        stack.push({ path: absolutePath, depth: current.depth + 1 });
+        continue;
+      }
+      if (entry.isFile() && isTextFile(entry.name)) {
+        yield absolutePath;
+      }
     }
   }
 }
@@ -581,24 +599,27 @@ async function readTextFileBounded(path: string): Promise<string | null> {
   return fs.readFile(path, "utf8");
 }
 
-function extractSymbols(content: string): Set<string> {
-  const symbols = new Set<string>();
-  for (const match of content.matchAll(
-    /\b(?:export\s+)?(?:async\s+)?(?:function|class|interface|type|const|let|var|enum)\s+([A-Za-z_$][A-Za-z0-9_$]{2,})/g,
-  )) {
-    const symbol = match[1];
-    if (symbol !== undefined) {
-      symbols.add(symbol);
+const SYMBOL_DECLARATION_PATTERNS = [
+  /\b(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s+([A-Za-z_$][A-Za-z0-9_$]{2,})/g,
+  /\b(?:export\s+)?(?:default\s+)?(?:class|interface|type|enum)\s+([A-Za-z_$][A-Za-z0-9_$]{2,})/g,
+  /\b(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]{2,})\s*=/g,
+] as const;
+
+function extractSymbols(content: string): Map<string, number> {
+  const symbols = new Map<string, number>();
+  for (const pattern of SYMBOL_DECLARATION_PATTERNS) {
+    for (const match of content.matchAll(pattern)) {
+      const symbol = match[1];
+      if (symbol !== undefined && !symbols.has(symbol)) {
+        symbols.set(symbol, lineForMatchIndex(content, match.index ?? 0));
+      }
     }
   }
   return symbols;
 }
 
-function findLineForSymbol(content: string, symbol: string): number {
-  const lines = content.split("\n");
-  const pattern = new RegExp(`\\b${escapeRegExp(symbol)}\\b`);
-  const index = lines.findIndex((line) => pattern.test(line));
-  return index === -1 ? 1 : index + 1;
+function lineForMatchIndex(content: string, index: number): number {
+  return content.slice(0, index).split("\n").length;
 }
 
 function toCitation(
@@ -708,6 +729,19 @@ function getLeaseMutex(workspaceRoot: string): AsyncMutex {
   if (mutex === undefined) {
     mutex = new AsyncMutex();
     leaseMutexes.set(workspaceRoot, mutex);
+  }
+  return mutex;
+}
+
+function getCheckoutMutex(
+  workspaceRoot: string,
+  checkoutId: string,
+): AsyncMutex {
+  const key = `${workspaceRoot}:${checkoutId}`;
+  let mutex = checkoutMutexes.get(key);
+  if (mutex === undefined) {
+    mutex = new AsyncMutex();
+    checkoutMutexes.set(key, mutex);
   }
   return mutex;
 }
@@ -910,8 +944,4 @@ function toRepoRelativePath(root: string, path: string): string {
 
 function hashContent(content: string): string {
   return createHash("sha256").update(content).digest("hex");
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

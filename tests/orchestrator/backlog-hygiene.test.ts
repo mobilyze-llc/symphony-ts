@@ -1,3 +1,7 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { BacklogAuditReport } from "../../src/audit/backlog-audit.js";
@@ -365,6 +369,54 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     expect(result.status).toBe("completed");
     expect(result.proposals).toHaveLength(1);
     expect(result.proposals[0]?.modelTier).toBe("frontier_high_judgment");
+  });
+
+  it("degrades code-grounding failures without dropping hygiene proposals", async () => {
+    const workspaceRoot = await mkdtemp(join(tmpdir(), "symph-hygiene-cg-"));
+    try {
+      const result = await runBacklogHygieneProposalLane({
+        enabled: true,
+        config: {
+          baseUrl: "http://127.0.0.1:9999",
+          model: "local",
+          apiKey: null,
+          timeoutMs: 1,
+        },
+        issues: [issue({ id: "1", identifier: "SYMPH-1" })],
+        runtimeEvidence: { state: {}, stateDelta: {} },
+        maxProposalsPerProductPerPoll: 5,
+        evaluation: passingEvaluation(),
+        fetchFn: vi.fn(async () => auditResponse()) as typeof fetch,
+        codeGrounding: {
+          workspaceRoot,
+          runId: "grounding-failure",
+          config: {
+            enabled: true,
+            baseDir: join(".symphony", "code-grounding"),
+            ttlMs: 86_400_000,
+            maxCheckoutsPerRepo: 5,
+          },
+          target: {
+            repoUrl: "file:///missing-repo",
+            commitSha: "bad",
+            repoScope: "symphony",
+          },
+          commandRunner: async () => ({
+            exitCode: 1,
+            stdout: "",
+            stderr: "clone failed",
+          }),
+        },
+      });
+
+      expect(result.status).toBe("completed");
+      expect(result.proposals).toHaveLength(1);
+      expect(result.proposals[0]?.codeGroundingStatus).toBeNull();
+      expect(result.warnings[0]).toContain("code grounding failed");
+      expect(result.warnings[0]).toContain("clone failed");
+    } finally {
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
   });
 
   it("journals proposals and accept/reject decisions as calibration-only label transitions", () => {
