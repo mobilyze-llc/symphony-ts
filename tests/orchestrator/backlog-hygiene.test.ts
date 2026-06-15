@@ -11,6 +11,7 @@ import {
   BACKLOG_HYGIENE_PROPOSAL_LABELS,
   QUEUE_TRIAGE_EVALUATION_DIMENSIONS,
   QUEUE_TRIAGE_GOLDEN_CORPUS,
+  buildBacklogHygieneCodeGroundingInput,
   buildBacklogHygieneDecisionJournalEntry,
   buildBacklogHygieneProposalJournalEntry,
   buildBacklogHygieneProposals,
@@ -244,6 +245,58 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     ).toThrow("maxProposalsPerProductPerPoll must be an integer.");
   });
 
+  it("builds code-grounding input from resolved workflow config only when enabled", () => {
+    const enabled = buildBacklogHygieneCodeGroundingInput({
+      workflowConfig: {
+        workspace: { root: "/tmp/symphony-workspace" },
+        codeGrounding: {
+          enabled: true,
+          baseDir: ".symphony/code-grounding",
+          ttlMs: 86_400_000,
+          maxCheckoutsPerRepo: 5,
+        },
+      },
+      runId: "hygiene-run-1",
+      target: {
+        repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+        commitSha: "abc123",
+        repoScope: "symphony",
+      },
+    });
+
+    expect(enabled).toMatchObject({
+      workspaceRoot: "/tmp/symphony-workspace",
+      runId: "hygiene-run-1",
+      config: {
+        enabled: true,
+        baseDir: ".symphony/code-grounding",
+      },
+      target: {
+        repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+        commitSha: "abc123",
+      },
+    });
+    expect(
+      buildBacklogHygieneCodeGroundingInput({
+        workflowConfig: {
+          workspace: { root: "/tmp/symphony-workspace" },
+          codeGrounding: {
+            enabled: false,
+            baseDir: ".symphony/code-grounding",
+            ttlMs: 86_400_000,
+            maxCheckoutsPerRepo: 5,
+          },
+        },
+        runId: "hygiene-run-2",
+        target: {
+          repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+          commitSha: "abc123",
+          repoScope: "symphony",
+        },
+      }),
+    ).toBeNull();
+  });
+
   it("uses the golden corpus registry when deciding local-vs-frontier model tier", () => {
     const missingDimensionDecision = decideBacklogHygieneModelTier({
       corpusId: QUEUE_TRIAGE_GOLDEN_CORPUS[0].id,
@@ -417,6 +470,51 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }
+  });
+
+  it("skips code grounding when cap and eligibility filters prevent proposals", async () => {
+    const commandRunner = vi.fn(async () => ({
+      exitCode: 1,
+      stdout: "",
+      stderr: "must not run",
+    }));
+
+    const result = await runBacklogHygieneProposalLane({
+      enabled: true,
+      config: {
+        baseUrl: "http://127.0.0.1:9999",
+        model: "local",
+        apiKey: null,
+        timeoutMs: 1,
+      },
+      issues: [issue({ id: "1", identifier: "SYMPH-1" })],
+      activeIssueIds: ["1"],
+      runtimeEvidence: { state: {}, stateDelta: {} },
+      maxProposalsPerProductPerPoll: 5,
+      evaluation: passingEvaluation(),
+      fetchFn: vi.fn(async () => auditResponse()) as typeof fetch,
+      codeGrounding: {
+        workspaceRoot: "/tmp/symphony-workspace",
+        runId: "no-proposals",
+        config: {
+          enabled: true,
+          baseDir: ".symphony/code-grounding",
+          ttlMs: 86_400_000,
+          maxCheckoutsPerRepo: 5,
+        },
+        target: {
+          repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+          commitSha: "abc123",
+          repoScope: "symphony",
+        },
+        commandRunner,
+      },
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.proposals).toEqual([]);
+    expect(result.warnings).toEqual([]);
+    expect(commandRunner).not.toHaveBeenCalled();
   });
 
   it("journals proposals and accept/reject decisions as calibration-only label transitions", () => {

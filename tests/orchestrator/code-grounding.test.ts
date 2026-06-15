@@ -358,10 +358,13 @@ describe("managed code grounding (SYMPH-596)", () => {
     const workspaceRoot = await tempRoot("symph-cg-workspace-");
     const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
     const staleCheckout = join(baseRoot, "checkouts", "cg-stale");
+    const staleCheckoutLock = join(baseRoot, "checkouts", "cg-stale.lock");
     const activeCheckout = join(baseRoot, "checkouts", "cg-active");
     await mkdir(staleCheckout, { recursive: true });
+    await mkdir(staleCheckoutLock, { recursive: true });
     await mkdir(activeCheckout, { recursive: true });
     await writeFile(join(staleCheckout, "file.txt"), "stale");
+    await writeFile(join(staleCheckoutLock, "owner.json"), "{}\n");
     await writeFile(join(activeCheckout, "file.txt"), "active");
     await mkdir(baseRoot, { recursive: true });
     await writeFile(
@@ -408,6 +411,9 @@ describe("managed code grounding (SYMPH-596)", () => {
 
     await expect(
       readFile(join(staleCheckout, "file.txt")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(join(staleCheckoutLock, "owner.json")),
     ).rejects.toMatchObject({ code: "ENOENT" });
     await expect(
       readFile(join(activeCheckout, "file.txt"), "utf8"),

@@ -301,6 +301,9 @@ export async function sweepCodeGroundingCheckouts(input: {
         }
         assertWorkspacePathWithinRoot(baseRoot, record.checkoutPath);
         await fs.rm(record.checkoutPath, { recursive: true, force: true });
+        const checkoutLockPath = `${record.checkoutPath}.lock`;
+        assertWorkspacePathWithinRoot(baseRoot, checkoutLockPath);
+        await fs.rm(checkoutLockPath, { recursive: true, force: true });
         delete index.checkouts[record.checkoutId];
       }
     }
