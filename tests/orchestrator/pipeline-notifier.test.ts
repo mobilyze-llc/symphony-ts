@@ -191,6 +191,33 @@ describe("formatNotification", () => {
     expect(blocks[6]?.type).toBe("context");
   });
 
+  it("escapes backticks in issue_completed stage inline code", () => {
+    const result = formatNotification({
+      type: "issue_completed",
+      issueIdentifier: "SYMPH-42",
+      issueTitle: "Add pagination",
+      issueUrl: null,
+      executionHistory: [
+        {
+          stageName: "imple`ment",
+          durationMs: 120_000,
+          totalTokens: 15000,
+          turns: 5,
+          outcome: "completed",
+        },
+      ],
+      reworkCount: 0,
+      totalTokens: 15000,
+      totalDurationMs: 120_000,
+    });
+
+    const stageBlock = result.blocks?.[3] as {
+      type: "section";
+      text: { type: string; text: string };
+    };
+    expect(stageBlock.text.text).toContain("`imple\\`ment` 2m");
+  });
+
   it("formats issue_completed without rework", () => {
     const result = formatNotification({
       type: "issue_completed",
@@ -1668,6 +1695,21 @@ describe("formatNotification — tracker_write_failed (SYMPH-413)", () => {
     );
     expect(result.text).toContain("GRAPHQL_VALIDATION_FAILED");
     expect(result.text).not.toContain("[object Object]");
+  });
+
+  it("escapes backticks in tracker_write_failed details inline code", () => {
+    const result = formatNotification({
+      type: "tracker_write_failed",
+      followUpTitle: "Dispatcher follow-up: tracker write",
+      sourceIssueIds: ["issue-1"],
+      reason: "Linear API request failed with HTTP 400.",
+      httpStatus: 400,
+      details: '{"title":"Fix `quoted` formatter"}',
+    });
+
+    expect(result.text).toContain(
+      'Details: `{"title":"Fix \\`quoted\\` formatter"}`',
+    );
   });
 
   it("formats tracker_write_failed without status or details", () => {
