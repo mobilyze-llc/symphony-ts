@@ -76,7 +76,7 @@ budget_escalation:
 # works best layered ABOVE the ladder: with the ladder off, a continue
 # verdict re-runs at the same ceiling that just paused and is usually wasted.
 pause_triage:
-  base_url: http://studio2.local:8000/v1
+  base_url: http://studio2:8000/v1
   model: deepseek-v4-flash
   api_key: $LOCAL_LLM_API_KEY
   max_resumes: 2
