@@ -18,6 +18,7 @@ import {
   LOOP_TRACE_JOURNAL_MAX_ENTRIES,
   appendLoopTraceJournalEntry,
   buildLoopTraceJournalPreview,
+  buildLoopTraceJournalResponse,
   findLoopTraceJournalByIssueIdentifier,
   getLoopTraceIssueIndexPath,
   readLoopTraceJournal,
@@ -116,6 +117,8 @@ describe("loop trace journal", () => {
         continuousFeedback: {
           event: "checkpoint",
           status: "unavailable",
+          unavailableSummary:
+            'Continuous feedback provider exited with 1: Error: Model "local-flash" not found.',
           reviewerRunner: "pi",
           reviewerModel: "local-flash",
           findingSignatures: [],
@@ -136,6 +139,18 @@ describe("loop trace journal", () => {
           workspaceKey: "issue-1",
         }),
       ).resolves.toEqual([entry]);
+      expect(
+        buildLoopTraceJournalResponse([entry], {
+          workspaceRoot,
+          workspaceKey: "issue-1",
+        }).entries[0],
+      ).toMatchObject({
+        continuous_feedback: {
+          status: "unavailable",
+          unavailable_summary:
+            'Continuous feedback provider exited with 1: Error: Model "local-flash" not found.',
+        },
+      });
     } finally {
       rmSync(workspaceRoot, { recursive: true, force: true });
     }

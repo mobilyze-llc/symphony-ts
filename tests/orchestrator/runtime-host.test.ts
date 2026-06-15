@@ -3264,6 +3264,8 @@ describe("OrchestratorRuntimeHost", () => {
         'Continuous feedback unavailable. Continuous feedback provider exited with 1: Error: Model "local-flash" not found.',
       continuous_feedback: {
         status: "unavailable",
+        unavailable_summary:
+          'Continuous feedback provider exited with 1: Error: Model "local-flash" not found.',
         finding_signatures: [],
       },
     });
