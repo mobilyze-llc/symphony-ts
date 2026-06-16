@@ -4400,7 +4400,11 @@ async function parseLaneResult(input: {
             stringOrNull(parsed.artifact_sha256),
         });
   const artifactPath = artifactPathResolution?.artifactPath ?? null;
-  if (artifactPath === null || !(await fileHasContent(artifactPath))) {
+  if (
+    artifactPath === null ||
+    (artifactPathResolution?.validationErrors.length ?? 0) > 0 ||
+    !(await fileHasContent(artifactPath))
+  ) {
     const fallbackKind =
       artifactPathResolution?.mirrorFallback.failureKind ?? null;
     return {

@@ -2917,6 +2917,50 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("fails closed when a rejected remote lane artifact is readable", async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), "headless-readable-"));
+    const remoteArtifact = join(outsideDir, "outside-readable.md");
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          json: {
+            state: "complete",
+            artifact_path: remoteArtifact,
+          },
+        },
+      },
+    });
+    await writeFile(
+      remoteArtifact,
+      "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n",
+    );
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        routingMode: "legacy",
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "error",
+      artifactPath: remoteArtifact,
+      rawArtifactPath: remoteArtifact,
+      message: "Reviewer artifact mirror fallback failed: remote_mismatch.",
+      mirrorFallback: {
+        attempted: true,
+        used: false,
+        failureKind: "remote_mismatch",
+      },
+    });
+  });
+
   it("resolves remote lane artifact paths through same-stem local mirrors", async () => {
     const harness = await createHarness({
       laneBehavior: {
