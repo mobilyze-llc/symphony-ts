@@ -1552,6 +1552,23 @@ export class OrchestratorCore {
       }
 
       if (
+        entry.kind === "merge_actuation" &&
+        (entry.metadata.action === "completed" ||
+          entry.metadata.action === "recovered") &&
+        entry.metadata.subject_action === "tracker_done"
+      ) {
+        // Actuator-driven merge completion writes Linear Done through the
+        // merge_actuation journal, not the tracker_write lease path. Replaying
+        // the completed side effect must still restore terminal issue state.
+        this.state.completed.add(entry.issueId);
+        this.releaseClaim(entry.issueId);
+        this.clearTerminalIssueRuntimeState(
+          entry.issueId,
+          this.journalEntryTimestampMs(entry),
+        );
+      }
+
+      if (
         entry.kind === "ac_gate" &&
         entry.metadata.status === "completed" &&
         (entry.metadata.verdict === "pass" ||

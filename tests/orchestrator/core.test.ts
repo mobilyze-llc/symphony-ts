@@ -327,6 +327,23 @@ describe("orchestrator core", () => {
     });
     expect(state.resumeRequired.has("1")).toBe(false);
 
+    const restartedSpawnedStages: Array<string | null> = [];
+    const restarted = createOrchestrator({
+      config: createReviewMergeConfig(),
+      runJournal: state.dispatcherRunJournal,
+      spawnWorker: async ({ stageName }) => {
+        restartedSpawnedStages.push(stageName);
+        return {
+          workerHandle: { pid: 1002 },
+          monitorHandle: { ref: "monitor-2" },
+        };
+      },
+    });
+    expect(restarted.getState().completed.has("1")).toBe(true);
+    expect(restarted.getState().claimed.has("1")).toBe(false);
+    expect((await restarted.pollTick()).dispatchedIssueIds).toEqual([]);
+    expect(restartedSpawnedStages).toEqual([]);
+
     const laterPoll = await orchestrator.pollTick();
     expect(laterPoll.dispatchedIssueIds).toEqual([]);
     expect(spawnedStages).toEqual(["review"]);
