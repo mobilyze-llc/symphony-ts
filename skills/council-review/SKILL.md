@@ -1,6 +1,6 @@
 ---
 name: council-review
-description: High-assurance Codex-led code review council for non-trivial changes. Codex orchestrates Opus via claude and DeepSeek via pi through cmux-spawn, runs Codex cross-examination in-session, triages evidence, fixes issues, and optionally prepares a merge.
+description: High-assurance Codex-led code review council for non-trivial changes. Codex orchestrates Opus via claude, DeepSeek via pi, and an optional non-authoritative Kimi shadow lane through cmux-spawn, runs Codex cross-examination in-session, triages evidence, fixes issues, and optionally prepares a merge.
 ---
 
 # Council Review - Codex-Led Cross-Examination
@@ -13,7 +13,8 @@ artifact, telemetry, and concurrency-cap semantics.
 
 This is the role-swapped version of the Claude-side council pattern:
 Codex is the lead, Opus is the external Claude lane, and Pi/DeepSeek is
-the second independent reviewer.
+the second independent reviewer. Kimi K2.7 may run as an optional Phase
+1 shadow lane for calibration only; it is never merge-authoritative.
 
 ## When This Applies
 
@@ -44,9 +45,10 @@ Read these files only when the workflow asks for them:
 
 | File | Contents | When to Read |
 | --- | --- | --- |
-| `cli-reference.md` | Correct cmux-spawn commands for Opus and Pi, artifact paths, and failure rules | Before spawning external lanes |
+| `cli-reference.md` | Correct cmux-spawn commands for Opus, Pi, and Kimi shadow diagnostics; artifact paths; and failure rules | Before spawning external lanes |
 | `templates/phase1-opus-prompt.md` | Phase 1 independent review prompt for Opus | During Phase 1 setup |
 | `templates/phase1-pi-prompt.md` | Phase 1 independent review prompt for Pi/DeepSeek | During Phase 1 setup |
+| `templates/phase1-kimi-shadow-prompt.md` | Phase 1 Kimi K2.7 shadow diagnostic prompt | When `SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED` enables the shadow lane |
 | `templates/cross-exam-codex-prompt.md` | Codex Lead's Phase 2 cross-exam worksheet | During Phase 2 setup |
 | `templates/cross-exam-opus-prompt.md` | Opus Phase 2 cross-exam prompt for Pi findings | During Phase 2 setup |
 | `templates/council-report.md` | Phase 3 report format | During triage |
@@ -69,6 +71,7 @@ Do not append new durable work to `docs/tracked-items.md`.
 | --- | --- | --- | --- |
 | Phase 1 | Independent review | Opus | `cmux-spawn run --agent claude --model opus` |
 | Phase 1 | Independent review | DeepSeek `deepseek-v4-pro` | `cmux-spawn run --agent pi --provider deepseek` |
+| Phase 1 | Independent shadow diagnostics | Kimi K2.7 | `cmux-spawn run --agent kimi --artifact-name kimi-k27-shadow --lane-id kimi-k27-shadow` |
 | Phase 2 | Cross-exam Pi findings | Opus | `cmux-spawn run --agent claude --model opus` |
 | Phase 2 | Cross-exam all external findings | Codex/GPT-5.5 | Current session, write `$COUNCIL_DIR/phase2-codex.md` |
 | Phase 3+ | Triage, fixes, convergence | Codex/GPT-5.5 | Current session |
@@ -76,6 +79,25 @@ Do not append new durable work to `docs/tracked-items.md`.
 Pi is Phase 1 only. It does not cross-examine. Codex does not spawn a
 separate Codex CLI lane for this skill because the current session is
 the Codex Lead.
+
+Kimi shadow is off by default. Enable it with the same switch as the
+headless gate: `SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED=1` (also accept
+`true`, `yes`, or `on`). When disabled or unavailable, write
+`$COUNCIL_DIR/kimi-k27-shadow.disabled.json` with
+`enabled:false`, a reason (`disabled-by-config`, `substrate-unavailable`,
+or `preflight-failed`), and `mergeAuthoritative:false`. Absence of both
+`kimi-k27-shadow.*` artifacts and this disabled marker is a defect in
+the manual council run, not a clean pass.
+
+Kimi output is diagnostics only. A Kimi finding may flag something for
+Opus, Pi, or Codex Phase 2 to confirm independently, but an
+uncorroborated Kimi finding cannot set a merge-authoritative P1/P2,
+block merge, or be recorded as an authoritative pass/fail. A failed,
+missing, or disabled Kimi lane cannot fail an otherwise clean
+authoritative council.
+PR-backed clean PASS closeout still requires either a non-empty
+`kimi-k27-shadow.md` diagnostic artifact or a valid disabled marker so
+operators can distinguish an intentional skip from an unobserved lane.
 
 ## Workflow
 
@@ -182,6 +204,8 @@ fi
 
 CLAUDE_AVAILABLE=false
 PI_AVAILABLE=false
+KIMI_SHADOW_ENABLED=false
+KIMI_AVAILABLE=false
 DIRTY=false
 printf '%s\n' "$SUBSTRATE_TIER" > "$COUNCIL_DIR/substrate-tier.txt"
 printf '%s\n' "$SUBSTRATE_HOST" > "$COUNCIL_DIR/substrate-host.txt"
@@ -192,6 +216,31 @@ if [ "$SUBSTRATE_TIER" = remote-pro16 ]; then
 else
   command -v claude >/dev/null 2>&1 && CLAUDE_AVAILABLE=true
   command -v pi >/dev/null 2>&1 && PI_AVAILABLE=true
+fi
+
+write_kimi_shadow_disabled_marker() {
+  KIMI_DISABLED_REASON="$1"
+  cat > "$COUNCIL_DIR/kimi-k27-shadow.disabled.json" <<EOF
+{"enabled":false,"reason":"$KIMI_DISABLED_REASON","mergeAuthoritative":false}
+EOF
+}
+
+case "${SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED:-}" in
+  1|true|TRUE|yes|YES|on|ON)
+    KIMI_SHADOW_ENABLED=true
+    ;;
+esac
+
+if [ "$KIMI_SHADOW_ENABLED" = "true" ]; then
+  if [ "$SUBSTRATE_TIER" = remote-pro16 ]; then
+    KIMI_AVAILABLE=true
+  elif command -v kimi >/dev/null 2>&1; then
+    KIMI_AVAILABLE=true
+  else
+    write_kimi_shadow_disabled_marker substrate-unavailable
+  fi
+else
+  write_kimi_shadow_disabled_marker disabled-by-config
 fi
 
 PR_VIEW_STATUS=0
@@ -261,14 +310,16 @@ if [ ! -s "$COUNCIL_DIR/diff.patch" ]; then
 fi
 ```
 
-Read `templates/phase1-opus-prompt.md` and
-`templates/phase1-pi-prompt.md`. Replace `{BASE_BRANCH}`,
+Read `templates/phase1-opus-prompt.md`,
+`templates/phase1-pi-prompt.md`, and, when Kimi shadow is enabled,
+`templates/phase1-kimi-shadow-prompt.md`. Replace `{BASE_BRANCH}`,
 `{WORKSPACE_PATH}`, `{REVIEW_MODE}`, `{REVIEW_ROUND}`,
 `{CURRENT_HEAD_SHA}`, `{PREVIOUS_REVIEWED_HEAD_SHA}`,
 `{ARTIFACT_STATUS}`, and `[DIFF]`; write the populated prompts to:
 
 - `$COUNCIL_DIR/phase1-opus-prompt.md`
 - `$COUNCIL_DIR/phase1-pi-prompt.md`
+- `$COUNCIL_DIR/kimi-k27-shadow-prompt.md` when Kimi shadow is enabled
 
 For the first pass, use `REVIEW_MODE="initial broad pass"` and
 `PREVIOUS_REVIEWED_HEAD_SHA=n/a`. For convergence, use
@@ -311,8 +362,29 @@ if [ "$PI_AVAILABLE" = "true" ]; then
   PI_PID=$!
 fi
 
+if [ "$KIMI_SHADOW_ENABLED" = "true" ] && [ "$KIMI_AVAILABLE" = "true" ]; then
+  "$CMUX_SPAWN_BIN" run \
+      --agent kimi \
+      --workspace "$WORKSPACE_PATH" \
+      --prompt-file "$COUNCIL_DIR/kimi-k27-shadow-prompt.md" \
+      --artifact-dir "$COUNCIL_DIR" \
+      --artifact-name kimi-k27-shadow \
+      --lane-id kimi-k27-shadow \
+      --timeout-seconds 1800 \
+      > "$COUNCIL_DIR/kimi-k27-shadow.cli.json" \
+      2> "$COUNCIL_DIR/kimi-k27-shadow.cli.stderr" &
+  KIMI_PID=$!
+fi
+
 [ -n "${OPUS_PID:-}" ] && wait "$OPUS_PID"
 [ -n "${PI_PID:-}" ] && wait "$PI_PID"
+[ -n "${KIMI_PID:-}" ] && wait "$KIMI_PID" || true
+
+if [ "$KIMI_SHADOW_ENABLED" = "true" ] && [ -n "${KIMI_PID:-}" ]; then
+  if [ ! -s "$COUNCIL_DIR/kimi-k27-shadow.md" ]; then
+    write_kimi_shadow_disabled_marker preflight-failed
+  fi
+fi
 ```
 
 The authoritative outputs are:
@@ -322,6 +394,21 @@ The authoritative outputs are:
 - Status: `$COUNCIL_DIR/phase1-{opus,pi}.status.json`
 - Usage: `$COUNCIL_DIR/phase1-{opus,pi}.usage.json`
 - Substrate logs: `$COUNCIL_DIR/phase1-{opus,pi}.{events.jsonl,pane.log,cli.stderr}`
+
+The non-authoritative shadow outputs are:
+
+- Kimi: `$COUNCIL_DIR/kimi-k27-shadow.md`, or
+  `$COUNCIL_DIR/kimi-k27-shadow.disabled.json`
+- Status: `$COUNCIL_DIR/kimi-k27-shadow.status.json`
+- Usage: `$COUNCIL_DIR/kimi-k27-shadow.usage.json`
+- Substrate logs:
+  `$COUNCIL_DIR/kimi-k27-shadow.{events.jsonl,pane.log,cli.stderr}`
+
+Kimi shadow status and findings are calibration diagnostics. Record
+them in the report's shadow section, but exclude them from
+merge-authoritative artifact counts, clean-PASS assertions, and P1/P2
+blocker tallies unless an authoritative lane independently confirms the
+same current-head issue.
 
 Claude/Opus liveness rule: after launching a Claude lane, wait for the
 `cmux-spawn run` process to finish or hit its configured
@@ -393,7 +480,8 @@ If Opus Phase 2 fails, proceed with Codex cross-exam only.
 
 ### Phase 3: Adversarial Triage
 
-Read all Phase 1 findings and Phase 2 cross-exam artifacts, then
+Read all merge-authoritative Phase 1 findings, Kimi shadow diagnostics
+if present, and Phase 2 cross-exam artifacts, then
 produce a unified triage. Use
 `templates/council-report.md` as `$COUNCIL_DIR/council-report.md`.
 Populate its Review Target section from `$COUNCIL_DIR/pr.json`,
@@ -441,7 +529,8 @@ P1/P2 blockers and merge readiness.
 
 Triage process:
 
-1. Collect every Phase 1 finding.
+1. Collect every merge-authoritative Phase 1 finding. Keep Kimi shadow
+   diagnostics in a separate non-merge-authoritative bucket.
 2. Annotate each finding with cross-exam verdicts:
    - Opus findings have Codex cross-exam evidence.
    - Pi findings have Codex cross-exam evidence and, when available,
@@ -460,6 +549,11 @@ Triage process:
      has a real correctness risk.
    - **Dismissed**: code is correct, out of scope, style-only, or an
      intentional design decision.
+   Kimi shadow findings are diagnostic only: an uncorroborated Kimi
+   finding cannot be classified as a merge-authoritative P1/P2, cannot
+   block merge, and cannot be used as an authoritative pass/fail. It may
+   be cited as diagnostic support only after Opus, Pi, or Codex Phase 2
+   independently confirms the same issue.
 6. For every surviving P1/P2, verify it has current-head evidence:
    exact file:line, current head SHA, contract violated, reachable
    failure mode, and missing test/proof gap. If the finding relies on a

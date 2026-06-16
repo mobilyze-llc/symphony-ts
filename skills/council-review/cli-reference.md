@@ -1,8 +1,9 @@
 ## CLI Reference Card - cmux-spawn
 
-All external reviewer CLIs in this skill (Opus through Claude Code and
-Pi through hosted DeepSeek) are spawned through `cmux-spawn`, Crucible's
-universal agent-lane CLI. The substrate handles preflight, cmux
+All external reviewer CLIs in this skill (Opus through Claude Code,
+Pi through hosted DeepSeek, and optional Kimi K2.7 shadow diagnostics)
+are spawned through `cmux-spawn`, Crucible's universal agent-lane CLI.
+The substrate handles preflight, cmux
 workspace lifecycle, artifact writes, status JSON, usage telemetry,
 pane logs, and cross-process concurrency caps.
 
@@ -57,8 +58,9 @@ subprocesses.
 For every `cmux-spawn run` invocation, set:
 
 - `--artifact-dir "$COUNCIL_DIR"`
-- `--artifact-name phase1-opus`, `phase1-pi`, or `phase2-opus`
-- `--lane-id opus` or `--lane-id pi`
+- `--artifact-name phase1-opus`, `phase1-pi`, `phase2-opus`, or
+  `kimi-k27-shadow`
+- `--lane-id opus`, `pi`, or `kimi-k27-shadow`
 - omit `--phase` unless you intentionally need a different file stem
 
 The substrate writes:
@@ -76,6 +78,17 @@ The substrate writes:
 
 The status file's `state` is authoritative. State `complete` plus a
 non-empty `.md` artifact means the lane is usable.
+
+Kimi shadow is non-merge-authoritative. If it is disabled or
+unavailable, write `$COUNCIL_DIR/kimi-k27-shadow.disabled.json` with:
+
+```json
+{"enabled":false,"reason":"disabled-by-config","mergeAuthoritative":false}
+```
+
+Allowed reasons are `disabled-by-config`, `substrate-unavailable`, and
+`preflight-failed`. A missing Kimi artifact and missing disabled marker
+is a manual-council defect.
 
 ### Opus Via Claude
 
@@ -153,6 +166,38 @@ non-empty `.md` artifact means the lane is usable.
   not include shell access for `git diff`.
 - Auth, quota, provider, and capacity failures require user action; do
   not retry blindly.
+
+### Kimi K2.7 Shadow
+
+Kimi shadow is opt-in via `SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED=1`
+(also accept `true`, `yes`, or `on`) and defaults to disabled. It uses
+the same lane identifier as the headless gate and does not invent model
+or provider flags:
+
+```bash
+"$CMUX_SPAWN_BIN" run \
+    --agent kimi \
+    --workspace "$WORKSPACE_PATH" \
+    --prompt-file "$COUNCIL_DIR/kimi-k27-shadow-prompt.md" \
+    --artifact-dir "$COUNCIL_DIR" \
+    --artifact-name kimi-k27-shadow \
+    --lane-id kimi-k27-shadow \
+    --timeout-seconds 1800 \
+    > "$COUNCIL_DIR/kimi-k27-shadow.cli.json" \
+    2> "$COUNCIL_DIR/kimi-k27-shadow.cli.stderr"
+```
+
+**Kimi rules:**
+
+- Kimi is Phase 1 shadow diagnostics only.
+- The lane is `mergeAuthoritative:false`; it cannot independently set a
+  P1/P2, block merge, or satisfy clean-pass evidence.
+- If enabled but unavailable, record
+  `kimi-k27-shadow.disabled.json` with `reason:"substrate-unavailable"`
+  or `reason:"preflight-failed"`.
+- Store Kimi output in the normal `$COUNCIL_DIR` beside Opus/Pi
+  artifacts so manual council smoke runs can verify presence or the
+  explicit disabled marker.
 
 ### General Rules
 

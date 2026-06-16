@@ -41,6 +41,14 @@ function writeArtifact(dir: string, name: string, content: string): void {
   writeFileSync(resolve(dir, name), content, "utf-8");
 }
 
+function writeJsonArtifact(
+  dir: string,
+  name: string,
+  content: Record<string, unknown>,
+): void {
+  writeArtifact(dir, name, `${JSON.stringify(content)}\n`);
+}
+
 function readArtifact(dir: string, name: string): string {
   return readFileSync(resolve(dir, name), "utf-8").trim();
 }
@@ -82,6 +90,14 @@ function phase1ArtifactNamesFromSkill(skill: string): string[] {
         .filter((artifact): artifact is string => artifact !== undefined),
     ),
   ].sort();
+}
+
+function mergeAuthoritativePhase1ArtifactNamesFromSkill(
+  skill: string,
+): string[] {
+  return phase1ArtifactNamesFromSkill(skill).filter(
+    (artifact) => artifact !== "kimi-k27-shadow",
+  );
 }
 
 function writeBaseSetupFacts(dir: string): void {
@@ -137,6 +153,18 @@ function writeCleanPassArtifacts(dir: string): void {
     "resolved-base-sha.txt",
     "2222222222222222222222222222222222222222\n",
   );
+  writeKimiDisabledMarker(dir);
+}
+
+function writeKimiDisabledMarker(
+  dir: string,
+  reason = "disabled-by-config",
+): void {
+  writeJsonArtifact(dir, "kimi-k27-shadow.disabled.json", {
+    enabled: false,
+    reason,
+    mergeAuthoritative: false,
+  });
 }
 
 function writeCompletedLaneStatus(
@@ -218,6 +246,9 @@ describe("council-review manual skill", () => {
   const codexCrossExam = readSkillFile("templates/cross-exam-codex-prompt.md");
   const opusCrossExam = readSkillFile("templates/cross-exam-opus-prompt.md");
   const reportTemplate = readSkillFile("templates/council-report.md");
+  const cycleReport = readSkillFile("templates/cycle-report.md");
+  const cliReference = readSkillFile("cli-reference.md");
+  const kimiPrompt = readSkillFile("templates/phase1-kimi-shadow-prompt.md");
 
   it("defines distinct initial and convergence review modes", () => {
     for (const prompt of [opusPrompt, piPrompt]) {
@@ -358,11 +389,58 @@ describe("council-review manual skill", () => {
   });
 
   it("keeps closeout reviewer stems in sync with Phase 1 spawn artifacts only", () => {
-    expect(phase1ArtifactNamesFromSkill(skill)).toEqual(
+    expect(mergeAuthoritativePhase1ArtifactNamesFromSkill(skill)).toEqual(
       laneArtifactStemsFromAssertScript().sort(),
+    );
+    expect(phase1ArtifactNamesFromSkill(skill)).toContain("kimi-k27-shadow");
+    expect(laneArtifactStemsFromAssertScript()).not.toContain(
+      "kimi-k27-shadow",
     );
     expect(skill).toContain("--artifact-name phase2-opus");
     expect(laneArtifactStemsFromAssertScript()).not.toContain("phase2-opus");
+  });
+
+  it("documents Kimi shadow as optional and non-merge-authoritative", () => {
+    expectAll(skill, [
+      "SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED",
+      "--agent kimi",
+      "--artifact-name kimi-k27-shadow",
+      "--lane-id kimi-k27-shadow",
+      "kimi-k27-shadow.disabled.json",
+      "mergeAuthoritative:false",
+      "uncorroborated Kimi finding cannot set a merge-authoritative P1/P2",
+    ]);
+
+    expectAll(cliReference, [
+      "Kimi K2.7 Shadow",
+      "SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED",
+      "--agent kimi",
+      "--artifact-name kimi-k27-shadow",
+      "--lane-id kimi-k27-shadow",
+      "disabled-by-config",
+      "substrate-unavailable",
+      "preflight-failed",
+      "mergeAuthoritative:false",
+    ]);
+
+    expectAll(reportTemplate, [
+      "Kimi K2.7 Shadow Diagnostics (non-merge-authoritative)",
+      "`$COUNCIL_DIR/kimi-k27-shadow.md` or `$COUNCIL_DIR/kimi-k27-shadow.disabled.json`",
+      "Kimi diagnostics never contribute to the authoritative P1/P2 tally",
+      "[K-shadow]",
+    ]);
+
+    expectAll(cycleReport, [
+      "Kimi K2.7 shadow diagnostics",
+      "mergeAuthoritative:false",
+    ]);
+
+    expectAll(kimiPrompt, [
+      "non-merge-authoritative",
+      "cannot set a P1/P2",
+      "mergeAuthoritative:false",
+      "Do not edit files, create commits, update PRs",
+    ]);
   });
 
   it("documents closeout evidence as provenance rather than reviewer PASS", () => {
@@ -644,6 +722,99 @@ describe("council-review manual skill", () => {
       );
       expect(assertion.stdout).toContain(
         "at least one phase1 reviewer artifact must satisfy the closeout contract",
+      );
+    });
+  });
+
+  it("rejects closeout when Kimi shadow neither wrote an artifact nor a disabled marker", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      rmSync(resolve(dir, "kimi-k27-shadow.disabled.json"));
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "kimi-k27-shadow: closeout requires either non-empty kimi-k27-shadow.md or valid kimi-k27-shadow.disabled.json",
+      );
+      expect(assertion.stdout).not.toContain(
+        "at least one phase1 reviewer artifact must satisfy the closeout contract",
+      );
+    });
+  });
+
+  it("accepts a non-empty Kimi shadow artifact without counting it as reviewer evidence", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      rmSync(resolve(dir, "kimi-k27-shadow.disabled.json"));
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+      writeArtifact(
+        dir,
+        "kimi-k27-shadow.md",
+        "Kimi shadow diagnostics only. mergeAuthoritative:false\n",
+      );
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(0);
+      expect(assertion.stdout).toContain(
+        "PASS council-review clean PASS assertion",
+      );
+    });
+  });
+
+  it("accepts an empty Kimi shadow artifact when a valid disabled marker explains it", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+      writeArtifact(dir, "kimi-k27-shadow.md", "");
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(0);
+      expect(assertion.stdout).toContain(
+        "PASS council-review clean PASS assertion",
+      );
+    });
+  });
+
+  it("rejects malformed Kimi disabled markers", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+      writeArtifact(dir, "kimi-k27-shadow.disabled.json", "{not-json\n");
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "kimi-k27-shadow: disabled marker JSON is unreadable or malformed",
+      );
+    });
+  });
+
+  it("rejects Kimi disabled markers that are merge-authoritative or use an unknown reason", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+      writeJsonArtifact(dir, "kimi-k27-shadow.disabled.json", {
+        enabled: true,
+        reason: "not-configured",
+        mergeAuthoritative: true,
+      });
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "kimi-k27-shadow: disabled marker must set enabled:false",
+      );
+      expect(assertion.stdout).toContain(
+        "kimi-k27-shadow: disabled marker must set mergeAuthoritative:false",
+      );
+      expect(assertion.stdout).toContain(
+        "kimi-k27-shadow: disabled marker reason must be one of",
       );
     });
   });

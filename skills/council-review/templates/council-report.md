@@ -20,6 +20,7 @@
 
 - Opus Phase 1: [complete/failed/skipped] - [brief note]
 - Pi Phase 1: [complete/failed/skipped] - [brief note]
+- Kimi K2.7 Shadow: [complete/disabled/failed/skipped] - [brief note; mergeAuthoritative:false]
 - Codex Phase 2: [complete] - in-session cross-exam
 - Opus Phase 2: [complete/failed/skipped] - [brief note]
 
@@ -28,11 +29,23 @@
 - Opus Phase 1 tokens/cost: [from phase1-opus.usage.json]
 - Opus Phase 2 tokens/cost: [from phase2-opus.usage.json]
 - Pi Phase 1 tokens/cost: [from phase1-pi.usage.json]
+- Kimi K2.7 shadow tokens/cost: [from kimi-k27-shadow.usage.json or disabled marker]
 
 ### Phase 1 Summary
 
 - [O]: [N] findings ([severity breakdown])
 - [P]: [N] findings ([severity breakdown])
+
+### Kimi K2.7 Shadow Diagnostics (non-merge-authoritative)
+
+- Status: [complete / disabled / failed / skipped]
+- Artifact or disabled marker: [`$COUNCIL_DIR/kimi-k27-shadow.md` or `$COUNCIL_DIR/kimi-k27-shadow.disabled.json`]
+- `mergeAuthoritative:false`
+- Diagnostics: [summary or None]
+
+Kimi diagnostics never contribute to the authoritative P1/P2 tally,
+clean-PASS evidence, or merge-blocking verdict unless Opus, Pi, or
+Codex Phase 2 independently confirms the same current-head issue.
 
 ### Phase 2 Cross-Examination
 
@@ -84,5 +97,6 @@ For each challenged finding:
 
 [PASS/FAIL] - [summary, including whether the run was PR-backed draft, PR-backed non-draft deviation, or DEGRADED. A run may be called a compliant PR-backed clean PASS only when clean-pass-assertion-exit-code.txt is 0. A PR-backed non-draft deviation may pass correctness review, but is not a compliant PR-backed clean PASS unless the PR was intentionally marked ready after all closeout gates passed and that transition is recorded.]
 
-Attribution key: `[O]` = Opus, `[P]` = Pi/DeepSeek, `[C]` = Codex.
+Attribution key: `[O]` = Opus, `[P]` = Pi/DeepSeek, `[C]` = Codex,
+`[K-shadow]` = Kimi K2.7 non-merge-authoritative diagnostics.
 Combine for multi-reviewer evidence, for example `[O+C]` or `[P+O+C]`.
