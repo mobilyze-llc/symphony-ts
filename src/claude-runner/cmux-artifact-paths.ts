@@ -134,9 +134,10 @@ export async function resolveCmuxArtifactPath(input: {
     }
 
     const freshnessPassed =
-      input.runStartedAtMs === undefined ||
-      mirrorStats.mtimeMs >= input.runStartedAtMs;
-    if (!freshnessPassed) {
+      input.runStartedAtMs === undefined
+        ? null
+        : mirrorStats.mtimeMs >= input.runStartedAtMs;
+    if (freshnessPassed === false) {
       return fallbackFailure(
         primary,
         {
