@@ -1,6 +1,13 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -312,6 +319,9 @@ export async function runClaudeCmux(
   const maxAttempts = input.retryOnInvalid === true ? 2 : 1;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    await rm(resolve(artifactDir, `${currentArtifactName}.md`), {
+      force: true,
+    });
     const run = await invokeCmuxRun({
       cmuxSpawnBin,
       workspace,
