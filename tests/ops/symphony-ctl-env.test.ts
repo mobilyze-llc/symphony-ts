@@ -165,21 +165,18 @@ it("documents service root help text with exact precedence", async () => {
   const environment = ctl.match(/Environment:\n[\s\S]*?\nEOF/)?.[0];
 
   expect(environment).toBeDefined();
-  expect(environment).toContain(
-    "SYMPHONY_ROOT > SYMPHONY_SERVICE_ROOT >\n" +
-      "                             SYMPHONY_RUNTIME_CHECKOUT > default",
+  expect(environment).toMatch(
+    /Root precedence\s+SYMPHONY_ROOT\s+>\s+SYMPHONY_SERVICE_ROOT\s+>\s+SYMPHONY_RUNTIME_CHECKOUT\s+>\s+default/,
   );
-  expect(environment).toContain(
-    "SYMPHONY_SERVICE_ROOT      Service checkout root override used after\n" +
-      "                             SYMPHONY_ROOT and before\n" +
-      "                             SYMPHONY_RUNTIME_CHECKOUT",
+  expect(environment).toMatch(
+    /SYMPHONY_SERVICE_ROOT\s+Service checkout root override used after\s+SYMPHONY_ROOT and before\s+SYMPHONY_RUNTIME_CHECKOUT/,
   );
 
-  const serviceRootLine = environment
-    ?.split("\n")
-    .find((line) => line.includes("SYMPHONY_SERVICE_ROOT"));
-  expect(serviceRootLine).toBeDefined();
-  expect(serviceRootLine).not.toMatch(/\balias\b/i);
+  const serviceRootEntry = environment?.match(
+    /SYMPHONY_SERVICE_ROOT[\s\S]*?(?=\n {2}SYMPHONY_RUNTIME_CHECKOUT)/,
+  )?.[0];
+  expect(serviceRootEntry).toBeDefined();
+  expect(serviceRootEntry).not.toMatch(/\balias\b/i);
 });
 
 it("renders the launchd plist from the configured service root", async () => {
