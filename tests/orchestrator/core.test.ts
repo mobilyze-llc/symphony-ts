@@ -31,6 +31,10 @@ import {
   isStopSignalDelivery,
   sortIssuesForDispatch,
 } from "../../src/orchestrator/core.js";
+import type {
+  MergeActuatorLiveState,
+  MergeActuatorSideEffects,
+} from "../../src/orchestrator/merge-candidate.js";
 import type { TrackerIssueWriteRequest } from "../../src/orchestrator/tracker-write.js";
 import type { HeadlessCouncilGateResult } from "../../src/review/headless-council-gate.js";
 import { DEFAULT_LINEAR_MAX_LEN } from "../../src/shared/egress.js";
@@ -7158,6 +7162,278 @@ describe("orchestrator core", () => {
   });
 });
 
+describe("live merge actuator (SYMPH-735)", () => {
+  // Resolved config matching the unwired-actuator harness, with the live
+  // actuator switched ON. The ceilings are kept small so the bounded-recovery
+  // exhaustion paths can be driven within a handful of cycles.
+  function createLiveMergeActuatorConfig(
+    overrides: Partial<
+      NonNullable<ResolvedWorkflowConfig["mergeActuator"]>
+    > = {},
+  ): ResolvedWorkflowConfig {
+    const config = createReviewMergeConfig();
+    config.mergeActuator = {
+      enabled: true,
+      maxWaitMs: 3_600_000,
+      maxLiveStateFailures: 2,
+      maxSideEffectFailures: 2,
+      maxDraftWaitObservations: 5,
+      ...overrides,
+    };
+    return config;
+  }
+
+  // A live state whose identity fields MATCH the merge candidate reduced from
+  // writeReviewGateResultFixture (repo mobilyze-llc/symphony-ts, PR 725,
+  // reviewed head "head-sha" — see review-journal-events.ts, where
+  // reviewed_head_sha is sourced from review_metadata.reviewed_head_sha — and
+  // base ref "main"). Mismatching any of these would make decideMergeActuation
+  // return "stale" (wrong_pr / stale_reviewed_head / base_ref_changed) and the
+  // barrier would park, so the matching is load-bearing for these tests.
+  function actuatorLiveState(
+    overrides: Partial<MergeActuatorLiveState> = {},
+  ): MergeActuatorLiveState {
+    return {
+      repo: "mobilyze-llc/symphony-ts",
+      prNumber: 725,
+      prUrl: "https://github.com/mobilyze-llc/symphony-ts/pull/725",
+      state: "OPEN",
+      isDraft: false,
+      mergeStateStatus: "CLEAN",
+      mergeable: "MERGEABLE",
+      reviewDecision: null,
+      headSha: "head-sha",
+      baseRef: "main",
+      baseSha: "base-sha",
+      requiredChecks: [],
+      requiresGithubReview: false,
+      mergeQueueRequired: true,
+      mergedAt: null,
+      mergeCommit: null,
+      ...overrides,
+    };
+  }
+
+  function mergedLiveState(): MergeActuatorLiveState {
+    return actuatorLiveState({
+      state: "MERGED",
+      mergedAt: "2026-03-06T00:02:00.000Z",
+      mergeCommit: "merge-sha",
+    });
+  }
+
+  // Drive a review-stage worker exit that ingests the passing review-gate
+  // artifact, which appends the review_gate_result + merge_candidate rows and
+  // advances the issue to the merge stage. After this returns, the next
+  // onRetryTimer / dispatch reaches enforceMergeCandidateDispatchBarrier with a
+  // real canonical candidate.
+  async function stageMergeCandidate(
+    orchestrator: OrchestratorCore,
+    reviewResultPath: string,
+  ): Promise<void> {
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+  }
+
+  it("completes the issue when the actuator writes tracker done", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const markReady = vi.fn(async () => {});
+    const enqueue = vi.fn(async () => {});
+    const writeTrackerDone = vi.fn(async () => {});
+    const sideEffects: MergeActuatorSideEffects = {
+      markReady,
+      enqueue,
+      writeTrackerDone,
+    };
+    const orchestrator = createOrchestrator({
+      config: createLiveMergeActuatorConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      // Durable merge proof: a MERGED PR with mergedAt + mergeCommit set, whose
+      // head/base match the reviewed candidate, decides tracker_done.
+      getMergeActuatorLiveState: async () => mergedLiveState(),
+      mergeActuatorSideEffects: sideEffects,
+    });
+
+    await stageMergeCandidate(orchestrator, reviewResultPath);
+    const retryResult = await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    expect(writeTrackerDone).toHaveBeenCalledTimes(1);
+    expect(markReady).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(state.completed.has("1")).toBe(true);
+    expect(state.failed.has("1")).toBe(false);
+    expect(state.failureExhaustedIds.has("1")).toBe(false);
+    // The candidate-backed merge completed via the actuator, not a merge worker.
+    expect(retryResult.dispatched).toBe(false);
+    // A tracker_done actuation row was journaled, and the run did NOT park.
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) =>
+          entry.kind === "merge_actuation" &&
+          entry.metadata.action === "tracker_done",
+      ),
+    ).toBe(true);
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) => entry.kind === "failure_exhausted",
+      ),
+    ).toBe(false);
+  });
+
+  it("parks with an operator blocker after repeated live-state failures", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const fetchLiveState = vi.fn(async () => {
+      throw new Error("gh pr view exploded");
+    });
+    const orchestrator = createOrchestrator({
+      config: createLiveMergeActuatorConfig({ maxLiveStateFailures: 2 }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      getMergeActuatorLiveState: fetchLiveState,
+      mergeActuatorSideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone: async () => {},
+      },
+    });
+
+    await stageMergeCandidate(orchestrator, reviewResultPath);
+
+    // Each barrier run executes one bounded actuator cycle. With
+    // maxLiveStateFailures: 2, the first cycle records countable evidence and
+    // re-polls (retry), the second exhausts the ceiling and parks. Drive a few
+    // re-polls so the ceiling is reached deterministically.
+    let failed = false;
+    for (let cycle = 0; cycle < 4 && !failed; cycle += 1) {
+      await orchestrator.onRetryTimer("1");
+      failed = orchestrator.getState().failed.has("1");
+    }
+
+    const state = orchestrator.getState();
+    expect(failed).toBe(true);
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.resumeRequired.has("1")).toBe(true);
+    expect(state.completed.has("1")).toBe(false);
+    // The park reason is the umbrella live-state ceiling reason from the
+    // coordinator's blocker (parkCandidate -> blocker.reason).
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "failure_exhausted",
+      )?.metadata.reason,
+    ).toContain("live_state_unavailable");
+    // Countable progress evidence: at least one live_state_failed actuation row
+    // per cycle, each carrying the live_state_throw per-failure reason.
+    const liveStateFailures = state.dispatcherRunJournal.filter(
+      (entry) =>
+        entry.kind === "merge_actuation" &&
+        entry.metadata.action === "live_state_failed",
+    );
+    expect(liveStateFailures.length).toBeGreaterThanOrEqual(2);
+    expect(
+      liveStateFailures.every(
+        (entry) => entry.metadata.reason === "live_state_throw",
+      ),
+    ).toBe(true);
+    // Distinct, replay-stable evidence rows (one per dispatch cycle / lease).
+    expect(
+      new Set(liveStateFailures.map((entry) => entry.idempotencyKey)).size,
+    ).toBe(liveStateFailures.length);
+    expect(fetchLiveState.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("re-polls without parking while still enqueuing", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const markReady = vi.fn(async () => {});
+    const enqueue = vi.fn(async () => {});
+    const writeTrackerDone = vi.fn(async () => {});
+    const orchestrator = createOrchestrator({
+      config: createLiveMergeActuatorConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      // OPEN, non-draft, mergeable, no required checks → decision is enqueue.
+      getMergeActuatorLiveState: async () =>
+        actuatorLiveState({ requiredChecks: [] }),
+      mergeActuatorSideEffects: { markReady, enqueue, writeTrackerDone },
+    });
+
+    await stageMergeCandidate(orchestrator, reviewResultPath);
+    const retryResult = await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    // Enqueued, but a raw enqueue intent must NOT complete or park the issue.
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(writeTrackerDone).not.toHaveBeenCalled();
+    expect(state.failed.has("1")).toBe(false);
+    expect(state.completed.has("1")).toBe(false);
+    expect(retryResult.dispatched).toBe(false);
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) => entry.kind === "failure_exhausted",
+      ),
+    ).toBe(false);
+    // A continuation re-poll is scheduled (deferral continuation), not a park.
+    const scheduledRetry = state.retryAttempts["1"];
+    expect(scheduledRetry).toBeDefined();
+    expect(scheduledRetry?.delayType).toBe("continuation");
+    // The enqueue side effect was journaled as a merge_actuation row.
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) =>
+          entry.kind === "merge_actuation" &&
+          entry.metadata.action === "enqueue",
+      ),
+    ).toBe(true);
+  });
+
+  it("still parks with merge_actuator_unwired when the actuator is disabled", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    // Default config (mergeActuator absent → disabled) AND no providers wired.
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+    });
+
+    await stageMergeCandidate(orchestrator, reviewResultPath);
+    const retryResult = await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    expect(retryResult.dispatched).toBe(false);
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.resumeRequired.has("1")).toBe(true);
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "failure_exhausted",
+      )?.metadata.reason,
+    ).toContain("merge_actuator_unwired");
+    // No actuator cycle ran, so no merge_actuation rows were journaled.
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) => entry.kind === "merge_actuation",
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("retry timer pipeline-halt guard", () => {
   it("skips dispatch and requeues retry at same attempt when pipeline is halted", async () => {
     const haltIssue = createIssue({
@@ -13562,6 +13838,8 @@ function createOrchestrator(overrides?: {
   onGateFailed?: OrchestratorCoreOptions["onGateFailed"];
   onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
   spawnWorker?: OrchestratorCoreOptions["spawnWorker"];
+  getMergeActuatorLiveState?: OrchestratorCoreOptions["getMergeActuatorLiveState"];
+  mergeActuatorSideEffects?: OrchestratorCoreOptions["mergeActuatorSideEffects"];
   now?: () => Date;
   runJournal?: DispatcherRunJournal;
 }) {
@@ -13634,6 +13912,14 @@ function createOrchestrator(overrides?: {
 
   if (overrides?.timerScheduler !== undefined) {
     options.timerScheduler = overrides.timerScheduler;
+  }
+
+  if (overrides?.getMergeActuatorLiveState !== undefined) {
+    options.getMergeActuatorLiveState = overrides.getMergeActuatorLiveState;
+  }
+
+  if (overrides?.mergeActuatorSideEffects !== undefined) {
+    options.mergeActuatorSideEffects = overrides.mergeActuatorSideEffects;
   }
 
   return new OrchestratorCore(options);

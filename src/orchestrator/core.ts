@@ -174,6 +174,7 @@ import {
   type MergeActuatorSideEffects,
   type MergeCandidateRecord,
   reduceMergeCandidates,
+  runMergeActuatorCycle,
 } from "./merge-candidate.js";
 import { createRightSizingDecision } from "./right-sizing.js";
 import { SignatureClusterRegistry } from "./signature-cluster.js";
@@ -10411,11 +10412,189 @@ export class OrchestratorCore {
       return true;
     }
 
+    const actuatorConfig = this.config.mergeActuator;
+    if (
+      actuatorConfig?.enabled === true &&
+      this.getMergeActuatorLiveState !== undefined &&
+      this.mergeActuatorSideEffects !== undefined
+    ) {
+      return await this.runLiveMergeActuator(
+        issue,
+        stageName,
+        candidate,
+        actuatorConfig,
+      );
+    }
+
+    // Actuator disabled or unwired: refuse to advance/dispatch merge — never
+    // fall through to a legacy merge worker (SYMPH-735 default-off behavior).
     await this.parkMergeCandidateInvariantFailure({
       issue,
       stageName,
       reasonCode: "merge_actuator_unwired",
       detail: `candidate ${candidate.candidateId} is available, but live merge-stage dispatch has no configured orchestrator actuator and must not fall through to the legacy merge worker`,
+      reviewResultPath: candidate.reviewResultPath,
+    });
+    return true;
+  }
+
+  /**
+   * Run one bounded merge-actuator cycle against live GitHub/tracker state and
+   * map its outcome onto orchestrator state (SYMPH-735). Only reached when the
+   * actuator is enabled in config AND the live-state + side-effect providers are
+   * wired. The bounded recovery (countable evidence, replay-stable ceilings,
+   * parking) lives entirely in `runMergeActuatorCycle`; this method only acquires
+   * a per-cycle lease and translates the result:
+   * - parked  -> operator-visible invariant-failure park (with the blocker)
+   * - retry   -> a deferral continuation re-poll (the coordinator owns the bound,
+   *              so this must NOT participate in scheduleRetry's failure ceiling)
+   * - actuated-> tracker_done completes the issue; mark_ready/enqueue/poll re-poll;
+   *              stale/timeout/blocked park.
+   */
+  private async runLiveMergeActuator(
+    issue: Issue,
+    stageName: string | null,
+    candidate: MergeCandidateRecord,
+    actuatorConfig: NonNullable<ResolvedWorkflowConfig["mergeActuator"]>,
+  ): Promise<boolean> {
+    const fetchLiveState = this.getMergeActuatorLiveState;
+    const sideEffects = this.mergeActuatorSideEffects;
+    if (fetchLiveState === undefined || sideEffects === undefined) {
+      // Defensive — the caller already checked; keep the barrier fail-closed.
+      await this.parkMergeCandidateInvariantFailure({
+        issue,
+        stageName,
+        reasonCode: "merge_actuator_unwired",
+        detail: `candidate ${candidate.candidateId} merge actuator enabled but live-state/side-effect providers are not wired`,
+        reviewResultPath: candidate.reviewResultPath,
+      });
+      return true;
+    }
+
+    // A fresh lease per cycle: the lease id embeds the candidate's last journal
+    // sequence, which advances as the coordinator appends evidence, so each poll
+    // gets a distinct lease id — exactly what keeps the coordinator's countable
+    // evidence (live_state_failed / failed / draft_wait) replay-stable.
+    const leaseId = createDispatcherLeaseId({
+      operation: "dispatcher",
+      issueId: issue.id,
+      stage: "merge",
+      attempt: null,
+      suffix: `merge-actuator-${candidate.cursorRange.lastSequence}`,
+    });
+    const lease = await this.acquireDispatcherLease({
+      leaseId,
+      idempotencyKey: `${leaseId}:started`,
+      kind: "dispatch_verdict",
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      operation: "dispatcher",
+      stage: "merge",
+      attempt: null,
+      summary: `Merge actuator lease acquired for ${issue.identifier}.`,
+      metadata: { candidate_id: candidate.candidateId },
+    });
+    if (lease === null) {
+      // A concurrent lease holds the candidate; retry on the next poll.
+      return true;
+    }
+
+    const result = await runMergeActuatorCycle({
+      candidate,
+      journal: this.state.dispatcherRunJournal,
+      lease,
+      ownerId: this.leaseOwnerId,
+      now: this.now(),
+      // Derived from the durable journal by the coordinator (replay-stable).
+      enqueuedAtMs: null,
+      maxWaitMs: actuatorConfig.maxWaitMs,
+      limits: {
+        maxLiveStateFailures: actuatorConfig.maxLiveStateFailures,
+        maxSideEffectFailures: actuatorConfig.maxSideEffectFailures,
+        maxDraftWaitObservations: actuatorConfig.maxDraftWaitObservations,
+      },
+      fetchLiveState: () => fetchLiveState(candidate),
+      appendActuation: (entry) => this.recordRunJournalEntry(entry),
+      sideEffects,
+    });
+
+    await this.completeDispatcherLease({
+      leaseId,
+      idempotencyKey: `${leaseId}:completed:${result.outcome}`,
+      kind: "dispatch_verdict",
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      operation: "dispatcher",
+      stage: "merge",
+      attempt: null,
+      summary: `Merge actuator ${result.outcome} for ${issue.identifier}.`,
+      metadata: {
+        candidate_id: candidate.candidateId,
+        outcome: result.outcome,
+      },
+    });
+
+    if (result.outcome === "parked") {
+      const blocker = result.blocker;
+      await this.parkMergeCandidateInvariantFailure({
+        issue,
+        stageName,
+        reasonCode: blocker.reason,
+        detail: `merge actuator parked candidate ${candidate.candidateId} (PR #${blocker.prNumber}, reviewed head ${blocker.reviewedHeadSha}) after ${blocker.attempts} attempts: ${blocker.lastErrorOrStateSummary}. Next: ${blocker.nextOperatorAction}`,
+        reviewResultPath: candidate.reviewResultPath,
+      });
+      return true;
+    }
+
+    if (result.outcome === "retry") {
+      // The coordinator owns the failure bound (journal-counted); this is a pure
+      // re-poll. deferral:true keeps it out of scheduleRetry's failure ceiling
+      // and novelty short-circuit, so repeated same-reason polls never falsely
+      // park a candidate the coordinator is still bounding.
+      this.scheduleRetry(issue.id, 1, {
+        identifier: issue.identifier,
+        error: result.reason,
+        delayType: "continuation",
+        deferral: true,
+      });
+      return true;
+    }
+
+    const decision = result.run.decision;
+    if (
+      decision.action === "tracker_done" &&
+      result.run.sideEffect === "tracker_done"
+    ) {
+      // Merge proven and tracker marked Done — the issue is complete.
+      this.state.completed.add(issue.id);
+      this.releaseClaim(issue.id);
+      this.clearTerminalIssueRuntimeState(issue.id);
+      return true;
+    }
+    if (
+      decision.action === "mark_ready" ||
+      decision.action === "enqueue" ||
+      decision.action === "poll" ||
+      decision.action === "tracker_done" ||
+      decision.action === "noop"
+    ) {
+      // Progress made or still waiting in the queue; re-poll next cycle.
+      this.scheduleRetry(issue.id, 1, {
+        identifier: issue.identifier,
+        error: decision.reason,
+        delayType: "continuation",
+        deferral: true,
+      });
+      return true;
+    }
+
+    // stale | timeout | blocked — a terminal non-mergeable state; park for an
+    // operator instead of looping.
+    await this.parkMergeCandidateInvariantFailure({
+      issue,
+      stageName,
+      reasonCode: decision.reason,
+      detail: `merge actuator could not actuate candidate ${candidate.candidateId}: ${decision.blockers.join(", ") || decision.reason}`,
       reviewResultPath: candidate.reviewResultPath,
     });
     return true;
