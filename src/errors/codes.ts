@@ -34,6 +34,7 @@ export const ERROR_CODES = {
   workspaceVerifyFailed: "workspace_verify_failed",
   workspaceCleanupFailed: "workspace_cleanup_failed",
   hookFailed: "hook_failed",
+  hookExecutionFailed: "hook_execution_failed",
   hookTimedOut: "hook_timed_out",
   promptRenderFailed: "prompt_render_failed",
   codexLaunchFailed: "codex_launch_failed",
