@@ -196,6 +196,10 @@ import {
   isPipelineSentinelValue,
 } from "./intent.js";
 import { reduceManagerRunJournal } from "./manager-run.js";
+import type {
+  MergeActuatorLiveState,
+  MergeCandidateRecord,
+} from "./merge-candidate.js";
 import type { PipelineNotificationSink } from "./pipeline-notifier.js";
 import {
   getRateLimitSnapshotPath,
@@ -722,6 +726,35 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 stateName,
                 teamKey,
               );
+            },
+            // SYMPH-735 merge-actuator substrate. Provided to OrchestratorCore
+            // but dormant: the live merge-stage dispatch barrier still parks
+            // (merge_actuator_unwired) and never invokes these until Phase 2.
+            getMergeActuatorLiveState: (candidate: MergeCandidateRecord) =>
+              this.fetchMergeActuatorLiveState(candidate),
+            mergeActuatorSideEffects: {
+              markReady: async (candidate: MergeCandidateRecord) => {
+                await this.runGh([
+                  "pr",
+                  "ready",
+                  String(candidate.prNumber),
+                  "--repo",
+                  candidate.repo,
+                ]);
+              },
+              enqueue: async (candidate: MergeCandidateRecord) => {
+                await this.runGh(buildMergeActuatorEnqueueArgs(candidate));
+              },
+              writeTrackerDone: async (candidate: MergeCandidateRecord) => {
+                const teamKey =
+                  candidate.issueIdentifier.split("-")[0] ??
+                  candidate.issueIdentifier;
+                await (this.tracker as LinearTrackerClient).updateIssueState(
+                  candidate.issueId,
+                  "Done",
+                  teamKey,
+                );
+              },
             },
             autoCloseParentIssue: async (
               issueId: string,
@@ -3524,6 +3557,65 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       worker.controller.abort(SERVICE_SHUTDOWN_ABORT_REASON);
     }
     return count;
+  }
+
+  private async fetchMergeActuatorLiveState(
+    candidate: MergeCandidateRecord,
+  ): Promise<MergeActuatorLiveState | null> {
+    const output = await this.runGh([
+      "pr",
+      "view",
+      String(candidate.prNumber),
+      "--repo",
+      candidate.repo,
+      "--json",
+      "url,state,isDraft,mergeStateStatus,mergeable,reviewDecision,headRefOid,baseRefName,statusCheckRollup,mergedAt,mergeCommit",
+    ]);
+    const parsed = parseJsonObject(output);
+    if (parsed === null) {
+      return null;
+    }
+
+    const state = parsePrState(parsed.state);
+    const isDraft = booleanValue(parsed.isDraft);
+    const headSha = stringValue(parsed.headRefOid);
+    const baseRef = stringValue(parsed.baseRefName);
+    if (
+      state === null ||
+      isDraft === null ||
+      headSha === null ||
+      baseRef === null
+    ) {
+      return null;
+    }
+
+    return {
+      repo: candidate.repo,
+      prNumber: candidate.prNumber,
+      prUrl: stringValue(parsed.url),
+      state,
+      isDraft,
+      mergeStateStatus: nullableStringValue(parsed.mergeStateStatus),
+      mergeable: nullableStringValue(parsed.mergeable),
+      reviewDecision: nullableStringValue(parsed.reviewDecision),
+      headSha,
+      baseRef,
+      baseSha: candidate.baseSha,
+      requiredChecks: parseStatusCheckRollup(parsed.statusCheckRollup),
+      requiresGithubReview: nullableStringValue(parsed.reviewDecision) !== null,
+      mergeQueueRequired: true,
+      mergedAt: nullableStringValue(parsed.mergedAt),
+      mergeCommit: parseMergeCommit(parsed.mergeCommit),
+    };
+  }
+
+  private async runGh(args: string[]): Promise<string> {
+    const { stdout } = await execFileAsync("gh", args, {
+      cwd: this.workspaceManager.root,
+      timeout: 60_000,
+      maxBuffer: 1024 * 1024,
+    });
+    return stdout.trim();
   }
 
   private async spawnWorkerExecution(
@@ -6920,3 +7012,105 @@ export function extractProductName(workflowPath: string): string {
   const match = /^WORKFLOW-(.+)$/i.exec(base);
   return match !== null ? (match[1] ?? base) : base;
 }
+
+// --- SYMPH-735 merge-actuator live-state parsing (substrate; consumed by
+// fetchMergeActuatorLiveState). Pure, fail-closed helpers at the gh I/O
+// boundary; exported via runtimeHostMergeActuatorTesting for unit coverage.
+
+function parseJsonObject(value: string): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function parsePrState(value: unknown): MergeActuatorLiveState["state"] | null {
+  return value === "OPEN" || value === "MERGED" || value === "CLOSED"
+    ? value
+    : null;
+}
+
+function booleanValue(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+function nullableStringValue(value: unknown): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  return stringValue(value);
+}
+
+function parseMergeCommit(value: unknown): string | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return null;
+  }
+  return stringValue((value as Record<string, unknown>).oid);
+}
+
+function parseStatusCheckRollup(
+  value: unknown,
+): MergeActuatorLiveState["requiredChecks"] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((entry): MergeActuatorLiveState["requiredChecks"] => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      return [];
+    }
+    const record = entry as Record<string, unknown>;
+    const name = stringValue(record.name);
+    if (name === null) {
+      return [];
+    }
+    const conclusion = nullableStringValue(record.conclusion)?.toUpperCase();
+    const status = nullableStringValue(record.status)?.toUpperCase();
+    if (conclusion === "SUCCESS" || conclusion === "NEUTRAL") {
+      return [{ name, status: "pass" as const }];
+    }
+    if (
+      conclusion !== null &&
+      conclusion !== "SKIPPED" &&
+      conclusion !== "ACTION_REQUIRED"
+    ) {
+      return [{ name, status: "fail" as const }];
+    }
+    if (status === "COMPLETED" && conclusion === "SKIPPED") {
+      return [{ name, status: "pass" as const }];
+    }
+    return [{ name, status: "pending" as const }];
+  });
+}
+
+function buildMergeActuatorEnqueueArgs(
+  candidate: MergeCandidateRecord,
+): string[] {
+  return [
+    "pr",
+    "merge",
+    String(candidate.prNumber),
+    "--repo",
+    candidate.repo,
+    "--match-head-commit",
+    candidate.reviewedHeadSha,
+    "--auto",
+  ];
+}
+
+export const runtimeHostMergeActuatorTesting = {
+  buildMergeActuatorEnqueueArgs,
+  parseJsonObject,
+  parseMergeCommit,
+  parsePrState,
+  parseStatusCheckRollup,
+};

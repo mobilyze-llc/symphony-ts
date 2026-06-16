@@ -170,6 +170,8 @@ import {
   isIntentActorKind,
 } from "./intent.js";
 import {
+  type MergeActuatorLiveState,
+  type MergeActuatorSideEffects,
   type MergeCandidateRecord,
   reduceMergeCandidates,
 } from "./merge-candidate.js";
@@ -579,6 +581,13 @@ export interface OrchestratorCoreOptions {
     issueIdentifier: string,
     stateName: string,
   ) => Promise<void>;
+  // SYMPH-735 merge-actuator substrate. Dormant in this phase: assigned to
+  // private fields but never invoked; the live merge-stage dispatch barrier
+  // still parks (merge_actuator_unwired) until Phase 2 wires the dispatch.
+  getMergeActuatorLiveState?: (
+    candidate: MergeCandidateRecord,
+  ) => Promise<MergeActuatorLiveState | null>;
+  mergeActuatorSideEffects?: MergeActuatorSideEffects;
   autoCloseParentIssue?: (
     issueId: string,
     issueIdentifier: string,
@@ -791,6 +800,10 @@ export class OrchestratorCore {
 
   private readonly updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
 
+  private readonly getMergeActuatorLiveState?: OrchestratorCoreOptions["getMergeActuatorLiveState"];
+
+  private readonly mergeActuatorSideEffects?: OrchestratorCoreOptions["mergeActuatorSideEffects"];
+
   private readonly autoCloseParentIssue?: OrchestratorCoreOptions["autoCloseParentIssue"];
 
   private readonly getRunningSupervisionSnapshots?: OrchestratorCoreOptions["getRunningSupervisionSnapshots"];
@@ -989,6 +1002,8 @@ export class OrchestratorCore {
     this.runAcGate = options.runAcGate;
     this.runSpecFidelityJudge = options.runSpecFidelityJudge;
     this.updateIssueState = options.updateIssueState;
+    this.getMergeActuatorLiveState = options.getMergeActuatorLiveState;
+    this.mergeActuatorSideEffects = options.mergeActuatorSideEffects;
     this.autoCloseParentIssue = options.autoCloseParentIssue;
     this.getRunningSupervisionSnapshots =
       options.getRunningSupervisionSnapshots;

@@ -50,6 +50,7 @@ import {
   parseLsofCwdProcessEntries,
   readGitBaseRevision,
   readGitChangedFiles,
+  runtimeHostMergeActuatorTesting,
   signalPid,
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
@@ -77,6 +78,67 @@ beforeEach(() => {
   rmSync(join("/tmp/workspaces", ".symphony", "run-journals"), {
     recursive: true,
     force: true,
+  });
+});
+
+describe("runtime host merge actuator parsing (SYMPH-735)", () => {
+  // fetchMergeActuatorLiveState drives gh through the non-injectable module
+  // execFileAsync, so its parse path is exercised here via the pure helpers it
+  // composes: a complete gh JSON payload maps to a usable live state, an
+  // incomplete one fails closed to null.
+  it("maps a complete gh pr view payload to a usable live state", () => {
+    const payload = JSON.stringify({
+      url: "https://github.com/acme/repo/pull/7",
+      state: "OPEN",
+      isDraft: false,
+      mergeStateStatus: "CLEAN",
+      mergeable: "MERGEABLE",
+      reviewDecision: "APPROVED",
+      headRefOid: "deadbeef",
+      baseRefName: "main",
+      statusCheckRollup: [
+        { name: "ci", status: "COMPLETED", conclusion: "SUCCESS" },
+        { name: "broken", status: "COMPLETED", conclusion: "FAILURE" },
+        { name: "queued", status: "QUEUED", conclusion: "ACTION_REQUIRED" },
+      ],
+      mergedAt: null,
+      mergeCommit: null,
+    });
+
+    const parsed = runtimeHostMergeActuatorTesting.parseJsonObject(payload);
+    expect(parsed).not.toBeNull();
+    expect(runtimeHostMergeActuatorTesting.parsePrState(parsed?.state)).toBe(
+      "OPEN",
+    );
+    // The mined SYMPH-735 substrate maps gh check conclusions to required-check
+    // buckets: SUCCESS -> pass, a terminal non-skip conclusion -> fail,
+    // ACTION_REQUIRED -> pending.
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup(
+        parsed?.statusCheckRollup,
+      ),
+    ).toEqual([
+      { name: "ci", status: "pass" },
+      { name: "broken", status: "fail" },
+      { name: "queued", status: "pending" },
+    ]);
+  });
+
+  it("fails closed to null for incomplete gh pr view payloads", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseJsonObject("{not-json"),
+    ).toBeNull();
+    // Missing/blank required fields the fetcher gates on (state, headRefOid,
+    // baseRefName) collapse to null rather than yielding a partial live state.
+    expect(runtimeHostMergeActuatorTesting.parsePrState(undefined)).toBeNull();
+    expect(runtimeHostMergeActuatorTesting.parsePrState("LOCKED")).toBeNull();
+    const missingHead = runtimeHostMergeActuatorTesting.parseJsonObject(
+      JSON.stringify({ state: "OPEN", baseRefName: "main" }),
+    );
+    expect(missingHead?.headRefOid).toBeUndefined();
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup("not-an-array"),
+    ).toEqual([]);
   });
 });
 
