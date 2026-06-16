@@ -594,12 +594,12 @@ describe("Claude CMUX runner", () => {
     const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-outside-"));
     const outsideArtifact = join(outsideDir, "opus.md");
     const linkedArtifact = join(harness.artifactDir, "opus.md");
-    await writeFile(outsideArtifact, validReviewArtifact(), "utf8");
-    await symlink(outsideArtifact, linkedArtifact);
     const runCommand: ClaudeRunnerCommand = async (_command, args) => {
       if (args[0] === "preflight") {
         return { exitCode: 0, stdout: "{}", stderr: "" };
       }
+      await writeFile(outsideArtifact, validReviewArtifact(), "utf8");
+      await symlink(outsideArtifact, linkedArtifact);
       return {
         exitCode: 0,
         stdout: JSON.stringify({
