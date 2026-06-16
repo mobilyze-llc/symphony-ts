@@ -1379,6 +1379,15 @@ function isUsableLiveState(live: MergeActuatorLiveState): boolean {
     live.headSha.length > 0 &&
     typeof live.baseRef === "string" &&
     live.baseRef.length > 0 &&
+    // The green-mergeability gate (SYMPH-752) dereferences these and keys the
+    // UNKNOWN branch on `=== null`. A fetcher returning `undefined` would slip
+    // past that check (undefined !== null) and either enqueue on unverified
+    // mergeability or throw on mergeStateStatus.toLowerCase() outside the
+    // recovery envelope. Require the same string|null shape the fetcher promises
+    // so a violating value is routed through bounded recovery instead.
+    (typeof live.mergeable === "string" || live.mergeable === null) &&
+    (typeof live.mergeStateStatus === "string" ||
+      live.mergeStateStatus === null) &&
     Array.isArray(live.requiredChecks) &&
     live.requiredChecks.every(isUsableRequiredCheck)
   );

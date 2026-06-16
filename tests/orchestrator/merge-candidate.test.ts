@@ -4,7 +4,9 @@ import type {
   DispatcherLease,
   DispatcherRunJournalEntry,
 } from "../../src/domain/model.js";
+import { computeMergeActuatorPollDelayMs } from "../../src/orchestrator/core.js";
 import {
+  type MergeActuationAction,
   type MergeActuationJournalDraft,
   type MergeActuatorCycleResult,
   type MergeActuatorLiveState,
@@ -13,6 +15,7 @@ import {
   buildMergeActuationEntry,
   buildMergeCandidateEntryFromReviewGate,
   decideMergeActuation,
+  mergeActuatorPollAttempt,
   reduceMergeCandidates,
   runMergeActuator,
   runMergeActuatorCycle,
@@ -1811,6 +1814,287 @@ describe("merge actuator bounded pre-enqueue poll (SYMPH-752/755)", () => {
       throw new Error("expected actuated");
     }
     expect(result.run.sideEffect).toBe("enqueue");
+  });
+
+  // P2-1 (council): isUsableLiveState must validate the mergeability fields the
+  // green-mergeability gate dereferences. A fetcher violating its TS return type
+  // with mergeable: undefined would, without the guard, slip past `=== null`
+  // (undefined !== null) and enqueue on unverified mergeability. It must instead
+  // be treated as UNUSABLE → bounded live-state-failure recovery, never run on.
+  it("treats undefined mergeability fields as an unusable live state (not enqueue)", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const enqueue = vi.fn(async () => {});
+    // requiredChecks empty + green-looking, but mergeable is undefined (a TS
+    // contract violation). Pre-P2-1 this enqueued; it must now be unusable.
+    const malformed = {
+      ...liveStateBase(),
+      requiredChecks: [],
+      mergeable: undefined,
+    } as unknown as MergeActuatorLiveState;
+
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 1, maxSideEffectFailures: 2 },
+      fetchLiveState: async () => malformed,
+      appendActuation: harness.appendActuation,
+      sideEffects: {
+        markReady: async () => {},
+        enqueue,
+        writeTrackerDone: async () => {},
+      },
+    });
+
+    // Routed through bounded recovery, not run on: never enqueued.
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(result.outcome).toBe("parked");
+    if (result.outcome !== "parked") {
+      throw new Error("expected parked");
+    }
+    expect(result.blocker.reason).toBe("live_state_unavailable");
+    const evidence = harness.entries.filter(
+      (e) => e.metadata.action === "live_state_failed",
+    );
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]?.metadata.reason).toBe("live_state_incomplete");
+  });
+
+  it("treats undefined mergeStateStatus as an unusable live state (not enqueue)", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const enqueue = vi.fn(async () => {});
+    const malformed = {
+      ...liveStateBase(),
+      requiredChecks: [],
+      mergeStateStatus: undefined,
+    } as unknown as MergeActuatorLiveState;
+
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 1, maxSideEffectFailures: 2 },
+      fetchLiveState: async () => malformed,
+      appendActuation: harness.appendActuation,
+      sideEffects: {
+        markReady: async () => {},
+        enqueue,
+        writeTrackerDone: async () => {},
+      },
+    });
+
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(result.outcome).toBe("parked");
+    if (result.outcome !== "parked") {
+      throw new Error("expected parked");
+    }
+    expect(result.blocker.reason).toBe("live_state_unavailable");
+  });
+
+  // T3 (council): the wait interception must catch ONLY the two transient wait
+  // reasons. The terminal blocked reasons (missing_required_review,
+  // merged_without_durable_proof, non-green merge_state_*) must still yield the
+  // generic actuated/blocked decision (→ core parks them), NOT a retry/wait.
+  it("does not intercept terminal blocked parks as bounded waits", async () => {
+    const candidateEntry = candidateJournalEntry();
+
+    const missingReview = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry]),
+      journal: [candidateEntry],
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      fetchLiveState: async () =>
+        liveState({ requiresGithubReview: true, reviewDecision: "PENDING" }),
+      appendActuation: makeJournalHarness().appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+    expect(missingReview.outcome).toBe("actuated");
+    if (missingReview.outcome === "actuated") {
+      expect(missingReview.run.decision).toMatchObject({
+        action: "blocked",
+        reason: "missing_required_review",
+      });
+    }
+
+    const mergedNoProof = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry]),
+      journal: [candidateEntry],
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      // MERGED but no durable mergedAt/mergeCommit, identity-matched.
+      fetchLiveState: async () =>
+        liveState({ state: "MERGED", mergedAt: null, mergeCommit: null }),
+      appendActuation: makeJournalHarness().appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+    expect(mergedNoProof.outcome).toBe("actuated");
+    if (mergedNoProof.outcome === "actuated") {
+      expect(mergedNoProof.run.decision).toMatchObject({
+        action: "blocked",
+        reason: "merged_without_durable_proof",
+      });
+    }
+
+    const nonGreenTerminal = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry]),
+      journal: [candidateEntry],
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      fetchLiveState: async () =>
+        liveState({ mergeStateStatus: "BLOCKED", mergeable: "MERGEABLE" }),
+      appendActuation: makeJournalHarness().appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+    expect(nonGreenTerminal.outcome).toBe("actuated");
+    if (nonGreenTerminal.outcome === "actuated") {
+      expect(nonGreenTerminal.run.decision).toMatchObject({
+        action: "blocked",
+        reason: "merge_state_blocked",
+      });
+    }
+  });
+
+  // T4 (council): replay for unknown_mergeability_wait, mirroring the
+  // pending_checks_wait replay test — the count is restored from the journal
+  // across a restart (no double-count, no early park).
+  it("restores the unknown-mergeability wait count from the journal across replay", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const original = makeJournalHarness();
+    await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...original.entries]),
+      journal: [candidateEntry, ...original.entries],
+      lease: lease({ leaseId: "lease-1" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:01:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      fetchLiveState: async () =>
+        liveState({ mergeStateStatus: null, mergeable: null }),
+      appendActuation: original.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    const restarted = makeJournalHarness(original.entries);
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...restarted.entries]),
+      journal: [candidateEntry, ...restarted.entries],
+      lease: lease({ leaseId: "lease-2" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:02:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      fetchLiveState: async () =>
+        liveState({ mergeStateStatus: null, mergeable: null }),
+      appendActuation: restarted.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("parked");
+    if (result.outcome !== "parked") {
+      throw new Error("expected park after restart");
+    }
+    expect(result.blocker.attempts).toBe(2);
+    // Exactly two distinct evidence rows — no double-count across the restart.
+    const evidence = restarted.entries.filter(
+      (e) => e.metadata.action === "unknown_mergeability_wait",
+    );
+    expect(evidence).toHaveLength(2);
+    expect(new Set(evidence.map((e) => e.idempotencyKey)).size).toBe(2);
+  });
+
+  // T6 (council): an asymmetric UNKNOWN — only ONE of mergeable /
+  // mergeStateStatus is null — must still route to the bounded UNKNOWN wait,
+  // never enqueue. Guards the `|| ` in the gate (either-null is UNKNOWN).
+  it("treats an asymmetric UNKNOWN mergeability as a bounded wait", () => {
+    const candidate = candidateFromJournal([candidateJournalEntry()]);
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState({ mergeable: "MERGEABLE", mergeStateStatus: null }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: 0,
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({ action: "blocked", reason: "mergeability_unknown" });
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState({ mergeable: null, mergeStateStatus: "CLEAN" }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: 0,
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({ action: "blocked", reason: "mergeability_unknown" });
+  });
+
+  // T7 (council): the journal-derived poll attempt count spans ALL countable
+  // re-poll actions (poll + draft_wait + pending_checks_wait + ...), and maps to
+  // the exact backoff rung. Proves the cadence advances across mixed wait types.
+  it("derives the poll-backoff attempt from mixed wait actions across the journal", () => {
+    const candidateEntry = candidateJournalEntry();
+    const candidate = candidateFromJournal([candidateEntry]);
+    const mix: MergeActuationAction[] = [
+      "poll",
+      "draft_wait",
+      "pending_checks_wait",
+    ];
+    const journal: DispatcherRunJournalEntry[] = [candidateEntry];
+    let sequence = candidateEntry.sequence;
+    mix.forEach((action, index) => {
+      sequence += 1;
+      journal.push({
+        ...buildMergeActuationEntry({
+          candidate,
+          action,
+          timestamp: `2026-06-16T01:0${index + 1}:00.000Z`,
+          ownerId: "owner-1",
+          // Distinct lease ids → distinct per-cycle keys, like real cycles.
+          lease: lease({ leaseId: `lease-${index + 1}` }),
+          reason: action,
+        }),
+        sequence,
+      });
+    });
+
+    // Three distinct countable re-poll rows → attempt 3 → 60s rung.
+    const attempt = mergeActuatorPollAttempt(journal, candidate.candidateId);
+    expect(attempt).toBe(3);
+    expect(computeMergeActuatorPollDelayMs(attempt)).toBe(60_000);
+
+    // A candidate with no re-poll evidence floors to attempt 1 (first rung).
+    expect(
+      mergeActuatorPollAttempt([candidateEntry], candidate.candidateId),
+    ).toBe(1);
   });
 });
 

@@ -7614,6 +7614,58 @@ describe("live merge actuator (SYMPH-735)", () => {
     ).toContain("merge_queue_max_wait_exceeded");
   });
 
+  it("does not park a queued PR via the failure ceiling after many poll cycles (SYMPH-753 deferral)", async () => {
+    // T5 (council): merge_actuator_poll is deferral-class — the journal-derived
+    // attempt count climbs past maxRetryAttempts, but the failure max-attempt
+    // guard and novelty short-circuit only fire for delayType === "failure".
+    // With maxRetryAttempts: 2, driving maxRetryAttempts + 1 (= 3) and more poll
+    // cycles must NOT falsely park/fail the healthy queued candidate.
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const maxRetryAttempts = 2;
+    const config = createLiveMergeActuatorConfig({ maxWaitMs: 3_600_000 });
+    config.agent = { ...config.agent, maxRetryAttempts };
+    const orchestrator = createOrchestrator({
+      config,
+      now: () => new Date("2026-03-06T01:00:00.000Z"),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      getMergeActuatorLiveState: async () =>
+        actuatorLiveState({ requiredChecks: [] }),
+      mergeActuatorSideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone: async () => {},
+      },
+    });
+
+    await stageMergeCandidate(orchestrator, reviewResultPath);
+
+    for (let cycle = 0; cycle < maxRetryAttempts + 3; cycle += 1) {
+      await orchestrator.onRetryTimer("1");
+      const state = orchestrator.getState();
+      // Never falsely parked/exhausted by the failure ceiling.
+      expect(state.failed.has("1")).toBe(false);
+      expect(state.failureExhaustedIds.has("1")).toBe(false);
+      // Still actively re-polling on the merge-actuator backoff, with an attempt
+      // index that has climbed past maxRetryAttempts.
+      const retry = state.retryAttempts["1"];
+      expect(retry?.delayType).toBe("merge_actuator_poll");
+    }
+
+    const finalRetry = orchestrator.getState().retryAttempts["1"];
+    expect(finalRetry).toBeDefined();
+    expect((finalRetry?.attempt ?? 0) > maxRetryAttempts).toBe(true);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) => entry.kind === "failure_exhausted",
+        ),
+    ).toBe(false);
+  });
+
   it("parks a candidate whose live PR is blocked by a failing check instead of re-polling", async () => {
     const reviewResultPath = await writeReviewGateResultFixture();
     const markReady = vi.fn(async () => {});

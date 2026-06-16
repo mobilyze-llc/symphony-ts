@@ -190,6 +190,10 @@ export const SPEC_DEFAULTS = Object.freeze({
     maxSideEffectFailures: DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES,
     maxDraftWaitObservations:
       DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS,
+    maxPendingChecksWaitObservations:
+      DEFAULT_MERGE_ACTUATOR_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS,
+    maxUnknownMergeabilityWaitObservations:
+      DEFAULT_MERGE_ACTUATOR_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS,
   },
   specFidelity: {
     enabled: false,

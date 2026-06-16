@@ -14,6 +14,8 @@ import {
   DEFAULT_MAX_CONCURRENT_AGENTS,
   DEFAULT_MAX_RETRY_BACKOFF_MS,
   DEFAULT_MAX_TURNS,
+  DEFAULT_MERGE_ACTUATOR_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS,
+  DEFAULT_MERGE_ACTUATOR_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS,
   DEFAULT_OBSERVABILITY_ENABLED,
   DEFAULT_OBSERVABILITY_REFRESH_MS,
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
@@ -89,6 +91,15 @@ describe("SPEC_DEFAULTS", () => {
     expect(SPEC_DEFAULTS.observability.dashboardEnabled).toBe(
       DEFAULT_OBSERVABILITY_ENABLED,
     );
+    // The frozen merge-actuator subtree must carry the bounded pre-enqueue wait
+    // ceilings (SYMPH-752/755); SPEC_DEFAULTS is Object.freeze with an inferred
+    // type, so an omission compiles silently — assert them explicitly here.
+    expect(SPEC_DEFAULTS.mergeActuator.maxPendingChecksWaitObservations).toBe(
+      DEFAULT_MERGE_ACTUATOR_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS,
+    );
+    expect(
+      SPEC_DEFAULTS.mergeActuator.maxUnknownMergeabilityWaitObservations,
+    ).toBe(DEFAULT_MERGE_ACTUATOR_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS);
     expect(Object.isFrozen(SPEC_DEFAULTS)).toBe(true);
   });
 });
