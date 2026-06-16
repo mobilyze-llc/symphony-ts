@@ -97,6 +97,36 @@ describe("merge candidates", () => {
     });
   });
 
+  it("keeps durable merged proof ahead of stale-head checks", () => {
+    const candidate = reduceMergeCandidates([
+      {
+        ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+        sequence: 2,
+      },
+    ])["issue-1"]!;
+
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState({
+        state: "MERGED",
+        headSha: "head-after-merge",
+        mergedAt: "2026-06-16T01:00:00Z",
+        mergeCommit: "merge-1",
+      }),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+    });
+
+    expect(decision).toMatchObject({
+      action: "tracker_done",
+      reason: "durable_merge_proof",
+    });
+  });
+
   it("journals actuator side effects as deterministic idempotency barriers", () => {
     const candidate = reduceMergeCandidates([
       {
@@ -213,6 +243,91 @@ describe("merge candidates", () => {
       journalEntry: { kind: "merge_actuation" },
     });
     expect(events).toEqual(["journal:tracker_done", "tracker_done"]);
+  });
+
+  it("records side-effect failures and lets the failed action be retried", async () => {
+    const candidate = reduceMergeCandidates([
+      {
+        ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+        sequence: 2,
+      },
+    ])["issue-1"]!;
+    const events: string[] = [];
+
+    const result = await runMergeActuator({
+      candidate,
+      live: liveState({ isDraft: true }),
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:01:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+      appendActuation: async (entry) => {
+        events.push(`journal:${entry.metadata.action}`);
+        return { ...entry, sequence: events.length + 2 };
+      },
+      sideEffects: {
+        markReady: async () => {
+          events.push("mark_ready");
+          throw new Error("gh pr ready failed");
+        },
+        enqueue: async () => {
+          events.push("enqueue");
+        },
+        writeTrackerDone: async () => {
+          events.push("tracker_done");
+        },
+      },
+    });
+
+    expect(result).toMatchObject({
+      sideEffect: "none",
+      error: "gh pr ready failed",
+      journalEntry: { metadata: { action: "mark_ready" } },
+      failureEntry: {
+        kind: "merge_actuation",
+        metadata: {
+          action: "failed",
+          reason: "mark_ready_failed:gh pr ready failed",
+        },
+      },
+    });
+    expect(events).toEqual([
+      "journal:mark_ready",
+      "mark_ready",
+      "journal:failed",
+    ]);
+
+    const blocked = reduceMergeCandidates([
+      {
+        ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+        sequence: 2,
+      },
+      result.journalEntry!,
+      result.failureEntry!,
+    ])["issue-1"]!;
+
+    expect(blocked).toMatchObject({
+      status: "blocked",
+      lastActuation: "failed",
+      blockedReason: "mark_ready_failed:gh pr ready failed",
+    });
+    expect(
+      decideMergeActuation({
+        candidate: blocked,
+        live: liveState({ isDraft: true }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: 0,
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set([result.journalEntry!.idempotencyKey]),
+      }),
+    ).toMatchObject({
+      action: "mark_ready",
+      reason: "draft_pr",
+    });
   });
 });
 

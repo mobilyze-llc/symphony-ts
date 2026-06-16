@@ -12,6 +12,7 @@ export const MERGE_ACTUATION_ACTIONS = [
   "tracker_done",
   "stale",
   "timeout",
+  "failed",
 ] as const;
 
 export type MergeActuationAction = (typeof MERGE_ACTUATION_ACTIONS)[number];
@@ -106,7 +107,9 @@ export interface MergeActuatorSideEffects {
 export interface RunMergeActuatorResult {
   decision: MergeActuatorDecision;
   journalEntry: DispatcherRunJournalEntry | null;
+  failureEntry: DispatcherRunJournalEntry | null;
   sideEffect: "none" | "mark_ready" | "enqueue" | "tracker_done";
+  error: string | null;
 }
 
 export function buildMergeCandidateEntryFromReviewGate(
@@ -265,16 +268,6 @@ export function decideMergeActuation(input: {
     return leaseDecision;
   }
 
-  const blocker = firstLiveBlocker(input.candidate, input.live);
-  if (blocker !== null) {
-    return {
-      action: "stale",
-      reason: blocker,
-      blockers: [blocker],
-      sideEffectKey: mergeActuationKey(input.candidate, "stale"),
-    };
-  }
-
   if (input.live.state === "MERGED") {
     if (input.live.mergedAt === null || input.live.mergeCommit === null) {
       return {
@@ -297,6 +290,16 @@ export function decideMergeActuation(input: {
       action: "stale",
       reason: "pr_closed_unmerged",
       blockers: ["pr_closed_unmerged"],
+      sideEffectKey: mergeActuationKey(input.candidate, "stale"),
+    };
+  }
+
+  const blocker = firstLiveBlocker(input.candidate, input.live);
+  if (blocker !== null) {
+    return {
+      action: "stale",
+      reason: blocker,
+      blockers: [blocker],
       sideEffectKey: mergeActuationKey(input.candidate, "stale"),
     };
   }
@@ -423,12 +426,24 @@ export async function runMergeActuator(input: {
   });
 
   if (decision.sideEffectKey === null || input.lease === null) {
-    return { decision, journalEntry: null, sideEffect: "none" };
+    return {
+      decision,
+      journalEntry: null,
+      failureEntry: null,
+      sideEffect: "none",
+      error: null,
+    };
   }
 
   const action = decisionToActuationAction(decision.action);
   if (action === null) {
-    return { decision, journalEntry: null, sideEffect: "none" };
+    return {
+      decision,
+      journalEntry: null,
+      failureEntry: null,
+      sideEffect: "none",
+      error: null,
+    };
   }
 
   const journalEntry = await input.appendActuation(
@@ -443,20 +458,66 @@ export async function runMergeActuator(input: {
     }),
   );
 
-  if (decision.action === "mark_ready") {
-    await input.sideEffects.markReady(input.candidate);
-    return { decision, journalEntry, sideEffect: "mark_ready" };
-  }
-  if (decision.action === "enqueue") {
-    await input.sideEffects.enqueue(input.candidate);
-    return { decision, journalEntry, sideEffect: "enqueue" };
-  }
-  if (decision.action === "tracker_done") {
-    await input.sideEffects.writeTrackerDone(input.candidate);
-    return { decision, journalEntry, sideEffect: "tracker_done" };
+  try {
+    if (decision.action === "mark_ready") {
+      await input.sideEffects.markReady(input.candidate);
+      return {
+        decision,
+        journalEntry,
+        failureEntry: null,
+        sideEffect: "mark_ready",
+        error: null,
+      };
+    }
+    if (decision.action === "enqueue") {
+      await input.sideEffects.enqueue(input.candidate);
+      return {
+        decision,
+        journalEntry,
+        failureEntry: null,
+        sideEffect: "enqueue",
+        error: null,
+      };
+    }
+    if (decision.action === "tracker_done") {
+      await input.sideEffects.writeTrackerDone(input.candidate);
+      return {
+        decision,
+        journalEntry,
+        failureEntry: null,
+        sideEffect: "tracker_done",
+        error: null,
+      };
+    }
+  } catch (error) {
+    const errorMessage = formatError(error);
+    const failureEntry = await input.appendActuation(
+      buildMergeActuationEntry({
+        candidate: input.candidate,
+        action: "failed",
+        timestamp: input.now.toISOString(),
+        ownerId: input.ownerId,
+        lease: input.lease,
+        live: input.live,
+        reason: `${decision.action}_failed:${errorMessage}`,
+      }),
+    );
+    return {
+      decision,
+      journalEntry,
+      failureEntry,
+      sideEffect: "none",
+      error: errorMessage,
+    };
   }
 
-  return { decision, journalEntry, sideEffect: "none" };
+  return {
+    decision,
+    journalEntry,
+    failureEntry: null,
+    sideEffect: "none",
+    error: null,
+  };
 }
 
 function candidateFromEntry(
@@ -551,6 +612,10 @@ function applyActuation(
     record.status = "blocked";
     record.blockedReason =
       stringField(entry.metadata.reason) ?? "merge_queue_max_wait_exceeded";
+  } else if (action === "failed") {
+    record.status = "blocked";
+    record.blockedReason =
+      stringField(entry.metadata.reason) ?? "merge_actuation_failed";
   }
 }
 
@@ -606,12 +671,15 @@ function validateLease(
 
 function sideEffectDecision(
   candidate: MergeCandidateRecord,
-  action: MergeActuationAction,
+  action: Exclude<MergeActuationAction, "failed">,
   completedSideEffectKeys: ReadonlySet<string>,
   reason: string,
 ): MergeActuatorDecision {
   const sideEffectKey = mergeActuationKey(candidate, action);
-  if (completedSideEffectKeys.has(sideEffectKey)) {
+  const canRedriveFailedAction =
+    candidate.lastActuation === "failed" &&
+    candidate.blockedReason?.startsWith(`${action}_failed:`) === true;
+  if (completedSideEffectKeys.has(sideEffectKey) && !canRedriveFailedAction) {
     return {
       action: "noop",
       reason: "side_effect_already_journaled",
@@ -689,4 +757,8 @@ function recordField(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : null;
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
