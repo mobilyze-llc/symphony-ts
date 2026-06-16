@@ -355,6 +355,17 @@ export function decideMergeActuation(input: {
       "draft_pr",
     );
   }
+  if (
+    input.candidate.status !== "merge_queue_pending" &&
+    !hasGreenMergeability(input.live)
+  ) {
+    return {
+      action: "blocked",
+      reason: "mergeability_unknown",
+      blockers: ["mergeability_unknown"],
+      sideEffectKey: null,
+    };
+  }
   if (input.candidate.status !== "merge_queue_pending") {
     return sideEffectDecision(
       input.candidate,
@@ -756,6 +767,10 @@ function firstLiveBlocker(
     return "behind_base";
   }
   return null;
+}
+
+function hasGreenMergeability(live: MergeActuatorLiveState): boolean {
+  return live.mergeable === "MERGEABLE" && live.mergeStateStatus !== "UNKNOWN";
 }
 
 function validateLease(

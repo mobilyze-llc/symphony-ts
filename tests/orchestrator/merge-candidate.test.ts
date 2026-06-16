@@ -270,6 +270,34 @@ describe("merge candidates", () => {
     });
   });
 
+  it("blocks pre-enqueue actuation while GitHub mergeability is unknown", () => {
+    const candidateEntry = {
+      ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+      sequence: 2,
+    };
+    const candidate = reduceMergeCandidates([candidateEntry])["issue-1"]!;
+
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState({
+          mergeStateStatus: "UNKNOWN",
+          mergeable: "UNKNOWN",
+        }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({
+      action: "blocked",
+      reason: "mergeability_unknown",
+      blockers: ["mergeability_unknown"],
+    });
+  });
+
   it("does not treat a raw enqueue intent as queue-pending side-effect proof", () => {
     const candidateEntry = {
       ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
