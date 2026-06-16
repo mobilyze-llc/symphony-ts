@@ -162,6 +162,6 @@ run_council_gate \
 
 Read `$ARTIFACT_DIR/review-result.json` and `$ARTIFACT_DIR/council-report.md`. The machine result must contain `review_metadata.reviewed_head_sha`, `review_metadata.base_sha`, `review_metadata.round`, `review_metadata.mode`, and a clean verdict.
 
-If the gate reports `PASS`, output `[STAGE_COMPLETE]`.
+If the gate reports `PASS`, output `[REVIEW_GATE_RESULT_PATH: $ARTIFACT_DIR/review-result.json]` immediately before `[STAGE_COMPLETE]`.
 If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/malformed: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
 {% endif %}

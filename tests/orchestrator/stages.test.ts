@@ -1,3 +1,7 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -11,6 +15,7 @@ import {
   type OrchestratorCoreOptions,
 } from "../../src/orchestrator/core.js";
 import type { EnsembleGateResult } from "../../src/orchestrator/gate-handler.js";
+import type { HeadlessCouncilGateResult } from "../../src/review/headless-council-gate.js";
 import type { IssueTracker } from "../../src/tracker/tracker.js";
 
 describe("orchestrator stage machine", () => {
@@ -287,8 +292,13 @@ describe("orchestrator stage machine", () => {
     // Dispatch review
     await orchestrator.onRetryTimer("1");
 
-    // review → merge (review passes — recorded in passedStages)
-    await orchestrator.onWorkerExit({ issueId: "1", outcome: "normal" });
+    // review → merge (review passes with canonical machine artifact)
+    const reviewResultPath = await writeReviewGateResultFixture();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]\n[STAGE_COMPLETE]`,
+    });
     expect(orchestrator.getState().issueStages["1"]).toBe("merge");
     expect(orchestrator.getState().issuePassedStages["1"]).toContain("review");
 
@@ -1251,6 +1261,74 @@ function createFourStageReworkConfig(): StagesConfig {
       },
     },
   };
+}
+
+async function writeReviewGateResultFixture(): Promise<string> {
+  const artifactDir = await mkdtemp(
+    join(tmpdir(), "symphony-stages-review-result-"),
+  );
+  await mkdir(artifactDir, { recursive: true });
+  const resultJson = join(artifactDir, "review-result.json");
+  const result = {
+    schemaVersion: 1,
+    issueId: "ISSUE-1",
+    verdict: "pass",
+    startedAt: "2026-03-06T00:00:00.000Z",
+    completedAt: "2026-03-06T00:01:00.000Z",
+    pr: {
+      repo: "mobilyze-llc/symphony-ts",
+      number: 725,
+      baseRef: "main",
+      headRef: "codex/SYMPH-725-merge-candidate-actuator",
+    },
+    review_metadata: {
+      reviewed_head_sha: "head-sha",
+      previous_reviewed_head_sha: null,
+      base_sha: "base-sha",
+      round: 1,
+      mode: "full",
+      routing_mode: "standard",
+      verdict: "pass",
+    },
+    review_routing: {
+      mode: "standard",
+      selectedLanes: [{ laneId: "pi-deepseek" }],
+      skippedLanes: [],
+      escalationPredicates: [],
+      operatorOverrideReason: null,
+      highRiskPredicate: {
+        triggerHits: [],
+        matchedPaths: [],
+      },
+      decorrelationBasis: {
+        mergeEligible: true,
+        summary:
+          "Merge-eligible decorrelated reviewer artifact(s): pi-deepseek.",
+        authorFamilies: ["openai-codex"],
+        requiredNonAuthorFamilyReviewer: true,
+        requiredReviewerLaneIds: ["pi-deepseek"],
+        directSignalLaneIds: [],
+        decorrelatedReviewerArtifacts: [
+          { laneId: "pi-deepseek", modelFamily: "deepseek" },
+        ],
+      },
+    },
+    review_bundle: null,
+    targeted_convergence: null,
+    lanes: [],
+    degradedConditions: [],
+    artifactPaths: {
+      artifactDir,
+      diff: null,
+      reviewBundle: null,
+      structuredArtifacts: [],
+      resultJson,
+      councilReport: join(artifactDir, "council-report.md"),
+    },
+    summary: "pass",
+  } as unknown as HeadlessCouncilGateResult;
+  await writeFile(resultJson, `${JSON.stringify(result, null, 2)}\n`);
+  return resultJson;
 }
 
 function createTracker(input?: {

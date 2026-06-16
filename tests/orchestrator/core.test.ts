@@ -1,3 +1,7 @@
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type {
@@ -28,6 +32,7 @@ import {
   sortIssuesForDispatch,
 } from "../../src/orchestrator/core.js";
 import type { TrackerIssueWriteRequest } from "../../src/orchestrator/tracker-write.js";
+import type { HeadlessCouncilGateResult } from "../../src/review/headless-council-gate.js";
 import { DEFAULT_LINEAR_MAX_LEN } from "../../src/shared/egress.js";
 import type { TicketFeatureSourceIssue } from "../../src/tracker/ticket-feature.js";
 import type {
@@ -59,6 +64,164 @@ describe("orchestrator core", () => {
     ]);
 
     expect(issues.map((issue) => issue.id)).toEqual(["1", "2", "3"]);
+  });
+
+  it("parks review completion before merge when the canonical review result artifact is missing", async () => {
+    const spawnedStages: Array<string | null> = [];
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStages.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "Council PASS.\n[STAGE_COMPLETE]",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const state = orchestrator.getState();
+    expect(retry).toBeNull();
+    expect(spawnedStages).toEqual(["review"]);
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.failureExhaustedIds.has("1")).toBe(true);
+    expect(state.issueStages["1"]).toBeUndefined();
+    expect(state.dispatcherRunJournal.map((entry) => entry.kind)).not.toContain(
+      "merge_candidate",
+    );
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "failure_exhausted",
+      )?.metadata.reason,
+    ).toContain("missing_canonical_review_gate_result");
+  });
+
+  it("ingests review-result artifact rows before advancing review to merge", async () => {
+    const spawnedStages: Array<string | null> = [];
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStages.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const state = orchestrator.getState();
+    expect(retry).toMatchObject({
+      issueId: "1",
+      identifier: "ISSUE-1",
+      delayType: "continuation",
+    });
+    expect(spawnedStages).toEqual(["review"]);
+    expect(state.issueStages["1"]).toBe("merge");
+    expect(state.issuePassedStages["1"]).toContain("review");
+    expect(state.dispatcherRunJournal.map((entry) => entry.kind)).toEqual(
+      expect.arrayContaining(["review_gate_result", "merge_candidate"]),
+    );
+    expect(
+      state.dispatcherRunJournal.find(
+        (entry) => entry.kind === "merge_candidate",
+      )?.metadata.review_result_path,
+    ).toBe(reviewResultPath);
+  });
+
+  it("parks replayed merge-stage issues with passed review but no candidate before worker dispatch", async () => {
+    const spawnedStages: Array<string | null> = [];
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStages.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+    });
+    const state = orchestrator.getState();
+    state.issueStages["1"] = "merge";
+    state.issuePassedStages["1"] = ["review"];
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(spawnedStages).toEqual([]);
+    expect(state.failed.has("1")).toBe(true);
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) => entry.kind === "admission" && entry.stage === "merge",
+      ),
+    ).toBe(false);
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "failure_exhausted",
+      )?.metadata.reason,
+    ).toContain("missing_canonical_review_gate_result");
+  });
+
+  it("parks candidate-backed merge dispatch explicitly when the live actuator is unwired", async () => {
+    const spawnedStages: Array<string | null> = [];
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async ({ stageName }) => {
+        spawnedStages.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+    const retryResult = await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    expect(retryResult.dispatched).toBe(false);
+    expect(spawnedStages).toEqual(["review"]);
+    expect(state.failed.has("1")).toBe(true);
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) => entry.kind === "admission" && entry.stage === "merge",
+      ),
+    ).toBe(false);
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "failure_exhausted",
+      )?.metadata.reason,
+    ).toContain("merge_actuator_unwired");
   });
 
   it("dispatches unrelated candidates when hard dependency cycles are excluded", async () => {
@@ -7535,11 +7698,17 @@ describe("dispatcher run journal restart recovery", () => {
 
     issueState = "Resume";
     const resumed = await orchestrator.pollTick();
-    expect(resumed.dispatchedIssueIds).toEqual(["1"]);
-    expect(spawnWorker).toHaveBeenCalledTimes(1);
-    expect(spawnedStageNames).toEqual(["merge"]);
-    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
-    expect(orchestrator.getState().issueStages["1"]).toBe("merge");
+    expect(resumed.dispatchedIssueIds).toEqual([]);
+    expect(spawnWorker).not.toHaveBeenCalled();
+    expect(spawnedStageNames).toEqual([]);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.findLast(
+          (entry) => entry.kind === "failure_exhausted",
+        )?.metadata.reason,
+    ).toContain("missing_canonical_review_gate_result");
   });
 
   it("restart recovery does not let prior hard-stop proof confirm a later emergency stop", async () => {
@@ -13473,6 +13642,140 @@ function createTracker(input?: {
       input.fetchTicketFeatureIssuesByStates;
   }
   return tracker;
+}
+
+function createReviewMergeConfig(): ResolvedWorkflowConfig {
+  const config = createConfig();
+  config.stages = {
+    initialStage: "review",
+    fastTrack: null,
+    stages: {
+      review: {
+        type: "agent",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "merge",
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: null,
+      },
+      merge: {
+        type: "agent",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: "done",
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: null,
+      },
+      done: {
+        type: "terminal",
+        runner: null,
+        model: null,
+        prompt: null,
+        maxTurns: null,
+        timeoutMs: null,
+        concurrency: null,
+        gateType: null,
+        maxRework: null,
+        reviewers: [],
+        transitions: {
+          onComplete: null,
+          onApprove: null,
+          onRework: null,
+        },
+        linearState: "Done",
+      },
+    },
+  };
+  return config;
+}
+
+async function writeReviewGateResultFixture(
+  overrides: Partial<HeadlessCouncilGateResult> = {},
+): Promise<string> {
+  const artifactDir = await mkdtemp(join(tmpdir(), "symphony-review-result-"));
+  await mkdir(artifactDir, { recursive: true });
+  const resultJson = join(artifactDir, "review-result.json");
+  const result = {
+    schemaVersion: 1,
+    issueId: "ISSUE-1",
+    verdict: "pass",
+    startedAt: "2026-03-06T00:00:00.000Z",
+    completedAt: "2026-03-06T00:01:00.000Z",
+    pr: {
+      repo: "mobilyze-llc/symphony-ts",
+      number: 725,
+      baseRef: "main",
+      headRef: "codex/SYMPH-725-merge-candidate-actuator",
+    },
+    review_metadata: {
+      reviewed_head_sha: "head-sha",
+      previous_reviewed_head_sha: null,
+      base_sha: "base-sha",
+      round: 1,
+      mode: "full",
+      routing_mode: "standard",
+      verdict: "pass",
+    },
+    review_routing: {
+      mode: "standard",
+      selectedLanes: [{ laneId: "pi-deepseek" }],
+      skippedLanes: [],
+      escalationPredicates: [],
+      operatorOverrideReason: null,
+      highRiskPredicate: {
+        triggerHits: [],
+        matchedPaths: [],
+      },
+      decorrelationBasis: {
+        mergeEligible: true,
+        summary:
+          "Merge-eligible decorrelated reviewer artifact(s): pi-deepseek.",
+        authorFamilies: ["openai-codex"],
+        requiredNonAuthorFamilyReviewer: true,
+        requiredReviewerLaneIds: ["pi-deepseek"],
+        directSignalLaneIds: [],
+        decorrelatedReviewerArtifacts: [
+          { laneId: "pi-deepseek", modelFamily: "deepseek" },
+        ],
+      },
+    },
+    review_bundle: null,
+    targeted_convergence: null,
+    lanes: [],
+    degradedConditions: [],
+    artifactPaths: {
+      artifactDir,
+      diff: null,
+      reviewBundle: null,
+      structuredArtifacts: [],
+      resultJson,
+      councilReport: join(artifactDir, "council-report.md"),
+    },
+    summary: "pass",
+    ...overrides,
+  } as unknown as HeadlessCouncilGateResult;
+  await writeFile(resultJson, `${JSON.stringify(result, null, 2)}\n`);
+  return resultJson;
 }
 
 function createConfig(overrides?: {
