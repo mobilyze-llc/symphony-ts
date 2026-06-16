@@ -10594,7 +10594,6 @@ export class OrchestratorCore {
         if (
           subjectAction === "mark_ready" ||
           subjectAction === "enqueue" ||
-          subjectAction === "poll" ||
           subjectAction === "tracker_done"
         ) {
           completed.add(

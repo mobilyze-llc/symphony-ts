@@ -284,12 +284,12 @@ export function decideMergeActuation(input: {
         sideEffectKey: null,
       };
     }
-    return sideEffectDecision(
-      input.candidate,
-      "tracker_done",
-      input.completedSideEffectKeys,
-      "durable_merge_proof",
-    );
+    return {
+      action: "tracker_done",
+      reason: "durable_merge_proof",
+      blockers: [],
+      sideEffectKey: mergeActuationKey(input.candidate, "tracker_done"),
+    };
   }
 
   if (input.live.state !== "OPEN") {
@@ -359,11 +359,19 @@ export function decideMergeActuation(input: {
     input.candidate.status !== "merge_queue_pending" &&
     !hasGreenMergeability(input.live)
   ) {
+    if (hasExceededCandidateWait(input)) {
+      return {
+        action: "blocked",
+        reason: "mergeability_unknown",
+        blockers: ["mergeability_unknown"],
+        sideEffectKey: null,
+      };
+    }
     return {
-      action: "blocked",
+      action: "poll",
       reason: "mergeability_unknown",
       blockers: ["mergeability_unknown"],
-      sideEffectKey: null,
+      sideEffectKey: mergeActuationKey(input.candidate, "poll"),
     };
   }
   if (input.candidate.status !== "merge_queue_pending") {
@@ -403,11 +411,10 @@ export function buildMergeActuationEntry(input: {
   live?: Partial<MergeActuatorLiveState>;
   reason?: string;
 }): MergeActuationJournalDraft {
-  const key = mergeActuationKey(
-    input.candidate,
-    input.action,
-    input.subjectAction,
-  );
+  const key =
+    input.action === "poll"
+      ? `${mergeActuationKey(input.candidate, input.action)}:${input.lease.leaseId}`
+      : mergeActuationKey(input.candidate, input.action, input.subjectAction);
   return {
     idempotencyKey: key,
     timestamp: input.timestamp,
@@ -699,6 +706,9 @@ function applyActuation(
   record.lastActuation = action;
   record.cursorRange.lastSequence = entry.sequence;
   if (action === "poll") {
+    if (stringField(entry.metadata.reason) === "mergeability_unknown") {
+      return;
+    }
     record.status = "merge_queue_pending";
   } else if (action === "stale") {
     record.status = "stale";
@@ -771,6 +781,17 @@ function firstLiveBlocker(
 
 function hasGreenMergeability(live: MergeActuatorLiveState): boolean {
   return live.mergeable === "MERGEABLE" && live.mergeStateStatus !== "UNKNOWN";
+}
+
+function hasExceededCandidateWait(input: {
+  candidate: MergeCandidateRecord;
+  nowMs: number;
+  maxWaitMs: number;
+}): boolean {
+  const createdAtMs = Date.parse(input.candidate.createdAt);
+  return (
+    !Number.isNaN(createdAtMs) && input.nowMs - createdAtMs > input.maxWaitMs
+  );
 }
 
 function validateLease(

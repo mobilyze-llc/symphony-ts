@@ -270,12 +270,67 @@ describe("merge candidates", () => {
     });
   });
 
-  it("blocks pre-enqueue actuation while GitHub mergeability is unknown", () => {
+  it("polls pre-enqueue GitHub mergeability unknown before parking after the bounded wait", () => {
     const candidateEntry = {
       ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
       sequence: 2,
     };
     const candidate = reduceMergeCandidates([candidateEntry])["issue-1"]!;
+
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState({
+        mergeStateStatus: "UNKNOWN",
+        mergeable: "UNKNOWN",
+      }),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 90 * 60_000,
+      completedSideEffectKeys: new Set(),
+    });
+
+    expect(decision).toMatchObject({
+      action: "poll",
+      reason: "mergeability_unknown",
+      blockers: ["mergeability_unknown"],
+    });
+
+    const firstPoll = {
+      ...buildMergeActuationEntry({
+        candidate,
+        action: "poll",
+        timestamp: "2026-06-16T01:03:00.000Z",
+        ownerId: "owner-1",
+        lease: lease({ leaseId: "lease-1" }),
+        live: liveState({ mergeStateStatus: "UNKNOWN", mergeable: "UNKNOWN" }),
+        reason: decision.reason,
+      }),
+      sequence: 3,
+    };
+    const secondPoll = {
+      ...buildMergeActuationEntry({
+        candidate,
+        action: "poll",
+        timestamp: "2026-06-16T01:03:01.000Z",
+        ownerId: "owner-1",
+        lease: lease({ leaseId: "lease-2" }),
+        live: liveState({ mergeStateStatus: "UNKNOWN", mergeable: "UNKNOWN" }),
+        reason: decision.reason,
+      }),
+      sequence: 4,
+    };
+    expect(firstPoll.idempotencyKey).not.toBe(secondPoll.idempotencyKey);
+    const polled = reduceMergeCandidates([
+      candidateEntry,
+      firstPoll,
+      secondPoll,
+    ])["issue-1"]!;
+    expect(polled).toMatchObject({
+      status: "candidate",
+      cursorRange: { lastSequence: 4 },
+    });
 
     expect(
       decideMergeActuation({
@@ -286,7 +341,7 @@ describe("merge candidates", () => {
         }),
         lease: lease(),
         ownerId: "owner-1",
-        nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+        nowMs: Date.parse("2026-06-16T02:40:00.000Z"),
         enqueuedAtMs: null,
         maxWaitMs: 30 * 60_000,
         completedSideEffectKeys: new Set(),
@@ -294,7 +349,6 @@ describe("merge candidates", () => {
     ).toMatchObject({
       action: "blocked",
       reason: "mergeability_unknown",
-      blockers: ["mergeability_unknown"],
     });
   });
 
@@ -571,8 +625,8 @@ describe("merge candidates", () => {
         completedSideEffectKeys: new Set([result.journalEntry!.idempotencyKey]),
       }),
     ).toMatchObject({
-      action: "noop",
-      reason: "side_effect_already_journaled",
+      action: "tracker_done",
+      reason: "durable_merge_proof",
     });
   });
 });
@@ -613,20 +667,20 @@ function reviewGateEntry(input?: {
   };
 }
 
-function lease(): DispatcherLease {
+function lease(overrides: Partial<DispatcherLease> = {}): DispatcherLease {
   return {
-    leaseId: "lease-1",
-    issueId: "issue-1",
-    issueIdentifier: "SYMPH-722",
-    operation: "dispatcher",
-    ownerId: "owner-1",
-    status: "active",
-    acquiredAt: "2026-06-16T00:00:00.000Z",
-    expiresAt: "2026-06-16T01:00:00.000Z",
-    completedAt: null,
-    stage: "merge",
-    attempt: null,
-    lastJournalSequence: 1,
+    leaseId: overrides.leaseId ?? "lease-1",
+    issueId: overrides.issueId ?? "issue-1",
+    issueIdentifier: overrides.issueIdentifier ?? "SYMPH-722",
+    operation: overrides.operation ?? "dispatcher",
+    ownerId: overrides.ownerId ?? "owner-1",
+    status: overrides.status ?? "active",
+    acquiredAt: overrides.acquiredAt ?? "2026-06-16T00:00:00.000Z",
+    expiresAt: overrides.expiresAt ?? "2026-06-16T01:00:00.000Z",
+    completedAt: overrides.completedAt ?? null,
+    stage: overrides.stage ?? "merge",
+    attempt: overrides.attempt ?? null,
+    lastJournalSequence: overrides.lastJournalSequence ?? 1,
   };
 }
 
