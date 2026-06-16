@@ -1,0 +1,58 @@
+## Merge Readiness Contract (SYMPH-641/SYMPH-645)
+
+Compute PR readiness deterministically before any merge permission boundary:
+```bash
+PR_NUMBER=$(gh pr view --json number --jq '.number')
+gh pr view --json number,state,isDraft,mergeStateStatus,mergeable,reviewDecision,statusCheckRollup
+gh pr checks --required
+```
+Name every active blocker in one summary:
+- `behind_base` when `mergeStateStatus` says the branch is behind or otherwise not current with base.
+- `failing_checks` with the failing required check names.
+- `pending_checks` with the pending required check names.
+- `missing_required_review` when `reviewDecision` is not approved.
+- `draft_pr` or `closed_pr` when the PR is not an open ready PR.
+- `mergeability_unknown` or `merge_conflict` when mergeability is not green.
+- `auto_merge_permission_denied` when readiness is green but the Mode Permission Envelope denies worker merge-queue enqueue.
+
+If readiness is not green, do NOT merge. Report all blockers and stop:
+```text
+[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":["behind_base","failing_checks"],"permission":[],"mergeStateStatus":"BEHIND","failingChecks":["test"],"pendingChecks":[]}]
+[BLOCKED_NEEDS_HUMAN: auto_merge]
+```
+Adjust the JSON values to match the live PR. The blockers line must appear immediately before the terminal marker.
+
+Assert the latest clean council artifact still covers the current PR head before merging:
+```bash
+REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
+ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-freshness-merge-$(date +%s)"
+REVIEW_RESULT_PATH="<path-to-latest-clean-review-result.json>"
+
+symphony-council-review-gate \
+  --issue-id <issue-identifier> \
+  --artifact-dir "$ARTIFACT_DIR" \
+  --workspace "$PWD" \
+  --repo "$REPO" \
+  --pr "$PR_NUMBER" \
+  --assert-fresh-review "$REVIEW_RESULT_PATH"
+```
+If this emits `code: "stale_review"` or the guidance `rerun convergence review against HEAD.`, do NOT merge. Return to review and run convergence against HEAD.
+
+If the Mode Permission Envelope explicitly allows PR merge-queue enqueue, enqueue the PR with the gate-enforcing merge queue command:
+```bash
+gh pr merge "$PR_NUMBER" --auto
+```
+Command success means the PR was enqueued or auto-merge was enabled; it does not prove the PR has merged. Do not use `gh pr checks --watch` as merge completion proof: PR checks can be green before GitHub creates or finishes the merge-queue run.
+
+Bounded merge-queue polling backoff is required after enqueue. Sleep 30s before the first re-poll, then use 30s, 60s, and 120s intervals capped at 300s between polls, keeping the total wait below the merge stage turn budget and `stall_timeout_ms`. Bounded `sleep` followed by the bounded `gh pr view` command is permitted in this stage.
+```bash
+gh pr view "$PR_NUMBER" --json state,mergedAt,mergeCommit --jq '{state, mergedAt, mergeCommit: .mergeCommit.oid}'
+gh pr checks "$PR_NUMBER" --required
+```
+Proceed only when `state` is `MERGED`, `mergedAt` is non-null, and `mergeCommit` is non-null. If `state` is still `OPEN` and required checks are pending or passing, keep waiting; an open PR after enqueue is queued/waiting, not failure evidence. If worker budget or time stops before merge proof and no explicit rejection exists, emit `[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":["merge_queue_pending"],"permission":[],"mergeStateStatus":"OPEN","failingChecks":[],"pendingChecks":[]}]` immediately before `[BLOCKED_NEEDS_HUMAN: auto_merge]`.
+
+If readiness is green and PR merge-queue enqueue is denied by the Mode Permission Envelope, do not run merge commands. Put:
+```text
+[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":[],"permission":["auto_merge_permission_denied"],"mergeStateStatus":"CLEAN","failingChecks":[],"pendingChecks":[]}]
+[BLOCKED_NEEDS_HUMAN: auto_merge]
+```

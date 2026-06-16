@@ -170,8 +170,12 @@ import {
   isIntentActorKind,
 } from "./intent.js";
 import {
+  type MergeActuationJournalDraft,
+  type MergeActuatorLiveState,
+  type MergeActuatorSideEffects,
   type MergeCandidateRecord,
   reduceMergeCandidates,
+  runMergeActuator,
 } from "./merge-candidate.js";
 import { createRightSizingDecision } from "./right-sizing.js";
 import { SignatureClusterRegistry } from "./signature-cluster.js";
@@ -220,6 +224,7 @@ const REVIEW_GATE_RESULT_PATH_PREFIX = "[REVIEW_GATE_RESULT_PATH:";
 const REVIEW_GATE_RESULT_PATH_SUFFIX = "]";
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
+const DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS = 55 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
 // Tracker timestamps come from the tracker's clock, pausedAt from ours.
 // Evidence must beat the pause by this margin so modest clock skew cannot
@@ -579,6 +584,11 @@ export interface OrchestratorCoreOptions {
     issueIdentifier: string,
     stateName: string,
   ) => Promise<void>;
+  getMergeActuatorLiveState?: (
+    candidate: MergeCandidateRecord,
+  ) => Promise<MergeActuatorLiveState | null>;
+  mergeActuatorSideEffects?: MergeActuatorSideEffects;
+  mergeActuatorMaxWaitMs?: number;
   autoCloseParentIssue?: (
     issueId: string,
     issueIdentifier: string,
@@ -791,6 +801,12 @@ export class OrchestratorCore {
 
   private readonly updateIssueState?: OrchestratorCoreOptions["updateIssueState"];
 
+  private readonly getMergeActuatorLiveState?: OrchestratorCoreOptions["getMergeActuatorLiveState"];
+
+  private readonly mergeActuatorSideEffects?: OrchestratorCoreOptions["mergeActuatorSideEffects"];
+
+  private readonly mergeActuatorMaxWaitMs: number;
+
   private readonly autoCloseParentIssue?: OrchestratorCoreOptions["autoCloseParentIssue"];
 
   private readonly getRunningSupervisionSnapshots?: OrchestratorCoreOptions["getRunningSupervisionSnapshots"];
@@ -989,6 +1005,10 @@ export class OrchestratorCore {
     this.runAcGate = options.runAcGate;
     this.runSpecFidelityJudge = options.runSpecFidelityJudge;
     this.updateIssueState = options.updateIssueState;
+    this.getMergeActuatorLiveState = options.getMergeActuatorLiveState;
+    this.mergeActuatorSideEffects = options.mergeActuatorSideEffects;
+    this.mergeActuatorMaxWaitMs =
+      options.mergeActuatorMaxWaitMs ?? DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS;
     this.autoCloseParentIssue = options.autoCloseParentIssue;
     this.getRunningSupervisionSnapshots =
       options.getRunningSupervisionSnapshots;
@@ -10396,14 +10416,197 @@ export class OrchestratorCore {
       return true;
     }
 
-    await this.parkMergeCandidateInvariantFailure({
-      issue,
-      stageName,
-      reasonCode: "merge_actuator_unwired",
-      detail: `candidate ${candidate.candidateId} is available, but live merge-stage dispatch has no configured orchestrator actuator and must not fall through to the legacy merge worker`,
-      reviewResultPath: candidate.reviewResultPath,
+    if (
+      this.getMergeActuatorLiveState === undefined ||
+      this.mergeActuatorSideEffects === undefined
+    ) {
+      await this.parkMergeCandidateInvariantFailure({
+        issue,
+        stageName,
+        reasonCode: "merge_actuator_unwired",
+        detail: `candidate ${candidate.candidateId} is available, but live merge-stage dispatch has no configured orchestrator actuator and must not fall through to the legacy merge worker`,
+        reviewResultPath: candidate.reviewResultPath,
+      });
+      return true;
+    }
+
+    let live: MergeActuatorLiveState | null;
+    try {
+      live = await this.getMergeActuatorLiveState(candidate);
+    } catch (error) {
+      await this.parkMergeCandidateInvariantFailure({
+        issue,
+        stageName,
+        reasonCode: "merge_actuator_live_state_unavailable",
+        detail: `candidate ${candidate.candidateId} live state fetch failed: ${formatUnknownError(error)}`,
+        reviewResultPath: candidate.reviewResultPath,
+      });
+      return true;
+    }
+    if (live === null) {
+      await this.parkMergeCandidateInvariantFailure({
+        issue,
+        stageName,
+        reasonCode: "merge_actuator_live_state_unavailable",
+        detail: `candidate ${candidate.candidateId} live state provider returned no complete state`,
+        reviewResultPath: candidate.reviewResultPath,
+      });
+      return true;
+    }
+
+    const leaseId = createDispatcherLeaseId({
+      operation: "dispatcher",
+      issueId: issue.id,
+      stage: "merge",
+      attempt: null,
+      suffix: `merge-actuator-${candidate.cursorRange.lastSequence}`,
     });
+    const lease = await this.acquireDispatcherLease({
+      leaseId,
+      idempotencyKey: `${leaseId}:started`,
+      kind: "dispatch_verdict",
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      operation: "dispatcher",
+      stage: "merge",
+      attempt: null,
+      summary: `Merge actuator lease acquired for ${issue.identifier}.`,
+      metadata: {
+        candidate_id: candidate.candidateId,
+        status: "started",
+      },
+    });
+    if (lease === null) {
+      return true;
+    }
+
+    const result = await runMergeActuator({
+      candidate,
+      live,
+      lease,
+      ownerId: this.leaseOwnerId,
+      now: this.now(),
+      enqueuedAtMs: this.mergeCandidateEnqueuedAtMs(candidate),
+      maxWaitMs: this.mergeActuatorMaxWaitMs,
+      completedSideEffectKeys:
+        this.completedMergeActuationSideEffectKeys(candidate),
+      appendActuation: async (entry: MergeActuationJournalDraft) =>
+        await this.recordRunJournalEntry(entry),
+      sideEffects: this.mergeActuatorSideEffects,
+    });
+
+    await this.completeDispatcherLease({
+      leaseId,
+      idempotencyKey: `${leaseId}:completed:${result.decision.action}:${result.decision.reason}`,
+      kind: "dispatch_verdict",
+      issueId: issue.id,
+      issueIdentifier: issue.identifier,
+      operation: "dispatcher",
+      stage: "merge",
+      attempt: null,
+      summary: `Merge actuator ${result.decision.action} completed for ${issue.identifier}.`,
+      metadata: {
+        candidate_id: candidate.candidateId,
+        action: result.decision.action,
+        reason: result.decision.reason,
+        side_effect: result.sideEffect,
+        error: result.error,
+      },
+    });
+
+    if (result.error !== null) {
+      await this.parkMergeCandidateInvariantFailure({
+        issue,
+        stageName,
+        reasonCode: "merge_actuator_side_effect_failed",
+        detail: `${result.decision.action} failed for candidate ${candidate.candidateId}: ${result.error}`,
+        reviewResultPath: candidate.reviewResultPath,
+      });
+      return true;
+    }
+
+    if (result.decision.action === "tracker_done") {
+      this.state.completed.add(issue.id);
+      this.releaseClaim(issue.id);
+      this.clearTerminalIssueRuntimeState(issue.id);
+      return true;
+    }
+
+    if (
+      result.decision.action === "mark_ready" ||
+      result.decision.action === "enqueue" ||
+      result.decision.action === "poll"
+    ) {
+      this.scheduleRetry(issue.id, 1, {
+        identifier: issue.identifier,
+        error: result.decision.reason,
+        delayType: "continuation",
+      });
+      return true;
+    }
+
+    if (
+      result.decision.action === "stale" ||
+      result.decision.action === "timeout" ||
+      result.decision.action === "blocked"
+    ) {
+      await this.parkMergeCandidateInvariantFailure({
+        issue,
+        stageName,
+        reasonCode: result.decision.reason,
+        detail: `candidate ${candidate.candidateId} could not actuate: ${result.decision.blockers.join(", ") || result.decision.reason}`,
+        reviewResultPath: candidate.reviewResultPath,
+      });
+      return true;
+    }
+
     return true;
+  }
+
+  private completedMergeActuationSideEffectKeys(
+    candidate: MergeCandidateRecord,
+  ): ReadonlySet<string> {
+    const completed = new Set<string>();
+    for (const entry of this.state.dispatcherRunJournal) {
+      if (
+        entry.kind !== "merge_actuation" ||
+        entry.issueId !== candidate.issueId ||
+        readMetadataString(entry.metadata, "candidate_id") !==
+          candidate.candidateId
+      ) {
+        continue;
+      }
+      const action = readMetadataString(entry.metadata, "action");
+      if (
+        action === "mark_ready" ||
+        action === "enqueue" ||
+        action === "poll" ||
+        action === "tracker_done" ||
+        action === "stale" ||
+        action === "timeout"
+      ) {
+        completed.add(entry.idempotencyKey);
+      }
+    }
+    return completed;
+  }
+
+  private mergeCandidateEnqueuedAtMs(
+    candidate: MergeCandidateRecord,
+  ): number | null {
+    const enqueueEntry = this.state.dispatcherRunJournal.findLast(
+      (entry) =>
+        entry.kind === "merge_actuation" &&
+        entry.issueId === candidate.issueId &&
+        readMetadataString(entry.metadata, "candidate_id") ===
+          candidate.candidateId &&
+        readMetadataString(entry.metadata, "action") === "enqueue",
+    );
+    if (enqueueEntry === undefined) {
+      return null;
+    }
+    const parsed = Date.parse(enqueueEntry.timestamp);
+    return Number.isNaN(parsed) ? null : parsed;
   }
 
   private async dispatchIssue(

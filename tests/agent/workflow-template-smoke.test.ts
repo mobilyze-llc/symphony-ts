@@ -77,6 +77,18 @@ const ELIGIBILITY_ON_REWRITE_PARTIAL_PATH = resolve(
 );
 const ELIGIBILITY_ON_REWRITE_INCLUDE =
   "{% render 'prompts/eligibility-on-ticket-rewrite.liquid' %}";
+const MERGE_READINESS_PARTIAL_PATH = resolve(
+  import.meta.dirname,
+  "../../pipeline-config/prompts/merge-readiness.liquid",
+);
+const MERGE_READINESS_INCLUDE = "{% render 'prompts/merge-readiness.liquid' %}";
+const MERGE_QUEUE_BACKOFF_PHRASE = "Bounded merge-queue polling backoff";
+const MERGE_READINESS_INCLUDE_SOURCE_PATHS = [
+  "../../pipeline-config/prompts/merge.liquid",
+  "../../pipeline-config/WORKFLOW-staged.md",
+  "../../pipeline-config/WORKFLOW-instrumentation.md",
+  "../../pipeline-config/templates/WORKFLOW-template.md",
+].map((path) => resolve(import.meta.dirname, path));
 const EXPECTED_ELIGIBILITY_ON_REWRITE_DIRECTIVE = `## Eligibility on Ticket Rewrite (SYMPH-515)
 
 - If you rewrite or rescope a Linear ticket, the edit is incomplete until you record an explicit eligibility decision in the ticket body, workpad, or edit note.
@@ -825,6 +837,7 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain("Do not use `gh pr checks --watch`");
     expect(output).toContain("queued/waiting");
     expect(output).toContain("merge_queue_pending");
+    expect(output).toContain(MERGE_QUEUE_BACKOFF_PHRASE);
     expect(output).not.toContain("gh pr checks --watch --required --fail-fast");
     expect(output).toContain("[BLOCKED_NEEDS_HUMAN_BLOCKERS:");
     expect(output).toContain("auto_merge_permission_denied");
@@ -876,6 +889,72 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
         ELIGIBILITY_ON_REWRITE_INCLUDE,
       );
     }
+  });
+
+  it("keeps merge readiness guidance in one inspectable prompt partial", async () => {
+    const directive = await readFile(MERGE_READINESS_PARTIAL_PATH, "utf8");
+    expect(directive).toContain(MERGE_QUEUE_BACKOFF_PHRASE);
+    expect(directive).toContain('gh pr merge "$PR_NUMBER" --auto');
+    expect(directive).toContain("state,mergedAt,mergeCommit");
+    expect(directive).toContain("auto_merge_permission_denied");
+    expect(directive).toContain("[BLOCKED_NEEDS_HUMAN_BLOCKERS:");
+    expect(directive).toContain("--assert-fresh-review");
+
+    const filesWithBackoff = await findFilesContaining(
+      resolve(REPO_ROOT, "pipeline-config"),
+      MERGE_QUEUE_BACKOFF_PHRASE,
+    );
+    expect(filesWithBackoff).toEqual([
+      "pipeline-config/prompts/merge-readiness.liquid",
+    ]);
+
+    for (const sourcePath of MERGE_READINESS_INCLUDE_SOURCE_PATHS) {
+      expect(await readFile(sourcePath, "utf8")).toContain(
+        MERGE_READINESS_INCLUDE,
+      );
+    }
+  });
+
+  it("renders merge readiness through every merge prompt surface", async () => {
+    for (const configPath of MERGE_READINESS_INCLUDE_SOURCE_PATHS.filter(
+      (sourcePath) => !sourcePath.endsWith("/prompts/merge.liquid"),
+    )) {
+      const workflowConfig = await loadWorkflowDefinition(configPath);
+      const output = await renderPrompt({
+        workflow: {
+          promptTemplate: workflowConfig.promptTemplate,
+          workflowPath: configPath,
+        },
+        issue: ISSUE_FIXTURE,
+        attempt: null,
+        stageName: "merge",
+        reworkCount: 0,
+      });
+      expect(output).toContain(MERGE_QUEUE_BACKOFF_PHRASE);
+      expect(output).toContain('gh pr merge "$PR_NUMBER" --auto');
+      expect(output).toContain("[BLOCKED_NEEDS_HUMAN_BLOCKERS:");
+      expect(output).toContain("--assert-fresh-review");
+    }
+
+    const standalonePath = MERGE_READINESS_INCLUDE_SOURCE_PATHS[0];
+    expect(standalonePath).toBeDefined();
+    const standalone = await readFile(standalonePath!, {
+      encoding: "utf8",
+    });
+    const output = await renderPrompt({
+      workflow: {
+        promptTemplate: standalone,
+        workflowPath: PIPELINE_WORKFLOW_PATH,
+      },
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      stageName: "merge",
+      reworkCount: 0,
+    });
+    expect(output).toContain(MERGE_QUEUE_BACKOFF_PHRASE);
+    expect(output).toContain('gh pr merge "$PR_NUMBER" --auto');
+    expect(output).toContain("[BLOCKED_NEEDS_HUMAN_BLOCKERS:");
+    expect(output).toContain("--assert-fresh-review");
   });
 
   it("renders eligibility-on-rewrite in primary file-backed rewrite prompt surfaces", async () => {

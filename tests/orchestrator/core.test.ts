@@ -245,9 +245,10 @@ describe("orchestrator core", () => {
     ).toContain("missing_canonical_review_gate_result");
   });
 
-  it("parks candidate-backed merge dispatch explicitly when the live actuator is unwired", async () => {
+  it("actuates candidate-backed merge dispatch without spawning the legacy merge worker", async () => {
     const spawnedStages: Array<string | null> = [];
     const reviewResultPath = await writeReviewGateResultFixture();
+    const sideEffects: string[] = [];
     const orchestrator = createOrchestrator({
       config: createReviewMergeConfig(),
       spawnWorker: async ({ stageName }) => {
@@ -256,6 +257,35 @@ describe("orchestrator core", () => {
           workerHandle: { pid: 1001 },
           monitorHandle: { ref: "monitor-1" },
         };
+      },
+      getMergeActuatorLiveState: async () => ({
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 725,
+        prUrl: "https://github.com/mobilyze-llc/symphony-ts/pull/725",
+        state: "MERGED",
+        isDraft: false,
+        mergeStateStatus: "UNKNOWN",
+        mergeable: "UNKNOWN",
+        reviewDecision: null,
+        headSha: "head-sha",
+        baseRef: "main",
+        baseSha: "base-sha",
+        requiredChecks: [],
+        requiresGithubReview: false,
+        mergeQueueRequired: true,
+        mergedAt: "2026-03-06T00:03:00.000Z",
+        mergeCommit: "merge-sha",
+      }),
+      mergeActuatorSideEffects: {
+        markReady: async () => {
+          sideEffects.push("mark_ready");
+        },
+        enqueue: async () => {
+          sideEffects.push("enqueue");
+        },
+        writeTrackerDone: async () => {
+          sideEffects.push("tracker_done");
+        },
       },
     });
 
@@ -275,7 +305,9 @@ describe("orchestrator core", () => {
     const state = orchestrator.getState();
     expect(retryResult.dispatched).toBe(false);
     expect(spawnedStages).toEqual(["review"]);
-    expect(state.failed.has("1")).toBe(true);
+    expect(sideEffects).toEqual(["tracker_done"]);
+    expect(state.failed.has("1")).toBe(false);
+    expect(state.completed.has("1")).toBe(true);
     expect(
       state.dispatcherRunJournal.some(
         (entry) => entry.kind === "admission" && entry.stage === "merge",
@@ -283,10 +315,17 @@ describe("orchestrator core", () => {
     ).toBe(false);
     expect(
       state.dispatcherRunJournal.findLast(
-        (entry) => entry.kind === "failure_exhausted",
-      )?.metadata.reason,
-    ).toContain("merge_actuator_unwired");
-    expect(state.resumeRequired.has("1")).toBe(true);
+        (entry) =>
+          entry.kind === "merge_actuation" &&
+          entry.metadata.action === "tracker_done",
+      ),
+    ).toMatchObject({
+      metadata: {
+        merge_commit: "merge-sha",
+        merged_at: "2026-03-06T00:03:00.000Z",
+      },
+    });
+    expect(state.resumeRequired.has("1")).toBe(false);
 
     const laterPoll = await orchestrator.pollTick();
     expect(laterPoll.dispatchedIssueIds).toEqual([]);
@@ -13558,6 +13597,8 @@ function createOrchestrator(overrides?: {
   requestTrackerIssueWrite?: OrchestratorCoreOptions["requestTrackerIssueWrite"];
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   postComment?: OrchestratorCoreOptions["postComment"];
+  getMergeActuatorLiveState?: OrchestratorCoreOptions["getMergeActuatorLiveState"];
+  mergeActuatorSideEffects?: OrchestratorCoreOptions["mergeActuatorSideEffects"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
   onGateFailed?: OrchestratorCoreOptions["onGateFailed"];
   onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
@@ -13622,6 +13663,14 @@ function createOrchestrator(overrides?: {
 
   if (overrides?.postComment !== undefined) {
     options.postComment = overrides.postComment;
+  }
+
+  if (overrides?.getMergeActuatorLiveState !== undefined) {
+    options.getMergeActuatorLiveState = overrides.getMergeActuatorLiveState;
+  }
+
+  if (overrides?.mergeActuatorSideEffects !== undefined) {
+    options.mergeActuatorSideEffects = overrides.mergeActuatorSideEffects;
   }
 
   if (overrides?.onGateFailed !== undefined) {
