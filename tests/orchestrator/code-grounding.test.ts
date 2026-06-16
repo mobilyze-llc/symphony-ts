@@ -316,6 +316,19 @@ describe("managed code grounding (SYMPH-596)", () => {
       findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
       commandRunner,
     });
+    const delSourcePath = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "del-source-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+        sourcePath: "/tmp/source\u007fwith-del",
+        commitSha: "abc123",
+        repoScope: "symphony",
+      },
+      findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
+      commandRunner,
+    });
 
     expect(commandRunner).not.toHaveBeenCalled();
     expect(dangerousTransport).toMatchObject({
@@ -347,6 +360,12 @@ describe("managed code grounding (SYMPH-596)", () => {
       ],
     });
     expect(tabSourcePath).toMatchObject({
+      status: "not_attempted",
+      warnings: [
+        "code-grounding target sourcePath is option-shaped and was rejected",
+      ],
+    });
+    expect(delSourcePath).toMatchObject({
       status: "not_attempted",
       warnings: [
         "code-grounding target sourcePath is option-shaped and was rejected",
@@ -1173,6 +1192,8 @@ describe("managed code grounding (SYMPH-596)", () => {
     await mkdir(freshCheckoutTombstone, { recursive: true });
     await mkdir(liveLock, { recursive: true });
     await writeFile(join(liveLock, "owner.json"), "{}\n");
+    // ctime is not directly settable; the future clock makes just-created
+    // old tombstones old by ctime while fresh mtime tombstones stay young.
     const now = new Date(Date.now() + 2 * 60 * 60_000);
     const oldTime = new Date("2026-06-13T00:00:00.000Z");
     const freshTime = new Date(now.getTime() - 60_000);
@@ -1198,6 +1219,28 @@ describe("managed code grounding (SYMPH-596)", () => {
     await expect(readFile(join(liveLock, "owner.json"), "utf8")).resolves.toBe(
       "{}\n",
     );
+  });
+
+  it("preserves backdated lock tombstones until their rename ctime is stale", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
+    const checkoutsRoot = join(baseRoot, "checkouts");
+    const backdatedTombstone = join(
+      checkoutsRoot,
+      "cg-backdated.lock.stale-123-dddddddd-dddd-4ddd-dddd-dddddddddddd",
+    );
+    await mkdir(backdatedTombstone, { recursive: true });
+    const oldTime = new Date("2026-06-13T00:00:00.000Z");
+    await utimes(backdatedTombstone, oldTime, oldTime);
+    const now = new Date(Date.now() + 5 * 60_000);
+
+    await sweepCodeGroundingCheckouts({
+      workspaceRoot,
+      config: codeGroundingConfig(),
+      now,
+    });
+
+    await expect(readdir(backdatedTombstone)).resolves.toEqual([]);
   });
 
   it("fails loudly instead of resetting malformed lease indexes", async () => {
