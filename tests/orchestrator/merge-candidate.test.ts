@@ -46,7 +46,9 @@ describe("merge candidates", () => {
     expect(buildMergeCandidateEntryFromReviewGate(ineligible)).toBeNull();
 
     const incomplete = reviewGateEntry();
-    incomplete.metadata.review_result_path = undefined;
+    const { review_result_path: _reviewResultPath, ...metadataWithoutPath } =
+      incomplete.metadata;
+    incomplete.metadata = metadataWithoutPath;
     expect(buildMergeCandidateEntryFromReviewGate(incomplete)).toBeNull();
   });
 

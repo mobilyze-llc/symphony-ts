@@ -4322,7 +4322,7 @@ export class OrchestratorCore {
     exitedStageName: string | null;
     agentMessage: string | undefined;
   }): Promise<boolean> {
-    if (!this.isReviewToMergeTransition(input.issueId, input.exitedStageName)) {
+    if (!this.isReviewToMergeTransition(input.exitedStageName)) {
       return true;
     }
 
@@ -4406,10 +4406,7 @@ export class OrchestratorCore {
     return true;
   }
 
-  private isReviewToMergeTransition(
-    issueId: string,
-    exitedStageName: string | null,
-  ): boolean {
+  private isReviewToMergeTransition(exitedStageName: string | null): boolean {
     if (exitedStageName !== "review" || this.config.stages === null) {
       return false;
     }
@@ -4425,17 +4422,17 @@ export class OrchestratorCore {
     | { ok: true; result: HeadlessCouncilGateResult }
     | { ok: false; reason: string }
   > {
-    const resolvedPath = resolve(input.path);
     if (input.path.includes("\0")) {
       return { ok: false, reason: "review artifact path contains NUL byte" };
     }
+    const resolvedPath = resolve(input.path);
     let parsed: unknown;
     try {
       parsed = JSON.parse(await readFile(resolvedPath, "utf8"));
-    } catch (error) {
+    } catch {
       return {
         ok: false,
-        reason: `review artifact unreadable or malformed: ${formatUnknownError(error)}`,
+        reason: "review artifact unreadable or malformed",
       };
     }
 
@@ -4483,28 +4480,49 @@ export class OrchestratorCore {
           "review artifact missing base SHA, reviewed head SHA, or review round",
       };
     }
-    if (
-      !isRecord(result.artifactPaths) ||
-      typeof result.artifactPaths.resultJson !== "string" ||
-      resolve(result.artifactPaths.resultJson) !== resolvedPath
-    ) {
+    if (!isRecord(result.artifactPaths)) {
       return {
         ok: false,
         reason:
           "review artifact resultJson path does not match the dispatcher marker",
       };
     }
-    if (
-      typeof result.artifactPaths.artifactDir !== "string" ||
-      resolve(result.artifactPaths.artifactDir) !== dirname(resolvedPath)
-    ) {
+    const resultJsonPath = result.artifactPaths.resultJson;
+    if (typeof resultJsonPath !== "string" || resultJsonPath.includes("\0")) {
+      return {
+        ok: false,
+        reason:
+          "review artifact resultJson path does not match the dispatcher marker",
+      };
+    }
+    if (resolve(resultJsonPath) !== resolvedPath) {
+      return {
+        ok: false,
+        reason:
+          "review artifact resultJson path does not match the dispatcher marker",
+      };
+    }
+    const artifactDirPath = result.artifactPaths.artifactDir;
+    if (typeof artifactDirPath !== "string" || artifactDirPath.includes("\0")) {
       return {
         ok: false,
         reason:
           "review artifact directory does not match the dispatcher marker parent directory",
       };
     }
-    if (result.review_routing?.decorrelationBasis.mergeEligible !== true) {
+    if (resolve(artifactDirPath) !== dirname(resolvedPath)) {
+      return {
+        ok: false,
+        reason:
+          "review artifact directory does not match the dispatcher marker parent directory",
+      };
+    }
+    const reviewRouting = result.review_routing;
+    const decorrelationBasis =
+      isRecord(reviewRouting) && isRecord(reviewRouting.decorrelationBasis)
+        ? reviewRouting.decorrelationBasis
+        : null;
+    if (decorrelationBasis?.mergeEligible !== true) {
       return {
         ok: false,
         reason:
@@ -4524,15 +4542,13 @@ export class OrchestratorCore {
     if (candidate === undefined) {
       return null;
     }
-    const candidateEntry = [...this.state.dispatcherRunJournal]
-      .reverse()
-      .find(
-        (entry) =>
-          entry.kind === "merge_candidate" &&
-          entry.issueId === issueId &&
-          readMetadataString(entry.metadata, "candidate_id") ===
-            candidate.candidateId,
-      );
+    const candidateEntry = this.state.dispatcherRunJournal.findLast(
+      (entry) =>
+        entry.kind === "merge_candidate" &&
+        entry.issueId === issueId &&
+        readMetadataString(entry.metadata, "candidate_id") ===
+          candidate.candidateId,
+    );
     const sourceKey =
       candidateEntry === undefined
         ? null
@@ -4568,6 +4584,15 @@ export class OrchestratorCore {
     this.state.failed.add(input.issue.id);
     this.releaseClaim(input.issue.id);
     this.clearTerminalIssueRuntimeState(input.issue.id);
+    this.markIssueRequiresExplicitResume(
+      input.issue.id,
+      input.issue.state,
+      null,
+      {
+        reason: input.reasonCode,
+        setBySequence: null,
+      },
+    );
     this.recordFailureInCluster(
       input.issue.id,
       input.issue.identifier,

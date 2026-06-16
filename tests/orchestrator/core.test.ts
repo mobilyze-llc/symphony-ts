@@ -103,6 +103,70 @@ describe("orchestrator core", () => {
     ).toContain("missing_canonical_review_gate_result");
   });
 
+  it("parks review completion when the review-result marker path contains NUL", async () => {
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage:
+        "Council PASS.\n[REVIEW_GATE_RESULT_PATH: /tmp/review\0result.json]\n[STAGE_COMPLETE]",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const state = orchestrator.getState();
+    expect(retry).toBeNull();
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.resumeRequired.has("1")).toBe(true);
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "failure_exhausted",
+      )?.metadata.reason,
+    ).toContain("review artifact path contains NUL byte");
+  });
+
+  it("parks malformed review-result routing instead of throwing", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture({
+      review_routing: {},
+    } as Partial<HeadlessCouncilGateResult>);
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+    });
+
+    await orchestrator.pollTick();
+    const retry = await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const state = orchestrator.getState();
+    expect(retry).toBeNull();
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.resumeRequired.has("1")).toBe(true);
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "failure_exhausted",
+      )?.metadata.reason,
+    ).toContain("not merge-eligible");
+  });
+
   it("ingests review-result artifact rows before advancing review to merge", async () => {
     const spawnedStages: Array<string | null> = [];
     const reviewResultPath = await writeReviewGateResultFixture();
@@ -222,6 +286,11 @@ describe("orchestrator core", () => {
         (entry) => entry.kind === "failure_exhausted",
       )?.metadata.reason,
     ).toContain("merge_actuator_unwired");
+    expect(state.resumeRequired.has("1")).toBe(true);
+
+    const laterPoll = await orchestrator.pollTick();
+    expect(laterPoll.dispatchedIssueIds).toEqual([]);
+    expect(spawnedStages).toEqual(["review"]);
   });
 
   it("dispatches unrelated candidates when hard dependency cycles are excluded", async () => {
