@@ -42,6 +42,7 @@ const HIGH_RISK_CODEX_EXCAVATION_TOOL_OUTPUT_TOKEN_LIMIT = 4_000;
 const HIGH_RISK_CODEX_EXCAVATION_MODEL_AUTO_COMPACT_TOKEN_LIMIT = 80_000;
 const DEFAULT_KIMI_LANE_ID = "kimi-k27-shadow";
 const DEFAULT_KIMI_ROLE = "kimi-k27-shadow-reviewer";
+const DEFAULT_KIMI_SHADOW_TIMEOUT_SECONDS = 300;
 const DEFAULT_LANE_STALL_GRACE_SECONDS = 60;
 const DEFAULT_LEAD_CONFIDENCE_THRESHOLD = 0.7;
 const ARTIFACT_SECTION_HEADINGS = [
@@ -1791,6 +1792,9 @@ function piReviewerLane(env: NodeJS.ProcessEnv): HeadlessReviewerLaneConfig {
 }
 
 function kimiReviewerLane(env: NodeJS.ProcessEnv): HeadlessReviewerLaneConfig {
+  const timeoutSeconds =
+    parseEnvPositiveInteger(env.SYMPHONY_COUNCIL_KIMI_TIMEOUT_SECONDS) ??
+    undefined;
   return {
     laneId: env.SYMPHONY_COUNCIL_KIMI_LANE_ID ?? DEFAULT_KIMI_LANE_ID,
     agent: "kimi",
@@ -1799,6 +1803,7 @@ function kimiReviewerLane(env: NodeJS.ProcessEnv): HeadlessReviewerLaneConfig {
       ? {}
       : { model: env.SYMPHONY_COUNCIL_KIMI_MODEL }),
     ...(env.KIMI_CLI_BIN === undefined ? {} : { binary: env.KIMI_CLI_BIN }),
+    ...(timeoutSeconds === undefined ? {} : { timeoutSeconds }),
     independentReviewer: false,
     mergeAuthoritative: false,
   };
@@ -2544,7 +2549,15 @@ function kimiShadowEnabled(
   if (override !== undefined) {
     return override;
   }
-  return envFlag(env.SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED);
+  const value = env.SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED;
+  if (value === undefined) {
+    return true;
+  }
+  return !explicitDisableFlag(value);
+}
+
+function explicitDisableFlag(value: string): boolean {
+  return ["0", "false", "no", "off"].includes(value.trim().toLowerCase());
 }
 
 function codexExcavationLane(
@@ -4052,7 +4065,14 @@ function timeoutSecondsForLane(
   lane: HeadlessReviewerLaneConfig,
   fallback: number,
 ): number {
+  if (isKimiShadowLane(lane) && lane.timeoutSeconds === undefined) {
+    return Math.min(fallback, DEFAULT_KIMI_SHADOW_TIMEOUT_SECONDS);
+  }
   return positiveIntegerForConfig(lane.timeoutSeconds, fallback);
+}
+
+function isKimiShadowLane(lane: HeadlessReviewerLaneConfig): boolean {
+  return lane.agent === "kimi" && lane.mergeAuthoritative === false;
 }
 
 function laneReasoningEffort(

@@ -152,6 +152,25 @@ describe("parseCouncilReviewGateArgs", () => {
       riskContractArtifactPaths: [],
       allowedChangePatterns: [],
     });
+    expect(
+      parseCouncilReviewGateArgs(
+        [
+          "--issue-id",
+          "SYMPH-689",
+          "--artifact-dir",
+          "/tmp/review",
+          "--no-kimi-shadow",
+        ],
+        "/cwd",
+      ),
+    ).toEqual({
+      issueId: "SYMPH-689",
+      artifactDir: "/tmp/review",
+      workspace: "/cwd",
+      kimiShadow: false,
+      riskContractArtifactPaths: [],
+      allowedChangePatterns: [],
+    });
   });
 
   it("parses Council v2 routing controls", () => {

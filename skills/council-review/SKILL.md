@@ -48,7 +48,7 @@ Read these files only when the workflow asks for them:
 | `cli-reference.md` | Correct cmux-spawn commands for Opus, Pi, and Kimi shadow diagnostics; artifact paths; and failure rules | Before spawning external lanes |
 | `templates/phase1-opus-prompt.md` | Phase 1 independent review prompt for Opus | During Phase 1 setup |
 | `templates/phase1-pi-prompt.md` | Phase 1 independent review prompt for Pi/DeepSeek | During Phase 1 setup |
-| `templates/phase1-kimi-shadow-prompt.md` | Phase 1 Kimi K2.7 shadow diagnostic prompt | When `SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED` enables the shadow lane |
+| `templates/phase1-kimi-shadow-prompt.md` | Phase 1 Kimi K2.7 shadow diagnostic prompt | Unless `SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED` explicitly disables the shadow lane |
 | `templates/cross-exam-codex-prompt.md` | Codex Lead's Phase 2 cross-exam worksheet | During Phase 2 setup |
 | `templates/cross-exam-opus-prompt.md` | Opus Phase 2 cross-exam prompt for Pi findings | During Phase 2 setup |
 | `templates/council-report.md` | Phase 3 report format | During triage |
@@ -80,9 +80,11 @@ Pi is Phase 1 only. It does not cross-examine. Codex does not spawn a
 separate Codex CLI lane for this skill because the current session is
 the Codex Lead.
 
-Kimi shadow is off by default. Enable it with the same switch as the
-headless gate: `SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED=1` (also accept
-`true`, `yes`, or `on`). When disabled or unavailable, write
+Kimi shadow is on by default. Disable it with the same switch as the
+headless gate: `SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED=0` (also accept
+`false`, `no`, or `off`). Its default timeout is 300 seconds so shadow
+diagnostics cannot impose the full reviewer timeout; override with
+`SYMPHONY_COUNCIL_KIMI_TIMEOUT_SECONDS`. When explicitly disabled or unavailable, write
 `$COUNCIL_DIR/kimi-k27-shadow.disabled.json` with
 `enabled:false`, a reason (`disabled-by-config`, `substrate-unavailable`,
 or `preflight-failed`), and `mergeAuthoritative:false`. Absence of both
@@ -204,8 +206,9 @@ fi
 
 CLAUDE_AVAILABLE=false
 PI_AVAILABLE=false
-KIMI_SHADOW_ENABLED=false
+KIMI_SHADOW_ENABLED=true
 KIMI_AVAILABLE=false
+KIMI_SHADOW_TIMEOUT_SECONDS="${SYMPHONY_COUNCIL_KIMI_TIMEOUT_SECONDS:-300}"
 DIRTY=false
 printf '%s\n' "$SUBSTRATE_TIER" > "$COUNCIL_DIR/substrate-tier.txt"
 printf '%s\n' "$SUBSTRATE_HOST" > "$COUNCIL_DIR/substrate-host.txt"
@@ -225,9 +228,10 @@ write_kimi_shadow_disabled_marker() {
 EOF
 }
 
-case "${SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED:-}" in
-  1|true|TRUE|yes|YES|on|ON)
-    KIMI_SHADOW_ENABLED=true
+KIMI_SHADOW_SWITCH="$(printf '%s' "${SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED:-}" | tr '[:upper:]' '[:lower:]')"
+case "$KIMI_SHADOW_SWITCH" in
+  0|false|no|off)
+    KIMI_SHADOW_ENABLED=false
     ;;
 esac
 
@@ -311,15 +315,15 @@ fi
 ```
 
 Read `templates/phase1-opus-prompt.md`,
-`templates/phase1-pi-prompt.md`, and, when Kimi shadow is enabled,
-`templates/phase1-kimi-shadow-prompt.md`. Replace `{BASE_BRANCH}`,
+`templates/phase1-pi-prompt.md`, and, unless Kimi shadow is explicitly
+disabled, `templates/phase1-kimi-shadow-prompt.md`. Replace `{BASE_BRANCH}`,
 `{WORKSPACE_PATH}`, `{REVIEW_MODE}`, `{REVIEW_ROUND}`,
 `{CURRENT_HEAD_SHA}`, `{PREVIOUS_REVIEWED_HEAD_SHA}`,
 `{ARTIFACT_STATUS}`, and `[DIFF]`; write the populated prompts to:
 
 - `$COUNCIL_DIR/phase1-opus-prompt.md`
 - `$COUNCIL_DIR/phase1-pi-prompt.md`
-- `$COUNCIL_DIR/kimi-k27-shadow-prompt.md` when Kimi shadow is enabled
+- `$COUNCIL_DIR/kimi-k27-shadow-prompt.md` unless Kimi shadow is explicitly disabled
 
 For the first pass, use `REVIEW_MODE="initial broad pass"` and
 `PREVIOUS_REVIEWED_HEAD_SHA=n/a`. For convergence, use
@@ -370,7 +374,7 @@ if [ "$KIMI_SHADOW_ENABLED" = "true" ] && [ "$KIMI_AVAILABLE" = "true" ]; then
       --artifact-dir "$COUNCIL_DIR" \
       --artifact-name kimi-k27-shadow \
       --lane-id kimi-k27-shadow \
-      --timeout-seconds 1800 \
+      --timeout-seconds "$KIMI_SHADOW_TIMEOUT_SECONDS" \
       > "$COUNCIL_DIR/kimi-k27-shadow.cli.json" \
       2> "$COUNCIL_DIR/kimi-k27-shadow.cli.stderr" &
   KIMI_PID=$!

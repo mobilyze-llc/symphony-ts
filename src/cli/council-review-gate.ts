@@ -186,6 +186,10 @@ export function parseCouncilReviewGateArgs(
       parsed.kimiShadow = true;
       continue;
     }
+    if (token === "--no-kimi-shadow") {
+      parsed.kimiShadow = false;
+      continue;
+    }
     if (token === "--codex-excavation-sweep") {
       parsed.codexExcavationSweep = readCodexExcavationSweep(
         readValue(argv, ++index, token),
@@ -513,7 +517,8 @@ function renderUsage(): string {
     "  --timeout-seconds N           Per-lane timeout in seconds",
     "  --no-codex-lead               Skip Codex lead triage and mark degraded",
     "  --no-codex-excavation         Skip the default Codex edge-case excavation reviewer lane",
-    "  --kimi-shadow                 Add optional Kimi K2.7 shadow reviewer lane; not merge-authoritative",
+    "  --kimi-shadow                 Enable Kimi K2.7 shadow reviewer lane; not merge-authoritative (default)",
+    "  --no-kimi-shadow              Disable Kimi K2.7 shadow reviewer lane for this run",
     "  --codex-excavation-sweep standard|high-risk  Codex excavation preset (default: standard; high-risk uses a longer bounded sweep)",
     "  --codex-excavation-timeout-seconds N          Override Codex excavation lane timeout",
     "  --codex-excavation-tool-output-token-limit N  Override Codex excavation per-tool output cap",
