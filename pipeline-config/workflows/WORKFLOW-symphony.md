@@ -9,6 +9,14 @@ agent:
   max_concurrent_agents: 5
 server:
   port: 4321
+# SYMPH-735: enable the live merge actuator for the symphony self-work pipeline.
+# When a council-passed PR reaches the merge stage, the orchestrator marks it
+# ready, enqueues it (auto-merge, head-pinned to the reviewed SHA), and writes
+# the tracker Done — with bounded, replay-stable recovery and operator parking
+# (runMergeActuatorCycle, SYMPH-746/748). Default-off for every other product;
+# ceilings inherit config defaults (1h queue wait, 5/3/20 failure ceilings).
+merge_actuator:
+  enabled: true
 ---
 
 You are working on the Symphony orchestrator (symphony-ts). This is the pipeline orchestration layer that schedules and coordinates autonomous development agents.

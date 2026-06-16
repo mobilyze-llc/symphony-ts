@@ -118,7 +118,12 @@ describe("merge candidates", () => {
     });
   });
 
-  it("keeps durable merged proof ahead of stale-head checks", () => {
+  it("parks a merged PR whose head drifted from the reviewed SHA", () => {
+    // A MERGED PR whose live head no longer matches the reviewed candidate head
+    // is an unreviewed merge: the identity guard runs BEFORE the durable-proof
+    // check, so even with mergedAt + mergeCommit set the actuator must park
+    // (stale), never auto-complete the issue as if the reviewed work shipped
+    // (SYMPH-735).
     const candidate = reduceMergeCandidates([
       {
         ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
@@ -131,6 +136,42 @@ describe("merge candidates", () => {
       live: liveState({
         state: "MERGED",
         headSha: "head-after-merge",
+        mergedAt: "2026-06-16T01:00:00Z",
+        mergeCommit: "merge-1",
+      }),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+    });
+
+    expect(decision).toMatchObject({
+      action: "stale",
+      reason: "stale_reviewed_head",
+    });
+  });
+
+  it("marks tracker done for a merged PR whose head matches the reviewed SHA", () => {
+    // The safe case: a MERGED PR whose identity (repo / prNumber / headSha /
+    // baseRef) matches the reviewed candidate AND carries durable proof
+    // (mergedAt + mergeCommit) clears the identity guard and returns
+    // tracker_done. liveStateBase()'s headSha ("head-1") and baseRef ("main")
+    // already match the reviewed fixture, so only state/mergedAt/mergeCommit
+    // are overridden here.
+    const candidate = reduceMergeCandidates([
+      {
+        ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+        sequence: 2,
+      },
+    ])["issue-1"]!;
+    expect(candidate.reviewedHeadSha).toBe("head-1");
+
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState({
+        state: "MERGED",
         mergedAt: "2026-06-16T01:00:00Z",
         mergeCommit: "merge-1",
       }),

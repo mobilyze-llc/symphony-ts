@@ -54,6 +54,10 @@ import {
   DEFAULT_MAX_RETRY_ATTEMPTS,
   DEFAULT_MAX_RETRY_BACKOFF_MS,
   DEFAULT_MAX_TURNS,
+  DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS,
+  DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES,
+  DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES,
+  DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS,
   DEFAULT_OBSERVABILITY_ENABLED,
   DEFAULT_OBSERVABILITY_REFRESH_MS,
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
@@ -120,6 +124,7 @@ export function resolveWorkflowConfig(
   const budgetEscalation = asRecord(config.budget_escalation);
   const pauseTriage = asRecord(config.pause_triage);
   const acGate = asRecord(config.ac_gate);
+  const mergeActuator = asRecord(config.merge_actuator);
   const specFidelity = asRecord(config.spec_fidelity);
   const admissionCard = asRecord(config.admission_card);
   const codeGrounding = asRecord(config.code_grounding);
@@ -273,6 +278,21 @@ export function resolveWorkflowConfig(
     },
     acGate: {
       enabled: acGate.enabled === true,
+    },
+    mergeActuator: {
+      enabled: mergeActuator.enabled === true,
+      maxWaitMs:
+        readPositiveInteger(mergeActuator.max_wait_ms) ??
+        DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS,
+      maxLiveStateFailures:
+        readPositiveInteger(mergeActuator.max_live_state_failures) ??
+        DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES,
+      maxSideEffectFailures:
+        readPositiveInteger(mergeActuator.max_side_effect_failures) ??
+        DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES,
+      maxDraftWaitObservations:
+        readPositiveInteger(mergeActuator.max_draft_wait_observations) ??
+        DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS,
     },
     specFidelity: {
       enabled: specFidelity.enabled === true,

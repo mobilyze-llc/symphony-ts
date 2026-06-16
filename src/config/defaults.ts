@@ -113,6 +113,16 @@ export const DEFAULT_CODE_GROUNDING_TTL_MS = 86_400_000;
 export const DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO = 5;
 export const DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS = 600_000;
 
+// Merge actuator defaults (SYMPH-735). Default-disabled: the live merge-stage
+// dispatch barrier keeps parking candidates (merge_actuator_unwired) until a
+// product opts in. The remaining values bound the merge-queue wait and the
+// bounded recovery ceilings (SYMPH-746/748).
+export const DEFAULT_MERGE_ACTUATOR_ENABLED = false;
+export const DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS = 3_600_000;
+export const DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES = 5;
+export const DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES = 3;
+export const DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS = 20;
+
 export const SPEC_DEFAULTS = Object.freeze({
   tracker: {
     kind: DEFAULT_TRACKER_KIND,
@@ -166,6 +176,14 @@ export const SPEC_DEFAULTS = Object.freeze({
   },
   acGate: {
     enabled: false,
+  },
+  mergeActuator: {
+    enabled: DEFAULT_MERGE_ACTUATOR_ENABLED,
+    maxWaitMs: DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS,
+    maxLiveStateFailures: DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES,
+    maxSideEffectFailures: DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES,
+    maxDraftWaitObservations:
+      DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS,
   },
   specFidelity: {
     enabled: false,

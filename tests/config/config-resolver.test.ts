@@ -38,6 +38,10 @@ import {
   DEFAULT_MAX_CONCURRENT_AGENTS,
   DEFAULT_MAX_RETRY_BACKOFF_MS,
   DEFAULT_MAX_TURNS,
+  DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS,
+  DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES,
+  DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES,
+  DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS,
   DEFAULT_OBSERVABILITY_ENABLED,
   DEFAULT_OBSERVABILITY_REFRESH_MS,
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
@@ -153,6 +157,64 @@ describe("config-resolver", () => {
         DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS,
     });
     expect(DEFAULT_CODE_GROUNDING_BASE_DIR).toBe(".symphony/code-grounding");
+    expect(resolved.mergeActuator).toEqual({
+      enabled: false,
+      maxWaitMs: DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS,
+      maxLiveStateFailures: DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES,
+      maxSideEffectFailures: DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES,
+      maxDraftWaitObservations:
+        DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS,
+    });
+    // Documented numeric defaults (SYMPH-735): pinned literals so a drift in
+    // defaults.ts is caught here, not just mirrored through the constant.
+    expect(resolved.mergeActuator?.enabled).toBe(false);
+    expect(DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS).toBe(3_600_000);
+    expect(DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES).toBe(5);
+    expect(DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES).toBe(3);
+    expect(DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS).toBe(20);
+  });
+
+  it("resolves merge actuator config from frontmatter", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        merge_actuator: {
+          enabled: true,
+          max_wait_ms: 123,
+          max_live_state_failures: 7,
+          max_side_effect_failures: 4,
+          max_draft_wait_observations: 9,
+        },
+      },
+    });
+
+    expect(resolved.mergeActuator).toEqual({
+      enabled: true,
+      maxWaitMs: 123,
+      maxLiveStateFailures: 7,
+      maxSideEffectFailures: 4,
+      maxDraftWaitObservations: 9,
+    });
+  });
+
+  it("keeps the merge actuator disabled unless enabled is exactly true", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        merge_actuator: {
+          enabled: "true",
+        },
+      },
+    });
+
+    // enabled must default false unless strictly boolean true; bad numeric
+    // overrides fall back to the documented defaults.
+    expect(resolved.mergeActuator?.enabled).toBe(false);
+    expect(resolved.mergeActuator?.maxWaitMs).toBe(
+      DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS,
+    );
   });
 
   it("resolves managed code-grounding config", () => {

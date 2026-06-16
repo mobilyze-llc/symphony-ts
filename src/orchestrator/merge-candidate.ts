@@ -333,6 +333,21 @@ export function decideMergeActuation(input: {
   }
 
   if (input.live.state === "MERGED") {
+    // A merged PR whose identity drifted from the reviewed candidate (different
+    // PR, head, or base) is an unreviewed merge — park it, do not auto-complete
+    // the issue as if the reviewed work shipped (SYMPH-735).
+    const identityBlocker = firstLiveIdentityBlocker(
+      input.candidate,
+      input.live,
+    );
+    if (identityBlocker !== null) {
+      return {
+        action: "stale",
+        reason: identityBlocker,
+        blockers: [identityBlocker],
+        sideEffectKey: mergeActuationKey(input.candidate, "stale"),
+      };
+    }
     if (input.live.mergedAt === null || input.live.mergeCommit === null) {
       return {
         action: "blocked",
@@ -1361,6 +1376,29 @@ function firstLiveBlocker(
   candidate: MergeCandidateRecord,
   live: MergeActuatorLiveState,
 ): string | null {
+  const identityBlocker = firstLiveIdentityBlocker(candidate, live);
+  if (identityBlocker !== null) {
+    return identityBlocker;
+  }
+  if (live.mergeStateStatus === "DIRTY" || live.mergeable === "CONFLICTING") {
+    return "merge_conflict";
+  }
+  if (live.mergeStateStatus === "BEHIND") {
+    return "behind_base";
+  }
+  return null;
+}
+
+/**
+ * PR identity vs the reviewed candidate: wrong PR, a head that drifted from the
+ * reviewed SHA, or a changed base. Checked on the MERGED path too (SYMPH-735):
+ * once the actuator can auto-complete, a PR merged at a head other than the
+ * reviewed one is an unreviewed merge and must park, not be marked done.
+ */
+function firstLiveIdentityBlocker(
+  candidate: MergeCandidateRecord,
+  live: MergeActuatorLiveState,
+): string | null {
   if (live.repo !== candidate.repo || live.prNumber !== candidate.prNumber) {
     return "wrong_pr";
   }
@@ -1369,12 +1407,6 @@ function firstLiveBlocker(
   }
   if (live.baseRef !== candidate.baseRef) {
     return "base_ref_changed";
-  }
-  if (live.mergeStateStatus === "DIRTY" || live.mergeable === "CONFLICTING") {
-    return "merge_conflict";
-  }
-  if (live.mergeStateStatus === "BEHIND") {
-    return "behind_base";
   }
   return null;
 }

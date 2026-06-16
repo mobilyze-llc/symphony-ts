@@ -114,6 +114,21 @@ export interface WorkflowAcGateConfig {
 }
 
 /**
+ * Merge actuator (SYMPH-735). When disabled the live merge-stage dispatch
+ * barrier keeps parking eligible candidates with `merge_actuator_unwired`
+ * instead of driving the GitHub/Linear merge side effects. maxWaitMs bounds the
+ * merge-queue wait; the failure ceilings bound bounded recovery (SYMPH-746/748).
+ */
+export interface WorkflowMergeActuatorConfig {
+  /** Master switch. When false the actuator stays parked (merge_actuator_unwired). Default false. */
+  enabled: boolean;
+  maxWaitMs: number;
+  maxLiveStateFailures: number;
+  maxSideEffectFailures: number;
+  maxDraftWaitObservations: number;
+}
+
+/**
  * Spec-fidelity judge lane (SYMPH-343): at review-stage exit the local
  * model renders an independent verdict over the actual diff vs the tagged
  * acceptance criteria. Advisory in this slice (journal + comment); becomes
@@ -357,6 +372,8 @@ export interface ResolvedWorkflowConfig {
   acGate: WorkflowAcGateConfig;
   specFidelity: WorkflowSpecFidelityConfig;
   admissionCard: WorkflowAdmissionCardConfig;
+  /** Optional so older fixtures keep compiling; resolveWorkflowConfig always sets it. */
+  mergeActuator?: WorkflowMergeActuatorConfig;
   /** Optional so older hand-built fixtures keep compiling; resolveWorkflowConfig always sets it. */
   codeGrounding?: WorkflowCodeGroundingConfig;
   operatorAnchors?: WorkflowOperatorAnchorsConfig;
