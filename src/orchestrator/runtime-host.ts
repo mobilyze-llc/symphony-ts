@@ -7131,6 +7131,44 @@ function classifyStatusContextState(
   return "fail";
 }
 
+/**
+ * Builds the `gh pr merge` enqueue args for the live merge actuator.
+ *
+ * Head-pin guarantee (SYMPH-750). `--match-head-commit <reviewedHeadSha>` is
+ * GitHub's documented mechanism for enforcing the reviewed head at MERGE time
+ * (not merely at enablement). Combined with the poll-driven identity guard
+ * (layer 3), an advancing head cannot silently merge unreviewed code:
+ *
+ *   1. `--match-head-commit` maps to the GraphQL `expectedHeadOid`, documented
+ *      as "OID that the pull request head ref must match TO ALLOW MERGE; if
+ *      omitted, no check is performed." (GitHub GraphQL `MergePullRequestInput`,
+ *      confirmed via live `gh api graphql` schema introspection 2026-06-16). gh
+ *      builds one `mergePayload` carrying `expectedHeadOid: MatchHeadCommit` and,
+ *      because `--auto` is set, passes that SAME input into the
+ *      `enablePullRequestAutoMerge` mutation (cli/cli pkg/cmd/pr/merge
+ *      `merge.go` + `http.go`). The pinned OID therefore rides into the
+ *      auto-merge / merge-queue enablement; per those documented merge-input
+ *      semantics it should be re-checked when the deferred merge fires,
+ *      rejecting a head advanced past `reviewedHeadSha`. The merge-QUEUE path's
+ *      re-validation timing is the least-documented part, so (1)-(2) are not
+ *      treated as proof — layer (3) is the guarantee that holds regardless.
+ *   2. This repo uses a GitHub merge QUEUE. A push by a NON-write user dequeues /
+ *      disables auto-merge (GitHub Docs, "Automatically merging a pull request"),
+ *      but GitHub does NOT document dequeue-on-push for WRITE-permission pushers,
+ *      and there is a known force-push merge-queue staleness bug
+ *      (cli/cli community discussion #194832). So dequeue-on-push is a partial,
+ *      not a guaranteed, defense — the `expectedHeadOid` merge-time semantics
+ *      (not dequeue-on-push) are the intended head-pin enforcement.
+ *   3. Defense in depth: the poll-driven identity guard `firstLiveIdentityBlocker`
+ *      (src/orchestrator/merge-candidate.ts) re-checks `live.headSha ===
+ *      reviewedHeadSha` on EVERY OPEN poll cycle (via `firstLiveBlocker`) AND on
+ *      the MERGED path. Any drift parks the candidate as `stale_reviewed_head`
+ *      rather than completing the issue, bounding blast radius even if (1) and
+ *      (2) ever regressed.
+ *
+ * The exact arg vector is locked by a unit test (runtime-host.test.ts) so the
+ * `--match-head-commit <reviewedHeadSha>` pin cannot be silently dropped.
+ */
 function buildMergeActuatorEnqueueArgs(
   candidate: MergeCandidateRecord,
 ): string[] {

@@ -36,6 +36,7 @@ import {
   SERVICE_SHUTDOWN_ABORT_REASON,
   type StopSignalDelivery,
 } from "../../src/orchestrator/core.js";
+import type { MergeCandidateRecord } from "../../src/orchestrator/merge-candidate.js";
 import type { PipelineNotificationEvent } from "../../src/orchestrator/pipeline-notifier.js";
 import {
   loadPersistedRateLimitSnapshot,
@@ -266,6 +267,88 @@ describe("runtime host merge actuator parsing (SYMPH-735)", () => {
         { name: "c", status: "IN_PROGRESS", conclusion: "" },
       ]),
     ).toEqual([{ name: "c", status: "pending" }]);
+  });
+});
+
+describe("runtime host merge actuator enqueue args (SYMPH-750)", () => {
+  function mergeCandidate(
+    overrides: Partial<MergeCandidateRecord> = {},
+  ): MergeCandidateRecord {
+    return {
+      candidateId: "candidate-1",
+      issueId: "issue-1",
+      issueIdentifier: "SYMPH-750",
+      repo: "mobilyze-llc/symphony-ts",
+      prNumber: 552,
+      prUrl: "https://github.com/mobilyze-llc/symphony-ts/pull/552",
+      baseRef: "main",
+      baseSha: "base-1",
+      headRef: "claude/SYMPH-750",
+      headSha: "reviewed-head-1",
+      reviewedHeadSha: "reviewed-head-1",
+      reviewResultPath: "/tmp/review-result.json",
+      councilVerdict: "pass",
+      decorrelationMergeEligible: true,
+      round: 1,
+      stage: "merge",
+      actorKind: "dispatcher",
+      actorId: "owner-1",
+      ownerId: "owner-1",
+      leaseId: "lease-1",
+      createdAt: "2026-06-16T00:00:00.000Z",
+      updatedAt: "2026-06-16T00:00:00.000Z",
+      status: "candidate",
+      supersededBy: null,
+      lastActuation: null,
+      mergeCommit: null,
+      mergedAt: null,
+      blockedReason: null,
+      cursorRange: { firstSequence: 1, lastSequence: 2 },
+      ...overrides,
+    };
+  }
+
+  // Locks the exact enqueue arg vector so the reviewed-head pin can never be
+  // silently dropped. `--match-head-commit <reviewedHeadSha>` is a MERGE-time
+  // check (GraphQL expectedHeadOid "must match to allow merge"), riding into the
+  // enablePullRequestAutoMerge mutation via `--auto`, so an advancing head cannot
+  // merge unreviewed code. See buildMergeActuatorEnqueueArgs doc comment.
+  it("pins the reviewed head and enables auto-merge", () => {
+    const candidate = mergeCandidate({
+      prNumber: 731,
+      repo: "mobilyze-llc/symphony-ts",
+      reviewedHeadSha: "abc1234deadbeef",
+    });
+
+    expect(
+      runtimeHostMergeActuatorTesting.buildMergeActuatorEnqueueArgs(candidate),
+    ).toEqual([
+      "pr",
+      "merge",
+      "731",
+      "--repo",
+      "mobilyze-llc/symphony-ts",
+      "--match-head-commit",
+      "abc1234deadbeef",
+      "--auto",
+    ]);
+  });
+
+  // The pin tracks reviewedHeadSha specifically — never the (possibly advanced)
+  // working headSha — so review identity, not the latest push, gates the merge.
+  it("pins reviewedHeadSha even when the working headSha has advanced", () => {
+    const candidate = mergeCandidate({
+      reviewedHeadSha: "reviewed-sha",
+      headSha: "advanced-sha",
+    });
+
+    const args =
+      runtimeHostMergeActuatorTesting.buildMergeActuatorEnqueueArgs(candidate);
+    const matchIndex = args.indexOf("--match-head-commit");
+
+    expect(matchIndex).toBeGreaterThanOrEqual(0);
+    expect(args[matchIndex + 1]).toBe("reviewed-sha");
+    expect(args).not.toContain("advanced-sha");
   });
 });
 
