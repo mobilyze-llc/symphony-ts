@@ -25,6 +25,7 @@ import {
   CODE_GROUNDING_SUPPORTED_PATH_PREFIXES,
   CODE_GROUNDING_SYMBOL_PRECISION,
   decideCodeGroundingEvidenceStatus,
+  getCodeGroundingMutexRegistrySizesForTests,
   removeAbandonedCodeGroundingFileLock,
   resolveCodeGroundingPaths,
   runManagedCodeGrounding,
@@ -263,6 +264,32 @@ describe("managed code grounding (SYMPH-596)", () => {
       findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
       commandRunner,
     });
+    const optionSourcePath = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "option-source-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+        sourcePath: "--upload-pack=sh",
+        commitSha: "abc123",
+        repoScope: "symphony",
+      },
+      findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
+      commandRunner,
+    });
+    const controlSourcePath = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "control-source-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+        sourcePath: "/tmp/source\n--upload-pack=sh",
+        commitSha: "abc123",
+        repoScope: "symphony",
+      },
+      findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
+      commandRunner,
+    });
 
     expect(commandRunner).not.toHaveBeenCalled();
     expect(dangerousTransport).toMatchObject({
@@ -273,6 +300,18 @@ describe("managed code grounding (SYMPH-596)", () => {
       status: "not_attempted",
       warnings: [
         "code-grounding target commitSha is option-shaped and was rejected",
+      ],
+    });
+    expect(optionSourcePath).toMatchObject({
+      status: "not_attempted",
+      warnings: [
+        "code-grounding target sourcePath is option-shaped and was rejected",
+      ],
+    });
+    expect(controlSourcePath).toMatchObject({
+      status: "not_attempted",
+      warnings: [
+        "code-grounding target sourcePath is option-shaped and was rejected",
       ],
     });
   });
@@ -1074,6 +1113,54 @@ describe("managed code grounding (SYMPH-596)", () => {
     ).resolves.toContain("fresh-owner");
   });
 
+  it("reaps old lock tombstones without deleting fresh tombstones or live locks", async () => {
+    const workspaceRoot = await tempRoot("symph-cg-workspace-");
+    const baseRoot = join(workspaceRoot, ".symphony", "code-grounding");
+    const checkoutsRoot = join(baseRoot, "checkouts");
+    const oldBaseTombstone = join(
+      baseRoot,
+      "leases.lock.stale-123-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa",
+    );
+    const oldCheckoutTombstone = join(
+      checkoutsRoot,
+      "cg-old.lock.stale-123-bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb",
+    );
+    const freshCheckoutTombstone = join(
+      checkoutsRoot,
+      "cg-fresh.lock.stale-123-cccccccc-cccc-4ccc-cccc-cccccccccccc",
+    );
+    const liveLock = join(checkoutsRoot, "cg-live.lock");
+    await mkdir(oldBaseTombstone, { recursive: true });
+    await mkdir(oldCheckoutTombstone, { recursive: true });
+    await mkdir(freshCheckoutTombstone, { recursive: true });
+    await mkdir(liveLock, { recursive: true });
+    await writeFile(join(liveLock, "owner.json"), "{}\n");
+    const oldTime = new Date("2026-06-13T00:00:00.000Z");
+    const freshTime = new Date("2026-06-14T23:59:00.000Z");
+    await utimes(oldBaseTombstone, oldTime, oldTime);
+    await utimes(oldCheckoutTombstone, oldTime, oldTime);
+    await utimes(freshCheckoutTombstone, freshTime, freshTime);
+
+    await sweepCodeGroundingCheckouts({
+      workspaceRoot,
+      config: codeGroundingConfig(),
+      now: new Date("2026-06-15T00:00:00.000Z"),
+    });
+
+    await expect(
+      readFile(join(oldBaseTombstone, "owner.json")),
+    ).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(
+      readFile(join(oldCheckoutTombstone, "owner.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readdir(freshCheckoutTombstone)).resolves.toEqual([]);
+    await expect(readFile(join(liveLock, "owner.json"), "utf8")).resolves.toBe(
+      "{}\n",
+    );
+  });
+
   it("fails loudly instead of resetting malformed lease indexes", async () => {
     const sourceRepo = await createSourceRepo();
     const workspaceRoot = await tempRoot("symph-cg-workspace-");
@@ -1146,6 +1233,43 @@ describe("managed code grounding (SYMPH-596)", () => {
     expect(first.status).toBe("verified");
     expect(second.status).toBe("verified");
     expect(maxActiveScans).toBe(1);
+    expect(getCodeGroundingMutexRegistrySizesForTests()).toEqual({
+      lease: 0,
+      checkout: 0,
+    });
+  });
+
+  it("evicts code-grounding mutex registry entries across distinct workspace roots", async () => {
+    const sourceRepo = await createSourceRepo();
+    const commitSha = await git(sourceRepo, ["rev-parse", "HEAD"]);
+
+    for (let index = 0; index < 3; index++) {
+      const workspaceRoot = await tempRoot(`symph-cg-workspace-${index}-`);
+      const report = await runManagedCodeGrounding({
+        workspaceRoot,
+        runId: `registry-eviction-${index}`,
+        config: codeGroundingConfig(),
+        target: {
+          repoUrl: sourceRepo,
+          sourcePath: sourceRepo,
+          commitSha,
+          repoScope: "symphony",
+        },
+        findings: [
+          backlogFinding({
+            evidence:
+              "Implemented in `src/orchestrator/queue.ts` via `runQueueTriage`.",
+          }),
+        ],
+      });
+
+      expect(report.status).toBe("verified");
+    }
+
+    expect(getCodeGroundingMutexRegistrySizesForTests()).toEqual({
+      lease: 0,
+      checkout: 0,
+    });
   });
 
   it("downgrades model verification when deterministic evidence did not verify it", () => {
@@ -1714,7 +1838,7 @@ function backlogFinding(
 function codeGroundingConfig() {
   return {
     enabled: true,
-    baseDir: join(".symphony", "code-grounding"),
+    baseDir: ".symphony/code-grounding",
     ttlMs: 86_400_000,
     maxCheckoutsPerRepo: 5,
   };
