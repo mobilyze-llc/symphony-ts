@@ -3,6 +3,7 @@ import type {
   DispatcherRunJournalEntry,
 } from "../domain/model.js";
 import { appendDispatcherRunJournalEntriesWithLock } from "../logging/run-journal.js";
+import { buildMergeCandidateEntryFromReviewGate } from "../orchestrator/merge-candidate.js";
 import type {
   CouncilTerminationAssessment,
   HeadlessCouncilGateResult,
@@ -240,26 +241,33 @@ export function buildReviewJournalEntries(
     );
   }
 
-  entries.push(
-    entryFor(context, {
-      kind: "review_gate_result",
-      timestamp: normalizeTimestamp(result.completedAt, result.startedAt),
-      keyParts: ["gate", result.verdict],
-      summary: `Council review gate ${result.verdict} for ${context.issueIdentifier}.`,
-      metadata: {
-        ...baseMetadata(context, contractVersion),
-        ...terminationMetadata(termination),
-        ...targetedConvergenceMetadata(result.targeted_convergence),
-        gate_verdict: result.verdict,
-        lane_count: result.lanes.length,
-        finding_count: findings.length,
-        blocking_finding_count: blockingFindingCount(
-          findings.map(({ finding }) => finding),
-        ),
-        degraded_condition_count: result.degradedConditions.length,
-      },
-    }),
-  );
+  const reviewGateResultEntry = entryFor(context, {
+    kind: "review_gate_result",
+    timestamp: normalizeTimestamp(result.completedAt, result.startedAt),
+    keyParts: ["gate", result.verdict],
+    summary: `Council review gate ${result.verdict} for ${context.issueIdentifier}.`,
+    metadata: {
+      ...baseMetadata(context, contractVersion),
+      ...terminationMetadata(termination),
+      ...targetedConvergenceMetadata(result.targeted_convergence),
+      gate_verdict: result.verdict,
+      lane_count: result.lanes.length,
+      finding_count: findings.length,
+      blocking_finding_count: blockingFindingCount(
+        findings.map(({ finding }) => finding),
+      ),
+      degraded_condition_count: result.degradedConditions.length,
+    },
+  });
+  entries.push(reviewGateResultEntry);
+
+  const mergeCandidateEntry = buildMergeCandidateEntryFromReviewGate({
+    ...reviewGateResultEntry,
+    sequence: 0,
+  });
+  if (mergeCandidateEntry !== null) {
+    entries.push(mergeCandidateEntry);
+  }
 
   return entries;
 }
@@ -321,6 +329,7 @@ function buildJournalContext(
     prNumber: result.pr.number,
     baseRef: result.pr.baseRef,
     headRef: result.pr.headRef,
+    reviewResultPath: result.artifactPaths.resultJson,
     bundleHash: result.review_bundle?.bundleHash ?? null,
     idempotencyKeyPrefix: options.idempotencyKeyPrefix ?? "review",
   };
@@ -343,6 +352,8 @@ function baseMetadata(
     head_ref: context.headRef ?? undefined,
     base_sha: context.baseSha ?? undefined,
     head_sha: context.headSha ?? undefined,
+    reviewed_head_sha: context.headSha ?? undefined,
+    review_result_path: context.reviewResultPath,
     bundle_hash: context.bundleHash ?? undefined,
     routing_mode: context.routingMode,
     round: context.round,

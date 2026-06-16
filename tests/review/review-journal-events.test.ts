@@ -118,11 +118,17 @@ describe("review journal events", () => {
       high_risk_predicate_triggers: [],
       high_risk_predicate_paths: [],
     });
-    expect(entries.at(-1)?.metadata).toMatchObject({
+    const gateResult = entries.find(
+      (entry) => entry.kind === "review_gate_result",
+    );
+    expect(gateResult?.metadata).toMatchObject({
       routing_mode: "standard",
       decorrelation_summary:
         "Merge-eligible decorrelated reviewer artifact(s): pi-deepseek.",
     });
+    expect(
+      entries.find((entry) => entry.kind === "merge_candidate"),
+    ).toBeDefined();
   });
 
   it("excludes non-authoritative shadow findings from journal escalation", () => {

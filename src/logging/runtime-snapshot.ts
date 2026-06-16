@@ -39,6 +39,10 @@ import {
   type PublicEmergencyStopInterruptedIssue,
   projectEmergencyStopInterruptedIssue,
 } from "../orchestrator/emergency-stop-projection.js";
+import {
+  type MergeCandidateRecord,
+  reduceMergeCandidates,
+} from "../orchestrator/merge-candidate.js";
 import type { WatchdogRegistrySnapshot } from "../orchestrator/signature-cluster.js";
 import { formatEasternTimestamp } from "./format-timestamp.js";
 import {
@@ -374,6 +378,12 @@ export interface RuntimeSnapshot {
    */
   spec_reviews?: Record<string, RuntimeSnapshotSpecReview>;
   /**
+   * Merge candidate and actuator state (SYMPH-722), reduced from
+   * merge_candidate and merge_actuation journal rows. This is the operator
+   * surface for ready/enqueue/poll/Done proof without parsing worker prose.
+   */
+  merge_candidates?: Record<string, RuntimeSnapshotMergeCandidate>;
+  /**
    * Fail-open component visibility (SYMPH-407 scope 5): every fail-open
    * element reports {enabled, degraded_reason?}.
    */
@@ -572,6 +582,40 @@ export interface RuntimeSnapshotSpecReview {
   linear_doc_url: string | null;
   completed_at: string | null;
   latest_summary: string;
+  cursor_range: {
+    first_sequence: number;
+    last_sequence: number;
+  };
+}
+
+export interface RuntimeSnapshotMergeCandidate {
+  issue_id: string;
+  issue_identifier: string;
+  status: MergeCandidateRecord["status"];
+  candidate_id: string;
+  repo: string;
+  pr_number: number;
+  pr_url: string | null;
+  base_ref: string;
+  base_sha: string;
+  head_ref: string;
+  head_sha: string;
+  reviewed_head_sha: string;
+  review_result_path: string;
+  council_verdict: "pass";
+  decorrelation_merge_eligible: true;
+  round: number;
+  actor_kind: string | null;
+  actor_id: string | null;
+  owner_id: string | null;
+  lease_id: string | null;
+  created_at: string;
+  updated_at: string;
+  superseded_by: string | null;
+  last_actuation: string | null;
+  merge_commit: string | null;
+  merged_at: string | null;
+  blocked_reason: string | null;
   cursor_range: {
     first_sequence: number;
     last_sequence: number;
@@ -857,6 +901,7 @@ export function buildRuntimeSnapshot(
     watchdog: buildWatchdogSection(state, enrichment?.watchdog ?? null),
     council_reviews: buildCouncilReviewSnapshots(state),
     spec_reviews: buildSpecReviewSnapshots(state),
+    merge_candidates: buildMergeCandidateSnapshots(state),
     components: enrichment?.components ?? {},
   };
 }
@@ -1076,6 +1121,54 @@ function buildSpecReviewSnapshots(
     };
   }
   return snapshots;
+}
+
+function buildMergeCandidateSnapshots(
+  state: OrchestratorState,
+): Record<string, RuntimeSnapshotMergeCandidate> {
+  const candidates = reduceMergeCandidates(state.dispatcherRunJournal);
+  return Object.fromEntries(
+    Object.entries(candidates)
+      .sort(([, left], [, right]) =>
+        left.issueIdentifier.localeCompare(right.issueIdentifier, "en"),
+      )
+      .map(([issueId, candidate]) => [
+        issueId,
+        {
+          issue_id: candidate.issueId,
+          issue_identifier: candidate.issueIdentifier,
+          status: candidate.status,
+          candidate_id: candidate.candidateId,
+          repo: candidate.repo,
+          pr_number: candidate.prNumber,
+          pr_url: candidate.prUrl,
+          base_ref: candidate.baseRef,
+          base_sha: candidate.baseSha,
+          head_ref: candidate.headRef,
+          head_sha: candidate.headSha,
+          reviewed_head_sha: candidate.reviewedHeadSha,
+          review_result_path: candidate.reviewResultPath,
+          council_verdict: candidate.councilVerdict,
+          decorrelation_merge_eligible: candidate.decorrelationMergeEligible,
+          round: candidate.round,
+          actor_kind: candidate.actorKind,
+          actor_id: candidate.actorId,
+          owner_id: candidate.ownerId,
+          lease_id: candidate.leaseId,
+          created_at: candidate.createdAt,
+          updated_at: candidate.updatedAt,
+          superseded_by: candidate.supersededBy,
+          last_actuation: candidate.lastActuation,
+          merge_commit: candidate.mergeCommit,
+          merged_at: candidate.mergedAt,
+          blocked_reason: candidate.blockedReason,
+          cursor_range: {
+            first_sequence: candidate.cursorRange.firstSequence,
+            last_sequence: candidate.cursorRange.lastSequence,
+          },
+        },
+      ]),
+  );
 }
 
 function emptyCouncilReviewSnapshot(
