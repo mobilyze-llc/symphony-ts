@@ -817,7 +817,7 @@ If a check fails, post a `## Review Findings` comment naming the missing evidenc
 
 ### Evaluate findings
 
-If the gate reports `PASS`, post a short workpad note with the artifact directory, then output `[STAGE_COMPLETE]` in a final message that also echoes the live-proof disposition line you verified in the pre-gate check (`live-proof: evidence|waived|n/a — …`) — the independent spec-fidelity judge reads your final message and checks for it (SYMPH-377).
+If the gate reports `PASS`, post a short workpad note with the artifact directory, then output `[REVIEW_GATE_RESULT_PATH: $ARTIFACT_DIR/review-result.json]` immediately before `[STAGE_COMPLETE]` in a final message that also echoes the live-proof disposition line you verified in the pre-gate check (`live-proof: evidence|waived|n/a — …`) — the independent spec-fidelity judge reads your final message and checks for it (SYMPH-377), and the runtime host ingests the machine result before allowing merge.
 If the gate reports `FAIL` with surviving P1/P2 code findings: post a `## Review Findings` comment on the Linear issue with the council report path and blocking summary, then output `[STAGE_FAILED: review]`.
 
 If `$ARTIFACT_DIR/review-result.json` reports `verdict: "error"` and a lane has `degradedReason: "substrate_stall"` or a `degradedConditions` entry starting with `substrate_stall:`, while no lane has `verdict: "fail"` and the council report names no surviving P1/P2 code finding, treat this as review infrastructure, not implement rework:

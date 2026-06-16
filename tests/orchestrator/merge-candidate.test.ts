@@ -36,6 +36,22 @@ describe("merge candidates", () => {
     });
   });
 
+  it("does not build candidates from non-pass, non-decorrelated, or incomplete review gates", () => {
+    const failed = reviewGateEntry();
+    failed.metadata.gate_verdict = "fail";
+    expect(buildMergeCandidateEntryFromReviewGate(failed)).toBeNull();
+
+    const ineligible = reviewGateEntry();
+    ineligible.metadata.decorrelation_merge_eligible = false;
+    expect(buildMergeCandidateEntryFromReviewGate(ineligible)).toBeNull();
+
+    const incomplete = reviewGateEntry();
+    const { review_result_path: _reviewResultPath, ...metadataWithoutPath } =
+      incomplete.metadata;
+    incomplete.metadata = metadataWithoutPath;
+    expect(buildMergeCandidateEntryFromReviewGate(incomplete)).toBeNull();
+  });
+
   it("supersedes older candidates and never promotes stale heads", () => {
     const first = {
       ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry({ round: 1 }))!,

@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { hostname } from "node:os";
+import { dirname, resolve } from "node:path";
 
 import { extractAcceptanceCriteria } from "../agent/ac-gate.js";
 import type {
@@ -100,6 +102,8 @@ import type {
   HardStopDecision,
   HardStopTrigger,
 } from "../policy/hard-stops.js";
+import type { HeadlessCouncilGateResult } from "../review/headless-council-gate.js";
+import { buildReviewJournalEntries } from "../review/review-journal-events.js";
 import { normalizeAccountEmail } from "../shared/account-email.js";
 import { sanitizeForLinear } from "../shared/egress.js";
 import { readProcessIdentityMetadata } from "../shared/process-tree.js";
@@ -165,6 +169,10 @@ import {
   formatIntentAttribution,
   isIntentActorKind,
 } from "./intent.js";
+import {
+  type MergeCandidateRecord,
+  reduceMergeCandidates,
+} from "./merge-candidate.js";
 import { createRightSizingDecision } from "./right-sizing.js";
 import { SignatureClusterRegistry } from "./signature-cluster.js";
 import type {
@@ -208,6 +216,8 @@ const REVIEW_SUBSTRATE_DEGRADATION_PREFIXES = [
   "substrate_stall:",
   "malformed_substrate_json:",
 ];
+const REVIEW_GATE_RESULT_PATH_PREFIX = "[REVIEW_GATE_RESULT_PATH:";
+const REVIEW_GATE_RESULT_PATH_SUFFIX = "]";
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
@@ -381,6 +391,7 @@ type DispatchIssueDisposition =
   | "undecorrelated_gate"
   | "gate_started"
   | "circuit_breaker_open"
+  | "merge_candidate_barrier"
   | "lease_unavailable"
   | "spawn_failed";
 
@@ -4277,6 +4288,16 @@ export class OrchestratorCore {
         });
     }
 
+    const reviewMergeReady = await this.prepareReviewCompletionForMerge({
+      issueId,
+      runningEntry,
+      exitedStageName,
+      agentMessage,
+    });
+    if (!reviewMergeReady) {
+      return null;
+    }
+
     const transition = this.advanceStage(
       issueId,
       runningEntry.identifier,
@@ -4293,6 +4314,334 @@ export class OrchestratorCore {
       error: null,
       delayType: "continuation",
     });
+  }
+
+  private async prepareReviewCompletionForMerge(input: {
+    issueId: string;
+    runningEntry: RunningEntry;
+    exitedStageName: string | null;
+    agentMessage: string | undefined;
+  }): Promise<boolean> {
+    if (!this.isReviewToMergeTransition(input.exitedStageName)) {
+      return true;
+    }
+
+    if (this.findCanonicalMergeCandidate(input.issueId) !== null) {
+      return true;
+    }
+
+    const markerPath = extractReviewGateResultPath(
+      input.agentMessage ?? input.runningEntry.lastCodexMessage,
+    );
+    if (markerPath === null) {
+      await this.parkMergeCandidateInvariantFailure({
+        issue: input.runningEntry.issue,
+        stageName: input.exitedStageName,
+        reasonCode: "missing_canonical_review_gate_result",
+        detail:
+          "review stage completed without [REVIEW_GATE_RESULT_PATH: ...], so the runtime host cannot append canonical review_gate_result and merge_candidate rows",
+      });
+      return false;
+    }
+
+    const artifactResult = await this.readAndValidateReviewGateArtifact({
+      path: markerPath,
+      issueId: input.issueId,
+      issueIdentifier: input.runningEntry.identifier,
+    });
+    if (!artifactResult.ok) {
+      await this.parkMergeCandidateInvariantFailure({
+        issue: input.runningEntry.issue,
+        stageName: input.exitedStageName,
+        reasonCode: "missing_canonical_review_gate_result",
+        detail: artifactResult.reason,
+        reviewResultPath: markerPath,
+      });
+      return false;
+    }
+
+    const entries = buildReviewJournalEntries(artifactResult.result, {
+      issueId: input.issueId,
+      issueIdentifier: input.runningEntry.identifier,
+      ownerId: this.leaseOwnerId,
+      stage: "review",
+      attempt: input.runningEntry.retryAttempt,
+      source: "pipeline",
+      actor: {
+        kind: "dispatcher",
+        id: this.leaseOwnerId,
+      },
+    });
+    if (
+      !entries.some((entry) => entry.kind === "review_gate_result") ||
+      !entries.some((entry) => entry.kind === "merge_candidate")
+    ) {
+      await this.parkMergeCandidateInvariantFailure({
+        issue: input.runningEntry.issue,
+        stageName: input.exitedStageName,
+        reasonCode: "missing_canonical_review_gate_result",
+        detail:
+          "review-result artifact did not reduce to both review_gate_result and merge_candidate rows; expected verdict pass with decorrelation_merge_eligible true",
+        reviewResultPath: markerPath,
+      });
+      return false;
+    }
+
+    for (const entry of entries) {
+      await this.recordRunJournalEntry(entry);
+    }
+
+    if (this.findCanonicalMergeCandidate(input.issueId) === null) {
+      await this.parkMergeCandidateInvariantFailure({
+        issue: input.runningEntry.issue,
+        stageName: input.exitedStageName,
+        reasonCode: "missing_canonical_review_gate_result",
+        detail:
+          "canonical review rows were appended, but no reducible merge_candidate exists for the issue",
+        reviewResultPath: markerPath,
+      });
+      return false;
+    }
+
+    return true;
+  }
+
+  private isReviewToMergeTransition(exitedStageName: string | null): boolean {
+    if (exitedStageName !== "review" || this.config.stages === null) {
+      return false;
+    }
+    const stage = this.config.stages.stages[exitedStageName];
+    return stage?.transitions.onComplete === "merge";
+  }
+
+  private async readAndValidateReviewGateArtifact(input: {
+    path: string;
+    issueId: string;
+    issueIdentifier: string;
+  }): Promise<
+    | { ok: true; result: HeadlessCouncilGateResult }
+    | { ok: false; reason: string }
+  > {
+    if (input.path.includes("\0")) {
+      return { ok: false, reason: "review artifact path contains NUL byte" };
+    }
+    const resolvedPath = resolve(input.path);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(resolvedPath, "utf8"));
+    } catch {
+      return {
+        ok: false,
+        reason: "review artifact unreadable or malformed",
+      };
+    }
+
+    if (!isRecord(parsed)) {
+      return { ok: false, reason: "review artifact root is not an object" };
+    }
+    const result = parsed as unknown as HeadlessCouncilGateResult;
+    if (
+      result.issueId !== input.issueIdentifier &&
+      result.issueId !== input.issueId
+    ) {
+      return {
+        ok: false,
+        reason: `review artifact issue mismatch: expected ${input.issueIdentifier} or ${input.issueId}, got ${String(result.issueId)}`,
+      };
+    }
+    if (result.verdict !== "pass") {
+      return {
+        ok: false,
+        reason: `review artifact verdict is ${String(result.verdict)}; expected pass`,
+      };
+    }
+    if (
+      !isRecord(result.pr) ||
+      typeof result.pr.repo !== "string" ||
+      typeof result.pr.number !== "number" ||
+      typeof result.pr.baseRef !== "string" ||
+      typeof result.pr.headRef !== "string"
+    ) {
+      return {
+        ok: false,
+        reason:
+          "review artifact missing repo, PR number, base ref, or head ref",
+      };
+    }
+    if (
+      !isRecord(result.review_metadata) ||
+      typeof result.review_metadata.base_sha !== "string" ||
+      typeof result.review_metadata.reviewed_head_sha !== "string" ||
+      typeof result.review_metadata.round !== "number"
+    ) {
+      return {
+        ok: false,
+        reason:
+          "review artifact missing base SHA, reviewed head SHA, or review round",
+      };
+    }
+    if (!isRecord(result.artifactPaths)) {
+      return {
+        ok: false,
+        reason:
+          "review artifact resultJson path does not match the dispatcher marker",
+      };
+    }
+    const resultJsonPath = result.artifactPaths.resultJson;
+    if (typeof resultJsonPath !== "string" || resultJsonPath.includes("\0")) {
+      return {
+        ok: false,
+        reason:
+          "review artifact resultJson path does not match the dispatcher marker",
+      };
+    }
+    if (resolve(resultJsonPath) !== resolvedPath) {
+      return {
+        ok: false,
+        reason:
+          "review artifact resultJson path does not match the dispatcher marker",
+      };
+    }
+    const artifactDirPath = result.artifactPaths.artifactDir;
+    if (typeof artifactDirPath !== "string" || artifactDirPath.includes("\0")) {
+      return {
+        ok: false,
+        reason:
+          "review artifact directory does not match the dispatcher marker parent directory",
+      };
+    }
+    if (resolve(artifactDirPath) !== dirname(resolvedPath)) {
+      return {
+        ok: false,
+        reason:
+          "review artifact directory does not match the dispatcher marker parent directory",
+      };
+    }
+    const reviewRouting = result.review_routing;
+    const decorrelationBasis =
+      isRecord(reviewRouting) && isRecord(reviewRouting.decorrelationBasis)
+        ? reviewRouting.decorrelationBasis
+        : null;
+    if (decorrelationBasis?.mergeEligible !== true) {
+      return {
+        ok: false,
+        reason:
+          "review artifact is not merge-eligible under its decorrelation basis",
+      };
+    }
+
+    return { ok: true, result };
+  }
+
+  private findCanonicalMergeCandidate(
+    issueId: string,
+  ): MergeCandidateRecord | null {
+    const candidate = reduceMergeCandidates(this.state.dispatcherRunJournal)[
+      issueId
+    ];
+    if (candidate === undefined) {
+      return null;
+    }
+    const candidateEntry = this.state.dispatcherRunJournal.findLast(
+      (entry) =>
+        entry.kind === "merge_candidate" &&
+        entry.issueId === issueId &&
+        readMetadataString(entry.metadata, "candidate_id") ===
+          candidate.candidateId,
+    );
+    const sourceKey =
+      candidateEntry === undefined
+        ? null
+        : readMetadataString(
+            candidateEntry.metadata,
+            "source_review_idempotency_key",
+          );
+    if (sourceKey === null) {
+      return null;
+    }
+    const sourceReview = this.state.dispatcherRunJournal.find(
+      (entry) =>
+        entry.kind === "review_gate_result" &&
+        entry.issueId === issueId &&
+        entry.idempotencyKey === sourceKey &&
+        readMetadataString(entry.metadata, "gate_verdict") === "pass",
+    );
+    return sourceReview === undefined ? null : candidate;
+  }
+
+  private async parkMergeCandidateInvariantFailure(input: {
+    issue: Issue;
+    stageName: string | null;
+    reasonCode: string;
+    detail: string;
+    reviewResultPath?: string;
+  }): Promise<void> {
+    const reason = `${input.reasonCode}: ${input.detail}`;
+    const signature = hashReviewInfrastructureSignature(
+      `merge_candidate_invariant:${input.reasonCode}:${input.issue.id}`,
+    );
+    const stageHistory = this.state.issueExecutionHistory[input.issue.id] ?? [];
+    this.state.failed.add(input.issue.id);
+    this.releaseClaim(input.issue.id);
+    this.clearTerminalIssueRuntimeState(input.issue.id);
+    this.markIssueRequiresExplicitResume(
+      input.issue.id,
+      input.issue.state,
+      null,
+      {
+        reason: input.reasonCode,
+        setBySequence: null,
+      },
+    );
+    this.recordFailureInCluster(
+      input.issue.id,
+      input.issue.identifier,
+      {
+        signature,
+        normalizedText: reason,
+        class: "infra",
+      },
+      input.stageName,
+    );
+    try {
+      await this.fireEscalationSideEffects(
+        input.issue.id,
+        input.issue.identifier,
+        [
+          "## Parked: canonical merge candidate missing",
+          "",
+          `Reason: ${sanitizeForLinear(reason, { maxLen: 2000 })}`,
+          ...(input.reviewResultPath === undefined
+            ? []
+            : [`Review result path: ${input.reviewResultPath}`]),
+          "",
+          "The runtime host refused to advance or dispatch merge without canonical review_gate_result and merge_candidate journal rows.",
+        ].join("\n"),
+      );
+    } catch (error) {
+      console.warn(
+        `Failed to post merge-candidate invariant escalation for ${input.issue.identifier}: ${formatUnknownError(error)}`,
+      );
+    }
+    await this.recordFailureExhausted(
+      input.issue.id,
+      input.issue.identifier,
+      input.issue.title,
+      reason,
+      {
+        failure_signature: signature,
+        failure_class: "infra",
+      },
+      {
+        issueDescription: input.issue.description ?? "",
+        stageName: input.stageName,
+        parkKind: "retry_exhausted",
+        attemptCount: 0,
+        reworkCount: this.state.issueReworkCounts[input.issue.id] ?? 0,
+        failureRecords: [],
+        stageHistory,
+      },
+    );
   }
 
   private async consumePendingStageSignal(
@@ -10024,6 +10373,39 @@ export class OrchestratorCore {
     return false;
   }
 
+  private async enforceMergeCandidateDispatchBarrier(
+    issue: Issue,
+    stageName: string | null,
+  ): Promise<boolean> {
+    if (stageName !== "merge") {
+      return false;
+    }
+    const passedStages = this.state.issuePassedStages[issue.id] ?? [];
+    if (!passedStages.includes("review")) {
+      return false;
+    }
+    const candidate = this.findCanonicalMergeCandidate(issue.id);
+    if (candidate === null) {
+      await this.parkMergeCandidateInvariantFailure({
+        issue,
+        stageName,
+        reasonCode: "missing_canonical_review_gate_result",
+        detail:
+          "issue is in merge with review marked passed but no canonical review_gate_result plus merge_candidate state exists",
+      });
+      return true;
+    }
+
+    await this.parkMergeCandidateInvariantFailure({
+      issue,
+      stageName,
+      reasonCode: "merge_actuator_unwired",
+      detail: `candidate ${candidate.candidateId} is available, but live merge-stage dispatch has no configured orchestrator actuator and must not fall through to the legacy merge worker`,
+      reviewResultPath: candidate.reviewResultPath,
+    });
+    return true;
+  }
+
   private async dispatchIssue(
     issue: Issue,
     attempt: number | null,
@@ -10323,6 +10705,15 @@ export class OrchestratorCore {
           reasonCode: "circuit_breaker_open",
         };
       }
+    }
+
+    if (await this.enforceMergeCandidateDispatchBarrier(issue, stageName)) {
+      return {
+        dispatched: false,
+        rightSizingDecision: null,
+        disposition: "merge_candidate_barrier",
+        reasonCode: "merge_candidate_barrier",
+      };
     }
 
     const isFirstDispatch = !this.state.issueFirstDispatchedAt[issue.id];
@@ -12446,6 +12837,29 @@ function formatIgnoredSetupInstructionCollisionSignature(
 
 function formatUnknownError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function extractReviewGateResultPath(
+  message: string | null | undefined,
+): string | null {
+  if (message === null || message === undefined) {
+    return null;
+  }
+  const markerStart = message.indexOf(REVIEW_GATE_RESULT_PATH_PREFIX);
+  if (markerStart === -1) {
+    return null;
+  }
+  const valueStart = markerStart + REVIEW_GATE_RESULT_PATH_PREFIX.length;
+  const markerEnd = message.indexOf(REVIEW_GATE_RESULT_PATH_SUFFIX, valueStart);
+  if (markerEnd === -1) {
+    return null;
+  }
+  const rawPath = message.slice(valueStart, markerEnd);
+  if (rawPath.includes("\r") || rawPath.includes("\n")) {
+    return null;
+  }
+  const path = rawPath.trim();
+  return path === "" ? null : path;
 }
 
 function sameGateLane(
