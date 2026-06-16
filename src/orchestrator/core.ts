@@ -10528,6 +10528,12 @@ export class OrchestratorCore {
         maxUnknownMergeabilityWaitObservations:
           actuatorConfig.maxUnknownMergeabilityWaitObservations,
       },
+      // Per-workflow actuator auto-merge permission (SYMPH-754), default-CLOSED.
+      // When false, an enqueue-ready candidate yields a terminal `blocked`
+      // decision (reason auto_merge_permission_denied) the actuated branch below
+      // parks for an operator — so enabling the actuator for a new product cannot
+      // silently auto-merge without an explicit grant.
+      autoMergePermission: actuatorConfig.autoMerge,
       fetchLiveState: () => fetchLiveState(candidate),
       appendActuation: (entry) => this.recordRunJournalEntry(entry),
       sideEffects,

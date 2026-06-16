@@ -122,6 +122,21 @@ export interface WorkflowAcGateConfig {
 export interface WorkflowMergeActuatorConfig {
   /** Master switch. When false the actuator stays parked (merge_actuator_unwired). Default false. */
   enabled: boolean;
+  /**
+   * Actuator auto-merge permission (SYMPH-754), DISTINCT from `enabled`.
+   * `enabled` lets the actuator run/observe; this permission lets it ENQUEUE
+   * (auto-merge). Default-CLOSED: when `enabled` is true but this is false the
+   * actuator parks any enqueue-ready candidate with `auto_merge_permission_denied`
+   * instead of enqueuing, so turning the actuator on for a new product cannot
+   * silently start auto-merging without an explicit per-workflow grant.
+   *
+   * This per-workflow permission — not the worker's Mode Permission Envelope — is
+   * the coherent auto-merge envelope: the actuator (not the worker) is the SOLE
+   * auto-merge/enqueue actor, so `ModeScopedPermissionPolicy.canAutoMerge` in
+   * `src/policy/hard-stops.ts` governs the WORKER only and is advisory w.r.t. the
+   * actuator. See `decideMergeActuation`'s `autoMergePermission` gate.
+   */
+  autoMerge: boolean;
   maxWaitMs: number;
   maxLiveStateFailures: number;
   maxSideEffectFailures: number;

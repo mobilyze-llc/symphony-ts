@@ -15,8 +15,16 @@ server:
 # the tracker Done — with bounded, replay-stable recovery and operator parking
 # (runMergeActuatorCycle, SYMPH-746/748). Default-off for every other product;
 # ceilings inherit config defaults (1h queue wait, 5/3/20 failure ceilings).
+# SYMPH-754: `auto_merge` is the actuator's auto-merge/enqueue permission,
+# DISTINCT from `enabled` and default-CLOSED. `enabled: true` lets the actuator
+# run/observe; `auto_merge: true` grants it permission to ENQUEUE. It MUST be
+# granted explicitly here for symphony — otherwise every symphony PR would park
+# as `auto_merge_permission_denied` instead of auto-merging. Every other product
+# leaves it closed (the actuator is the sole auto-merge path; the worker's mode
+# envelope governs the worker only and is advisory w.r.t. the actuator).
 merge_actuator:
   enabled: true
+  auto_merge: true
 ---
 
 You are working on the Symphony orchestrator (symphony-ts). This is the pipeline orchestration layer that schedules and coordinates autonomous development agents.

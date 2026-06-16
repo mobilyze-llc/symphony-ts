@@ -270,6 +270,63 @@ describe("merge candidates", () => {
     });
   });
 
+  it("parks instead of enqueuing when the actuator auto-merge permission is denied (SYMPH-754)", () => {
+    const candidate = reduceMergeCandidates([
+      {
+        ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+        sequence: 2,
+      },
+    ])["issue-1"]!;
+
+    const decision = decideMergeActuation({
+      candidate,
+      // A fresh, green, non-draft candidate that would otherwise enqueue.
+      live: liveState(),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+      autoMergePermission: false,
+    });
+
+    expect(decision).toMatchObject({
+      action: "blocked",
+      reason: "auto_merge_permission_denied",
+      blockers: ["auto_merge_permission_denied"],
+    });
+    // The defining property: a denied permission produces NO enqueue side effect.
+    expect(decision.sideEffectKey).toBeNull();
+  });
+
+  it("enqueues when the actuator auto-merge permission is granted (SYMPH-754)", () => {
+    const candidate = reduceMergeCandidates([
+      {
+        ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+        sequence: 2,
+      },
+    ])["issue-1"]!;
+
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState(),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+      autoMergePermission: true,
+    });
+
+    expect(decision).toMatchObject({
+      action: "enqueue",
+      reason: "merge_queue_required",
+    });
+    expect(decision.sideEffectKey).toContain(":enqueue");
+  });
+
   it("keeps worker merge permissions denied while allowing a separate actuator model", () => {
     const policy = createModeScopedPermissionPolicy({
       mode: "full",
@@ -589,6 +646,7 @@ describe("merge actuator bounded recovery (SYMPH-746)", () => {
       enqueuedAtMs: null,
       maxWaitMs: 30 * 60_000,
       completedSideEffectKeys: new Set(),
+      autoMergePermission: true,
       appendActuation: harness.appendActuation,
       sideEffects: noopSideEffects(),
     });
@@ -972,6 +1030,7 @@ describe("merge actuator bounded recovery (SYMPH-746)", () => {
       fetchLiveState: async () => liveState(),
       appendActuation: harness.appendActuation,
       sideEffects: noopSideEffects(),
+      autoMergePermission: true,
     });
 
     expect(result.outcome).toBe("actuated");
@@ -979,6 +1038,54 @@ describe("merge actuator bounded recovery (SYMPH-746)", () => {
       throw new Error("expected actuated");
     }
     expect(result.run.sideEffect).toBe("enqueue");
+  });
+
+  it("does not enqueue and emits no side effect when auto-merge permission is denied (SYMPH-754)", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    let enqueued = false;
+
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 3, maxSideEffectFailures: 2 },
+      fetchLiveState: async () => liveState(),
+      appendActuation: harness.appendActuation,
+      sideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {
+          enqueued = true;
+        },
+        writeTrackerDone: async () => {},
+      },
+      autoMergePermission: false,
+    });
+
+    expect(result.outcome).toBe("actuated");
+    if (result.outcome !== "actuated") {
+      throw new Error("expected actuated");
+    }
+    // The enqueue side effect must never run.
+    expect(enqueued).toBe(false);
+    expect(result.run.sideEffect).toBe("none");
+    // A terminal `blocked` decision the coordinator does NOT convert to a bounded
+    // wait — core's runLiveMergeActuator parks it (auto_merge_permission_denied).
+    expect(result.run.decision).toMatchObject({
+      action: "blocked",
+      reason: "auto_merge_permission_denied",
+    });
+    // No enqueue actuation row was journaled.
+    expect(
+      harness.entries.some((entry) => entry.metadata.action === "enqueue"),
+    ).toBe(false);
+    // The candidate is not advanced toward the queue.
+    const after = candidateFromJournal([candidateEntry, ...harness.entries]);
+    expect(after.status).toBe("candidate");
   });
 
   it("actuates tracker_done on durable merge proof", async () => {
@@ -1305,6 +1412,7 @@ describe("merge actuator bounded recovery (SYMPH-746)", () => {
       fetchLiveState: async () => liveState({ isDraft: false }),
       appendActuation: harness.appendActuation,
       sideEffects: noopSideEffects(),
+      autoMergePermission: true,
     });
 
     expect(result.outcome).toBe("actuated");
@@ -1622,6 +1730,7 @@ describe("merge actuator bounded pre-enqueue poll (SYMPH-752/755)", () => {
         liveState({ requiredChecks: [{ name: "build", status: "pass" }] }),
       appendActuation: harness.appendActuation,
       sideEffects: noopSideEffects(),
+      autoMergePermission: true,
     });
 
     expect(result.outcome).toBe("actuated");
@@ -1664,6 +1773,7 @@ describe("merge actuator bounded pre-enqueue poll (SYMPH-752/755)", () => {
         enqueuedAtMs: null,
         maxWaitMs: 30 * 60_000,
         completedSideEffectKeys: new Set(),
+        autoMergePermission: true,
       });
       expect(decision).toMatchObject({ action: "enqueue" });
     }
@@ -1807,6 +1917,7 @@ describe("merge actuator bounded pre-enqueue poll (SYMPH-752/755)", () => {
         liveState({ mergeStateStatus: "CLEAN", mergeable: "MERGEABLE" }),
       appendActuation: harness.appendActuation,
       sideEffects: noopSideEffects(),
+      autoMergePermission: true,
     });
 
     expect(result.outcome).toBe("actuated");

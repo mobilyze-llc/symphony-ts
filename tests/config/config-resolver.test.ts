@@ -161,6 +161,7 @@ describe("config-resolver", () => {
     expect(DEFAULT_CODE_GROUNDING_BASE_DIR).toBe(".symphony/code-grounding");
     expect(resolved.mergeActuator).toEqual({
       enabled: false,
+      autoMerge: false,
       maxWaitMs: DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS,
       maxLiveStateFailures: DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES,
       maxSideEffectFailures: DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES,
@@ -174,6 +175,8 @@ describe("config-resolver", () => {
     // Documented numeric defaults (SYMPH-735/752/755): pinned literals so a
     // drift in defaults.ts is caught here, not just mirrored through the constant.
     expect(resolved.mergeActuator?.enabled).toBe(false);
+    // SYMPH-754: the auto-merge permission is default-CLOSED.
+    expect(resolved.mergeActuator?.autoMerge).toBe(false);
     expect(DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS).toBe(3_600_000);
     expect(DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES).toBe(5);
     expect(DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES).toBe(3);
@@ -193,6 +196,7 @@ describe("config-resolver", () => {
       config: {
         merge_actuator: {
           enabled: true,
+          auto_merge: true,
           max_wait_ms: 123,
           max_live_state_failures: 7,
           max_side_effect_failures: 4,
@@ -205,6 +209,7 @@ describe("config-resolver", () => {
 
     expect(resolved.mergeActuator).toEqual({
       enabled: true,
+      autoMerge: true,
       maxWaitMs: 123,
       maxLiveStateFailures: 7,
       maxSideEffectFailures: 4,
@@ -212,6 +217,35 @@ describe("config-resolver", () => {
       maxPendingChecksWaitObservations: 11,
       maxUnknownMergeabilityWaitObservations: 13,
     });
+  });
+
+  it("keeps the actuator auto-merge permission closed unless granted exactly true (SYMPH-754)", () => {
+    // enabled without an explicit auto_merge grant: the actuator runs but must
+    // NOT have enqueue permission — default-CLOSED.
+    const ungranted = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        merge_actuator: {
+          enabled: true,
+        },
+      },
+    });
+    expect(ungranted.mergeActuator?.enabled).toBe(true);
+    expect(ungranted.mergeActuator?.autoMerge).toBe(false);
+
+    // A truthy-but-non-boolean grant must not open it.
+    const stringy = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        merge_actuator: {
+          enabled: true,
+          auto_merge: "true",
+        },
+      },
+    });
+    expect(stringy.mergeActuator?.autoMerge).toBe(false);
   });
 
   it("keeps the merge actuator disabled unless enabled is exactly true", () => {
