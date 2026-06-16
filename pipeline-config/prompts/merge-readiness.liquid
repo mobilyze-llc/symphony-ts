@@ -28,7 +28,20 @@ REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-freshness-merge-$(date +%s)"
 REVIEW_RESULT_PATH="<path-to-latest-clean-review-result.json>"
 
-symphony-council-review-gate \
+run_council_gate() {
+  if [ -n "${SYMPHONY_COUNCIL_REVIEW_GATE:-}" ]; then
+    "$SYMPHONY_COUNCIL_REVIEW_GATE" "$@"
+  elif command -v symphony-council-review-gate >/dev/null 2>&1; then
+    symphony-council-review-gate "$@"
+  elif [ -f dist/src/cli/council-review-gate.js ]; then
+    node dist/src/cli/council-review-gate.js "$@"
+  else
+    echo "Set SYMPHONY_COUNCIL_REVIEW_GATE, install symphony-council-review-gate on PATH, or run from a built symphony-ts checkout." >&2
+    return 127
+  fi
+}
+
+run_council_gate \
   --issue-id <issue-identifier> \
   --artifact-dir "$ARTIFACT_DIR" \
   --workspace "$PWD" \

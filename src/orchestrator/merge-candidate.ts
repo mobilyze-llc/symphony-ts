@@ -317,11 +317,22 @@ export function decideMergeActuation(input: {
   const pendingChecks = input.live.requiredChecks
     .filter((check) => check.status === "pending")
     .map((check) => check.name);
-  if (failingChecks.length > 0 || pendingChecks.length > 0) {
+  if (failingChecks.length > 0) {
     return {
       action: "blocked",
-      reason: failingChecks.length > 0 ? "failing_checks" : "pending_checks",
-      blockers: [...failingChecks, ...pendingChecks],
+      reason: "failing_checks",
+      blockers: failingChecks,
+      sideEffectKey: null,
+    };
+  }
+  if (
+    pendingChecks.length > 0 &&
+    input.candidate.status !== "merge_queue_pending"
+  ) {
+    return {
+      action: "blocked",
+      reason: "pending_checks",
+      blockers: pendingChecks,
       sideEffectKey: null,
     };
   }

@@ -92,6 +92,7 @@ describe("runtime host merge actuator parsing", () => {
           { name: "required-cancel", bucket: "cancel" },
           { name: "required-pending", bucket: "pending" },
           { name: "unknown-bucket", bucket: "startup" },
+          { name: "missing-bucket" },
           { name: "", bucket: "pass" },
         ]),
       ),
@@ -101,7 +102,15 @@ describe("runtime host merge actuator parsing", () => {
       { name: "required-fail", status: "fail" },
       { name: "required-cancel", status: "fail" },
       { name: "required-pending", status: "pending" },
+      { name: "unknown-bucket", status: "pending" },
+      { name: "missing-bucket", status: "pending" },
     ]);
+    expect(
+      runtimeHostMergeActuatorTesting.GH_PR_CHECKS_JSON_EXIT_CODES.has(1),
+    ).toBe(true);
+    expect(
+      runtimeHostMergeActuatorTesting.GH_PR_CHECKS_JSON_EXIT_CODES.has(8),
+    ).toBe(true);
   });
 
   it("fails closed for malformed merge actuator JSON fields", () => {

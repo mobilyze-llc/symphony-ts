@@ -421,6 +421,7 @@ const SNAPSHOT_REFRESH_EXTERNAL_JOURNAL_KINDS =
   ]);
 
 const execFileAsync = promisify(execFile);
+const GH_PR_CHECKS_JSON_EXIT_CODES = new Set([0, 1, 8]);
 
 /**
  * Repo root of the running checkout for deploy-drift capture:
@@ -3587,7 +3588,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         "--json",
         "name,bucket",
       ],
-      new Set([0, 8]),
+      GH_PR_CHECKS_JSON_EXIT_CODES,
     );
     const parsed = parseJsonObject(output);
     if (parsed === null) {
@@ -7069,10 +7070,10 @@ function parseRequiredChecks(
     if (bucket === "fail" || bucket === "cancel") {
       return [{ name, status: "fail" as const }];
     }
-    if (bucket === "pending") {
+    if (bucket === "pending" || bucket === null) {
       return [{ name, status: "pending" as const }];
     }
-    return [];
+    return [{ name, status: "pending" as const }];
   });
 }
 
@@ -7104,6 +7105,7 @@ function exitCodeValue(error: unknown): number | null {
 }
 
 export const runtimeHostMergeActuatorTesting = {
+  GH_PR_CHECKS_JSON_EXIT_CODES,
   parseJsonObject,
   parseMergeCommit,
   parsePrState,

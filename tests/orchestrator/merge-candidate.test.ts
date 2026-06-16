@@ -241,6 +241,35 @@ describe("merge candidates", () => {
     ).toMatchObject({ allowed: false });
   });
 
+  it("continues polling queued PRs while required checks are pending", () => {
+    const candidateEntry = {
+      ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+      sequence: 2,
+    };
+    const candidate = {
+      ...reduceMergeCandidates([candidateEntry])["issue-1"]!,
+      status: "merge_queue_pending" as const,
+    };
+
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState({
+          requiredChecks: [{ name: "merge queue", status: "pending" }],
+        }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+        enqueuedAtMs: Date.parse("2026-06-16T01:00:00.000Z"),
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({
+      action: "poll",
+      reason: "merge_queue_pending",
+    });
+  });
+
   it("runs side effects only after appending the actuation journal barrier", async () => {
     const candidate = reduceMergeCandidates([
       {
