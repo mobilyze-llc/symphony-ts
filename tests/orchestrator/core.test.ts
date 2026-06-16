@@ -7493,6 +7493,47 @@ describe("live merge actuator (SYMPH-735)", () => {
     ).toBe(true);
   });
 
+  it("parks a candidate whose live PR is blocked by a failing check instead of re-polling", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const markReady = vi.fn(async () => {});
+    const enqueue = vi.fn(async () => {});
+    const writeTrackerDone = vi.fn(async () => {});
+    const orchestrator = createOrchestrator({
+      config: createLiveMergeActuatorConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      // Identity-matched OPEN PR with a FAILING required check → decision
+      // "blocked" (failing_checks). A blocked decision journals no actuation row
+      // and produces no countable coordinator evidence, so it must PARK, not
+      // re-poll forever (council R2: Codex).
+      getMergeActuatorLiveState: async () =>
+        actuatorLiveState({
+          requiredChecks: [{ name: "test", status: "fail" }],
+        }),
+      mergeActuatorSideEffects: { markReady, enqueue, writeTrackerDone },
+    });
+
+    await stageMergeCandidate(orchestrator, reviewResultPath);
+    const retryResult = await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(writeTrackerDone).not.toHaveBeenCalled();
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.resumeRequired.has("1")).toBe(true);
+    expect(state.completed.has("1")).toBe(false);
+    expect(retryResult.dispatched).toBe(false);
+    // Parked, not re-polled: no continuation retry scheduled.
+    expect(state.retryAttempts["1"]).toBeUndefined();
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "failure_exhausted",
+      )?.metadata.reason,
+    ).toContain("failing_checks");
+  });
+
   it("still parks with merge_actuator_unwired when the actuator is disabled", async () => {
     const reviewResultPath = await writeReviewGateResultFixture();
     // Default config (mergeActuator absent → disabled) AND no providers wired.

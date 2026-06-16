@@ -10586,6 +10586,25 @@ export class OrchestratorCore {
       return true;
     }
 
+    if (result.run.decision.action === "blocked") {
+      // A `blocked` decision (failing/pending checks, missing required review,
+      // merged-without-proof) journals NO actuation row, so the candidate status
+      // is unchanged and the status checks above miss it. It is a terminal
+      // not-mergeable-now state that will not self-resolve under the actuator's
+      // control, so park for an operator rather than re-polling forever — the
+      // coordinator appends no countable evidence for it, so a deferral re-poll
+      // would loop unbounded (council R2: Codex). Matches the pre-fix / #562
+      // behavior of parking blocked decisions.
+      await this.parkMergeCandidateInvariantFailure({
+        issue,
+        stageName,
+        reasonCode: result.run.decision.reason,
+        detail: `merge actuator candidate ${candidate.candidateId} is not mergeable: ${result.run.decision.blockers.join(", ") || result.run.decision.reason}`,
+        reviewResultPath: candidate.reviewResultPath,
+      });
+      return true;
+    }
+
     // candidate / ready_marked / merge_queue_pending / superseded — still in
     // progress; re-poll next cycle. The coordinator owns the failure/wait bound
     // (it returns "parked" on exhaustion), so deferral:true keeps this re-poll
