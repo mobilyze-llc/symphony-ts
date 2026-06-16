@@ -203,6 +203,9 @@ export const PIPELINE_VERDICT_SCOPE_ID = "__dispatch__";
 export const PIPELINE_VERDICT_SCOPE_IDENTIFIER = "PIPELINE";
 
 const CONTINUATION_RETRY_DELAY_MS = 1_000;
+const MERGE_ACTUATOR_POLL_BACKOFF_MS = [
+  30_000, 30_000, 60_000, 120_000, 300_000,
+] as const;
 const HARD_STOP_COMMENT_UNTRUSTED_FIELD_MAX_LEN = 600;
 
 /**
@@ -470,7 +473,7 @@ export interface TimerScheduler {
 interface ScheduledRetryContext {
   attempt: number;
   identifier: string | null;
-  delayType: "continuation" | "failure";
+  delayType: RetryEntry["delayType"];
 }
 
 /**
@@ -10550,11 +10553,7 @@ export class OrchestratorCore {
     }
 
     if (result.decision.action === "noop") {
-      this.scheduleRetry(issue.id, 1, {
-        identifier: issue.identifier,
-        error: result.decision.reason,
-        delayType: "continuation",
-      });
+      this.scheduleMergeActuatorRetry(issue, candidate, result.decision.reason);
       return true;
     }
 
@@ -10563,11 +10562,7 @@ export class OrchestratorCore {
       result.decision.action === "enqueue" ||
       result.decision.action === "poll"
     ) {
-      this.scheduleRetry(issue.id, 1, {
-        identifier: issue.identifier,
-        error: result.decision.reason,
-        delayType: "continuation",
-      });
+      this.scheduleMergeActuatorRetry(issue, candidate, result.decision.reason);
       return true;
     }
 
@@ -10587,6 +10582,18 @@ export class OrchestratorCore {
     }
 
     return true;
+  }
+
+  private scheduleMergeActuatorRetry(
+    issue: Issue,
+    candidate: MergeCandidateRecord,
+    reason: string,
+  ): void {
+    this.scheduleRetry(issue.id, this.nextMergeActuatorPollAttempt(candidate), {
+      identifier: issue.identifier,
+      error: reason,
+      delayType: "merge_actuator_poll",
+    });
   }
 
   private completedMergeActuationSideEffectKeys(
@@ -10624,6 +10631,24 @@ export class OrchestratorCore {
       }
     }
     return completed;
+  }
+
+  private nextMergeActuatorPollAttempt(
+    candidate: MergeCandidateRecord,
+  ): number {
+    let pollCount = 0;
+    for (const entry of this.state.dispatcherRunJournal) {
+      if (
+        entry.kind === "merge_actuation" &&
+        entry.issueId === candidate.issueId &&
+        readMetadataString(entry.metadata, "candidate_id") ===
+          candidate.candidateId &&
+        readMetadataString(entry.metadata, "action") === "poll"
+      ) {
+        pollCount += 1;
+      }
+    }
+    return pollCount + 1;
   }
 
   private mergeActuationSideEffectKey(
@@ -12042,7 +12067,7 @@ export class OrchestratorCore {
        * the title is resolved from state.running (which may already be cleared). */
       issueTitle?: string;
       error: string | null;
-      delayType: "continuation" | "failure";
+      delayType: RetryEntry["delayType"];
       /** When true, this call is an admission deferral (no-slots or deterministic
        * supervision pause) — not a real worker failure.  Deferrals must never
        * participate in the novelty short-circuit: neither recording nor comparing
@@ -12234,13 +12259,7 @@ export class OrchestratorCore {
 
     this.clearRetryEntry(issueId);
 
-    const delayMs =
-      input.delayType === "continuation"
-        ? CONTINUATION_RETRY_DELAY_MS
-        : computeFailureRetryDelayMs(
-            attempt,
-            this.config.agent.maxRetryBackoffMs,
-          );
+    const delayMs = this.computeRetryDelayMs(input.delayType, attempt);
     const dueAtMs = this.now().getTime() + delayMs;
     const timerHandle = this.timerScheduler.set(() => {
       void this.runScheduledRetryTimer(issueId, {
@@ -12263,6 +12282,23 @@ export class OrchestratorCore {
     this.state.claimed.add(issueId);
     this.state.retryAttempts[issueId] = retryEntry;
     return retryEntry;
+  }
+
+  private computeRetryDelayMs(
+    delayType: RetryEntry["delayType"],
+    attempt: number,
+  ): number {
+    if (delayType === "continuation") {
+      return CONTINUATION_RETRY_DELAY_MS;
+    }
+    if (delayType === "merge_actuator_poll") {
+      const index = Math.max(0, attempt - 1);
+      return MERGE_ACTUATOR_POLL_BACKOFF_MS[index] ?? 300_000;
+    }
+    return computeFailureRetryDelayMs(
+      attempt,
+      this.config.agent.maxRetryBackoffMs,
+    );
   }
 
   private async runScheduledRetryTimer(

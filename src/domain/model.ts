@@ -848,7 +848,7 @@ export interface RetryEntry {
   dueAtMs: number;
   timerHandle: ReturnType<typeof setTimeout> | null;
   error: string | null;
-  delayType: "continuation" | "failure";
+  delayType: "continuation" | "failure" | "merge_actuator_poll";
 }
 
 export const RIGHT_SIZING_MODES = ["prototype", "thin", "full"] as const;

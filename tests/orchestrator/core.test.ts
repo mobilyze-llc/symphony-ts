@@ -565,10 +565,11 @@ describe("orchestrator core", () => {
     expect(state.retryAttempts["1"]).toMatchObject({
       issueId: "1",
       identifier: "ISSUE-1",
-      delayType: "continuation",
+      delayType: "merge_actuator_poll",
       error: "side_effect_already_journaled",
     });
     expect(timers.scheduled).toHaveLength(1);
+    expect(timers.scheduled[0]?.delayMs).toBe(30_000);
     expect(
       state.dispatcherRunJournal.findLast(
         (entry) =>
