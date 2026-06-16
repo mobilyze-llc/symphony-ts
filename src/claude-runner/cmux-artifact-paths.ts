@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, realpath, rm, stat } from "node:fs/promises";
+import { lstat, readFile, realpath, rm, stat, unlink } from "node:fs/promises";
 import { basename, isAbsolute, relative, resolve } from "node:path";
 
 export type CmuxMirrorFallbackFailureKind =
@@ -33,7 +33,22 @@ export async function removeStaleCmuxMirror(input: {
   artifactDir: string;
   artifactName: string;
 }): Promise<void> {
-  const mirrorPath = resolve(input.artifactDir, `${input.artifactName}.md`);
+  const resolvedArtifactDir = resolve(input.artifactDir);
+  const mirrorPath = resolve(resolvedArtifactDir, `${input.artifactName}.md`);
+  if (!isInside(resolvedArtifactDir, mirrorPath)) {
+    return;
+  }
+
+  try {
+    const mirrorEntry = await lstat(mirrorPath);
+    if (mirrorEntry.isSymbolicLink()) {
+      await unlink(mirrorPath);
+      return;
+    }
+  } catch {
+    return;
+  }
+
   const mirror = await validateArtifactPathWithinDir(
     input.artifactDir,
     mirrorPath,

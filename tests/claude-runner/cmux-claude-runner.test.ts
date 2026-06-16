@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -677,7 +678,7 @@ describe("Claude CMUX runner", () => {
     });
   });
 
-  it("skips stale mirror cleanup when the mirror symlink resolves outside the artifact dir", async () => {
+  it("unlinks stale mirror symlinks without touching outside targets", async () => {
     const harness = await createHarness();
     const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-remote-"));
     const remoteArtifact = join(outsideDir, "opus.md");
@@ -718,11 +719,12 @@ describe("Claude CMUX runner", () => {
     );
 
     expect(await readFile(symlinkTarget, "utf8")).toContain("ready_as_written");
+    await expect(lstat(mirroredArtifact)).rejects.toThrow();
     expect(result.status).toBe("invalid_artifact");
     expect(result.attempts[0]?.mirrorFallback).toMatchObject({
       attempted: true,
       used: false,
-      failureKind: "symlink_escape",
+      failureKind: "absent",
       remoteArtifactPath: remoteArtifact,
     });
   });
