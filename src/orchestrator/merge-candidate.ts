@@ -813,11 +813,15 @@ function firstLiveBlocker(
   if (live.mergeStateStatus === "DIRTY" || live.mergeable === "CONFLICTING") {
     return "merge_conflict";
   }
-  if (
-    live.mergeStateStatus === "BEHIND" &&
-    candidate.status !== "merge_queue_pending"
-  ) {
+  const isWaitingOnQueue =
+    candidate.status === "merge_queue_pending" ||
+    isUnconfirmedEnqueueIntent(candidate);
+  if (live.mergeStateStatus === "BEHIND" && !isWaitingOnQueue) {
     return "behind_base";
+  }
+  const nonGreenMergeStateBlocker = firstNonGreenMergeStateBlocker(live);
+  if (!isWaitingOnQueue && nonGreenMergeStateBlocker !== null) {
+    return nonGreenMergeStateBlocker;
   }
   return null;
 }
@@ -839,7 +843,27 @@ function firstLiveIdentityBlocker(
 }
 
 function hasGreenMergeability(live: MergeActuatorLiveState): boolean {
-  return live.mergeable === "MERGEABLE" && live.mergeStateStatus !== "UNKNOWN";
+  return (
+    live.mergeable === "MERGEABLE" &&
+    (live.mergeStateStatus === "CLEAN" ||
+      live.mergeStateStatus === "HAS_HOOKS" ||
+      live.mergeStateStatus === "UNSTABLE")
+  );
+}
+
+function firstNonGreenMergeStateBlocker(
+  live: MergeActuatorLiveState,
+): string | null {
+  if (
+    live.mergeStateStatus === null ||
+    live.mergeStateStatus === "UNKNOWN" ||
+    live.mergeStateStatus === "CLEAN" ||
+    live.mergeStateStatus === "HAS_HOOKS" ||
+    live.mergeStateStatus === "UNSTABLE"
+  ) {
+    return null;
+  }
+  return `merge_state_${live.mergeStateStatus.toLowerCase()}`;
 }
 
 function hasExceededWait(input: {

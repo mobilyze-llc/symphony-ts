@@ -300,6 +300,75 @@ describe("merge candidates", () => {
     });
   });
 
+  it("continues polling unconfirmed enqueue recovery while GitHub reports the queue branch behind", () => {
+    const candidateEntry = {
+      ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+      sequence: 2,
+    };
+    const rawEnqueueIntent = {
+      ...buildMergeActuationEntry({
+        candidate: reduceMergeCandidates([candidateEntry])["issue-1"]!,
+        action: "enqueue",
+        timestamp: "2026-06-16T01:00:00.000Z",
+        ownerId: "owner-1",
+        lease: lease(),
+        live: liveState(),
+        reason: "merge_queue_required",
+      }),
+      sequence: 3,
+    };
+    const candidate = reduceMergeCandidates([candidateEntry, rawEnqueueIntent])[
+      "issue-1"
+    ]!;
+
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState({
+          mergeStateStatus: "BEHIND",
+          mergeable: "MERGEABLE",
+        }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+        enqueuedAtMs: Date.parse(rawEnqueueIntent.timestamp),
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({
+      action: "poll",
+      reason: "enqueue_status_uncertain",
+    });
+  });
+
+  it("blocks pre-enqueue candidates when GitHub reports a non-green merge state", () => {
+    const candidateEntry = {
+      ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+      sequence: 2,
+    };
+    const candidate = reduceMergeCandidates([candidateEntry])["issue-1"]!;
+
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState({
+          mergeStateStatus: "BLOCKED",
+          mergeable: "MERGEABLE",
+        }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({
+      action: "stale",
+      reason: "merge_state_blocked",
+      blockers: ["merge_state_blocked"],
+    });
+  });
+
   it("polls pre-enqueue GitHub mergeability unknown before parking after the bounded wait", () => {
     const candidateEntry = {
       ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
