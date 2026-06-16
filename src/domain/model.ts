@@ -848,7 +848,13 @@ export interface RetryEntry {
   dueAtMs: number;
   timerHandle: ReturnType<typeof setTimeout> | null;
   error: string | null;
-  delayType: "continuation" | "failure";
+  /**
+   * `merge_actuator_poll` (SYMPH-753): orchestrator-side merge-actuator re-poll
+   * on a dedicated exponential backoff (journal-derived, replay-stable attempt
+   * count), distinct from the 1s `continuation` cadence. Like `continuation` it
+   * is deferral-class — it never counts against the failure retry ceiling.
+   */
+  delayType: "continuation" | "failure" | "merge_actuator_poll";
 }
 
 export const RIGHT_SIZING_MODES = ["prototype", "thin", "full"] as const;

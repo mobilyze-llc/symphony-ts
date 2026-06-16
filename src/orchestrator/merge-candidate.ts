@@ -1264,6 +1264,48 @@ function countDraftWaitObservations(
 }
 
 /**
+ * Countable re-poll actions whose cadence the SYMPH-753 backoff governs: the
+ * merge-queue `poll` plus the bounded pre-enqueue/draft waits. Each leaves one
+ * distinct-keyed `merge_actuation` row per dispatch cycle.
+ */
+const MERGE_ACTUATOR_POLL_ACTIONS: ReadonlySet<MergeActuationAction> = new Set([
+  "poll",
+  "draft_wait",
+  "pending_checks_wait",
+  "unknown_mergeability_wait",
+]);
+
+/**
+ * The 1-based attempt index for the merge-actuator re-poll backoff (SYMPH-753),
+ * derived from the durable journal so it is replay-stable: the count of distinct
+ * countable re-poll rows ({@link MERGE_ACTUATOR_POLL_ACTIONS}) for the candidate.
+ * Call AFTER the current cycle's poll/wait evidence has been appended, so the
+ * first re-poll returns 1 (the first backoff rung). Returns 1 when there is no
+ * such evidence yet, so the cadence never under-counts to a zero/negative rung.
+ */
+export function mergeActuatorPollAttempt(
+  journal: readonly DispatcherRunJournalEntry[],
+  candidateId: string,
+): number {
+  const keys = new Set<string>();
+  for (const entry of journal) {
+    if (
+      entry.kind === "merge_actuation" &&
+      stringField(entry.metadata.candidate_id) === candidateId
+    ) {
+      const action = stringField(entry.metadata.action);
+      if (
+        action !== null &&
+        MERGE_ACTUATOR_POLL_ACTIONS.has(action as MergeActuationAction)
+      ) {
+        keys.add(entry.idempotencyKey);
+      }
+    }
+  }
+  return Math.max(keys.size, 1);
+}
+
+/**
  * Count distinct idempotency keys of `merge_actuation` rows with the given
  * countable wait `action` for a candidate (SYMPH-752/755). Each dispatch cycle
  * holds a distinct lease id, so each cycle's wait row is a distinct key — this
