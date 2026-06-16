@@ -300,6 +300,42 @@ describe("merge candidates", () => {
     expect(decision.sideEffectKey).toBeNull();
   });
 
+  it("fails closed at the enqueue gate when the auto-merge permission is omitted entirely (SYMPH-754)", () => {
+    // Council Track T1: pin the optional-param contract directly at the gate.
+    // `autoMergePermission` is optional (the wrapper hops default it to false via
+    // `?? false`); an omitted key (undefined) MUST be treated as denied, never
+    // enqueued. This is the fail-closed guarantee for any future caller that
+    // forgets to thread the permission.
+    const candidate = reduceMergeCandidates([
+      {
+        ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+        sequence: 2,
+      },
+    ])["issue-1"]!;
+
+    const decision = decideMergeActuation({
+      candidate,
+      // An otherwise enqueue-ready candidate: OPEN, not draft, no failing/pending
+      // required checks, GitHub review not required, green mergeability
+      // (MERGEABLE + CLEAN), and status !== merge_queue_pending.
+      live: liveState(),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+      // autoMergePermission intentionally OMITTED (undefined) — must fail closed.
+    });
+
+    expect(decision).toEqual({
+      action: "blocked",
+      reason: "auto_merge_permission_denied",
+      blockers: ["auto_merge_permission_denied"],
+      sideEffectKey: null,
+    });
+  });
+
   it("enqueues when the actuator auto-merge permission is granted (SYMPH-754)", () => {
     const candidate = reduceMergeCandidates([
       {
@@ -1738,6 +1774,98 @@ describe("merge actuator bounded pre-enqueue poll (SYMPH-752/755)", () => {
       throw new Error("expected actuated");
     }
     expect(result.run.sideEffect).toBe("enqueue");
+  });
+
+  it("evaluates the bounded pending-checks wait BEFORE the auto-merge permission park (SYMPH-754)", async () => {
+    // Council Track T2: lock the ordering invariant. With the permission DENIED
+    // and an in-flight required check on a fresh candidate, the CI-readiness wait
+    // must be evaluated first — cycle 1 is a bounded pending_checks_pre_enqueue
+    // retry, NOT an immediate auto_merge_permission_denied park and NOT an
+    // enqueue. Only once checks go green (cycle 2) does the decision reach the
+    // permission gate and park. (The permission gate sits after the green-
+    // mergeability / required-check classification in decideMergeActuation.)
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    let enqueued = false;
+    const sideEffects: MergeActuatorSideEffects = {
+      markReady: async () => {},
+      enqueue: async () => {
+        enqueued = true;
+      },
+      writeTrackerDone: async () => {},
+    };
+
+    // Cycle 1: pending check + permission denied → bounded pending-checks wait,
+    // NOT a permission park.
+    const first = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-1" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:01:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      fetchLiveState: async () =>
+        liveState({ requiredChecks: [{ name: "build", status: "pending" }] }),
+      appendActuation: harness.appendActuation,
+      sideEffects,
+      autoMergePermission: false,
+    });
+
+    expect(first.outcome).toBe("retry");
+    if (first.outcome !== "retry") {
+      throw new Error("expected the pending-checks wait retry, not a park");
+    }
+    expect(first.reason).toBe("pending_checks_pre_enqueue");
+    // The permission park must NOT have fired yet.
+    expect(
+      harness.entries.some(
+        (entry) =>
+          entry.metadata.action === "parked" &&
+          entry.metadata.reason === "auto_merge_permission_denied",
+      ),
+    ).toBe(false);
+
+    // Cycle 2: check now passing → the decision reaches the permission gate and
+    // parks (permission still denied). No enqueue side effect or journal row.
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-2" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:02:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      fetchLiveState: async () =>
+        liveState({ requiredChecks: [{ name: "build", status: "pass" }] }),
+      appendActuation: harness.appendActuation,
+      sideEffects,
+      autoMergePermission: false,
+    });
+
+    // A terminal `blocked` decision (auto_merge_permission_denied) the coordinator
+    // does not convert to a bounded wait: the cycle returns `actuated` with that
+    // decision; core's runLiveMergeActuator parks it for an operator.
+    expect(result.outcome).toBe("actuated");
+    if (result.outcome !== "actuated") {
+      throw new Error("expected actuated with a terminal blocked decision");
+    }
+    expect(result.run.decision).toMatchObject({
+      action: "blocked",
+      reason: "auto_merge_permission_denied",
+    });
+    expect(result.run.sideEffect).toBe("none");
+    // The enqueue side effect never ran across either cycle.
+    expect(enqueued).toBe(false);
+    // No enqueue actuation row was journaled.
+    expect(
+      harness.entries.some((entry) => entry.metadata.action === "enqueue"),
+    ).toBe(false);
+    // The candidate is never advanced toward the queue.
+    const after = candidateFromJournal([candidateEntry, ...harness.entries]);
+    expect(after.status).toBe("candidate");
   });
 
   // ---- 752: green-mergeability gate before enqueue ----
