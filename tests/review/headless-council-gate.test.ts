@@ -3042,15 +3042,63 @@ describe("runHeadlessCouncilGate", () => {
     const lane = result.lanes.find((entry) => entry.laneId === "claude-opus")!;
     expect(lane).toMatchObject({
       verdict: "error",
-      message: "Reviewer artifact mirror fallback failed: stale.",
+      message: "Reviewer artifact mirror fallback failed: absent.",
       artifactPath: null,
       rawArtifactPath: join(tmpdir(), "claude-opus.md"),
       mirrorFallback: {
         attempted: true,
         used: false,
         selectedMirrorPath: mirroredArtifact,
-        freshnessPassed: false,
-        failureKind: "stale",
+        freshnessPassed: null,
+        failureKind: "absent",
+      },
+    });
+  });
+
+  it("removes pre-existing future-dated remote lane mirrors before launch", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          json: {
+            state: "complete",
+            artifact_path: join(tmpdir(), "claude-opus.md"),
+          },
+        },
+      },
+    });
+    const mirroredArtifact = join(harness.artifactDir, "claude-opus.md");
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      mirroredArtifact,
+      "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n",
+    );
+    const futureTime = new Date(Date.now() + 60_000);
+    await utimes(mirroredArtifact, futureTime, futureTime);
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    const lane = result.lanes.find((entry) => entry.laneId === "claude-opus")!;
+    expect(lane).toMatchObject({
+      verdict: "error",
+      message: "Reviewer artifact mirror fallback failed: absent.",
+      artifactPath: null,
+      rawArtifactPath: join(tmpdir(), "claude-opus.md"),
+      mirrorFallback: {
+        attempted: true,
+        used: false,
+        selectedMirrorPath: mirroredArtifact,
+        failureKind: "absent",
       },
     });
   });

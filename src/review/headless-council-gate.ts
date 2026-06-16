@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 
 import {
   type CmuxMirrorFallbackStatus,
+  removeStaleCmuxMirror,
   resolveCmuxArtifactPath,
 } from "../claude-runner/cmux-artifact-paths.js";
 import type { CouncilRiskPredicateResult } from "../domain/model.js";
@@ -3589,6 +3590,10 @@ async function runReviewerLane(input: {
     ...laneAgentArgs(input.lane, input.artifactDir),
   ];
 
+  await removeStaleCmuxMirror({
+    artifactDir: input.artifactDir,
+    artifactName: input.lane.laneId,
+  });
   const result = await input.runCommand(input.cmuxSpawnBin, args, {
     cwd: input.workspace,
     env: input.env,
@@ -3701,6 +3706,10 @@ async function runCodexLeadLane(input: {
     });
   }
 
+  await removeStaleCmuxMirror({
+    artifactDir: input.artifactDir,
+    artifactName: laneId,
+  });
   const result = await input.runCommand(
     input.cmuxSpawnBin,
     [
