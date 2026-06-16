@@ -4370,17 +4370,18 @@ async function parseLaneResult(input: {
   const state = parseLaneState(parsed.state);
   const telemetry = await laneTelemetryFromCmuxRun(parsed, state);
   if (commandResult.exitCode !== 0 || state !== "complete") {
+    const rawArtifactPath = stringOrNull(parsed.artifact_path);
     return {
       ...laneIdentity,
       state,
       verdict: "error",
-      artifactPath: stringOrNull(parsed.artifact_path),
+      artifactPath: null,
       message:
         parsed.message ??
         `cmux-spawn lane ended in ${state} with exit code ${commandResult.exitCode}.`,
       degradedReason: null,
       ...telemetry,
-      rawArtifactPath: stringOrNull(parsed.artifact_path),
+      rawArtifactPath,
       structuredArtifactPath: null,
       structuredArtifact: null,
     };
@@ -4411,7 +4412,10 @@ async function parseLaneResult(input: {
       ...laneIdentity,
       state: "error",
       verdict: "error",
-      artifactPath,
+      artifactPath:
+        (artifactPathResolution?.validationErrors.length ?? 0) > 0
+          ? null
+          : artifactPath,
       message:
         fallbackKind === null
           ? "Reviewer artifact was missing or empty."

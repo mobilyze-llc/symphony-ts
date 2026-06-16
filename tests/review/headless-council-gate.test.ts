@@ -2950,7 +2950,7 @@ describe("runHeadlessCouncilGate", () => {
       result.lanes.find((lane) => lane.laneId === "claude-opus"),
     ).toMatchObject({
       verdict: "error",
-      artifactPath: remoteArtifact,
+      artifactPath: null,
       rawArtifactPath: remoteArtifact,
       message: "Reviewer artifact mirror fallback failed: remote_mismatch.",
       mirrorFallback: {
@@ -2959,6 +2959,9 @@ describe("runHeadlessCouncilGate", () => {
         failureKind: "remote_mismatch",
       },
     });
+    expect(await readFile(remoteArtifact, "utf-8")).not.toContain(
+      "symphony-review-bundle",
+    );
   });
 
   it("resolves remote lane artifact paths through same-stem local mirrors", async () => {
@@ -3040,7 +3043,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(lane).toMatchObject({
       verdict: "error",
       message: "Reviewer artifact mirror fallback failed: stale.",
-      artifactPath: join(tmpdir(), "claude-opus.md"),
+      artifactPath: null,
       rawArtifactPath: join(tmpdir(), "claude-opus.md"),
       mirrorFallback: {
         attempted: true,
