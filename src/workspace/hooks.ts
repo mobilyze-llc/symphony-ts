@@ -91,6 +91,16 @@ export class WorkspaceHookError extends Error {
   }
 }
 
+export class WorkspaceHookTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number, options?: { cause?: unknown }) {
+    super(`Workspace hook timed out after ${timeoutMs} ms.`, options);
+    this.name = "WorkspaceHookTimeoutError";
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 export class WorkspaceHookRunner {
   readonly #config: WorkspaceHookRunnerConfig;
   readonly #execute: HookCommandExecutor;
@@ -179,20 +189,26 @@ export class WorkspaceHookRunner {
       }
 
       const durationMs = Date.now() - startedAt;
+      const timedOut = error instanceof WorkspaceHookTimeoutError;
       const hookError = new WorkspaceHookError({
-        code: ERROR_CODES.hookTimedOut,
-        message: `Workspace hook '${options.name}' timed out after ${this.#config.timeoutMs} ms.`,
+        code: timedOut
+          ? ERROR_CODES.hookTimedOut
+          : ERROR_CODES.hookExecutionFailed,
+        message: timedOut
+          ? `Workspace hook '${options.name}' timed out after ${this.#config.timeoutMs} ms.`
+          : `Workspace hook '${options.name}' executor failed before completion.`,
         hook: options.name,
         workspacePath: options.workspacePath,
         cause: error,
       });
       this.#log({
         level: "error",
-        event: "workspace_hook_timed_out",
+        event: timedOut ? "workspace_hook_timed_out" : "workspace_hook_failed",
         hook: options.name,
         workspacePath: options.workspacePath,
         durationMs,
         errorCode: hookError.code,
+        exitCode: null,
       });
       throw hookError;
     }
@@ -236,9 +252,7 @@ export async function executeShellHook(
 
       settled = true;
       child.kill("SIGTERM");
-      reject(
-        new Error(`Workspace hook timed out after ${options.timeoutMs} ms.`),
-      );
+      reject(new WorkspaceHookTimeoutError(options.timeoutMs));
     }, options.timeoutMs);
 
     child.stdout?.setEncoding("utf8");

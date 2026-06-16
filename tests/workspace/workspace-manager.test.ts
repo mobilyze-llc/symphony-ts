@@ -310,6 +310,83 @@ describe("WorkspaceManager", () => {
     expect(getCreationMutexRegistrySizeForTests()).toBe(0);
   });
 
+  it("keeps the same-root mutex while a queued caller waits behind a failing hook", async () => {
+    const root = await createRoot();
+    let unblockFirstHook!: () => void;
+    const firstHookMayThrow = new Promise<void>((resolve) => {
+      unblockFirstHook = resolve;
+    });
+    let unblockSecondHook!: () => void;
+    const secondHookMayFinish = new Promise<void>((resolve) => {
+      unblockSecondHook = resolve;
+    });
+    let signalFirstHookStarted!: () => void;
+    const observedFirstHook = new Promise<void>((resolve) => {
+      signalFirstHookStarted = resolve;
+    });
+    let hookCalls = 0;
+    const hooks = new WorkspaceHookRunner({
+      config: {
+        afterCreate: "prepare",
+        beforeRun: null,
+        afterRun: null,
+        beforeRemove: null,
+        timeoutMs: 5_000,
+      },
+      execute: async () => {
+        hookCalls++;
+        if (hookCalls === 1) {
+          signalFirstHookStarted();
+          await firstHookMayThrow;
+          throw new Error("first hook fails while another caller is queued");
+        }
+
+        if (hookCalls === 2) {
+          await secondHookMayFinish;
+        }
+
+        return { exitCode: 0, signal: null, stdout: "", stderr: "" };
+      },
+    });
+    const manager = new WorkspaceManager({
+      root,
+      hooks,
+      verifyIsolation: null,
+    });
+
+    const firstCreation = manager.createForIssue("issue-queued-fail-a");
+    await observedFirstHook;
+    const mutex = getCreationMutexForTests(root);
+    const secondCreation = manager.createForIssue("issue-queued-fail-b");
+
+    await waitForMutexDepth(
+      mutex,
+      2,
+      "second caller never queued behind mutex",
+    );
+    expect(getCreationMutexForTests(root)).toBe(mutex);
+    expect(getCreationMutexRegistrySizeForTests()).toBe(1);
+
+    unblockFirstHook();
+    await expect(firstCreation).rejects.toThrowError(
+      expect.objectContaining<Partial<WorkspacePathError>>({
+        code: ERROR_CODES.workspaceCreateFailed,
+      }),
+    );
+
+    expect(getCreationMutexRegistrySizeForTests()).toBe(1);
+    expect(mutex.depth).toBe(1);
+
+    unblockSecondHook();
+    await expect(secondCreation).resolves.toMatchObject({
+      createdNow: true,
+    });
+
+    expect(hookCalls).toBe(2);
+    expect(mutex.depth).toBe(0);
+    expect(getCreationMutexRegistrySizeForTests()).toBe(0);
+  });
+
   it("keeps a registry entry while a same-root waiter is queued", async () => {
     const root = await createRoot();
     const mutex = getCreationMutexForTests(root);
@@ -573,4 +650,23 @@ async function createRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "symphony-task6-"));
   roots.push(root);
   return root;
+}
+
+async function waitForMutexDepth(
+  mutex: AsyncMutex,
+  expectedDepth: number,
+  failureMessage: string,
+): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    if (mutex.depth === expectedDepth) {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+  }
+
+  throw new Error(`${failureMessage}; observed depth ${mutex.depth}`);
 }

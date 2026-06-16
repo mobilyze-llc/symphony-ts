@@ -2035,6 +2035,43 @@ describe("AgentRunner", () => {
     });
   });
 
+  it("classifies hook execution failures as failed instead of timed out", async () => {
+    const root = await createRoot();
+    const hooks = {
+      run: vi.fn(async ({ name }: { name: string }) => {
+        if (name !== "beforeRun") {
+          return false;
+        }
+
+        throw new WorkspaceHookError({
+          code: ERROR_CODES.hookExecutionFailed,
+          message: "before_run hook executor failed",
+          hook: "beforeRun",
+          workspacePath: join(root, "issue-1"),
+        });
+      }),
+      runBestEffort: vi.fn(),
+    };
+    const runner = new AgentRunner({
+      config: createConfig(root, "unused"),
+      tracker: createTracker(),
+      hooks: hooks as never,
+      createCodexClient: vi.fn(),
+    });
+
+    await expect(
+      runner.run({
+        issue: ISSUE_FIXTURE,
+        attempt: null,
+      }),
+    ).rejects.toMatchObject({
+      name: "AgentRunnerError",
+      code: ERROR_CODES.hookExecutionFailed,
+      status: "failed",
+      failedPhase: "preparing_workspace",
+    } satisfies Partial<AgentRunnerError>);
+  });
+
   it("removes temporary workspace artifacts before each attempt starts", async () => {
     const root = await createRoot();
     const workspacePath = join(root, "issue-1");

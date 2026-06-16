@@ -9,6 +9,7 @@ import {
   type WorkspaceHookError,
   type WorkspaceHookLogEntry,
   WorkspaceHookRunner,
+  WorkspaceHookTimeoutError,
   resolveWorkflowConfig,
 } from "../../src/index.js";
 
@@ -91,7 +92,7 @@ describe("WorkspaceHookRunner", () => {
     ]);
   });
 
-  it("maps executor failures to hook timeout errors", async () => {
+  it("maps executor timeout signals to hook timeout errors", async () => {
     const logs: WorkspaceHookLogEntry[] = [];
     const runner = new WorkspaceHookRunner({
       config: {
@@ -104,7 +105,7 @@ describe("WorkspaceHookRunner", () => {
       log: (entry) => {
         logs.push(entry);
       },
-      execute: vi.fn().mockRejectedValue(new Error("timed out")),
+      execute: vi.fn().mockRejectedValue(new WorkspaceHookTimeoutError(25)),
     });
 
     await expect(
@@ -131,6 +132,54 @@ describe("WorkspaceHookRunner", () => {
         hook: "beforeRun",
         workspacePath: "/tmp/workspace",
         errorCode: ERROR_CODES.hookTimedOut,
+        exitCode: null,
+      }),
+    ]);
+  });
+
+  it("maps generic executor failures to non-timeout hook execution errors", async () => {
+    const logs: WorkspaceHookLogEntry[] = [];
+    const executorError = new Error("spawn ENOENT");
+    const runner = new WorkspaceHookRunner({
+      config: {
+        afterCreate: null,
+        beforeRun: "sh ./missing",
+        afterRun: null,
+        beforeRemove: null,
+        timeoutMs: 25,
+      },
+      log: (entry) => {
+        logs.push(entry);
+      },
+      execute: vi.fn().mockRejectedValue(executorError),
+    });
+
+    await expect(
+      runner.run({
+        name: "beforeRun",
+        workspacePath: "/tmp/workspace",
+      }),
+    ).rejects.toThrowError(
+      expect.objectContaining<Partial<WorkspaceHookError>>({
+        code: ERROR_CODES.hookExecutionFailed,
+        cause: executorError,
+      }),
+    );
+
+    expect(logs).toEqual([
+      {
+        level: "info",
+        event: "workspace_hook_started",
+        hook: "beforeRun",
+        workspacePath: "/tmp/workspace",
+      },
+      expect.objectContaining({
+        level: "error",
+        event: "workspace_hook_failed",
+        hook: "beforeRun",
+        workspacePath: "/tmp/workspace",
+        errorCode: ERROR_CODES.hookExecutionFailed,
+        exitCode: null,
       }),
     ]);
   });
