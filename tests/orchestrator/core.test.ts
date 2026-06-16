@@ -7293,6 +7293,97 @@ describe("live merge actuator (SYMPH-735)", () => {
     ).toBe(false);
   });
 
+  it("completes (not re-polls) an already-merged candidate on the crash-recovery noop replay", async () => {
+    // Regression for the crash-recovery infinite re-poll loop (council R1: Codex
+    // P2 / Pi P1). A tracker_done merge_actuation row is journaled, but the
+    // process crashes BEFORE state.completed.add(issueId) runs. On replay the
+    // candidate reduces to status "merged", yet the actuator decision is a noop
+    // (side_effect_already_journaled). The actuated mapping now keys on the
+    // re-reduced DURABLE status, not the single-cycle decision, so the issue is
+    // completed instead of re-polling forever. Mapping by decision.action would
+    // make the noop fall through to a continuation re-poll, looping every tick.
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const markReady = vi.fn(async () => {});
+    const enqueue = vi.fn(async () => {});
+    const writeTrackerDone = vi.fn(async () => {});
+    const orchestrator = createOrchestrator({
+      config: createLiveMergeActuatorConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      // Identity-matched MERGED PR with durable proof: head/base match the
+      // reviewed candidate, so cycle 1 decides tracker_done and replay still
+      // sees a clean MERGED-and-matched live state.
+      getMergeActuatorLiveState: async () => mergedLiveState(),
+      mergeActuatorSideEffects: { markReady, enqueue, writeTrackerDone },
+    });
+
+    // Cycle 1: the actuator writes tracker_done and completes the issue.
+    await stageMergeCandidate(orchestrator, reviewResultPath);
+    await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    expect(state.completed.has("1")).toBe(true);
+    expect(writeTrackerDone).toHaveBeenCalledTimes(1);
+    const mergeActuationsAfterMerge = state.dispatcherRunJournal.filter(
+      (entry) => entry.kind === "merge_actuation",
+    );
+    expect(
+      mergeActuationsAfterMerge.some(
+        (entry) => entry.metadata.action === "tracker_done",
+      ),
+    ).toBe(true);
+    const mergeActuationCountBeforeReplay = mergeActuationsAfterMerge.length;
+
+    // Simulate the crash window: the tracker_done row is durably journaled, but
+    // the in-memory completion (state.completed.add + releaseClaim +
+    // clearTerminalIssueRuntimeState) was lost to the crash. Reconstruct the
+    // post-restart state where the issue re-enters the merge-candidate dispatch
+    // barrier: removed from completed, restored to the merge stage with review
+    // passed, and re-scheduled for a dispatch tick. The candidate (reduced from
+    // the unchanged journal) is already status "merged".
+    state.completed.delete("1");
+    state.issueStages["1"] = "merge";
+    state.issuePassedStages["1"] = ["review"];
+    state.retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      dueAtMs: Date.parse("2026-03-06T00:02:00.000Z"),
+      timerHandle: null,
+      error: "merge_queue_pending",
+      delayType: "continuation",
+    };
+
+    // Cycle 2 (replay): the decision is a noop (side_effect_already_journaled),
+    // but the durable status is "merged", so the barrier completes the issue
+    // again rather than scheduling another continuation re-poll.
+    await orchestrator.onRetryTimer("1");
+
+    const replayState = orchestrator.getState();
+    expect(replayState.completed.has("1")).toBe(true);
+    expect(replayState.failed.has("1")).toBe(false);
+    expect(replayState.failureExhaustedIds.has("1")).toBe(false);
+    // No second tracker_done side effect fired on replay.
+    expect(writeTrackerDone).toHaveBeenCalledTimes(1);
+    // The replay recognized the already-merged status and completed: it did NOT
+    // append a new merge_actuation row, and did NOT schedule another re-poll.
+    const mergeActuationCountAfterReplay =
+      replayState.dispatcherRunJournal.filter(
+        (entry) => entry.kind === "merge_actuation",
+      ).length;
+    expect(mergeActuationCountAfterReplay).toBe(
+      mergeActuationCountBeforeReplay,
+    );
+    expect(replayState.retryAttempts["1"]).toBeUndefined();
+    expect(
+      replayState.dispatcherRunJournal.some(
+        (entry) => entry.kind === "failure_exhausted",
+      ),
+    ).toBe(false);
+  });
+
   it("parks with an operator blocker after repeated live-state failures", async () => {
     const reviewResultPath = await writeReviewGateResultFixture();
     const fetchLiveState = vi.fn(async () => {

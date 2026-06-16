@@ -10560,42 +10560,41 @@ export class OrchestratorCore {
       return true;
     }
 
-    const decision = result.run.decision;
-    if (
-      decision.action === "tracker_done" &&
-      result.run.sideEffect === "tracker_done"
-    ) {
-      // Merge proven and tracker marked Done — the issue is complete.
+    // Map the actuated cycle by the candidate's re-reduced, DURABLE status (not
+    // the single-cycle decision). This is replay-stable and resolves the
+    // crash-recovery case where a terminal action (e.g. tracker_done) was
+    // journaled but the issue was not yet completed: on replay the decision is a
+    // noop (side_effect_already_journaled), yet the status is already merged, so
+    // we complete instead of re-polling forever (council R1: Codex P2 / Pi P1).
+    const updated = this.findCanonicalMergeCandidate(issue.id) ?? candidate;
+    if (updated.status === "merged") {
       this.state.completed.add(issue.id);
       this.releaseClaim(issue.id);
       this.clearTerminalIssueRuntimeState(issue.id);
       return true;
     }
-    if (
-      decision.action === "mark_ready" ||
-      decision.action === "enqueue" ||
-      decision.action === "poll" ||
-      decision.action === "tracker_done" ||
-      decision.action === "noop"
-    ) {
-      // Progress made or still waiting in the queue; re-poll next cycle.
-      this.scheduleRetry(issue.id, 1, {
-        identifier: issue.identifier,
-        error: decision.reason,
-        delayType: "continuation",
-        deferral: true,
+    if (updated.status === "blocked" || updated.status === "stale") {
+      // Terminal non-mergeable state (incl. timeout/stale/side-effect-exhausted)
+      // — park for an operator instead of looping.
+      await this.parkMergeCandidateInvariantFailure({
+        issue,
+        stageName,
+        reasonCode: updated.blockedReason ?? updated.status,
+        detail: `merge actuator parked candidate ${candidate.candidateId}: ${updated.blockedReason ?? updated.status}`,
+        reviewResultPath: candidate.reviewResultPath,
       });
       return true;
     }
 
-    // stale | timeout | blocked — a terminal non-mergeable state; park for an
-    // operator instead of looping.
-    await this.parkMergeCandidateInvariantFailure({
-      issue,
-      stageName,
-      reasonCode: decision.reason,
-      detail: `merge actuator could not actuate candidate ${candidate.candidateId}: ${decision.blockers.join(", ") || decision.reason}`,
-      reviewResultPath: candidate.reviewResultPath,
+    // candidate / ready_marked / merge_queue_pending / superseded — still in
+    // progress; re-poll next cycle. The coordinator owns the failure/wait bound
+    // (it returns "parked" on exhaustion), so deferral:true keeps this re-poll
+    // out of scheduleRetry's own failure ceiling and novelty short-circuit.
+    this.scheduleRetry(issue.id, 1, {
+      identifier: issue.identifier,
+      error: result.run.decision.reason,
+      delayType: "continuation",
+      deferral: true,
     });
     return true;
   }
