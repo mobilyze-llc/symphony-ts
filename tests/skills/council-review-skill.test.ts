@@ -100,6 +100,18 @@ function mergeAuthoritativePhase1ArtifactNamesFromSkill(
   );
 }
 
+function assertCleanPassInvocationShapesFromSkill(
+  skill: string,
+): Array<"bare" | "closeout"> {
+  const shapes = new Set<"bare" | "closeout">();
+  for (const match of skill.matchAll(
+    /assert-clean-pass\.py(?:["`])?(?:\s+(--closeout))?/g,
+  )) {
+    shapes.add(match[1] === "--closeout" ? "closeout" : "bare");
+  }
+  return [...shapes].sort();
+}
+
 function writeBaseSetupFacts(dir: string): void {
   writeArtifact(dir, "pr-view-exit-code.txt", "0\n");
   writeArtifact(dir, "git-status-short.txt", "");
@@ -305,6 +317,28 @@ describe("council-review manual skill", () => {
     expect(reportTemplate).toContain(
       "Stale-base, degraded-lane, malformed, partial, or empty artifact evidence is unavailable evidence",
     );
+  });
+
+  it("keeps documented clean-pass command shapes accepted by the helper", () => {
+    const shapes = assertCleanPassInvocationShapesFromSkill(skill);
+    expect(shapes).toEqual(["bare", "closeout"]);
+
+    withArtifactDir((dir) => {
+      for (const shape of shapes) {
+        const args = shape === "closeout" ? ["--closeout"] : [];
+        const result = runPython(ASSERT_CLEAN_PASS, dir, args);
+        expect(result.status).not.toBe(2);
+        expect(result.stderr).not.toContain(
+          "usage: assert-clean-pass.py [--closeout] COUNCIL_DIR",
+        );
+      }
+
+      const unknownFlag = runPython(ASSERT_CLEAN_PASS, dir, ["--bogus"]);
+      expect(unknownFlag.status).toBe(2);
+      expect(unknownFlag.stderr).toContain(
+        "usage: assert-clean-pass.py [--closeout] COUNCIL_DIR",
+      );
+    });
   });
 
   it("forces cold-read Track items and reviewer immutability", () => {

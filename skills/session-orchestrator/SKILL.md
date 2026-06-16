@@ -346,6 +346,14 @@ If no current Done/merged evidence exists, use Pi plus in-session Codex review
 when review is needed, record the lane degradation explicitly, and avoid
 counting thin, empty, stale, or malformed artifacts as passes.
 
+Review lanes inherit the blessed cmux entrypoint through the active
+`council-review` skill: remote pro16 primary via `cmux-spawn-remote`, explicit
+local pro14 degradation through `cmux-spawn`, `CMUX_SPAWN_BIN` as operator
+override, and fail-closed behavior when neither substrate preflights. Do not
+replace that ladder with a hardcoded local `bin/cmux-spawn` path in
+session-orchestrator prompts or packets; checkpoint the selected substrate tier
+and any degradation in the review evidence table.
+
 Round policy:
 
 - Round 1 is broad.

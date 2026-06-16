@@ -1,6 +1,13 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 
@@ -94,6 +101,7 @@ export interface ClaudeRunnerAttempt {
   attempt: number;
   artifactName: string;
   artifactPath: string;
+  remoteArtifactPath?: string | null;
   cliJsonPath: string;
   statusPath: string;
   state: string | null;
@@ -132,6 +140,7 @@ export interface ClaudeRunnerResult {
   artifactDir: string;
   artifactName: string;
   artifactPath: string | null;
+  remoteArtifactPath?: string | null;
   resultJsonPath: string;
   cmuxSpawnBin: string;
   laneId: string;
@@ -231,6 +240,7 @@ export async function runClaudeCmux(
       artifactDir,
       artifactName,
       artifactPath: null,
+      remoteArtifactPath: null,
       resultJsonPath,
       cmuxSpawnBin,
       laneId,
@@ -276,6 +286,7 @@ export async function runClaudeCmux(
       artifactDir,
       artifactName,
       artifactPath: null,
+      remoteArtifactPath: null,
       resultJsonPath,
       cmuxSpawnBin,
       laneId,
@@ -301,12 +312,17 @@ export async function runClaudeCmux(
   let currentArtifactName = artifactName;
   let finalStatus: ClaudeRunnerStatus = "failed";
   let artifactPath: string | null = null;
+  let remoteArtifactPath: string | null = null;
   let usage: Record<string, unknown> | null = null;
   let message = "";
   let validationErrors: string[] = [];
   const maxAttempts = input.retryOnInvalid === true ? 2 : 1;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    await rm(resolve(artifactDir, `${currentArtifactName}.md`), {
+      force: true,
+      recursive: true,
+    });
     const run = await invokeCmuxRun({
       cmuxSpawnBin,
       workspace,
@@ -329,10 +345,11 @@ export async function runClaudeCmux(
       typeof cmux.artifact_path === "string"
         ? cmux.artifact_path
         : resolve(artifactDir, `${currentArtifactName}.md`);
-    const artifactPathValidation = await validateArtifactPathWithinDir(
+    const artifactPathValidation = await resolveCmuxArtifactPath({
       artifactDir,
-      rawArtifactPath,
-    );
+      artifactName: currentArtifactName,
+      candidatePath: rawArtifactPath,
+    });
     const currentArtifactPath = artifactPathValidation.artifactPath;
     const currentStatusPath =
       typeof cmux.status_path === "string"
@@ -350,6 +367,7 @@ export async function runClaudeCmux(
 
     usage = cmux.usage ?? null;
     artifactPath = currentArtifactPath;
+    remoteArtifactPath = artifactPathValidation.remoteArtifactPath;
     message = cmux.message ?? diagnosticMessage(diagnostics);
     const laneState =
       cmux.state ?? (run.exitCode === 0 ? "complete" : "failed");
@@ -364,6 +382,7 @@ export async function runClaudeCmux(
       attempt,
       artifactName: currentArtifactName,
       artifactPath: currentArtifactPath,
+      remoteArtifactPath: artifactPathValidation.remoteArtifactPath,
       cliJsonPath: currentCliJsonPath,
       statusPath: currentStatusPath,
       state: laneState,
@@ -413,6 +432,7 @@ export async function runClaudeCmux(
     artifactDir,
     artifactName,
     artifactPath,
+    remoteArtifactPath,
     resultJsonPath,
     cmuxSpawnBin,
     laneId,
@@ -677,6 +697,47 @@ async function validateArtifactPathWithinDir(
     };
   }
   return { artifactPath, validationErrors: [] };
+}
+
+async function resolveCmuxArtifactPath(input: {
+  artifactDir: string;
+  artifactName: string;
+  candidatePath: string;
+}): Promise<{
+  artifactPath: string;
+  remoteArtifactPath: string | null;
+  validationErrors: string[];
+}> {
+  const primary = await validateArtifactPathWithinDir(
+    input.artifactDir,
+    input.candidatePath,
+  );
+  if (primary.validationErrors.length === 0) {
+    return { ...primary, remoteArtifactPath: null };
+  }
+
+  const mirrorPath = resolve(input.artifactDir, `${input.artifactName}.md`);
+  const mirror = await validateArtifactPathWithinDir(
+    input.artifactDir,
+    mirrorPath,
+  );
+  if (mirror.validationErrors.length > 0) {
+    return { ...primary, remoteArtifactPath: null };
+  }
+  try {
+    const mirrorStats = await stat(mirror.artifactPath);
+    if (!mirrorStats.isFile()) {
+      return { ...primary, remoteArtifactPath: null };
+    }
+  } catch {
+    return { ...primary, remoteArtifactPath: null };
+  }
+
+  return {
+    artifactPath: mirror.artifactPath,
+    remoteArtifactPath: primary.artifactPath,
+    validationErrors: [],
+  };
 }
 
 async function invokeCmuxRun(input: {
