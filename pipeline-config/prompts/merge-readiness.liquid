@@ -27,7 +27,7 @@ Assert the latest clean council artifact still covers the current PR head before
 REPO=$(gh repo view --json nameWithOwner --jq '.nameWithOwner')
 ARTIFACT_DIR="${TMPDIR:-/tmp}/symphony-council-freshness-merge-$(date +%s)"
 REVIEW_RESULT_PATH="<path-to-latest-clean-review-result.json>"
-ISSUE_IDENTIFIER="<issue-identifier>"
+{% if issue.identifier %}ISSUE_IDENTIFIER="{{ issue.identifier }}"{% else %}ISSUE_IDENTIFIER="<issue-identifier>"{% endif %}
 
 run_council_gate() {
   if [ -n "${SYMPHONY_COUNCIL_REVIEW_GATE:-}" ]; then

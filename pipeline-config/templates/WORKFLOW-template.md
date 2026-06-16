@@ -855,7 +855,7 @@ This repo uses GitHub's merge queue. When you run `gh pr merge`, GitHub will:
 In BOTH cases, the merge is not immediate — GitHub queues it, rebases, runs CI on the rebased version, then merges. This is normal behavior. Do NOT interpret it as a failure.
 
 ### Step 1: Check PR Readiness
-{% render 'prompts/merge-readiness.liquid' %}
+{% render 'prompts/merge-readiness.liquid', issue: issue %}
 
 If the merge queue rejects the PR (check failures on rebased code):
 1. Run `gh pr view --json state,statusCheckRollup` to identify which check failed and why

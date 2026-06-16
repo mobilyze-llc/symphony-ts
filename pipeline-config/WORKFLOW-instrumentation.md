@@ -466,7 +466,7 @@ If the gate reports `FAIL`, is degraded, times out, or artifacts are missing/mal
 {% if stageName == "merge" %}
 ## Stage: Merge
 You are in the MERGE stage. The PR has been reviewed and approved.
-{% render 'prompts/merge-readiness.liquid' %}
+{% render 'prompts/merge-readiness.liquid', issue: issue %}
 - Verify the merge succeeded on the main branch
 - Do NOT modify code in this stage
 

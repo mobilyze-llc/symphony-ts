@@ -10,7 +10,7 @@ You are merging the PR for Linear issue {{ issue.identifier }}.
 
 ## Merge Steps
 
-{% render 'prompts/merge-readiness.liquid' %}
+{% render 'prompts/merge-readiness.liquid', issue: issue %}
 
 Update the Linear issue state to "Done" only after the merge proof shows the PR is merged.
 

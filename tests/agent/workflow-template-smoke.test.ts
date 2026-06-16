@@ -81,7 +81,8 @@ const MERGE_READINESS_PARTIAL_PATH = resolve(
   import.meta.dirname,
   "../../pipeline-config/prompts/merge-readiness.liquid",
 );
-const MERGE_READINESS_INCLUDE = "{% render 'prompts/merge-readiness.liquid' %}";
+const MERGE_READINESS_INCLUDE =
+  "{% render 'prompts/merge-readiness.liquid', issue: issue %}";
 const MERGE_QUEUE_BACKOFF_PHRASE = "Bounded merge-queue polling backoff";
 const MERGE_READINESS_INCLUDE_SOURCE_PATHS = [
   "../../pipeline-config/prompts/merge.liquid",
@@ -827,6 +828,8 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toMatch(/MUST NOT/);
     expect(output).toContain("Your ONLY job is to merge the PR");
     expect(output).toContain("--assert-fresh-review");
+    expect(output).toContain('ISSUE_IDENTIFIER="TEST-1"');
+    expect(output).not.toContain('ISSUE_IDENTIFIER="<issue-identifier>"');
     expect(output).toContain('code: "stale_review"');
     expect(output).toContain("rerun convergence review against HEAD.");
     expect(output).toContain(
@@ -934,6 +937,8 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
       expect(output).toContain('gh pr merge "$PR_NUMBER" --auto');
       expect(output).toContain("[BLOCKED_NEEDS_HUMAN_BLOCKERS:");
       expect(output).toContain("--assert-fresh-review");
+      expect(output).toContain('ISSUE_IDENTIFIER="TEST-1"');
+      expect(output).not.toContain('ISSUE_IDENTIFIER="<issue-identifier>"');
     }
 
     const standalonePath = MERGE_READINESS_INCLUDE_SOURCE_PATHS[0];
@@ -955,6 +960,8 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain('gh pr merge "$PR_NUMBER" --auto');
     expect(output).toContain("[BLOCKED_NEEDS_HUMAN_BLOCKERS:");
     expect(output).toContain("--assert-fresh-review");
+    expect(output).toContain('ISSUE_IDENTIFIER="TEST-1"');
+    expect(output).not.toContain('ISSUE_IDENTIFIER="<issue-identifier>"');
   });
 
   it("renders eligibility-on-rewrite in primary file-backed rewrite prompt surfaces", async () => {
