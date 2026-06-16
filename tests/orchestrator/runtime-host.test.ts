@@ -140,6 +140,133 @@ describe("runtime host merge actuator parsing (SYMPH-735)", () => {
       runtimeHostMergeActuatorTesting.parseStatusCheckRollup("not-an-array"),
     ).toEqual([]);
   });
+
+  // SYMPH-751: in-flight CheckRuns (conclusion: null while QUEUED/IN_PROGRESS/
+  // PENDING) must map to pending, not fail — otherwise the now-enabled merge
+  // actuator parks a healthy PR merely waiting on CI.
+  it("maps an in-flight CheckRun (conclusion: null) to pending", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+        { name: "test", status: "IN_PROGRESS", conclusion: null },
+      ]),
+    ).toEqual([{ name: "test", status: "pending" }]);
+  });
+
+  it("maps a queued CheckRun (conclusion: null) to pending", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+        { name: "q", status: "QUEUED", conclusion: null },
+      ]),
+    ).toEqual([{ name: "q", status: "pending" }]);
+  });
+
+  it("maps a CheckRun with an absent conclusion field to pending", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+        { name: "x", status: "PENDING" },
+      ]),
+    ).toEqual([{ name: "x", status: "pending" }]);
+  });
+
+  // SYMPH-751: legacy StatusContext nodes (context/state, no name/status/
+  // conclusion) were silently dropped — hiding a failing legacy check from the
+  // actuator. Parse them by field presence.
+  it("maps a StatusContext PENDING state to pending", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+        { context: "ci/circleci", state: "PENDING" },
+      ]),
+    ).toEqual([{ name: "ci/circleci", status: "pending" }]);
+  });
+
+  it("maps a StatusContext SUCCESS state to pass", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+        { context: "ci/circleci", state: "SUCCESS" },
+      ]),
+    ).toEqual([{ name: "ci/circleci", status: "pass" }]);
+  });
+
+  it("maps a StatusContext FAILURE state to fail", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+        { context: "ci/circleci", state: "FAILURE" },
+      ]),
+    ).toEqual([{ name: "ci/circleci", status: "fail" }]);
+  });
+
+  it("maps a StatusContext ERROR state to fail", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+        { context: "ci/circleci", state: "ERROR" },
+      ]),
+    ).toEqual([{ name: "ci/circleci", status: "fail" }]);
+  });
+
+  it("maps a StatusContext EXPECTED state to pending", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+        { context: "ci/circleci", state: "EXPECTED" },
+      ]),
+    ).toEqual([{ name: "ci/circleci", status: "pending" }]);
+  });
+
+  it("preserves both node types and order in a mixed rollup", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+        { name: "ga", status: "COMPLETED", conclusion: "SUCCESS" },
+        { context: "legacy", state: "FAILURE" },
+      ]),
+    ).toEqual([
+      { name: "ga", status: "pass" },
+      { name: "legacy", status: "fail" },
+    ]);
+  });
+
+  it("drops a rollup entry with neither name nor context", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+        {},
+        { name: "ok", status: "COMPLETED", conclusion: "SUCCESS" },
+      ]),
+    ).toEqual([{ name: "ok", status: "pass" }]);
+  });
+
+  // SYMPH-751 fail-closed contract (council Track): any terminal CheckRun
+  // conclusion that is not an explicit pass/pending value — including unknown
+  // future values — must map to fail, never silently to pass. A false pass
+  // would let the actuator merge a broken PR.
+  it.each(["CANCELLED", "TIMED_OUT", "STARTUP_FAILURE", "STALE", "MYSTERY"])(
+    "maps terminal CheckRun conclusion %s to fail (fail-closed)",
+    (conclusion) => {
+      expect(
+        runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+          { name: "c", status: "COMPLETED", conclusion },
+        ]),
+      ).toEqual([{ name: "c", status: "fail" }]);
+    },
+  );
+
+  // Same fail-closed contract for legacy StatusContext: an unrecognized state
+  // (incl. a non-string state coerced to undefined) must fail closed.
+  it.each(["MYSTERY_STATE", "", "BROKEN"])(
+    "maps unknown StatusContext state %s to fail (fail-closed)",
+    (state) => {
+      expect(
+        runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+          { context: "legacy", state },
+        ]),
+      ).toEqual([{ name: "legacy", status: "fail" }]);
+    },
+  );
+
+  it("maps an empty-string CheckRun conclusion to pending (not-yet-concluded)", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+        { name: "c", status: "IN_PROGRESS", conclusion: "" },
+      ]),
+    ).toEqual([{ name: "c", status: "pending" }]);
+  });
 });
 
 function removeWorkspaceWithRetry(workspaceRoot: string): void {
