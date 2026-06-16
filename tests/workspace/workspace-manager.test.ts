@@ -10,11 +10,16 @@ import {
   WorkspaceHookRunner,
   WorkspaceManager,
   type WorkspacePathError,
+  clearCreationMutexRegistryForTests,
+  evictCreationMutexIfIdleForTests,
+  getCreationMutexForTests,
+  getCreationMutexRegistrySizeForTests,
 } from "../../src/index.js";
 
 const roots: string[] = [];
 
 afterEach(async () => {
+  clearCreationMutexRegistryForTests();
   await Promise.allSettled(
     roots.splice(0).map(async (root) => {
       const manager = new WorkspaceManager({ root });
@@ -206,6 +211,125 @@ describe("WorkspaceManager", () => {
     // exactly two distinct paths.
     expect(execOrder).toHaveLength(2);
     expect(new Set(execOrder).size).toBe(2);
+  });
+
+  it("evicts creation mutex registry entries across distinct workspace roots", async () => {
+    expect(getCreationMutexRegistrySizeForTests()).toBe(0);
+
+    for (let index = 0; index < 3; index++) {
+      const root = await createRoot();
+      const manager = new WorkspaceManager({ root });
+
+      await manager.createForIssue(`issue-${index}`);
+
+      expect(getCreationMutexRegistrySizeForTests()).toBe(0);
+    }
+  });
+
+  it("keeps same-root creation serialised until the last queued caller releases", async () => {
+    const root = await createRoot();
+    let unblockFirstHook!: () => void;
+    let hookCalls = 0;
+    const firstHookMayFinish = new Promise<void>((resolve) => {
+      unblockFirstHook = resolve;
+    });
+    let signalFirstHookStarted!: () => void;
+    const observedFirstHook = new Promise<void>((resolve) => {
+      signalFirstHookStarted = resolve;
+    });
+    const hooks = new WorkspaceHookRunner({
+      config: {
+        afterCreate: "prepare",
+        beforeRun: null,
+        afterRun: null,
+        beforeRemove: null,
+        timeoutMs: 5_000,
+      },
+      execute: async () => {
+        hookCalls++;
+        if (hookCalls === 1) {
+          signalFirstHookStarted();
+          await firstHookMayFinish;
+        }
+        return { exitCode: 0, signal: null, stdout: "", stderr: "" };
+      },
+    });
+    const manager = new WorkspaceManager({ root, hooks });
+
+    const creations = Promise.all([
+      manager.createForIssue("issue-queued-a"),
+      manager.createForIssue("issue-queued-b"),
+    ]);
+
+    await observedFirstHook;
+    expect(getCreationMutexRegistrySizeForTests()).toBe(1);
+
+    unblockFirstHook();
+    await creations;
+
+    expect(hookCalls).toBe(2);
+    expect(getCreationMutexRegistrySizeForTests()).toBe(0);
+  });
+
+  it("does not evict a newer same-root mutex from a stale release path", async () => {
+    const root = await createRoot();
+    const installedMutex = getCreationMutexForTests(root);
+    const staleMutex = new AsyncMutex();
+
+    expect(getCreationMutexRegistrySizeForTests()).toBe(1);
+
+    evictCreationMutexIfIdleForTests(root, staleMutex);
+    expect(getCreationMutexRegistrySizeForTests()).toBe(1);
+
+    evictCreationMutexIfIdleForTests(root, installedMutex);
+    expect(getCreationMutexRegistrySizeForTests()).toBe(0);
+  });
+
+  it("evicts creation mutex registry entries when afterCreate throws", async () => {
+    const root = await createRoot();
+    const hooks = new WorkspaceHookRunner({
+      config: {
+        afterCreate: "prepare",
+        beforeRun: null,
+        afterRun: null,
+        beforeRemove: null,
+        timeoutMs: 100,
+      },
+      execute: async () => {
+        throw new Error("hook failed before registry eviction");
+      },
+    });
+    const manager = new WorkspaceManager({ root, hooks });
+
+    await expect(manager.createForIssue("issue-123")).rejects.toThrowError(
+      expect.objectContaining<Partial<WorkspacePathError>>({
+        code: ERROR_CODES.workspaceCreateFailed,
+      }),
+    );
+
+    expect(getCreationMutexRegistrySizeForTests()).toBe(0);
+  });
+
+  it("keeps a registry entry while a same-root waiter is queued", async () => {
+    const root = await createRoot();
+    const mutex = getCreationMutexForTests(root);
+    const releaseFirst = await mutex.acquire();
+    const secondAcquire = mutex.acquire();
+
+    expect(mutex.depth).toBe(2);
+
+    releaseFirst();
+    evictCreationMutexIfIdleForTests(root, mutex);
+
+    expect(mutex.depth).toBe(1);
+    expect(getCreationMutexRegistrySizeForTests()).toBe(1);
+
+    const releaseSecond = await secondAcquire;
+    releaseSecond();
+    evictCreationMutexIfIdleForTests(root, mutex);
+
+    expect(mutex.depth).toBe(0);
+    expect(getCreationMutexRegistrySizeForTests()).toBe(0);
   });
 
   it("does not block removeForIssue while afterCreate hook is running", async () => {

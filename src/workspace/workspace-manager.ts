@@ -96,6 +96,34 @@ function getCreationMutex(workspaceRoot: string): AsyncMutex {
   return mutex;
 }
 
+function evictCreationMutexIfIdle(
+  workspaceRoot: string,
+  mutex: AsyncMutex,
+): void {
+  if (mutex.depth === 0 && creationMutexes.get(workspaceRoot) === mutex) {
+    creationMutexes.delete(workspaceRoot);
+  }
+}
+
+export function getCreationMutexRegistrySizeForTests(): number {
+  return creationMutexes.size;
+}
+
+export function clearCreationMutexRegistryForTests(): void {
+  creationMutexes.clear();
+}
+
+export function getCreationMutexForTests(workspaceRoot: string): AsyncMutex {
+  return getCreationMutex(workspaceRoot);
+}
+
+export function evictCreationMutexIfIdleForTests(
+  workspaceRoot: string,
+  mutex: AsyncMutex,
+): void {
+  evictCreationMutexIfIdle(workspaceRoot, mutex);
+}
+
 export class WorkspaceManager {
   readonly root: string;
   readonly #fs: FileSystemLike;
@@ -152,6 +180,7 @@ export class WorkspaceManager {
             });
           } finally {
             release();
+            evictCreationMutexIfIdle(workspaceRoot, mutex);
           }
         } catch (hookError) {
           // Clean up the empty directory so the next retry re-creates it
