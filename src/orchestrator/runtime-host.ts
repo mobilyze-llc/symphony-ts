@@ -7069,27 +7069,66 @@ function parseStatusCheckRollup(
       return [];
     }
     const record = entry as Record<string, unknown>;
-    const name = stringValue(record.name);
-    if (name === null) {
-      return [];
+    // gh's statusCheckRollup mixes two node shapes: CheckRun (GitHub Actions —
+    // name/status/conclusion) and StatusContext (legacy commit statuses —
+    // context/state). Detect by field presence so a missing `name` no longer
+    // silently drops a StatusContext (which would hide a failing or in-flight
+    // legacy check from the actuator).
+    const checkRunName = stringValue(record.name);
+    if (checkRunName !== null) {
+      return [{ name: checkRunName, status: classifyCheckRunStatus(record) }];
     }
-    const conclusion = nullableStringValue(record.conclusion)?.toUpperCase();
-    const status = nullableStringValue(record.status)?.toUpperCase();
-    if (conclusion === "SUCCESS" || conclusion === "NEUTRAL") {
-      return [{ name, status: "pass" as const }];
+    const contextName = stringValue(record.context);
+    if (contextName !== null) {
+      return [
+        { name: contextName, status: classifyStatusContextState(record) },
+      ];
     }
-    if (
-      conclusion !== null &&
-      conclusion !== "SKIPPED" &&
-      conclusion !== "ACTION_REQUIRED"
-    ) {
-      return [{ name, status: "fail" as const }];
-    }
-    if (status === "COMPLETED" && conclusion === "SKIPPED") {
-      return [{ name, status: "pass" as const }];
-    }
-    return [{ name, status: "pending" as const }];
+    return [];
   });
+}
+
+function classifyCheckRunStatus(
+  record: Record<string, unknown>,
+): "pass" | "fail" | "pending" {
+  const conclusion = nullableStringValue(record.conclusion)?.toUpperCase();
+  // Still running: gh reports conclusion: null until the run reaches a
+  // terminal state. The actuator must wait on these, not fail them.
+  if (conclusion === undefined) {
+    return "pending";
+  }
+  if (
+    conclusion === "SUCCESS" ||
+    conclusion === "NEUTRAL" ||
+    conclusion === "SKIPPED"
+  ) {
+    return "pass";
+  }
+  // ACTION_REQUIRED is completed-but-needs-manual-action; existing actuator
+  // intent treats it as pending (bounded recovery times it out rather than
+  // hard-failing). Preserve that.
+  if (conclusion === "ACTION_REQUIRED") {
+    return "pending";
+  }
+  // FAILURE / CANCELLED / TIMED_OUT / STARTUP_FAILURE / STALE / unknown
+  // terminal conclusions fail closed.
+  return "fail";
+}
+
+function classifyStatusContextState(
+  record: Record<string, unknown>,
+): "pass" | "fail" | "pending" {
+  const state = nullableStringValue(record.state)?.toUpperCase();
+  if (state === "SUCCESS") {
+    return "pass";
+  }
+  // EXPECTED and PENDING are still-in-flight legacy statuses → wait.
+  if (state === "PENDING" || state === "EXPECTED") {
+    return "pending";
+  }
+  // ERROR / FAILURE / unknown → fail closed: an unrecognized legacy state
+  // must never be treated as passing.
+  return "fail";
 }
 
 function buildMergeActuatorEnqueueArgs(
