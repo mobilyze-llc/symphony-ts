@@ -10512,6 +10512,10 @@ export class OrchestratorCore {
         maxLiveStateFailures: actuatorConfig.maxLiveStateFailures,
         maxSideEffectFailures: actuatorConfig.maxSideEffectFailures,
         maxDraftWaitObservations: actuatorConfig.maxDraftWaitObservations,
+        maxPendingChecksWaitObservations:
+          actuatorConfig.maxPendingChecksWaitObservations,
+        maxUnknownMergeabilityWaitObservations:
+          actuatorConfig.maxUnknownMergeabilityWaitObservations,
       },
       fetchLiveState: () => fetchLiveState(candidate),
       appendActuation: (entry) => this.recordRunJournalEntry(entry),

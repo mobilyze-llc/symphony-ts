@@ -7178,6 +7178,8 @@ describe("live merge actuator (SYMPH-735)", () => {
       maxLiveStateFailures: 2,
       maxSideEffectFailures: 2,
       maxDraftWaitObservations: 5,
+      maxPendingChecksWaitObservations: 3,
+      maxUnknownMergeabilityWaitObservations: 3,
       ...overrides,
     };
     return config;

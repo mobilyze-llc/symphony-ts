@@ -40,7 +40,9 @@ import {
   DEFAULT_MAX_TURNS,
   DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS,
   DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES,
+  DEFAULT_MERGE_ACTUATOR_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS,
   DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES,
+  DEFAULT_MERGE_ACTUATOR_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS,
   DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS,
   DEFAULT_OBSERVABILITY_ENABLED,
   DEFAULT_OBSERVABILITY_REFRESH_MS,
@@ -164,14 +166,24 @@ describe("config-resolver", () => {
       maxSideEffectFailures: DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES,
       maxDraftWaitObservations:
         DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS,
+      maxPendingChecksWaitObservations:
+        DEFAULT_MERGE_ACTUATOR_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS,
+      maxUnknownMergeabilityWaitObservations:
+        DEFAULT_MERGE_ACTUATOR_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS,
     });
-    // Documented numeric defaults (SYMPH-735): pinned literals so a drift in
-    // defaults.ts is caught here, not just mirrored through the constant.
+    // Documented numeric defaults (SYMPH-735/752/755): pinned literals so a
+    // drift in defaults.ts is caught here, not just mirrored through the constant.
     expect(resolved.mergeActuator?.enabled).toBe(false);
     expect(DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS).toBe(3_600_000);
     expect(DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES).toBe(5);
     expect(DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES).toBe(3);
     expect(DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS).toBe(20);
+    expect(DEFAULT_MERGE_ACTUATOR_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS).toBe(
+      30,
+    );
+    expect(
+      DEFAULT_MERGE_ACTUATOR_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS,
+    ).toBe(20);
   });
 
   it("resolves merge actuator config from frontmatter", () => {
@@ -185,6 +197,8 @@ describe("config-resolver", () => {
           max_live_state_failures: 7,
           max_side_effect_failures: 4,
           max_draft_wait_observations: 9,
+          max_pending_checks_wait_observations: 11,
+          max_unknown_mergeability_wait_observations: 13,
         },
       },
     });
@@ -195,6 +209,8 @@ describe("config-resolver", () => {
       maxLiveStateFailures: 7,
       maxSideEffectFailures: 4,
       maxDraftWaitObservations: 9,
+      maxPendingChecksWaitObservations: 11,
+      maxUnknownMergeabilityWaitObservations: 13,
     });
   });
 

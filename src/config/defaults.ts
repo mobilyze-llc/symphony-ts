@@ -122,6 +122,12 @@ export const DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS = 3_600_000;
 export const DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES = 5;
 export const DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES = 3;
 export const DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS = 20;
+// Bounded pre-enqueue waits (SYMPH-752/755). With the SYMPH-753 backoff capped
+// at 5m, 30 pending-checks waits bound a fresh PR's in-flight-CI window to a few
+// hours before parking; 20 UNKNOWN-mergeability waits cover GitHub's async
+// mergeability computation, which normally resolves within seconds.
+export const DEFAULT_MERGE_ACTUATOR_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS = 30;
+export const DEFAULT_MERGE_ACTUATOR_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS = 20;
 
 export const SPEC_DEFAULTS = Object.freeze({
   tracker: {

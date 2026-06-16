@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type {
   DispatcherLease,
@@ -1367,6 +1367,450 @@ describe("merge actuator bounded recovery (SYMPH-746)", () => {
     expect(
       harness.entries.filter((e) => e.metadata.action === "draft_wait"),
     ).toHaveLength(0);
+  });
+});
+
+describe("merge actuator bounded pre-enqueue poll (SYMPH-752/755)", () => {
+  const boundedLimits = {
+    maxLiveStateFailures: 5,
+    maxSideEffectFailures: 5,
+    maxDraftWaitObservations: 5,
+    maxPendingChecksWaitObservations: 2,
+    maxUnknownMergeabilityWaitObservations: 2,
+  };
+
+  // ---- 755: bounded pending-checks wait for fresh candidates ----
+
+  it("decides a bounded pending-checks wait for a fresh candidate with in-flight CI", () => {
+    const candidate = candidateFromJournal([candidateJournalEntry()]);
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState({
+        requiredChecks: [{ name: "build", status: "pending" }],
+      }),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+    });
+    expect(decision).toMatchObject({
+      action: "blocked",
+      reason: "pending_checks_pre_enqueue",
+    });
+    expect(decision.sideEffectKey).toContain(":pending_checks_wait");
+  });
+
+  it("decides the bounded pending-checks wait for a ready_marked (not just candidate) PR", () => {
+    const candidateEntry = candidateJournalEntry();
+    const markReady = {
+      ...buildMergeActuationEntry({
+        candidate: candidateFromJournal([candidateEntry]),
+        action: "mark_ready",
+        timestamp: "2026-06-16T01:00:00.000Z",
+        ownerId: "owner-1",
+        lease: lease(),
+        live: liveState(),
+        reason: "draft_pr",
+      }),
+      sequence: 3,
+    };
+    const candidate = candidateFromJournal([candidateEntry, markReady]);
+    expect(candidate.status).toBe("ready_marked");
+
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState({
+        requiredChecks: [{ name: "build", status: "pending" }],
+      }),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+    });
+    expect(decision).toMatchObject({
+      action: "blocked",
+      reason: "pending_checks_pre_enqueue",
+    });
+  });
+
+  it("still parks immediately on a failing check (fail wins over pending)", () => {
+    const candidate = candidateFromJournal([candidateJournalEntry()]);
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState({
+        requiredChecks: [
+          { name: "build", status: "pending" },
+          { name: "test", status: "fail" },
+        ],
+      }),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+    });
+    expect(decision).toMatchObject({
+      action: "blocked",
+      reason: "failing_checks",
+    });
+    expect(decision.sideEffectKey).toBeNull();
+  });
+
+  it("tolerates pending checks once the candidate is waiting on the queue", () => {
+    // An enqueued candidate (raw enqueue intent) with a pending merge-queue
+    // check must poll, not re-block on the pending-checks wait.
+    const candidateEntry = candidateJournalEntry();
+    const rawEnqueueIntent = enqueueIntentEntry(candidateEntry, {
+      sequence: 3,
+    });
+    const candidate = candidateFromJournal([candidateEntry, rawEnqueueIntent]);
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState({
+        requiredChecks: [{ name: "merge queue", status: "pending" }],
+      }),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+      enqueuedAtMs: Date.parse("2026-06-16T01:00:00.000Z"),
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+    });
+    expect(decision).toMatchObject({
+      action: "poll",
+      reason: "merge_queue_pending",
+    });
+  });
+
+  it("bounds a persistently-pending-CI fresh candidate and parks after the ceiling", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const results: MergeActuatorCycleResult[] = [];
+    for (let n = 1; n <= 4; n += 1) {
+      results.push(
+        await runMergeActuatorCycle({
+          candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+          journal: [candidateEntry, ...harness.entries],
+          lease: lease({ leaseId: `lease-${n}` }),
+          ownerId: "owner-1",
+          now: new Date(`2026-06-16T01:0${n}:00.000Z`),
+          enqueuedAtMs: null,
+          maxWaitMs: 30 * 60_000,
+          limits: boundedLimits,
+          fetchLiveState: async () =>
+            liveState({
+              requiredChecks: [{ name: "build", status: "pending" }],
+            }),
+          appendActuation: harness.appendActuation,
+          sideEffects: noopSideEffects(),
+        }),
+      );
+      if (results[results.length - 1]?.outcome === "parked") {
+        break;
+      }
+    }
+
+    expect(results[0]).toMatchObject({
+      outcome: "retry",
+      reason: "pending_checks_pre_enqueue",
+      attempts: 1,
+    });
+    const park = results[results.length - 1];
+    expect(park?.outcome).toBe("parked");
+    if (park?.outcome !== "parked") {
+      throw new Error("expected a park");
+    }
+    expect(park.blocker).toMatchObject({
+      prNumber: 552,
+      reason: "pending_checks_timeout",
+      attempts: 2,
+    });
+    expect(park.blocker.nextOperatorAction.length).toBeGreaterThan(0);
+
+    const evidence = harness.entries.filter(
+      (e) => e.metadata.action === "pending_checks_wait",
+    );
+    expect(evidence).toHaveLength(2);
+    expect(new Set(evidence.map((e) => e.idempotencyKey)).size).toBe(2);
+
+    // The countable wait evidence must not mutate the candidate's status.
+    const parked = candidateFromJournal([candidateEntry, ...harness.entries]);
+    expect(parked.status).toBe("blocked");
+    expect(parked.blockedReason).toBe("pending_checks_timeout");
+  });
+
+  it("restores the pending-checks wait count from the journal across replay", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const original = makeJournalHarness();
+    await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...original.entries]),
+      journal: [candidateEntry, ...original.entries],
+      lease: lease({ leaseId: "lease-1" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:01:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      fetchLiveState: async () =>
+        liveState({ requiredChecks: [{ name: "build", status: "pending" }] }),
+      appendActuation: original.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    const restarted = makeJournalHarness(original.entries);
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...restarted.entries]),
+      journal: [candidateEntry, ...restarted.entries],
+      lease: lease({ leaseId: "lease-2" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:02:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      fetchLiveState: async () =>
+        liveState({ requiredChecks: [{ name: "build", status: "pending" }] }),
+      appendActuation: restarted.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("parked");
+    if (result.outcome !== "parked") {
+      throw new Error("expected park after restart");
+    }
+    expect(result.blocker.attempts).toBe(2);
+  });
+
+  it("enqueues once pending checks resolve to pass within the wait", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    // Cycle 1: pending check → bounded wait (retry).
+    const first = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-1" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:01:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      fetchLiveState: async () =>
+        liveState({ requiredChecks: [{ name: "build", status: "pending" }] }),
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+    expect(first.outcome).toBe("retry");
+
+    // Cycle 2: check passed → enqueue.
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-2" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:02:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      fetchLiveState: async () =>
+        liveState({ requiredChecks: [{ name: "build", status: "pass" }] }),
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("actuated");
+    if (result.outcome !== "actuated") {
+      throw new Error("expected actuated");
+    }
+    expect(result.run.sideEffect).toBe("enqueue");
+  });
+
+  // ---- 752: green-mergeability gate before enqueue ----
+
+  it("decides a bounded mergeability wait when mergeability is UNKNOWN/null", () => {
+    const candidate = candidateFromJournal([candidateJournalEntry()]);
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState({ mergeStateStatus: null, mergeable: null }),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+    });
+    expect(decision).toMatchObject({
+      action: "blocked",
+      reason: "mergeability_unknown",
+    });
+    expect(decision.sideEffectKey).toContain(":unknown_mergeability_wait");
+  });
+
+  it("enqueues when mergeability is green (MERGEABLE + CLEAN/HAS_HOOKS/UNSTABLE)", () => {
+    const candidate = candidateFromJournal([candidateJournalEntry()]);
+    for (const mergeStateStatus of ["CLEAN", "HAS_HOOKS", "UNSTABLE"]) {
+      const decision = decideMergeActuation({
+        candidate,
+        live: liveState({ mergeStateStatus, mergeable: "MERGEABLE" }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: 0,
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      });
+      expect(decision).toMatchObject({ action: "enqueue" });
+    }
+  });
+
+  it("parks a non-green terminal merge state (BLOCKED) with a merge_state_* blocker", () => {
+    const candidate = candidateFromJournal([candidateJournalEntry()]);
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState({ mergeStateStatus: "BLOCKED", mergeable: "MERGEABLE" }),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+    });
+    expect(decision).toMatchObject({
+      action: "blocked",
+      reason: "merge_state_blocked",
+    });
+    expect(decision.sideEffectKey).toBeNull();
+  });
+
+  it("keeps DIRTY/BEHIND parked via firstLiveBlocker (not the mergeability gate)", () => {
+    const candidate = candidateFromJournal([candidateJournalEntry()]);
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState({
+          mergeStateStatus: "DIRTY",
+          mergeable: "CONFLICTING",
+        }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: 0,
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({ action: "stale", reason: "merge_conflict" });
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState({ mergeStateStatus: "BEHIND", mergeable: "MERGEABLE" }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: 0,
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({ action: "stale", reason: "behind_base" });
+  });
+
+  it("never enqueues while UNKNOWN: bounds the mergeability wait and parks", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const enqueue = vi.fn(async () => {});
+    const sideEffects: MergeActuatorSideEffects = {
+      markReady: async () => {},
+      enqueue,
+      writeTrackerDone: async () => {},
+    };
+    const results: MergeActuatorCycleResult[] = [];
+    for (let n = 1; n <= 4; n += 1) {
+      results.push(
+        await runMergeActuatorCycle({
+          candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+          journal: [candidateEntry, ...harness.entries],
+          lease: lease({ leaseId: `lease-${n}` }),
+          ownerId: "owner-1",
+          now: new Date(`2026-06-16T01:0${n}:00.000Z`),
+          enqueuedAtMs: null,
+          maxWaitMs: 30 * 60_000,
+          limits: boundedLimits,
+          fetchLiveState: async () =>
+            liveState({ mergeStateStatus: null, mergeable: null }),
+          appendActuation: harness.appendActuation,
+          sideEffects,
+        }),
+      );
+      if (results[results.length - 1]?.outcome === "parked") {
+        break;
+      }
+    }
+
+    expect(results[0]).toMatchObject({
+      outcome: "retry",
+      reason: "mergeability_unknown",
+      attempts: 1,
+    });
+    const park = results[results.length - 1];
+    expect(park?.outcome).toBe("parked");
+    if (park?.outcome !== "parked") {
+      throw new Error("expected a park");
+    }
+    expect(park.blocker).toMatchObject({
+      reason: "mergeability_unknown",
+      attempts: 2,
+    });
+    // Never enqueued while UNKNOWN.
+    expect(enqueue).not.toHaveBeenCalled();
+    const evidence = harness.entries.filter(
+      (e) => e.metadata.action === "unknown_mergeability_wait",
+    );
+    expect(evidence).toHaveLength(2);
+    expect(new Set(evidence.map((e) => e.idempotencyKey)).size).toBe(2);
+  });
+
+  it("enqueues once mergeability resolves to green within the wait", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    // Cycle 1: UNKNOWN → bounded wait.
+    await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-1" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:01:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      fetchLiveState: async () =>
+        liveState({ mergeStateStatus: null, mergeable: null }),
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    // Cycle 2: mergeability green → enqueue.
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-2" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:02:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: boundedLimits,
+      fetchLiveState: async () =>
+        liveState({ mergeStateStatus: "CLEAN", mergeable: "MERGEABLE" }),
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("actuated");
+    if (result.outcome !== "actuated") {
+      throw new Error("expected actuated");
+    }
+    expect(result.run.sideEffect).toBe("enqueue");
   });
 });
 
