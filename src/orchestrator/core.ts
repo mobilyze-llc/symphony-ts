@@ -173,6 +173,7 @@ import {
   type MergeActuatorLiveState,
   type MergeActuatorSideEffects,
   type MergeCandidateRecord,
+  mergeActuatorPollAttempt,
   reduceMergeCandidates,
   runMergeActuatorCycle,
 } from "./merge-candidate.js";
@@ -222,6 +223,16 @@ const REVIEW_SUBSTRATE_DEGRADATION_PREFIXES = [
 const REVIEW_GATE_RESULT_PATH_PREFIX = "[REVIEW_GATE_RESULT_PATH:";
 const REVIEW_GATE_RESULT_PATH_SUFFIX = "]";
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
+/**
+ * Orchestrator-side merge-actuator re-poll backoff ladder (SYMPH-753). Replaces
+ * the flat 1s continuation cadence for actuator re-polls so a PR held in the
+ * merge queue (or a bounded pre-enqueue wait) issues O(log) `gh pr view` calls
+ * over the wait window instead of ~one per second. The attempt index is derived
+ * from the durable journal (replay-stable). The last rung caps the delay.
+ */
+const MERGE_ACTUATOR_POLL_BACKOFF_MS: readonly number[] = [
+  30_000, 30_000, 60_000, 120_000, 300_000,
+];
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
 // Tracker timestamps come from the tracker's clock, pausedAt from ours.
@@ -468,7 +479,7 @@ export interface TimerScheduler {
 interface ScheduledRetryContext {
   attempt: number;
   identifier: string | null;
-  delayType: "continuation" | "failure";
+  delayType: "continuation" | "failure" | "merge_actuator_poll";
 }
 
 /**
@@ -10512,6 +10523,10 @@ export class OrchestratorCore {
         maxLiveStateFailures: actuatorConfig.maxLiveStateFailures,
         maxSideEffectFailures: actuatorConfig.maxSideEffectFailures,
         maxDraftWaitObservations: actuatorConfig.maxDraftWaitObservations,
+        maxPendingChecksWaitObservations:
+          actuatorConfig.maxPendingChecksWaitObservations,
+        maxUnknownMergeabilityWaitObservations:
+          actuatorConfig.maxUnknownMergeabilityWaitObservations,
       },
       fetchLiveState: () => fetchLiveState(candidate),
       appendActuation: (entry) => this.recordRunJournalEntry(entry),
@@ -10547,16 +10562,25 @@ export class OrchestratorCore {
     }
 
     if (result.outcome === "retry") {
-      // The coordinator owns the failure bound (journal-counted); this is a pure
-      // re-poll. deferral:true keeps it out of scheduleRetry's failure ceiling
-      // and novelty short-circuit, so repeated same-reason polls never falsely
-      // park a candidate the coordinator is still bounding.
-      this.scheduleRetry(issue.id, 1, {
-        identifier: issue.identifier,
-        error: result.reason,
-        delayType: "continuation",
-        deferral: true,
-      });
+      // The coordinator owns the failure/wait bound (journal-counted); this is a
+      // pure re-poll on the merge-actuator backoff (SYMPH-753), its attempt index
+      // derived from the durable journal so the cadence is replay-stable.
+      // deferral:true keeps it out of scheduleRetry's failure ceiling and novelty
+      // short-circuit, so repeated same-reason polls never falsely park a
+      // candidate the coordinator is still bounding.
+      this.scheduleRetry(
+        issue.id,
+        mergeActuatorPollAttempt(
+          this.state.dispatcherRunJournal,
+          candidate.candidateId,
+        ),
+        {
+          identifier: issue.identifier,
+          error: result.reason,
+          delayType: "merge_actuator_poll",
+          deferral: true,
+        },
+      );
       return true;
     }
 
@@ -10587,14 +10611,18 @@ export class OrchestratorCore {
     }
 
     if (result.run.decision.action === "blocked") {
-      // A `blocked` decision (failing/pending checks, missing required review,
-      // merged-without-proof) journals NO actuation row, so the candidate status
-      // is unchanged and the status checks above miss it. It is a terminal
-      // not-mergeable-now state that will not self-resolve under the actuator's
-      // control, so park for an operator rather than re-polling forever — the
-      // coordinator appends no countable evidence for it, so a deferral re-poll
-      // would loop unbounded (council R2: Codex). Matches the pre-fix / #562
-      // behavior of parking blocked decisions.
+      // A `blocked` decision that the coordinator did NOT convert to a bounded
+      // wait (failing_checks, missing_required_review, merged_without_durable_proof,
+      // or a non-green-terminal merge_state_*) journals NO actuation row, so the
+      // candidate status is unchanged and the status checks above miss it. It is a
+      // terminal not-mergeable-now state that will not self-resolve under the
+      // actuator's control, so park for an operator rather than re-polling forever
+      // — the coordinator appends no countable evidence for it, so a deferral
+      // re-poll would loop unbounded (council R2: Codex). The transient
+      // pending_checks_pre_enqueue / mergeability_unknown blocked decisions are
+      // intercepted earlier as bounded retry/parked outcomes (SYMPH-752/755) and
+      // never reach here. Matches the pre-fix / #562 behavior of parking blocked
+      // decisions.
       await this.parkMergeCandidateInvariantFailure({
         issue,
         stageName,
@@ -10606,15 +10634,24 @@ export class OrchestratorCore {
     }
 
     // candidate / ready_marked / merge_queue_pending / superseded — still in
-    // progress; re-poll next cycle. The coordinator owns the failure/wait bound
-    // (it returns "parked" on exhaustion), so deferral:true keeps this re-poll
-    // out of scheduleRetry's own failure ceiling and novelty short-circuit.
-    this.scheduleRetry(issue.id, 1, {
-      identifier: issue.identifier,
-      error: result.run.decision.reason,
-      delayType: "continuation",
-      deferral: true,
-    });
+    // progress; re-poll next cycle on the merge-actuator backoff (SYMPH-753),
+    // with the attempt index derived from the durable journal (replay-stable).
+    // The coordinator owns the failure/wait bound (it returns "parked" on
+    // exhaustion), so deferral:true keeps this re-poll out of scheduleRetry's own
+    // failure ceiling and novelty short-circuit.
+    this.scheduleRetry(
+      issue.id,
+      mergeActuatorPollAttempt(
+        this.state.dispatcherRunJournal,
+        candidate.candidateId,
+      ),
+      {
+        identifier: issue.identifier,
+        error: result.run.decision.reason,
+        delayType: "merge_actuator_poll",
+        deferral: true,
+      },
+    );
     return true;
   }
 
@@ -12007,7 +12044,7 @@ export class OrchestratorCore {
        * the title is resolved from state.running (which may already be cleared). */
       issueTitle?: string;
       error: string | null;
-      delayType: "continuation" | "failure";
+      delayType: "continuation" | "failure" | "merge_actuator_poll";
       /** When true, this call is an admission deferral (no-slots or deterministic
        * supervision pause) — not a real worker failure.  Deferrals must never
        * participate in the novelty short-circuit: neither recording nor comparing
@@ -12199,13 +12236,21 @@ export class OrchestratorCore {
 
     this.clearRetryEntry(issueId);
 
-    const delayMs =
-      input.delayType === "continuation"
-        ? CONTINUATION_RETRY_DELAY_MS
-        : computeFailureRetryDelayMs(
-            attempt,
-            this.config.agent.maxRetryBackoffMs,
-          );
+    let delayMs: number;
+    if (input.delayType === "continuation") {
+      delayMs = CONTINUATION_RETRY_DELAY_MS;
+    } else if (input.delayType === "merge_actuator_poll") {
+      // Orchestrator-side merge-actuator re-poll backoff (SYMPH-753). `attempt`
+      // is the journal-derived poll observation count for the candidate
+      // (replay-stable), so the cadence is restored after restart rather than
+      // resetting to the first rung.
+      delayMs = computeMergeActuatorPollDelayMs(attempt);
+    } else {
+      delayMs = computeFailureRetryDelayMs(
+        attempt,
+        this.config.agent.maxRetryBackoffMs,
+      );
+    }
     const dueAtMs = this.now().getTime() + delayMs;
     const timerHandle = this.timerScheduler.set(() => {
       void this.runScheduledRetryTimer(issueId, {
@@ -12448,6 +12493,20 @@ export function computeFailureRetryDelayMs(
   const exponentialDelay =
     FAILURE_RETRY_BASE_DELAY_MS * 2 ** (normalizedAttempt - 1);
   return Math.min(exponentialDelay, maxRetryBackoffMs);
+}
+
+/**
+ * Delay for the Nth orchestrator-side merge-actuator re-poll (SYMPH-753).
+ * `attempt` is 1-based (the prior poll/wait observation count for the
+ * candidate, derived from the durable journal). Walks the
+ * {@link MERGE_ACTUATOR_POLL_BACKOFF_MS} ladder and holds at the last (capped)
+ * rung for any further attempt; a non-positive attempt floors to the first rung.
+ */
+export function computeMergeActuatorPollDelayMs(attempt: number): number {
+  const lastIndex = MERGE_ACTUATOR_POLL_BACKOFF_MS.length - 1;
+  const index = Math.min(Math.max(attempt, 1) - 1, lastIndex);
+  // index is clamped to [0, lastIndex]; the ladder is a non-empty const.
+  return MERGE_ACTUATOR_POLL_BACKOFF_MS[index] as number;
 }
 
 // rate_limit_budget is deliberately NOT escalatable: the ladder widens token

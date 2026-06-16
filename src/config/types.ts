@@ -126,6 +126,17 @@ export interface WorkflowMergeActuatorConfig {
   maxLiveStateFailures: number;
   maxSideEffectFailures: number;
   maxDraftWaitObservations: number;
+  /**
+   * Max bounded pending-checks waits for a fresh (pre-enqueue) candidate whose
+   * required CI is still in-flight before parking with pending_checks_timeout
+   * (SYMPH-755).
+   */
+  maxPendingChecksWaitObservations: number;
+  /**
+   * Max bounded UNKNOWN-mergeability waits for a fresh (pre-enqueue) candidate
+   * before parking with mergeability_unknown (SYMPH-752).
+   */
+  maxUnknownMergeabilityWaitObservations: number;
 }
 
 /**

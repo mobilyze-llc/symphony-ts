@@ -26,6 +26,7 @@ import {
   type SupervisionResteerRequest,
   classifyExitOutcome,
   computeFailureRetryDelayMs,
+  computeMergeActuatorPollDelayMs,
   deriveAttemptedStopSignalDeliveryStatus,
   getFailedStopSignalDeliveryAttempts,
   isStopSignalDelivery,
@@ -3163,6 +3164,22 @@ describe("orchestrator core", () => {
     });
     expect(timers.scheduled[0]?.delayMs).toBe(10_000);
     expect(computeFailureRetryDelayMs(3, 30_000)).toBe(30_000);
+  });
+
+  it("computes the merge-actuator poll backoff ladder capped at 5m (SYMPH-753)", () => {
+    // Attempt count is the prior poll/wait observation count for the candidate;
+    // the first re-poll (attempt 1) uses the first rung. Ladder: 30s, 30s, 60s,
+    // 120s, 300s, then capped at 300s. Replaces the flat 1s continuation delay
+    // so a queued PR issues O(log) gh pr view calls over the wait window.
+    expect(computeMergeActuatorPollDelayMs(1)).toBe(30_000);
+    expect(computeMergeActuatorPollDelayMs(2)).toBe(30_000);
+    expect(computeMergeActuatorPollDelayMs(3)).toBe(60_000);
+    expect(computeMergeActuatorPollDelayMs(4)).toBe(120_000);
+    expect(computeMergeActuatorPollDelayMs(5)).toBe(300_000);
+    expect(computeMergeActuatorPollDelayMs(6)).toBe(300_000);
+    expect(computeMergeActuatorPollDelayMs(50)).toBe(300_000);
+    // Defensive: a non-positive attempt floors to the first rung.
+    expect(computeMergeActuatorPollDelayMs(0)).toBe(30_000);
   });
 
   it("does not retry or redispatch a manually stopped issue until explicit Resume", async () => {
@@ -7178,6 +7195,8 @@ describe("live merge actuator (SYMPH-735)", () => {
       maxLiveStateFailures: 2,
       maxSideEffectFailures: 2,
       maxDraftWaitObservations: 5,
+      maxPendingChecksWaitObservations: 3,
+      maxUnknownMergeabilityWaitObservations: 3,
       ...overrides,
     };
     return config;
@@ -7479,10 +7498,11 @@ describe("live merge actuator (SYMPH-735)", () => {
         (entry) => entry.kind === "failure_exhausted",
       ),
     ).toBe(false);
-    // A continuation re-poll is scheduled (deferral continuation), not a park.
+    // A bounded merge-actuator poll re-poll is scheduled (SYMPH-753 backoff),
+    // not a park.
     const scheduledRetry = state.retryAttempts["1"];
     expect(scheduledRetry).toBeDefined();
-    expect(scheduledRetry?.delayType).toBe("continuation");
+    expect(scheduledRetry?.delayType).toBe("merge_actuator_poll");
     // The enqueue side effect was journaled as a merge_actuation row.
     expect(
       state.dispatcherRunJournal.some(
@@ -7491,6 +7511,159 @@ describe("live merge actuator (SYMPH-735)", () => {
           entry.metadata.action === "enqueue",
       ),
     ).toBe(true);
+  });
+
+  it("schedules an increasing journal-derived poll backoff for a queued PR (SYMPH-753)", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const timers = createFakeTimerScheduler();
+    // Large maxWaitMs and a fixed clock keep the PR healthily queued so it polls
+    // without timing out — the resource-drain case SYMPH-753 targets.
+    const orchestrator = createOrchestrator({
+      config: createLiveMergeActuatorConfig({ maxWaitMs: 3_600_000 }),
+      timerScheduler: timers,
+      now: () => new Date("2026-03-06T01:00:00.000Z"),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      // Green, no required checks → cycle 1 enqueues (advancing to
+      // merge_queue_pending); each later cycle emits a queue poll.
+      getMergeActuatorLiveState: async () =>
+        actuatorLiveState({ requiredChecks: [] }),
+      mergeActuatorSideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone: async () => {},
+      },
+    });
+
+    await stageMergeCandidate(orchestrator, reviewResultPath);
+
+    // Drive several poll cycles; capture the delayMs scheduled by each.
+    // The fake scheduler clears the prior handle and sets a new one each cycle,
+    // so exactly one live timer remains; its delayMs is the current re-poll
+    // cadence. Read it (not a slice) after each cycle.
+    const delays: number[] = [];
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      await orchestrator.onRetryTimer("1");
+      const live = timers.scheduled[timers.scheduled.length - 1];
+      const retry = orchestrator.getState().retryAttempts["1"];
+      expect(retry?.delayType).toBe("merge_actuator_poll");
+      if (live !== undefined) {
+        delays.push(live.delayMs);
+      }
+    }
+
+    // No flat 1s continuation hammering: the cadence climbs the backoff ladder
+    // (monotonic non-decreasing, capped at 5m), derived from the journal's poll
+    // observation count for this candidate.
+    expect(delays.length).toBeGreaterThanOrEqual(4);
+    expect(delays[0]).toBe(30_000);
+    for (let i = 1; i < delays.length; i += 1) {
+      expect(delays[i]).toBeGreaterThanOrEqual(delays[i - 1] as number);
+    }
+    expect(delays.some((d) => d > 30_000)).toBe(true);
+    expect(delays.every((d) => d <= 300_000)).toBe(true);
+    expect(orchestrator.getState().completed.has("1")).toBe(false);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+  });
+
+  it("still parks a queued PR on the queue-wait timeout under the poll backoff (SYMPH-753)", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    // An advancing clock so the enqueue timestamp (cycle 1) sits in the past by
+    // the time later cycles evaluate the bounded queue wait. A tiny maxWaitMs
+    // means the wait is exceeded once enqueued; the backoff must NOT weaken the
+    // timeout park (the candidate still parks on merge_queue_max_wait_exceeded).
+    let nowMs = Date.parse("2026-03-06T01:00:00.000Z");
+    const orchestrator = createOrchestrator({
+      config: createLiveMergeActuatorConfig({ maxWaitMs: 1 }),
+      now: () => new Date(nowMs),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      // No required checks → cycle 1 enqueues cleanly (green, not pending), so
+      // the candidate advances to merge_queue_pending and the queue wait governs.
+      getMergeActuatorLiveState: async () =>
+        actuatorLiveState({ requiredChecks: [] }),
+      mergeActuatorSideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone: async () => {},
+      },
+    });
+
+    await stageMergeCandidate(orchestrator, reviewResultPath);
+    // Cycle 1 enqueues (merge_queue_pending). Advance the clock so the bounded
+    // queue wait elapses, then later cycles time out → park.
+    let parked = false;
+    for (let cycle = 0; cycle < 4 && !parked; cycle += 1) {
+      await orchestrator.onRetryTimer("1");
+      nowMs += 60_000;
+      parked = orchestrator.getState().failed.has("1");
+    }
+
+    const state = orchestrator.getState();
+    expect(parked).toBe(true);
+    expect(state.resumeRequired.has("1")).toBe(true);
+    expect(state.completed.has("1")).toBe(false);
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "failure_exhausted",
+      )?.metadata.reason,
+    ).toContain("merge_queue_max_wait_exceeded");
+  });
+
+  it("does not park a queued PR via the failure ceiling after many poll cycles (SYMPH-753 deferral)", async () => {
+    // T5 (council): merge_actuator_poll is deferral-class — the journal-derived
+    // attempt count climbs past maxRetryAttempts, but the failure max-attempt
+    // guard and novelty short-circuit only fire for delayType === "failure".
+    // With maxRetryAttempts: 2, driving maxRetryAttempts + 1 (= 3) and more poll
+    // cycles must NOT falsely park/fail the healthy queued candidate.
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const maxRetryAttempts = 2;
+    const config = createLiveMergeActuatorConfig({ maxWaitMs: 3_600_000 });
+    config.agent = { ...config.agent, maxRetryAttempts };
+    const orchestrator = createOrchestrator({
+      config,
+      now: () => new Date("2026-03-06T01:00:00.000Z"),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      getMergeActuatorLiveState: async () =>
+        actuatorLiveState({ requiredChecks: [] }),
+      mergeActuatorSideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone: async () => {},
+      },
+    });
+
+    await stageMergeCandidate(orchestrator, reviewResultPath);
+
+    for (let cycle = 0; cycle < maxRetryAttempts + 3; cycle += 1) {
+      await orchestrator.onRetryTimer("1");
+      const state = orchestrator.getState();
+      // Never falsely parked/exhausted by the failure ceiling.
+      expect(state.failed.has("1")).toBe(false);
+      expect(state.failureExhaustedIds.has("1")).toBe(false);
+      // Still actively re-polling on the merge-actuator backoff, with an attempt
+      // index that has climbed past maxRetryAttempts.
+      const retry = state.retryAttempts["1"];
+      expect(retry?.delayType).toBe("merge_actuator_poll");
+    }
+
+    const finalRetry = orchestrator.getState().retryAttempts["1"];
+    expect(finalRetry).toBeDefined();
+    expect((finalRetry?.attempt ?? 0) > maxRetryAttempts).toBe(true);
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.some(
+          (entry) => entry.kind === "failure_exhausted",
+        ),
+    ).toBe(false);
   });
 
   it("parks a candidate whose live PR is blocked by a failing check instead of re-polling", async () => {

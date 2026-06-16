@@ -56,7 +56,9 @@ import {
   DEFAULT_MAX_TURNS,
   DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS,
   DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES,
+  DEFAULT_MERGE_ACTUATOR_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS,
   DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES,
+  DEFAULT_MERGE_ACTUATOR_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS,
   DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS,
   DEFAULT_OBSERVABILITY_ENABLED,
   DEFAULT_OBSERVABILITY_REFRESH_MS,
@@ -293,6 +295,14 @@ export function resolveWorkflowConfig(
       maxDraftWaitObservations:
         readPositiveInteger(mergeActuator.max_draft_wait_observations) ??
         DEFAULT_MERGE_ACTUATOR_MAX_DRAFT_WAIT_OBSERVATIONS,
+      maxPendingChecksWaitObservations:
+        readPositiveInteger(
+          mergeActuator.max_pending_checks_wait_observations,
+        ) ?? DEFAULT_MERGE_ACTUATOR_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS,
+      maxUnknownMergeabilityWaitObservations:
+        readPositiveInteger(
+          mergeActuator.max_unknown_mergeability_wait_observations,
+        ) ?? DEFAULT_MERGE_ACTUATOR_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS,
     },
     specFidelity: {
       enabled: specFidelity.enabled === true,

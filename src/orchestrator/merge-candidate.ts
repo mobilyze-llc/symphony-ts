@@ -17,6 +17,12 @@ export const MERGE_ACTUATION_ACTIONS = [
   "recovered",
   "live_state_failed",
   "draft_wait",
+  // Bounded pre-enqueue waits (SYMPH-752/755): countable, replay-stable
+  // no-progress observations for transient non-terminal states before enqueue
+  // (in-flight required checks; UNKNOWN mergeability). Like draft_wait they are
+  // evidence only — never a side effect and never a status mutation.
+  "pending_checks_wait",
+  "unknown_mergeability_wait",
   "parked",
 ] as const;
 
@@ -28,6 +34,8 @@ type SideEffectActuationAction = Exclude<
   | "recovered"
   | "live_state_failed"
   | "draft_wait"
+  | "pending_checks_wait"
+  | "unknown_mergeability_wait"
   | "parked"
 >;
 
@@ -143,6 +151,18 @@ export interface MergeActuatorRecoveryLimits {
    * {@link DEFAULT_MAX_DRAFT_WAIT_OBSERVATIONS}.
    */
   maxDraftWaitObservations?: number;
+  /**
+   * Max in-flight required-check (pending) observations for a fresh, not-yet-
+   * enqueued candidate before parking (SYMPH-755). Optional; defaults to
+   * {@link DEFAULT_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS}.
+   */
+  maxPendingChecksWaitObservations?: number;
+  /**
+   * Max UNKNOWN-mergeability observations for a fresh, not-yet-enqueued
+   * candidate before parking (SYMPH-752). Optional; defaults to
+   * {@link DEFAULT_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS}.
+   */
+  maxUnknownMergeabilityWaitObservations?: number;
 }
 
 /** Operator-visible blocker recorded when a candidate parks after exhaustion. */
@@ -416,11 +436,18 @@ export function decideMergeActuation(input: {
     );
   }
   if (pendingChecks.length > 0 && !isWaitingOnQueue) {
+    // Fresh (pre-enqueue) candidate with in-flight required checks and no
+    // failing check: a healthy PR whose CI has not finished. Do not park it —
+    // signal a BOUNDED pending-checks wait the coordinator converts into
+    // countable, replay-stable journal evidence + a ceiling (SYMPH-755),
+    // mirroring draft_wait. The decision stays `blocked` (so the pure actuator
+    // writes no side-effect row); the non-null sideEffectKey is the coordinator's
+    // signal to record a pending_checks_wait observation, not to park.
     return {
       action: "blocked",
-      reason: "pending_checks",
+      reason: "pending_checks_pre_enqueue",
       blockers: pendingChecks,
-      sideEffectKey: null,
+      sideEffectKey: mergeActuationKey(input.candidate, "pending_checks_wait"),
     };
   }
   if (
@@ -457,6 +484,18 @@ export function decideMergeActuation(input: {
     };
   }
   if (input.candidate.status !== "merge_queue_pending") {
+    // Green-mergeability gate before enqueue (SYMPH-752). Only a fresh,
+    // not-yet-enqueued candidate reaches here (isWaitingOnQueue paths return
+    // above), so never enqueue until GitHub has computed a green merge state.
+    // DIRTY/BEHIND/CONFLICTING are already parked by firstLiveBlocker above;
+    // this handles the remaining UNKNOWN and non-green-terminal states.
+    const mergeabilityDecision = mergeabilityGateDecision(
+      input.candidate,
+      input.live,
+    );
+    if (mergeabilityDecision !== null) {
+      return mergeabilityDecision;
+    }
     return sideEffectDecision(
       input.candidate,
       "enqueue",
@@ -488,14 +527,17 @@ export function buildMergeActuationEntry(input: {
     input.action,
     input.subjectAction,
   );
-  // Poll, failed, live-state-failure, and draft-wait entries are countable
-  // progress evidence: one durable, replay-stable entry per dispatch cycle, made
-  // unique by the lease id so the journal does not collapse them into one row.
+  // Poll, failed, live-state-failure, draft-wait, and the bounded pre-enqueue
+  // waits are countable progress evidence: one durable, replay-stable entry per
+  // dispatch cycle, made unique by the lease id so the journal does not collapse
+  // them into one row.
   const key =
     input.action === "poll" ||
     input.action === "failed" ||
     input.action === "live_state_failed" ||
-    input.action === "draft_wait"
+    input.action === "draft_wait" ||
+    input.action === "pending_checks_wait" ||
+    input.action === "unknown_mergeability_wait"
       ? `${baseKey}:${input.lease.leaseId}`
       : baseKey;
   return {
@@ -873,6 +915,48 @@ export async function runMergeActuatorCycle(input: {
     });
   }
 
+  // Bounded pending-checks wait (SYMPH-755): a fresh, not-yet-enqueued candidate
+  // whose required CI is still in-flight. The pure actuator returns a `blocked`
+  // decision (no side-effect row) keyed to the pending_checks_wait action; bound
+  // it on its own countable ceiling instead of parking a healthy in-flight-CI PR.
+  if (
+    run.decision.action === "blocked" &&
+    run.decision.reason === "pending_checks_pre_enqueue" &&
+    run.decision.sideEffectKey ===
+      mergeActuationKey(input.candidate, "pending_checks_wait")
+  ) {
+    return recordPendingChecksWaitObservation({
+      candidate: input.candidate,
+      journal: input.journal,
+      lease,
+      ownerId: input.ownerId,
+      now: input.now,
+      limits: input.limits,
+      pendingChecks: run.decision.blockers,
+      appendActuation: input.appendActuation,
+    });
+  }
+
+  // Bounded UNKNOWN-mergeability wait (SYMPH-752): a fresh candidate GitHub has
+  // not yet computed mergeability for. Same shape as the pending-checks wait —
+  // never enqueue while UNKNOWN, bound the wait, then park.
+  if (
+    run.decision.action === "blocked" &&
+    run.decision.reason === "mergeability_unknown" &&
+    run.decision.sideEffectKey ===
+      mergeActuationKey(input.candidate, "unknown_mergeability_wait")
+  ) {
+    return recordUnknownMergeabilityWaitObservation({
+      candidate: input.candidate,
+      journal: input.journal,
+      lease,
+      ownerId: input.ownerId,
+      now: input.now,
+      limits: input.limits,
+      appendActuation: input.appendActuation,
+    });
+  }
+
   return { outcome: "actuated", run };
 }
 
@@ -978,6 +1062,142 @@ async function recordDraftWaitObservation(input: {
   };
 }
 
+const DEFAULT_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS = 30;
+
+/**
+ * Record one bounded pending-checks wait observation (SYMPH-755). Mirrors
+ * {@link recordDraftWaitObservation}: append a countable, replay-stable
+ * `pending_checks_wait` row (per-cycle keyed by lease id), count distinct rows
+ * from the durable journal, and park with a `pending_checks_timeout` blocker on
+ * ceiling exhaustion. Otherwise return a retry so the candidate re-polls.
+ */
+async function recordPendingChecksWaitObservation(input: {
+  candidate: MergeCandidateRecord;
+  journal: readonly DispatcherRunJournalEntry[];
+  lease: DispatcherLease;
+  ownerId: string;
+  now: Date;
+  limits: MergeActuatorRecoveryLimits;
+  pendingChecks: readonly string[];
+  appendActuation: (
+    entry: MergeActuationJournalDraft,
+  ) => Promise<DispatcherRunJournalEntry>;
+}): Promise<MergeActuatorCycleResult> {
+  const pendingSummary =
+    input.pendingChecks.length > 0
+      ? input.pendingChecks.join(", ")
+      : "required checks";
+  const evidenceEntry = await input.appendActuation(
+    buildMergeActuationEntry({
+      candidate: input.candidate,
+      action: "pending_checks_wait",
+      timestamp: input.now.toISOString(),
+      ownerId: input.ownerId,
+      lease: input.lease,
+      reason: "pending_checks_pre_enqueue",
+      metadata: {
+        last_error: `required checks still pending: ${pendingSummary}`,
+        pending_checks: [...input.pendingChecks],
+      },
+    }),
+  );
+  const attempts = countWaitObservations(
+    input.journal,
+    input.candidate.candidateId,
+    "pending_checks_wait",
+    evidenceEntry,
+  );
+  const ceiling =
+    input.limits.maxPendingChecksWaitObservations ??
+    DEFAULT_MAX_PENDING_CHECKS_WAIT_OBSERVATIONS;
+  if (attempts >= ceiling) {
+    return parkCandidate({
+      candidate: input.candidate,
+      lease: input.lease,
+      ownerId: input.ownerId,
+      now: input.now,
+      live: null,
+      reason: "pending_checks_timeout",
+      attempts,
+      lastErrorOrStateSummary: `required checks still pending after ${attempts} waits: ${pendingSummary}`,
+      nextOperatorAction: pendingChecksNextOperatorAction(input.candidate),
+      appendActuation: input.appendActuation,
+    });
+  }
+  return {
+    outcome: "retry",
+    reason: "pending_checks_pre_enqueue",
+    attempts,
+    evidenceEntry,
+  };
+}
+
+const DEFAULT_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS = 20;
+
+/**
+ * Record one bounded UNKNOWN-mergeability wait observation (SYMPH-752). Same
+ * shape as {@link recordPendingChecksWaitObservation}: countable, replay-stable
+ * `unknown_mergeability_wait` evidence + a ceiling, parking with a
+ * `mergeability_unknown` blocker on exhaustion. The candidate is never enqueued
+ * while mergeability is UNKNOWN.
+ */
+async function recordUnknownMergeabilityWaitObservation(input: {
+  candidate: MergeCandidateRecord;
+  journal: readonly DispatcherRunJournalEntry[];
+  lease: DispatcherLease;
+  ownerId: string;
+  now: Date;
+  limits: MergeActuatorRecoveryLimits;
+  appendActuation: (
+    entry: MergeActuationJournalDraft,
+  ) => Promise<DispatcherRunJournalEntry>;
+}): Promise<MergeActuatorCycleResult> {
+  const evidenceEntry = await input.appendActuation(
+    buildMergeActuationEntry({
+      candidate: input.candidate,
+      action: "unknown_mergeability_wait",
+      timestamp: input.now.toISOString(),
+      ownerId: input.ownerId,
+      lease: input.lease,
+      reason: "mergeability_unknown",
+      metadata: {
+        last_error: "GitHub has not computed mergeability (UNKNOWN/null)",
+      },
+    }),
+  );
+  const attempts = countWaitObservations(
+    input.journal,
+    input.candidate.candidateId,
+    "unknown_mergeability_wait",
+    evidenceEntry,
+  );
+  const ceiling =
+    input.limits.maxUnknownMergeabilityWaitObservations ??
+    DEFAULT_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS;
+  if (attempts >= ceiling) {
+    return parkCandidate({
+      candidate: input.candidate,
+      lease: input.lease,
+      ownerId: input.ownerId,
+      now: input.now,
+      live: null,
+      reason: "mergeability_unknown",
+      attempts,
+      lastErrorOrStateSummary: `GitHub mergeability still UNKNOWN after ${attempts} waits`,
+      nextOperatorAction: unknownMergeabilityNextOperatorAction(
+        input.candidate,
+      ),
+      appendActuation: input.appendActuation,
+    });
+  }
+  return {
+    outcome: "retry",
+    reason: "mergeability_unknown",
+    attempts,
+    evidenceEntry,
+  };
+}
+
 async function parkCandidate(input: {
   candidate: MergeCandidateRecord;
   lease: DispatcherLease;
@@ -1040,11 +1260,69 @@ function countDraftWaitObservations(
   candidateId: string,
   appended: DispatcherRunJournalEntry,
 ): number {
+  return countWaitObservations(journal, candidateId, "draft_wait", appended);
+}
+
+/**
+ * Countable re-poll actions whose cadence the SYMPH-753 backoff governs: the
+ * merge-queue `poll` plus the bounded pre-enqueue/draft waits. Each leaves one
+ * distinct-keyed `merge_actuation` row per dispatch cycle.
+ */
+const MERGE_ACTUATOR_POLL_ACTIONS: ReadonlySet<MergeActuationAction> = new Set([
+  "poll",
+  "draft_wait",
+  "pending_checks_wait",
+  "unknown_mergeability_wait",
+]);
+
+/**
+ * The 1-based attempt index for the merge-actuator re-poll backoff (SYMPH-753),
+ * derived from the durable journal so it is replay-stable: the count of distinct
+ * countable re-poll rows ({@link MERGE_ACTUATOR_POLL_ACTIONS}) for the candidate.
+ * Call AFTER the current cycle's poll/wait evidence has been appended, so the
+ * first re-poll returns 1 (the first backoff rung). Returns 1 when there is no
+ * such evidence yet, so the cadence never under-counts to a zero/negative rung.
+ */
+export function mergeActuatorPollAttempt(
+  journal: readonly DispatcherRunJournalEntry[],
+  candidateId: string,
+): number {
   const keys = new Set<string>();
   for (const entry of journal) {
     if (
       entry.kind === "merge_actuation" &&
-      stringField(entry.metadata.action) === "draft_wait" &&
+      stringField(entry.metadata.candidate_id) === candidateId
+    ) {
+      const action = stringField(entry.metadata.action);
+      if (
+        action !== null &&
+        MERGE_ACTUATOR_POLL_ACTIONS.has(action as MergeActuationAction)
+      ) {
+        keys.add(entry.idempotencyKey);
+      }
+    }
+  }
+  return Math.max(keys.size, 1);
+}
+
+/**
+ * Count distinct idempotency keys of `merge_actuation` rows with the given
+ * countable wait `action` for a candidate (SYMPH-752/755). Each dispatch cycle
+ * holds a distinct lease id, so each cycle's wait row is a distinct key — this
+ * is exactly the per-cycle countable, replay-stable bound the draft_wait pattern
+ * uses. The just-appended row is always included.
+ */
+function countWaitObservations(
+  journal: readonly DispatcherRunJournalEntry[],
+  candidateId: string,
+  action: MergeActuationAction,
+  appended: DispatcherRunJournalEntry,
+): number {
+  const keys = new Set<string>();
+  for (const entry of journal) {
+    if (
+      entry.kind === "merge_actuation" &&
+      stringField(entry.metadata.action) === action &&
       stringField(entry.metadata.candidate_id) === candidateId
     ) {
       keys.add(entry.idempotencyKey);
@@ -1101,6 +1379,15 @@ function isUsableLiveState(live: MergeActuatorLiveState): boolean {
     live.headSha.length > 0 &&
     typeof live.baseRef === "string" &&
     live.baseRef.length > 0 &&
+    // The green-mergeability gate (SYMPH-752) dereferences these and keys the
+    // UNKNOWN branch on `=== null`. A fetcher returning `undefined` would slip
+    // past that check (undefined !== null) and either enqueue on unverified
+    // mergeability or throw on mergeStateStatus.toLowerCase() outside the
+    // recovery envelope. Require the same string|null shape the fetcher promises
+    // so a violating value is routed through bounded recovery instead.
+    (typeof live.mergeable === "string" || live.mergeable === null) &&
+    (typeof live.mergeStateStatus === "string" ||
+      live.mergeStateStatus === null) &&
     Array.isArray(live.requiredChecks) &&
     live.requiredChecks.every(isUsableRequiredCheck)
   );
@@ -1204,6 +1491,20 @@ function draftWaitNextOperatorAction(candidate: MergeCandidateRecord): string {
   return `${target} is still a draft after the actuator marked it ready; mark the PR ready (or close it), then re-queue the issue (Todo -> Resume).`;
 }
 
+function pendingChecksNextOperatorAction(
+  candidate: MergeCandidateRecord,
+): string {
+  const target = `${candidate.repo}#${candidate.prNumber}`;
+  return `${target} still has required checks pending after the bounded wait; investigate the stuck/slow CI checks, then re-queue the issue (Todo -> Resume).`;
+}
+
+function unknownMergeabilityNextOperatorAction(
+  candidate: MergeCandidateRecord,
+): string {
+  const target = `${candidate.repo}#${candidate.prNumber}`;
+  return `GitHub never computed a mergeability for ${target} within the bounded wait; check the PR's merge state, then re-queue the issue (Todo -> Resume).`;
+}
+
 function candidateFromEntry(
   entry: DispatcherRunJournalEntry,
 ): MergeCandidateRecord | null {
@@ -1282,11 +1583,17 @@ function applyActuation(
   const previousLastActuation = record.lastActuation;
   record.updatedAt = entry.timestamp;
   record.cursorRange.lastSequence = entry.sequence;
-  if (action === "live_state_failed" || action === "draft_wait") {
+  if (
+    action === "live_state_failed" ||
+    action === "draft_wait" ||
+    action === "pending_checks_wait" ||
+    action === "unknown_mergeability_wait"
+  ) {
     // Countable progress evidence only. It must not mutate status or
-    // lastActuation, so a transient live-state outage or a draft-wait
-    // observation cannot erase an in-flight enqueue intent or otherwise rewrite
-    // the candidate's recovery state.
+    // lastActuation, so a transient live-state outage, a draft-wait, or a
+    // bounded pre-enqueue wait (pending checks / UNKNOWN mergeability) cannot
+    // erase an in-flight enqueue intent or otherwise rewrite the candidate's
+    // recovery state (SYMPH-746/752/755).
     return;
   }
   if (action === "mark_ready") {
@@ -1370,6 +1677,56 @@ function applyRecoveredActuation(
     record.blockedReason =
       stringField(entry.metadata.reason) ?? "merge_queue_max_wait_exceeded";
   }
+}
+
+/**
+ * Merge-state statuses that are safe to enqueue behind (SYMPH-752). UNSTABLE
+ * (non-required checks pending/failing) and HAS_HOOKS are mergeable; the
+ * required-check gate above already bounds genuinely in-flight required checks.
+ */
+const GREEN_MERGE_STATE_STATUSES: ReadonlySet<string> = new Set([
+  "CLEAN",
+  "HAS_HOOKS",
+  "UNSTABLE",
+]);
+
+/**
+ * Green-mergeability gate before enqueue (SYMPH-752). Returns `null` when the
+ * PR is green and may enqueue; otherwise a non-enqueue decision:
+ * - UNKNOWN (`mergeable`/`mergeStateStatus` null — GitHub has not computed
+ *   mergeability yet): a BOUNDED wait (reason `mergeability_unknown`, signaled
+ *   by an `unknown_mergeability_wait` sideEffectKey the coordinator counts and
+ *   bounds). Never enqueue while UNKNOWN.
+ * - Non-green terminal merge state (e.g. BLOCKED): park via `merge_state_<status>`.
+ *
+ * DIRTY/BEHIND/CONFLICTING are NOT handled here — firstLiveBlocker already
+ * parks them as merge_conflict/behind_base before the decision reaches enqueue.
+ */
+function mergeabilityGateDecision(
+  candidate: MergeCandidateRecord,
+  live: MergeActuatorLiveState,
+): MergeActuatorDecision | null {
+  if (live.mergeable === null || live.mergeStateStatus === null) {
+    return {
+      action: "blocked",
+      reason: "mergeability_unknown",
+      blockers: ["mergeability_unknown"],
+      sideEffectKey: mergeActuationKey(candidate, "unknown_mergeability_wait"),
+    };
+  }
+  if (
+    live.mergeable === "MERGEABLE" &&
+    GREEN_MERGE_STATE_STATUSES.has(live.mergeStateStatus)
+  ) {
+    return null;
+  }
+  const status = live.mergeStateStatus.toLowerCase();
+  return {
+    action: "blocked",
+    reason: `merge_state_${status}`,
+    blockers: [`merge_state_${status}`],
+    sideEffectKey: null,
+  };
 }
 
 function firstLiveBlocker(
