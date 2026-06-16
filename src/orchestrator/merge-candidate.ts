@@ -777,7 +777,10 @@ function firstLiveBlocker(
   if (live.mergeStateStatus === "DIRTY" || live.mergeable === "CONFLICTING") {
     return "merge_conflict";
   }
-  if (live.mergeStateStatus === "BEHIND") {
+  if (
+    live.mergeStateStatus === "BEHIND" &&
+    candidate.status !== "merge_queue_pending"
+  ) {
     return "behind_base";
   }
   return null;

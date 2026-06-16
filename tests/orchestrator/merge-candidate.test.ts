@@ -270,6 +270,36 @@ describe("merge candidates", () => {
     });
   });
 
+  it("continues polling queued PRs while GitHub reports the queue branch behind", () => {
+    const candidateEntry = {
+      ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+      sequence: 2,
+    };
+    const candidate = {
+      ...reduceMergeCandidates([candidateEntry])["issue-1"]!,
+      status: "merge_queue_pending" as const,
+    };
+
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState({
+          mergeStateStatus: "BEHIND",
+          mergeable: "MERGEABLE",
+        }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+        enqueuedAtMs: Date.parse("2026-06-16T01:00:00.000Z"),
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({
+      action: "poll",
+      reason: "merge_queue_pending",
+    });
+  });
+
   it("polls pre-enqueue GitHub mergeability unknown before parking after the bounded wait", () => {
     const candidateEntry = {
       ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
