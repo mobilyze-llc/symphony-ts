@@ -764,6 +764,21 @@ describe("council-review manual skill", () => {
     });
   });
 
+  it("accepts an empty Kimi shadow artifact when a valid disabled marker explains it", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+      writeArtifact(dir, "kimi-k27-shadow.md", "");
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(0);
+      expect(assertion.stdout).toContain(
+        "PASS council-review clean PASS assertion",
+      );
+    });
+  });
+
   it("rejects malformed Kimi disabled markers", () => {
     withArtifactDir((dir) => {
       writeCleanPassArtifacts(dir);

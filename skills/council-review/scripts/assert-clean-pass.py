@@ -198,7 +198,7 @@ def validate_kimi_shadow_presence(artifact_dir: Path) -> list[str]:
             return []
         if not marker_path.exists():
             return [
-                f"kimi-k27-shadow: shadow artifact is empty and disabled marker is missing"
+                "kimi-k27-shadow: shadow artifact is empty and disabled marker is missing"
             ]
 
     if not marker_path.exists():

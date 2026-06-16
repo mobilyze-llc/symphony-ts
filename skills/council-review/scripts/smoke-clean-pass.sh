@@ -67,6 +67,14 @@ EOF
 EOF
 }
 
+write_kimi_disabled_marker() {
+  local dir="$1"
+  local reason="${2:-disabled-by-config}"
+
+  printf '{"enabled":false,"reason":"%s","mergeAuthoritative":false}\n' "$reason" \
+    > "$dir/kimi-k27-shadow.disabled.json"
+}
+
 expect_pass() {
   local name="$1"
   local dir="$2"
@@ -110,12 +118,19 @@ expect_pass "matching PR-backed draft" "$clean"
 closeout="$WORK_DIR/clean-closeout"
 write_case "$closeout" "PR-backed draft" "true" "0" "" "match" "exact"
 write_completed_reviewer_artifact "$closeout"
+write_kimi_disabled_marker "$closeout"
 expect_closeout_pass "matching PR-backed draft closeout" "$closeout"
 
 diagnostic_status="$WORK_DIR/diagnostic-status"
 write_case "$diagnostic_status" "PR-backed draft" "true" "0" "" "match" "exact"
 write_completed_reviewer_artifact "$diagnostic_status" "Review complete: 2 P1s mentioned in diagnostic status"
+write_kimi_disabled_marker "$diagnostic_status"
 expect_closeout_pass "valid artifact is authoritative over blocker-claiming status" "$diagnostic_status"
+
+missing_kimi="$WORK_DIR/missing-kimi-shadow"
+write_case "$missing_kimi" "PR-backed draft" "true" "0" "" "match" "exact"
+write_completed_reviewer_artifact "$missing_kimi"
+expect_closeout_fail "missing Kimi shadow artifact or disabled marker" "$missing_kimi"
 
 thin_status="$WORK_DIR/thin-status"
 write_case "$thin_status" "PR-backed draft" "true" "0" "" "match" "exact"
@@ -123,6 +138,7 @@ printf '%s\n' "P1 and P2 summary only" > "$thin_status/phase1-opus.md"
 cat > "$thin_status/phase1-opus.status.json" <<EOF
 {"schema":"agent-harness.lane-status.v1","agent":"claude","lane":"phase1-opus","phase":"phase1-opus","state":"complete","message":"Review complete: 1 P1","artifact":"$thin_status/phase1-opus.md"}
 EOF
+write_kimi_disabled_marker "$thin_status"
 expect_closeout_fail "thin artifact with blocker-claiming status" "$thin_status"
 
 safe_base="$WORK_DIR/safe-base-equivalence"
