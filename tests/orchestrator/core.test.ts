@@ -503,6 +503,78 @@ describe("orchestrator core", () => {
     expect(timers.scheduled[0]?.delayMs).toBe(30_000);
   });
 
+  it("parks candidate-backed merge dispatch after persistent actuator side-effect failures", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const config = createReviewMergeConfig();
+    config.agent.maxRetryAttempts = 1;
+    const timers = createFakeTimerScheduler();
+    const orchestrator = createOrchestrator({
+      config,
+      timerScheduler: timers,
+      getMergeActuatorLiveState: async () => ({
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 725,
+        prUrl: "https://github.com/mobilyze-llc/symphony-ts/pull/725",
+        state: "MERGED",
+        isDraft: false,
+        mergeStateStatus: "UNKNOWN",
+        mergeable: "UNKNOWN",
+        reviewDecision: null,
+        headSha: "head-sha",
+        baseRef: "main",
+        baseSha: "base-sha",
+        requiredChecks: [],
+        requiresGithubReview: false,
+        mergeQueueRequired: true,
+        mergedAt: "2026-03-06T00:03:00.000Z",
+        mergeCommit: "merge-sha",
+      }),
+      mergeActuatorSideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone: async () => {
+          throw new Error("Linear unavailable");
+        },
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+    await orchestrator.onRetryTimer("1");
+    const result = await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    expect(result.dispatched).toBe(false);
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.retryAttempts["1"]).toBeUndefined();
+    expect(
+      state.dispatcherRunJournal.filter(
+        (entry) =>
+          entry.kind === "merge_actuation" &&
+          entry.metadata.action === "failed" &&
+          entry.metadata.subject_action === "tracker_done",
+      ),
+    ).toHaveLength(2);
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) =>
+          entry.kind === "failure_exhausted" &&
+          String(entry.metadata.reason).startsWith(
+            "merge_actuator_side_effect_failed:",
+          ),
+      ),
+    ).toBeDefined();
+  });
+
   it("enqueues candidate-backed merge dispatch only with explicit actuator permission", async () => {
     const reviewResultPath = await writeReviewGateResultFixture();
     const timers = createFakeTimerScheduler();

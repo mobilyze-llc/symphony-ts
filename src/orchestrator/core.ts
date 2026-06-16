@@ -171,6 +171,7 @@ import {
 } from "./intent.js";
 import {
   type MergeActuationJournalDraft,
+  type MergeActuatorDecision,
   type MergeActuatorLiveState,
   type MergeActuatorSideEffects,
   type MergeCandidateRecord,
@@ -4619,6 +4620,8 @@ export class OrchestratorCore {
     reasonCode: string;
     detail: string;
     reviewResultPath?: string;
+    title?: string;
+    operatorMessage?: string;
   }): Promise<void> {
     const reason = `${input.reasonCode}: ${input.detail}`;
     const signature = hashReviewInfrastructureSignature(
@@ -4652,14 +4655,15 @@ export class OrchestratorCore {
         input.issue.id,
         input.issue.identifier,
         [
-          "## Parked: canonical merge candidate missing",
+          `## Parked: ${input.title ?? "canonical merge candidate missing"}`,
           "",
           `Reason: ${sanitizeForLinear(reason, { maxLen: 2000 })}`,
           ...(input.reviewResultPath === undefined
             ? []
             : [`Review result path: ${input.reviewResultPath}`]),
           "",
-          "The runtime host refused to advance or dispatch merge without canonical review_gate_result and merge_candidate journal rows.",
+          input.operatorMessage ??
+            "The runtime host refused to advance or dispatch merge without canonical review_gate_result and merge_candidate journal rows.",
         ].join("\n"),
       );
     } catch (error) {
@@ -10538,11 +10542,13 @@ export class OrchestratorCore {
     });
 
     if (result.error !== null) {
-      this.scheduleMergeActuatorRetry(
+      await this.handleMergeActuatorSideEffectFailure({
         issue,
+        stageName,
         candidate,
-        `merge_actuator_side_effect_failed:${result.error}`,
-      );
+        action: result.decision.action,
+        error: result.error,
+      });
       return true;
     }
 
@@ -10592,6 +10598,39 @@ export class OrchestratorCore {
   ): void {
     this.scheduleRetry(issue.id, this.nextMergeActuatorPollAttempt(candidate), {
       identifier: issue.identifier,
+      error: reason,
+      delayType: "merge_actuator_poll",
+    });
+  }
+
+  private async handleMergeActuatorSideEffectFailure(input: {
+    issue: Issue;
+    stageName: string | null;
+    candidate: MergeCandidateRecord;
+    action: MergeActuatorDecision["action"];
+    error: string;
+  }): Promise<void> {
+    const failureAttempt = this.mergeActuatorSideEffectFailureAttempt(
+      input.candidate,
+      input.action,
+    );
+    const reason = `merge_actuator_side_effect_failed:${input.error}`;
+    if (failureAttempt > this.config.agent.maxRetryAttempts) {
+      await this.parkMergeCandidateInvariantFailure({
+        issue: input.issue,
+        stageName: input.stageName,
+        reasonCode: "merge_actuator_side_effect_failed",
+        detail: `candidate ${input.candidate.candidateId} ${input.action} side effect failed ${failureAttempt} times: ${input.error}`,
+        reviewResultPath: input.candidate.reviewResultPath,
+        title: "merge actuator side-effect retries exhausted",
+        operatorMessage:
+          "The runtime host preserved the merge candidate but stopped retrying a persistent merge-actuator side-effect failure. Resume after fixing the underlying GitHub or tracker write failure.",
+      });
+      return;
+    }
+
+    this.scheduleRetry(input.issue.id, failureAttempt, {
+      identifier: input.issue.identifier,
       error: reason,
       delayType: "merge_actuator_poll",
     });
@@ -10650,6 +10689,26 @@ export class OrchestratorCore {
       }
     }
     return pollCount + 1;
+  }
+
+  private mergeActuatorSideEffectFailureAttempt(
+    candidate: MergeCandidateRecord,
+    action: MergeActuatorDecision["action"],
+  ): number {
+    let failureCount = 0;
+    for (const entry of this.state.dispatcherRunJournal) {
+      if (
+        entry.kind === "merge_actuation" &&
+        entry.issueId === candidate.issueId &&
+        readMetadataString(entry.metadata, "candidate_id") ===
+          candidate.candidateId &&
+        readMetadataString(entry.metadata, "action") === "failed" &&
+        readMetadataString(entry.metadata, "subject_action") === action
+      ) {
+        failureCount += 1;
+      }
+    }
+    return failureCount;
   }
 
   private mergeActuationSideEffectKey(

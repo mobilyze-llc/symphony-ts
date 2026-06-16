@@ -460,8 +460,8 @@ export function buildMergeActuationEntry(input: {
   reason?: string;
 }): MergeActuationJournalDraft {
   const key =
-    input.action === "poll"
-      ? `${mergeActuationKey(input.candidate, input.action)}:${input.lease.leaseId}`
+    input.action === "poll" || input.action === "failed"
+      ? `${mergeActuationKey(input.candidate, input.action, input.subjectAction)}:${input.lease.leaseId}`
       : mergeActuationKey(input.candidate, input.action, input.subjectAction);
   return {
     idempotencyKey: key,
@@ -754,11 +754,21 @@ function applyActuation(
   if (action === null) {
     return;
   }
+  const previousLastActuation = record.lastActuation;
+  const previousStatus = record.status;
   record.updatedAt = entry.timestamp;
-  record.lastActuation = action;
   record.cursorRange.lastSequence = entry.sequence;
   if (action === "poll") {
     const reason = stringField(entry.metadata.reason);
+    const preservesUnconfirmedEnqueue =
+      previousStatus !== "merge_queue_pending" &&
+      previousLastActuation === "enqueue" &&
+      (reason === "enqueue_status_uncertain" ||
+        reason === "merge_queue_pending");
+    if (preservesUnconfirmedEnqueue) {
+      return;
+    }
+    record.lastActuation = action;
     if (
       reason === "mergeability_unknown" ||
       reason === "enqueue_status_uncertain"
@@ -767,18 +777,24 @@ function applyActuation(
     }
     record.status = "merge_queue_pending";
   } else if (action === "stale") {
+    record.lastActuation = action;
     record.status = "stale";
     record.blockedReason = stringField(entry.metadata.reason) ?? "stale";
   } else if (action === "timeout") {
+    record.lastActuation = action;
     record.status = "blocked";
     record.blockedReason =
       stringField(entry.metadata.reason) ?? "merge_queue_max_wait_exceeded";
   } else if (action === "failed") {
+    record.lastActuation = action;
     record.status = "blocked";
     record.blockedReason =
       stringField(entry.metadata.reason) ?? "merge_actuation_failed";
   } else if (action === "completed" || action === "recovered") {
+    record.lastActuation = action;
     applyRecoveredActuation(record, entry);
+  } else {
+    record.lastActuation = action;
   }
 }
 
