@@ -241,6 +241,56 @@ describe("merge candidates", () => {
     ).toMatchObject({ allowed: false });
   });
 
+  it("blocks enqueue when actuator auto-merge permission is not explicit", () => {
+    const candidateEntry = {
+      ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+      sequence: 2,
+    };
+    const candidate = reduceMergeCandidates([candidateEntry])["issue-1"]!;
+
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState(),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({
+      action: "blocked",
+      reason: "auto_merge_permission_denied",
+      blockers: ["auto_merge_permission_denied"],
+    });
+  });
+
+  it("enqueues only when actuator auto-merge permission is explicit", () => {
+    const candidateEntry = {
+      ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+      sequence: 2,
+    };
+    const candidate = reduceMergeCandidates([candidateEntry])["issue-1"]!;
+
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState(),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        canAutoMerge: true,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({
+      action: "enqueue",
+      reason: "merge_queue_required",
+    });
+  });
+
   it("continues polling queued PRs while required checks are pending", () => {
     const candidateEntry = {
       ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,

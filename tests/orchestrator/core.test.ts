@@ -503,6 +503,77 @@ describe("orchestrator core", () => {
     expect(timers.scheduled[0]?.delayMs).toBe(30_000);
   });
 
+  it("enqueues candidate-backed merge dispatch only with explicit actuator permission", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const timers = createFakeTimerScheduler();
+    const sideEffects: string[] = [];
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      timerScheduler: timers,
+      mergeActuatorCanAutoMerge: true,
+      getMergeActuatorLiveState: async () => ({
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 725,
+        prUrl: "https://github.com/mobilyze-llc/symphony-ts/pull/725",
+        state: "OPEN",
+        isDraft: false,
+        mergeStateStatus: "CLEAN",
+        mergeable: "MERGEABLE",
+        reviewDecision: null,
+        headSha: "head-sha",
+        baseRef: "main",
+        baseSha: "base-sha",
+        requiredChecks: [],
+        requiresGithubReview: false,
+        mergeQueueRequired: true,
+        mergedAt: null,
+        mergeCommit: null,
+      }),
+      mergeActuatorSideEffects: {
+        markReady: async () => {
+          sideEffects.push("mark_ready");
+        },
+        enqueue: async () => {
+          sideEffects.push("enqueue");
+        },
+        writeTrackerDone: async () => {
+          sideEffects.push("tracker_done");
+        },
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+    const result = await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    expect(result.dispatched).toBe(false);
+    expect(sideEffects).toEqual(["enqueue"]);
+    expect(state.failed.has("1")).toBe(false);
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) =>
+          entry.kind === "merge_actuation" &&
+          entry.metadata.action === "completed" &&
+          entry.metadata.subject_action === "enqueue",
+      ),
+    ).toBeDefined();
+    expect(state.retryAttempts["1"]).toMatchObject({
+      delayType: "merge_actuator_poll",
+      error: "merge_queue_required",
+    });
+    expect(timers.scheduled[0]?.delayMs).toBe(30_000);
+  });
+
   it("parks candidate-backed merge dispatch when the actuator is not configured", async () => {
     const spawnedStages: Array<string | null> = [];
     const reviewResultPath = await writeReviewGateResultFixture();
@@ -13998,6 +14069,7 @@ function createOrchestrator(overrides?: {
   postComment?: OrchestratorCoreOptions["postComment"];
   getMergeActuatorLiveState?: OrchestratorCoreOptions["getMergeActuatorLiveState"];
   mergeActuatorSideEffects?: OrchestratorCoreOptions["mergeActuatorSideEffects"];
+  mergeActuatorCanAutoMerge?: OrchestratorCoreOptions["mergeActuatorCanAutoMerge"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
   onGateFailed?: OrchestratorCoreOptions["onGateFailed"];
   onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
@@ -14070,6 +14142,10 @@ function createOrchestrator(overrides?: {
 
   if (overrides?.mergeActuatorSideEffects !== undefined) {
     options.mergeActuatorSideEffects = overrides.mergeActuatorSideEffects;
+  }
+
+  if (overrides?.mergeActuatorCanAutoMerge !== undefined) {
+    options.mergeActuatorCanAutoMerge = overrides.mergeActuatorCanAutoMerge;
   }
 
   if (overrides?.onGateFailed !== undefined) {

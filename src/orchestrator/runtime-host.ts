@@ -731,6 +731,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
             getMergeActuatorLiveState: async (
               candidate: MergeCandidateRecord,
             ) => await this.fetchMergeActuatorLiveState(candidate),
+            mergeActuatorCanAutoMerge: true,
             mergeActuatorSideEffects: {
               markReady: async (candidate: MergeCandidateRecord) => {
                 await this.runGh([

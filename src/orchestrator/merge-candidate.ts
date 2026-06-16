@@ -265,6 +265,7 @@ export function decideMergeActuation(input: {
   enqueuedAtMs: number | null;
   mergeabilityWaitStartedAtMs?: number | null;
   maxWaitMs: number;
+  canAutoMerge?: boolean;
   completedSideEffectKeys: ReadonlySet<string>;
 }): MergeActuatorDecision {
   const leaseDecision = validateLease(
@@ -414,6 +415,14 @@ export function decideMergeActuation(input: {
     };
   }
   if (input.candidate.status !== "merge_queue_pending") {
+    if (input.canAutoMerge !== true) {
+      return {
+        action: "blocked",
+        reason: "auto_merge_permission_denied",
+        blockers: ["auto_merge_permission_denied"],
+        sideEffectKey: null,
+      };
+    }
     return sideEffectDecision(
       input.candidate,
       "enqueue",
@@ -490,6 +499,7 @@ export async function runMergeActuator(input: {
   enqueuedAtMs: number | null;
   mergeabilityWaitStartedAtMs?: number | null;
   maxWaitMs: number;
+  canAutoMerge?: boolean;
   completedSideEffectKeys: ReadonlySet<string>;
   appendActuation: (
     entry: MergeActuationJournalDraft,
@@ -505,6 +515,7 @@ export async function runMergeActuator(input: {
     enqueuedAtMs: input.enqueuedAtMs,
     mergeabilityWaitStartedAtMs: input.mergeabilityWaitStartedAtMs ?? null,
     maxWaitMs: input.maxWaitMs,
+    canAutoMerge: input.canAutoMerge === true,
     completedSideEffectKeys: input.completedSideEffectKeys,
   });
 

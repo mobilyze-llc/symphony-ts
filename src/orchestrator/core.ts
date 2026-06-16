@@ -592,6 +592,7 @@ export interface OrchestratorCoreOptions {
   ) => Promise<MergeActuatorLiveState | null>;
   mergeActuatorSideEffects?: MergeActuatorSideEffects;
   mergeActuatorMaxWaitMs?: number;
+  mergeActuatorCanAutoMerge?: boolean;
   autoCloseParentIssue?: (
     issueId: string,
     issueIdentifier: string,
@@ -810,6 +811,8 @@ export class OrchestratorCore {
 
   private readonly mergeActuatorMaxWaitMs: number;
 
+  private readonly mergeActuatorCanAutoMerge: boolean;
+
   private readonly autoCloseParentIssue?: OrchestratorCoreOptions["autoCloseParentIssue"];
 
   private readonly getRunningSupervisionSnapshots?: OrchestratorCoreOptions["getRunningSupervisionSnapshots"];
@@ -1012,6 +1015,7 @@ export class OrchestratorCore {
     this.mergeActuatorSideEffects = options.mergeActuatorSideEffects;
     this.mergeActuatorMaxWaitMs =
       options.mergeActuatorMaxWaitMs ?? DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS;
+    this.mergeActuatorCanAutoMerge = options.mergeActuatorCanAutoMerge === true;
     this.autoCloseParentIssue = options.autoCloseParentIssue;
     this.getRunningSupervisionSnapshots =
       options.getRunningSupervisionSnapshots;
@@ -10506,6 +10510,7 @@ export class OrchestratorCore {
       mergeabilityWaitStartedAtMs:
         this.mergeCandidateMergeabilityWaitStartedAtMs(candidate),
       maxWaitMs: this.mergeActuatorMaxWaitMs,
+      canAutoMerge: this.mergeActuatorCanAutoMerge,
       completedSideEffectKeys:
         this.completedMergeActuationSideEffectKeys(candidate),
       appendActuation: async (entry: MergeActuationJournalDraft) =>
