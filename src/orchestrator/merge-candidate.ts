@@ -976,7 +976,23 @@ function isUsableLiveState(live: MergeActuatorLiveState): boolean {
     live.headSha.length > 0 &&
     typeof live.baseRef === "string" &&
     live.baseRef.length > 0 &&
-    Array.isArray(live.requiredChecks)
+    Array.isArray(live.requiredChecks) &&
+    live.requiredChecks.every(isUsableRequiredCheck)
+  );
+}
+
+function isUsableRequiredCheck(check: unknown): boolean {
+  // The actuator decision dereferences `check.status`, so an array element that
+  // is null or the wrong shape would throw outside the recovery envelope.
+  if (typeof check !== "object" || check === null) {
+    return false;
+  }
+  const record = check as Record<string, unknown>;
+  return (
+    typeof record.name === "string" &&
+    (record.status === "pass" ||
+      record.status === "fail" ||
+      record.status === "pending")
   );
 }
 

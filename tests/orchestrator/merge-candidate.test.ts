@@ -1048,6 +1048,37 @@ describe("merge actuator bounded recovery (SYMPH-746)", () => {
     expect(evidence[0]?.metadata.reason).toBe("live_state_incomplete");
   });
 
+  // Path 2 — a malformed required-check element (passes Array.isArray but would
+  // throw on check.status) must also be bounded, not escape the envelope.
+  it("treats malformed required-check elements as a bounded recovery failure", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const malformed = {
+      ...liveStateBase(),
+      requiredChecks: [null],
+    } as unknown as MergeActuatorLiveState;
+
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 1, maxSideEffectFailures: 2 },
+      fetchLiveState: async () => malformed,
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("parked");
+    if (result.outcome !== "parked") {
+      throw new Error("expected parked");
+    }
+    expect(result.blocker.reason).toBe("live_state_unavailable");
+  });
+
   // Idempotency — re-invoking after a park stays parked and appends nothing.
   it("stays parked and appends no new evidence when re-invoked after a park", async () => {
     const candidateEntry = candidateJournalEntry();
