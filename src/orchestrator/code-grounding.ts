@@ -62,13 +62,17 @@ export interface CodeGroundingConfig {
   baseDir: string;
   ttlMs: number;
   maxCheckoutsPerRepo: number;
+  materializationTimeoutMs?: number;
 }
 
 export interface CodeGroundingTarget {
   repoUrl: string;
   commitSha: string;
   repoScope: "symphony" | "non_symphony";
-  /** Test-fixture clone source override. Product callers should use repoUrl provenance. */
+  /**
+   * Test-fixture clone source override. Product callers should use repoUrl
+   * provenance; option-shaped/control-character values are rejected.
+   */
   sourcePath?: string;
 }
 
@@ -180,6 +184,7 @@ export interface CodeGroundingSweepResult {
 }
 
 const DEFAULT_GIT_TIMEOUT_MS = 60_000;
+const DEFAULT_GIT_MATERIALIZATION_TIMEOUT_MS = 600_000;
 const MAX_SCAN_FILES = 500;
 const MAX_SCAN_FILE_BYTES = 256_000;
 const MAX_SCAN_DEPTH = 64;
@@ -213,6 +218,13 @@ const PATH_EVIDENCE_PATTERN = new RegExp(
 );
 const leaseMutexes = new Map<string, AsyncMutex>();
 const checkoutMutexes = new Map<string, AsyncMutex>();
+const LOCK_TOMBSTONE_PATTERN = /\.lock\.stale-\d+-[0-9a-fA-F-]+$/;
+const GIT_MATERIALIZATION_COMMANDS = new Set([
+  "clone",
+  "checkout",
+  "reset",
+  "clean",
+]);
 
 export async function runManagedCodeGrounding(
   input: RunCodeGroundingInput,
@@ -232,10 +244,10 @@ export async function runManagedCodeGrounding(
   }
 
   const paths = resolveCodeGroundingPaths(input);
-  const releaseCheckout = await getCheckoutMutex(
-    paths.workspaceRoot,
-    paths.checkoutId,
-  ).acquire();
+  const releaseCheckout = await acquireRegisteredMutex(
+    checkoutMutexes,
+    checkoutMutexKey(paths.workspaceRoot, paths.checkoutId),
+  );
   let releaseCheckoutFileLock: (() => Promise<void>) | null = null;
   try {
     releaseCheckoutFileLock = await acquireCodeGroundingFileLock(
@@ -402,6 +414,14 @@ export async function sweepCodeGroundingCheckouts(input: {
       retentionMs: input.config.ttlMs,
       now,
     });
+    await sweepCodeGroundingLockTombstones({
+      workspaceRoot,
+      baseRoot,
+      roots: [baseRoot, join(baseRoot, "checkouts")],
+      now,
+      retentionMs: FILE_LOCK_STALE_MS,
+      warnings,
+    });
     await writeLeaseIndex(leaseIndexPath, index);
   });
   return { warnings };
@@ -531,7 +551,7 @@ async function cloneManagedCheckout(
     await runGit(
       paths,
       input,
-      ["clone", "--no-checkout", source, paths.checkoutPath],
+      ["clone", "--no-checkout", "--", source, paths.checkoutPath],
       {
         cwd: paths.checkoutsRoot,
       },
@@ -1164,6 +1184,9 @@ function validateCodeGroundingTarget(
     return "code-grounding target commitSha is option-shaped and was rejected";
   }
   if (target.sourcePath !== undefined) {
+    if (isOptionShapedGitArgument(target.sourcePath)) {
+      return "code-grounding target sourcePath is option-shaped and was rejected";
+    }
     return null;
   }
   if (isOptionShapedGitArgument(target.repoUrl)) {
@@ -1176,7 +1199,21 @@ function validateCodeGroundingTarget(
 }
 
 function isOptionShapedGitArgument(value: string): boolean {
-  return value.trim().startsWith("-") || /[\0\r\n]/.test(value);
+  return (
+    value.trim().length === 0 ||
+    value.trim().startsWith("-") ||
+    hasControlCharacter(value)
+  );
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isAllowedCodeGroundingRepoUrl(value: string): boolean {
@@ -1246,6 +1283,74 @@ async function sweepOrphanedArtifactRoots(input: {
   }
 }
 
+async function sweepCodeGroundingLockTombstones(input: {
+  workspaceRoot: string;
+  baseRoot: string;
+  roots: readonly string[];
+  now: Date;
+  retentionMs: number;
+  warnings: string[];
+}): Promise<void> {
+  const seen = new Set<string>();
+  for (const root of input.roots) {
+    const normalizedRoot = resolve(root);
+    if (seen.has(normalizedRoot)) {
+      continue;
+    }
+    seen.add(normalizedRoot);
+    assertWorkspacePathWithinRoot(input.baseRoot, normalizedRoot);
+    let entries: Dirent<string>[];
+    try {
+      entries = await fs.readdir(normalizedRoot, { withFileTypes: true });
+    } catch (error) {
+      if (isMissingPathError(error)) {
+        continue;
+      }
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) {
+        continue;
+      }
+      if (!LOCK_TOMBSTONE_PATTERN.test(entry.name)) {
+        continue;
+      }
+      const tombstonePath = join(normalizedRoot, entry.name);
+      assertWorkspacePathWithinRoot(input.workspaceRoot, tombstonePath);
+      let stat: Awaited<ReturnType<typeof fs.lstat>>;
+      try {
+        stat = await fs.lstat(tombstonePath);
+      } catch (error) {
+        if (isMissingPathError(error)) {
+          continue;
+        }
+        throw error;
+      }
+      if (
+        stat.isSymbolicLink() ||
+        !stat.isDirectory() ||
+        input.now.getTime() - tombstoneAgeReferenceMs(stat) < input.retentionMs
+      ) {
+        continue;
+      }
+      try {
+        await fs.rm(tombstonePath, { recursive: true, force: true });
+      } catch (error) {
+        if (isMissingPathError(error)) {
+          continue;
+        }
+        input.warnings.push(
+          `code-grounding lock tombstone cleanup skipped for ${entry.name}: ${boundedErrorCode(error)}`,
+        );
+      }
+    }
+  }
+}
+
+function tombstoneAgeReferenceMs(input: { mtimeMs: number; ctimeMs: number }) {
+  return Math.max(input.mtimeMs, input.ctimeMs);
+}
+
 function normalizeArtifactChildPath(
   artifactsRoot: string,
   artifactRoot: string,
@@ -1300,7 +1405,10 @@ async function withLeaseIndexLock<T>(
   baseRoot: string,
   action: () => Promise<T>,
 ): Promise<T> {
-  const releaseMutex = await getLeaseMutex(workspaceRoot).acquire();
+  const releaseMutex = await acquireRegisteredMutex(
+    leaseMutexes,
+    workspaceRoot,
+  );
   let releaseFileLock: (() => Promise<void>) | null = null;
   try {
     releaseFileLock = await acquireCodeGroundingFileLock(
@@ -1525,26 +1633,27 @@ function leaseIndexLockPath(baseRoot: string): string {
   return join(baseRoot, "leases.lock");
 }
 
-function getLeaseMutex(workspaceRoot: string): AsyncMutex {
-  let mutex = leaseMutexes.get(workspaceRoot);
-  if (mutex === undefined) {
-    mutex = new AsyncMutex();
-    leaseMutexes.set(workspaceRoot, mutex);
-  }
-  return mutex;
+function checkoutMutexKey(workspaceRoot: string, checkoutId: string): string {
+  return `${workspaceRoot}:${checkoutId}`;
 }
 
-function getCheckoutMutex(
-  workspaceRoot: string,
-  checkoutId: string,
-): AsyncMutex {
-  const key = `${workspaceRoot}:${checkoutId}`;
-  let mutex = checkoutMutexes.get(key);
+async function acquireRegisteredMutex(
+  registry: Map<string, AsyncMutex>,
+  key: string,
+): Promise<() => void> {
+  let mutex = registry.get(key);
   if (mutex === undefined) {
     mutex = new AsyncMutex();
-    checkoutMutexes.set(key, mutex);
+    registry.set(key, mutex);
   }
-  return mutex;
+  const selectedMutex = mutex;
+  const release = await selectedMutex.acquire();
+  return () => {
+    release();
+    if (selectedMutex.depth === 0 && registry.get(key) === selectedMutex) {
+      registry.delete(key);
+    }
+  };
 }
 
 function runGit(
@@ -1553,14 +1662,28 @@ function runGit(
   args: readonly string[],
   options?: { cwd?: string },
 ): Promise<CodeGroundingCommandResult> {
+  const timeoutMs = GIT_MATERIALIZATION_COMMANDS.has(args[0] ?? "")
+    ? (input.config.materializationTimeoutMs ??
+      DEFAULT_GIT_MATERIALIZATION_TIMEOUT_MS)
+    : DEFAULT_GIT_TIMEOUT_MS;
   return runAllowedCommand(input, "git", args, {
     cwd: options?.cwd ?? paths.checkoutPath,
     env: scrubGitPointerEnv({
       ...process.env,
       ...gitIsolationEnv(paths.checkoutPath),
     }),
-    timeoutMs: DEFAULT_GIT_TIMEOUT_MS,
+    timeoutMs,
   });
+}
+
+export function getCodeGroundingMutexRegistrySizesForTests(): {
+  lease: number;
+  checkout: number;
+} {
+  return {
+    lease: leaseMutexes.size,
+    checkout: checkoutMutexes.size,
+  };
 }
 
 async function runAllowedCommand(

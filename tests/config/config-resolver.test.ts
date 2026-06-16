@@ -17,6 +17,7 @@ import {
   DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
   DEFAULT_CODE_GROUNDING_BASE_DIR,
   DEFAULT_CODE_GROUNDING_ENABLED,
+  DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS,
   DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
   DEFAULT_CODE_GROUNDING_TTL_MS,
   DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
@@ -148,7 +149,10 @@ describe("config-resolver", () => {
       baseDir: DEFAULT_CODE_GROUNDING_BASE_DIR,
       ttlMs: DEFAULT_CODE_GROUNDING_TTL_MS,
       maxCheckoutsPerRepo: DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
+      materializationTimeoutMs:
+        DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS,
     });
+    expect(DEFAULT_CODE_GROUNDING_BASE_DIR).toBe(".symphony/code-grounding");
   });
 
   it("resolves managed code-grounding config", () => {
@@ -161,6 +165,7 @@ describe("config-resolver", () => {
           base_dir: ".cache/grounding",
           ttl_ms: "120000",
           max_checkouts_per_repo: "2",
+          materialization_timeout_ms: "180000",
         },
       },
     });
@@ -170,6 +175,7 @@ describe("config-resolver", () => {
       baseDir: ".cache/grounding",
       ttlMs: 120_000,
       maxCheckoutsPerRepo: 2,
+      materializationTimeoutMs: 180_000,
     });
   });
 

@@ -19,6 +19,7 @@ import {
   runBacklogHygieneProposalLane,
   selectBacklogHygieneProposalFindings,
 } from "../../src/orchestrator/backlog-hygiene.js";
+import type { CodeGroundingCommandRunner } from "../../src/orchestrator/code-grounding.js";
 import { INTENT_VERBS } from "../../src/orchestrator/intent.js";
 
 function issue(overrides: Partial<Issue>): Issue {
@@ -432,6 +433,14 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
   it("degrades code-grounding failures without dropping hygiene proposals", async () => {
     const workspaceRoot = await mkdtemp(join(tmpdir(), "symph-hygiene-cg-"));
     try {
+      const commandRunner = vi
+        .fn<CodeGroundingCommandRunner>()
+        .mockImplementation(async (_command, args, options) => {
+          expect(args[0]).toBe("clone");
+          expect(options.timeoutMs).toBe(180_000);
+          throw new Error("clone timed out");
+        });
+
       const result = await runBacklogHygieneProposalLane({
         enabled: true,
         config: {
@@ -453,17 +462,14 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
             baseDir: join(".symphony", "code-grounding"),
             ttlMs: 86_400_000,
             maxCheckoutsPerRepo: 5,
+            materializationTimeoutMs: 180_000,
           },
           target: {
             repoUrl: "file:///missing-repo",
             commitSha: "bad",
             repoScope: "symphony",
           },
-          commandRunner: async () => ({
-            exitCode: 1,
-            stdout: "",
-            stderr: "clone failed",
-          }),
+          commandRunner,
         },
       });
 
@@ -471,7 +477,8 @@ describe("backlog hygiene proposal lane (SYMPH-484)", () => {
       expect(result.proposals).toHaveLength(1);
       expect(result.proposals[0]?.codeGroundingStatus).toBeNull();
       expect(result.warnings[0]).toContain("code grounding failed");
-      expect(result.warnings[0]).toContain("clone failed");
+      expect(result.warnings[0]).toContain("clone timed out");
+      expect(commandRunner).toHaveBeenCalledOnce();
     } finally {
       await rm(workspaceRoot, { recursive: true, force: true });
     }

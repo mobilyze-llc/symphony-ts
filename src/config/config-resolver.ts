@@ -26,6 +26,7 @@ import {
   DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
   DEFAULT_CODE_GROUNDING_BASE_DIR,
   DEFAULT_CODE_GROUNDING_ENABLED,
+  DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS,
   DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
   DEFAULT_CODE_GROUNDING_TTL_MS,
   DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
@@ -290,6 +291,9 @@ export function resolveWorkflowConfig(
       maxCheckoutsPerRepo:
         readPositiveInteger(codeGrounding.max_checkouts_per_repo) ??
         DEFAULT_CODE_GROUNDING_MAX_CHECKOUTS_PER_REPO,
+      materializationTimeoutMs:
+        readPositiveInteger(codeGrounding.materialization_timeout_ms) ??
+        DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS,
     },
     operatorAnchors: {
       operatorAllowlist: readStringList(

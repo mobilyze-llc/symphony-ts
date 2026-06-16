@@ -141,6 +141,7 @@ export interface WorkflowCodeGroundingConfig {
   baseDir: string;
   ttlMs: number;
   maxCheckoutsPerRepo: number;
+  materializationTimeoutMs?: number;
 }
 
 /**
