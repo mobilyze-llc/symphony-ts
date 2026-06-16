@@ -290,6 +290,32 @@ describe("managed code grounding (SYMPH-596)", () => {
       findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
       commandRunner,
     });
+    const blankSourcePath = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "blank-source-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+        sourcePath: "",
+        commitSha: "abc123",
+        repoScope: "symphony",
+      },
+      findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
+      commandRunner,
+    });
+    const tabSourcePath = await runManagedCodeGrounding({
+      workspaceRoot,
+      runId: "tab-source-run",
+      config: codeGroundingConfig(),
+      target: {
+        repoUrl: "https://github.com/mobilyze-llc/symphony-ts.git",
+        sourcePath: "/tmp/source\twith-tab",
+        commitSha: "abc123",
+        repoScope: "symphony",
+      },
+      findings: [backlogFinding({ evidence: "`src/orchestrator/queue.ts`" })],
+      commandRunner,
+    });
 
     expect(commandRunner).not.toHaveBeenCalled();
     expect(dangerousTransport).toMatchObject({
@@ -309,6 +335,18 @@ describe("managed code grounding (SYMPH-596)", () => {
       ],
     });
     expect(controlSourcePath).toMatchObject({
+      status: "not_attempted",
+      warnings: [
+        "code-grounding target sourcePath is option-shaped and was rejected",
+      ],
+    });
+    expect(blankSourcePath).toMatchObject({
+      status: "not_attempted",
+      warnings: [
+        "code-grounding target sourcePath is option-shaped and was rejected",
+      ],
+    });
+    expect(tabSourcePath).toMatchObject({
       status: "not_attempted",
       warnings: [
         "code-grounding target sourcePath is option-shaped and was rejected",
@@ -1135,8 +1173,9 @@ describe("managed code grounding (SYMPH-596)", () => {
     await mkdir(freshCheckoutTombstone, { recursive: true });
     await mkdir(liveLock, { recursive: true });
     await writeFile(join(liveLock, "owner.json"), "{}\n");
+    const now = new Date(Date.now() + 2 * 60 * 60_000);
     const oldTime = new Date("2026-06-13T00:00:00.000Z");
-    const freshTime = new Date("2026-06-14T23:59:00.000Z");
+    const freshTime = new Date(now.getTime() - 60_000);
     await utimes(oldBaseTombstone, oldTime, oldTime);
     await utimes(oldCheckoutTombstone, oldTime, oldTime);
     await utimes(freshCheckoutTombstone, freshTime, freshTime);
@@ -1144,7 +1183,7 @@ describe("managed code grounding (SYMPH-596)", () => {
     await sweepCodeGroundingCheckouts({
       workspaceRoot,
       config: codeGroundingConfig(),
-      now: new Date("2026-06-15T00:00:00.000Z"),
+      now,
     });
 
     await expect(

@@ -1199,7 +1199,21 @@ function validateCodeGroundingTarget(
 }
 
 function isOptionShapedGitArgument(value: string): boolean {
-  return value.trim().startsWith("-") || /[\0\r\n]/.test(value);
+  return (
+    value.trim().length === 0 ||
+    value.trim().startsWith("-") ||
+    hasControlCharacter(value)
+  );
+}
+
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || (code >= 0x7f && code <= 0x9f)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isAllowedCodeGroundingRepoUrl(value: string): boolean {
@@ -1315,7 +1329,7 @@ async function sweepCodeGroundingLockTombstones(input: {
       if (
         stat.isSymbolicLink() ||
         !stat.isDirectory() ||
-        input.now.getTime() - stat.mtimeMs < input.retentionMs
+        input.now.getTime() - tombstoneAgeReferenceMs(stat) < input.retentionMs
       ) {
         continue;
       }
@@ -1331,6 +1345,10 @@ async function sweepCodeGroundingLockTombstones(input: {
       }
     }
   }
+}
+
+function tombstoneAgeReferenceMs(input: { mtimeMs: number; ctimeMs: number }) {
+  return Math.max(input.mtimeMs, input.ctimeMs);
 }
 
 function normalizeArtifactChildPath(
