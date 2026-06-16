@@ -7131,6 +7131,41 @@ function classifyStatusContextState(
   return "fail";
 }
 
+/**
+ * Builds the `gh pr merge` enqueue args for the live merge actuator.
+ *
+ * Head-pin guarantee (SYMPH-750). `--match-head-commit <reviewedHeadSha>`
+ * enforces the reviewed head at MERGE time, not merely at enablement time, so an
+ * advancing head cannot silently merge unreviewed code:
+ *
+ *   1. `--match-head-commit` maps to the GraphQL `expectedHeadOid`, documented
+ *      as "OID that the pull request head ref must match TO ALLOW MERGE; if
+ *      omitted, no check is performed." (GitHub GraphQL `MergePullRequestInput`,
+ *      confirmed via live `gh api graphql` schema introspection 2026-06-16). gh
+ *      builds one `mergePayload` carrying `expectedHeadOid: MatchHeadCommit` and,
+ *      because `--auto` is set, passes that SAME input into the
+ *      `enablePullRequestAutoMerge` mutation (cli/cli pkg/cmd/pr/merge
+ *      `merge.go` + `http.go`). The pinned OID therefore rides into the
+ *      auto-merge / merge-queue enablement and is checked when the deferred
+ *      merge actually fires — if the head has advanced past `reviewedHeadSha`,
+ *      the merge is rejected rather than shipping unreviewed code.
+ *   2. This repo uses a GitHub merge QUEUE. A push by a NON-write user dequeues /
+ *      disables auto-merge (GitHub Docs, "Automatically merging a pull request"),
+ *      but GitHub does NOT document dequeue-on-push for WRITE-permission pushers,
+ *      and there is a known force-push merge-queue staleness bug
+ *      (cli/cli community discussion #194832). So dequeue-on-push is a partial,
+ *      not a guaranteed, defense — the `expectedHeadOid` merge-time check is what
+ *      makes the head-pin authoritative.
+ *   3. Defense in depth: the poll-driven identity guard `firstLiveIdentityBlocker`
+ *      (src/orchestrator/merge-candidate.ts) re-checks `live.headSha ===
+ *      reviewedHeadSha` on EVERY OPEN poll cycle (via `firstLiveBlocker`) AND on
+ *      the MERGED path. Any drift parks the candidate as `stale_reviewed_head`
+ *      rather than completing the issue, bounding blast radius even if (1) and
+ *      (2) ever regressed.
+ *
+ * The exact arg vector is locked by a unit test (runtime-host.test.ts) so the
+ * `--match-head-commit <reviewedHeadSha>` pin cannot be silently dropped.
+ */
 function buildMergeActuatorEnqueueArgs(
   candidate: MergeCandidateRecord,
 ): string[] {
