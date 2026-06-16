@@ -13,9 +13,14 @@ export const MERGE_ACTUATION_ACTIONS = [
   "stale",
   "timeout",
   "failed",
+  "recovered",
 ] as const;
 
 export type MergeActuationAction = (typeof MERGE_ACTUATION_ACTIONS)[number];
+type SideEffectActuationAction = Exclude<
+  MergeActuationAction,
+  "failed" | "recovered"
+>;
 
 export type MergeCandidateStatus =
   | "candidate"
@@ -108,6 +113,7 @@ export interface RunMergeActuatorResult {
   decision: MergeActuatorDecision;
   journalEntry: DispatcherRunJournalEntry | null;
   failureEntry: DispatcherRunJournalEntry | null;
+  recoveryEntry: DispatcherRunJournalEntry | null;
   sideEffect: "none" | "mark_ready" | "enqueue" | "tracker_done";
   error: string | null;
 }
@@ -367,13 +373,18 @@ export function decideMergeActuation(input: {
 export function buildMergeActuationEntry(input: {
   candidate: MergeCandidateRecord;
   action: MergeActuationAction;
+  subjectAction?: SideEffectActuationAction;
   timestamp: string;
   ownerId: string;
   lease: DispatcherLease;
   live?: Partial<MergeActuatorLiveState>;
   reason?: string;
 }): MergeActuationJournalDraft {
-  const key = mergeActuationKey(input.candidate, input.action);
+  const key = mergeActuationKey(
+    input.candidate,
+    input.action,
+    input.subjectAction,
+  );
   return {
     idempotencyKey: key,
     timestamp: input.timestamp,
@@ -390,6 +401,7 @@ export function buildMergeActuationEntry(input: {
       schema_version: MERGE_CANDIDATE_SCHEMA_VERSION,
       candidate_id: input.candidate.candidateId,
       action: input.action,
+      subject_action: input.subjectAction,
       reason: input.reason,
       repo: input.candidate.repo,
       pr_number: input.candidate.prNumber,
@@ -430,6 +442,7 @@ export async function runMergeActuator(input: {
       decision,
       journalEntry: null,
       failureEntry: null,
+      recoveryEntry: null,
       sideEffect: "none",
       error: null,
     };
@@ -441,6 +454,7 @@ export async function runMergeActuator(input: {
       decision,
       journalEntry: null,
       failureEntry: null,
+      recoveryEntry: null,
       sideEffect: "none",
       error: null,
     };
@@ -457,34 +471,68 @@ export async function runMergeActuator(input: {
       reason: decision.reason,
     }),
   );
+  const needsRecoveryEntry = isRedrivingFailedAction(input.candidate, action);
 
   try {
     if (decision.action === "mark_ready") {
       await input.sideEffects.markReady(input.candidate);
+      const recoveryEntry = await appendRecoveryEntryIfNeeded({
+        appendActuation: input.appendActuation,
+        candidate: input.candidate,
+        action,
+        timestamp: input.now.toISOString(),
+        ownerId: input.ownerId,
+        lease: input.lease,
+        live: input.live,
+        needsRecoveryEntry,
+      });
       return {
         decision,
         journalEntry,
         failureEntry: null,
+        recoveryEntry,
         sideEffect: "mark_ready",
         error: null,
       };
     }
     if (decision.action === "enqueue") {
       await input.sideEffects.enqueue(input.candidate);
+      const recoveryEntry = await appendRecoveryEntryIfNeeded({
+        appendActuation: input.appendActuation,
+        candidate: input.candidate,
+        action,
+        timestamp: input.now.toISOString(),
+        ownerId: input.ownerId,
+        lease: input.lease,
+        live: input.live,
+        needsRecoveryEntry,
+      });
       return {
         decision,
         journalEntry,
         failureEntry: null,
+        recoveryEntry,
         sideEffect: "enqueue",
         error: null,
       };
     }
     if (decision.action === "tracker_done") {
       await input.sideEffects.writeTrackerDone(input.candidate);
+      const recoveryEntry = await appendRecoveryEntryIfNeeded({
+        appendActuation: input.appendActuation,
+        candidate: input.candidate,
+        action,
+        timestamp: input.now.toISOString(),
+        ownerId: input.ownerId,
+        lease: input.lease,
+        live: input.live,
+        needsRecoveryEntry,
+      });
       return {
         decision,
         journalEntry,
         failureEntry: null,
+        recoveryEntry,
         sideEffect: "tracker_done",
         error: null,
       };
@@ -495,6 +543,7 @@ export async function runMergeActuator(input: {
       buildMergeActuationEntry({
         candidate: input.candidate,
         action: "failed",
+        subjectAction: action,
         timestamp: input.now.toISOString(),
         ownerId: input.ownerId,
         lease: input.lease,
@@ -506,6 +555,7 @@ export async function runMergeActuator(input: {
       decision,
       journalEntry,
       failureEntry,
+      recoveryEntry: null,
       sideEffect: "none",
       error: errorMessage,
     };
@@ -515,6 +565,7 @@ export async function runMergeActuator(input: {
     decision,
     journalEntry,
     failureEntry: null,
+    recoveryEntry: null,
     sideEffect: "none",
     error: null,
   };
@@ -616,6 +667,38 @@ function applyActuation(
     record.status = "blocked";
     record.blockedReason =
       stringField(entry.metadata.reason) ?? "merge_actuation_failed";
+  } else if (action === "recovered") {
+    applyRecoveredActuation(record, entry);
+  }
+}
+
+function applyRecoveredActuation(
+  record: MergeCandidateRecord,
+  entry: DispatcherRunJournalEntry,
+): void {
+  const subjectAction = mergeActuationAction(entry.metadata.subject_action);
+  if (
+    subjectAction === null ||
+    subjectAction === "failed" ||
+    subjectAction === "recovered"
+  ) {
+    return;
+  }
+  record.blockedReason = null;
+  if (subjectAction === "mark_ready") {
+    record.status = "ready_marked";
+  } else if (subjectAction === "enqueue" || subjectAction === "poll") {
+    record.status = "merge_queue_pending";
+  } else if (subjectAction === "tracker_done") {
+    record.status = "merged";
+    record.mergedAt = stringField(entry.metadata.merged_at);
+    record.mergeCommit = stringField(entry.metadata.merge_commit);
+  } else if (subjectAction === "stale") {
+    record.status = "stale";
+  } else if (subjectAction === "timeout") {
+    record.status = "blocked";
+    record.blockedReason =
+      stringField(entry.metadata.reason) ?? "merge_queue_max_wait_exceeded";
   }
 }
 
@@ -671,14 +754,12 @@ function validateLease(
 
 function sideEffectDecision(
   candidate: MergeCandidateRecord,
-  action: Exclude<MergeActuationAction, "failed">,
+  action: SideEffectActuationAction,
   completedSideEffectKeys: ReadonlySet<string>,
   reason: string,
 ): MergeActuatorDecision {
   const sideEffectKey = mergeActuationKey(candidate, action);
-  const canRedriveFailedAction =
-    candidate.lastActuation === "failed" &&
-    candidate.blockedReason?.startsWith(`${action}_failed:`) === true;
+  const canRedriveFailedAction = isRedrivingFailedAction(candidate, action);
   if (completedSideEffectKeys.has(sideEffectKey) && !canRedriveFailedAction) {
     return {
       action: "noop",
@@ -722,7 +803,14 @@ function mergeCandidateId(input: {
 function mergeActuationKey(
   candidate: MergeCandidateRecord,
   action: MergeActuationAction,
+  subjectAction?: SideEffectActuationAction,
 ): string {
+  if (
+    (action === "failed" || action === "recovered") &&
+    subjectAction !== undefined
+  ) {
+    return `merge_actuation:${candidate.candidateId}:${action}:${subjectAction}`;
+  }
   return `merge_actuation:${candidate.candidateId}:${action}`;
 }
 
@@ -734,7 +822,7 @@ function mergeActuationAction(value: unknown): MergeActuationAction | null {
 
 function decisionToActuationAction(
   action: MergeActuatorDecision["action"],
-): MergeActuationAction | null {
+): SideEffectActuationAction | null {
   if (action === "blocked" || action === "noop") {
     return null;
   }
@@ -761,4 +849,43 @@ function recordField(value: unknown): Record<string, unknown> | null {
 
 function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isRedrivingFailedAction(
+  candidate: MergeCandidateRecord,
+  action: SideEffectActuationAction,
+): boolean {
+  return (
+    candidate.lastActuation === "failed" &&
+    candidate.blockedReason?.startsWith(`${action}_failed:`) === true
+  );
+}
+
+async function appendRecoveryEntryIfNeeded(input: {
+  appendActuation: (
+    entry: MergeActuationJournalDraft,
+  ) => Promise<DispatcherRunJournalEntry>;
+  candidate: MergeCandidateRecord;
+  action: SideEffectActuationAction;
+  timestamp: string;
+  ownerId: string;
+  lease: DispatcherLease;
+  live: MergeActuatorLiveState;
+  needsRecoveryEntry: boolean;
+}): Promise<DispatcherRunJournalEntry | null> {
+  if (!input.needsRecoveryEntry) {
+    return null;
+  }
+  return input.appendActuation(
+    buildMergeActuationEntry({
+      candidate: input.candidate,
+      action: "recovered",
+      subjectAction: input.action,
+      timestamp: input.timestamp,
+      ownerId: input.ownerId,
+      lease: input.lease,
+      live: input.live,
+      reason: `${input.action}_recovered`,
+    }),
+  );
 }
