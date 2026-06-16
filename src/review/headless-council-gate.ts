@@ -2548,7 +2548,11 @@ function kimiShadowEnabled(
   if (value === undefined) {
     return true;
   }
-  return envFlag(value);
+  return !explicitDisableFlag(value);
+}
+
+function explicitDisableFlag(value: string): boolean {
+  return ["0", "false", "no"].includes(value.trim().toLowerCase());
 }
 
 function codexExcavationLane(

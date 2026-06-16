@@ -102,6 +102,16 @@ describe("runHeadlessCouncilGate", () => {
     ).not.toContain("kimi-k27-shadow");
     expect(
       defaultReviewerLanes({
+        SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED: "",
+      }).map((lane) => lane.laneId),
+    ).toContain("kimi-k27-shadow");
+    expect(
+      defaultReviewerLanes({
+        SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED: "maybe",
+      }).map((lane) => lane.laneId),
+    ).toContain("kimi-k27-shadow");
+    expect(
+      defaultReviewerLanes({
         SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED: "true",
         SYMPHONY_COUNCIL_KIMI_MODEL: "kimi-test",
         KIMI_CLI_BIN: "/opt/kimi/bin/kimi",
