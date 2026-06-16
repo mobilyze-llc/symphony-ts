@@ -687,14 +687,8 @@ function applyActuation(
   record.updatedAt = entry.timestamp;
   record.lastActuation = action;
   record.cursorRange.lastSequence = entry.sequence;
-  if (action === "mark_ready") {
-    record.status = "ready_marked";
-  } else if (action === "enqueue" || action === "poll") {
+  if (action === "poll") {
     record.status = "merge_queue_pending";
-  } else if (action === "tracker_done") {
-    record.status = "merged";
-    record.mergedAt = stringField(entry.metadata.merged_at);
-    record.mergeCommit = stringField(entry.metadata.merge_commit);
   } else if (action === "stale") {
     record.status = "stale";
     record.blockedReason = stringField(entry.metadata.reason) ?? "stale";

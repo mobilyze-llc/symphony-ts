@@ -742,14 +742,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
                 ]);
               },
               enqueue: async (candidate: MergeCandidateRecord) => {
-                await this.runGh([
-                  "pr",
-                  "merge",
-                  String(candidate.prNumber),
-                  "--repo",
-                  candidate.repo,
-                  "--auto",
-                ]);
+                await this.runGh(buildMergeActuatorEnqueueArgs(candidate));
               },
               writeTrackerDone: async (candidate: MergeCandidateRecord) => {
                 const teamKey =
@@ -7044,6 +7037,21 @@ function parseMergeCommit(value: unknown): string | null {
   return stringValue((value as Record<string, unknown>).oid);
 }
 
+function buildMergeActuatorEnqueueArgs(
+  candidate: MergeCandidateRecord,
+): string[] {
+  return [
+    "pr",
+    "merge",
+    String(candidate.prNumber),
+    "--repo",
+    candidate.repo,
+    "--match-head-commit",
+    candidate.reviewedHeadSha,
+    "--auto",
+  ];
+}
+
 function parseRequiredChecks(
   value: unknown,
 ): MergeActuatorLiveState["requiredChecks"] | null {
@@ -7106,6 +7114,7 @@ function exitCodeValue(error: unknown): number | null {
 
 export const runtimeHostMergeActuatorTesting = {
   GH_PR_CHECKS_JSON_EXIT_CODES,
+  buildMergeActuatorEnqueueArgs,
   parseJsonObject,
   parseMergeCommit,
   parsePrState,

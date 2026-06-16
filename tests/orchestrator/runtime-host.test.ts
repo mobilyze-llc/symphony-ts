@@ -125,6 +125,25 @@ describe("runtime host merge actuator parsing", () => {
     ).toBeNull();
     expect(runtimeHostMergeActuatorTesting.parsePrState("LOCKED")).toBeNull();
   });
+
+  it("pins merge enqueue to the reviewed head SHA", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.buildMergeActuatorEnqueueArgs({
+        prNumber: 562,
+        repo: "mobilyze-llc/symphony-ts",
+        reviewedHeadSha: "reviewed-head-sha",
+      } as never),
+    ).toEqual([
+      "pr",
+      "merge",
+      "562",
+      "--repo",
+      "mobilyze-llc/symphony-ts",
+      "--match-head-commit",
+      "reviewed-head-sha",
+      "--auto",
+    ]);
+  });
 });
 
 function removeWorkspaceWithRetry(workspaceRoot: string): void {

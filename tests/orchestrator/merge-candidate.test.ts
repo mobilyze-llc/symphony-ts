@@ -270,6 +270,45 @@ describe("merge candidates", () => {
     });
   });
 
+  it("does not treat a raw enqueue intent as queue-pending side-effect proof", () => {
+    const candidateEntry = {
+      ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+      sequence: 2,
+    };
+    const rawEnqueueIntent = {
+      ...buildMergeActuationEntry({
+        candidate: reduceMergeCandidates([candidateEntry])["issue-1"]!,
+        action: "enqueue",
+        timestamp: "2026-06-16T01:00:00.000Z",
+        ownerId: "owner-1",
+        lease: lease(),
+        live: liveState(),
+        reason: "merge_queue_required",
+      }),
+      sequence: 3,
+    };
+    const candidate = reduceMergeCandidates([candidateEntry, rawEnqueueIntent])[
+      "issue-1"
+    ]!;
+
+    expect(candidate.status).toBe("candidate");
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState(),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({
+      action: "enqueue",
+      reason: "merge_queue_required",
+    });
+  });
+
   it("runs side effects only after appending the actuation journal barrier", async () => {
     const candidate = reduceMergeCandidates([
       {
