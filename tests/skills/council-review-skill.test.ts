@@ -84,6 +84,14 @@ function phase1ArtifactNamesFromSkill(skill: string): string[] {
   ].sort();
 }
 
+function mergeAuthoritativePhase1ArtifactNamesFromSkill(
+  skill: string,
+): string[] {
+  return phase1ArtifactNamesFromSkill(skill).filter(
+    (artifact) => artifact !== "kimi-k27-shadow",
+  );
+}
+
 function writeBaseSetupFacts(dir: string): void {
   writeArtifact(dir, "pr-view-exit-code.txt", "0\n");
   writeArtifact(dir, "git-status-short.txt", "");
@@ -218,6 +226,9 @@ describe("council-review manual skill", () => {
   const codexCrossExam = readSkillFile("templates/cross-exam-codex-prompt.md");
   const opusCrossExam = readSkillFile("templates/cross-exam-opus-prompt.md");
   const reportTemplate = readSkillFile("templates/council-report.md");
+  const cycleReport = readSkillFile("templates/cycle-report.md");
+  const cliReference = readSkillFile("cli-reference.md");
+  const kimiPrompt = readSkillFile("templates/phase1-kimi-shadow-prompt.md");
 
   it("defines distinct initial and convergence review modes", () => {
     for (const prompt of [opusPrompt, piPrompt]) {
@@ -358,11 +369,58 @@ describe("council-review manual skill", () => {
   });
 
   it("keeps closeout reviewer stems in sync with Phase 1 spawn artifacts only", () => {
-    expect(phase1ArtifactNamesFromSkill(skill)).toEqual(
+    expect(mergeAuthoritativePhase1ArtifactNamesFromSkill(skill)).toEqual(
       laneArtifactStemsFromAssertScript().sort(),
+    );
+    expect(phase1ArtifactNamesFromSkill(skill)).toContain("kimi-k27-shadow");
+    expect(laneArtifactStemsFromAssertScript()).not.toContain(
+      "kimi-k27-shadow",
     );
     expect(skill).toContain("--artifact-name phase2-opus");
     expect(laneArtifactStemsFromAssertScript()).not.toContain("phase2-opus");
+  });
+
+  it("documents Kimi shadow as optional and non-merge-authoritative", () => {
+    expectAll(skill, [
+      "SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED",
+      "--agent kimi",
+      "--artifact-name kimi-k27-shadow",
+      "--lane-id kimi-k27-shadow",
+      "kimi-k27-shadow.disabled.json",
+      "mergeAuthoritative:false",
+      "uncorroborated Kimi finding cannot set a merge-authoritative P1/P2",
+    ]);
+
+    expectAll(cliReference, [
+      "Kimi K2.7 Shadow",
+      "SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED",
+      "--agent kimi",
+      "--artifact-name kimi-k27-shadow",
+      "--lane-id kimi-k27-shadow",
+      "disabled-by-config",
+      "substrate-unavailable",
+      "preflight-failed",
+      "mergeAuthoritative:false",
+    ]);
+
+    expectAll(reportTemplate, [
+      "Kimi K2.7 Shadow Diagnostics (non-merge-authoritative)",
+      "`$COUNCIL_DIR/kimi-k27-shadow.md` or `$COUNCIL_DIR/kimi-k27-shadow.disabled.json`",
+      "Kimi diagnostics never contribute to the authoritative P1/P2 tally",
+      "[K-shadow]",
+    ]);
+
+    expectAll(cycleReport, [
+      "Kimi K2.7 shadow diagnostics",
+      "mergeAuthoritative:false",
+    ]);
+
+    expectAll(kimiPrompt, [
+      "non-merge-authoritative",
+      "cannot set a P1/P2",
+      "mergeAuthoritative:false",
+      "Do not edit files, create commits, update PRs",
+    ]);
   });
 
   it("documents closeout evidence as provenance rather than reviewer PASS", () => {

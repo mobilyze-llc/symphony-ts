@@ -14,6 +14,7 @@
 ### Council Round
 
 - Phase 1 findings: Opus [N], Pi [N]
+- Kimi K2.7 shadow diagnostics: [complete/disabled/failed/skipped], mergeAuthoritative:false, [N] diagnostics
 - Phase 2 cross-exam: Codex [N] challenged, Opus [N] challenged
 - Phase 3 triage: [N] P1, [N] P2, [N] Track, [N] dismissed
 - Council value-add: [what cross-exam caught that direct triage would have missed]
@@ -33,4 +34,5 @@
 
 - Opus: [useful catches or recurring false positives]
 - Pi: [useful catches or recurring false positives]
+- Kimi K2.7 shadow: [diagnostic-only signal, disabled marker, or recurring false positives]
 - Codex: [cross-exam/triage notes]
