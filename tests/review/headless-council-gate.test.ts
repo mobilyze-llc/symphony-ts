@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -2906,7 +2913,193 @@ describe("runHeadlessCouncilGate", () => {
       result.lanes.find((lane) => lane.laneId === "claude-opus"),
     ).toMatchObject({
       verdict: "error",
-      message: "Reviewer artifact was missing or empty.",
+      message: "Reviewer artifact mirror fallback failed: remote_mismatch.",
+    });
+  });
+
+  it("fails closed when a rejected remote lane artifact is readable", async () => {
+    const outsideDir = await mkdtemp(join(tmpdir(), "headless-readable-"));
+    const remoteArtifact = join(outsideDir, "outside-readable.md");
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          json: {
+            state: "complete",
+            artifact_path: remoteArtifact,
+          },
+        },
+      },
+    });
+    await writeFile(
+      remoteArtifact,
+      "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n",
+    );
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        routingMode: "legacy",
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    expect(
+      result.lanes.find((lane) => lane.laneId === "claude-opus"),
+    ).toMatchObject({
+      verdict: "error",
+      artifactPath: null,
+      rawArtifactPath: remoteArtifact,
+      message: "Reviewer artifact mirror fallback failed: remote_mismatch.",
+      mirrorFallback: {
+        attempted: true,
+        used: false,
+        failureKind: "remote_mismatch",
+      },
+    });
+    expect(await readFile(remoteArtifact, "utf-8")).not.toContain(
+      "symphony-review-bundle",
+    );
+  });
+
+  it("resolves remote lane artifact paths through same-stem local mirrors", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          mirrorArtifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n",
+          json: {
+            state: "complete",
+            artifact_path: join(tmpdir(), "claude-opus.md"),
+          },
+        },
+      },
+    });
+    const mirroredArtifact = join(harness.artifactDir, "claude-opus.md");
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    const lane = result.lanes.find((entry) => entry.laneId === "claude-opus")!;
+    expect(lane).toMatchObject({
+      verdict: "pass",
+      artifactPath: mirroredArtifact,
+      rawArtifactPath: mirroredArtifact,
+      mirrorFallback: {
+        attempted: true,
+        used: true,
+        selectedMirrorPath: mirroredArtifact,
+        failureKind: null,
+      },
+    });
+    expect(lane.mirrorFallback?.remoteArtifactPath).toContain("claude-opus.md");
+  });
+
+  it("rejects stale remote lane mirrors that predate lane launch", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          json: {
+            state: "complete",
+            artifact_path: join(tmpdir(), "claude-opus.md"),
+          },
+        },
+      },
+    });
+    const mirroredArtifact = join(harness.artifactDir, "claude-opus.md");
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      mirroredArtifact,
+      "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n",
+    );
+    const staleTime = new Date(Date.now() - 60_000);
+    await utimes(mirroredArtifact, staleTime, staleTime);
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    const lane = result.lanes.find((entry) => entry.laneId === "claude-opus")!;
+    expect(lane).toMatchObject({
+      verdict: "error",
+      message: "Reviewer artifact mirror fallback failed: absent.",
+      artifactPath: null,
+      rawArtifactPath: join(tmpdir(), "claude-opus.md"),
+      mirrorFallback: {
+        attempted: true,
+        used: false,
+        selectedMirrorPath: mirroredArtifact,
+        freshnessPassed: null,
+        failureKind: "absent",
+      },
+    });
+  });
+
+  it("removes pre-existing future-dated remote lane mirrors before launch", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          json: {
+            state: "complete",
+            artifact_path: join(tmpdir(), "claude-opus.md"),
+          },
+        },
+      },
+    });
+    const mirroredArtifact = join(harness.artifactDir, "claude-opus.md");
+    await mkdir(harness.artifactDir, { recursive: true });
+    await writeFile(
+      mirroredArtifact,
+      "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n",
+    );
+    const futureTime = new Date(Date.now() + 60_000);
+    await utimes(mirroredArtifact, futureTime, futureTime);
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("error");
+    const lane = result.lanes.find((entry) => entry.laneId === "claude-opus")!;
+    expect(lane).toMatchObject({
+      verdict: "error",
+      message: "Reviewer artifact mirror fallback failed: absent.",
+      artifactPath: null,
+      rawArtifactPath: join(tmpdir(), "claude-opus.md"),
+      mirrorFallback: {
+        attempted: true,
+        used: false,
+        selectedMirrorPath: mirroredArtifact,
+        failureKind: "absent",
+      },
     });
   });
 
@@ -7576,6 +7769,7 @@ interface LaneBehavior {
   json?: Record<string, unknown>;
   status?: Record<string, unknown>;
   artifact?: string;
+  mirrorArtifact?: string;
   afterArtifactWrite?: (artifactPath: string) => Promise<void>;
   reject?: Error;
   delayMs?: number;
@@ -7813,6 +8007,10 @@ async function createHarness(options?: {
           behavior.artifact ?? "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n",
         );
         await behavior.afterArtifactWrite?.(artifactPath);
+      } else if (behavior.mirrorArtifact !== undefined) {
+        const mirrorPath = join(artifactDir, `${artifactName}.md`);
+        await writeFile(mirrorPath, behavior.mirrorArtifact);
+        await behavior.afterArtifactWrite?.(mirrorPath);
       }
       if (behavior.status !== undefined) {
         await writeFile(statusPath, `${JSON.stringify(behavior.status)}\n`);

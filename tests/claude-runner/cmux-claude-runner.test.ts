@@ -1,9 +1,12 @@
+import { createHash } from "node:crypto";
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
   realpath,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -396,9 +399,12 @@ describe("Claude CMUX runner", () => {
     expect(result.status).toBe("invalid_artifact");
     expect(result.remoteArtifactPath).toBeNull();
     expect(result.attempts).toHaveLength(1);
-    expect(result.validationErrors).toEqual([
-      expect.stringContaining("artifact_path resolves outside artifact dir"),
-    ]);
+    expect(result.validationErrors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("artifact_path resolves outside artifact dir"),
+        expect.stringContaining("mirror fallback local mirror is absent"),
+      ]),
+    );
   });
 
   it("accepts a same-stem local mirror for remote cmux artifact paths", async () => {
@@ -406,16 +412,19 @@ describe("Claude CMUX runner", () => {
     const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-remote-"));
     const remoteArtifact = join(outsideDir, "opus.md");
     const mirroredArtifact = join(harness.artifactDir, "opus.md");
+    const artifact = validReviewArtifact();
+    const artifactSha256 = createHash("sha256").update(artifact).digest("hex");
     const runCommand: ClaudeRunnerCommand = async (_command, args) => {
       if (args[0] === "preflight") {
         return { exitCode: 0, stdout: "{}", stderr: "" };
       }
-      await writeFile(mirroredArtifact, validReviewArtifact(), "utf8");
+      await writeFile(mirroredArtifact, artifact, "utf8");
       return {
         exitCode: 0,
         stdout: JSON.stringify({
           state: "complete",
           artifact_path: remoteArtifact,
+          remote_artifact_sha256: artifactSha256,
           status_path: join(harness.artifactDir, "opus.status.json"),
         }),
         stderr: "",
@@ -445,6 +454,14 @@ describe("Claude CMUX runner", () => {
     expect(result.attempts[0]).toMatchObject({
       artifactPath: mirroredArtifact,
       remoteArtifactPath: remoteArtifact,
+      mirrorFallback: expect.objectContaining({
+        attempted: true,
+        used: true,
+        remoteArtifactPath: remoteArtifact,
+        selectedMirrorPath: mirroredArtifact,
+        freshnessPassed: true,
+        failureKind: null,
+      }),
       validationErrors: [],
     });
   });
@@ -492,6 +509,67 @@ describe("Claude CMUX runner", () => {
     expect(result.remoteArtifactPath).toBeNull();
     expect(result.validationErrors).toEqual([
       expect.stringContaining("artifact_path resolves outside artifact dir"),
+      expect.stringContaining("mirror fallback local mirror is absent"),
+    ]);
+    expect(result.attempts[0]?.mirrorFallback).toMatchObject({
+      attempted: true,
+      used: false,
+      failureKind: "absent",
+      selectedMirrorPath: mirroredArtifact,
+    });
+  });
+
+  it("rejects stale same-stem mirrors written before the run start", async () => {
+    const harness = await createHarness();
+    const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-remote-"));
+    const remoteArtifact = join(outsideDir, "opus.md");
+    const mirroredArtifact = join(harness.artifactDir, "opus.md");
+    const oldDate = new Date("2000-01-01T00:00:00Z");
+    const runCommand: ClaudeRunnerCommand = async (_command, args) => {
+      if (args[0] === "preflight") {
+        return { exitCode: 0, stdout: "{}", stderr: "" };
+      }
+      await writeFile(mirroredArtifact, validReviewArtifact(), "utf8");
+      await utimes(mirroredArtifact, oldDate, oldDate);
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          state: "complete",
+          artifact_path: remoteArtifact,
+          status_path: join(harness.artifactDir, "opus.status.json"),
+        }),
+        stderr: "",
+      };
+    };
+
+    const result = await runClaudeCmux(
+      {
+        purpose: "spec-review",
+        workspace: harness.workspace,
+        promptFile: harness.promptFile,
+        artifactDir: harness.artifactDir,
+        artifactName: "opus",
+        validation: {
+          minBytes: 50,
+          requireFirstHeading: "Verdict",
+          requiredHeadings: ["Source Read Status"],
+          verdictEnums: ["ready_as_written"],
+        },
+      },
+      { runCommand },
+    );
+
+    expect(result.status).toBe("invalid_artifact");
+    expect(result.attempts[0]?.mirrorFallback).toMatchObject({
+      attempted: true,
+      used: false,
+      failureKind: "stale",
+      freshnessPassed: false,
+      selectedMirrorPath: mirroredArtifact,
+    });
+    expect(result.validationErrors).toEqual([
+      expect.stringContaining("artifact_path resolves outside artifact dir"),
+      expect.stringContaining("mirror fallback is stale"),
     ]);
   });
 
@@ -536,15 +614,18 @@ describe("Claude CMUX runner", () => {
     expect(result.status).toBe("invalid_artifact");
     expect(result.artifactPath).toBe(remoteArtifact);
     expect(result.remoteArtifactPath).toBeNull();
-    expect(result.validationErrors).toEqual([
-      expect.stringContaining("artifact_path resolves outside artifact dir"),
-    ]);
+    expect(result.validationErrors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("artifact_path resolves outside artifact dir"),
+        expect.stringContaining("mirror fallback local mirror is absent"),
+      ]),
+    );
   });
 
   it("rejects remote cmux artifact paths when the local mirror escapes by symlink", async () => {
     const harness = await createHarness();
     const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-remote-"));
-    const remoteArtifact = join(outsideDir, "remote-opus.md");
+    const remoteArtifact = join(outsideDir, "opus.md");
     const symlinkTarget = join(outsideDir, "opus.md");
     const mirroredArtifact = join(harness.artifactDir, "opus.md");
     const runCommand: ClaudeRunnerCommand = async (_command, args) => {
@@ -584,8 +665,173 @@ describe("Claude CMUX runner", () => {
     expect(result.status).toBe("invalid_artifact");
     expect(result.artifactPath).toBe(remoteArtifact);
     expect(result.remoteArtifactPath).toBeNull();
+    expect(result.validationErrors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("artifact_path resolves outside artifact dir"),
+      ]),
+    );
+    expect(result.attempts[0]?.mirrorFallback).toMatchObject({
+      attempted: true,
+      used: false,
+      failureKind: "symlink_escape",
+      remoteArtifactPath: remoteArtifact,
+    });
+  });
+
+  it("unlinks stale mirror symlinks without touching outside targets", async () => {
+    const harness = await createHarness();
+    const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-remote-"));
+    const remoteArtifact = join(outsideDir, "opus.md");
+    const symlinkTarget = join(outsideDir, "opus.md");
+    const mirroredArtifact = join(harness.artifactDir, "opus.md");
+    await writeFile(symlinkTarget, validReviewArtifact(), "utf8");
+    await symlink(symlinkTarget, mirroredArtifact);
+    const runCommand: ClaudeRunnerCommand = async (_command, args) => {
+      if (args[0] === "preflight") {
+        return { exitCode: 0, stdout: "{}", stderr: "" };
+      }
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          state: "complete",
+          artifact_path: remoteArtifact,
+          status_path: join(harness.artifactDir, "opus.status.json"),
+        }),
+        stderr: "",
+      };
+    };
+
+    const result = await runClaudeCmux(
+      {
+        purpose: "spec-review",
+        workspace: harness.workspace,
+        promptFile: harness.promptFile,
+        artifactDir: harness.artifactDir,
+        artifactName: "opus",
+        validation: {
+          minBytes: 50,
+          requireFirstHeading: "Verdict",
+          requiredHeadings: ["Source Read Status"],
+          verdictEnums: ["ready_as_written"],
+        },
+      },
+      { runCommand },
+    );
+
+    expect(await readFile(symlinkTarget, "utf8")).toContain("ready_as_written");
+    await expect(lstat(mirroredArtifact)).rejects.toThrow();
+    expect(result.status).toBe("invalid_artifact");
+    expect(result.attempts[0]?.mirrorFallback).toMatchObject({
+      attempted: true,
+      used: false,
+      failureKind: "absent",
+      remoteArtifactPath: remoteArtifact,
+    });
+  });
+
+  it("fails closed without repair when remote mirror provenance hash mismatches", async () => {
+    const harness = await createHarness();
+    const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-remote-"));
+    const remoteArtifact = join(outsideDir, "opus.md");
+    const mirroredArtifact = join(harness.artifactDir, "opus.md");
+    const runCommand: ClaudeRunnerCommand = async (_command, args) => {
+      if (args[0] === "preflight") {
+        return { exitCode: 0, stdout: "{}", stderr: "" };
+      }
+      await writeFile(mirroredArtifact, validReviewArtifact(), "utf8");
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          state: "complete",
+          artifact_path: remoteArtifact,
+          remote_artifact_sha256: "0".repeat(64),
+          status_path: join(harness.artifactDir, "opus.status.json"),
+        }),
+        stderr: "",
+      };
+    };
+
+    const result = await runClaudeCmux(
+      {
+        purpose: "spec-review",
+        workspace: harness.workspace,
+        promptFile: harness.promptFile,
+        artifactDir: harness.artifactDir,
+        artifactName: "opus",
+        retryOnInvalid: true,
+        validation: {
+          minBytes: 50,
+          requireFirstHeading: "Verdict",
+          requiredHeadings: ["Source Read Status"],
+          verdictEnums: ["ready_as_written"],
+        },
+      },
+      { runCommand },
+    );
+
+    expect(result.status).toBe("invalid_artifact");
+    expect(result.attempts).toHaveLength(1);
+    expect(result.attempts[0]?.mirrorFallback).toMatchObject({
+      attempted: true,
+      used: false,
+      failureKind: "provenance_mismatch",
+      selectedMirrorPath: mirroredArtifact,
+    });
     expect(result.validationErrors).toEqual([
       expect.stringContaining("artifact_path resolves outside artifact dir"),
+      expect.stringContaining("mirror fallback provenance sha256 mismatch"),
+    ]);
+  });
+
+  it("fails closed when remote mirror provenance hash is malformed", async () => {
+    const harness = await createHarness();
+    const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-remote-"));
+    const remoteArtifact = join(outsideDir, "opus.md");
+    const mirroredArtifact = join(harness.artifactDir, "opus.md");
+    const runCommand: ClaudeRunnerCommand = async (_command, args) => {
+      if (args[0] === "preflight") {
+        return { exitCode: 0, stdout: "{}", stderr: "" };
+      }
+      await writeFile(mirroredArtifact, validReviewArtifact(), "utf8");
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          state: "complete",
+          artifact_path: remoteArtifact,
+          remote_artifact_sha256: "not-a-sha",
+          status_path: join(harness.artifactDir, "opus.status.json"),
+        }),
+        stderr: "",
+      };
+    };
+
+    const result = await runClaudeCmux(
+      {
+        purpose: "spec-review",
+        workspace: harness.workspace,
+        promptFile: harness.promptFile,
+        artifactDir: harness.artifactDir,
+        artifactName: "opus",
+        validation: {
+          minBytes: 50,
+          requireFirstHeading: "Verdict",
+          requiredHeadings: ["Source Read Status"],
+          verdictEnums: ["ready_as_written"],
+        },
+      },
+      { runCommand },
+    );
+
+    expect(result.status).toBe("invalid_artifact");
+    expect(result.attempts[0]?.mirrorFallback).toMatchObject({
+      attempted: true,
+      used: false,
+      failureKind: "provenance_mismatch",
+      selectedMirrorPath: mirroredArtifact,
+    });
+    expect(result.validationErrors).toEqual([
+      expect.stringContaining("artifact_path resolves outside artifact dir"),
+      expect.stringContaining("mirror fallback provenance sha256 is malformed"),
     ]);
   });
 
@@ -629,9 +875,11 @@ describe("Claude CMUX runner", () => {
     );
 
     expect(result.status).toBe("invalid_artifact");
-    expect(result.validationErrors).toEqual([
-      expect.stringContaining("artifact_path resolves outside artifact dir"),
-    ]);
+    expect(result.validationErrors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("artifact_path resolves outside artifact dir"),
+      ]),
+    );
   });
 
   it("fails before invocation when a declared source is outside the workspace", async () => {

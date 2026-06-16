@@ -12,6 +12,11 @@ import {
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 
+import {
+  type CmuxMirrorFallbackStatus,
+  removeStaleCmuxMirror,
+  resolveCmuxArtifactPath,
+} from "../claude-runner/cmux-artifact-paths.js";
 import type { CouncilRiskPredicateResult } from "../domain/model.js";
 import { classifyCouncilRiskPaths } from "../orchestrator/council-risk-predicate.js";
 import { stableJsonStringify } from "./stable-json.js";
@@ -584,6 +589,7 @@ export interface HeadlessLaneResult {
   wallTimeMs: number | null;
   tokenUsage: HeadlessLaneTokenUsage | null;
   rawArtifactPath?: string | null;
+  mirrorFallback?: CmuxMirrorFallbackStatus | null;
   structuredArtifactPath?: string | null;
   structuredArtifact?: StructuredReviewerArtifact | null;
   workspaceIntegrity?: HeadlessWorkspaceIntegrityEvidence | null;
@@ -681,6 +687,8 @@ interface HeadlessCouncilGateDependencies {
 interface CmuxRunJson {
   state?: string;
   artifact_path?: string;
+  artifact_sha256?: string;
+  remote_artifact_sha256?: string;
   message?: string;
   status_path?: string;
   usage?: unknown;
@@ -1091,6 +1099,7 @@ export async function runHeadlessCouncilGate(
         targetedConvergence,
         priorStructuredArtifacts: input.priorStructuredArtifacts ?? [],
         riskContractArtifactPaths: input.riskContractArtifactPaths ?? [],
+        runStartedAtMs: startedAtMs,
       }).catch((error: unknown) =>
         reviewerLaneExecutionErrorResult(
           lane,
@@ -1208,6 +1217,7 @@ export async function runHeadlessCouncilGate(
           targetedConvergence,
           priorStructuredArtifacts: input.priorStructuredArtifacts ?? [],
           riskContractArtifactPaths: input.riskContractArtifactPaths ?? [],
+          runStartedAtMs: codexLeadStartedAtMs,
         }).catch((error: unknown) =>
           codexLeadExecutionErrorResult(
             artifactDir,
@@ -3512,6 +3522,7 @@ async function runReviewerLane(input: {
   targetedConvergence: TargetedConvergenceHypothesis | null;
   priorStructuredArtifacts: readonly StructuredReviewerArtifact[];
   riskContractArtifactPaths: readonly string[];
+  runStartedAtMs: number;
 }): Promise<HeadlessLaneResult> {
   const phase = `headless-council-review-${input.lane.laneId}`;
   const promptPath = `${input.artifactDir}/${input.lane.laneId}.prompt.md`;
@@ -3579,6 +3590,10 @@ async function runReviewerLane(input: {
     ...laneAgentArgs(input.lane, input.artifactDir),
   ];
 
+  await removeStaleCmuxMirror({
+    artifactDir: input.artifactDir,
+    artifactName: input.lane.laneId,
+  });
   const result = await input.runCommand(input.cmuxSpawnBin, args, {
     cwd: input.workspace,
     env: input.env,
@@ -3601,9 +3616,11 @@ async function runReviewerLane(input: {
     commandResult: result,
     reviewBundle: input.reviewBundle,
     context: input.context,
+    artifactDir: input.artifactDir,
     mode: input.mode,
     routingMode: input.routingMode,
     round: input.round,
+    runStartedAtMs: input.runStartedAtMs,
     structuredArtifactPath: structuredArtifactPathFor(
       input.artifactDir,
       input.lane.laneId,
@@ -3638,6 +3655,7 @@ async function runCodexLeadLane(input: {
   targetedConvergence: TargetedConvergenceHypothesis | null;
   priorStructuredArtifacts: readonly StructuredReviewerArtifact[];
   riskContractArtifactPaths: readonly string[];
+  runStartedAtMs: number;
 }): Promise<HeadlessLaneResult> {
   const laneId = CODEX_LEAD_LANE_ID;
   const phase = `headless-council-triage-${laneId}`;
@@ -3688,6 +3706,10 @@ async function runCodexLeadLane(input: {
     });
   }
 
+  await removeStaleCmuxMirror({
+    artifactDir: input.artifactDir,
+    artifactName: laneId,
+  });
   const result = await input.runCommand(
     input.cmuxSpawnBin,
     [
@@ -3735,9 +3757,11 @@ async function runCodexLeadLane(input: {
     commandResult: result,
     reviewBundle: input.reviewBundle,
     context: input.context,
+    artifactDir: input.artifactDir,
     mode: input.mode,
     routingMode: input.routingMode,
     round: input.round,
+    runStartedAtMs: input.runStartedAtMs,
     structuredArtifactPath: structuredArtifactPathFor(
       input.artifactDir,
       laneId,
@@ -4317,9 +4341,11 @@ async function parseLaneResult(input: {
   commandResult: CommandResult;
   reviewBundle: ReviewBundleReference | null;
   context: ReviewContext;
+  artifactDir: string;
   mode: CouncilReviewMode;
   routingMode: CouncilRoutingMode | null;
   round: number;
+  runStartedAtMs: number;
   structuredArtifactPath: string;
 }): Promise<HeadlessLaneResult> {
   const {
@@ -4353,33 +4379,60 @@ async function parseLaneResult(input: {
   const state = parseLaneState(parsed.state);
   const telemetry = await laneTelemetryFromCmuxRun(parsed, state);
   if (commandResult.exitCode !== 0 || state !== "complete") {
+    const rawArtifactPath = stringOrNull(parsed.artifact_path);
     return {
       ...laneIdentity,
       state,
       verdict: "error",
-      artifactPath: stringOrNull(parsed.artifact_path),
+      artifactPath: null,
       message:
         parsed.message ??
         `cmux-spawn lane ended in ${state} with exit code ${commandResult.exitCode}.`,
       degradedReason: null,
       ...telemetry,
-      rawArtifactPath: stringOrNull(parsed.artifact_path),
+      rawArtifactPath,
       structuredArtifactPath: null,
       structuredArtifact: null,
     };
   }
 
-  const artifactPath = stringOrNull(parsed.artifact_path);
-  if (artifactPath === null || !(await fileHasContent(artifactPath))) {
+  const rawArtifactPath = stringOrNull(parsed.artifact_path);
+  const artifactPathResolution =
+    rawArtifactPath === null
+      ? null
+      : await resolveCmuxArtifactPath({
+          artifactDir: input.artifactDir,
+          artifactName: laneIdentity.laneId,
+          candidatePath: rawArtifactPath,
+          runStartedAtMs: input.runStartedAtMs,
+          remoteArtifactSha256:
+            stringOrNull(parsed.remote_artifact_sha256) ??
+            stringOrNull(parsed.artifact_sha256),
+        });
+  const artifactPath = artifactPathResolution?.artifactPath ?? null;
+  const artifactPathValidationErrors =
+    artifactPathResolution?.validationErrors ?? [];
+  const artifactHasValidationErrors = artifactPathValidationErrors.length > 0;
+  const artifactHasContent =
+    artifactPath !== null &&
+    !artifactHasValidationErrors &&
+    (await fileHasContent(artifactPath));
+  if (!artifactHasContent) {
+    const fallbackKind =
+      artifactPathResolution?.mirrorFallback.failureKind ?? null;
     return {
       ...laneIdentity,
       state: "error",
       verdict: "error",
-      artifactPath,
-      message: "Reviewer artifact was missing or empty.",
+      artifactPath: artifactHasValidationErrors ? null : artifactPath,
+      message:
+        fallbackKind === null
+          ? "Reviewer artifact was missing or empty."
+          : `Reviewer artifact mirror fallback failed: ${fallbackKind}.`,
       degradedReason: null,
       ...telemetry,
-      rawArtifactPath: artifactPath,
+      rawArtifactPath,
+      mirrorFallback: artifactPathResolution?.mirrorFallback ?? null,
       structuredArtifactPath: null,
       structuredArtifact: null,
     };
@@ -4401,6 +4454,7 @@ async function parseLaneResult(input: {
       degradedReason: "artifact_persistence_failed",
       ...telemetry,
       rawArtifactPath: persistedArtifact.rawArtifactPath,
+      mirrorFallback: artifactPathResolution?.mirrorFallback ?? null,
       structuredArtifactPath: null,
       structuredArtifact: null,
     };
@@ -4430,6 +4484,7 @@ async function parseLaneResult(input: {
     degradedReason: parsedVerdict.degradedReason,
     ...telemetry,
     rawArtifactPath: persistedArtifact.rawArtifactPath,
+    mirrorFallback: artifactPathResolution?.mirrorFallback ?? null,
     structuredArtifactPath,
     structuredArtifact,
   };

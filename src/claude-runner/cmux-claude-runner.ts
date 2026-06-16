@@ -1,15 +1,16 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  mkdir,
-  readFile,
-  realpath,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
-import { isAbsolute, relative, resolve } from "node:path";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { promisify } from "node:util";
+
+import {
+  type CmuxMirrorFallbackStatus,
+  isInside,
+  realpathOrSelf,
+  removeStaleCmuxMirror,
+  resolveCmuxArtifactPath,
+} from "./cmux-artifact-paths.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -101,6 +102,8 @@ export interface ClaudeRunnerAttempt {
   attempt: number;
   artifactName: string;
   artifactPath: string;
+  mirrorFallback?: CmuxMirrorFallbackStatus | null;
+  /** Records fallback provenance when a remote artifact path is resolved through a local mirror. */
   remoteArtifactPath?: string | null;
   cliJsonPath: string;
   statusPath: string;
@@ -140,7 +143,9 @@ export interface ClaudeRunnerResult {
   artifactDir: string;
   artifactName: string;
   artifactPath: string | null;
+  /** Records fallback provenance, not proof that execution happened remotely. */
   remoteArtifactPath?: string | null;
+  mirrorFallback?: CmuxMirrorFallbackStatus | null;
   resultJsonPath: string;
   cmuxSpawnBin: string;
   laneId: string;
@@ -158,6 +163,8 @@ export interface ClaudeRunnerResult {
 interface CmuxRunStdout {
   state?: string;
   artifact_path?: string;
+  artifact_sha256?: string;
+  remote_artifact_sha256?: string;
   status_path?: string;
   usage?: Record<string, unknown>;
   message?: string;
@@ -313,15 +320,16 @@ export async function runClaudeCmux(
   let finalStatus: ClaudeRunnerStatus = "failed";
   let artifactPath: string | null = null;
   let remoteArtifactPath: string | null = null;
+  let mirrorFallback: CmuxMirrorFallbackStatus | null = null;
   let usage: Record<string, unknown> | null = null;
   let message = "";
   let validationErrors: string[] = [];
   const maxAttempts = input.retryOnInvalid === true ? 2 : 1;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    await rm(resolve(artifactDir, `${currentArtifactName}.md`), {
-      force: true,
-      recursive: true,
+    await removeStaleCmuxMirror({
+      artifactDir,
+      artifactName: currentArtifactName,
     });
     const run = await invokeCmuxRun({
       cmuxSpawnBin,
@@ -349,6 +357,9 @@ export async function runClaudeCmux(
       artifactDir,
       artifactName: currentArtifactName,
       candidatePath: rawArtifactPath,
+      runStartedAtMs: Date.parse(startedAt),
+      remoteArtifactSha256:
+        cmux.remote_artifact_sha256 ?? cmux.artifact_sha256 ?? null,
     });
     const currentArtifactPath = artifactPathValidation.artifactPath;
     const currentStatusPath =
@@ -368,6 +379,7 @@ export async function runClaudeCmux(
     usage = cmux.usage ?? null;
     artifactPath = currentArtifactPath;
     remoteArtifactPath = artifactPathValidation.remoteArtifactPath;
+    mirrorFallback = artifactPathValidation.mirrorFallback;
     message = cmux.message ?? diagnosticMessage(diagnostics);
     const laneState =
       cmux.state ?? (run.exitCode === 0 ? "complete" : "failed");
@@ -382,6 +394,7 @@ export async function runClaudeCmux(
       attempt,
       artifactName: currentArtifactName,
       artifactPath: currentArtifactPath,
+      mirrorFallback: artifactPathValidation.mirrorFallback,
       remoteArtifactPath: artifactPathValidation.remoteArtifactPath,
       cliJsonPath: currentCliJsonPath,
       statusPath: currentStatusPath,
@@ -433,6 +446,7 @@ export async function runClaudeCmux(
     artifactName,
     artifactPath,
     remoteArtifactPath,
+    mirrorFallback,
     resultJsonPath,
     cmuxSpawnBin,
     laneId,
@@ -670,74 +684,6 @@ async function inspectPromptFile(
       error: error instanceof Error ? error.message : String(error),
     };
   }
-}
-
-async function realpathOrSelf(path: string): Promise<string> {
-  try {
-    return await realpath(path);
-  } catch {
-    return path;
-  }
-}
-
-async function validateArtifactPathWithinDir(
-  artifactDir: string,
-  candidatePath: string,
-): Promise<{ artifactPath: string; validationErrors: string[] }> {
-  const resolvedArtifactDir = resolve(artifactDir);
-  const artifactPath = resolve(resolvedArtifactDir, candidatePath);
-  const canonicalArtifactDir = await realpathOrSelf(resolvedArtifactDir);
-  const canonicalArtifactPath = await realpathOrSelf(artifactPath);
-  if (!isInside(canonicalArtifactDir, canonicalArtifactPath)) {
-    return {
-      artifactPath,
-      validationErrors: [
-        `artifact_path resolves outside artifact dir: ${candidatePath}`,
-      ],
-    };
-  }
-  return { artifactPath, validationErrors: [] };
-}
-
-async function resolveCmuxArtifactPath(input: {
-  artifactDir: string;
-  artifactName: string;
-  candidatePath: string;
-}): Promise<{
-  artifactPath: string;
-  remoteArtifactPath: string | null;
-  validationErrors: string[];
-}> {
-  const primary = await validateArtifactPathWithinDir(
-    input.artifactDir,
-    input.candidatePath,
-  );
-  if (primary.validationErrors.length === 0) {
-    return { ...primary, remoteArtifactPath: null };
-  }
-
-  const mirrorPath = resolve(input.artifactDir, `${input.artifactName}.md`);
-  const mirror = await validateArtifactPathWithinDir(
-    input.artifactDir,
-    mirrorPath,
-  );
-  if (mirror.validationErrors.length > 0) {
-    return { ...primary, remoteArtifactPath: null };
-  }
-  try {
-    const mirrorStats = await stat(mirror.artifactPath);
-    if (!mirrorStats.isFile()) {
-      return { ...primary, remoteArtifactPath: null };
-    }
-  } catch {
-    return { ...primary, remoteArtifactPath: null };
-  }
-
-  return {
-    artifactPath: mirror.artifactPath,
-    remoteArtifactPath: primary.artifactPath,
-    validationErrors: [],
-  };
 }
 
 async function invokeCmuxRun(input: {
@@ -1041,11 +987,6 @@ function normalizeHeading(value: string): string {
     .trim()
     .replace(/\s+/g, " ")
     .toLowerCase();
-}
-
-function isInside(root: string, candidate: string): boolean {
-  const rel = relative(resolve(root), resolve(candidate));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 async function fileSha256(path: string): Promise<string | null> {
