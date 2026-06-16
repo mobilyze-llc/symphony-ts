@@ -113,7 +113,7 @@ describe("merge candidates", () => {
     });
   });
 
-  it("keeps durable merged proof ahead of stale-head checks", () => {
+  it("rejects durable merged proof when the reviewed head is stale", () => {
     const candidate = reduceMergeCandidates([
       {
         ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
@@ -138,8 +138,8 @@ describe("merge candidates", () => {
     });
 
     expect(decision).toMatchObject({
-      action: "tracker_done",
-      reason: "durable_merge_proof",
+      action: "stale",
+      reason: "stale_reviewed_head",
     });
   });
 

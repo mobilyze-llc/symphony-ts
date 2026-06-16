@@ -276,6 +276,15 @@ export function decideMergeActuation(input: {
   }
 
   if (input.live.state === "MERGED") {
+    const blocker = firstLiveIdentityBlocker(input.candidate, input.live);
+    if (blocker !== null) {
+      return {
+        action: "stale",
+        reason: blocker,
+        blockers: [blocker],
+        sideEffectKey: mergeActuationKey(input.candidate, "stale"),
+      };
+    }
     if (input.live.mergedAt === null || input.live.mergeCommit === null) {
       return {
         action: "blocked",
@@ -761,6 +770,23 @@ function firstLiveBlocker(
   candidate: MergeCandidateRecord,
   live: MergeActuatorLiveState,
 ): string | null {
+  const identityBlocker = firstLiveIdentityBlocker(candidate, live);
+  if (identityBlocker !== null) {
+    return identityBlocker;
+  }
+  if (live.mergeStateStatus === "DIRTY" || live.mergeable === "CONFLICTING") {
+    return "merge_conflict";
+  }
+  if (live.mergeStateStatus === "BEHIND") {
+    return "behind_base";
+  }
+  return null;
+}
+
+function firstLiveIdentityBlocker(
+  candidate: MergeCandidateRecord,
+  live: MergeActuatorLiveState,
+): string | null {
   if (live.repo !== candidate.repo || live.prNumber !== candidate.prNumber) {
     return "wrong_pr";
   }
@@ -769,12 +795,6 @@ function firstLiveBlocker(
   }
   if (live.baseRef !== candidate.baseRef) {
     return "base_ref_changed";
-  }
-  if (live.mergeStateStatus === "DIRTY" || live.mergeable === "CONFLICTING") {
-    return "merge_conflict";
-  }
-  if (live.mergeStateStatus === "BEHIND") {
-    return "behind_base";
   }
   return null;
 }
