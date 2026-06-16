@@ -82,7 +82,9 @@ the Codex Lead.
 
 Kimi shadow is on by default. Disable it with the same switch as the
 headless gate: `SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED=0` (also accept
-`false` or `no`). When explicitly disabled or unavailable, write
+`false`, `no`, or `off`). Its default timeout is 300 seconds so shadow
+diagnostics cannot impose the full reviewer timeout; override with
+`SYMPHONY_COUNCIL_KIMI_TIMEOUT_SECONDS`. When explicitly disabled or unavailable, write
 `$COUNCIL_DIR/kimi-k27-shadow.disabled.json` with
 `enabled:false`, a reason (`disabled-by-config`, `substrate-unavailable`,
 or `preflight-failed`), and `mergeAuthoritative:false`. Absence of both
@@ -206,6 +208,7 @@ CLAUDE_AVAILABLE=false
 PI_AVAILABLE=false
 KIMI_SHADOW_ENABLED=true
 KIMI_AVAILABLE=false
+KIMI_SHADOW_TIMEOUT_SECONDS="${SYMPHONY_COUNCIL_KIMI_TIMEOUT_SECONDS:-300}"
 DIRTY=false
 printf '%s\n' "$SUBSTRATE_TIER" > "$COUNCIL_DIR/substrate-tier.txt"
 printf '%s\n' "$SUBSTRATE_HOST" > "$COUNCIL_DIR/substrate-host.txt"
@@ -225,8 +228,9 @@ write_kimi_shadow_disabled_marker() {
 EOF
 }
 
-case "${SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED:-}" in
-  0|false|FALSE|no|NO)
+KIMI_SHADOW_SWITCH="$(printf '%s' "${SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED:-}" | tr '[:upper:]' '[:lower:]')"
+case "$KIMI_SHADOW_SWITCH" in
+  0|false|no|off)
     KIMI_SHADOW_ENABLED=false
     ;;
 esac
@@ -370,7 +374,7 @@ if [ "$KIMI_SHADOW_ENABLED" = "true" ] && [ "$KIMI_AVAILABLE" = "true" ]; then
       --artifact-dir "$COUNCIL_DIR" \
       --artifact-name kimi-k27-shadow \
       --lane-id kimi-k27-shadow \
-      --timeout-seconds 1800 \
+      --timeout-seconds "$KIMI_SHADOW_TIMEOUT_SECONDS" \
       > "$COUNCIL_DIR/kimi-k27-shadow.cli.json" \
       2> "$COUNCIL_DIR/kimi-k27-shadow.cli.stderr" &
   KIMI_PID=$!

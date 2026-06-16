@@ -171,10 +171,11 @@ is a manual-council defect.
 ### Kimi K2.7 Shadow
 
 Kimi shadow is enabled by default. Disable it with
-`SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED=0` (also accept `false` or `no`).
-It uses
-the same lane identifier as the headless gate and does not invent model
-or provider flags:
+`SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED=0` (also accept `false`, `no`,
+or `off`). It uses the same lane identifier as the headless gate and
+does not invent model or provider flags. Its default timeout is 300
+seconds so shadow diagnostics cannot impose the full reviewer timeout;
+override with `SYMPHONY_COUNCIL_KIMI_TIMEOUT_SECONDS`.
 
 ```bash
 "$CMUX_SPAWN_BIN" run \
@@ -184,7 +185,7 @@ or provider flags:
     --artifact-dir "$COUNCIL_DIR" \
     --artifact-name kimi-k27-shadow \
     --lane-id kimi-k27-shadow \
-    --timeout-seconds 1800 \
+    --timeout-seconds "${SYMPHONY_COUNCIL_KIMI_TIMEOUT_SECONDS:-300}" \
     > "$COUNCIL_DIR/kimi-k27-shadow.cli.json" \
     2> "$COUNCIL_DIR/kimi-k27-shadow.cli.stderr"
 ```

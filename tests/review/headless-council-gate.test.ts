@@ -102,6 +102,11 @@ describe("runHeadlessCouncilGate", () => {
     ).not.toContain("kimi-k27-shadow");
     expect(
       defaultReviewerLanes({
+        SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED: "off",
+      }).map((lane) => lane.laneId),
+    ).not.toContain("kimi-k27-shadow");
+    expect(
+      defaultReviewerLanes({
         SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED: "",
       }).map((lane) => lane.laneId),
     ).toContain("kimi-k27-shadow");
@@ -114,6 +119,7 @@ describe("runHeadlessCouncilGate", () => {
       defaultReviewerLanes({
         SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED: "true",
         SYMPHONY_COUNCIL_KIMI_MODEL: "kimi-test",
+        SYMPHONY_COUNCIL_KIMI_TIMEOUT_SECONDS: "45",
         KIMI_CLI_BIN: "/opt/kimi/bin/kimi",
       }),
     ).toEqual(
@@ -124,6 +130,7 @@ describe("runHeadlessCouncilGate", () => {
           role: "kimi-k27-shadow-reviewer",
           model: "kimi-test",
           binary: "/opt/kimi/bin/kimi",
+          timeoutSeconds: 45,
           independentReviewer: false,
         }),
       ]),
@@ -151,6 +158,7 @@ describe("runHeadlessCouncilGate", () => {
       expect.arrayContaining(["--agent", "kimi"]),
     );
     expect(kimiCommand.args).not.toContain("--model");
+    expect(readFlag(kimiCommand.args, "--timeout-seconds")).toBe("300");
     expect(result.lanes.map((lane) => lane.laneId)).toContain(
       "kimi-k27-shadow",
     );
