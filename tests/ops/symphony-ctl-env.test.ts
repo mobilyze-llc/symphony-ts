@@ -160,6 +160,28 @@ it("resolves service root overrides in documented precedence order", async () =>
   expect(symphonyRootResult.stdout).toContain("root=/tmp/explicit-root");
 });
 
+it("documents service root help text with exact precedence", async () => {
+  const ctl = await readFile("ops/symphony-ctl", "utf8");
+  const environment = ctl.match(/Environment:\n[\s\S]*?\nEOF/)?.[0];
+
+  expect(environment).toBeDefined();
+  expect(environment).toContain(
+    "SYMPHONY_ROOT > SYMPHONY_SERVICE_ROOT >\n" +
+      "                             SYMPHONY_RUNTIME_CHECKOUT > default",
+  );
+  expect(environment).toContain(
+    "SYMPHONY_SERVICE_ROOT      Service checkout root override used after\n" +
+      "                             SYMPHONY_ROOT and before\n" +
+      "                             SYMPHONY_RUNTIME_CHECKOUT",
+  );
+
+  const serviceRootLine = environment
+    ?.split("\n")
+    .find((line) => line.includes("SYMPHONY_SERVICE_ROOT"));
+  expect(serviceRootLine).toBeDefined();
+  expect(serviceRootLine).not.toMatch(/\balias\b/i);
+});
+
 it("renders the launchd plist from the configured service root", async () => {
   const root = await createTempDir("symphony-ctl-plist-root-");
   const envFile = join(root, ".env");

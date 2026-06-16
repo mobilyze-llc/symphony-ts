@@ -1195,11 +1195,15 @@ Commands:
 
 Environment:
   SYMPHONY_PROJECT           Project name for label/logs (default: symphony)
-  SYMPHONY_ROOT              Service checkout root (default: SYMPHONY_SERVICE_ROOT,
-                             then SYMPHONY_RUNTIME_CHECKOUT, then
-                             the checkout containing ops/symphony-ctl)
-  SYMPHONY_SERVICE_ROOT      Alias for the service checkout root
-  SYMPHONY_RUNTIME_CHECKOUT  Explicit runtime checkout root override
+  SYMPHONY_ROOT              Service checkout root override (highest priority)
+  SYMPHONY_SERVICE_ROOT      Service checkout root override used after
+                             SYMPHONY_ROOT and before
+                             SYMPHONY_RUNTIME_CHECKOUT
+  SYMPHONY_RUNTIME_CHECKOUT  Service checkout root override used after
+                             SYMPHONY_SERVICE_ROOT
+  Root precedence            SYMPHONY_ROOT > SYMPHONY_SERVICE_ROOT >
+                             SYMPHONY_RUNTIME_CHECKOUT > default
+                             (checkout containing ops/symphony-ctl)
   SYMPHONY_ALLOW_WORKTREE_ROOT
                              Allow install when the resolved service root is
                              under a worktree path (default: refuse)
