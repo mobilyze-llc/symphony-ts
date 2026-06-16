@@ -10577,18 +10577,35 @@ export class OrchestratorCore {
         continue;
       }
       const action = readMetadataString(entry.metadata, "action");
-      if (
-        action === "mark_ready" ||
-        action === "enqueue" ||
-        action === "poll" ||
-        action === "tracker_done" ||
-        action === "stale" ||
-        action === "timeout"
-      ) {
+      if (action === "completed" || action === "recovered") {
+        const subjectAction = readMetadataString(
+          entry.metadata,
+          "subject_action",
+        );
+        if (
+          subjectAction === "mark_ready" ||
+          subjectAction === "enqueue" ||
+          subjectAction === "poll" ||
+          subjectAction === "tracker_done"
+        ) {
+          completed.add(
+            this.mergeActuationSideEffectKey(candidate, subjectAction),
+          );
+        }
+        continue;
+      }
+      if (action === "stale" || action === "timeout") {
         completed.add(entry.idempotencyKey);
       }
     }
     return completed;
+  }
+
+  private mergeActuationSideEffectKey(
+    candidate: MergeCandidateRecord,
+    action: "mark_ready" | "enqueue" | "poll" | "tracker_done",
+  ): string {
+    return `merge_actuation:${candidate.candidateId}:${action}`;
   }
 
   private mergeCandidateEnqueuedAtMs(
@@ -10600,7 +10617,9 @@ export class OrchestratorCore {
         entry.issueId === candidate.issueId &&
         readMetadataString(entry.metadata, "candidate_id") ===
           candidate.candidateId &&
-        readMetadataString(entry.metadata, "action") === "enqueue",
+        (readMetadataString(entry.metadata, "action") === "completed" ||
+          readMetadataString(entry.metadata, "action") === "recovered") &&
+        readMetadataString(entry.metadata, "subject_action") === "enqueue",
     );
     if (enqueueEntry === undefined) {
       return null;

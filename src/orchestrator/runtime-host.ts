@@ -3574,10 +3574,27 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       "--repo",
       candidate.repo,
       "--json",
-      "url,state,isDraft,mergeStateStatus,mergeable,reviewDecision,headRefOid,baseRefName,statusCheckRollup,mergedAt,mergeCommit",
+      "url,state,isDraft,mergeStateStatus,mergeable,reviewDecision,headRefOid,baseRefName,mergedAt,mergeCommit",
     ]);
+    const requiredChecksOutput = await this.runGhAllowingExitCodes(
+      [
+        "pr",
+        "checks",
+        String(candidate.prNumber),
+        "--repo",
+        candidate.repo,
+        "--required",
+        "--json",
+        "name,bucket",
+      ],
+      new Set([0, 8]),
+    );
     const parsed = parseJsonObject(output);
     if (parsed === null) {
+      return null;
+    }
+    const requiredChecks = parseRequiredChecks(requiredChecksOutput);
+    if (requiredChecks === null) {
       return null;
     }
 
@@ -3606,7 +3623,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       headSha,
       baseRef,
       baseSha: candidate.baseSha,
-      requiredChecks: parseStatusCheckRollup(parsed.statusCheckRollup),
+      requiredChecks,
       requiresGithubReview: nullableStringValue(parsed.reviewDecision) !== null,
       mergeQueueRequired: true,
       mergedAt: nullableStringValue(parsed.mergedAt),
@@ -3621,6 +3638,26 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       maxBuffer: 1024 * 1024,
     });
     return stdout.trim();
+  }
+
+  private async runGhAllowingExitCodes(
+    args: string[],
+    allowedExitCodes: ReadonlySet<number>,
+  ): Promise<string> {
+    try {
+      return await this.runGh(args);
+    } catch (error) {
+      const exitCode = exitCodeValue(error);
+      const stdout = stdoutValue(error);
+      if (
+        exitCode !== null &&
+        allowedExitCodes.has(exitCode) &&
+        stdout !== null
+      ) {
+        return stdout.trim();
+      }
+      throw error;
+    }
   }
 
   private async spawnWorkerExecution(
@@ -7006,11 +7043,15 @@ function parseMergeCommit(value: unknown): string | null {
   return stringValue((value as Record<string, unknown>).oid);
 }
 
-function parseStatusCheckRollup(
+function parseRequiredChecks(
   value: unknown,
-): MergeActuatorLiveState["requiredChecks"] {
+): MergeActuatorLiveState["requiredChecks"] | null {
+  if (typeof value === "string") {
+    const parsed = parseJsonArray(value);
+    return parsed === null ? null : parseRequiredChecks(parsed);
+  }
   if (!Array.isArray(value)) {
-    return [];
+    return null;
   }
   return value.flatMap((entry): MergeActuatorLiveState["requiredChecks"] => {
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
@@ -7021,24 +7062,53 @@ function parseStatusCheckRollup(
     if (name === null) {
       return [];
     }
-    const conclusion = nullableStringValue(record.conclusion)?.toUpperCase();
-    const status = nullableStringValue(record.status)?.toUpperCase();
-    if (conclusion === "SUCCESS" || conclusion === "NEUTRAL") {
+    const bucket = nullableStringValue(record.bucket)?.toLowerCase();
+    if (bucket === "pass" || bucket === "skipping") {
       return [{ name, status: "pass" as const }];
     }
-    if (
-      conclusion !== null &&
-      conclusion !== "SKIPPED" &&
-      conclusion !== "ACTION_REQUIRED"
-    ) {
+    if (bucket === "fail" || bucket === "cancel") {
       return [{ name, status: "fail" as const }];
     }
-    if (status === "COMPLETED" && conclusion === "SKIPPED") {
-      return [{ name, status: "pass" as const }];
+    if (bucket === "pending") {
+      return [{ name, status: "pending" as const }];
     }
-    return [{ name, status: "pending" as const }];
+    return [];
   });
 }
+
+function parseJsonArray(value: string): unknown[] | null {
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function stdoutValue(error: unknown): string | null {
+  return typeof error === "object" &&
+    error !== null &&
+    "stdout" in error &&
+    typeof error.stdout === "string"
+    ? error.stdout
+    : null;
+}
+
+function exitCodeValue(error: unknown): number | null {
+  return typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "number"
+    ? error.code
+    : null;
+}
+
+export const runtimeHostMergeActuatorTesting = {
+  parseJsonObject,
+  parseMergeCommit,
+  parsePrState,
+  parseRequiredChecks,
+};
 
 function getPipelineRestartSafetyReason(
   lanesActive: boolean,

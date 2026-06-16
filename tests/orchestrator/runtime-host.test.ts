@@ -50,6 +50,7 @@ import {
   parseLsofCwdProcessEntries,
   readGitBaseRevision,
   readGitChangedFiles,
+  runtimeHostMergeActuatorTesting,
   signalPid,
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
@@ -77,6 +78,43 @@ beforeEach(() => {
   rmSync(join("/tmp/workspaces", ".symphony", "run-journals"), {
     recursive: true,
     force: true,
+  });
+});
+
+describe("runtime host merge actuator parsing", () => {
+  it("maps gh required-check buckets without inspecting optional rollup checks", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseRequiredChecks(
+        JSON.stringify([
+          { name: "required-pass", bucket: "pass" },
+          { name: "required-skip", bucket: "skipping" },
+          { name: "required-fail", bucket: "fail" },
+          { name: "required-cancel", bucket: "cancel" },
+          { name: "required-pending", bucket: "pending" },
+          { name: "unknown-bucket", bucket: "startup" },
+          { name: "", bucket: "pass" },
+        ]),
+      ),
+    ).toEqual([
+      { name: "required-pass", status: "pass" },
+      { name: "required-skip", status: "pass" },
+      { name: "required-fail", status: "fail" },
+      { name: "required-cancel", status: "fail" },
+      { name: "required-pending", status: "pending" },
+    ]);
+  });
+
+  it("fails closed for malformed merge actuator JSON fields", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseJsonObject("{not-json"),
+    ).toBeNull();
+    expect(
+      runtimeHostMergeActuatorTesting.parseRequiredChecks("{not-json"),
+    ).toBeNull();
+    expect(
+      runtimeHostMergeActuatorTesting.parseMergeCommit({ oid: "" }),
+    ).toBeNull();
+    expect(runtimeHostMergeActuatorTesting.parsePrState("LOCKED")).toBeNull();
   });
 });
 

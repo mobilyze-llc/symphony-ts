@@ -332,6 +332,93 @@ describe("orchestrator core", () => {
     expect(spawnedStages).toEqual(["review"]);
   });
 
+  it("redrives merge side effects when only the pre-effect intent was journaled", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const sideEffects: string[] = [];
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      getMergeActuatorLiveState: async () => ({
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 725,
+        prUrl: "https://github.com/mobilyze-llc/symphony-ts/pull/725",
+        state: "MERGED",
+        isDraft: false,
+        mergeStateStatus: "UNKNOWN",
+        mergeable: "UNKNOWN",
+        reviewDecision: null,
+        headSha: "head-sha",
+        baseRef: "main",
+        baseSha: "base-sha",
+        requiredChecks: [],
+        requiresGithubReview: false,
+        mergeQueueRequired: true,
+        mergedAt: "2026-03-06T00:03:00.000Z",
+        mergeCommit: "merge-sha",
+      }),
+      mergeActuatorSideEffects: {
+        markReady: async () => {
+          sideEffects.push("mark_ready");
+        },
+        enqueue: async () => {
+          sideEffects.push("enqueue");
+        },
+        writeTrackerDone: async () => {
+          sideEffects.push("tracker_done");
+        },
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const state = orchestrator.getState();
+    const candidateEntry = state.dispatcherRunJournal.find(
+      (entry) => entry.kind === "merge_candidate",
+    );
+    expect(candidateEntry).toBeDefined();
+    const candidateId = candidateEntry?.metadata.candidate_id;
+    expect(candidateId).toEqual(expect.any(String));
+    state.dispatcherRunJournal.push(
+      createJournalEntry({
+        sequence: state.dispatcherRunJournal.length + 1,
+        idempotencyKey: `merge_actuation:${candidateId}:tracker_done`,
+        kind: "merge_actuation",
+        operation: "dispatcher",
+        stage: "merge",
+        leaseId: "merge-actuator-crashed-before-side-effect",
+        leaseStatus: "completed",
+        metadata: {
+          candidate_id: candidateId,
+          action: "tracker_done",
+          reason: "durable_merge_proof",
+          merge_commit: "merge-sha",
+          merged_at: "2026-03-06T00:03:00.000Z",
+        },
+      }),
+    );
+
+    await orchestrator.onRetryTimer("1");
+
+    expect(sideEffects).toEqual(["tracker_done"]);
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) =>
+          entry.kind === "merge_actuation" &&
+          entry.metadata.action === "completed" &&
+          entry.metadata.subject_action === "tracker_done",
+      ),
+    ).toBeDefined();
+  });
+
   it("dispatches unrelated candidates when hard dependency cycles are excluded", async () => {
     const orchestrator = createOrchestrator({
       tracker: createTracker({

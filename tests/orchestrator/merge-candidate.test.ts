@@ -284,7 +284,11 @@ describe("merge candidates", () => {
       sideEffect: "tracker_done",
       journalEntry: { kind: "merge_actuation" },
     });
-    expect(events).toEqual(["journal:tracker_done", "tracker_done"]);
+    expect(events).toEqual([
+      "journal:tracker_done",
+      "tracker_done",
+      "journal:completed",
+    ]);
   });
 
   it("records side-effect failures and journals recovery after a retry succeeds", async () => {
@@ -435,6 +439,14 @@ describe("merge candidates", () => {
         },
       },
     });
+    expect(
+      actuationEntries.some(
+        (entry) =>
+          entry.metadata.action === "completed" &&
+          entry.metadata.subject_action === "tracker_done" &&
+          entry.metadata.reason === "tracker_done_completed",
+      ),
+    ).toBe(true);
 
     const recovered = reduceMergeCandidates([
       candidateEntry,

@@ -13,13 +13,14 @@ export const MERGE_ACTUATION_ACTIONS = [
   "stale",
   "timeout",
   "failed",
+  "completed",
   "recovered",
 ] as const;
 
 export type MergeActuationAction = (typeof MERGE_ACTUATION_ACTIONS)[number];
 type SideEffectActuationAction = Exclude<
   MergeActuationAction,
-  "failed" | "recovered"
+  "failed" | "completed" | "recovered"
 >;
 
 export type MergeCandidateStatus =
@@ -476,6 +477,15 @@ export async function runMergeActuator(input: {
   try {
     if (decision.action === "mark_ready") {
       await input.sideEffects.markReady(input.candidate);
+      await appendCompletionEntry({
+        appendActuation: input.appendActuation,
+        candidate: input.candidate,
+        action,
+        timestamp: input.now.toISOString(),
+        ownerId: input.ownerId,
+        lease: input.lease,
+        live: input.live,
+      });
       const recoveryEntry = await appendRecoveryEntryIfNeeded({
         appendActuation: input.appendActuation,
         candidate: input.candidate,
@@ -497,6 +507,15 @@ export async function runMergeActuator(input: {
     }
     if (decision.action === "enqueue") {
       await input.sideEffects.enqueue(input.candidate);
+      await appendCompletionEntry({
+        appendActuation: input.appendActuation,
+        candidate: input.candidate,
+        action,
+        timestamp: input.now.toISOString(),
+        ownerId: input.ownerId,
+        lease: input.lease,
+        live: input.live,
+      });
       const recoveryEntry = await appendRecoveryEntryIfNeeded({
         appendActuation: input.appendActuation,
         candidate: input.candidate,
@@ -518,6 +537,15 @@ export async function runMergeActuator(input: {
     }
     if (decision.action === "tracker_done") {
       await input.sideEffects.writeTrackerDone(input.candidate);
+      await appendCompletionEntry({
+        appendActuation: input.appendActuation,
+        candidate: input.candidate,
+        action,
+        timestamp: input.now.toISOString(),
+        ownerId: input.ownerId,
+        lease: input.lease,
+        live: input.live,
+      });
       const recoveryEntry = await appendRecoveryEntryIfNeeded({
         appendActuation: input.appendActuation,
         candidate: input.candidate,
@@ -667,7 +695,7 @@ function applyActuation(
     record.status = "blocked";
     record.blockedReason =
       stringField(entry.metadata.reason) ?? "merge_actuation_failed";
-  } else if (action === "recovered") {
+  } else if (action === "completed" || action === "recovered") {
     applyRecoveredActuation(record, entry);
   }
 }
@@ -680,6 +708,7 @@ function applyRecoveredActuation(
   if (
     subjectAction === null ||
     subjectAction === "failed" ||
+    subjectAction === "completed" ||
     subjectAction === "recovered"
   ) {
     return;
@@ -806,7 +835,7 @@ function mergeActuationKey(
   subjectAction?: SideEffectActuationAction,
 ): string {
   if (
-    (action === "failed" || action === "recovered") &&
+    (action === "failed" || action === "completed" || action === "recovered") &&
     subjectAction !== undefined
   ) {
     return `merge_actuation:${candidate.candidateId}:${action}:${subjectAction}`;
@@ -858,6 +887,31 @@ function isRedrivingFailedAction(
   return (
     candidate.lastActuation === "failed" &&
     candidate.blockedReason?.startsWith(`${action}_failed:`) === true
+  );
+}
+
+async function appendCompletionEntry(input: {
+  appendActuation: (
+    entry: MergeActuationJournalDraft,
+  ) => Promise<DispatcherRunJournalEntry>;
+  candidate: MergeCandidateRecord;
+  action: SideEffectActuationAction;
+  timestamp: string;
+  ownerId: string;
+  lease: DispatcherLease;
+  live: MergeActuatorLiveState;
+}): Promise<DispatcherRunJournalEntry> {
+  return input.appendActuation(
+    buildMergeActuationEntry({
+      candidate: input.candidate,
+      action: "completed",
+      subjectAction: input.action,
+      timestamp: input.timestamp,
+      ownerId: input.ownerId,
+      lease: input.lease,
+      live: input.live,
+      reason: `${input.action}_completed`,
+    }),
   );
 }
 
