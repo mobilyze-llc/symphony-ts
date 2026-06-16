@@ -364,6 +364,34 @@ describe("merge candidates", () => {
 
     expect(
       decideMergeActuation({
+        candidate: polled,
+        live: liveState({
+          mergeStateStatus: "UNKNOWN",
+          mergeable: "UNKNOWN",
+        }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T02:40:00.000Z"),
+        enqueuedAtMs: null,
+        mergeabilityWaitStartedAtMs: Date.parse(firstPoll.timestamp),
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({
+      action: "blocked",
+      reason: "mergeability_unknown",
+    });
+  });
+
+  it("starts the pre-enqueue mergeability wait at the first unknown observation", () => {
+    const candidateEntry = {
+      ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+      sequence: 2,
+    };
+    const candidate = reduceMergeCandidates([candidateEntry])["issue-1"]!;
+
+    expect(
+      decideMergeActuation({
         candidate,
         live: liveState({
           mergeStateStatus: "UNKNOWN",
@@ -373,11 +401,12 @@ describe("merge candidates", () => {
         ownerId: "owner-1",
         nowMs: Date.parse("2026-06-16T02:40:00.000Z"),
         enqueuedAtMs: null,
+        mergeabilityWaitStartedAtMs: null,
         maxWaitMs: 30 * 60_000,
         completedSideEffectKeys: new Set(),
       }),
     ).toMatchObject({
-      action: "blocked",
+      action: "poll",
       reason: "mergeability_unknown",
     });
   });

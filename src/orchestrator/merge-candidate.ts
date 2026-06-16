@@ -263,6 +263,7 @@ export function decideMergeActuation(input: {
   ownerId: string;
   nowMs: number;
   enqueuedAtMs: number | null;
+  mergeabilityWaitStartedAtMs?: number | null;
   maxWaitMs: number;
   completedSideEffectKeys: ReadonlySet<string>;
 }): MergeActuatorDecision {
@@ -391,7 +392,13 @@ export function decideMergeActuation(input: {
     input.candidate.status !== "merge_queue_pending" &&
     !hasGreenMergeability(input.live)
   ) {
-    if (hasExceededCandidateWait(input)) {
+    if (
+      hasExceededWait({
+        startedAtMs: input.mergeabilityWaitStartedAtMs ?? null,
+        nowMs: input.nowMs,
+        maxWaitMs: input.maxWaitMs,
+      })
+    ) {
       return {
         action: "blocked",
         reason: "mergeability_unknown",
@@ -481,6 +488,7 @@ export async function runMergeActuator(input: {
   ownerId: string;
   now: Date;
   enqueuedAtMs: number | null;
+  mergeabilityWaitStartedAtMs?: number | null;
   maxWaitMs: number;
   completedSideEffectKeys: ReadonlySet<string>;
   appendActuation: (
@@ -495,6 +503,7 @@ export async function runMergeActuator(input: {
     ownerId: input.ownerId,
     nowMs: input.now.getTime(),
     enqueuedAtMs: input.enqueuedAtMs,
+    mergeabilityWaitStartedAtMs: input.mergeabilityWaitStartedAtMs ?? null,
     maxWaitMs: input.maxWaitMs,
     completedSideEffectKeys: input.completedSideEffectKeys,
   });
@@ -833,14 +842,14 @@ function hasGreenMergeability(live: MergeActuatorLiveState): boolean {
   return live.mergeable === "MERGEABLE" && live.mergeStateStatus !== "UNKNOWN";
 }
 
-function hasExceededCandidateWait(input: {
-  candidate: MergeCandidateRecord;
+function hasExceededWait(input: {
+  startedAtMs: number | null;
   nowMs: number;
   maxWaitMs: number;
 }): boolean {
-  const createdAtMs = Date.parse(input.candidate.createdAt);
   return (
-    !Number.isNaN(createdAtMs) && input.nowMs - createdAtMs > input.maxWaitMs
+    input.startedAtMs !== null &&
+    input.nowMs - input.startedAtMs > input.maxWaitMs
   );
 }
 

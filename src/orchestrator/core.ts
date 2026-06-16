@@ -10503,6 +10503,8 @@ export class OrchestratorCore {
       ownerId: this.leaseOwnerId,
       now: this.now(),
       enqueuedAtMs: this.mergeCandidateEnqueuedAtMs(candidate),
+      mergeabilityWaitStartedAtMs:
+        this.mergeCandidateMergeabilityWaitStartedAtMs(candidate),
       maxWaitMs: this.mergeActuatorMaxWaitMs,
       completedSideEffectKeys:
         this.completedMergeActuationSideEffectKeys(candidate),
@@ -10531,13 +10533,11 @@ export class OrchestratorCore {
     });
 
     if (result.error !== null) {
-      await this.parkMergeCandidateInvariantFailure({
+      this.scheduleMergeActuatorRetry(
         issue,
-        stageName,
-        reasonCode: "merge_actuator_side_effect_failed",
-        detail: `${result.decision.action} failed for candidate ${candidate.candidateId}: ${result.error}`,
-        reviewResultPath: candidate.reviewResultPath,
-      });
+        candidate,
+        `merge_actuator_side_effect_failed:${result.error}`,
+      );
       return true;
     }
 
@@ -10675,6 +10675,25 @@ export class OrchestratorCore {
       return Number.isNaN(parsed) ? null : parsed;
     }
     const parsed = Date.parse(enqueueEntry.timestamp);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+
+  private mergeCandidateMergeabilityWaitStartedAtMs(
+    candidate: MergeCandidateRecord,
+  ): number | null {
+    const pollEntry = this.state.dispatcherRunJournal.find(
+      (entry) =>
+        entry.kind === "merge_actuation" &&
+        entry.issueId === candidate.issueId &&
+        readMetadataString(entry.metadata, "candidate_id") ===
+          candidate.candidateId &&
+        readMetadataString(entry.metadata, "action") === "poll" &&
+        readMetadataString(entry.metadata, "reason") === "mergeability_unknown",
+    );
+    if (pollEntry === undefined) {
+      return null;
+    }
+    const parsed = Date.parse(pollEntry.timestamp);
     return Number.isNaN(parsed) ? null : parsed;
   }
 
