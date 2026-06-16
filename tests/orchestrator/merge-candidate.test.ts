@@ -1272,6 +1272,61 @@ describe("merge actuator bounded recovery (SYMPH-746)", () => {
       harness.entries.filter((e) => e.metadata.action === "draft_wait"),
     ).toHaveLength(0);
   });
+
+  it("does not treat a merged-but-draft tracker_done noop as a persistent draft", async () => {
+    // A MERGED PR that also reports isDraft (a contradictory live state) noops on
+    // an already-journaled tracker_done. That must NOT be misclassified as a
+    // persistent-draft wait — the detector keys on the mark_ready side-effect.
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const mergedDraft = liveState({
+      state: "MERGED",
+      isDraft: true,
+      mergedAt: "2026-06-16T01:00:00Z",
+      mergeCommit: "merge-1",
+    });
+    const limits = {
+      maxLiveStateFailures: 5,
+      maxSideEffectFailures: 5,
+      maxDraftWaitObservations: 1,
+    };
+
+    // Cycle 1: tracker_done fires and is journaled (candidate becomes merged).
+    await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-1" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:01:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits,
+      fetchLiveState: async () => mergedDraft,
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    // Cycle 2: tracker_done already journaled -> noop while isDraft. With
+    // maxDraftWaitObservations=1 a misfire would park immediately; it must not.
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-2" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:02:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits,
+      fetchLiveState: async () => mergedDraft,
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("actuated");
+    expect(
+      harness.entries.filter((e) => e.metadata.action === "draft_wait"),
+    ).toHaveLength(0);
+  });
 });
 
 function reviewGateEntry(input?: {

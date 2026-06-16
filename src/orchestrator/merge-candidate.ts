@@ -837,12 +837,16 @@ export async function runMergeActuatorCycle(input: {
   if (
     live.isDraft &&
     run.decision.action === "noop" &&
-    run.decision.reason === "side_effect_already_journaled"
+    run.decision.reason === "side_effect_already_journaled" &&
+    run.decision.sideEffectKey ===
+      mergeActuationKey(input.candidate, "mark_ready")
   ) {
     // Persistent draft: mark_ready already succeeded but the PR is still draft
     // (e.g. re-drafted by an external actor). This is a no-progress noop loop,
     // not a failure, so bound it on its own countable ceiling instead of
-    // polling forever (SYMPH-748).
+    // polling forever (SYMPH-748). The mark_ready side-effect-key check is
+    // required: a MERGED PR reporting isDraft can also noop on an
+    // already-journaled tracker_done, which must NOT be treated as draft.
     return recordDraftWaitObservation({
       candidate: input.candidate,
       journal: input.journal,
