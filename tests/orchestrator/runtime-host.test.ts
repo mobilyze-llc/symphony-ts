@@ -231,6 +231,42 @@ describe("runtime host merge actuator parsing (SYMPH-735)", () => {
       ]),
     ).toEqual([{ name: "ok", status: "pass" }]);
   });
+
+  // SYMPH-751 fail-closed contract (council Track): any terminal CheckRun
+  // conclusion that is not an explicit pass/pending value — including unknown
+  // future values — must map to fail, never silently to pass. A false pass
+  // would let the actuator merge a broken PR.
+  it.each(["CANCELLED", "TIMED_OUT", "STARTUP_FAILURE", "STALE", "MYSTERY"])(
+    "maps terminal CheckRun conclusion %s to fail (fail-closed)",
+    (conclusion) => {
+      expect(
+        runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+          { name: "c", status: "COMPLETED", conclusion },
+        ]),
+      ).toEqual([{ name: "c", status: "fail" }]);
+    },
+  );
+
+  // Same fail-closed contract for legacy StatusContext: an unrecognized state
+  // (incl. a non-string state coerced to undefined) must fail closed.
+  it.each(["MYSTERY_STATE", "", "BROKEN"])(
+    "maps unknown StatusContext state %s to fail (fail-closed)",
+    (state) => {
+      expect(
+        runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+          { context: "legacy", state },
+        ]),
+      ).toEqual([{ name: "legacy", status: "fail" }]);
+    },
+  );
+
+  it("maps an empty-string CheckRun conclusion to pending (not-yet-concluded)", () => {
+    expect(
+      runtimeHostMergeActuatorTesting.parseStatusCheckRollup([
+        { name: "c", status: "IN_PROGRESS", conclusion: "" },
+      ]),
+    ).toEqual([{ name: "c", status: "pending" }]);
+  });
 });
 
 function removeWorkspaceWithRetry(workspaceRoot: string): void {
