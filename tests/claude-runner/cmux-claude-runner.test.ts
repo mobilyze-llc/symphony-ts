@@ -495,6 +495,52 @@ describe("Claude CMUX runner", () => {
     ]);
   });
 
+  it("rejects stale same-stem mirror directories without aborting the run", async () => {
+    const harness = await createHarness();
+    const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-remote-"));
+    const remoteArtifact = join(outsideDir, "opus.md");
+    const mirroredArtifact = join(harness.artifactDir, "opus.md");
+    await mkdir(mirroredArtifact);
+    const runCommand: ClaudeRunnerCommand = async (_command, args) => {
+      if (args[0] === "preflight") {
+        return { exitCode: 0, stdout: "{}", stderr: "" };
+      }
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          state: "complete",
+          artifact_path: remoteArtifact,
+          status_path: join(harness.artifactDir, "opus.status.json"),
+        }),
+        stderr: "",
+      };
+    };
+
+    const result = await runClaudeCmux(
+      {
+        purpose: "spec-review",
+        workspace: harness.workspace,
+        promptFile: harness.promptFile,
+        artifactDir: harness.artifactDir,
+        artifactName: "opus",
+        validation: {
+          minBytes: 50,
+          requireFirstHeading: "Verdict",
+          requiredHeadings: ["Source Read Status"],
+          verdictEnums: ["ready_as_written"],
+        },
+      },
+      { runCommand },
+    );
+
+    expect(result.status).toBe("invalid_artifact");
+    expect(result.artifactPath).toBe(remoteArtifact);
+    expect(result.remoteArtifactPath).toBeNull();
+    expect(result.validationErrors).toEqual([
+      expect.stringContaining("artifact_path resolves outside artifact dir"),
+    ]);
+  });
+
   it("rejects remote cmux artifact paths when the local mirror escapes by symlink", async () => {
     const harness = await createHarness();
     const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-remote-"));

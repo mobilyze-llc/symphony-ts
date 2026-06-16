@@ -321,6 +321,7 @@ export async function runClaudeCmux(
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     await rm(resolve(artifactDir, `${currentArtifactName}.md`), {
       force: true,
+      recursive: true,
     });
     const run = await invokeCmuxRun({
       cmuxSpawnBin,
