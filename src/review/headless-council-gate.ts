@@ -2544,7 +2544,11 @@ function kimiShadowEnabled(
   if (override !== undefined) {
     return override;
   }
-  return envFlag(env.SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED);
+  const value = env.SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED;
+  if (value === undefined) {
+    return true;
+  }
+  return envFlag(value);
 }
 
 function codexExcavationLane(

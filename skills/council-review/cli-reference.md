@@ -79,8 +79,9 @@ The substrate writes:
 The status file's `state` is authoritative. State `complete` plus a
 non-empty `.md` artifact means the lane is usable.
 
-Kimi shadow is non-merge-authoritative. If it is disabled or
-unavailable, write `$COUNCIL_DIR/kimi-k27-shadow.disabled.json` with:
+Kimi shadow is non-merge-authoritative and enabled by default. If it is
+explicitly disabled or unavailable, write
+`$COUNCIL_DIR/kimi-k27-shadow.disabled.json` with:
 
 ```json
 {"enabled":false,"reason":"disabled-by-config","mergeAuthoritative":false}
@@ -169,8 +170,9 @@ is a manual-council defect.
 
 ### Kimi K2.7 Shadow
 
-Kimi shadow is opt-in via `SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED=1`
-(also accept `true`, `yes`, or `on`) and defaults to disabled. It uses
+Kimi shadow is enabled by default. Disable it with
+`SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED=0` (also accept `false` or `no`).
+It uses
 the same lane identifier as the headless gate and does not invent model
 or provider flags:
 

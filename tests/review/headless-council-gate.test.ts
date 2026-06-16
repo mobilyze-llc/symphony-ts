@@ -71,6 +71,12 @@ describe("runHeadlessCouncilGate", () => {
         slim: true,
         independentReviewer: false,
       }),
+      expect.objectContaining({
+        laneId: "kimi-k27-shadow",
+        agent: "kimi",
+        mergeAuthoritative: false,
+        independentReviewer: false,
+      }),
     ]);
     expect(
       defaultReviewerLanes({
@@ -85,10 +91,15 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
-  it("adds Kimi only as an explicit shadow reviewer lane", async () => {
-    expect(defaultReviewerLanes({}).map((lane) => lane.laneId)).not.toContain(
+  it("adds Kimi as a default shadow reviewer lane unless explicitly disabled", async () => {
+    expect(defaultReviewerLanes({}).map((lane) => lane.laneId)).toContain(
       "kimi-k27-shadow",
     );
+    expect(
+      defaultReviewerLanes({
+        SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED: "0",
+      }).map((lane) => lane.laneId),
+    ).not.toContain("kimi-k27-shadow");
     expect(
       defaultReviewerLanes({
         SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED: "true",
@@ -300,13 +311,13 @@ describe("runHeadlessCouncilGate", () => {
       defaultReviewerLanes({
         SYMPHONY_COUNCIL_CODEX_EXCAVATION_ENABLED: "false",
       }).map((lane) => lane.laneId),
-    ).toEqual(["pi-deepseek"]);
+    ).toEqual(["pi-deepseek", "kimi-k27-shadow"]);
     expect(
       defaultReviewerLanes({
         SYMPHONY_COUNCIL_FORCE_LEGACY: "1",
         SYMPHONY_COUNCIL_CODEX_EXCAVATION_ENABLED: "false",
       }).map((lane) => lane.laneId),
-    ).toEqual(["claude-opus", "pi-deepseek"]);
+    ).toEqual(["claude-opus", "pi-deepseek", "kimi-k27-shadow"]);
     expect(
       defaultReviewerLanes(
         {},
@@ -616,6 +627,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.lanes.map((lane) => lane.laneId)).toEqual([
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
     ]);
     expect(
@@ -637,6 +649,11 @@ describe("runHeadlessCouncilGate", () => {
           laneId: "codex-excavation",
           decorrelatedSignal: false,
           codexExcavationSweep: "standard",
+        }),
+        expect.objectContaining({
+          laneId: "kimi-k27-shadow",
+          decorrelatedSignal: false,
+          reason: "shadow_calibration_signal",
         }),
         expect.objectContaining({ laneId: "codex-high-lead" }),
       ],
@@ -689,6 +706,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.lanes.map((lane) => lane.laneId)).toEqual([
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
     ]);
     expect(result.review_metadata).toMatchObject({
@@ -736,6 +754,7 @@ describe("runHeadlessCouncilGate", () => {
       "claude-opus",
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
     ]);
     expect(result.review_routing).toMatchObject({
@@ -797,6 +816,7 @@ describe("runHeadlessCouncilGate", () => {
       "claude-opus",
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
     ]);
     expect(result.review_routing).toMatchObject({
@@ -975,6 +995,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.lanes.map((lane) => lane.laneId)).toEqual([
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
     ]);
     expect(result.review_routing).toMatchObject({
@@ -1187,6 +1208,7 @@ describe("runHeadlessCouncilGate", () => {
       "claude-opus",
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
     ]);
     expect(result.review_routing).toMatchObject({
@@ -1348,6 +1370,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.lanes.map((lane) => lane.laneId)).toEqual([
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
       "claude-opus",
     ]);
@@ -1400,6 +1423,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.lanes.map((lane) => lane.laneId)).toEqual([
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
     ]);
     expect(result.review_routing).toMatchObject({
@@ -1452,6 +1476,7 @@ describe("runHeadlessCouncilGate", () => {
       "claude-opus",
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
     ]);
     expect(result.review_routing).toMatchObject({
@@ -1494,6 +1519,7 @@ describe("runHeadlessCouncilGate", () => {
       "claude-opus",
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
     ]);
     expect(result.review_routing).toMatchObject({
@@ -1549,6 +1575,7 @@ describe("runHeadlessCouncilGate", () => {
     expect(result.lanes.map((lane) => lane.laneId)).toEqual([
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
       "claude-opus",
     ]);
@@ -1585,6 +1612,7 @@ describe("runHeadlessCouncilGate", () => {
       "claude-opus",
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
     ]);
     expect(result.review_routing).toMatchObject({
@@ -1612,6 +1640,7 @@ describe("runHeadlessCouncilGate", () => {
       "claude-opus",
       "pi-deepseek",
       "codex-excavation",
+      "kimi-k27-shadow",
       "codex-high-lead",
     ]);
     expect(result.review_routing).toMatchObject({
@@ -1677,7 +1706,7 @@ describe("runHeadlessCouncilGate", () => {
     );
 
     expect(result.verdict).toBe("pass");
-    expect(result.lanes).toHaveLength(4);
+    expect(result.lanes).toHaveLength(5);
     const reviewBundle = result.review_bundle;
     expect(reviewBundle).not.toBeNull();
     if (reviewBundle === null) {
@@ -1696,6 +1725,7 @@ describe("runHeadlessCouncilGate", () => {
       new Set(result.lanes.map((lane) => lane.reviewBundle?.hash)).size,
     ).toBe(1);
     expect(result.lanes.map((lane) => lane.reviewBundle?.hash)).toEqual([
+      reviewBundle.hash,
       reviewBundle.hash,
       reviewBundle.hash,
       reviewBundle.hash,
@@ -6146,7 +6176,7 @@ describe("runHeadlessCouncilGate", () => {
       harness.commands
         .filter((command) => command.args[0] === "run")
         .map((command) => command.timeoutMs),
-    ).toEqual([63_000, 63_000, 63_000]);
+    ).toEqual([63_000, 63_000, 63_000, 63_000]);
   });
 
   it("supports a single decorrelated reviewer for low-risk gates", async () => {
