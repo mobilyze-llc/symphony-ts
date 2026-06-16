@@ -326,6 +326,9 @@ export function decideMergeActuation(input: {
   const pendingChecks = input.live.requiredChecks
     .filter((check) => check.status === "pending")
     .map((check) => check.name);
+  const hasUnconfirmedEnqueue = isUnconfirmedEnqueueIntent(input.candidate);
+  const isWaitingOnQueue =
+    input.candidate.status === "merge_queue_pending" || hasUnconfirmedEnqueue;
   if (failingChecks.length > 0) {
     return {
       action: "blocked",
@@ -335,9 +338,18 @@ export function decideMergeActuation(input: {
     };
   }
   if (
-    pendingChecks.length > 0 &&
-    input.candidate.status !== "merge_queue_pending"
+    isWaitingOnQueue &&
+    input.enqueuedAtMs !== null &&
+    input.nowMs - input.enqueuedAtMs > input.maxWaitMs
   ) {
+    return sideEffectDecision(
+      input.candidate,
+      "timeout",
+      input.completedSideEffectKeys,
+      "merge_queue_max_wait_exceeded",
+    );
+  }
+  if (pendingChecks.length > 0 && !isWaitingOnQueue) {
     return {
       action: "blocked",
       reason: "pending_checks",
@@ -363,6 +375,17 @@ export function decideMergeActuation(input: {
       input.completedSideEffectKeys,
       "draft_pr",
     );
+  }
+  if (hasUnconfirmedEnqueue) {
+    return {
+      action: "poll",
+      reason:
+        pendingChecks.length > 0
+          ? "merge_queue_pending"
+          : "enqueue_status_uncertain",
+      blockers: pendingChecks,
+      sideEffectKey: mergeActuationKey(input.candidate, "poll"),
+    };
   }
   if (
     input.candidate.status !== "merge_queue_pending" &&
@@ -715,7 +738,11 @@ function applyActuation(
   record.lastActuation = action;
   record.cursorRange.lastSequence = entry.sequence;
   if (action === "poll") {
-    if (stringField(entry.metadata.reason) === "mergeability_unknown") {
+    const reason = stringField(entry.metadata.reason);
+    if (
+      reason === "mergeability_unknown" ||
+      reason === "enqueue_status_uncertain"
+    ) {
       return;
     }
     record.status = "merge_queue_pending";
@@ -951,6 +978,13 @@ function isRedrivingFailedAction(
   return (
     candidate.lastActuation === "failed" &&
     candidate.blockedReason?.startsWith(`${action}_failed:`) === true
+  );
+}
+
+function isUnconfirmedEnqueueIntent(candidate: MergeCandidateRecord): boolean {
+  return (
+    candidate.status !== "merge_queue_pending" &&
+    candidate.lastActuation === "enqueue"
   );
 }
 

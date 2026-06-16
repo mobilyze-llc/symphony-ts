@@ -483,6 +483,88 @@ describe("orchestrator core", () => {
     ).toContain("merge_actuator_unwired");
   });
 
+  it("retries candidate-backed merge dispatch when live-state fetch throws", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const timers = createFakeTimerScheduler();
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      timerScheduler: timers,
+      getMergeActuatorLiveState: async () => {
+        throw new Error("gh rate limited");
+      },
+      mergeActuatorSideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone: async () => {},
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+    const result = await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    expect(result.dispatched).toBe(false);
+    expect(state.failed.has("1")).toBe(false);
+    expect(state.failureExhaustedIds.has("1")).toBe(false);
+    expect(state.retryAttempts["1"]).toMatchObject({
+      issueId: "1",
+      identifier: "ISSUE-1",
+      delayType: "merge_actuator_poll",
+      error: "merge_actuator_live_state_unavailable:gh rate limited",
+    });
+    expect(timers.scheduled[0]?.delayMs).toBe(30_000);
+  });
+
+  it("retries candidate-backed merge dispatch when live-state parsing is incomplete", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const timers = createFakeTimerScheduler();
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      timerScheduler: timers,
+      getMergeActuatorLiveState: async () => null,
+      mergeActuatorSideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone: async () => {},
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+    const result = await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    expect(result.dispatched).toBe(false);
+    expect(state.failed.has("1")).toBe(false);
+    expect(state.failureExhaustedIds.has("1")).toBe(false);
+    expect(state.retryAttempts["1"]).toMatchObject({
+      issueId: "1",
+      identifier: "ISSUE-1",
+      delayType: "merge_actuator_poll",
+      error: "merge_actuator_live_state_unavailable",
+    });
+    expect(timers.scheduled[0]?.delayMs).toBe(30_000);
+  });
+
   it("schedules a merge continuation when the actuator decision is noop", async () => {
     const reviewResultPath = await writeReviewGateResultFixture();
     const timers = createFakeTimerScheduler();

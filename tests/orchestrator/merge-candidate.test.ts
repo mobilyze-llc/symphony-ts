@@ -404,6 +404,7 @@ describe("merge candidates", () => {
     ]!;
 
     expect(candidate.status).toBe("candidate");
+    expect(candidate.lastActuation).toBe("enqueue");
     expect(
       decideMergeActuation({
         candidate,
@@ -411,13 +412,92 @@ describe("merge candidates", () => {
         lease: lease(),
         ownerId: "owner-1",
         nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
-        enqueuedAtMs: null,
+        enqueuedAtMs: Date.parse(rawEnqueueIntent.timestamp),
         maxWaitMs: 30 * 60_000,
         completedSideEffectKeys: new Set(),
       }),
     ).toMatchObject({
-      action: "enqueue",
-      reason: "merge_queue_required",
+      action: "poll",
+      reason: "enqueue_status_uncertain",
+    });
+  });
+
+  it("polls pending checks after replaying a raw enqueue intent", () => {
+    const candidateEntry = {
+      ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+      sequence: 2,
+    };
+    const rawEnqueueIntent = {
+      ...buildMergeActuationEntry({
+        candidate: reduceMergeCandidates([candidateEntry])["issue-1"]!,
+        action: "enqueue",
+        timestamp: "2026-06-16T01:00:00.000Z",
+        ownerId: "owner-1",
+        lease: lease(),
+        live: liveState(),
+        reason: "merge_queue_required",
+      }),
+      sequence: 3,
+    };
+    const candidate = reduceMergeCandidates([candidateEntry, rawEnqueueIntent])[
+      "issue-1"
+    ]!;
+
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState({
+          requiredChecks: [{ name: "merge queue", status: "pending" }],
+        }),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+        enqueuedAtMs: Date.parse(rawEnqueueIntent.timestamp),
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({
+      action: "poll",
+      reason: "merge_queue_pending",
+      blockers: ["merge queue"],
+    });
+  });
+
+  it("times out a raw enqueue intent after the bounded queue wait", () => {
+    const candidateEntry = {
+      ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry())!,
+      sequence: 2,
+    };
+    const rawEnqueueIntent = {
+      ...buildMergeActuationEntry({
+        candidate: reduceMergeCandidates([candidateEntry])["issue-1"]!,
+        action: "enqueue",
+        timestamp: "2026-06-16T01:00:00.000Z",
+        ownerId: "owner-1",
+        lease: lease(),
+        live: liveState(),
+        reason: "merge_queue_required",
+      }),
+      sequence: 3,
+    };
+    const candidate = reduceMergeCandidates([candidateEntry, rawEnqueueIntent])[
+      "issue-1"
+    ]!;
+
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState(),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T01:31:00.000Z"),
+        enqueuedAtMs: Date.parse(rawEnqueueIntent.timestamp),
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({
+      action: "timeout",
+      reason: "merge_queue_max_wait_exceeded",
     });
   });
 

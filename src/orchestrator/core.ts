@@ -10454,23 +10454,19 @@ export class OrchestratorCore {
     try {
       live = await this.getMergeActuatorLiveState(candidate);
     } catch (error) {
-      await this.parkMergeCandidateInvariantFailure({
+      this.scheduleMergeActuatorRetry(
         issue,
-        stageName,
-        reasonCode: "merge_actuator_live_state_unavailable",
-        detail: `candidate ${candidate.candidateId} live state fetch failed: ${formatUnknownError(error)}`,
-        reviewResultPath: candidate.reviewResultPath,
-      });
+        candidate,
+        `merge_actuator_live_state_unavailable:${formatUnknownError(error)}`,
+      );
       return true;
     }
     if (live === null) {
-      await this.parkMergeCandidateInvariantFailure({
+      this.scheduleMergeActuatorRetry(
         issue,
-        stageName,
-        reasonCode: "merge_actuator_live_state_unavailable",
-        detail: `candidate ${candidate.candidateId} live state provider returned no complete state`,
-        reviewResultPath: candidate.reviewResultPath,
-      });
+        candidate,
+        "merge_actuator_live_state_unavailable",
+      );
       return true;
     }
 
@@ -10672,7 +10668,11 @@ export class OrchestratorCore {
         readMetadataString(entry.metadata, "subject_action") === "enqueue",
     );
     if (enqueueEntry === undefined) {
-      return null;
+      if (candidate.lastActuation !== "enqueue") {
+        return null;
+      }
+      const parsed = Date.parse(candidate.updatedAt);
+      return Number.isNaN(parsed) ? null : parsed;
     }
     const parsed = Date.parse(enqueueEntry.timestamp);
     return Number.isNaN(parsed) ? null : parsed;
