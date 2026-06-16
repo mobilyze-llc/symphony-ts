@@ -216,8 +216,8 @@ const REVIEW_SUBSTRATE_DEGRADATION_PREFIXES = [
   "substrate_stall:",
   "malformed_substrate_json:",
 ];
-const REVIEW_GATE_RESULT_PATH_MARKER =
-  /\[REVIEW_GATE_RESULT_PATH:\s*([^\]\r\n]+?)\s*\]/;
+const REVIEW_GATE_RESULT_PATH_PREFIX = "[REVIEW_GATE_RESULT_PATH:";
+const REVIEW_GATE_RESULT_PATH_SUFFIX = "]";
 const FAILURE_RETRY_BASE_DELAY_MS = 10_000;
 const DEFAULT_DISPATCHER_LEASE_TTL_MS = 15 * 60_000;
 const EXPLICIT_RESUME_STATE = "resume";
@@ -12845,9 +12845,21 @@ function extractReviewGateResultPath(
   if (message === null || message === undefined) {
     return null;
   }
-  const match = REVIEW_GATE_RESULT_PATH_MARKER.exec(message);
-  const rawPath = match?.[1]?.trim();
-  return rawPath === undefined || rawPath === "" ? null : rawPath;
+  const markerStart = message.indexOf(REVIEW_GATE_RESULT_PATH_PREFIX);
+  if (markerStart === -1) {
+    return null;
+  }
+  const valueStart = markerStart + REVIEW_GATE_RESULT_PATH_PREFIX.length;
+  const markerEnd = message.indexOf(REVIEW_GATE_RESULT_PATH_SUFFIX, valueStart);
+  if (markerEnd === -1) {
+    return null;
+  }
+  const rawPath = message.slice(valueStart, markerEnd);
+  if (rawPath.includes("\r") || rawPath.includes("\n")) {
+    return null;
+  }
+  const path = rawPath.trim();
+  return path === "" ? null : path;
 }
 
 function sameGateLane(
