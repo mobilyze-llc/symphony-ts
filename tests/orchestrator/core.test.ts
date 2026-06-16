@@ -419,6 +419,151 @@ describe("orchestrator core", () => {
     ).toBeDefined();
   });
 
+  it("parks candidate-backed merge dispatch when the actuator is not configured", async () => {
+    const spawnedStages: Array<string | null> = [];
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const timers = createFakeTimerScheduler();
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      timerScheduler: timers,
+      spawnWorker: async ({ stageName }) => {
+        spawnedStages.push(stageName);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+    const result = await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    expect(result.dispatched).toBe(false);
+    expect(spawnedStages).toEqual(["review"]);
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.failureExhaustedIds.has("1")).toBe(true);
+    expect(state.issueStages["1"]).toBeUndefined();
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) => entry.kind === "admission" && entry.stage === "merge",
+      ),
+    ).toBe(false);
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "failure_exhausted",
+      )?.metadata.reason,
+    ).toContain("merge_actuator_unwired");
+  });
+
+  it("schedules a merge continuation when the actuator decision is noop", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const timers = createFakeTimerScheduler();
+    const sideEffects: string[] = [];
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      timerScheduler: timers,
+      getMergeActuatorLiveState: async () => ({
+        repo: "mobilyze-llc/symphony-ts",
+        prNumber: 725,
+        prUrl: "https://github.com/mobilyze-llc/symphony-ts/pull/725",
+        state: "OPEN",
+        isDraft: true,
+        mergeStateStatus: "UNKNOWN",
+        mergeable: "UNKNOWN",
+        reviewDecision: null,
+        headSha: "head-sha",
+        baseRef: "main",
+        baseSha: "base-sha",
+        requiredChecks: [],
+        requiresGithubReview: false,
+        mergeQueueRequired: true,
+        mergedAt: null,
+        mergeCommit: null,
+      }),
+      mergeActuatorSideEffects: {
+        markReady: async () => {
+          sideEffects.push("mark_ready");
+        },
+        enqueue: async () => {
+          sideEffects.push("enqueue");
+        },
+        writeTrackerDone: async () => {
+          sideEffects.push("tracker_done");
+        },
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const state = orchestrator.getState();
+    const candidateEntry = state.dispatcherRunJournal.find(
+      (entry) => entry.kind === "merge_candidate",
+    );
+    const candidateId = candidateEntry?.metadata.candidate_id;
+    expect(candidateId).toEqual(expect.any(String));
+    state.dispatcherRunJournal.push(
+      createJournalEntry({
+        sequence: state.dispatcherRunJournal.length + 1,
+        idempotencyKey: `merge_actuation:${candidateId}:completed:mark_ready`,
+        kind: "merge_actuation",
+        operation: "dispatcher",
+        stage: "merge",
+        leaseId: "merge-actuator-mark-ready-completed",
+        leaseStatus: "completed",
+        metadata: {
+          candidate_id: candidateId,
+          action: "completed",
+          subject_action: "mark_ready",
+          reason: "pr_is_draft",
+        },
+      }),
+    );
+
+    const result = await orchestrator.onRetryTimer("1");
+
+    expect(result.dispatched).toBe(false);
+    expect(sideEffects).toEqual([]);
+    expect(state.failed.has("1")).toBe(false);
+    expect(state.retryAttempts["1"]).toMatchObject({
+      issueId: "1",
+      identifier: "ISSUE-1",
+      delayType: "continuation",
+      error: "side_effect_already_journaled",
+    });
+    expect(timers.scheduled).toHaveLength(1);
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) =>
+          entry.kind === "dispatch_verdict" && entry.metadata.action === "noop",
+      ),
+    ).toMatchObject({
+      metadata: {
+        reason: "side_effect_already_journaled",
+      },
+    });
+  });
+
   it("dispatches unrelated candidates when hard dependency cycles are excluded", async () => {
     const orchestrator = createOrchestrator({
       tracker: createTracker({

@@ -10532,6 +10532,15 @@ export class OrchestratorCore {
       return true;
     }
 
+    if (result.decision.action === "noop") {
+      this.scheduleRetry(issue.id, 1, {
+        identifier: issue.identifier,
+        error: result.decision.reason,
+        delayType: "continuation",
+      });
+      return true;
+    }
+
     if (
       result.decision.action === "mark_ready" ||
       result.decision.action === "enqueue" ||
