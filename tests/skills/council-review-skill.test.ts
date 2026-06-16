@@ -41,6 +41,14 @@ function writeArtifact(dir: string, name: string, content: string): void {
   writeFileSync(resolve(dir, name), content, "utf-8");
 }
 
+function writeJsonArtifact(
+  dir: string,
+  name: string,
+  content: Record<string, unknown>,
+): void {
+  writeArtifact(dir, name, `${JSON.stringify(content)}\n`);
+}
+
 function readArtifact(dir: string, name: string): string {
   return readFileSync(resolve(dir, name), "utf-8").trim();
 }
@@ -145,6 +153,18 @@ function writeCleanPassArtifacts(dir: string): void {
     "resolved-base-sha.txt",
     "2222222222222222222222222222222222222222\n",
   );
+  writeKimiDisabledMarker(dir);
+}
+
+function writeKimiDisabledMarker(
+  dir: string,
+  reason = "disabled-by-config",
+): void {
+  writeJsonArtifact(dir, "kimi-k27-shadow.disabled.json", {
+    enabled: false,
+    reason,
+    mergeAuthoritative: false,
+  });
 }
 
 function writeCompletedLaneStatus(
@@ -702,6 +722,84 @@ describe("council-review manual skill", () => {
       );
       expect(assertion.stdout).toContain(
         "at least one phase1 reviewer artifact must satisfy the closeout contract",
+      );
+    });
+  });
+
+  it("rejects closeout when Kimi shadow neither wrote an artifact nor a disabled marker", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      rmSync(resolve(dir, "kimi-k27-shadow.disabled.json"));
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "kimi-k27-shadow: closeout requires either non-empty kimi-k27-shadow.md or valid kimi-k27-shadow.disabled.json",
+      );
+      expect(assertion.stdout).not.toContain(
+        "at least one phase1 reviewer artifact must satisfy the closeout contract",
+      );
+    });
+  });
+
+  it("accepts a non-empty Kimi shadow artifact without counting it as reviewer evidence", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      rmSync(resolve(dir, "kimi-k27-shadow.disabled.json"));
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+      writeArtifact(
+        dir,
+        "kimi-k27-shadow.md",
+        "Kimi shadow diagnostics only. mergeAuthoritative:false\n",
+      );
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(0);
+      expect(assertion.stdout).toContain(
+        "PASS council-review clean PASS assertion",
+      );
+    });
+  });
+
+  it("rejects malformed Kimi disabled markers", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+      writeArtifact(dir, "kimi-k27-shadow.disabled.json", "{not-json\n");
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "kimi-k27-shadow: disabled marker JSON is unreadable or malformed",
+      );
+    });
+  });
+
+  it("rejects Kimi disabled markers that are merge-authoritative or use an unknown reason", () => {
+    withArtifactDir((dir) => {
+      writeCleanPassArtifacts(dir);
+      writeCompletedLaneStatus(dir, "phase1-opus");
+      writeArtifact(dir, "phase1-opus.md", validReviewArtifact());
+      writeJsonArtifact(dir, "kimi-k27-shadow.disabled.json", {
+        enabled: true,
+        reason: "not-configured",
+        mergeAuthoritative: true,
+      });
+
+      const assertion = runCloseoutAssert(dir);
+      expect(assertion.status).toBe(1);
+      expect(assertion.stdout).toContain(
+        "kimi-k27-shadow: disabled marker must set enabled:false",
+      );
+      expect(assertion.stdout).toContain(
+        "kimi-k27-shadow: disabled marker must set mergeAuthoritative:false",
+      );
+      expect(assertion.stdout).toContain(
+        "kimi-k27-shadow: disabled marker reason must be one of",
       );
     });
   });

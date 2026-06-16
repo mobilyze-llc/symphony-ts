@@ -95,6 +95,9 @@ uncorroborated Kimi finding cannot set a merge-authoritative P1/P2,
 block merge, or be recorded as an authoritative pass/fail. A failed,
 missing, or disabled Kimi lane cannot fail an otherwise clean
 authoritative council.
+PR-backed clean PASS closeout still requires either a non-empty
+`kimi-k27-shadow.md` diagnostic artifact or a valid disabled marker so
+operators can distinguish an intentional skip from an unobserved lane.
 
 ## Workflow
 

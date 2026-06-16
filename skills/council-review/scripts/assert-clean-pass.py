@@ -14,6 +14,13 @@ SHA_RE = re.compile(r"[0-9a-fA-F]{7,64}")
 # by the council-review skill before its Phase 2 section. Phase 2 cross-exam
 # artifacts are deliberately excluded from closeout reviewer evidence.
 LANE_ARTIFACT_STEMS = ("phase1-opus", "phase1-pi")
+KIMI_SHADOW_ARTIFACT = "kimi-k27-shadow.md"
+KIMI_SHADOW_DISABLED_MARKER = "kimi-k27-shadow.disabled.json"
+KIMI_SHADOW_DISABLED_REASONS = {
+    "disabled-by-config",
+    "substrate-unavailable",
+    "preflight-failed",
+}
 # Contract note: this is a fail-closed heuristic floor. One-line cmux status
 # summaries are usually ~100-200 bytes, while a contract-valid reviewer artifact
 # with required headings plus a no-findings or structured findings surface
@@ -181,6 +188,47 @@ def validate_review_artifacts(artifact_dir: Path) -> list[str]:
     return failures
 
 
+def validate_kimi_shadow_presence(artifact_dir: Path) -> list[str]:
+    artifact_path = artifact_dir / KIMI_SHADOW_ARTIFACT
+    marker_path = artifact_dir / KIMI_SHADOW_DISABLED_MARKER
+
+    if artifact_path.exists():
+        byte_count = len(artifact_path.read_bytes())
+        if byte_count > 0:
+            return []
+        if not marker_path.exists():
+            return [
+                f"kimi-k27-shadow: shadow artifact is empty and disabled marker is missing"
+            ]
+
+    if not marker_path.exists():
+        return [
+            "kimi-k27-shadow: closeout requires either non-empty "
+            f"{KIMI_SHADOW_ARTIFACT} or valid {KIMI_SHADOW_DISABLED_MARKER}"
+        ]
+
+    marker, error = read_json_object_with_error(marker_path)
+    if error:
+        return [
+            f"kimi-k27-shadow: disabled marker JSON is unreadable or malformed: {error}"
+        ]
+
+    failures = []
+    if marker.get("enabled") is not False:
+        failures.append("kimi-k27-shadow: disabled marker must set enabled:false")
+    if marker.get("mergeAuthoritative") is not False:
+        failures.append(
+            "kimi-k27-shadow: disabled marker must set mergeAuthoritative:false"
+        )
+    reason = marker.get("reason")
+    if reason not in KIMI_SHADOW_DISABLED_REASONS:
+        failures.append(
+            "kimi-k27-shadow: disabled marker reason must be one of "
+            f"{sorted(KIMI_SHADOW_DISABLED_REASONS)!r}, got {reason!r}"
+        )
+    return failures
+
+
 def main() -> int:
     if len(sys.argv) not in (2, 3):
         print("usage: assert-clean-pass.py [--closeout] COUNCIL_DIR", file=sys.stderr)
@@ -246,6 +294,7 @@ def main() -> int:
 
     if closeout:
         failures.extend(validate_review_artifacts(artifact_dir))
+        failures.extend(validate_kimi_shadow_presence(artifact_dir))
 
     if failures:
         print("FAIL council-review clean PASS assertion")
