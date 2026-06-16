@@ -732,6 +732,19 @@ describe("parseCouncilReviewGateArgs", () => {
       isDirectRun(pathToFileURL(await realpath(realBin)).href, linkedBin),
     ).toBe(true);
   });
+
+  it("rejects non-direct execution paths", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-council-cli-"));
+    const realBin = join(root, "real-bin.js");
+    const differentBin = join(root, "different-bin.js");
+    await writeFile(realBin, "");
+    await writeFile(differentBin, "");
+
+    const metaUrl = pathToFileURL(await realpath(realBin)).href;
+    expect(isDirectRun(metaUrl, undefined)).toBe(false);
+    expect(isDirectRun(metaUrl, "/nonexistent/path")).toBe(false);
+    expect(isDirectRun(metaUrl, differentBin)).toBe(false);
+  });
 });
 
 function cliReviewResult(): HeadlessCouncilGateResult {
