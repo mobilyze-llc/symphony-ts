@@ -114,7 +114,7 @@ export async function resolveCmuxArtifactPath(input: {
     freshnessPassed: null,
   };
 
-  if (basename(resolve(input.candidatePath)) !== `${input.artifactName}.md`) {
+  if (basename(remoteArtifactPath) !== `${input.artifactName}.md`) {
     return fallbackFailure(
       primary,
       mirrorFallbackBase,

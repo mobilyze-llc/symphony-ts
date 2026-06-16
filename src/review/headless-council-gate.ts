@@ -4401,21 +4401,21 @@ async function parseLaneResult(input: {
             stringOrNull(parsed.artifact_sha256),
         });
   const artifactPath = artifactPathResolution?.artifactPath ?? null;
-  if (
-    artifactPath === null ||
-    (artifactPathResolution?.validationErrors.length ?? 0) > 0 ||
-    !(await fileHasContent(artifactPath))
-  ) {
+  const artifactPathValidationErrors =
+    artifactPathResolution?.validationErrors ?? [];
+  const artifactHasValidationErrors = artifactPathValidationErrors.length > 0;
+  const artifactHasContent =
+    artifactPath !== null &&
+    !artifactHasValidationErrors &&
+    (await fileHasContent(artifactPath));
+  if (!artifactHasContent) {
     const fallbackKind =
       artifactPathResolution?.mirrorFallback.failureKind ?? null;
     return {
       ...laneIdentity,
       state: "error",
       verdict: "error",
-      artifactPath:
-        (artifactPathResolution?.validationErrors.length ?? 0) > 0
-          ? null
-          : artifactPath,
+      artifactPath: artifactHasValidationErrors ? null : artifactPath,
       message:
         fallbackKind === null
           ? "Reviewer artifact was missing or empty."
