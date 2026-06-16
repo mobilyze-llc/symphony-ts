@@ -1115,6 +1115,218 @@ describe("merge actuator bounded recovery (SYMPH-746)", () => {
     // The park short-circuit fired: no new evidence appended, no extra fetch.
     expect(harness.entries.length).toBe(entryCountAfterPark);
   });
+
+  // Persistent-draft no-progress loop (SYMPH-748): a PR that stays draft after
+  // mark_ready must be bounded and park, not poll forever.
+  it("bounds a persistently-draft PR and parks after the configured observations", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const limits = {
+      maxLiveStateFailures: 5,
+      maxSideEffectFailures: 5,
+      maxDraftWaitObservations: 2,
+    };
+    const results: MergeActuatorCycleResult[] = [];
+    for (let n = 1; n <= 4; n += 1) {
+      results.push(
+        await runMergeActuatorCycle({
+          candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+          journal: [candidateEntry, ...harness.entries],
+          lease: lease({ leaseId: `lease-${n}` }),
+          ownerId: "owner-1",
+          now: new Date(`2026-06-16T01:0${n}:00.000Z`),
+          enqueuedAtMs: null,
+          maxWaitMs: 30 * 60_000,
+          limits,
+          fetchLiveState: async () => liveState({ isDraft: true }),
+          appendActuation: harness.appendActuation,
+          sideEffects: noopSideEffects(),
+        }),
+      );
+      if (results[results.length - 1]?.outcome === "parked") {
+        break;
+      }
+    }
+
+    // Cycle 1 marks the PR ready; subsequent still-draft cycles are bounded
+    // no-progress observations; the 2nd observation parks.
+    expect(results[0]).toMatchObject({ outcome: "actuated" });
+    const park = results[results.length - 1];
+    expect(park?.outcome).toBe("parked");
+    if (park?.outcome !== "parked") {
+      throw new Error("expected a park");
+    }
+    expect(park.blocker).toMatchObject({
+      candidateId: candidateFromJournal([candidateEntry]).candidateId,
+      prNumber: 552,
+      reviewedHeadSha: "head-1",
+      reason: "persistent_draft",
+      attempts: 2,
+    });
+    expect(park.blocker.nextOperatorAction.length).toBeGreaterThan(0);
+
+    const evidence = harness.entries.filter(
+      (e) => e.metadata.action === "draft_wait",
+    );
+    expect(evidence).toHaveLength(2);
+    expect(new Set(evidence.map((e) => e.idempotencyKey)).size).toBe(2);
+
+    const parked = candidateFromJournal([candidateEntry, ...harness.entries]);
+    expect(parked.status).toBe("blocked");
+    expect(parked.blockedReason).toBe("persistent_draft");
+  });
+
+  it("restores the draft-wait observation count from the journal across replay", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const limits = {
+      maxLiveStateFailures: 5,
+      maxSideEffectFailures: 5,
+      maxDraftWaitObservations: 2,
+    };
+    const original = makeJournalHarness();
+    // Cycle 1 marks ready; cycle 2 records the first draft-wait observation.
+    for (let n = 1; n <= 2; n += 1) {
+      await runMergeActuatorCycle({
+        candidate: candidateFromJournal([candidateEntry, ...original.entries]),
+        journal: [candidateEntry, ...original.entries],
+        lease: lease({ leaseId: `lease-${n}` }),
+        ownerId: "owner-1",
+        now: new Date(`2026-06-16T01:0${n}:00.000Z`),
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        limits,
+        fetchLiveState: async () => liveState({ isDraft: true }),
+        appendActuation: original.appendActuation,
+        sideEffects: noopSideEffects(),
+      });
+    }
+
+    // Fresh process: only the durable journal carries state across the restart.
+    const restarted = makeJournalHarness(original.entries);
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...restarted.entries]),
+      journal: [candidateEntry, ...restarted.entries],
+      lease: lease({ leaseId: "lease-3" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:05:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits,
+      fetchLiveState: async () => liveState({ isDraft: true }),
+      appendActuation: restarted.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("parked");
+    if (result.outcome !== "parked") {
+      throw new Error("expected park after restart");
+    }
+    expect(result.blocker.attempts).toBe(2);
+  });
+
+  it("does not park a draft PR that is readied within the wait", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const limits = {
+      maxLiveStateFailures: 5,
+      maxSideEffectFailures: 5,
+      maxDraftWaitObservations: 2,
+    };
+
+    // Cycle 1: draft → mark_ready.
+    await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-1" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:01:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits,
+      fetchLiveState: async () => liveState({ isDraft: true }),
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    // Cycle 2: the PR is readied within the wait → normal actuation, no park.
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-2" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:02:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits,
+      fetchLiveState: async () => liveState({ isDraft: false }),
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("actuated");
+    if (result.outcome !== "actuated") {
+      throw new Error("expected actuated");
+    }
+    expect(result.run.sideEffect).toBe("enqueue");
+    expect(
+      harness.entries.filter((e) => e.metadata.action === "draft_wait"),
+    ).toHaveLength(0);
+  });
+
+  it("does not treat a merged-but-draft tracker_done noop as a persistent draft", async () => {
+    // A MERGED PR that also reports isDraft (a contradictory live state) noops on
+    // an already-journaled tracker_done. That must NOT be misclassified as a
+    // persistent-draft wait — the detector keys on the mark_ready side-effect.
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const mergedDraft = liveState({
+      state: "MERGED",
+      isDraft: true,
+      mergedAt: "2026-06-16T01:00:00Z",
+      mergeCommit: "merge-1",
+    });
+    const limits = {
+      maxLiveStateFailures: 5,
+      maxSideEffectFailures: 5,
+      maxDraftWaitObservations: 1,
+    };
+
+    // Cycle 1: tracker_done fires and is journaled (candidate becomes merged).
+    await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-1" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:01:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits,
+      fetchLiveState: async () => mergedDraft,
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    // Cycle 2: tracker_done already journaled -> noop while isDraft. With
+    // maxDraftWaitObservations=1 a misfire would park immediately; it must not.
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-2" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:02:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits,
+      fetchLiveState: async () => mergedDraft,
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("actuated");
+    expect(
+      harness.entries.filter((e) => e.metadata.action === "draft_wait"),
+    ).toHaveLength(0);
+  });
 });
 
 function reviewGateEntry(input?: {

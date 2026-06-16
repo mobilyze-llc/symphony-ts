@@ -16,13 +16,19 @@ export const MERGE_ACTUATION_ACTIONS = [
   "completed",
   "recovered",
   "live_state_failed",
+  "draft_wait",
   "parked",
 ] as const;
 
 export type MergeActuationAction = (typeof MERGE_ACTUATION_ACTIONS)[number];
 type SideEffectActuationAction = Exclude<
   MergeActuationAction,
-  "failed" | "completed" | "recovered" | "live_state_failed" | "parked"
+  | "failed"
+  | "completed"
+  | "recovered"
+  | "live_state_failed"
+  | "draft_wait"
+  | "parked"
 >;
 
 export type MergeCandidateStatus =
@@ -131,6 +137,12 @@ export interface MergeActuatorRecoveryLimits {
   maxLiveStateFailures: number;
   /** Max post-decision side-effect failures (e.g. tracker_done) before parking. */
   maxSideEffectFailures: number;
+  /**
+   * Max persistent-draft no-progress observations (a PR that stays draft after
+   * mark_ready) before parking. Optional; defaults to
+   * {@link DEFAULT_MAX_DRAFT_WAIT_OBSERVATIONS}.
+   */
+  maxDraftWaitObservations?: number;
 }
 
 /** Operator-visible blocker recorded when a candidate parks after exhaustion. */
@@ -461,13 +473,14 @@ export function buildMergeActuationEntry(input: {
     input.action,
     input.subjectAction,
   );
-  // Poll, failed, and live-state-failure entries are countable progress
-  // evidence: one durable, replay-stable entry per dispatch cycle, made unique
-  // by the lease id so the journal does not collapse them into one row.
+  // Poll, failed, live-state-failure, and draft-wait entries are countable
+  // progress evidence: one durable, replay-stable entry per dispatch cycle, made
+  // unique by the lease id so the journal does not collapse them into one row.
   const key =
     input.action === "poll" ||
     input.action === "failed" ||
-    input.action === "live_state_failed"
+    input.action === "live_state_failed" ||
+    input.action === "draft_wait"
       ? `${baseKey}:${input.lease.leaseId}`
       : baseKey;
   return {
@@ -821,6 +834,30 @@ export async function runMergeActuatorCycle(input: {
     };
   }
 
+  if (
+    live.isDraft &&
+    run.decision.action === "noop" &&
+    run.decision.reason === "side_effect_already_journaled" &&
+    run.decision.sideEffectKey ===
+      mergeActuationKey(input.candidate, "mark_ready")
+  ) {
+    // Persistent draft: mark_ready already succeeded but the PR is still draft
+    // (e.g. re-drafted by an external actor). This is a no-progress noop loop,
+    // not a failure, so bound it on its own countable ceiling instead of
+    // polling forever (SYMPH-748). The mark_ready side-effect-key check is
+    // required: a MERGED PR reporting isDraft can also noop on an
+    // already-journaled tracker_done, which must NOT be treated as draft.
+    return recordDraftWaitObservation({
+      candidate: input.candidate,
+      journal: input.journal,
+      lease,
+      ownerId: input.ownerId,
+      now: input.now,
+      limits: input.limits,
+      appendActuation: input.appendActuation,
+    });
+  }
+
   return { outcome: "actuated", run };
 }
 
@@ -872,6 +909,60 @@ async function recordLiveStateFailure(input: {
   return { outcome: "retry", reason: input.reason, attempts, evidenceEntry };
 }
 
+const DEFAULT_MAX_DRAFT_WAIT_OBSERVATIONS = 20;
+
+async function recordDraftWaitObservation(input: {
+  candidate: MergeCandidateRecord;
+  journal: readonly DispatcherRunJournalEntry[];
+  lease: DispatcherLease;
+  ownerId: string;
+  now: Date;
+  limits: MergeActuatorRecoveryLimits;
+  appendActuation: (
+    entry: MergeActuationJournalDraft,
+  ) => Promise<DispatcherRunJournalEntry>;
+}): Promise<MergeActuatorCycleResult> {
+  const evidenceEntry = await input.appendActuation(
+    buildMergeActuationEntry({
+      candidate: input.candidate,
+      action: "draft_wait",
+      timestamp: input.now.toISOString(),
+      ownerId: input.ownerId,
+      lease: input.lease,
+      reason: "persistent_draft",
+      metadata: { last_error: "pull request still draft after mark_ready" },
+    }),
+  );
+  const attempts = countDraftWaitObservations(
+    input.journal,
+    input.candidate.candidateId,
+    evidenceEntry,
+  );
+  const ceiling =
+    input.limits.maxDraftWaitObservations ??
+    DEFAULT_MAX_DRAFT_WAIT_OBSERVATIONS;
+  if (attempts >= ceiling) {
+    return parkCandidate({
+      candidate: input.candidate,
+      lease: input.lease,
+      ownerId: input.ownerId,
+      now: input.now,
+      live: null,
+      reason: "persistent_draft",
+      attempts,
+      lastErrorOrStateSummary: `pull request still draft after ${attempts} mark_ready waits`,
+      nextOperatorAction: draftWaitNextOperatorAction(input.candidate),
+      appendActuation: input.appendActuation,
+    });
+  }
+  return {
+    outcome: "retry",
+    reason: "persistent_draft",
+    attempts,
+    evidenceEntry,
+  };
+}
+
 async function parkCandidate(input: {
   candidate: MergeCandidateRecord;
   lease: DispatcherLease;
@@ -920,6 +1011,25 @@ function countLiveStateFailures(
     if (
       entry.kind === "merge_actuation" &&
       stringField(entry.metadata.action) === "live_state_failed" &&
+      stringField(entry.metadata.candidate_id) === candidateId
+    ) {
+      keys.add(entry.idempotencyKey);
+    }
+  }
+  keys.add(appended.idempotencyKey);
+  return keys.size;
+}
+
+function countDraftWaitObservations(
+  journal: readonly DispatcherRunJournalEntry[],
+  candidateId: string,
+  appended: DispatcherRunJournalEntry,
+): number {
+  const keys = new Set<string>();
+  for (const entry of journal) {
+    if (
+      entry.kind === "merge_actuation" &&
+      stringField(entry.metadata.action) === "draft_wait" &&
       stringField(entry.metadata.candidate_id) === candidateId
     ) {
       keys.add(entry.idempotencyKey);
@@ -1074,6 +1184,11 @@ function sideEffectNextOperatorAction(
   return `The ${effect} side effect keeps failing for ${target}; resolve the underlying GitHub/tracker failure, then re-queue the issue (Todo -> Resume).`;
 }
 
+function draftWaitNextOperatorAction(candidate: MergeCandidateRecord): string {
+  const target = `${candidate.repo}#${candidate.prNumber}`;
+  return `${target} is still a draft after the actuator marked it ready; mark the PR ready (or close it), then re-queue the issue (Todo -> Resume).`;
+}
+
 function candidateFromEntry(
   entry: DispatcherRunJournalEntry,
 ): MergeCandidateRecord | null {
@@ -1152,10 +1267,11 @@ function applyActuation(
   const previousLastActuation = record.lastActuation;
   record.updatedAt = entry.timestamp;
   record.cursorRange.lastSequence = entry.sequence;
-  if (action === "live_state_failed") {
+  if (action === "live_state_failed" || action === "draft_wait") {
     // Countable progress evidence only. It must not mutate status or
-    // lastActuation, so a transient live-state outage cannot erase an in-flight
-    // enqueue intent or otherwise rewrite the candidate's recovery state.
+    // lastActuation, so a transient live-state outage or a draft-wait
+    // observation cannot erase an in-flight enqueue intent or otherwise rewrite
+    // the candidate's recovery state.
     return;
   }
   if (action === "mark_ready") {
