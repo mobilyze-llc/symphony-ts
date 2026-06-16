@@ -748,7 +748,11 @@ export async function runMergeActuatorCycle(input: {
       appendActuation: input.appendActuation,
     });
   }
-  if (live === null) {
+  if (live === null || !isUsableLiveState(live)) {
+    // Treat a non-null but incomplete/unusable live state the same as null, so
+    // an actuator decision never runs on malformed input and throws outside the
+    // recovery envelope (SYMPH-746, path 2: "null, incomplete, or otherwise
+    // unusable state").
     return recordLiveStateFailure({
       candidate: input.candidate,
       journal: input.journal,
@@ -757,10 +761,18 @@ export async function runMergeActuatorCycle(input: {
       now: input.now,
       limits: input.limits,
       reason: "live_state_incomplete",
-      summary: "live state provider returned null or incomplete state",
+      summary: "live state provider returned null or unusable state",
       appendActuation: input.appendActuation,
     });
   }
+
+  // Derive the enqueue/queue wait start from the durable journal when the caller
+  // does not supply it, so an unconfirmed enqueue intent stays bounded across
+  // restart/replay instead of polling forever — the journal, not process memory,
+  // is the source of truth for the wait (SYMPH-746, path 4).
+  const effectiveEnqueuedAtMs =
+    input.enqueuedAtMs ??
+    enqueueIntentStartMs(input.journal, input.candidate.candidateId);
 
   const run = await runMergeActuator({
     candidate: input.candidate,
@@ -768,7 +780,7 @@ export async function runMergeActuatorCycle(input: {
     lease,
     ownerId: input.ownerId,
     now: input.now,
-    enqueuedAtMs: input.enqueuedAtMs,
+    enqueuedAtMs: effectiveEnqueuedAtMs,
     maxWaitMs: input.maxWaitMs,
     completedSideEffectKeys: completedSideEffectKeysFromJournal(input.journal),
     appendActuation: input.appendActuation,
@@ -948,6 +960,43 @@ function completedSideEffectKeysFromJournal(
     }
   }
   return keys;
+}
+
+function isUsableLiveState(live: MergeActuatorLiveState): boolean {
+  // Runtime guard at the I/O boundary: a fetcher can violate its TS return type
+  // and hand back a non-null but incomplete object. The actuator decision
+  // dereferences these fields (e.g. requiredChecks.filter), so an unusable
+  // shape must be routed through the bounded recovery, not run on.
+  return (
+    (live.state === "OPEN" ||
+      live.state === "MERGED" ||
+      live.state === "CLOSED") &&
+    typeof live.isDraft === "boolean" &&
+    typeof live.headSha === "string" &&
+    live.headSha.length > 0 &&
+    typeof live.baseRef === "string" &&
+    live.baseRef.length > 0 &&
+    Array.isArray(live.requiredChecks)
+  );
+}
+
+function enqueueIntentStartMs(
+  journal: readonly DispatcherRunJournalEntry[],
+  candidateId: string,
+): number | null {
+  for (const entry of journal) {
+    if (
+      entry.kind === "merge_actuation" &&
+      stringField(entry.metadata.action) === "enqueue" &&
+      stringField(entry.metadata.candidate_id) === candidateId
+    ) {
+      const parsed = Date.parse(entry.timestamp);
+      if (!Number.isNaN(parsed)) {
+        return parsed;
+      }
+    }
+  }
+  return null;
 }
 
 function findParkEntry(
@@ -1280,7 +1329,7 @@ function mergeActuationKey(
   subjectAction?: SideEffectActuationAction,
 ): string {
   if (
-    (action === "failed" || action === "recovered") &&
+    (action === "failed" || action === "completed" || action === "recovered") &&
     subjectAction !== undefined
   ) {
     return `merge_actuation:${candidate.candidateId}:${action}:${subjectAction}`;

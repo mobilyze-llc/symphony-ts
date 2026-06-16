@@ -964,6 +964,126 @@ describe("merge actuator bounded recovery (SYMPH-746)", () => {
     const merged = candidateFromJournal([candidateEntry, ...harness.entries]);
     expect(merged.status).toBe("merged");
   });
+
+  // Path 4 — the unconfirmed enqueue wait must be bounded from the durable
+  // journal, not caller memory, so it terminates after restart.
+  it("bounds an unconfirmed enqueue across restart when the caller omits enqueuedAtMs", async () => {
+    const candidateEntry = candidateJournalEntry();
+    // A raw enqueue intent is durably journaled at T; the process then restarts.
+    const rawEnqueueIntent = enqueueIntentEntry(candidateEntry, {
+      sequence: 3,
+    });
+    const harness = makeJournalHarness([rawEnqueueIntent]);
+    const enqueueMs = Date.parse("2026-06-16T01:00:00.000Z");
+
+    // Fresh process: enqueuedAtMs is null (lost with process memory), well past
+    // the bounded queue wait.
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-restart" }),
+      ownerId: "owner-1",
+      now: new Date(enqueueMs + 31 * 60_000),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 3, maxSideEffectFailures: 2 },
+      fetchLiveState: async () => liveState(),
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    // It times out (does not poll forever) and the candidate is blocked — never
+    // falsely advanced into the queue.
+    expect(result.outcome).toBe("actuated");
+    if (result.outcome !== "actuated") {
+      throw new Error("expected actuated");
+    }
+    expect(result.run.decision).toMatchObject({
+      action: "timeout",
+      reason: "merge_queue_max_wait_exceeded",
+    });
+    const bounded = candidateFromJournal([candidateEntry, ...harness.entries]);
+    expect(bounded.status).toBe("blocked");
+    expect(bounded.blockedReason).toBe("merge_queue_max_wait_exceeded");
+  });
+
+  // Path 2 — a non-null but incomplete live state must be bounded, not throw
+  // out of the recovery envelope.
+  it("treats an incomplete non-null live state as a bounded recovery failure", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    // Fetcher violates its return contract: a non-null object missing required
+    // fields (here requiredChecks/isDraft/headSha/baseRef).
+    const malformed = {
+      repo: "mobilyze-llc/symphony-ts",
+      prNumber: 552,
+      state: "OPEN",
+    } as unknown as MergeActuatorLiveState;
+
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 1, maxSideEffectFailures: 2 },
+      fetchLiveState: async () => malformed,
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    // No throw escaped: the unusable state is journaled as incomplete and parks
+    // at the ceiling.
+    expect(result.outcome).toBe("parked");
+    if (result.outcome !== "parked") {
+      throw new Error("expected parked");
+    }
+    expect(result.blocker.reason).toBe("live_state_unavailable");
+    const evidence = harness.entries.filter(
+      (e) => e.metadata.action === "live_state_failed",
+    );
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]?.metadata.reason).toBe("live_state_incomplete");
+  });
+
+  // Idempotency — re-invoking after a park stays parked and appends nothing.
+  it("stays parked and appends no new evidence when re-invoked after a park", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const limits = { maxLiveStateFailures: 2, maxSideEffectFailures: 2 };
+    const cycle = (n: number) =>
+      runMergeActuatorCycle({
+        candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+        journal: [candidateEntry, ...harness.entries],
+        lease: lease({ leaseId: `lease-${n}` }),
+        ownerId: "owner-1",
+        now: new Date(`2026-06-16T01:0${n}:00.000Z`),
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        limits,
+        fetchLiveState: async () => {
+          throw new Error("down");
+        },
+        appendActuation: harness.appendActuation,
+        sideEffects: noopSideEffects(),
+      });
+
+    await cycle(1); // retry (1/2)
+    const parkResult = await cycle(2); // parks at the ceiling
+    expect(parkResult.outcome).toBe("parked");
+    const entryCountAfterPark = harness.entries.length;
+
+    // Re-invoke against the same journal (already contains the park entry).
+    const reinvoke = await cycle(3);
+    expect(reinvoke.outcome).toBe("parked");
+    if (reinvoke.outcome === "parked" && parkResult.outcome === "parked") {
+      expect(reinvoke.blocker).toEqual(parkResult.blocker);
+    }
+    // The park short-circuit fired: no new evidence appended, no extra fetch.
+    expect(harness.entries.length).toBe(entryCountAfterPark);
+  });
 });
 
 function reviewGateEntry(input?: {
