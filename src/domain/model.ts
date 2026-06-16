@@ -257,6 +257,12 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   "fix_round",
   "review_gate_result",
   "review_synthesis",
+  // Merge candidates and actuator side-effect barriers (SYMPH-722): a clean,
+  // merge-authoritative council PASS can publish a deterministic candidate.
+  // The orchestrator actuator consumes only these records and journals every
+  // irreversible side effect before execution so replay cannot duplicate it.
+  "merge_candidate",
+  "merge_actuation",
   // Queue-triage week-zero baseline (SYMPH-482): disposable/read-model
   // consumers use this to measure the FIFO control arm before hygiene lanes
   // or comparators gain authority.
