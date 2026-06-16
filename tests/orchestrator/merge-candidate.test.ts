@@ -5,12 +5,17 @@ import type {
   DispatcherRunJournalEntry,
 } from "../../src/domain/model.js";
 import {
+  type MergeActuationJournalDraft,
+  type MergeActuatorCycleResult,
   type MergeActuatorLiveState,
+  type MergeActuatorSideEffects,
+  type MergeCandidateRecord,
   buildMergeActuationEntry,
   buildMergeCandidateEntryFromReviewGate,
   decideMergeActuation,
   reduceMergeCandidates,
   runMergeActuator,
+  runMergeActuatorCycle,
 } from "../../src/orchestrator/merge-candidate.js";
 import {
   createModeScopedPermissionPolicy,
@@ -469,6 +474,649 @@ describe("merge candidates", () => {
   });
 });
 
+describe("merge actuator bounded recovery (SYMPH-746)", () => {
+  // ---- Path 4: raw enqueue intent preservation ----
+
+  it("does not treat a raw enqueue intent as queue-pending side-effect proof", () => {
+    const candidateEntry = candidateJournalEntry();
+    const rawEnqueueIntent = enqueueIntentEntry(candidateEntry, {
+      sequence: 3,
+    });
+    const candidate = candidateFromJournal([candidateEntry, rawEnqueueIntent]);
+
+    // A raw enqueue intent is recorded but must NOT advance status into the queue.
+    expect(candidate.status).toBe("candidate");
+    expect(candidate.lastActuation).toBe("enqueue");
+
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState(),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T01:03:00.000Z"),
+        enqueuedAtMs: Date.parse("2026-06-16T01:00:00.000Z"),
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({ action: "poll", reason: "enqueue_status_uncertain" });
+  });
+
+  it("keeps a raw enqueue intent unconfirmed across a pending-check poll replay", () => {
+    const candidateEntry = candidateJournalEntry();
+    const rawEnqueueIntent = enqueueIntentEntry(candidateEntry, {
+      sequence: 3,
+    });
+    const pendingPoll = {
+      ...buildMergeActuationEntry({
+        candidate: candidateFromJournal([candidateEntry, rawEnqueueIntent]),
+        action: "poll",
+        timestamp: "2026-06-16T01:03:00.000Z",
+        ownerId: "owner-1",
+        lease: lease({ leaseId: "lease-2" }),
+        live: liveState({
+          requiredChecks: [{ name: "merge queue", status: "pending" }],
+        }),
+        reason: "merge_queue_pending",
+      }),
+      sequence: 4,
+    };
+    const candidate = candidateFromJournal([
+      candidateEntry,
+      rawEnqueueIntent,
+      pendingPoll,
+    ]);
+
+    // The poll must not overwrite the unconfirmed enqueue into queued/waiting.
+    expect(candidate.status).toBe("candidate");
+    expect(candidate.lastActuation).toBe("enqueue");
+  });
+
+  it("advances to merge_queue_pending only after enqueue completion evidence", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+
+    const result = await runMergeActuator({
+      candidate: candidateFromJournal([candidateEntry]),
+      live: liveState(),
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+    expect(result.sideEffect).toBe("enqueue");
+
+    // Both the raw intent and a completion entry are journaled; only the
+    // completion evidence advances the candidate into the queue.
+    expect(harness.entries.some((e) => e.metadata.action === "enqueue")).toBe(
+      true,
+    );
+    expect(
+      harness.entries.some(
+        (e) =>
+          e.metadata.action === "completed" &&
+          e.metadata.subject_action === "enqueue",
+      ),
+    ).toBe(true);
+
+    const confirmed = candidateFromJournal([
+      candidateEntry,
+      ...harness.entries,
+    ]);
+    expect(confirmed.status).toBe("merge_queue_pending");
+  });
+
+  it("times out a raw enqueue intent after the bounded queue wait", () => {
+    const candidateEntry = candidateJournalEntry();
+    const rawEnqueueIntent = enqueueIntentEntry(candidateEntry, {
+      sequence: 3,
+    });
+    const candidate = candidateFromJournal([candidateEntry, rawEnqueueIntent]);
+
+    expect(
+      decideMergeActuation({
+        candidate,
+        live: liveState(),
+        lease: lease(),
+        ownerId: "owner-1",
+        nowMs: Date.parse("2026-06-16T01:00:00.000Z") + 31 * 60_000,
+        enqueuedAtMs: Date.parse("2026-06-16T01:00:00.000Z"),
+        maxWaitMs: 30 * 60_000,
+        completedSideEffectKeys: new Set(),
+      }),
+    ).toMatchObject({
+      action: "timeout",
+      reason: "merge_queue_max_wait_exceeded",
+    });
+  });
+
+  // ---- Path 1: live-state fetch throws ----
+
+  it("writes countable evidence and parks after repeated live-state throws", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const limits = { maxLiveStateFailures: 3, maxSideEffectFailures: 2 };
+    const results: MergeActuatorCycleResult[] = [];
+
+    for (let cycle = 1; cycle <= 3; cycle += 1) {
+      results.push(
+        await runMergeActuatorCycle({
+          candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+          journal: [candidateEntry, ...harness.entries],
+          lease: lease({ leaseId: `lease-${cycle}` }),
+          ownerId: "owner-1",
+          now: new Date(`2026-06-16T01:0${cycle}:00.000Z`),
+          enqueuedAtMs: null,
+          maxWaitMs: 30 * 60_000,
+          limits,
+          fetchLiveState: async () => {
+            throw new Error("gh pr view exploded");
+          },
+          appendActuation: harness.appendActuation,
+          sideEffects: noopSideEffects(),
+        }),
+      );
+    }
+
+    expect(results[0]).toMatchObject({
+      outcome: "retry",
+      reason: "live_state_throw",
+      attempts: 1,
+    });
+    expect(results[1]).toMatchObject({
+      outcome: "retry",
+      reason: "live_state_throw",
+      attempts: 2,
+    });
+
+    const evidence = harness.entries.filter(
+      (e) => e.metadata.action === "live_state_failed",
+    );
+    expect(evidence).toHaveLength(3);
+    expect(
+      evidence.every((e) => e.metadata.reason === "live_state_throw"),
+    ).toBe(true);
+    // Countable: one distinct entry per dispatch cycle, keyed by candidate + reason + lease.
+    expect(new Set(evidence.map((e) => e.idempotencyKey)).size).toBe(3);
+    for (const entry of evidence) {
+      expect(entry.metadata.candidate_id).toBe(
+        candidateFromJournal([candidateEntry]).candidateId,
+      );
+      expect(entry.metadata.pr_number).toBe(552);
+      expect(entry.metadata.reviewed_head_sha).toBe("head-1");
+    }
+
+    const park = results[2];
+    expect(park?.outcome).toBe("parked");
+    if (park?.outcome !== "parked") {
+      throw new Error("expected the third cycle to park");
+    }
+    expect(park.blocker).toMatchObject({
+      candidateId: candidateFromJournal([candidateEntry]).candidateId,
+      prNumber: 552,
+      reviewedHeadSha: "head-1",
+      reason: "live_state_unavailable",
+      attempts: 3,
+    });
+    expect(park.blocker.lastErrorOrStateSummary).toContain(
+      "gh pr view exploded",
+    );
+    expect(park.blocker.nextOperatorAction.length).toBeGreaterThan(0);
+    expect(park.parkEntry.metadata.action).toBe("parked");
+    expect(park.parkEntry.metadata.blocker).toMatchObject({ attempts: 3 });
+
+    const parked = candidateFromJournal([candidateEntry, ...harness.entries]);
+    expect(parked).toMatchObject({
+      status: "blocked",
+      blockedReason: "live_state_unavailable",
+    });
+  });
+
+  it("restores the live-state failure count from the journal across replay", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const limits = { maxLiveStateFailures: 3, maxSideEffectFailures: 2 };
+    const original = makeJournalHarness();
+
+    // Two live-state throws are durably journaled, then the process "restarts".
+    for (let cycle = 1; cycle <= 2; cycle += 1) {
+      await runMergeActuatorCycle({
+        candidate: candidateFromJournal([candidateEntry, ...original.entries]),
+        journal: [candidateEntry, ...original.entries],
+        lease: lease({ leaseId: `lease-${cycle}` }),
+        ownerId: "owner-1",
+        now: new Date(`2026-06-16T01:0${cycle}:00.000Z`),
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        limits,
+        fetchLiveState: async () => {
+          throw new Error("down");
+        },
+        appendActuation: original.appendActuation,
+        sideEffects: noopSideEffects(),
+      });
+    }
+
+    // Fresh process: only the durable journal carries state across the restart.
+    const restarted = makeJournalHarness(original.entries);
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...restarted.entries]),
+      journal: [candidateEntry, ...restarted.entries],
+      lease: lease({ leaseId: "lease-3" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:05:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits,
+      fetchLiveState: async () => {
+        throw new Error("still down");
+      },
+      appendActuation: restarted.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("parked");
+    if (result.outcome !== "parked") {
+      throw new Error("expected park after restart");
+    }
+    // Count restored from the journal (2 prior + 1) rather than reset to 1.
+    expect(result.blocker.attempts).toBe(3);
+  });
+
+  // ---- Path 2: live-state fetch returns null / incomplete ----
+
+  it("writes countable evidence with a distinct reason and parks after repeated incomplete live state", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const limits = { maxLiveStateFailures: 2, maxSideEffectFailures: 2 };
+    const results: MergeActuatorCycleResult[] = [];
+
+    for (let cycle = 1; cycle <= 2; cycle += 1) {
+      results.push(
+        await runMergeActuatorCycle({
+          candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+          journal: [candidateEntry, ...harness.entries],
+          lease: lease({ leaseId: `lease-${cycle}` }),
+          ownerId: "owner-1",
+          now: new Date(`2026-06-16T01:0${cycle}:00.000Z`),
+          enqueuedAtMs: null,
+          maxWaitMs: 30 * 60_000,
+          limits,
+          fetchLiveState: async () => null,
+          appendActuation: harness.appendActuation,
+          sideEffects: noopSideEffects(),
+        }),
+      );
+    }
+
+    expect(results[0]).toMatchObject({
+      outcome: "retry",
+      reason: "live_state_incomplete",
+      attempts: 1,
+    });
+    expect(results[1]?.outcome).toBe("parked");
+
+    const evidence = harness.entries.filter(
+      (e) => e.metadata.action === "live_state_failed",
+    );
+    expect(evidence).toHaveLength(2);
+    expect(
+      evidence.every((e) => e.metadata.reason === "live_state_incomplete"),
+    ).toBe(true);
+  });
+
+  it("records distinct reasons for live-state throws versus incomplete responses", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const limits = { maxLiveStateFailures: 5, maxSideEffectFailures: 5 };
+
+    await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-1" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:01:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits,
+      fetchLiveState: async () => {
+        throw new Error("boom");
+      },
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+    await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-2" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:02:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits,
+      fetchLiveState: async () => null,
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    const reasons = harness.entries
+      .filter((e) => e.metadata.action === "live_state_failed")
+      .map((e) => e.metadata.reason);
+    expect(reasons).toEqual(["live_state_throw", "live_state_incomplete"]);
+  });
+
+  // ---- Path 3: post-proof side-effect failure ----
+
+  it("parks after the configured number of post-proof side-effect failures", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const limits = { maxLiveStateFailures: 5, maxSideEffectFailures: 2 };
+    const results: MergeActuatorCycleResult[] = [];
+
+    for (let cycle = 1; cycle <= 2; cycle += 1) {
+      results.push(
+        await runMergeActuatorCycle({
+          candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+          journal: [candidateEntry, ...harness.entries],
+          lease: lease({ leaseId: `lease-${cycle}` }),
+          ownerId: "owner-1",
+          now: new Date(`2026-06-16T01:0${cycle}:00.000Z`),
+          enqueuedAtMs: null,
+          maxWaitMs: 30 * 60_000,
+          limits,
+          fetchLiveState: async () => mergedLiveState(),
+          appendActuation: harness.appendActuation,
+          sideEffects: throwingTrackerDone("linear done failed"),
+        }),
+      );
+    }
+
+    expect(results[0]).toMatchObject({
+      outcome: "retry",
+      reason: "tracker_done_side_effect_failed",
+      attempts: 1,
+    });
+
+    const failures = harness.entries.filter(
+      (e) =>
+        e.metadata.action === "failed" &&
+        e.metadata.subject_action === "tracker_done",
+    );
+    expect(failures).toHaveLength(2);
+    expect(new Set(failures.map((e) => e.idempotencyKey)).size).toBe(2);
+
+    const park = results[1];
+    expect(park?.outcome).toBe("parked");
+    if (park?.outcome !== "parked") {
+      throw new Error("expected park after side-effect exhaustion");
+    }
+    expect(park.blocker).toMatchObject({
+      candidateId: candidateFromJournal([candidateEntry]).candidateId,
+      prNumber: 552,
+      reviewedHeadSha: "head-1",
+      reason: "tracker_done_side_effect_failed",
+      attempts: 2,
+    });
+    expect(park.blocker.lastErrorOrStateSummary).toContain(
+      "linear done failed",
+    );
+    expect(park.blocker.nextOperatorAction.length).toBeGreaterThan(0);
+
+    const parked = candidateFromJournal([candidateEntry, ...harness.entries]);
+    expect(parked.status).toBe("blocked");
+  });
+
+  it("restores the side-effect failure count from the journal across replay", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const limits = { maxLiveStateFailures: 5, maxSideEffectFailures: 2 };
+    const original = makeJournalHarness();
+
+    await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...original.entries]),
+      journal: [candidateEntry, ...original.entries],
+      lease: lease({ leaseId: "lease-1" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:01:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits,
+      fetchLiveState: async () => mergedLiveState(),
+      appendActuation: original.appendActuation,
+      sideEffects: throwingTrackerDone("linear down"),
+    });
+
+    const restarted = makeJournalHarness(original.entries);
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...restarted.entries]),
+      journal: [candidateEntry, ...restarted.entries],
+      lease: lease({ leaseId: "lease-2" }),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:02:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits,
+      fetchLiveState: async () => mergedLiveState(),
+      appendActuation: restarted.appendActuation,
+      sideEffects: throwingTrackerDone("linear still down"),
+    });
+
+    expect(result.outcome).toBe("parked");
+    if (result.outcome !== "parked") {
+      throw new Error("expected park after restart");
+    }
+    expect(result.blocker.attempts).toBe(2);
+  });
+
+  // ---- Healthy passthrough ----
+
+  it("actuates normally when live state is healthy", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 3, maxSideEffectFailures: 2 },
+      fetchLiveState: async () => liveState(),
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("actuated");
+    if (result.outcome !== "actuated") {
+      throw new Error("expected actuated");
+    }
+    expect(result.run.sideEffect).toBe("enqueue");
+  });
+
+  it("actuates tracker_done on durable merge proof", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 3, maxSideEffectFailures: 2 },
+      fetchLiveState: async () => mergedLiveState(),
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("actuated");
+    if (result.outcome !== "actuated") {
+      throw new Error("expected actuated");
+    }
+    expect(result.run.sideEffect).toBe("tracker_done");
+
+    const merged = candidateFromJournal([candidateEntry, ...harness.entries]);
+    expect(merged.status).toBe("merged");
+  });
+
+  // Path 4 — the unconfirmed enqueue wait must be bounded from the durable
+  // journal, not caller memory, so it terminates after restart.
+  it("bounds an unconfirmed enqueue across restart when the caller omits enqueuedAtMs", async () => {
+    const candidateEntry = candidateJournalEntry();
+    // A raw enqueue intent is durably journaled at T; the process then restarts.
+    const rawEnqueueIntent = enqueueIntentEntry(candidateEntry, {
+      sequence: 3,
+    });
+    const harness = makeJournalHarness([rawEnqueueIntent]);
+    const enqueueMs = Date.parse("2026-06-16T01:00:00.000Z");
+
+    // Fresh process: enqueuedAtMs is null (lost with process memory), well past
+    // the bounded queue wait.
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease({ leaseId: "lease-restart" }),
+      ownerId: "owner-1",
+      now: new Date(enqueueMs + 31 * 60_000),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 3, maxSideEffectFailures: 2 },
+      fetchLiveState: async () => liveState(),
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    // It times out (does not poll forever) and the candidate is blocked — never
+    // falsely advanced into the queue.
+    expect(result.outcome).toBe("actuated");
+    if (result.outcome !== "actuated") {
+      throw new Error("expected actuated");
+    }
+    expect(result.run.decision).toMatchObject({
+      action: "timeout",
+      reason: "merge_queue_max_wait_exceeded",
+    });
+    const bounded = candidateFromJournal([candidateEntry, ...harness.entries]);
+    expect(bounded.status).toBe("blocked");
+    expect(bounded.blockedReason).toBe("merge_queue_max_wait_exceeded");
+  });
+
+  // Path 2 — a non-null but incomplete live state must be bounded, not throw
+  // out of the recovery envelope.
+  it("treats an incomplete non-null live state as a bounded recovery failure", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    // Fetcher violates its return contract: a non-null object missing required
+    // fields (here requiredChecks/isDraft/headSha/baseRef).
+    const malformed = {
+      repo: "mobilyze-llc/symphony-ts",
+      prNumber: 552,
+      state: "OPEN",
+    } as unknown as MergeActuatorLiveState;
+
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 1, maxSideEffectFailures: 2 },
+      fetchLiveState: async () => malformed,
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    // No throw escaped: the unusable state is journaled as incomplete and parks
+    // at the ceiling.
+    expect(result.outcome).toBe("parked");
+    if (result.outcome !== "parked") {
+      throw new Error("expected parked");
+    }
+    expect(result.blocker.reason).toBe("live_state_unavailable");
+    const evidence = harness.entries.filter(
+      (e) => e.metadata.action === "live_state_failed",
+    );
+    expect(evidence).toHaveLength(1);
+    expect(evidence[0]?.metadata.reason).toBe("live_state_incomplete");
+  });
+
+  // Path 2 — a malformed required-check element (passes Array.isArray but would
+  // throw on check.status) must also be bounded, not escape the envelope.
+  it("treats malformed required-check elements as a bounded recovery failure", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const malformed = {
+      ...liveStateBase(),
+      requiredChecks: [null],
+    } as unknown as MergeActuatorLiveState;
+
+    const result = await runMergeActuatorCycle({
+      candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+      journal: [candidateEntry, ...harness.entries],
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 1, maxSideEffectFailures: 2 },
+      fetchLiveState: async () => malformed,
+      appendActuation: harness.appendActuation,
+      sideEffects: noopSideEffects(),
+    });
+
+    expect(result.outcome).toBe("parked");
+    if (result.outcome !== "parked") {
+      throw new Error("expected parked");
+    }
+    expect(result.blocker.reason).toBe("live_state_unavailable");
+  });
+
+  // Idempotency — re-invoking after a park stays parked and appends nothing.
+  it("stays parked and appends no new evidence when re-invoked after a park", async () => {
+    const candidateEntry = candidateJournalEntry();
+    const harness = makeJournalHarness();
+    const limits = { maxLiveStateFailures: 2, maxSideEffectFailures: 2 };
+    const cycle = (n: number) =>
+      runMergeActuatorCycle({
+        candidate: candidateFromJournal([candidateEntry, ...harness.entries]),
+        journal: [candidateEntry, ...harness.entries],
+        lease: lease({ leaseId: `lease-${n}` }),
+        ownerId: "owner-1",
+        now: new Date(`2026-06-16T01:0${n}:00.000Z`),
+        enqueuedAtMs: null,
+        maxWaitMs: 30 * 60_000,
+        limits,
+        fetchLiveState: async () => {
+          throw new Error("down");
+        },
+        appendActuation: harness.appendActuation,
+        sideEffects: noopSideEffects(),
+      });
+
+    await cycle(1); // retry (1/2)
+    const parkResult = await cycle(2); // parks at the ceiling
+    expect(parkResult.outcome).toBe("parked");
+    const entryCountAfterPark = harness.entries.length;
+
+    // Re-invoke against the same journal (already contains the park entry).
+    const reinvoke = await cycle(3);
+    expect(reinvoke.outcome).toBe("parked");
+    if (reinvoke.outcome === "parked" && parkResult.outcome === "parked") {
+      expect(reinvoke.blocker).toEqual(parkResult.blocker);
+    }
+    // The park short-circuit fired: no new evidence appended, no extra fetch.
+    expect(harness.entries.length).toBe(entryCountAfterPark);
+  });
+});
+
 function reviewGateEntry(input?: {
   round?: number;
   headSha?: string;
@@ -505,7 +1153,7 @@ function reviewGateEntry(input?: {
   };
 }
 
-function lease(): DispatcherLease {
+function lease(overrides: Partial<DispatcherLease> = {}): DispatcherLease {
   return {
     leaseId: "lease-1",
     issueId: "issue-1",
@@ -519,6 +1167,7 @@ function lease(): DispatcherLease {
     stage: "merge",
     attempt: null,
     lastJournalSequence: 1,
+    ...overrides,
   };
 }
 
@@ -546,5 +1195,99 @@ function liveStateBase(): MergeActuatorLiveState {
     mergeQueueRequired: true,
     mergedAt: null,
     mergeCommit: null,
+  };
+}
+
+function mergedLiveState(): MergeActuatorLiveState {
+  return liveState({
+    state: "MERGED",
+    mergedAt: "2026-06-16T01:00:00Z",
+    mergeCommit: "merge-1",
+  });
+}
+
+function candidateJournalEntry(input?: {
+  round?: number;
+  headSha?: string;
+}): DispatcherRunJournalEntry {
+  return {
+    ...buildMergeCandidateEntryFromReviewGate(reviewGateEntry(input))!,
+    sequence: 2,
+  };
+}
+
+function candidateFromJournal(
+  journal: readonly DispatcherRunJournalEntry[],
+): MergeCandidateRecord {
+  const reduced = reduceMergeCandidates(journal)["issue-1"];
+  if (reduced === undefined) {
+    throw new Error("expected a reduced candidate for issue-1");
+  }
+  return reduced;
+}
+
+function enqueueIntentEntry(
+  candidateEntry: DispatcherRunJournalEntry,
+  options: { sequence: number; leaseId?: string },
+): DispatcherRunJournalEntry {
+  return {
+    ...buildMergeActuationEntry({
+      candidate: candidateFromJournal([candidateEntry]),
+      action: "enqueue",
+      timestamp: "2026-06-16T01:00:00.000Z",
+      ownerId: "owner-1",
+      lease: lease({ leaseId: options.leaseId ?? "lease-1" }),
+      live: liveState(),
+      reason: "merge_queue_required",
+    }),
+    sequence: options.sequence,
+  };
+}
+
+function makeJournalHarness(
+  initial: readonly DispatcherRunJournalEntry[] = [],
+): {
+  entries: DispatcherRunJournalEntry[];
+  appendActuation: (
+    draft: MergeActuationJournalDraft,
+  ) => Promise<DispatcherRunJournalEntry>;
+} {
+  const entries: DispatcherRunJournalEntry[] = [...initial];
+  let sequence = entries.reduce(
+    (max, entry) => Math.max(max, entry.sequence),
+    9,
+  );
+  const appendActuation = async (
+    draft: MergeActuationJournalDraft,
+  ): Promise<DispatcherRunJournalEntry> => {
+    const existing = entries.find(
+      (entry) => entry.idempotencyKey === draft.idempotencyKey,
+    );
+    if (existing !== undefined) {
+      return existing;
+    }
+    sequence += 1;
+    const appended: DispatcherRunJournalEntry = { ...draft, sequence };
+    entries.push(appended);
+    return appended;
+  };
+  return { entries, appendActuation };
+}
+
+function noopSideEffects(): MergeActuatorSideEffects {
+  return {
+    markReady: async () => {},
+    enqueue: async () => {},
+    writeTrackerDone: async () => {},
+  };
+}
+
+function throwingTrackerDone(message: string): MergeActuatorSideEffects {
+  return {
+    markReady: async () => {},
+    enqueue: async () => {},
+    writeTrackerDone: async () => {
+      throw new Error(message);
+    },
   };
 }
