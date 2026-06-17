@@ -2347,6 +2347,11 @@ describe("merge actuator spec-fidelity rework gate (SYMPH-758)", () => {
     );
   });
 
+  it("reports no current rework for a completely empty journal", () => {
+    const candidate = candidateFromJournal([candidateJournalEntry()]);
+    expect(hasCurrentSpecFidelityRework([], candidate)).toBe(false);
+  });
+
   it("reports a current rework when the latest verdict for the reviewed head is rework", () => {
     const candidateEntry = candidateJournalEntry();
     const candidate = candidateFromJournal([candidateEntry]);

@@ -6113,9 +6113,11 @@ function assessCouncilTermination(input: {
   >;
 }): CouncilTerminationAssessment {
   const terminationLanes = mergeAuthoritativeLanes(input.lanes);
-  const currentArtifacts = currentTerminationArtifacts({
+  // Single derivation shared with collectTrackFindings (SYMPH-760, council R1
+  // P2) so the filer and the assessment can never operate on divergent sets.
+  const currentArtifacts = authoritativeTerminationArtifacts({
     verdict: input.verdict,
-    lanes: terminationLanes,
+    lanes: input.lanes,
   });
   const currentFindings = currentArtifacts.flatMap(
     (artifact) => artifact.findings,
@@ -6261,20 +6263,32 @@ function computeTrackFiling(
 }
 
 /**
- * The council's surviving Track findings (SYMPH-760), derived identically to
- * {@link assessCouncilTermination}'s track count so the filer and the
- * assessment operate on the same set.
+ * Authoritative termination artifacts for a verdict + lane set: merge the
+ * authoritative lanes, then select the current-round artifacts. The single
+ * source of truth for both {@link assessCouncilTermination} and
+ * {@link collectTrackFindings} so the assessment and the Track-finding filer
+ * can never derive divergent finding sets (SYMPH-760, council R1 P2).
+ */
+function authoritativeTerminationArtifacts(input: {
+  verdict: HeadlessGateVerdict;
+  lanes: readonly HeadlessLaneResult[];
+}): StructuredReviewerArtifact[] {
+  return currentTerminationArtifacts({
+    verdict: input.verdict,
+    lanes: mergeAuthoritativeLanes(input.lanes),
+  });
+}
+
+/**
+ * The council's surviving Track findings (SYMPH-760), derived through the same
+ * {@link authoritativeTerminationArtifacts} path as
+ * {@link assessCouncilTermination}'s track count.
  */
 function collectTrackFindings(input: {
   verdict: HeadlessGateVerdict;
   lanes: readonly HeadlessLaneResult[];
 }): StructuredReviewFinding[] {
-  const terminationLanes = mergeAuthoritativeLanes(input.lanes);
-  const currentArtifacts = currentTerminationArtifacts({
-    verdict: input.verdict,
-    lanes: terminationLanes,
-  });
-  return currentArtifacts
+  return authoritativeTerminationArtifacts(input)
     .flatMap((artifact) => artifact.findings)
     .filter(isTrackDisposition);
 }
@@ -6301,7 +6315,14 @@ async function resolveTrackFindingFilings(
   }>;
   try {
     refs = await filer(trackFindings);
-  } catch {
+  } catch (error) {
+    // Fail closed (findings stay unfiled), but surface WHY so an operator can
+    // tell a thrown filer from no filer being configured (council R1 P2).
+    console.warn(
+      `[council] track-finding filer threw; ${trackFindings.length} finding(s) remain unfiled: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     return resolved;
   }
   for (const ref of refs) {
@@ -6314,6 +6335,14 @@ async function resolveTrackFindingFilings(
         issueId: ref.issueId,
         url: ref.url ?? null,
       });
+    } else {
+      // A malformed ref leaves its finding unfiled; do not drop it silently
+      // (council R1 P3).
+      console.warn(
+        `[council] track-finding filer returned an invalid ref (fingerprint=${String(
+          ref.fingerprint,
+        )}); finding remains unfiled`,
+      );
     }
   }
   return resolved;

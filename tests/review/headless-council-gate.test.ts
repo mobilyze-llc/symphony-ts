@@ -4403,6 +4403,45 @@ describe("runHeadlessCouncilGate", () => {
     expect(report).toContain("SYMPH-999");
   });
 
+  it("fails closed to unfiled when the Track-finding filer throws (SYMPH-760)", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n\n## Track\n- docs/operators.md:9 add rollout notes for a pre-existing issue.",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        // A filer that throws must NOT crash the closeout; findings stay unfiled.
+        trackFindingFiler: async () => {
+          throw new Error("linear unreachable");
+        },
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.termination).toMatchObject({
+      action: "continue_pipeline",
+      alertLevel: "warning",
+      trackFiling: {
+        status: "unfiled",
+        required: 1,
+        filed: 0,
+        reason: "track_findings_unfiled",
+      },
+    });
+  });
+
   it("reports no track-filing requirement when there are no Track findings (SYMPH-760)", async () => {
     const harness = await createHarness({
       laneBehavior: {
