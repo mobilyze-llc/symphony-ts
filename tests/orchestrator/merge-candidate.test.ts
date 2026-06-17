@@ -2723,6 +2723,138 @@ describe("merge actuator late-rework dequeue + reconciliation (SYMPH-766)", () =
       );
     }
   });
+
+  it("records the dequeue in the reducer without mis-transitioning the candidate, then reconciles dequeued (SYMPH-769, council Beta-1)", async () => {
+    const { journal, candidate } = enqueuedCandidateJournal();
+    const harness = makeJournalHarness(journal);
+    // Cycle 1: dequeue. The disable_auto_merge intent + completion are journaled.
+    await runMergeActuatorCycle({
+      candidate,
+      journal: harness.entries,
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:05:00.000Z"),
+      enqueuedAtMs: Date.parse("2026-06-16T01:00:00.000Z"),
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 3, maxSideEffectFailures: 2 },
+      autoMergePermission: true,
+      fetchLiveState: async () => liveState(),
+      appendActuation: harness.appendActuation,
+      sideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone: async () => {},
+        disableAutoMerge: async () => {},
+      },
+    });
+    // The reducer now handles disable_auto_merge: the dequeue is a hold in flight,
+    // so it must NOT mis-transition the candidate (no merged/ready_marked/stale) —
+    // it stays merge_queue_pending until the coordinator parks it next cycle.
+    const afterDequeue = candidateFromJournal(harness.entries);
+    expect(afterDequeue.status).toBe("merge_queue_pending");
+    expect(
+      harness.entries.some((e) => e.metadata.action === "disable_auto_merge"),
+    ).toBe(true);
+
+    // Cycle 2: the confirmed dequeue yields the explicit dequeued reconciliation.
+    const cycle2 = await runMergeActuatorCycle({
+      candidate: afterDequeue,
+      journal: harness.entries,
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:06:00.000Z"),
+      enqueuedAtMs: Date.parse("2026-06-16T01:00:00.000Z"),
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 3, maxSideEffectFailures: 2 },
+      autoMergePermission: true,
+      fetchLiveState: async () => liveState(),
+      appendActuation: harness.appendActuation,
+      sideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone: async () => {},
+        disableAutoMerge: async () => {},
+      },
+    });
+    expect(cycle2.outcome).toBe("actuated");
+    if (cycle2.outcome === "actuated") {
+      expect(cycle2.run.decision).toMatchObject({
+        action: "blocked",
+        reason: "spec_fidelity_rework_dequeued",
+      });
+    }
+  });
+
+  it("treats a non_gating spec-fidelity verdict as non-blocking for merge actuation (SYMPH-769, council Beta-2)", () => {
+    const candidateEntry = candidateJournalEntry();
+    const candidate = candidateFromJournal([candidateEntry]);
+    const nonGating: DispatcherRunJournalEntry = {
+      sequence: 5,
+      idempotencyKey: "spec_fidelity:issue-1:review:non-gating",
+      timestamp: "2026-06-16T00:42:00.000Z",
+      kind: "spec_fidelity",
+      issueId: "issue-1",
+      issueIdentifier: "SYMPH-722",
+      operation: "dispatcher",
+      stage: "review",
+      attempt: null,
+      ownerId: "owner-1",
+      lease: null,
+      summary: "Spec-fidelity non-gating for SYMPH-722.",
+      metadata: {
+        status: "skipped",
+        verdict: "non_gating",
+        reason: "no_canonical_ac_stage_skipped",
+        reviewed_head_sha: candidate.reviewedHeadSha,
+      },
+    };
+    const journal = [candidateEntry, nonGating];
+    // A non_gating verdict is NOT a rework hold.
+    expect(hasCurrentSpecFidelityRework(journal, candidate)).toBe(false);
+    // ...so the actuator is not held by it: an enqueue-ready candidate proceeds.
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState(),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+      autoMergePermission: true,
+      specFidelityRework: hasCurrentSpecFidelityRework(journal, candidate),
+    });
+    expect(decision.reason).not.toBe("spec_fidelity_rework");
+    expect(decision.action).not.toBe("disable_auto_merge");
+  });
+
+  it("attempts a dequeue for an UNCONFIRMED enqueue intent when a late rework lands (SYMPH-769, council Alpha-2)", () => {
+    // A raw enqueue intent with no completion row: isUnconfirmedEnqueueIntent is
+    // true (crash window). A late rework over-attempts the dequeue (the SAFE
+    // direction — better to disable auto-merge on a maybe-queued PR than to miss
+    // a real dequeue); a doomed attempt fails safe into cannot_dequeue, never a
+    // bad merge.
+    const candidateEntry = candidateJournalEntry();
+    const intent = enqueueIntentEntry(candidateEntry, { sequence: 3 });
+    const candidate = candidateFromJournal([candidateEntry, intent]);
+    expect(candidate.status).not.toBe("merge_queue_pending");
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState(),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: Date.parse("2026-06-16T01:00:00.000Z"),
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+      autoMergePermission: true,
+      specFidelityRework: true,
+    });
+    expect(decision).toMatchObject({
+      action: "disable_auto_merge",
+      reason: "spec_fidelity_rework_dequeue",
+    });
+  });
 });
 
 function specFidelityEntry(input: {
