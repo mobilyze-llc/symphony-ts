@@ -825,9 +825,42 @@ describe("WORKFLOW-symphony.md smoke tests", () => {
     expect(output).toContain("Do not use `gh pr checks --watch`");
     expect(output).toContain("queued/waiting");
     expect(output).toContain("merge_queue_pending");
+    // SYMPH-645: the post-enqueue wait names a concrete, falsifiable cadence +
+    // bound, not just "keep waiting" — rendered via the symphony base template.
+    expect(output).toContain(
+      "wait 30s before the first re-check, then 60s, then 120s, capping the interval at 300s between checks",
+    );
     expect(output).not.toContain("gh pr checks --watch --required --fail-fast");
     expect(output).toContain("[BLOCKED_NEEDS_HUMAN_BLOCKERS:");
     expect(output).toContain("auto_merge_permission_denied");
+  });
+
+  it("names a bounded merge-queue polling cadence across every merge surface (SYMPH-645)", async () => {
+    const cadence =
+      "wait 30s before the first re-check, then 60s, then 120s, capping the interval at 300s between checks";
+
+    // Standalone partial rendered by the primary pipeline-config/WORKFLOW.md
+    // merge stage (asserted directly so removing it from the partial fails).
+    const mergeLiquid = await readFile(
+      resolve(
+        import.meta.dirname,
+        "../../pipeline-config/prompts/merge.liquid",
+      ),
+      "utf8",
+    );
+    expect(mergeLiquid).toContain(cadence);
+    // The cadence terminates into the existing pending marker, never a tight loop.
+    expect(mergeLiquid).toContain("merge_queue_pending");
+
+    // Inline merge surfaces must stay in sync so the cadence cannot silently
+    // drift out of one rendered worker prompt.
+    for (const configPath of [
+      "../../pipeline-config/templates/WORKFLOW-template.md",
+      "../../pipeline-config/WORKFLOW-staged.md",
+      "../../pipeline-config/WORKFLOW-instrumentation.md",
+    ].map((path) => resolve(import.meta.dirname, path))) {
+      expect(await readFile(configPath, "utf8")).toContain(cadence);
+    }
   });
 
   it("null stageName renders without error (backward compat)", async () => {

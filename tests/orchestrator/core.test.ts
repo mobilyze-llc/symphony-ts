@@ -37,6 +37,7 @@ import {
   type MergeActuatorLiveState,
   type MergeActuatorSideEffects,
   buildMergeCandidateEntryFromReviewGate,
+  reduceMergeCandidates,
 } from "../../src/orchestrator/merge-candidate.js";
 import type { TrackerIssueWriteRequest } from "../../src/orchestrator/tracker-write.js";
 import type { HeadlessCouncilGateResult } from "../../src/review/headless-council-gate.js";
@@ -7860,6 +7861,62 @@ describe("live merge actuator (SYMPH-735)", () => {
       .getState()
       .dispatcherRunJournal.find((entry) => entry.kind === "spec_fidelity");
     expect(specEntry?.metadata.reviewed_head_sha).toBe("head-sha");
+  });
+
+  it("supersedes a stale parked merge candidate when a resumed review round reviews a new head (SYMPH-764)", async () => {
+    const round1Path = await writeReviewGateResultFixture();
+    const round2Path = await writeReviewGateResultFixture({
+      review_metadata: {
+        reviewed_head_sha: "head-B",
+        previous_reviewed_head_sha: "head-sha",
+        base_sha: "base-sha",
+        round: 2,
+        mode: "full",
+        routing_mode: "standard",
+        verdict: "pass",
+      },
+    } as Partial<HeadlessCouncilGateResult>);
+
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+    });
+
+    // Round 1: a passing review→merge promotes a candidate at head "head-sha".
+    await stageMergeCandidate(orchestrator, round1Path);
+    const state = orchestrator.getState();
+    expect(
+      reduceMergeCandidates(state.dispatcherRunJournal)["1"]?.reviewedHeadSha,
+    ).toBe("head-sha");
+
+    // That candidate parked, and the operator resumed the issue into a NEW
+    // review round. Re-arm the review stage and drop the round-1 merge
+    // continuation so the next poll re-dispatches review.
+    state.issueStages["1"] = "review";
+    state.retryAttempts = {};
+    state.claimed.delete("1");
+
+    // Round 2: a passing review for a NEW head exits review→merge. The stale
+    // round-1 candidate must NOT short-circuit ingestion of this round's rows.
+    await stageMergeCandidate(orchestrator, round2Path);
+
+    // The new round's candidate supersedes the stale one: a head-B merge_candidate
+    // row was appended, and the canonical reviewed head — which merge dispatch and
+    // the spec-fidelity verdict both key on (SYMPH-758) — now reflects "head-B".
+    const after = orchestrator.getState();
+    expect(
+      after.dispatcherRunJournal.some(
+        (entry) =>
+          entry.kind === "merge_candidate" &&
+          entry.metadata.reviewed_head_sha === "head-B",
+      ),
+    ).toBe(true);
+    expect(
+      reduceMergeCandidates(after.dispatcherRunJournal)["1"]?.reviewedHeadSha,
+    ).toBe("head-B");
   });
 
   it("completes the issue when the actuator writes tracker done", async () => {
@@ -15895,6 +15952,135 @@ describe("dispatch failure diagnostics", () => {
     } finally {
       console.warn = origWarn;
     }
+  });
+});
+
+describe("retry reconciliation under rate gate (SYMPH-773)", () => {
+  const blockedSecondaryHeadroom = {
+    secondary: {
+      used_percent: 98,
+      window_minutes: 10080,
+      resets_at: 1772800000,
+    },
+  };
+
+  function gatedRetryOrchestrator(input: {
+    candidates: Issue[];
+    onIssueDropped?: (drop: {
+      issueId: string;
+      identifier: string;
+      reason: string;
+    }) => void;
+  }) {
+    const timers = createFakeTimerScheduler();
+    const orchestrator = createOrchestrator({
+      timerScheduler: timers,
+      tracker: createTracker({ candidates: input.candidates }),
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+        },
+      }),
+      ...(input.onIssueDropped ? { onIssueDropped: input.onIssueDropped } : {}),
+    });
+    // Secondary headroom below the configured floor: the admission gate blocks.
+    orchestrator.getState().codexRateLimits = blockedSecondaryHeadroom;
+    return { orchestrator, timers };
+  }
+
+  it("clears a retry entry for an issue that left the active set when the rate-limit gate is blocked", async () => {
+    const dropped: Array<{ identifier: string; reason: string }> = [];
+    // Operator parked the issue to a state outside active_states, so it is gone
+    // from the candidate fetch.
+    const { orchestrator, timers } = gatedRetryOrchestrator({
+      candidates: [],
+      onIssueDropped: (input) => {
+        dropped.push(input);
+      },
+    });
+    orchestrator.getState().claimed.add("1");
+    orchestrator.getState().retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+      timerHandle: timers.set(() => {}, 1000),
+      error: "rate-limit admission floor active",
+      delayType: "failure",
+    };
+
+    const result = await orchestrator.onRetryTimer("1");
+
+    // The retry timer reconciles against a fresh candidate fetch before the
+    // rate-gate deferral, so the departed issue is released instead of pinned.
+    expect(result.released).toBe(true);
+    expect(result.retryEntry).toBeNull();
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(orchestrator.getState().claimed.has("1")).toBe(false);
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]!.identifier).toBe("ISSUE-1");
+    expect(dropped[0]!.reason).toBe("issue no longer in candidate list");
+  });
+
+  it("does not reconcile merge-actuator poll retries by candidate-set membership", async () => {
+    const dropped: Array<{ issueId: string }> = [];
+    const { orchestrator, timers } = gatedRetryOrchestrator({
+      candidates: [],
+      onIssueDropped: (input) => {
+        dropped.push(input);
+      },
+    });
+    orchestrator.getState().claimed.add("1");
+    orchestrator.getState().retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 2,
+      dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+      timerHandle: timers.set(() => {}, 1000),
+      error: "merge_queue_pending",
+      delayType: "merge_actuator_poll",
+    };
+
+    const result = await orchestrator.onRetryTimer("1");
+
+    // The merge-actuator re-poll is bounded by the durable journal, not by
+    // candidate-set membership — under the gate it defers (re-polls) rather than
+    // being dropped, even though the issue is absent from the candidate fetch.
+    expect(result.released).toBe(false);
+    expect(orchestrator.getState().retryAttempts["1"]).toMatchObject({
+      delayType: "merge_actuator_poll",
+    });
+    expect(dropped).toHaveLength(0);
+  });
+
+  it("keeps deferring an active issue's retry when the rate-limit gate is blocked", async () => {
+    const dropped: Array<{ issueId: string }> = [];
+    // Issue is still in the active candidate set.
+    const { orchestrator, timers } = gatedRetryOrchestrator({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      onIssueDropped: (input) => {
+        dropped.push(input);
+      },
+    });
+    orchestrator.getState().claimed.add("1");
+    orchestrator.getState().retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+      timerHandle: timers.set(() => {}, 1000),
+      error: "previous failure",
+      delayType: "failure",
+    };
+
+    const result = await orchestrator.onRetryTimer("1");
+
+    // Still active, just gated: the retry is preserved and re-deferred, not dropped.
+    expect(result.released).toBe(false);
+    expect(orchestrator.getState().retryAttempts["1"]).toBeDefined();
+    expect(orchestrator.getState().claimed.has("1")).toBe(true);
+    expect(dropped).toHaveLength(0);
   });
 });
 

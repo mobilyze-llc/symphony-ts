@@ -940,7 +940,7 @@ gh pr view $PR_NUMBER --json state,mergedAt,mergeCommit --jq '{state, mergedAt, 
 ```
 Expected: `state` is `MERGED`, `mergedAt` is non-null, and `mergeCommit` is non-null. If all three are true, proceed to workpad update.
 
-If `state` is still `OPEN` and required checks are pending or passing, keep waiting; do not mark the issue failed or return it to In Progress merely because the queued PR is still open. If worker budget or time stops before merge proof and there is no explicit rejection, emit `[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":["merge_queue_pending"],"permission":[],"mergeStateStatus":"OPEN","failingChecks":[],"pendingChecks":[]}]` immediately before `[BLOCKED_NEEDS_HUMAN: auto_merge]`.
+If `state` is still `OPEN` and required checks are pending or passing, keep waiting on a bounded backoff — wait 30s before the first re-check, then 60s, then 120s, capping the interval at 300s between checks, keeping the total post-enqueue wait under the merge stage turn budget and `stall_timeout_ms`; do not mark the issue failed or return it to In Progress merely because the queued PR is still open. On reaching that wait bound with the PR still `OPEN` and no explicit rejection, stop polling and emit the `merge_queue_pending` markers below rather than looping; equally, if worker budget or time stops before merge proof and there is no explicit rejection, emit `[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":["merge_queue_pending"],"permission":[],"mergeStateStatus":"OPEN","failingChecks":[],"pendingChecks":[]}]` immediately before `[BLOCKED_NEEDS_HUMAN: auto_merge]`.
 
 If the merge queue rejects the PR (check failures on rebased code):
 1. Run `gh pr view --json state,statusCheckRollup` to identify which check failed and why
