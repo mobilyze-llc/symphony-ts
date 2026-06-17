@@ -4396,14 +4396,26 @@ export class OrchestratorCore {
       return true;
     }
 
-    if (this.findCanonicalMergeCandidate(input.issueId) !== null) {
-      return true;
-    }
+    // SYMPH-764: only short-circuit when the existing canonical candidate
+    // reflects THIS review round. The prior guard returned on ANY canonical
+    // candidate, which wrongly skipped re-ingestion after a parked candidate was
+    // resumed into a NEW review round — the new round's review_gate_result /
+    // merge_candidate rows were never appended, so merge dispatch and the
+    // spec-fidelity verdict (SYMPH-758) kept keying to the stale candidate's
+    // reviewed head. The decision is deferred until after the artifact is read,
+    // where this round's reviewed head is known.
+    const existingCanonical = this.findCanonicalMergeCandidate(input.issueId);
 
     const markerPath = extractReviewGateResultPath(
       input.agentMessage ?? input.runningEntry.lastCodexMessage,
     );
     if (markerPath === null) {
+      // No fresh review artifact on this exit. If a prior round already recorded
+      // a canonical candidate this is an idempotent re-exit — advance on it.
+      // Otherwise the review produced no canonical rows at all: park.
+      if (existingCanonical !== null) {
+        return true;
+      }
       await this.parkMergeCandidateInvariantFailure({
         issue: input.runningEntry.issue,
         stageName: input.exitedStageName,
@@ -4420,6 +4432,17 @@ export class OrchestratorCore {
       issueIdentifier: input.runningEntry.identifier,
     });
     if (!artifactResult.ok) {
+      // SYMPH-764 (council R1 P2 + R2): advance on the durable journal canonical
+      // ONLY when the artifact is genuinely UNREADABLE/missing (I/O failure) and
+      // a canonical already exists — the idempotent-re-exit replay where the
+      // ephemeral /tmp artifact was cleaned up after the canonical was journaled.
+      // A READABLE artifact that fails semantic validation (wrong issue, non-pass
+      // verdict, not merge-eligible, ...) means THIS round did NOT pass: it must
+      // park, never advance on a stale candidate (council R2 — that would revive
+      // the SYMPH-764 class through a different door).
+      if (existingCanonical !== null && artifactResult.unreadable === true) {
+        return true;
+      }
       await this.parkMergeCandidateInvariantFailure({
         issue: input.runningEntry.issue,
         stageName: input.exitedStageName,
@@ -4457,6 +4480,27 @@ export class OrchestratorCore {
       return false;
     }
 
+    // SYMPH-764: short-circuit only when the existing canonical candidate is
+    // this round's candidate (same reviewed head) — an idempotent re-exit whose
+    // rows are already present. A canonical candidate from an earlier,
+    // since-parked round has a different reviewed head; appending this round's
+    // rows (idempotent by key) lets the reducer supersede it so the canonical
+    // reviewed head reflects the current round.
+    const mergeCandidateEntry = entries.find(
+      (entry) => entry.kind === "merge_candidate",
+    );
+    const reviewedHeadSha =
+      mergeCandidateEntry === undefined
+        ? null
+        : readMetadataString(mergeCandidateEntry.metadata, "reviewed_head_sha");
+    if (
+      existingCanonical !== null &&
+      reviewedHeadSha !== null &&
+      existingCanonical.reviewedHeadSha === reviewedHeadSha
+    ) {
+      return true;
+    }
+
     for (const entry of entries) {
       await this.recordRunJournalEntry(entry);
     }
@@ -4490,7 +4534,7 @@ export class OrchestratorCore {
     issueIdentifier: string;
   }): Promise<
     | { ok: true; result: HeadlessCouncilGateResult }
-    | { ok: false; reason: string }
+    | { ok: false; reason: string; unreadable?: boolean }
   > {
     if (input.path.includes("\0")) {
       return { ok: false, reason: "review artifact path contains NUL byte" };
@@ -4500,9 +4544,16 @@ export class OrchestratorCore {
     try {
       parsed = JSON.parse(await readFile(resolvedPath, "utf8"));
     } catch {
+      // I/O failure (e.g. the ephemeral artifact was cleaned up before an
+      // idempotent re-exit), distinct from a readable artifact that fails the
+      // semantic validation below. Only this branch is "the input vanished" —
+      // the SYMPH-764 council-R2 fix may fall back to the durable journal
+      // canonical here, but NOT on a semantic failure (which means this round
+      // did not pass and must never advance on a stale candidate).
       return {
         ok: false,
         reason: "review artifact unreadable or malformed",
+        unreadable: true,
       };
     }
 
@@ -5089,6 +5140,36 @@ export class OrchestratorCore {
     // (SYMPH-337): auto-resumes must never burn into protected headroom.
     const rateLimitGate = this.evaluateRateLimitAdmissionGate();
     if (rateLimitGate.blocked) {
+      // SYMPH-773: a closed rate gate must not pin a retry whose issue already
+      // left the active set (e.g. an operator parked it to a state outside
+      // active_states). Reconcile against a fresh candidate fetch BEFORE the
+      // deferral so the retry is released within one timer cycle instead of
+      // rescheduling forever behind the gate. The fetch is bounded — at most one
+      // per gated retry-timer fire, not per poll. Merge-actuator re-polls are
+      // journal-bounded and intentionally outlive candidate-set membership, so
+      // they are exempt and simply re-defer.
+      if (retryEntry.delayType !== "merge_actuator_poll") {
+        let gateCandidates: Issue[] | null;
+        try {
+          gateCandidates = await this.tracker.fetchCandidateIssues();
+        } catch {
+          // A tracker hiccup must not drop a healthy retry: fall through to the
+          // normal gate deferral and reconcile again on the next timer fire.
+          gateCandidates = null;
+        }
+        if (
+          gateCandidates !== null &&
+          !gateCandidates.some((candidate) => candidate.id === issueId)
+        ) {
+          this.dropDepartedRetryCandidate(
+            issueId,
+            retryEntry.identifier ?? issueId,
+            null,
+            null,
+          );
+          return { dispatched: false, released: true, retryEntry: null };
+        }
+      }
       console.warn(
         `[orchestrator] ${rateLimitGate.reason} Deferring retry for ${retryEntry.identifier ?? issueId}.`,
       );
@@ -5143,16 +5224,12 @@ export class OrchestratorCore {
     const issue =
       candidates.find((candidate) => candidate.id === issueId) ?? null;
     if (issue === null) {
-      this.state.failed.add(issueId);
-      this.releaseClaim(issueId);
-      this.clearTerminalIssueRuntimeState(issueId);
-      this.onIssueDropped?.({
+      this.dropDepartedRetryCandidate(
         issueId,
-        identifier: retryEntry.identifier ?? issueId,
-        title: null,
-        url: null,
-        reason: "issue no longer in candidate list",
-      });
+        retryEntry.identifier ?? issueId,
+        null,
+        null,
+      );
       return {
         dispatched: false,
         released: true,
@@ -12554,6 +12631,32 @@ export class OrchestratorCore {
   private releaseClaim(issueId: string): void {
     this.clearRetryEntry(issueId);
     this.state.claimed.delete(issueId);
+  }
+
+  /**
+   * Drop a retry-only candidate that can no longer be dispatched: an issue with
+   * a pending retry timer that has left the active candidate set. Shared by the
+   * onRetryTimer rate-gate reconcile (SYMPH-773) and its post-fetch "issue gone
+   * from candidates" path so both dispose identically — mark failed, release the
+   * claim (which cancels the retry timer and deletes the entry), clear terminal
+   * runtime state, and fire the drop callback.
+   */
+  private dropDepartedRetryCandidate(
+    issueId: string,
+    identifier: string,
+    title: string | null,
+    url: string | null,
+  ): void {
+    this.state.failed.add(issueId);
+    this.releaseClaim(issueId);
+    this.clearTerminalIssueRuntimeState(issueId);
+    this.onIssueDropped?.({
+      issueId,
+      identifier,
+      title,
+      url,
+      reason: "issue no longer in candidate list",
+    });
   }
 
   private intentIdempotencyContext(
