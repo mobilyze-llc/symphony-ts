@@ -340,6 +340,21 @@ describe("parseHumanBlockSignal", () => {
     });
   });
 
+  it("treats an empty blockers payload as a deliberate empty string", () => {
+    expect(
+      parseHumanBlockSignal(
+        [
+          "Readiness blocked.",
+          "[BLOCKED_NEEDS_HUMAN_BLOCKERS: ]",
+          "[BLOCKED_NEEDS_HUMAN: auto_merge]",
+        ].join("\n"),
+      ),
+    ).toEqual({
+      operation: "auto_merge",
+      blockers: "",
+    });
+  });
+
   it("accepts bracket-like blocker payload content verbatim", () => {
     expect(
       parseHumanBlockSignal(
@@ -442,6 +457,20 @@ describe("parseHumanBlockSignal", () => {
       blockers:
         '{"readiness":["pending_checks"],"permission":["auto_merge_denied"]}',
     });
+  });
+
+  it("normalizes operation markers with interior bracket text to other", () => {
+    expect(
+      parseHumanBlockSignal(
+        "Verification blocked.\n[BLOCKED_NEEDS_HUMAN: needs [operator] decision]",
+      ),
+    ).toEqual({ operation: "other", blockers: null });
+  });
+
+  it("normalizes unknown operation markers to other", () => {
+    expect(
+      parseHumanBlockSignal("[BLOCKED_NEEDS_HUMAN: await_review]"),
+    ).toEqual({ operation: "other", blockers: null });
   });
 
   it("keeps a bare BLOCKED-needs-human line as a legacy safe fallback", () => {

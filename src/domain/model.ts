@@ -1522,7 +1522,8 @@ function parseHumanBlockersLine(line: string | null): string | null {
 
   const trimmed = line.trim();
   // Treat only the outer marker envelope as syntax; payload text is recorded
-  // verbatim and may contain bracket-like content.
+  // verbatim after edge trim and may contain bracket-like content. An empty
+  // payload is a deliberate empty string, distinct from a missing blockers line.
   if (
     !trimmed.startsWith(HUMAN_BLOCKERS_PREFIX) ||
     !trimmed.endsWith(HUMAN_BLOCK_SUFFIX)
@@ -1542,6 +1543,8 @@ function normalizeHumanBlockOperation(
     return "other";
   }
 
+  // Operation payloads are normalized only by case and dash/underscore spelling;
+  // bracket-bearing or otherwise unknown payloads collapse to "other".
   const normalized = rawOperation.toLowerCase().replaceAll("-", "_");
   return HUMAN_BLOCK_OPERATIONS.includes(normalized as HumanBlockOperation)
     ? (normalized as HumanBlockOperation)
