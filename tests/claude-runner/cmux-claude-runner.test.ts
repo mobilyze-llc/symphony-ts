@@ -519,11 +519,15 @@ describe("Claude CMUX runner", () => {
     });
   });
 
-  it("rejects stale same-stem mirrors written before the run start", async () => {
+  it("accepts a same-stem mirror written during the run even when its mtime predates run start", async () => {
     const harness = await createHarness();
     const outsideDir = await mkdtemp(join(tmpdir(), "claude-runner-remote-"));
     const remoteArtifact = join(outsideDir, "opus.md");
     const mirroredArtifact = join(harness.artifactDir, "opus.md");
+    // Backdate the freshly written mirror to reproduce CI filesystem mtime
+    // granularity / clock skew. Freshness is established by absent-before ->
+    // present-after (removeStaleCmuxMirror clears any pre-run mirror), not by a
+    // wall-clock mtime comparison, so the mirror must still be accepted.
     const oldDate = new Date("2000-01-01T00:00:00Z");
     const runCommand: ClaudeRunnerCommand = async (_command, args) => {
       if (args[0] === "preflight") {
@@ -559,18 +563,22 @@ describe("Claude CMUX runner", () => {
       { runCommand },
     );
 
-    expect(result.status).toBe("invalid_artifact");
-    expect(result.attempts[0]?.mirrorFallback).toMatchObject({
-      attempted: true,
-      used: false,
-      failureKind: "stale",
-      freshnessPassed: false,
-      selectedMirrorPath: mirroredArtifact,
+    expect(result.status).toBe("passed");
+    expect(result.artifactPath).toBe(mirroredArtifact);
+    expect(result.remoteArtifactPath).toBe(remoteArtifact);
+    expect(result.attempts[0]).toMatchObject({
+      artifactPath: mirroredArtifact,
+      remoteArtifactPath: remoteArtifact,
+      mirrorFallback: expect.objectContaining({
+        attempted: true,
+        used: true,
+        remoteArtifactPath: remoteArtifact,
+        selectedMirrorPath: mirroredArtifact,
+        freshnessPassed: true,
+        failureKind: null,
+      }),
+      validationErrors: [],
     });
-    expect(result.validationErrors).toEqual([
-      expect.stringContaining("artifact_path resolves outside artifact dir"),
-      expect.stringContaining("mirror fallback is stale"),
-    ]);
   });
 
   it("rejects stale same-stem mirror directories without aborting the run", async () => {
