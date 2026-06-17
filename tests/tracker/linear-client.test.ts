@@ -1037,6 +1037,162 @@ describe("resolveLabelIdsByNames", () => {
   });
 });
 
+describe("createTrackFindingIssue", () => {
+  it("dedups by the fingerprint marker without resolving state or creating", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [
+              {
+                id: "ex-1",
+                identifier: "SYMPH-500",
+                title: "[track:fp-1] Existing track finding",
+                url: "https://linear.app/x/issue/SYMPH-500",
+                state: { name: "Backlog", type: "backlog" },
+              },
+            ],
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+
+    const result = await client.createTrackFindingIssue({
+      teamId: "team-1",
+      teamKey: "SYMPH",
+      fingerprint: "fp-1",
+      title: "[track:fp-1] Existing track finding",
+      description: "body",
+    });
+
+    expect(result).toEqual({
+      id: "ex-1",
+      identifier: "SYMPH-500",
+      title: "[track:fp-1] Existing track finding",
+      url: "https://linear.app/x/issue/SYMPH-500",
+      created: false,
+    });
+    // Only the dedup search ran — no state resolution, no create mutation.
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates a Track-finding issue in the Backlog state when none exists", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(jsonResponse({ data: { issues: { nodes: [] } } }))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            workflowStates: {
+              nodes: [
+                { id: "state-triage", name: "Triage" },
+                { id: "state-backlog", name: "Backlog" },
+              ],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issueCreate: {
+              success: true,
+              issue: {
+                id: "new-1",
+                identifier: "SYMPH-600",
+                title: "[track:fp-1] New track finding",
+                url: "https://linear.app/x/issue/SYMPH-600",
+                state: { name: "Backlog" },
+              },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    const result = await client.createTrackFindingIssue({
+      teamId: "team-1",
+      teamKey: "SYMPH",
+      fingerprint: "fp-1",
+      title: "[track:fp-1] New track finding",
+      description: "body",
+    });
+
+    expect(result).toEqual({
+      id: "new-1",
+      identifier: "SYMPH-600",
+      title: "[track:fp-1] New track finding",
+      url: "https://linear.app/x/issue/SYMPH-600",
+      created: true,
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    // Backlog is preferred over Triage for non-blocking follow-up work.
+    const createCall = parseRequestBody(fetchFn.mock.calls[2]?.[1]);
+    expect(createCall.variables.stateId).toBe("state-backlog");
+  });
+
+  it("files a fresh issue when the only marker match is completed/cancelled", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issues: {
+              nodes: [
+                {
+                  id: "old-1",
+                  identifier: "SYMPH-400",
+                  title: "[track:fp-1] Old (done)",
+                  url: "https://linear.app/x/issue/SYMPH-400",
+                  state: { name: "Done", type: "completed" },
+                },
+              ],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            workflowStates: {
+              nodes: [{ id: "state-backlog", name: "Backlog" }],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issueCreate: {
+              success: true,
+              issue: {
+                id: "new-2",
+                identifier: "SYMPH-601",
+                title: "[track:fp-1] Fresh track finding",
+                url: "https://linear.app/x/issue/SYMPH-601",
+                state: { name: "Backlog" },
+              },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    const result = await client.createTrackFindingIssue({
+      teamId: "team-1",
+      teamKey: "SYMPH",
+      fingerprint: "fp-1",
+      title: "[track:fp-1] Fresh track finding",
+      description: "body",
+    });
+
+    expect(result.created).toBe(true);
+    expect(result.identifier).toBe("SYMPH-601");
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  });
+});
+
 function createClient(
   overrides: Partial<ConstructorParameters<typeof LinearTrackerClient>[0]> = {},
 ): LinearTrackerClient {

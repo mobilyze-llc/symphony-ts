@@ -40,7 +40,10 @@ import {
   reduceMergeCandidates,
 } from "../../src/orchestrator/merge-candidate.js";
 import type { TrackerIssueWriteRequest } from "../../src/orchestrator/tracker-write.js";
-import type { HeadlessCouncilGateResult } from "../../src/review/headless-council-gate.js";
+import type {
+  CouncilTerminationAssessment,
+  HeadlessCouncilGateResult,
+} from "../../src/review/headless-council-gate.js";
 import { DEFAULT_LINEAR_MAX_LEN } from "../../src/shared/egress.js";
 import type { TicketFeatureSourceIssue } from "../../src/tracker/ticket-feature.js";
 import type {
@@ -218,6 +221,163 @@ describe("orchestrator core", () => {
         (entry) => entry.kind === "merge_candidate",
       )?.metadata.review_result_path,
     ).toBe(reviewResultPath);
+  });
+
+  it("files surviving Track findings with durable IDs before advancing review to merge (SYMPH-763)", async () => {
+    const filerCalls: Array<readonly { fingerprint: string }[]> = [];
+    const reviewResultPath = await writeReviewGateResultFixture({
+      termination: trackFilingTermination([
+        { fingerprint: "fp-1", title: "Track A", issueId: null, url: null },
+      ]),
+    });
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      fileTrackFindings: async (request) => {
+        filerCalls.push(request.findings);
+        return {
+          filed: request.findings.map((f) => ({
+            fingerprint: f.fingerprint,
+            issueId: `id-${f.fingerprint}`,
+            identifier: "SYMPH-901",
+            url: `https://linear.app/x/issue/${f.fingerprint}`,
+          })),
+          unfiled: [],
+        };
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const state = orchestrator.getState();
+    expect(state.issueStages["1"]).toBe("merge");
+    expect(filerCalls).toHaveLength(1);
+    expect(filerCalls[0]?.map((f) => f.fingerprint)).toEqual(["fp-1"]);
+    const entry = state.dispatcherRunJournal.findLast(
+      (e) => e.kind === "track_finding_filing",
+    );
+    expect(entry).toBeDefined();
+    expect(entry?.metadata.track_filing_status).toBe("filed");
+    const filings = entry?.metadata.filings as Array<Record<string, unknown>>;
+    expect(filings).toEqual([
+      expect.objectContaining({
+        fingerprint: "fp-1",
+        issue_id: "id-fp-1",
+        status: "filed",
+      }),
+    ]);
+  });
+
+  it("records an explicit unfiled status with the exact reason when the Track-finding filer fails, and still advances (SYMPH-763/SYMPH-760)", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture({
+      termination: trackFilingTermination([
+        { fingerprint: "fp-1", title: "Track A", issueId: null, url: null },
+      ]),
+    });
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      fileTrackFindings: async () => {
+        throw new Error("Linear 503 Service Unavailable");
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const state = orchestrator.getState();
+    // Filing is best-effort: a tracker failure must never block the merge advance.
+    expect(state.issueStages["1"]).toBe("merge");
+    const entry = state.dispatcherRunJournal.findLast(
+      (e) => e.kind === "track_finding_filing",
+    );
+    expect(entry?.metadata.track_filing_status).toBe("unfiled");
+    expect(entry?.metadata.track_filing_reason).toBe("track_findings_unfiled");
+    const filings = entry?.metadata.filings as Array<Record<string, unknown>>;
+    expect(filings[0]).toMatchObject({
+      fingerprint: "fp-1",
+      status: "unfiled",
+      reason: "Linear 503 Service Unavailable",
+    });
+  });
+
+  it("does not re-file a Track finding already filed in the journal on replay (SYMPH-763 dedup)", async () => {
+    let filerCallCount = 0;
+    const reviewResultPath = await writeReviewGateResultFixture({
+      termination: trackFilingTermination([
+        { fingerprint: "fp-1", title: "Track A", issueId: null, url: null },
+      ]),
+    });
+    const priorFiling: DispatcherRunJournalEntry = {
+      sequence: 1,
+      idempotencyKey: "track_finding_filing:1:prior-round",
+      timestamp: "2026-03-05T00:00:00.000Z",
+      kind: "track_finding_filing",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      operation: "tracker_write",
+      stage: "review",
+      attempt: null,
+      ownerId: null,
+      lease: null,
+      summary: "prior filing",
+      metadata: {
+        track_filing_status: "filed",
+        track_filing_required: 1,
+        track_filing_filed_count: 1,
+        filings: [
+          {
+            fingerprint: "fp-1",
+            issue_id: "id-fp-1",
+            identifier: "SYMPH-901",
+            url: "https://linear.app/x/issue/fp-1",
+            status: "filed",
+          },
+        ],
+      },
+    };
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      runJournal: [priorFiling],
+      fileTrackFindings: async () => {
+        filerCallCount += 1;
+        return { filed: [], unfiled: [] };
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const state = orchestrator.getState();
+    expect(state.issueStages["1"]).toBe("merge");
+    // fp-1 already carries a durable ID in the journal — the filer must not run.
+    expect(filerCallCount).toBe(0);
   });
 
   it("parks replayed merge-stage issues with passed review but no candidate before worker dispatch", async () => {
@@ -14930,6 +15090,7 @@ function createOrchestrator(overrides?: {
   requestSupervisionResteer?: OrchestratorCoreOptions["requestSupervisionResteer"];
   runEnsembleGate?: OrchestratorCoreOptions["runEnsembleGate"];
   requestTrackerIssueWrite?: OrchestratorCoreOptions["requestTrackerIssueWrite"];
+  fileTrackFindings?: OrchestratorCoreOptions["fileTrackFindings"];
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   postComment?: OrchestratorCoreOptions["postComment"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
@@ -14990,6 +15151,10 @@ function createOrchestrator(overrides?: {
 
   if (overrides?.requestTrackerIssueWrite !== undefined) {
     options.requestTrackerIssueWrite = overrides.requestTrackerIssueWrite;
+  }
+
+  if (overrides?.fileTrackFindings !== undefined) {
+    options.fileTrackFindings = overrides.fileTrackFindings;
   }
 
   if (overrides?.runContinuousFeedback !== undefined) {
@@ -15229,6 +15394,47 @@ async function writeReviewGateResultFixture(
   } as unknown as HeadlessCouncilGateResult;
   await writeFile(resultJson, `${JSON.stringify(result, null, 2)}\n`);
   return resultJson;
+}
+
+function trackFilingTermination(
+  findings: Array<{
+    fingerprint: string;
+    title: string;
+    issueId: string | null;
+    url: string | null;
+  }>,
+): CouncilTerminationAssessment {
+  const required = findings.length;
+  const filed = findings.filter((f) => f.issueId !== null).length;
+  const status =
+    required === 0 ? "none" : filed === required ? "filed" : "unfiled";
+  return {
+    status: "converged",
+    reason: "disposition_exit",
+    action: "continue_pipeline",
+    roundsPerCycle: 1,
+    thresholds: { sameFamilyReopenLimit: 2, roundWarning: 2, roundCap: 3 },
+    alertLevel: status === "unfiled" ? "warning" : "ok",
+    blockingFindingCount: 0,
+    nonBlockingFindingCount: required,
+    trackFindingCount: required,
+    trackFiling: {
+      status,
+      required,
+      filed,
+      reason:
+        status !== "unfiled"
+          ? null
+          : filed === 0
+            ? "track_findings_unfiled"
+            : "track_findings_partially_filed",
+      findings,
+    },
+    familySynthesisCount: 0,
+    synthesisAttached: false,
+    tripwireFamilyNames: [],
+    synthesisFamilyNames: [],
+  };
 }
 
 function createConfig(overrides?: {

@@ -14,6 +14,7 @@ import {
   LINEAR_CREATE_COMMENT_MUTATION,
   LINEAR_CREATE_ISSUE_MUTATION,
   LINEAR_CREATE_ISSUE_WITH_STATE_MUTATION,
+  LINEAR_CREATE_TRACK_FINDING_ISSUE_MUTATION,
   LINEAR_ISSUES_BY_LABELS_QUERY,
   LINEAR_ISSUES_BY_STATES_QUERY,
   LINEAR_ISSUE_BY_IDENTIFIER_QUERY,
@@ -29,6 +30,7 @@ import {
   LINEAR_OPEN_ISSUES_BY_LABELS_QUERY,
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
   LINEAR_SEARCH_ISSUES_BY_TITLE_AND_TEAM_QUERY,
+  LINEAR_SEARCH_ISSUES_BY_TITLE_MARKER_AND_TEAM_QUERY,
   LINEAR_TICKET_FEATURE_ISSUES_QUERY,
   LINEAR_UPDATE_ISSUE_DESCRIPTION_MUTATION,
   LINEAR_WORKFLOW_STATES_QUERY,
@@ -149,6 +151,31 @@ interface LinearIssueCreateData {
       title?: string;
       state?: { name?: string };
     };
+  };
+}
+
+interface LinearTrackFindingCreateData {
+  issueCreate?: {
+    success?: boolean;
+    issue?: {
+      id?: string;
+      identifier?: string;
+      title?: string;
+      url?: string | null;
+      state?: { name?: string };
+    };
+  };
+}
+
+interface LinearSearchIssuesByTitleMarkerData {
+  issues?: {
+    nodes?: Array<{
+      id?: string;
+      identifier?: string;
+      title?: string;
+      url?: string | null;
+      state?: { name?: string; type?: string } | null;
+    }>;
   };
 }
 
@@ -996,6 +1023,128 @@ export class LinearTrackerClient implements IssueTracker {
       id: issue.id,
       identifier: issue.identifier,
       title: issue.title,
+      created: true,
+    };
+  }
+
+  /**
+   * File an autonomous Track-finding issue (SYMPH-763). Deduplicates by the
+   * `[track:<fingerprint>]` marker carried in the title: if an open
+   * (non-terminal) issue with that marker exists, returns it without creating a
+   * duplicate. Otherwise resolves a Backlog (then Triage) state and creates the
+   * issue — Track findings are non-blocking follow-up work, so they land in the
+   * backlog rather than demanding triage attention.
+   *
+   * The caller passes the marker-bearing title and full body (built by the
+   * shared track-finding-filing helpers); this method owns only the dedup,
+   * state resolution, and create.
+   */
+  async createTrackFindingIssue(input: {
+    teamId: string;
+    teamKey: string;
+    fingerprint: string;
+    title: string;
+    description: string;
+  }): Promise<{
+    id: string;
+    identifier: string;
+    title: string;
+    url: string | null;
+    created: boolean;
+  }> {
+    const marker = `[track:${input.fingerprint}]`;
+
+    // 1. Dedup by the fingerprint marker — find an existing non-terminal issue.
+    const existingResponse =
+      await this.postGraphql<LinearSearchIssuesByTitleMarkerData>(
+        LINEAR_SEARCH_ISSUES_BY_TITLE_MARKER_AND_TEAM_QUERY,
+        { teamKey: input.teamKey, marker, first: 10 },
+      );
+    for (const node of existingResponse.issues?.nodes ?? []) {
+      if (
+        typeof node?.id !== "string" ||
+        typeof node.identifier !== "string" ||
+        typeof node.title !== "string"
+      ) {
+        continue;
+      }
+      // `containsIgnoreCase` is a substring match; require the exact marker so a
+      // longer fingerprint that contains this one as a prefix cannot alias.
+      if (!node.title.includes(marker)) {
+        continue;
+      }
+      const stateType = node.state?.type;
+      if (stateType !== "completed" && stateType !== "cancelled") {
+        return {
+          id: node.id,
+          identifier: node.identifier,
+          title: node.title,
+          url: typeof node.url === "string" ? node.url : null,
+          created: false,
+        };
+      }
+    }
+
+    // 2. Resolve target state: Backlog first, then Triage.
+    const statesResponse = await this.postGraphql<LinearWorkflowStatesData>(
+      LINEAR_WORKFLOW_STATES_QUERY,
+      { teamKey: input.teamKey },
+    );
+    const states = statesResponse.workflowStates?.nodes ?? [];
+    let targetStateId: string | null = null;
+    for (const preferred of ["Backlog", "Triage"]) {
+      const found = states.find(
+        (s) =>
+          typeof s.name === "string" &&
+          s.name.toLowerCase() === preferred.toLowerCase(),
+      );
+      if (found !== undefined && typeof found.id === "string") {
+        targetStateId = found.id;
+        break;
+      }
+    }
+    if (targetStateId === null) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        `Could not find Backlog or Triage state for team "${input.teamKey}".`,
+        { details: { teamKey: input.teamKey, stateCount: states.length } },
+      );
+    }
+
+    // 3. Create the issue.
+    const response = await this.postGraphql<LinearTrackFindingCreateData>(
+      LINEAR_CREATE_TRACK_FINDING_ISSUE_MUTATION,
+      {
+        teamId: input.teamId,
+        title: input.title,
+        stateId: targetStateId,
+        description: input.description,
+      },
+    );
+    if (response.issueCreate?.success !== true) {
+      throw new TrackerError(
+        ERROR_CODES.linearGraphqlErrors,
+        "Linear issueCreate (track finding) mutation did not return success.",
+        { details: response },
+      );
+    }
+    const issue = response.issueCreate.issue;
+    if (
+      typeof issue?.id !== "string" ||
+      typeof issue.identifier !== "string" ||
+      typeof issue.title !== "string"
+    ) {
+      throw new TrackerError(
+        ERROR_CODES.linearUnknownPayload,
+        "Linear issueCreate (track finding) returned incomplete issue data.",
+        { details: response },
+      );
+    }
+    return {
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      url: typeof issue.url === "string" ? issue.url : null,
       created: true,
     };
   }

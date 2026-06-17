@@ -193,6 +193,13 @@ import {
   detectSupervisionFindings,
   formatSupervisionFindingsComment,
 } from "./supervision.js";
+import {
+  type TrackFindingFiler,
+  type TrackFindingFilingResult,
+  buildTrackFindingFilingMetadata,
+  collectTrackFindingsToFile,
+  reduceTrackFindingFilings,
+} from "./track-finding-filing.js";
 import type { TrackerIssueWriteRequest } from "./tracker-write.js";
 
 /**
@@ -614,6 +621,17 @@ export interface OrchestratorCoreOptions {
   requestTrackerIssueWrite?: (
     input: TrackerIssueWriteRequest,
   ) => Promise<void> | void;
+  /**
+   * Autonomous headless-council Track-finding filer (SYMPH-763). Invoked at
+   * review→merge closeout when the review-result records surviving Track
+   * findings as `unfiled` (SYMPH-760): files/finds durable Linear issues for
+   * them and returns the refs the orchestrator journals. The CLI council gate
+   * has no tracker access, so this is the only production path that attaches
+   * durable IDs. Best-effort — wired in runtime-host (mirrors
+   * `fileWatchdogTicketBestEffort`); absence/failure never blocks the merge
+   * advance, only leaves an explicit unfiled+reason in the journal.
+   */
+  fileTrackFindings?: TrackFindingFiler;
   runContinuousFeedback?: (input: {
     issue: Issue;
     event: ContinuousFeedbackEvent;
@@ -825,6 +843,8 @@ export class OrchestratorCore {
 
   private readonly requestTrackerIssueWrite?: OrchestratorCoreOptions["requestTrackerIssueWrite"];
 
+  private readonly fileTrackFindings?: OrchestratorCoreOptions["fileTrackFindings"];
+
   private readonly runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
 
   private readonly timerScheduler: TimerScheduler;
@@ -1022,6 +1042,7 @@ export class OrchestratorCore {
       options.getRunningSupervisionSnapshots;
     this.requestSupervisionResteer = options.requestSupervisionResteer;
     this.requestTrackerIssueWrite = options.requestTrackerIssueWrite;
+    this.fileTrackFindings = options.fileTrackFindings;
     this.runContinuousFeedback = options.runContinuousFeedback;
     this.timerScheduler = options.timerScheduler ?? defaultTimerScheduler();
     this.now = options.now ?? (() => new Date());
@@ -4493,31 +4514,165 @@ export class OrchestratorCore {
       mergeCandidateEntry === undefined
         ? null
         : readMetadataString(mergeCandidateEntry.metadata, "reviewed_head_sha");
-    if (
+    const sameRoundReExit =
       existingCanonical !== null &&
       reviewedHeadSha !== null &&
-      existingCanonical.reviewedHeadSha === reviewedHeadSha
-    ) {
-      return true;
+      existingCanonical.reviewedHeadSha === reviewedHeadSha;
+
+    if (!sameRoundReExit) {
+      for (const entry of entries) {
+        await this.recordRunJournalEntry(entry);
+      }
+
+      if (this.findCanonicalMergeCandidate(input.issueId) === null) {
+        await this.parkMergeCandidateInvariantFailure({
+          issue: input.runningEntry.issue,
+          stageName: input.exitedStageName,
+          reasonCode: "missing_canonical_review_gate_result",
+          detail:
+            "canonical review rows were appended, but no reducible merge_candidate exists for the issue",
+          reviewResultPath: markerPath,
+        });
+        return false;
+      }
     }
 
-    for (const entry of entries) {
-      await this.recordRunJournalEntry(entry);
-    }
-
-    if (this.findCanonicalMergeCandidate(input.issueId) === null) {
-      await this.parkMergeCandidateInvariantFailure({
-        issue: input.runningEntry.issue,
-        stageName: input.exitedStageName,
-        reasonCode: "missing_canonical_review_gate_result",
-        detail:
-          "canonical review rows were appended, but no reducible merge_candidate exists for the issue",
-        reviewResultPath: markerPath,
-      });
-      return false;
-    }
+    // SYMPH-763: file the council's surviving Track findings to the tracker
+    // before the pipeline continues to merge. Best-effort and idempotent on the
+    // finding fingerprint; runs on both the fresh closeout and an idempotent
+    // same-round re-exit (the per-round + fingerprint guards make the re-entry a
+    // no-op once filed). Never blocks the advance.
+    await this.fileTrackFindingsBestEffort(artifactResult.result, {
+      issueId: input.issueId,
+      issueIdentifier: input.runningEntry.identifier,
+      issue: input.runningEntry.issue,
+      stageName: input.exitedStageName,
+      reviewedHeadSha,
+    });
 
     return true;
+  }
+
+  /**
+   * File the council's surviving Track findings to the tracker at review→merge
+   * closeout (SYMPH-763). The CLI council gate has no tracker access, so it
+   * records Track findings as `unfiled` (SYMPH-760); this attaches durable
+   * Linear IDs via the injected `fileTrackFindings` filer and journals the
+   * outcome.
+   *
+   * Idempotency has two layers:
+   * - per review round: a `track_finding_filing` entry keyed on the reviewed
+   *   head short-circuits a replay/re-exit of the same round; and
+   * - per fingerprint: findings already carrying a durable ID in the journal
+   *   are dropped before the filer runs (cross-round dedup, AC: keyed on
+   *   finding fingerprint).
+   *
+   * Best-effort throughout: a missing filer, a thrown filer, or a tracker error
+   * leaves an explicit `unfiled` + exact reason in the journal (never a silent
+   * clean closeout — the SYMPH-760 invariant) and never blocks the merge
+   * advance.
+   */
+  private async fileTrackFindingsBestEffort(
+    result: HeadlessCouncilGateResult,
+    context: {
+      issueId: string;
+      issueIdentifier: string;
+      issue: Issue;
+      stageName: string | null;
+      reviewedHeadSha: string | null;
+    },
+  ): Promise<void> {
+    const filer = this.fileTrackFindings;
+    if (filer === undefined) {
+      return;
+    }
+    const trackFiling = result.termination?.trackFiling;
+    if (trackFiling === undefined) {
+      return;
+    }
+
+    const roundKey = `track_finding_filing:${context.issueId}:${
+      context.reviewedHeadSha ?? "unknown"
+    }`;
+    if (
+      this.state.dispatcherRunJournal.some(
+        (entry) =>
+          entry.kind === "track_finding_filing" &&
+          entry.idempotencyKey === roundKey,
+      )
+    ) {
+      // This review round already attempted filing (replay / same-round re-exit).
+      return;
+    }
+
+    const alreadyFiled = reduceTrackFindingFilings(
+      this.state.dispatcherRunJournal,
+      context.issueId,
+    );
+    const toFile = collectTrackFindingsToFile(
+      trackFiling,
+      result.lanes,
+      new Set(alreadyFiled.keys()),
+    );
+    if (toFile.length === 0) {
+      // Nothing survived, or every surviving finding already carries a durable
+      // ID from a prior round/replay — no filing and no new journal row.
+      return;
+    }
+
+    let filingResult: TrackFindingFilingResult;
+    try {
+      filingResult = await filer({
+        issueId: context.issueId,
+        issueIdentifier: context.issueIdentifier,
+        issueTitle: context.issue.title,
+        issueUrl: context.issue.url ?? null,
+        stageName: context.stageName,
+        reviewedHeadSha: context.reviewedHeadSha,
+        repo: result.pr.repo,
+        prNumber: result.pr.number,
+        findings: toFile,
+      });
+    } catch (error) {
+      // A thrown filer must not block the merge advance: record every attempted
+      // finding as unfiled with the exact reason (SYMPH-760 invariant).
+      filingResult = {
+        filed: [],
+        unfiled: toFile.map((finding) => ({
+          fingerprint: finding.fingerprint,
+          reason: error instanceof Error ? error.message : String(error),
+        })),
+      };
+    }
+
+    const metadata = buildTrackFindingFilingMetadata({
+      required: toFile.length,
+      reviewedHeadSha: context.reviewedHeadSha,
+      filed: filingResult.filed,
+      unfiled: filingResult.unfiled,
+    });
+    try {
+      await this.recordRunJournalEntry({
+        idempotencyKey: roundKey,
+        timestamp: this.now().toISOString(),
+        kind: "track_finding_filing",
+        issueId: context.issueId,
+        issueIdentifier: context.issueIdentifier,
+        operation: "tracker_write",
+        stage: context.stageName,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary: `Filed ${filingResult.filed.length}/${toFile.length} council Track finding(s) to the tracker.`,
+        metadata,
+      });
+    } catch (error) {
+      console.warn(
+        `[orchestrator] Failed to journal Track-finding filing for ${context.issueIdentifier}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   private isReviewToMergeTransition(exitedStageName: string | null): boolean {
