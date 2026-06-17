@@ -48,7 +48,7 @@ export function ensureDecorrelatedFeedbackLane(
     role: `${preferredLane.role}-decorrelated`,
     model:
       preferredLane.model === null
-        ? "local-flash-reviewer"
+        ? "ds4-studio2/deepseek-v4-flash-reviewer"
         : `${preferredLane.model}-reviewer`,
   };
 }

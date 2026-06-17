@@ -120,7 +120,7 @@ continuous_feedback:
   # Default cheap lane. Override per workflow if a different feedback runner is
   # available, but keep this separate from authoritative terminal review.
   runner: pi
-  model: local-flash
+  model: ds4-studio2/deepseek-v4-flash
   role: continuous-feedback
   bounce_on_finding: true
 

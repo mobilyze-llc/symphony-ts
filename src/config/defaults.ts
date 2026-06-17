@@ -64,7 +64,8 @@ export const DEFAULT_RUNNER_KIND = "codex";
 export const DEFAULT_CONTINUOUS_FEEDBACK_ENABLED = true;
 export const DEFAULT_CONTINUOUS_FEEDBACK_EVENTS = ["checkpoint"] as const;
 export const DEFAULT_CONTINUOUS_FEEDBACK_RUNNER = "pi";
-export const DEFAULT_CONTINUOUS_FEEDBACK_MODEL = "local-flash";
+export const DEFAULT_CONTINUOUS_FEEDBACK_MODEL =
+  "ds4-studio2/deepseek-v4-flash";
 export const DEFAULT_CONTINUOUS_FEEDBACK_ROLE = "continuous-feedback";
 export const DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING = true;
 
