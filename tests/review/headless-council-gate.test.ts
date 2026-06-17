@@ -4442,6 +4442,42 @@ describe("runHeadlessCouncilGate", () => {
     });
   });
 
+  it("fails closed to unfiled when the Track-finding filer returns a malformed ref (SYMPH-760, council R2)", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n\n## Track\n- docs/operators.md:9 add rollout notes for a pre-existing issue.",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        // A non-object element and an empty issueId must not crash the gate.
+        trackFindingFiler: async () =>
+          [
+            null,
+            { fingerprint: "x", issueId: "" },
+          ] as unknown as ReadonlyArray<{
+            fingerprint: string;
+            issueId: string;
+            url?: string | null;
+          }>,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.termination?.trackFiling.status).toBe("unfiled");
+  });
+
   it("reports no track-filing requirement when there are no Track findings (SYMPH-760)", async () => {
     const harness = await createHarness({
       laneBehavior: {

@@ -4292,12 +4292,18 @@ export class OrchestratorCore {
     ) {
       // Advisory judge lane (SYMPH-343): fires alongside the normal advance.
       // Fired AFTER prepareReviewCompletionForMerge so this round's merge
-      // candidate already exists, letting us capture the reviewed head the
-      // judge is about to evaluate NOW — when only this round's candidate is
-      // canonical (SYMPH-758, council R1 P1). Capturing it here, not at
-      // deferred-record time, prevents a later review round's candidate from
-      // mis-keying this verdict. Null when no candidate was promoted (advisory
-      // only). Still before advanceStage so the AC snapshot is intact.
+      // candidate already exists, letting us capture the canonical candidate's
+      // reviewed head at FIRE time rather than re-resolving it at
+      // deferred-record time (SYMPH-758, council R1 P1) — that prevents a later
+      // review round's candidate from mis-keying this verdict. Null when no
+      // candidate was promoted (advisory only). NOTE: when an OLD candidate is
+      // already canonical from a parked/resumed lifecycle, prepareReviewCompletionForMerge
+      // short-circuits and the captured head may be that stale candidate's —
+      // a pre-existing merge-candidate-lifecycle gap tracked in SYMPH-764, not
+      // introduced here (the prior record-time lookup had the same staleness).
+      // Gated behind the reviewMergeReady guard, so a parked review skips the
+      // advisory judge — acceptable, as that path is already parked for an
+      // operator. Still before advanceStage, so the AC snapshot is intact.
       const scheduleDeferred = this.scheduleDeferred;
       const stageForVerdict = exitedStageName;
       const reviewedHeadShaForVerdict =

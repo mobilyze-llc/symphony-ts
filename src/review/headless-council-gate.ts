@@ -6325,23 +6325,29 @@ async function resolveTrackFindingFilings(
     );
     return resolved;
   }
-  for (const ref of refs) {
+  // The filer is external: narrow each ref as `unknown` so a malformed element
+  // (null, a primitive, a missing field) leaves its finding unfiled rather than
+  // throwing and aborting the gate (council R2 P3). A non-object element would
+  // otherwise crash on the field access below.
+  for (const ref of refs as readonly unknown[]) {
+    const record =
+      typeof ref === "object" && ref !== null
+        ? (ref as { fingerprint?: unknown; issueId?: unknown; url?: unknown })
+        : null;
     if (
-      typeof ref.fingerprint === "string" &&
-      typeof ref.issueId === "string" &&
-      ref.issueId.length > 0
+      record !== null &&
+      typeof record.fingerprint === "string" &&
+      typeof record.issueId === "string" &&
+      record.issueId.length > 0
     ) {
-      resolved.set(ref.fingerprint, {
-        issueId: ref.issueId,
-        url: ref.url ?? null,
+      resolved.set(record.fingerprint, {
+        issueId: record.issueId,
+        url: typeof record.url === "string" ? record.url : null,
       });
     } else {
-      // A malformed ref leaves its finding unfiled; do not drop it silently
-      // (council R1 P3).
+      // A malformed ref leaves its finding unfiled; do not drop it silently.
       console.warn(
-        `[council] track-finding filer returned an invalid ref (fingerprint=${String(
-          ref.fingerprint,
-        )}); finding remains unfiled`,
+        "[council] track-finding filer returned an invalid ref; finding remains unfiled",
       );
     }
   }
