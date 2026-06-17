@@ -17,6 +17,7 @@ import {
   decideMergeActuation,
   hasCurrentSpecFidelityRework,
   mergeActuatorPollAttempt,
+  mergeReworkParkDetail,
   reduceMergeCandidates,
   runMergeActuator,
   runMergeActuatorCycle,
@@ -2457,10 +2458,12 @@ describe("merge actuator spec-fidelity rework gate (SYMPH-758)", () => {
     expect(decision.sideEffectKey).toBeNull();
   });
 
-  it("blocks tracker_done on a merged PR when a current rework exists", () => {
-    // The canary's worst case: GitHub already merged the PR, but an unresolved
-    // rework for the reviewed head must still park instead of auto-completing
-    // the issue as Done (journal sequence 1835 in SYMPH-758).
+  it("surfaces an explicit already-merged reconciliation when a merged PR has a current rework (SYMPH-766)", () => {
+    // The canary's worst case: GitHub already merged the PR from the queue, but
+    // an unresolved rework for the reviewed head must still park instead of
+    // auto-completing the issue as Done (SYMPH-758). SYMPH-766 additionally
+    // labels this split-brain explicitly (`spec_fidelity_rework_already_merged`)
+    // so the operator sees "parked but already merged", never a silent Blocked.
     const candidate = candidateFromJournal([candidateJournalEntry()]);
     const decision = decideMergeActuation({
       candidate,
@@ -2479,7 +2482,7 @@ describe("merge actuator spec-fidelity rework gate (SYMPH-758)", () => {
     });
     expect(decision).toMatchObject({
       action: "blocked",
-      reason: "spec_fidelity_rework",
+      reason: "spec_fidelity_rework_already_merged",
     });
     expect(decision.sideEffectKey).toBeNull();
   });
@@ -2535,6 +2538,190 @@ describe("merge actuator spec-fidelity rework gate (SYMPH-758)", () => {
     expect(harness.entries.some((e) => e.metadata.action === "enqueue")).toBe(
       false,
     );
+  });
+});
+
+describe("merge actuator late-rework dequeue + reconciliation (SYMPH-766)", () => {
+  function enqueuedCandidateJournal(): {
+    candidateEntry: DispatcherRunJournalEntry;
+    journal: DispatcherRunJournalEntry[];
+    candidate: MergeCandidateRecord;
+  } {
+    const candidateEntry = candidateJournalEntry();
+    const intent = enqueueIntentEntry(candidateEntry, { sequence: 3 });
+    const completion: DispatcherRunJournalEntry = {
+      ...buildMergeActuationEntry({
+        candidate: candidateFromJournal([candidateEntry]),
+        action: "completed",
+        subjectAction: "enqueue",
+        timestamp: "2026-06-16T01:00:00.000Z",
+        ownerId: "owner-1",
+        lease: lease(),
+        live: liveState(),
+        reason: "enqueue_completed",
+      }),
+      sequence: 4,
+    };
+    const baseJournal = [candidateEntry, intent, completion];
+    const candidate = candidateFromJournal(baseJournal);
+    // A late rework for the reviewed head — what runMergeActuatorCycle derives
+    // its specFidelityRework signal from. (Decision-level tests pass the flag
+    // directly and only use `candidate`, so this entry is inert for them; the
+    // reducer ignores spec_fidelity entries, so the candidate is unchanged.)
+    const rework = specFidelityEntry({
+      verdict: "rework",
+      reviewedHeadSha: candidate.reviewedHeadSha,
+      sequence: 5,
+    });
+    const journal = [...baseJournal, rework];
+    return { candidateEntry, journal, candidate };
+  }
+
+  it("attempts a dequeue (disable_auto_merge) when a late rework lands on an already-enqueued candidate", () => {
+    const { candidate } = enqueuedCandidateJournal();
+    expect(candidate.status).toBe("merge_queue_pending");
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState(),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+      autoMergePermission: true,
+      specFidelityRework: true,
+    });
+    expect(decision).toMatchObject({
+      action: "disable_auto_merge",
+      reason: "spec_fidelity_rework_dequeue",
+    });
+    expect(decision.sideEffectKey).toBe(
+      `merge_actuation:${candidate.candidateId}:disable_auto_merge`,
+    );
+  });
+
+  it("parks as dequeued once the disable_auto_merge side effect is confirmed", () => {
+    const { candidate } = enqueuedCandidateJournal();
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState(),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      // The dequeue completion entry is present → the dequeue succeeded.
+      completedSideEffectKeys: new Set([
+        `merge_actuation:${candidate.candidateId}:completed:disable_auto_merge`,
+      ]),
+      autoMergePermission: true,
+      specFidelityRework: true,
+    });
+    expect(decision).toMatchObject({
+      action: "blocked",
+      reason: "spec_fidelity_rework_dequeued",
+    });
+    expect(decision.sideEffectKey).toBeNull();
+  });
+
+  it("invokes the disable_auto_merge side effect and journals it through a full cycle", async () => {
+    const { journal, candidate } = enqueuedCandidateJournal();
+    const harness = makeJournalHarness(journal);
+    let disabled = false;
+    const result = await runMergeActuatorCycle({
+      candidate,
+      journal: harness.entries,
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:05:00.000Z"),
+      enqueuedAtMs: Date.parse("2026-06-16T01:00:00.000Z"),
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 3, maxSideEffectFailures: 2 },
+      autoMergePermission: true,
+      fetchLiveState: async () => liveState(),
+      appendActuation: harness.appendActuation,
+      sideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone: async () => {},
+        disableAutoMerge: async () => {
+          disabled = true;
+        },
+      },
+    });
+    expect(result.outcome).toBe("actuated");
+    expect(disabled).toBe(true);
+    expect(
+      harness.entries.some((e) => e.metadata.action === "disable_auto_merge"),
+    ).toBe(true);
+    expect(
+      harness.entries.some(
+        (e) =>
+          e.metadata.action === "completed" &&
+          e.metadata.subject_action === "disable_auto_merge",
+      ),
+    ).toBe(true);
+  });
+
+  it("renders distinct, accurate operator park details per reconciliation reason", () => {
+    const merged = mergeReworkParkDetail(
+      "spec_fidelity_rework_already_merged",
+      577,
+    );
+    expect(merged).toContain("577");
+    expect(merged?.toLowerCase()).toContain("merged");
+    // Must NOT mislead the operator into thinking an already-merged PR is "not
+    // mergeable" — the SYMPH-766 split-brain the reason exists to surface.
+    expect(merged?.toLowerCase()).not.toContain("not mergeable");
+
+    const dequeued = mergeReworkParkDetail(
+      "spec_fidelity_rework_dequeued",
+      577,
+    );
+    expect(dequeued?.toLowerCase()).toContain("dequeued");
+
+    const held = mergeReworkParkDetail("spec_fidelity_rework", 577);
+    expect(held?.toLowerCase()).toContain("held");
+
+    // Non-reconciliation reasons fall through to the caller's default detail.
+    expect(mergeReworkParkDetail("failing_checks", 577)).toBeNull();
+  });
+
+  it("parks as cannot_dequeue when disable_auto_merge fails to the ceiling", async () => {
+    const { journal, candidate } = enqueuedCandidateJournal();
+    const harness = makeJournalHarness(journal);
+    const limits = { maxLiveStateFailures: 3, maxSideEffectFailures: 2 };
+    let lastResult: MergeActuatorCycleResult | null = null;
+    for (let cycle = 1; cycle <= 2; cycle += 1) {
+      lastResult = await runMergeActuatorCycle({
+        candidate: candidateFromJournal(harness.entries),
+        journal: harness.entries,
+        lease: lease({ leaseId: `lease-${cycle}` }),
+        ownerId: "owner-1",
+        now: new Date("2026-06-16T01:05:00.000Z"),
+        enqueuedAtMs: Date.parse("2026-06-16T01:00:00.000Z"),
+        maxWaitMs: 30 * 60_000,
+        limits,
+        autoMergePermission: true,
+        fetchLiveState: async () => liveState(),
+        appendActuation: harness.appendActuation,
+        sideEffects: {
+          markReady: async () => {},
+          enqueue: async () => {},
+          writeTrackerDone: async () => {},
+          disableAutoMerge: async () => {
+            throw new Error("gh disable-auto failed");
+          },
+        },
+      });
+    }
+    expect(lastResult?.outcome).toBe("parked");
+    if (lastResult?.outcome === "parked") {
+      expect(lastResult.blocker.reason).toBe(
+        "disable_auto_merge_side_effect_failed",
+      );
+    }
   });
 });
 
@@ -2729,6 +2916,7 @@ function noopSideEffects(): MergeActuatorSideEffects {
   return {
     markReady: async () => {},
     enqueue: async () => {},
+    disableAutoMerge: async () => {},
     writeTrackerDone: async () => {},
   };
 }
@@ -2737,6 +2925,7 @@ function throwingTrackerDone(message: string): MergeActuatorSideEffects {
   return {
     markReady: async () => {},
     enqueue: async () => {},
+    disableAutoMerge: async () => {},
     writeTrackerDone: async () => {
       throw new Error(message);
     },

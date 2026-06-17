@@ -174,6 +174,7 @@ import {
   type MergeActuatorSideEffects,
   type MergeCandidateRecord,
   mergeActuatorPollAttempt,
+  mergeReworkParkDetail,
   reduceMergeCandidates,
   runMergeActuatorCycle,
 } from "./merge-candidate.js";
@@ -10773,7 +10774,15 @@ export class OrchestratorCore {
         issue,
         stageName,
         reasonCode: result.run.decision.reason,
-        detail: `merge actuator candidate ${candidate.candidateId} is not mergeable: ${result.run.decision.blockers.join(", ") || result.run.decision.reason}`,
+        // SYMPH-766: the late-rework reconciliation reasons get an accurate,
+        // operator-facing detail (never "not mergeable" for an already-merged
+        // PR); other blocked reasons keep the generic not-mergeable detail.
+        detail:
+          mergeReworkParkDetail(
+            result.run.decision.reason,
+            candidate.prNumber,
+          ) ??
+          `merge actuator candidate ${candidate.candidateId} is not mergeable: ${result.run.decision.blockers.join(", ") || result.run.decision.reason}`,
         reviewResultPath: candidate.reviewResultPath,
       });
       return true;

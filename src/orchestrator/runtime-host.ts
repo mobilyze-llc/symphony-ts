@@ -745,6 +745,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               enqueue: async (candidate: MergeCandidateRecord) => {
                 await this.runGh(buildMergeActuatorEnqueueArgs(candidate));
               },
+              disableAutoMerge: async (candidate: MergeCandidateRecord) => {
+                await this.runGh(buildMergeActuatorDisableAutoArgs(candidate));
+              },
               writeTrackerDone: async (candidate: MergeCandidateRecord) => {
                 const teamKey =
                   candidate.issueIdentifier.split("-")[0] ??
@@ -7184,8 +7187,31 @@ function buildMergeActuatorEnqueueArgs(
   ];
 }
 
+/**
+ * Dequeue args (SYMPH-766): `gh pr merge <pr> --repo <repo> --disable-auto`
+ * removes the candidate from GitHub's merge queue / disables auto-merge so the
+ * queue cannot merge it behind a late spec-fidelity rework. Idempotent — `gh`
+ * tolerates disabling auto-merge that is already off. No strategy or head-pin
+ * flag: this only turns auto-merge off; it never merges. The arg vector is
+ * locked by a runtime-host unit test so the `--disable-auto` intent cannot be
+ * silently changed into a merge.
+ */
+function buildMergeActuatorDisableAutoArgs(
+  candidate: MergeCandidateRecord,
+): string[] {
+  return [
+    "pr",
+    "merge",
+    String(candidate.prNumber),
+    "--repo",
+    candidate.repo,
+    "--disable-auto",
+  ];
+}
+
 export const runtimeHostMergeActuatorTesting = {
   buildMergeActuatorEnqueueArgs,
+  buildMergeActuatorDisableAutoArgs,
   parseJsonObject,
   parseMergeCommit,
   parsePrState,
