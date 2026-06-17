@@ -5827,6 +5827,264 @@ describe("orchestrator core", () => {
     expect(orchestrator.getState().issueAcSnapshots["1"]).toBeUndefined();
   });
 
+  it("freezes the ticket-description AC at admission when a fast-tracked issue skips the investigate gate, and serves it to the judge (SYMPH-765)", async () => {
+    const deferred: Array<() => Promise<void>> = [];
+    const judgedAcs: Array<string | null> = [];
+    const dispatchedAcs: Array<string | null> = [];
+    const mkAgentStage = (transitions: {
+      onComplete: string | null;
+      onRework: string | null;
+    }) => ({
+      type: "agent" as const,
+      runner: null,
+      model: null,
+      maxTurns: null,
+      maxRework: null,
+      gateType: null,
+      prompt: null,
+      promptPath: null,
+      reviewers: [],
+      hardStops: null,
+      linearState: null,
+      mcpServers: {},
+      timeoutMs: null,
+      concurrency: null,
+      transitions: { ...transitions, onApprove: null },
+    });
+    const baseConfig = createConfig();
+    const config = {
+      ...baseConfig,
+      acGate: { enabled: true },
+      specFidelity: { enabled: true },
+      stages: {
+        initialStage: "investigate",
+        fastTrack: {
+          label: "trivial",
+          labels: ["trivial"],
+          initialStage: "implement",
+        },
+        stages: {
+          investigate: mkAgentStage({
+            onComplete: "implement",
+            onRework: null,
+          }),
+          implement: mkAgentStage({ onComplete: "review", onRework: null }),
+          review: mkAgentStage({ onComplete: null, onRework: "implement" }),
+        },
+      },
+    };
+    const ticketDescription = [
+      "## Context",
+      "Harden the parser.",
+      "",
+      "## Acceptance Criteria",
+      "- [ ] `test: tests/foo.test.ts covers bar`",
+      "- [ ] `check: npx tsc --noEmit exits 0`",
+      "",
+      "## Verification",
+      "- run the tests",
+    ].join("\n");
+    const expectedSnapshot = [
+      "## Acceptance Criteria",
+      "- [ ] `test: tests/foo.test.ts covers bar`",
+      "- [ ] `check: npx tsc --noEmit exits 0`",
+    ].join("\n");
+
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["trivial"],
+            description: ticketDescription,
+          }),
+        ],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async (input) => {
+        dispatchedAcs.push(input.acceptanceCriteria);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      postComment: async () => {},
+      runAcGate: async () => ({
+        verdict: "pass" as const,
+        feedback: "unused on the fast-track path",
+      }),
+      runSpecFidelityJudge: async (evidence) => {
+        judgedAcs.push(evidence.acceptanceCriteria);
+        return { verdict: "pass", findings: "AC1 PASS: covered by diff." };
+      },
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+    });
+
+    // Fast-track dispatch goes straight to implement, skipping the investigate
+    // AC gate — but the ticket-description AC is frozen at admission and handed
+    // to the implement worker (never null on this path).
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().issueAcSnapshots["1"]).toBe(
+      expectedSnapshot,
+    );
+    expect(dispatchedAcs).toEqual([expectedSnapshot]);
+
+    // The freeze is journaled (survives restart) and marked as the
+    // admission-time ticket snapshot, distinct from a gate-pass snapshot.
+    const gateEntry = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((entry) => entry.kind === "ac_gate");
+    expect(gateEntry?.metadata.acceptanceCriteria).toBe(expectedSnapshot);
+    expect(gateEntry?.metadata.source).toBe("ticket_admission");
+
+    // implement -> review, then review exit fires the judge against the frozen
+    // ticket AC — never null, so no spurious "no acceptance criteria" rework.
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE] implement done",
+    });
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+    await orchestrator.onRetryTimer("1");
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE] review done",
+    });
+    expect(judgedAcs).toEqual([expectedSnapshot]);
+  });
+
+  it("keeps spec-fidelity non-gating with an explicit reason when a fast-tracked issue has no ticket AC, never a spurious rework (SYMPH-765)", async () => {
+    const deferred: Array<() => Promise<void>> = [];
+    let judgeCalls = 0;
+    const mkAgentStage = (transitions: {
+      onComplete: string | null;
+      onRework: string | null;
+    }) => ({
+      type: "agent" as const,
+      runner: null,
+      model: null,
+      maxTurns: null,
+      maxRework: null,
+      gateType: null,
+      prompt: null,
+      promptPath: null,
+      reviewers: [],
+      hardStops: null,
+      linearState: null,
+      mcpServers: {},
+      timeoutMs: null,
+      concurrency: null,
+      transitions: { ...transitions, onApprove: null },
+    });
+    const baseConfig = createConfig();
+    const config = {
+      ...baseConfig,
+      acGate: { enabled: true },
+      specFidelity: { enabled: true },
+      stages: {
+        initialStage: "investigate",
+        fastTrack: {
+          label: "trivial",
+          labels: ["trivial"],
+          initialStage: "implement",
+        },
+        stages: {
+          investigate: mkAgentStage({
+            onComplete: "implement",
+            onRework: null,
+          }),
+          implement: mkAgentStage({ onComplete: "review", onRework: null }),
+          review: mkAgentStage({ onComplete: null, onRework: "implement" }),
+        },
+      },
+    };
+
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["trivial"],
+            // No "## Acceptance Criteria" section anywhere in the ticket.
+            description: "## Context\nJust fix the typo. No criteria here.",
+          }),
+        ],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      postComment: async () => {},
+      runAcGate: async () => ({
+        verdict: "pass" as const,
+        feedback: "unused on the fast-track path",
+      }),
+      runSpecFidelityJudge: async () => {
+        judgeCalls += 1;
+        // If the judge were (wrongly) invoked with no canonical AC, it would
+        // rework — exactly the SYMPH-759 false positive this guards against.
+        return {
+          verdict: "rework",
+          findings: "No acceptance criteria recorded.",
+        };
+      },
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+    });
+
+    await orchestrator.pollTick();
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    // No snapshot frozen (ticket carried none), and admission journaled an
+    // explicit stage-skipped marker.
+    expect(orchestrator.getState().issueAcSnapshots["1"]).toBeUndefined();
+    const acSkip = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((e) => e.kind === "ac_gate");
+    expect(acSkip?.metadata.status).toBe("skipped");
+    expect(acSkip?.metadata.reason).toBe("no_canonical_ac_stage_skipped");
+
+    // implement -> review, then review exit must NOT run the gating judge.
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE] implement done",
+    });
+    expect(orchestrator.getState().issueStages["1"]).toBe("review");
+    await orchestrator.onRetryTimer("1");
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "[STAGE_COMPLETE] review done",
+    });
+    for (const task of deferred.splice(0)) {
+      await task();
+    }
+
+    // The judge never ran, so it can never have produced a gating rework.
+    expect(judgeCalls).toBe(0);
+    const specEntries = orchestrator
+      .getState()
+      .dispatcherRunJournal.filter((e) => e.kind === "spec_fidelity");
+    expect(specEntries.some((e) => e.metadata.verdict === "rework")).toBe(
+      false,
+    );
+    // An explicit, operator-visible non-gating record exists instead.
+    const nonGating = specEntries.find((e) => e.metadata.status === "skipped");
+    expect(nonGating?.metadata.reason).toBe("no_canonical_ac_stage_skipped");
+  });
+
   it("posts the admission card once, on first dispatch only (SYMPH-379)", async () => {
     const comments: string[] = [];
     let spawnCount = 0;

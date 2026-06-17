@@ -131,6 +131,37 @@ describe("formatAdmissionCard (SYMPH-379)", () => {
     expect(card).not.toContain("src/r8.ts");
   });
 
+  it("does not promise an investigate AC freeze when the route skips the investigate gate (SYMPH-765)", () => {
+    const card = formatAdmissionCard({
+      issueIdentifier: "SYMPH-765",
+      stageName: "implement",
+      decision: decision({ stageName: "implement" }),
+      budgetMultiplier: 1,
+      hasFrozenAcceptanceCriteria: false,
+      skipsAcGate: true,
+    });
+
+    // The misleading claim that investigate will author/freeze ACs must NOT
+    // appear when the issue is fast-tracked past investigate.
+    expect(card).not.toContain("investigate exit gate");
+    expect(card).toContain("skips the investigate AC gate");
+    expect(card).toContain("non-gating");
+  });
+
+  it("still promises the investigate AC freeze on the normal (non-skipping) path", () => {
+    const card = formatAdmissionCard({
+      issueIdentifier: "SYMPH-765",
+      stageName: "investigate",
+      decision: decision(),
+      budgetMultiplier: 1,
+      hasFrozenAcceptanceCriteria: false,
+      skipsAcGate: false,
+    });
+    expect(card).toContain(
+      "the investigate exit gate authors and freezes them before implement",
+    );
+  });
+
   it("renders 'none declared' when the decision carries no declared scope", () => {
     const card = formatAdmissionCard({
       issueIdentifier: "SYMPH-997",

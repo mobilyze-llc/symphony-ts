@@ -37,6 +37,13 @@ export interface AdmissionCardInput {
   budgetMultiplier: number;
   /** A gate-passed frozen AC snapshot already exists for this issue. */
   hasFrozenAcceptanceCriteria: boolean;
+  /**
+   * The dispatched route skips the investigate AC gate (SYMPH-765) — e.g. a
+   * fast-track / direct-to-implement issue. Defaults to false. When true and no
+   * AC is frozen, the verification line must NOT claim an investigate exit gate
+   * will author and freeze criteria, because that stage never runs.
+   */
+  skipsAcGate?: boolean;
 }
 
 export function formatAdmissionCard(input: AdmissionCardInput): string {
@@ -55,7 +62,9 @@ export function formatAdmissionCard(input: AdmissionCardInput): string {
       : `${decision.mode} ceilings`;
   const verificationLine = input.hasFrozenAcceptanceCriteria
     ? "frozen acceptance criteria on record — implement satisfies them in-session; spec-fidelity judges the diff at review exit"
-    : "acceptance criteria not yet frozen — the investigate exit gate authors and freezes them before implement";
+    : input.skipsAcGate === true
+      ? "no frozen acceptance criteria and this route skips the investigate AC gate — the ticket has no `## Acceptance Criteria` section to freeze, so spec-fidelity is non-gating (no canonical rubric) and merge gating rests on the council review result"
+      : "acceptance criteria not yet frozen — the investigate exit gate authors and freezes them before implement";
   const modelRoutingLine = describeModelRouting(decision.modelRouting.reason);
   const riskFiles = decision.signals.highRiskFiles;
   const riskLines =
