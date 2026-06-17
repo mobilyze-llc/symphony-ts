@@ -333,6 +333,43 @@ export function reduceMergeCandidates(
   return reduced;
 }
 
+/**
+ * SYMPH-758: report whether a CURRENT spec-fidelity `rework` verdict stands for
+ * the candidate's reviewed head. The advisory spec-fidelity judge (SYMPH-343)
+ * posts verdicts asynchronously, so a `rework` can race in AFTER a passed review
+ * gate has already promoted a merge candidate (the SYMPH-639 canary: a rework
+ * landed between enqueue and merge). Correlating verdicts to the candidate by
+ * `reviewed_head_sha` lets the merge actuator hold actuation until the rework is
+ * resolved or superseded.
+ *
+ * "Current" = the LATEST spec-fidelity verdict (in durable journal order) keyed
+ * to this candidate's reviewed head is `rework`. A later `pass` for the same
+ * head supersedes an earlier `rework`. Verdicts with no recorded head, or keyed
+ * to a different head (e.g. a prior review round), are ignored: a candidate is
+ * only held by a verdict that provably judged its reviewed commit, so a stale or
+ * uncorrelated verdict never spuriously parks a clean merge.
+ */
+export function hasCurrentSpecFidelityRework(
+  journal: readonly DispatcherRunJournalEntry[],
+  candidate: Pick<MergeCandidateRecord, "issueId" | "reviewedHeadSha">,
+): boolean {
+  let latestVerdict: string | null = null;
+  for (const entry of journal) {
+    if (entry.kind !== "spec_fidelity" || entry.issueId !== candidate.issueId) {
+      continue;
+    }
+    const head = stringField(entry.metadata.reviewed_head_sha);
+    if (head === null || head !== candidate.reviewedHeadSha) {
+      continue;
+    }
+    const verdict = stringField(entry.metadata.verdict);
+    if (verdict !== null) {
+      latestVerdict = verdict;
+    }
+  }
+  return latestVerdict === "rework";
+}
+
 export function decideMergeActuation(input: {
   candidate: MergeCandidateRecord;
   live: MergeActuatorLiveState;
@@ -354,6 +391,15 @@ export function decideMergeActuation(input: {
    * the decision stays a pure function of its inputs and remains replay-stable.
    */
   autoMergePermission?: boolean;
+  /**
+   * Whether a current spec-fidelity `rework` verdict stands for the candidate's
+   * reviewed head (SYMPH-758), derived by {@link hasCurrentSpecFidelityRework}
+   * from the durable journal. When true, every merge-advancing action is held
+   * (see the gate below). Default false keeps spec-fidelity non-gating in the
+   * absence of a rework — the advisory judge (SYMPH-343) only blocks when it has
+   * actually returned a rework for this commit.
+   */
+  specFidelityRework?: boolean;
 }): MergeActuatorDecision {
   const leaseDecision = validateLease(
     input.lease,
@@ -362,6 +408,27 @@ export function decideMergeActuation(input: {
   );
   if (leaseDecision !== null) {
     return leaseDecision;
+  }
+
+  // Spec-fidelity rework gate (SYMPH-758). The advisory judge (SYMPH-343) posts
+  // verdicts asynchronously, so an independent-judge `rework` can land AFTER a
+  // passed review gate promoted this candidate. While that rework stands for the
+  // reviewed head, hold every merge-advancing action — mark_ready, enqueue, and
+  // tracker_done — with a terminal `blocked` decision and NO side-effect key, so
+  // the pure actuator writes no row and the coordinator parks it for an operator
+  // (the same blocked→park path as auto_merge_permission_denied). Placed first,
+  // before the MERGED/OPEN branches, so even an already-merged PR does not
+  // auto-complete the issue as Done while the rework is unresolved or
+  // unsuperseded — the exact ordering defect the canary hit (tracker_done fired
+  // behind a late rework). A held candidate never reaches the stale/poll/timeout
+  // paths, which is intended: nothing advances until the rework clears.
+  if (input.specFidelityRework === true) {
+    return {
+      action: "blocked",
+      reason: "spec_fidelity_rework",
+      blockers: ["spec_fidelity_rework"],
+      sideEffectKey: null,
+    };
   }
 
   if (input.live.state === "MERGED") {
@@ -609,6 +676,8 @@ export async function runMergeActuator(input: {
   completedSideEffectKeys: ReadonlySet<string>;
   /** Actuator auto-merge/enqueue permission (SYMPH-754); default-CLOSED. See {@link decideMergeActuation}. */
   autoMergePermission?: boolean;
+  /** Current spec-fidelity rework for the reviewed head (SYMPH-758); default false. See {@link decideMergeActuation}. */
+  specFidelityRework?: boolean;
   appendActuation: (
     entry: MergeActuationJournalDraft,
   ) => Promise<DispatcherRunJournalEntry>;
@@ -624,6 +693,7 @@ export async function runMergeActuator(input: {
     maxWaitMs: input.maxWaitMs,
     completedSideEffectKeys: input.completedSideEffectKeys,
     autoMergePermission: input.autoMergePermission ?? false,
+    specFidelityRework: input.specFidelityRework ?? false,
   });
 
   if (decision.sideEffectKey === null || input.lease === null) {
@@ -888,6 +958,12 @@ export async function runMergeActuatorCycle(input: {
     maxWaitMs: input.maxWaitMs,
     completedSideEffectKeys: completedSideEffectKeysFromJournal(input.journal),
     autoMergePermission: input.autoMergePermission ?? false,
+    // Derived from the durable journal so the rework hold is replay-stable: a
+    // verdict that landed late is just as authoritative on the next cycle.
+    specFidelityRework: hasCurrentSpecFidelityRework(
+      input.journal,
+      input.candidate,
+    ),
     appendActuation: input.appendActuation,
     sideEffects: input.sideEffects,
   });

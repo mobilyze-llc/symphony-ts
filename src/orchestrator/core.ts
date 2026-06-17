@@ -4807,6 +4807,17 @@ export class OrchestratorCore {
     stageName: string;
     verdict: { verdict: "pass" | "rework"; findings: string };
   }): Promise<void> {
+    // SHA-key the verdict to the reviewed merge candidate (SYMPH-758). The
+    // advisory judge runs against the same review-stage exit that promotes the
+    // candidate, and this deferred recording runs AFTER prepareReviewCompletionForMerge
+    // has appended the merge_candidate row, so the canonical candidate's
+    // reviewedHeadSha is the head the judge evaluated. Recording it lets the
+    // merge actuator correlate a late `rework` to the exact candidate it must
+    // hold (hasCurrentSpecFidelityRework). When no candidate exists (the review
+    // gate did not promote one), there is nothing to gate, so the head is left
+    // absent and the verdict stays purely advisory.
+    const reviewedHeadSha =
+      this.findCanonicalMergeCandidate(input.issueId)?.reviewedHeadSha ?? null;
     try {
       await this.recordRunJournalEntry({
         idempotencyKey: `spec_fidelity:${input.issueId}:${input.stageName}:${this.now().toISOString()}`,
@@ -4824,6 +4835,9 @@ export class OrchestratorCore {
           status: "completed",
           verdict: input.verdict.verdict,
           findings: input.verdict.findings,
+          ...(reviewedHeadSha === null
+            ? {}
+            : { reviewed_head_sha: reviewedHeadSha }),
         },
       });
     } catch {
