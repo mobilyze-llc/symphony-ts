@@ -51,10 +51,7 @@ const cmuxSpawnSkillSource = resolve(
     resolve(homedir(), "projects/claude-config/skills/cmux-spawn"),
 );
 
-const skillNames = [
-  "spec-review-lane",
-  "claude-runner",
-];
+const skillNames = ["spec-review-lane", "claude-runner"];
 const userOnlySkillContracts = [
   {
     skillName: "cmux-spawn",
