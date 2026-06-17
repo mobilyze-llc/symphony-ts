@@ -584,6 +584,13 @@ function terminationMetadata(
     blocking_finding_count: termination.blockingFindingCount,
     non_blocking_finding_count: termination.nonBlockingFindingCount,
     track_finding_count: termination.trackFindingCount,
+    // SYMPH-760: the Track-finding filing status rides into the durable journal
+    // so the merge gate never silently treats trackFindingCount > 0 with
+    // missing issue IDs as a clean closeout. `reason` is null when none/filed
+    // and is dropped by compactMetadata.
+    track_filing_status: termination.trackFiling.status,
+    track_filing_filed_count: termination.trackFiling.filed,
+    track_filing_reason: termination.trackFiling.reason ?? undefined,
   });
 }
 

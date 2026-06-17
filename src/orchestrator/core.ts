@@ -4272,6 +4272,17 @@ export class OrchestratorCore {
       exitedStageName !== null && this.config.stages !== null
         ? this.config.stages.stages[exitedStageName]
         : undefined;
+
+    const reviewMergeReady = await this.prepareReviewCompletionForMerge({
+      issueId,
+      runningEntry,
+      exitedStageName,
+      agentMessage,
+    });
+    if (!reviewMergeReady) {
+      return null;
+    }
+
     if (
       this.config.specFidelity.enabled &&
       this.runSpecFidelityJudge !== undefined &&
@@ -4280,8 +4291,23 @@ export class OrchestratorCore {
       exitedStageDef?.transitions.onRework != null
     ) {
       // Advisory judge lane (SYMPH-343): fires alongside the normal advance.
+      // Fired AFTER prepareReviewCompletionForMerge so this round's merge
+      // candidate already exists, letting us capture the canonical candidate's
+      // reviewed head at FIRE time rather than re-resolving it at
+      // deferred-record time (SYMPH-758, council R1 P1) — that prevents a later
+      // review round's candidate from mis-keying this verdict. Null when no
+      // candidate was promoted (advisory only). NOTE: when an OLD candidate is
+      // already canonical from a parked/resumed lifecycle, prepareReviewCompletionForMerge
+      // short-circuits and the captured head may be that stale candidate's —
+      // a pre-existing merge-candidate-lifecycle gap tracked in SYMPH-764, not
+      // introduced here (the prior record-time lookup had the same staleness).
+      // Gated behind the reviewMergeReady guard, so a parked review skips the
+      // advisory judge — acceptable, as that path is already parked for an
+      // operator. Still before advanceStage, so the AC snapshot is intact.
       const scheduleDeferred = this.scheduleDeferred;
       const stageForVerdict = exitedStageName;
+      const reviewedHeadShaForVerdict =
+        this.findCanonicalMergeCandidate(issueId)?.reviewedHeadSha ?? null;
       void this.runSpecFidelityJudge({
         issueId,
         issueIdentifier: runningEntry.identifier,
@@ -4307,22 +4333,13 @@ export class OrchestratorCore {
               identifier: runningEntry.identifier,
               stageName: stageForVerdict,
               verdict,
+              reviewedHeadSha: reviewedHeadShaForVerdict,
             }),
           );
         })
         .catch(() => {
           // Chain must never become an unhandled rejection.
         });
-    }
-
-    const reviewMergeReady = await this.prepareReviewCompletionForMerge({
-      issueId,
-      runningEntry,
-      exitedStageName,
-      agentMessage,
-    });
-    if (!reviewMergeReady) {
-      return null;
     }
 
     const transition = this.advanceStage(
@@ -4806,10 +4823,26 @@ export class OrchestratorCore {
     identifier: string;
     stageName: string;
     verdict: { verdict: "pass" | "rework"; findings: string };
+    /**
+     * Reviewed head the judge evaluated, captured at judge-FIRE time by the
+     * caller (SYMPH-758). It must NOT be re-resolved here: this recording runs
+     * in a deferred task, and a later review round can promote a newer candidate
+     * before it fires — resolving the canonical candidate now would key the
+     * verdict to the wrong head, letting a stale `pass` mask a real `rework`
+     * (council R1 P1, confirmed by Codex + Pi). Null when no candidate was
+     * promoted, leaving the verdict purely advisory.
+     */
+    reviewedHeadSha: string | null;
   }): Promise<void> {
+    const reviewedHeadSha = input.reviewedHeadSha;
     try {
       await this.recordRunJournalEntry({
-        idempotencyKey: `spec_fidelity:${input.issueId}:${input.stageName}:${this.now().toISOString()}`,
+        // Include the reviewed head so distinct-head verdicts never collide and
+        // the entry is correlated to the exact judged commit (SYMPH-758, council
+        // R1 P2). The timestamp is retained so a re-judged `pass` for the same
+        // head is a NEW row that supersedes an earlier `rework` (latest-wins);
+        // a head-only key would dedupe it and break supersession.
+        idempotencyKey: `spec_fidelity:${input.issueId}:${input.stageName}:${reviewedHeadSha ?? "no-head"}:${this.now().toISOString()}`,
         timestamp: this.now().toISOString(),
         kind: "spec_fidelity",
         issueId: input.issueId,
@@ -4824,6 +4857,9 @@ export class OrchestratorCore {
           status: "completed",
           verdict: input.verdict.verdict,
           findings: input.verdict.findings,
+          ...(reviewedHeadSha === null
+            ? {}
+            : { reviewed_head_sha: reviewedHeadSha }),
         },
       });
     } catch {

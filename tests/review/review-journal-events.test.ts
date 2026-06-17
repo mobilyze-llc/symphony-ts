@@ -395,6 +395,13 @@ describe("review journal events", () => {
         blockingFindingCount: 0,
         nonBlockingFindingCount: 0,
         trackFindingCount: 0,
+        trackFiling: {
+          status: "none",
+          required: 0,
+          filed: 0,
+          reason: null,
+          findings: [],
+        },
         familySynthesisCount: 1,
         synthesisAttached: true,
         tripwireFamilyNames: [],
@@ -440,6 +447,59 @@ describe("review journal events", () => {
       synthesis_count: 1,
       non_blocking_finding_count: 0,
       track_finding_count: 0,
+    });
+  });
+
+  it("surfaces the Track-finding filing status in review_gate_result metadata (SYMPH-760)", () => {
+    // The merge gate must not silently treat trackFindingCount > 0 with missing
+    // issue IDs as a clean closeout: the filing status rides into the durable
+    // review_gate_result row so it is machine-readable downstream.
+    const result = reviewResult({
+      verdict: "pass",
+      termination: {
+        status: "converged",
+        reason: "disposition_exit",
+        action: "continue_pipeline",
+        roundsPerCycle: 1,
+        thresholds: { sameFamilyReopenLimit: 2, roundWarning: 2, roundCap: 3 },
+        alertLevel: "warning",
+        blockingFindingCount: 0,
+        nonBlockingFindingCount: 1,
+        trackFindingCount: 1,
+        trackFiling: {
+          status: "unfiled",
+          required: 1,
+          filed: 0,
+          reason: "track_findings_unfiled",
+          findings: [
+            {
+              fingerprint: "abc123",
+              title: "doc gap",
+              issueId: null,
+              url: null,
+            },
+          ],
+        },
+        familySynthesisCount: 0,
+        synthesisAttached: false,
+        tripwireFamilyNames: [],
+        synthesisFamilyNames: [],
+      },
+    });
+
+    const entries = buildReviewJournalEntries(result, {
+      issueIdentifier: "SYMPH-760",
+      ownerId: "worker-1",
+      source: "pipeline",
+    });
+
+    expect(
+      entries.find((entry) => entry.kind === "review_gate_result")?.metadata,
+    ).toMatchObject({
+      track_finding_count: 1,
+      track_filing_status: "unfiled",
+      track_filing_reason: "track_findings_unfiled",
+      track_filing_filed_count: 0,
     });
   });
 
@@ -544,6 +604,13 @@ describe("review journal events", () => {
         blockingFindingCount: 0,
         nonBlockingFindingCount: 0,
         trackFindingCount: 0,
+        trackFiling: {
+          status: "none",
+          required: 0,
+          filed: 0,
+          reason: null,
+          findings: [],
+        },
         familySynthesisCount: 1,
         synthesisAttached: true,
         tripwireFamilyNames: [],
@@ -862,6 +929,11 @@ function defaultTerminationAssessment(
         (finding.severity === "P1" || finding.severity === "P2") &&
         finding.leadDisposition === "open",
     ).length ?? 0;
+  const trackFindingCount =
+    artifact?.findings.filter(
+      (finding) =>
+        finding.severity === "Track" || finding.leadDisposition === "track",
+    ).length ?? 0;
   const status =
     verdict === "pass"
       ? "converged"
@@ -892,11 +964,17 @@ function defaultTerminationAssessment(
     blockingFindingCount,
     nonBlockingFindingCount:
       (artifact?.findings.length ?? 0) - blockingFindingCount,
-    trackFindingCount:
-      artifact?.findings.filter(
-        (finding) =>
-          finding.severity === "Track" || finding.leadDisposition === "track",
-      ).length ?? 0,
+    trackFindingCount: trackFindingCount,
+    trackFiling:
+      trackFindingCount === 0
+        ? { status: "none", required: 0, filed: 0, reason: null, findings: [] }
+        : {
+            status: "unfiled",
+            required: trackFindingCount,
+            filed: 0,
+            reason: "track_findings_unfiled",
+            findings: [],
+          },
     familySynthesisCount: artifact?.familySyntheses.length ?? 0,
     synthesisAttached: (artifact?.familySyntheses.length ?? 0) > 0,
     tripwireFamilyNames: [],

@@ -11,6 +11,7 @@ import type {
 import type {
   ComputedDispatchOrderSnapshot,
   DispatcherRunJournal,
+  DispatcherRunJournalEntry,
   Issue,
 } from "../../src/domain/model.js";
 import { ERROR_CODES } from "../../src/errors/codes.js";
@@ -32,9 +33,10 @@ import {
   isStopSignalDelivery,
   sortIssuesForDispatch,
 } from "../../src/orchestrator/core.js";
-import type {
-  MergeActuatorLiveState,
-  MergeActuatorSideEffects,
+import {
+  type MergeActuatorLiveState,
+  type MergeActuatorSideEffects,
+  buildMergeCandidateEntryFromReviewGate,
 } from "../../src/orchestrator/merge-candidate.js";
 import type { TrackerIssueWriteRequest } from "../../src/orchestrator/tracker-write.js";
 import type { HeadlessCouncilGateResult } from "../../src/review/headless-council-gate.js";
@@ -5680,6 +5682,10 @@ describe("orchestrator core", () => {
       .getState()
       .dispatcherRunJournal.filter((e) => e.kind === "spec_fidelity");
     expect(journal).toHaveLength(1);
+    // No merge candidate was promoted (the review stage does not transition to
+    // merge), so the verdict carries no reviewed head and stays purely advisory
+    // — nothing for the merge actuator to correlate or hold (SYMPH-758).
+    expect(journal[0]?.metadata.reviewed_head_sha).toBeUndefined();
   });
 
   it("freezes the gate-passed AC snapshot, serves it to dispatch and the judge, and clears it at terminal (SYMPH-374)", async () => {
@@ -7267,6 +7273,205 @@ describe("live merge actuator (SYMPH-735)", () => {
       endedAt: new Date("2026-03-06T00:01:05.000Z"),
     });
   }
+
+  it("holds merge actuation when a late spec-fidelity rework lands for the reviewed head (SYMPH-758)", async () => {
+    // End-to-end canary (SYMPH-639 ordering): the review gate passes and
+    // promotes a merge candidate, THEN the advisory spec-fidelity judge
+    // (SYMPH-343) returns `rework` for the SAME reviewed head after the
+    // candidate already exists. The actuator must hold — never enqueue or write
+    // tracker_done — and park for an operator, instead of letting the rework
+    // race behind merge actuation as it did for PR #574.
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const deferred: Array<() => Promise<void>> = [];
+    const markReady = vi.fn(async () => {});
+    const enqueue = vi.fn(async () => {});
+    const writeTrackerDone = vi.fn(async () => {});
+
+    const config = createLiveMergeActuatorConfig();
+    // The advisory judge only fires when the review stage declares an onRework
+    // transition; wire one and enable spec-fidelity so the verdict is recorded.
+    const reviewStage = config.stages?.stages.review;
+    if (reviewStage === undefined) {
+      throw new Error("expected a review stage in the live-actuator config");
+    }
+    reviewStage.transitions.onRework = "review";
+    config.specFidelity = { enabled: true };
+
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      runSpecFidelityJudge: async () => ({
+        verdict: "rework",
+        findings: "AC1 FAIL: named regression test absent from the diff.",
+      }),
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+      // A clean OPEN PR whose identity matches the reviewed candidate — without
+      // the rework hold this would enqueue immediately.
+      getMergeActuatorLiveState: async () => actuatorLiveState(),
+      mergeActuatorSideEffects: { markReady, enqueue, writeTrackerDone },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    // Drain the deferred verdict task: records spec_fidelity:rework keyed to the
+    // candidate's reviewed head.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (const task of deferred) {
+      await task();
+    }
+
+    // The recorded verdict is SHA-keyed to the reviewed candidate head so the
+    // actuator can correlate it (SYMPH-758).
+    const specEntry = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((entry) => entry.kind === "spec_fidelity");
+    expect(specEntry?.metadata.reviewed_head_sha).toBe("head-sha");
+
+    // Drive the actuator cycle: it must hold rather than enqueue/merge.
+    await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(writeTrackerDone).not.toHaveBeenCalled();
+    expect(markReady).not.toHaveBeenCalled();
+    expect(state.completed.has("1")).toBe(false);
+    expect(state.failed.has("1")).toBe(true);
+    // Parked specifically for the rework hold, not some unrelated block.
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) =>
+          entry.kind === "failure_exhausted" &&
+          typeof entry.metadata.reason === "string" &&
+          entry.metadata.reason.includes("spec_fidelity_rework"),
+      ),
+    ).toBe(true);
+  });
+
+  it("keys a late spec-fidelity verdict to the round's reviewed head, not a newer candidate (SYMPH-758, council R1 P1)", async () => {
+    // Codex + Pi both flagged: recordSpecFidelityVerdict must NOT re-resolve the
+    // canonical merge candidate at DEFERRED-record time. A later review round can
+    // promote a newer candidate (different head) before the deferred task runs;
+    // resolving then would key the verdict to the wrong head, letting a stale
+    // `pass` mask a real `rework` (false negative). The reviewed head must be
+    // captured at judge-fire time, when only this round's candidate is canonical.
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const deferred: Array<() => Promise<void>> = [];
+
+    const config = createLiveMergeActuatorConfig();
+    const reviewStage = config.stages?.stages.review;
+    if (reviewStage === undefined) {
+      throw new Error("expected a review stage in the live-actuator config");
+    }
+    reviewStage.transitions.onRework = "review";
+    config.specFidelity = { enabled: true };
+
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      runSpecFidelityJudge: async () => ({
+        verdict: "rework",
+        findings: "AC1 FAIL: named regression test absent from the diff.",
+      }),
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+      getMergeActuatorLiveState: async () => actuatorLiveState(),
+      mergeActuatorSideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone: async () => {},
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    // The round-1 candidate (reviewed head "head-sha") is canonical and the
+    // judge has fired. Before draining its deferred verdict, simulate a LATER
+    // review round promoting a newer candidate with a DIFFERENT reviewed head,
+    // so findCanonicalMergeCandidate would now resolve to "head-B".
+    const journal = orchestrator.getState().dispatcherRunJournal;
+    const newerGate: DispatcherRunJournalEntry = {
+      sequence: 0,
+      idempotencyKey: "review:1:round-2",
+      timestamp: "2026-03-06T00:02:00.000Z",
+      kind: "review_gate_result",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      operation: "dispatcher",
+      stage: "review",
+      attempt: null,
+      ownerId: "owner-1",
+      lease: null,
+      summary: "round 2 gate pass for ISSUE-1",
+      metadata: {
+        actor: { kind: "dispatcher", id: "owner-1" },
+        repo: "mobilyze-llc/symphony-ts",
+        pr_number: 725,
+        base_ref: "main",
+        base_sha: "base-sha",
+        head_ref: "codex/SYMPH-725-merge-candidate-actuator",
+        head_sha: "head-B",
+        reviewed_head_sha: "head-B",
+        review_result_path: "/tmp/review-result.json",
+        round: 2,
+        gate_verdict: "pass",
+        decorrelation_merge_eligible: true,
+      },
+    };
+    journal.push({
+      ...buildMergeCandidateEntryFromReviewGate(newerGate)!,
+      sequence: (journal.at(-1)?.sequence ?? 0) + 1,
+    });
+
+    // Drain the round-1 verdict; it must record the head the judge evaluated.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (const task of deferred) {
+      await task();
+    }
+
+    const specEntry = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((entry) => entry.kind === "spec_fidelity");
+    expect(specEntry?.metadata.reviewed_head_sha).toBe("head-sha");
+  });
 
   it("completes the issue when the actuator writes tracker done", async () => {
     const reviewResultPath = await writeReviewGateResultFixture();

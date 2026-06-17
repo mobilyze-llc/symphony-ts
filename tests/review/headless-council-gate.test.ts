@@ -4311,10 +4311,18 @@ describe("runHeadlessCouncilGate", () => {
       status: "converged",
       reason: "disposition_exit",
       action: "continue_pipeline",
-      alertLevel: "ok",
+      // An unfiled Track finding raises the closeout from a silent clean "ok"
+      // to "warning" so it is not lost in an artifact-only report (SYMPH-760).
+      alertLevel: "warning",
       blockingFindingCount: 0,
       nonBlockingFindingCount: 1,
       trackFindingCount: 1,
+      trackFiling: {
+        status: "unfiled",
+        required: 1,
+        filed: 0,
+        reason: "track_findings_unfiled",
+      },
       roundsPerCycle: 1,
       thresholds: {
         roundWarning: 2,
@@ -4334,6 +4342,176 @@ describe("runHeadlessCouncilGate", () => {
     expect(report).toContain("## Termination Ladder");
     expect(report).toContain("- Reason: disposition_exit");
     expect(report).toContain("- Track findings to file: 1");
+    expect(report).toContain("- Track filing status: unfiled");
+  });
+
+  it("attaches durable Linear IDs to Track findings when a filer is provided (SYMPH-760)", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n\n## Track\n- docs/operators.md:9 add rollout notes for a pre-existing issue.",
+        },
+      },
+    });
+
+    const filed: string[] = [];
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        // A filer (dedup is its responsibility) returns the durable ref it
+        // filed/found for each Track finding.
+        trackFindingFiler: async (findings) => {
+          for (const finding of findings) {
+            filed.push(finding.fingerprint);
+          }
+          return findings.map((finding) => ({
+            fingerprint: finding.fingerprint,
+            issueId: "SYMPH-999",
+            url: "https://linear.app/mobilyze-llc/issue/SYMPH-999",
+          }));
+        },
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(filed).toHaveLength(1);
+    expect(result.verdict).toBe("pass");
+    expect(result.termination).toMatchObject({
+      action: "continue_pipeline",
+      // Filed Track findings keep the closeout clean.
+      alertLevel: "ok",
+      trackFindingCount: 1,
+      trackFiling: {
+        status: "filed",
+        required: 1,
+        filed: 1,
+        reason: null,
+      },
+    });
+    expect(result.termination?.trackFiling.findings[0]).toMatchObject({
+      issueId: "SYMPH-999",
+      url: "https://linear.app/mobilyze-llc/issue/SYMPH-999",
+    });
+    const report = await readFile(result.artifactPaths.councilReport, "utf-8");
+    expect(report).toContain("- Track filing status: filed");
+    expect(report).toContain("SYMPH-999");
+  });
+
+  it("fails closed to unfiled when the Track-finding filer throws (SYMPH-760)", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n\n## Track\n- docs/operators.md:9 add rollout notes for a pre-existing issue.",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        // A filer that throws must NOT crash the closeout; findings stay unfiled.
+        trackFindingFiler: async () => {
+          throw new Error("linear unreachable");
+        },
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.termination).toMatchObject({
+      action: "continue_pipeline",
+      alertLevel: "warning",
+      trackFiling: {
+        status: "unfiled",
+        required: 1,
+        filed: 0,
+        reason: "track_findings_unfiled",
+      },
+    });
+  });
+
+  it("fails closed to unfiled when the Track-finding filer returns a malformed ref (SYMPH-760, council R2)", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n\n## Track\n- docs/operators.md:9 add rollout notes for a pre-existing issue.",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+        // A non-object element and an empty issueId must not crash the gate.
+        trackFindingFiler: async () =>
+          [
+            null,
+            { fingerprint: "x", issueId: "" },
+          ] as unknown as ReadonlyArray<{
+            fingerprint: string;
+            issueId: string;
+            url?: string | null;
+          }>,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.termination?.trackFiling.status).toBe("unfiled");
+  });
+
+  it("reports no track-filing requirement when there are no Track findings (SYMPH-760)", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          artifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n\n## Track\nNone",
+        },
+      },
+    });
+
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    expect(result.termination).toMatchObject({
+      action: "continue_pipeline",
+      alertLevel: "ok",
+      trackFindingCount: 0,
+      trackFiling: {
+        status: "none",
+        required: 0,
+        filed: 0,
+        reason: null,
+      },
+    });
   });
 
   it("keeps PASS triage rows with track disposition as non-blocking", async () => {

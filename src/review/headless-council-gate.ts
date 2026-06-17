@@ -181,6 +181,40 @@ export interface CouncilTerminationLadderThresholds {
   roundCap: number;
 }
 
+/**
+ * Durable-filing status of one Track finding (SYMPH-760). `issueId`/`url` are
+ * non-null once a filer has attached a durable Linear issue to the finding.
+ */
+export interface CouncilTrackFindingFilingEntry {
+  fingerprint: string;
+  title: string;
+  issueId: string | null;
+  url: string | null;
+}
+
+/**
+ * Machine-readable record of whether the council's Track findings carry durable
+ * Linear IDs (SYMPH-760). Track findings do not block merge, but they must not
+ * disappear into an artifact-only report during autonomous closeout: this makes
+ * their filing state explicit so a `continue_pipeline` is never a silent clean
+ * closeout when issue IDs are missing.
+ *
+ * - `none`: no Track findings to file.
+ * - `filed`: every Track finding has a durable Linear ID.
+ * - `unfiled`: at least one Track finding lacks a durable ID; `reason` carries
+ *   the machine-readable explanation.
+ */
+export interface CouncilTrackFindingFiling {
+  status: "none" | "filed" | "unfiled";
+  /** Number of Track findings requiring a durable Linear ID. */
+  required: number;
+  /** Number of Track findings that carry a durable Linear ID. */
+  filed: number;
+  /** Machine-readable reason filing is incomplete, or null when none/filed. */
+  reason: "track_findings_unfiled" | "track_findings_partially_filed" | null;
+  findings: CouncilTrackFindingFilingEntry[];
+}
+
 export interface CouncilTerminationAssessment {
   status: CouncilTerminationStatus;
   reason: CouncilTerminationReason;
@@ -191,6 +225,7 @@ export interface CouncilTerminationAssessment {
   blockingFindingCount: number;
   nonBlockingFindingCount: number;
   trackFindingCount: number;
+  trackFiling: CouncilTrackFindingFiling;
   familySynthesisCount: number;
   synthesisAttached: boolean;
   tripwireFamilyNames: string[];
@@ -438,6 +473,21 @@ export interface HeadlessCouncilGateInput {
   provenance?: readonly ReviewBundleProvenanceEntry[];
   priorStructuredArtifacts?: readonly StructuredReviewerArtifact[];
   terminationLadder?: Partial<CouncilTerminationLadderThresholds>;
+  /**
+   * Optional filer for the council's Track findings (SYMPH-760). Receives the
+   * surviving Track findings and returns the durable Linear refs it filed or
+   * found for them; the caller owns duplicate search and same-family
+   * consolidation, and may return one ref for several fingerprints. When
+   * omitted (or when it throws/returns no ref for a finding), the finding is
+   * recorded as `unfiled` with an explicit machine-readable status rather than
+   * silently dropped. Returning refs lets the gate attach durable IDs to
+   * `review-result.json` and `council-report.md` before the pipeline continues.
+   */
+  trackFindingFiler?: (
+    findings: readonly StructuredReviewFinding[],
+  ) => Promise<
+    ReadonlyArray<{ fingerprint: string; issueId: string; url?: string | null }>
+  >;
   env?: NodeJS.ProcessEnv;
 }
 
@@ -1321,6 +1371,13 @@ export async function runHeadlessCouncilGate(
       ? "error"
       : laneVerdict;
   const summary = summarizeVerdict(verdict, lanes, degradedConditions);
+  // Resolve durable Linear IDs for the surviving Track findings before the
+  // closeout so the assessment, report, and review-result.json all carry an
+  // explicit filing status (SYMPH-760). Best-effort: no filer ⇒ unfiled.
+  const resolvedTrackIssues = await resolveTrackFindingFilings(
+    collectTrackFindings({ verdict, lanes }),
+    input.trackFindingFiler,
+  );
   const termination = assessCouncilTermination({
     verdict,
     round,
@@ -1328,6 +1385,7 @@ export async function runHeadlessCouncilGate(
     lanes,
     degradedConditions,
     priorStructuredArtifacts: input.priorStructuredArtifacts ?? [],
+    resolvedTrackIssues,
   });
 
   return await writeResult({
@@ -6044,11 +6102,22 @@ function assessCouncilTermination(input: {
   lanes: readonly HeadlessLaneResult[];
   degradedConditions: readonly string[];
   priorStructuredArtifacts: readonly StructuredReviewerArtifact[];
+  /**
+   * Durable Linear refs the caller filed/found for Track findings, keyed by
+   * finding fingerprint (SYMPH-760). Empty (the default) leaves Track findings
+   * `unfiled` with an explicit machine-readable status.
+   */
+  resolvedTrackIssues?: ReadonlyMap<
+    string,
+    { issueId: string; url: string | null }
+  >;
 }): CouncilTerminationAssessment {
   const terminationLanes = mergeAuthoritativeLanes(input.lanes);
-  const currentArtifacts = currentTerminationArtifacts({
+  // Single derivation shared with collectTrackFindings (SYMPH-760, council R1
+  // P2) so the filer and the assessment can never operate on divergent sets.
+  const currentArtifacts = authoritativeTerminationArtifacts({
     verdict: input.verdict,
-    lanes: terminationLanes,
+    lanes: input.lanes,
   });
   const currentFindings = currentArtifacts.flatMap(
     (artifact) => artifact.findings,
@@ -6056,7 +6125,12 @@ function assessCouncilTermination(input: {
   const blockingFindings = currentFindings.filter(isOpenBlockingFinding);
   const nonBlockingFindingCount =
     currentFindings.length - blockingFindings.length;
-  const trackFindingCount = currentFindings.filter(isTrackDisposition).length;
+  const trackFindings = currentFindings.filter(isTrackDisposition);
+  const trackFindingCount = trackFindings.length;
+  const trackFiling = computeTrackFiling(
+    trackFindings,
+    input.resolvedTrackIssues ?? new Map(),
+  );
   const familySyntheses = currentArtifacts.flatMap(
     (artifact) => artifact.familySyntheses,
   );
@@ -6118,6 +6192,14 @@ function assessCouncilTermination(input: {
     action = "continue_fix_loop";
   }
 
+  // Unfiled Track findings must not ride out on a silent clean closeout: raise
+  // an otherwise-`ok` closeout to `warning` so the missing durable IDs are
+  // operator-visible without blocking merge (SYMPH-760). Escalating states
+  // (operator / warning from the ladder) already outrank this.
+  if (trackFiling.status === "unfiled" && alertLevel === "ok") {
+    alertLevel = "warning";
+  }
+
   return {
     status,
     reason,
@@ -6128,11 +6210,148 @@ function assessCouncilTermination(input: {
     blockingFindingCount: blockingFindings.length,
     nonBlockingFindingCount,
     trackFindingCount,
+    trackFiling,
     familySynthesisCount: familySyntheses.length,
     synthesisAttached: familySyntheses.length > 0,
     tripwireFamilyNames,
     synthesisFamilyNames,
   };
+}
+
+/**
+ * Build the {@link CouncilTrackFindingFiling} record for the council's Track
+ * findings from the durable Linear refs the caller resolved for them, keyed by
+ * fingerprint (SYMPH-760). Findings absent from the map are reported `unfiled`.
+ */
+function computeTrackFiling(
+  trackFindings: readonly StructuredReviewFinding[],
+  resolved: ReadonlyMap<string, { issueId: string; url: string | null }>,
+): CouncilTrackFindingFiling {
+  const required = trackFindings.length;
+  if (required === 0) {
+    return {
+      status: "none",
+      required: 0,
+      filed: 0,
+      reason: null,
+      findings: [],
+    };
+  }
+  const findings: CouncilTrackFindingFilingEntry[] = trackFindings.map(
+    (finding) => {
+      const ref = resolved.get(finding.fingerprint) ?? null;
+      return {
+        fingerprint: finding.fingerprint,
+        title: finding.title,
+        issueId: ref?.issueId ?? null,
+        url: ref?.url ?? null,
+      };
+    },
+  );
+  const filed = findings.filter((entry) => entry.issueId !== null).length;
+  if (filed === required) {
+    return { status: "filed", required, filed, reason: null, findings };
+  }
+  return {
+    status: "unfiled",
+    required,
+    filed,
+    reason:
+      filed === 0 ? "track_findings_unfiled" : "track_findings_partially_filed",
+    findings,
+  };
+}
+
+/**
+ * Authoritative termination artifacts for a verdict + lane set: merge the
+ * authoritative lanes, then select the current-round artifacts. The single
+ * source of truth for both {@link assessCouncilTermination} and
+ * {@link collectTrackFindings} so the assessment and the Track-finding filer
+ * can never derive divergent finding sets (SYMPH-760, council R1 P2).
+ */
+function authoritativeTerminationArtifacts(input: {
+  verdict: HeadlessGateVerdict;
+  lanes: readonly HeadlessLaneResult[];
+}): StructuredReviewerArtifact[] {
+  return currentTerminationArtifacts({
+    verdict: input.verdict,
+    lanes: mergeAuthoritativeLanes(input.lanes),
+  });
+}
+
+/**
+ * The council's surviving Track findings (SYMPH-760), derived through the same
+ * {@link authoritativeTerminationArtifacts} path as
+ * {@link assessCouncilTermination}'s track count.
+ */
+function collectTrackFindings(input: {
+  verdict: HeadlessGateVerdict;
+  lanes: readonly HeadlessLaneResult[];
+}): StructuredReviewFinding[] {
+  return authoritativeTerminationArtifacts(input)
+    .flatMap((artifact) => artifact.findings)
+    .filter(isTrackDisposition);
+}
+
+/**
+ * Invoke an optional Track-finding filer and reduce its durable refs into a
+ * fingerprint→ref map for {@link assessCouncilTermination} (SYMPH-760). Filing
+ * is best-effort: a missing filer, a throw, or a finding with no returned ref
+ * all leave the finding `unfiled` with an explicit status rather than blocking
+ * or crashing the review closeout.
+ */
+async function resolveTrackFindingFilings(
+  trackFindings: readonly StructuredReviewFinding[],
+  filer: HeadlessCouncilGateInput["trackFindingFiler"],
+): Promise<Map<string, { issueId: string; url: string | null }>> {
+  const resolved = new Map<string, { issueId: string; url: string | null }>();
+  if (filer === undefined || trackFindings.length === 0) {
+    return resolved;
+  }
+  let refs: ReadonlyArray<{
+    fingerprint: string;
+    issueId: string;
+    url?: string | null;
+  }>;
+  try {
+    refs = await filer(trackFindings);
+  } catch (error) {
+    // Fail closed (findings stay unfiled), but surface WHY so an operator can
+    // tell a thrown filer from no filer being configured (council R1 P2).
+    console.warn(
+      `[council] track-finding filer threw; ${trackFindings.length} finding(s) remain unfiled: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+    return resolved;
+  }
+  // The filer is external: narrow each ref as `unknown` so a malformed element
+  // (null, a primitive, a missing field) leaves its finding unfiled rather than
+  // throwing and aborting the gate (council R2 P3). A non-object element would
+  // otherwise crash on the field access below.
+  for (const ref of refs as readonly unknown[]) {
+    const record =
+      typeof ref === "object" && ref !== null
+        ? (ref as { fingerprint?: unknown; issueId?: unknown; url?: unknown })
+        : null;
+    if (
+      record !== null &&
+      typeof record.fingerprint === "string" &&
+      typeof record.issueId === "string" &&
+      record.issueId.length > 0
+    ) {
+      resolved.set(record.fingerprint, {
+        issueId: record.issueId,
+        url: typeof record.url === "string" ? record.url : null,
+      });
+    } else {
+      // A malformed ref leaves its finding unfiled; do not drop it silently.
+      console.warn(
+        "[council] track-finding filer returned an invalid ref; finding remains unfiled",
+      );
+    }
+  }
+  return resolved;
 }
 
 function currentTerminationArtifacts(input: {
@@ -6582,6 +6801,19 @@ function formatCouncilReport(result: HeadlessCouncilGateResult): string {
       `- Blocking findings: ${termination.blockingFindingCount}`,
       `- Non-blocking findings: ${termination.nonBlockingFindingCount}`,
       `- Track findings to file: ${termination.trackFindingCount}`,
+      `- Track filing status: ${termination.trackFiling.status}${
+        termination.trackFiling.reason === null
+          ? ""
+          : ` (${termination.trackFiling.reason})`
+      }`,
+      ...termination.trackFiling.findings.map(
+        (entry) =>
+          `  - ${entry.title}: ${
+            entry.issueId === null
+              ? "unfiled"
+              : `${entry.issueId}${entry.url === null ? "" : ` (${entry.url})`}`
+          }`,
+      ),
       `- Synthesis attached: ${termination.synthesisAttached ? "yes" : "no"}`,
       `- Trip-wire families: ${termination.tripwireFamilyNames.join(", ") || "none"}`,
       `- Synthesis families: ${termination.synthesisFamilyNames.join(", ") || "none"}`,

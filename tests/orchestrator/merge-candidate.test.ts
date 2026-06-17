@@ -15,6 +15,7 @@ import {
   buildMergeActuationEntry,
   buildMergeCandidateEntryFromReviewGate,
   decideMergeActuation,
+  hasCurrentSpecFidelityRework,
   mergeActuatorPollAttempt,
   reduceMergeCandidates,
   runMergeActuator,
@@ -2336,6 +2337,236 @@ describe("merge actuator bounded pre-enqueue poll (SYMPH-752/755)", () => {
     ).toBe(1);
   });
 });
+
+describe("merge actuator spec-fidelity rework gate (SYMPH-758)", () => {
+  it("reports no current rework when the journal has no spec-fidelity verdicts", () => {
+    const candidateEntry = candidateJournalEntry();
+    const candidate = candidateFromJournal([candidateEntry]);
+    expect(hasCurrentSpecFidelityRework([candidateEntry], candidate)).toBe(
+      false,
+    );
+  });
+
+  it("reports no current rework for a completely empty journal", () => {
+    const candidate = candidateFromJournal([candidateJournalEntry()]);
+    expect(hasCurrentSpecFidelityRework([], candidate)).toBe(false);
+  });
+
+  it("reports a current rework when the latest verdict for the reviewed head is rework", () => {
+    const candidateEntry = candidateJournalEntry();
+    const candidate = candidateFromJournal([candidateEntry]);
+    const journal = [
+      candidateEntry,
+      specFidelityEntry({
+        verdict: "rework",
+        reviewedHeadSha: candidate.reviewedHeadSha,
+        sequence: 5,
+      }),
+    ];
+    expect(hasCurrentSpecFidelityRework(journal, candidate)).toBe(true);
+  });
+
+  it("treats a later pass for the same head as superseding an earlier rework", () => {
+    const candidateEntry = candidateJournalEntry();
+    const candidate = candidateFromJournal([candidateEntry]);
+    const journal = [
+      candidateEntry,
+      specFidelityEntry({
+        verdict: "rework",
+        reviewedHeadSha: candidate.reviewedHeadSha,
+        sequence: 5,
+      }),
+      specFidelityEntry({
+        verdict: "pass",
+        reviewedHeadSha: candidate.reviewedHeadSha,
+        sequence: 6,
+      }),
+    ];
+    expect(hasCurrentSpecFidelityRework(journal, candidate)).toBe(false);
+  });
+
+  it("ignores a rework verdict keyed to a different reviewed head", () => {
+    const candidateEntry = candidateJournalEntry();
+    const candidate = candidateFromJournal([candidateEntry]);
+    const journal = [
+      candidateEntry,
+      specFidelityEntry({
+        verdict: "rework",
+        reviewedHeadSha: "head-from-a-prior-round",
+        sequence: 5,
+      }),
+    ];
+    expect(hasCurrentSpecFidelityRework(journal, candidate)).toBe(false);
+  });
+
+  it("ignores a rework verdict that cannot be correlated to a head", () => {
+    // Legacy entries with no reviewed_head_sha must not block a candidate: a
+    // false-positive park is safer to avoid than a false-negative is to chase,
+    // and an uncorrelated verdict could belong to any round.
+    const candidateEntry = candidateJournalEntry();
+    const candidate = candidateFromJournal([candidateEntry]);
+    const journal = [
+      candidateEntry,
+      specFidelityEntry({
+        verdict: "rework",
+        reviewedHeadSha: null,
+        sequence: 5,
+      }),
+    ];
+    expect(hasCurrentSpecFidelityRework(journal, candidate)).toBe(false);
+  });
+
+  it("blocks an otherwise enqueue-ready candidate when a current rework exists", () => {
+    const candidate = candidateFromJournal([candidateJournalEntry()]);
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState(),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+      autoMergePermission: true,
+      specFidelityRework: true,
+    });
+    expect(decision).toMatchObject({
+      action: "blocked",
+      reason: "spec_fidelity_rework",
+    });
+    expect(decision.sideEffectKey).toBeNull();
+  });
+
+  it("blocks mark_ready on a draft PR when a current rework exists", () => {
+    const candidate = candidateFromJournal([candidateJournalEntry()]);
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState({ isDraft: true }),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+      specFidelityRework: true,
+    });
+    expect(decision).toMatchObject({
+      action: "blocked",
+      reason: "spec_fidelity_rework",
+    });
+    expect(decision.sideEffectKey).toBeNull();
+  });
+
+  it("blocks tracker_done on a merged PR when a current rework exists", () => {
+    // The canary's worst case: GitHub already merged the PR, but an unresolved
+    // rework for the reviewed head must still park instead of auto-completing
+    // the issue as Done (journal sequence 1835 in SYMPH-758).
+    const candidate = candidateFromJournal([candidateJournalEntry()]);
+    const decision = decideMergeActuation({
+      candidate,
+      live: liveState({
+        state: "MERGED",
+        mergedAt: "2026-06-16T01:00:00Z",
+        mergeCommit: "merge-1",
+      }),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set(),
+      specFidelityRework: true,
+    });
+    expect(decision).toMatchObject({
+      action: "blocked",
+      reason: "spec_fidelity_rework",
+    });
+    expect(decision.sideEffectKey).toBeNull();
+  });
+
+  it("does not enqueue when a late rework verdict races behind a passed review gate", async () => {
+    // SYMPH-758 canary regression: review_gate_result:pass → merge_candidate →
+    // late spec_fidelity:rework for the same reviewed head must NOT enqueue.
+    const candidateEntry = candidateJournalEntry();
+    const candidate = candidateFromJournal([candidateEntry]);
+    const journal = [
+      candidateEntry,
+      specFidelityEntry({
+        verdict: "rework",
+        reviewedHeadSha: candidate.reviewedHeadSha,
+        sequence: 5,
+      }),
+    ];
+    const harness = makeJournalHarness(journal);
+    let enqueued = false;
+
+    const result = await runMergeActuatorCycle({
+      candidate,
+      journal,
+      lease: lease(),
+      ownerId: "owner-1",
+      now: new Date("2026-06-16T01:00:00.000Z"),
+      enqueuedAtMs: null,
+      maxWaitMs: 30 * 60_000,
+      limits: { maxLiveStateFailures: 3, maxSideEffectFailures: 2 },
+      // Permission granted: the rework gate, not the auto-merge gate, must be
+      // what blocks the enqueue here.
+      autoMergePermission: true,
+      fetchLiveState: async () => liveState(),
+      appendActuation: harness.appendActuation,
+      sideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {
+          enqueued = true;
+        },
+        writeTrackerDone: async () => {},
+      },
+    });
+
+    expect(result.outcome).toBe("actuated");
+    if (result.outcome === "actuated") {
+      expect(result.run.decision).toMatchObject({
+        action: "blocked",
+        reason: "spec_fidelity_rework",
+      });
+      expect(result.run.sideEffect).toBe("none");
+    }
+    expect(enqueued).toBe(false);
+    expect(harness.entries.some((e) => e.metadata.action === "enqueue")).toBe(
+      false,
+    );
+  });
+});
+
+function specFidelityEntry(input: {
+  verdict: "pass" | "rework";
+  reviewedHeadSha: string | null;
+  sequence: number;
+}): DispatcherRunJournalEntry {
+  const metadata: Record<string, unknown> = {
+    status: "completed",
+    verdict: input.verdict,
+    findings: "AC-1: evidence",
+  };
+  if (input.reviewedHeadSha !== null) {
+    metadata.reviewed_head_sha = input.reviewedHeadSha;
+  }
+  return {
+    sequence: input.sequence,
+    idempotencyKey: `spec_fidelity:issue-1:review:${input.sequence}`,
+    timestamp: "2026-06-16T00:42:00.000Z",
+    kind: "spec_fidelity",
+    issueId: "issue-1",
+    issueIdentifier: "SYMPH-722",
+    operation: "dispatcher",
+    stage: "review",
+    attempt: null,
+    ownerId: "owner-1",
+    lease: null,
+    summary: `Spec-fidelity verdict for SYMPH-722: ${input.verdict}.`,
+    metadata,
+  };
+}
 
 function reviewGateEntry(input?: {
   round?: number;
