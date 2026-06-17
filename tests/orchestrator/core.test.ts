@@ -6085,6 +6085,137 @@ describe("orchestrator core", () => {
     expect(nonGating?.metadata.reason).toBe("no_canonical_ac_stage_skipped");
   });
 
+  it("freezes newly-added ticket AC on a fresh dispatch even when a stale skip row survives from a prior lifecycle (SYMPH-765, council R1)", async () => {
+    // Council R1 (Codex P1 / Opus): clearTerminalIssueRuntimeState clears
+    // issueFirstDispatchedAt + issueAcSnapshots on terminal, but the journal is
+    // append-only so a prior lifecycle's `ac_gate` skip row survives. The
+    // admission freeze must NOT be blocked by that stale skip when the ticket now
+    // carries AC — otherwise the new AC is never frozen and review exit goes
+    // non-gating off the stale skip.
+    const mkAgentStage = (transitions: {
+      onComplete: string | null;
+      onRework: string | null;
+    }) => ({
+      type: "agent" as const,
+      runner: null,
+      model: null,
+      maxTurns: null,
+      maxRework: null,
+      gateType: null,
+      prompt: null,
+      promptPath: null,
+      reviewers: [],
+      hardStops: null,
+      linearState: null,
+      mcpServers: {},
+      timeoutMs: null,
+      concurrency: null,
+      transitions: { ...transitions, onApprove: null },
+    });
+    const baseConfig = createConfig();
+    const config = {
+      ...baseConfig,
+      acGate: { enabled: true },
+      specFidelity: { enabled: true },
+      stages: {
+        initialStage: "investigate",
+        fastTrack: {
+          label: "trivial",
+          labels: ["trivial"],
+          initialStage: "implement",
+        },
+        stages: {
+          investigate: mkAgentStage({
+            onComplete: "implement",
+            onRework: null,
+          }),
+          implement: mkAgentStage({ onComplete: "review", onRework: null }),
+          review: mkAgentStage({ onComplete: null, onRework: "implement" }),
+        },
+      },
+    };
+    const dispatchedAcs: Array<string | null> = [];
+    const expectedSnapshot = [
+      "## Acceptance Criteria",
+      "- [ ] `test: tests/foo.test.ts covers bar`",
+    ].join("\n");
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "1",
+            identifier: "ISSUE-1",
+            labels: ["trivial"],
+            description: [
+              "## Context",
+              "fix it",
+              "",
+              ...expectedSnapshot.split("\n"),
+            ].join("\n"),
+          }),
+        ],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      spawnWorker: async (input) => {
+        dispatchedAcs.push(input.acceptanceCriteria);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+      postComment: async () => {},
+      runAcGate: async () => ({ verdict: "pass" as const, feedback: "x" }),
+      runSpecFidelityJudge: async () => ({
+        verdict: "pass",
+        findings: "AC1 PASS.",
+      }),
+      scheduleDeferred: () => {},
+    });
+
+    // Simulate a survived prior-lifecycle skip: the issue ran fast-track with no
+    // AC (skip row journaled), then went terminal (first-dispatch + snapshot
+    // cleared) — but the skip row remains in the append-only journal.
+    orchestrator.getState().dispatcherRunJournal.push({
+      sequence: orchestrator.getState().dispatcherRunJournal.length + 1,
+      idempotencyKey: "ac_gate:1:implement:admission-skip:prior-lifecycle",
+      timestamp: "2026-03-05T00:00:00.000Z",
+      kind: "ac_gate",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      operation: "dispatcher",
+      stage: "implement",
+      attempt: null,
+      ownerId: "owner-prior",
+      lease: null,
+      summary: "prior-lifecycle skip",
+      metadata: {
+        status: "skipped",
+        verdict: "non_gating",
+        source: "ticket_admission",
+        reason: "no_canonical_ac_stage_skipped",
+        acceptanceCriteria: null,
+      },
+    });
+
+    await orchestrator.pollTick();
+
+    // The freeze must run despite the stale skip: the new ticket AC is frozen,
+    // handed to the worker, and a fresh completed ac_gate row supersedes the skip.
+    expect(orchestrator.getState().issueStages["1"]).toBe("implement");
+    expect(orchestrator.getState().issueAcSnapshots["1"]).toBe(
+      expectedSnapshot,
+    );
+    expect(dispatchedAcs).toEqual([expectedSnapshot]);
+    const latestAcGate = orchestrator
+      .getState()
+      .dispatcherRunJournal.filter((e) => e.kind === "ac_gate")
+      .at(-1);
+    expect(latestAcGate?.metadata.status).toBe("completed");
+    expect(latestAcGate?.metadata.acceptanceCriteria).toBe(expectedSnapshot);
+  });
+
   it("posts the admission card once, on first dispatch only (SYMPH-379)", async () => {
     const comments: string[] = [];
     let spawnCount = 0;

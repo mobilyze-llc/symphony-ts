@@ -11262,8 +11262,16 @@ export class OrchestratorCore {
       isFirstDispatch &&
       skipsAcGate &&
       stageName !== null &&
-      this.state.issueAcSnapshots[issue.id] === undefined &&
-      this.issueStageSkippedAcGateReason(issue.id) === null
+      this.state.issueAcSnapshots[issue.id] === undefined
+      // Intentionally NOT guarded on issueStageSkippedAcGateReason (council R1,
+      // Codex P1 / Opus): clearTerminalIssueRuntimeState clears
+      // issueFirstDispatchedAt + issueAcSnapshots on terminal, but the journal is
+      // append-only so a prior lifecycle's `ac_gate` skip row survives. Guarding
+      // on the latest-skip lookup would block a fresh first-dispatch (isFirstDispatch
+      // is true again) from freezing newly-added ticket AC, leaving review exit to
+      // go non-gating off the stale skip. The freeze runs once per lifecycle
+      // (isFirstDispatch), and its fresh `ac_gate` row supersedes any stale skip
+      // because issueStageSkippedAcGateReason reads the latest row.
     ) {
       const ticketAcceptanceCriteria = extractAcceptanceCriteria(
         issue.description ?? null,
