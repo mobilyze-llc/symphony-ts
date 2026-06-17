@@ -3054,6 +3054,56 @@ describe("runHeadlessCouncilGate", () => {
     expect(lane.mirrorFallback?.remoteArtifactPath).toContain("claude-opus.md");
   });
 
+  it("treats a mirror written during the run as fresh even when its mtime predates run start", async () => {
+    const harness = await createHarness({
+      laneBehavior: {
+        "claude-opus": {
+          mirrorArtifact:
+            "## Verdict\nPASS\n\n## P1 Must Fix\nNone\n\n## P2 Should Fix\nNone\n",
+          json: {
+            state: "complete",
+            artifact_path: join(tmpdir(), "claude-opus.md"),
+          },
+          afterArtifactWrite: async (mirrorPath) => {
+            // Reproduce the CI flake deterministically: the mirror is written
+            // during the run, but filesystem mtime granularity / clock skew can
+            // leave its mtime before the captured run-start. Freshness must not
+            // depend on a wall-clock comparison.
+            const skewed = new Date(Date.now() - 60_000);
+            await utimes(mirrorPath, skewed, skewed);
+          },
+        },
+      },
+    });
+    const mirroredArtifact = join(harness.artifactDir, "claude-opus.md");
+    const result = await runHeadlessCouncilGate(
+      {
+        issueId: "MOB-88",
+        workspace: harness.workspace,
+        artifactDir: harness.artifactDir,
+        diffPath: harness.diffPath,
+        reviewerLanes: [opusLane()],
+        codexLead: false,
+      },
+      { runCommand: harness.runCommand },
+    );
+
+    expect(result.verdict).toBe("pass");
+    const lane = result.lanes.find((entry) => entry.laneId === "claude-opus")!;
+    expect(lane).toMatchObject({
+      verdict: "pass",
+      artifactPath: mirroredArtifact,
+      rawArtifactPath: mirroredArtifact,
+      mirrorFallback: {
+        attempted: true,
+        used: true,
+        selectedMirrorPath: mirroredArtifact,
+        freshnessPassed: true,
+        failureKind: null,
+      },
+    });
+  });
+
   it("rejects stale remote lane mirrors that predate lane launch", async () => {
     const harness = await createHarness({
       laneBehavior: {

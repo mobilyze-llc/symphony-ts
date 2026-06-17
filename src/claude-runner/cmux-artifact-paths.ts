@@ -27,26 +27,60 @@ export interface CmuxArtifactPathResolution {
   mirrorFallback: CmuxMirrorFallbackStatus;
 }
 
+/**
+ * Snapshot of the same-stem mirror taken immediately before a lane launches.
+ *
+ * Mirror freshness is established by an absent-before -> present-after signal
+ * rather than a wall-clock comparison: {@link removeStaleCmuxMirror} clears any
+ * pre-existing mirror before launch, so a mirror present afterwards was written
+ * during the run. The former `mtimeMs >= runStartedAtMs` check flaked on CI
+ * because filesystem mtime granularity / clock skew could make a freshly written
+ * mirror look older than a wall-clock start captured via `Date.now()`.
+ */
+export interface CmuxMirrorPriorState {
+  /**
+   * Whether the mirror path was guaranteed clear (absent) when the lane
+   * launched: either nothing was there, or {@link removeStaleCmuxMirror}
+   * removed it. When `false`, a mirror survived pre-run cleanup (it could not be
+   * removed, or its path could not be validated), so a mirror present after the
+   * run cannot be assumed to be this run's output and is treated as stale.
+   */
+  cleared: boolean;
+}
+
+const CLEARED_MIRROR_PRIOR_STATE: CmuxMirrorPriorState = { cleared: true };
+const UNCLEARED_MIRROR_PRIOR_STATE: CmuxMirrorPriorState = { cleared: false };
+
 const VALID_SHA256_HEX = /^[a-f0-9]{64}$/;
 
 export async function removeStaleCmuxMirror(input: {
   artifactDir: string;
   artifactName: string;
-}): Promise<void> {
+}): Promise<CmuxMirrorPriorState> {
   const resolvedArtifactDir = resolve(input.artifactDir);
   const mirrorPath = resolve(resolvedArtifactDir, `${input.artifactName}.md`);
   if (!isInside(resolvedArtifactDir, mirrorPath)) {
-    return;
+    return UNCLEARED_MIRROR_PRIOR_STATE;
   }
 
+  let mirrorEntry: Awaited<ReturnType<typeof lstat>>;
   try {
-    const mirrorEntry = await lstat(mirrorPath);
-    if (mirrorEntry.isSymbolicLink()) {
-      await unlink(mirrorPath);
-      return;
-    }
+    mirrorEntry = await lstat(mirrorPath);
   } catch {
-    return;
+    // Nothing at the mirror path — already clear.
+    return CLEARED_MIRROR_PRIOR_STATE;
+  }
+
+  if (mirrorEntry.isSymbolicLink()) {
+    try {
+      await unlink(mirrorPath);
+    } catch {
+      // The symlink survived cleanup (e.g. unlink threw on a read-only parent),
+      // so a mirror present after the run cannot be assumed fresh. Scoped to its
+      // own try/catch so a failed unlink is never misread as an absent mirror.
+      return UNCLEARED_MIRROR_PRIOR_STATE;
+    }
+    return CLEARED_MIRROR_PRIOR_STATE;
   }
 
   const mirror = await validateArtifactPathWithinDir(
@@ -54,12 +88,21 @@ export async function removeStaleCmuxMirror(input: {
     mirrorPath,
   );
   if (mirror.validationErrors.length > 0) {
-    return;
+    // Path could not be validated; resolveCmuxArtifactPath rejects it as a
+    // symlink_escape before freshness. Report uncleared rather than claim fresh.
+    return UNCLEARED_MIRROR_PRIOR_STATE;
   }
 
   // Recursive cleanup is intentional: stale same-stem mirrors may be files or
   // directories, but cleanup stays scoped to runner-managed artifact scratch.
-  await rm(mirror.artifactPath, { force: true, recursive: true });
+  try {
+    await rm(mirror.artifactPath, { force: true, recursive: true });
+  } catch {
+    // The mirror survived removal; treat it as a lingering (stale) mirror rather
+    // than letting the throw degrade the whole lane.
+    return UNCLEARED_MIRROR_PRIOR_STATE;
+  }
+  return CLEARED_MIRROR_PRIOR_STATE;
 }
 
 export async function validateArtifactPathWithinDir(
@@ -89,7 +132,7 @@ export async function resolveCmuxArtifactPath(input: {
   artifactDir: string;
   artifactName: string;
   candidatePath: string;
-  runStartedAtMs?: number;
+  priorMirror?: CmuxMirrorPriorState;
   remoteArtifactSha256?: string | null;
 }): Promise<CmuxArtifactPathResolution> {
   const primary = await validateArtifactPathWithinDir(
@@ -148,10 +191,7 @@ export async function resolveCmuxArtifactPath(input: {
       );
     }
 
-    const freshnessPassed =
-      input.runStartedAtMs === undefined
-        ? null
-        : mirrorStats.mtimeMs >= input.runStartedAtMs;
+    const freshnessPassed = mirrorFreshnessFromPriorState(input.priorMirror);
     if (freshnessPassed === false) {
       return fallbackFailure(
         primary,
@@ -224,6 +264,24 @@ async function validateRemoteArtifactSha256(
     return `mirror fallback provenance sha256 mismatch: expected ${normalized} but found ${localSha256}`;
   }
   return null;
+}
+
+/**
+ * Decide whether the post-run mirror is fresh from the pre-run snapshot.
+ *
+ * Returns `null` when the caller supplied no snapshot (freshness not assessed).
+ * Otherwise a mirror present after the run is fresh iff the mirror path was
+ * cleared before the lane launched — so the lane itself must have written it. A
+ * mirror that survived pre-run cleanup cannot be assumed fresh and is treated as
+ * stale (fail closed).
+ */
+function mirrorFreshnessFromPriorState(
+  priorMirror: CmuxMirrorPriorState | undefined,
+): boolean | null {
+  if (priorMirror === undefined) {
+    return null;
+  }
+  return priorMirror.cleared;
 }
 
 function fallbackFailure(

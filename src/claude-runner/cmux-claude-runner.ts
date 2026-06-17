@@ -327,7 +327,7 @@ export async function runClaudeCmux(
   const maxAttempts = input.retryOnInvalid === true ? 2 : 1;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    await removeStaleCmuxMirror({
+    const priorMirror = await removeStaleCmuxMirror({
       artifactDir,
       artifactName: currentArtifactName,
     });
@@ -357,7 +357,7 @@ export async function runClaudeCmux(
       artifactDir,
       artifactName: currentArtifactName,
       candidatePath: rawArtifactPath,
-      runStartedAtMs: Date.parse(startedAt),
+      priorMirror,
       remoteArtifactSha256:
         cmux.remote_artifact_sha256 ?? cmux.artifact_sha256 ?? null,
     });

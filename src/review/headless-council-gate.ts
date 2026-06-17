@@ -14,6 +14,7 @@ import { promisify } from "node:util";
 
 import {
   type CmuxMirrorFallbackStatus,
+  type CmuxMirrorPriorState,
   removeStaleCmuxMirror,
   resolveCmuxArtifactPath,
 } from "../claude-runner/cmux-artifact-paths.js";
@@ -1100,7 +1101,6 @@ export async function runHeadlessCouncilGate(
         targetedConvergence,
         priorStructuredArtifacts: input.priorStructuredArtifacts ?? [],
         riskContractArtifactPaths: input.riskContractArtifactPaths ?? [],
-        runStartedAtMs: startedAtMs,
       }).catch((error: unknown) =>
         reviewerLaneExecutionErrorResult(
           lane,
@@ -1218,7 +1218,6 @@ export async function runHeadlessCouncilGate(
           targetedConvergence,
           priorStructuredArtifacts: input.priorStructuredArtifacts ?? [],
           riskContractArtifactPaths: input.riskContractArtifactPaths ?? [],
-          runStartedAtMs: codexLeadStartedAtMs,
         }).catch((error: unknown) =>
           codexLeadExecutionErrorResult(
             artifactDir,
@@ -3535,7 +3534,6 @@ async function runReviewerLane(input: {
   targetedConvergence: TargetedConvergenceHypothesis | null;
   priorStructuredArtifacts: readonly StructuredReviewerArtifact[];
   riskContractArtifactPaths: readonly string[];
-  runStartedAtMs: number;
 }): Promise<HeadlessLaneResult> {
   const phase = `headless-council-review-${input.lane.laneId}`;
   const promptPath = `${input.artifactDir}/${input.lane.laneId}.prompt.md`;
@@ -3603,7 +3601,7 @@ async function runReviewerLane(input: {
     ...laneAgentArgs(input.lane, input.artifactDir),
   ];
 
-  await removeStaleCmuxMirror({
+  const priorMirror = await removeStaleCmuxMirror({
     artifactDir: input.artifactDir,
     artifactName: input.lane.laneId,
   });
@@ -3633,7 +3631,7 @@ async function runReviewerLane(input: {
     mode: input.mode,
     routingMode: input.routingMode,
     round: input.round,
-    runStartedAtMs: input.runStartedAtMs,
+    priorMirror,
     structuredArtifactPath: structuredArtifactPathFor(
       input.artifactDir,
       input.lane.laneId,
@@ -3668,7 +3666,6 @@ async function runCodexLeadLane(input: {
   targetedConvergence: TargetedConvergenceHypothesis | null;
   priorStructuredArtifacts: readonly StructuredReviewerArtifact[];
   riskContractArtifactPaths: readonly string[];
-  runStartedAtMs: number;
 }): Promise<HeadlessLaneResult> {
   const laneId = CODEX_LEAD_LANE_ID;
   const phase = `headless-council-triage-${laneId}`;
@@ -3719,7 +3716,7 @@ async function runCodexLeadLane(input: {
     });
   }
 
-  await removeStaleCmuxMirror({
+  const priorMirror = await removeStaleCmuxMirror({
     artifactDir: input.artifactDir,
     artifactName: laneId,
   });
@@ -3774,7 +3771,7 @@ async function runCodexLeadLane(input: {
     mode: input.mode,
     routingMode: input.routingMode,
     round: input.round,
-    runStartedAtMs: input.runStartedAtMs,
+    priorMirror,
     structuredArtifactPath: structuredArtifactPathFor(
       input.artifactDir,
       laneId,
@@ -4365,7 +4362,7 @@ async function parseLaneResult(input: {
   mode: CouncilReviewMode;
   routingMode: CouncilRoutingMode | null;
   round: number;
-  runStartedAtMs: number;
+  priorMirror: CmuxMirrorPriorState;
   structuredArtifactPath: string;
 }): Promise<HeadlessLaneResult> {
   const {
@@ -4424,7 +4421,7 @@ async function parseLaneResult(input: {
           artifactDir: input.artifactDir,
           artifactName: laneIdentity.laneId,
           candidatePath: rawArtifactPath,
-          runStartedAtMs: input.runStartedAtMs,
+          priorMirror: input.priorMirror,
           remoteArtifactSha256:
             stringOrNull(parsed.remote_artifact_sha256) ??
             stringOrNull(parsed.artifact_sha256),
