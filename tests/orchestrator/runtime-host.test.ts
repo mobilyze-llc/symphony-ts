@@ -350,6 +350,35 @@ describe("runtime host merge actuator enqueue args (SYMPH-750)", () => {
     expect(args[matchIndex + 1]).toBe("reviewed-sha");
     expect(args).not.toContain("advanced-sha");
   });
+
+  // Locks the dequeue arg vector (SYMPH-766): `--disable-auto` only turns
+  // auto-merge off; it must NEVER carry `--auto` or a merge strategy, so the
+  // dequeue side effect can never silently become a merge.
+  it("dequeues with --disable-auto and never merges", () => {
+    const candidate = mergeCandidate({
+      prNumber: 731,
+      repo: "mobilyze-llc/symphony-ts",
+    });
+
+    const args =
+      runtimeHostMergeActuatorTesting.buildMergeActuatorDisableAutoArgs(
+        candidate,
+      );
+
+    expect(args).toEqual([
+      "pr",
+      "merge",
+      "731",
+      "--repo",
+      "mobilyze-llc/symphony-ts",
+      "--disable-auto",
+    ]);
+    expect(args).not.toContain("--auto");
+    expect(args).not.toContain("--match-head-commit");
+    expect(args).not.toContain("--squash");
+    expect(args).not.toContain("--merge");
+    expect(args).not.toContain("--rebase");
+  });
 });
 
 function removeWorkspaceWithRetry(workspaceRoot: string): void {

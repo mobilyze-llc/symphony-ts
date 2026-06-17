@@ -8,6 +8,12 @@ export const MERGE_CANDIDATE_SCHEMA_VERSION = 1;
 export const MERGE_ACTUATION_ACTIONS = [
   "mark_ready",
   "enqueue",
+  // Dequeue side effect (SYMPH-766): `gh pr merge --disable-auto` pulls an
+  // already-enqueued candidate out of GitHub's merge queue when a late
+  // spec-fidelity rework lands, so the queue cannot merge it behind the rework.
+  // Idempotent (disabling auto-merge twice is harmless), so it follows the
+  // enqueue intent/completion pattern and is safe to redrive on failure.
+  "disable_auto_merge",
   "poll",
   "tracker_done",
   "stale",
@@ -107,6 +113,7 @@ export interface MergeActuatorDecision {
     | "noop"
     | "mark_ready"
     | "enqueue"
+    | "disable_auto_merge"
     | "poll"
     | "tracker_done"
     | "stale"
@@ -123,6 +130,20 @@ export interface MergeActuationJournalDraft
 export interface MergeActuatorSideEffects {
   markReady(candidate: MergeCandidateRecord): Promise<void>;
   enqueue(candidate: MergeCandidateRecord): Promise<void>;
+  /**
+   * Dequeue the candidate from GitHub's merge queue / disable auto-merge
+   * (SYMPH-766), invoked when a late spec-fidelity rework lands on an
+   * already-enqueued candidate. Must be idempotent (the actuator may redrive it)
+   * and must throw on failure so the bounded recovery can park it as
+   * `cannot_dequeue` rather than falsely claiming containment.
+   *
+   * Optional only for ergonomics: a provider that omits it cannot contain a late
+   * rework on an already-enqueued candidate, so the actuator parks those
+   * candidates as `cannot_dequeue` (the {@link runMergeActuator} guard throws,
+   * routing through bounded recovery) rather than silently claiming containment.
+   * The production provider (runtime-host) always supplies it.
+   */
+  disableAutoMerge?(candidate: MergeCandidateRecord): Promise<void>;
   writeTrackerDone(candidate: MergeCandidateRecord): Promise<void>;
 }
 
@@ -131,7 +152,12 @@ export interface RunMergeActuatorResult {
   journalEntry: DispatcherRunJournalEntry | null;
   failureEntry: DispatcherRunJournalEntry | null;
   recoveryEntry: DispatcherRunJournalEntry | null;
-  sideEffect: "none" | "mark_ready" | "enqueue" | "tracker_done";
+  sideEffect:
+    | "none"
+    | "mark_ready"
+    | "enqueue"
+    | "disable_auto_merge"
+    | "tracker_done";
   error: string | null;
 }
 
@@ -410,24 +436,78 @@ export function decideMergeActuation(input: {
     return leaseDecision;
   }
 
-  // Spec-fidelity rework gate (SYMPH-758). The advisory judge (SYMPH-343) posts
-  // verdicts asynchronously, so an independent-judge `rework` can land AFTER a
-  // passed review gate promoted this candidate. While that rework stands for the
-  // reviewed head, hold every merge-advancing action — mark_ready, enqueue, and
-  // tracker_done — with a terminal `blocked` decision and NO side-effect key, so
-  // the pure actuator writes no row and the coordinator parks it for an operator
-  // (the same blocked→park path as auto_merge_permission_denied). Placed first,
-  // before the MERGED/OPEN branches, so even an already-merged PR does not
-  // auto-complete the issue as Done while the rework is unresolved or
-  // unsuperseded — the exact ordering defect the canary hit (tracker_done fired
-  // behind a late rework). A held candidate never reaches the stale/poll/timeout
-  // paths, which is intended: nothing advances until the rework clears.
+  // Spec-fidelity rework gate (SYMPH-758 + SYMPH-766). The advisory judge
+  // (SYMPH-343) posts verdicts asynchronously, so an independent-judge `rework`
+  // can land AFTER a passed review gate promoted — and possibly enqueued — this
+  // candidate. While that rework stands for the reviewed head, SYMPH-758 holds
+  // every merge-advancing action (mark_ready, enqueue, tracker_done) so the
+  // issue never auto-completes as Done. Placed first, before the MERGED/OPEN
+  // branches, so even an already-merged PR does not auto-complete while the
+  // rework is unresolved — the exact ordering defect the canary hit. SYMPH-766
+  // extends the hold into active CONTAINMENT and explicit reconciliation: an
+  // already-enqueued candidate is pulled out of GitHub's merge queue (so the
+  // queue cannot merge it behind the rework), and each terminal state carries a
+  // precise operator-facing reason instead of a silent Blocked-while-merged.
   if (input.specFidelityRework === true) {
+    if (input.live.state === "MERGED") {
+      // GitHub merged from the queue before we could dequeue (or the rework
+      // landed post-merge). Do NOT auto-complete (SYMPH-758) and do NOT pretend
+      // we contained it: surface an explicit already-merged reconciliation so
+      // the operator sees "parked but already merged", never a silent Blocked
+      // while origin/main already carries the merge (the canary split-brain).
+      return {
+        action: "blocked",
+        reason: "spec_fidelity_rework_already_merged",
+        blockers: ["spec_fidelity_rework_already_merged"],
+        sideEffectKey: null,
+      };
+    }
+    const dequeueCompletionKey = mergeActuationKey(
+      input.candidate,
+      "completed",
+      "disable_auto_merge",
+    );
+    if (input.completedSideEffectKeys.has(dequeueCompletionKey)) {
+      // The dequeue side effect is confirmed: the PR is out of the merge queue
+      // and contained. Park with the precise dequeued reconciliation reason.
+      return {
+        action: "blocked",
+        reason: "spec_fidelity_rework_dequeued",
+        blockers: ["spec_fidelity_rework_dequeued"],
+        sideEffectKey: null,
+      };
+    }
+    const wasEnqueued =
+      input.candidate.status === "merge_queue_pending" ||
+      isUnconfirmedEnqueueIntent(input.candidate) ||
+      // A failed dequeue attempt also proves the candidate was enqueued, and
+      // must keep redriving the disable-auto rather than falling through to the
+      // never-queued hold below.
+      isRedrivingFailedAction(input.candidate, "disable_auto_merge");
+    if (!wasEnqueued) {
+      // Never entered the merge queue (fresh candidate, draft, or a pre-enqueue
+      // blocked state): there is nothing to dequeue, so hold with the original
+      // SYMPH-758 semantics. The coordinator parks it for an operator.
+      return {
+        action: "blocked",
+        reason: "spec_fidelity_rework",
+        blockers: ["spec_fidelity_rework"],
+        sideEffectKey: null,
+      };
+    }
+    // Already enqueued and not yet confirmed dequeued: pull it out of the queue
+    // before claiming containment (AC #1). The action key is returned directly
+    // (not via sideEffectDecision) so a crash between the intent row and the
+    // side effect re-attempts rather than stalling on a side_effect_already_
+    // journaled noop — `disable_auto_merge` is idempotent, so repeated calls are
+    // safe. On success a completion row is journaled (handled above as
+    // `_dequeued`); repeated failures accrue countable `failed` rows the bounded
+    // recovery parks as `disable_auto_merge_side_effect_failed` (cannot_dequeue).
     return {
-      action: "blocked",
-      reason: "spec_fidelity_rework",
+      action: "disable_auto_merge",
+      reason: "spec_fidelity_rework_dequeue",
       blockers: ["spec_fidelity_rework"],
-      sideEffectKey: null,
+      sideEffectKey: mergeActuationKey(input.candidate, "disable_auto_merge"),
     };
   }
 
@@ -783,6 +863,48 @@ export async function runMergeActuator(input: {
         failureEntry: null,
         recoveryEntry,
         sideEffect: "enqueue",
+        error: null,
+      };
+    }
+    if (decision.action === "disable_auto_merge") {
+      if (input.sideEffects.disableAutoMerge === undefined) {
+        // A provider without dequeue capability cannot contain the rework;
+        // throw so the catch below records a countable failure and the bounded
+        // recovery parks it as cannot_dequeue rather than falsely claiming the
+        // PR was pulled from the queue.
+        throw new Error(
+          "disable_auto_merge requested but no disableAutoMerge side effect is configured",
+        );
+      }
+      await input.sideEffects.disableAutoMerge(input.candidate);
+      // Completion evidence (mirrors enqueue, SYMPH-746/766): the dequeue is
+      // only "confirmed" once the side effect actually succeeds, so the decision
+      // keys `_dequeued` off this completion row, never the raw intent row.
+      await appendCompletionEntry({
+        appendActuation: input.appendActuation,
+        candidate: input.candidate,
+        action,
+        timestamp: input.now.toISOString(),
+        ownerId: input.ownerId,
+        lease: input.lease,
+        live: input.live,
+      });
+      const recoveryEntry = await appendRecoveryEntryIfNeeded({
+        appendActuation: input.appendActuation,
+        candidate: input.candidate,
+        action,
+        timestamp: input.now.toISOString(),
+        ownerId: input.ownerId,
+        lease: input.lease,
+        live: input.live,
+        needsRecoveryEntry,
+      });
+      return {
+        decision,
+        journalEntry,
+        failureEntry: null,
+        recoveryEntry,
+        sideEffect: "disable_auto_merge",
         error: null,
       };
     }
@@ -1585,12 +1707,38 @@ function liveStateNextOperatorAction(candidate: MergeCandidateRecord): string {
   return `Investigate live GitHub/tracker state for ${target} (reviewed head ${candidate.reviewedHeadSha}); once reachable, re-queue the issue (Todo -> Resume).`;
 }
 
+/**
+ * Operator-facing park detail for the SYMPH-766 late-rework reconciliation
+ * reasons. Returns null for any other reason so the coordinator keeps its
+ * default detail. Keeps the message accurate — notably, an already-merged PR
+ * must NOT be described as "not mergeable" (it merged); the operator needs to
+ * see the split-brain to reconcile it.
+ */
+export function mergeReworkParkDetail(
+  reason: string,
+  prNumber: number,
+): string | null {
+  switch (reason) {
+    case "spec_fidelity_rework_already_merged":
+      return `A late spec-fidelity rework landed for the reviewed head AFTER GitHub merged PR #${prNumber} from the queue — Symphony could not dequeue it in time. origin/main already carries the merge, but Symphony did NOT auto-complete the issue (split-brain). Reconcile deliberately: accept the merge (mark Done) or revert it, then clear the resume hold.`;
+    case "spec_fidelity_rework_dequeued":
+      return `A late spec-fidelity rework landed for the reviewed head; PR #${prNumber} was dequeued from the merge queue before it merged (contained). Resolve the rework, then re-queue the issue (Todo -> Resume).`;
+    case "spec_fidelity_rework":
+      return `A late spec-fidelity rework landed for the reviewed head before PR #${prNumber} entered the merge queue; merge actuation is held. Resolve the rework, then re-queue the issue (Todo -> Resume).`;
+    default:
+      return null;
+  }
+}
+
 function sideEffectNextOperatorAction(
   subjectAction: string | null,
   candidate: MergeCandidateRecord,
 ): string {
   if (subjectAction === "tracker_done") {
     return `The merge is proven but the tracker write keeps failing for ${candidate.issueIdentifier}; fix the underlying tracker write failure, then re-queue the issue (Todo -> Resume).`;
+  }
+  if (subjectAction === "disable_auto_merge") {
+    return `A late spec-fidelity rework landed but the dequeue (disable auto-merge) keeps failing for ${candidate.repo}#${candidate.prNumber}; the PR may still be in GitHub's merge queue. Manually dequeue/cancel it in GitHub, resolve the rework, then re-queue the issue (Todo -> Resume).`;
   }
   const target = `${candidate.repo}#${candidate.prNumber}`;
   const effect = subjectAction ?? "merge";

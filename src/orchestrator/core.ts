@@ -174,6 +174,7 @@ import {
   type MergeActuatorSideEffects,
   type MergeCandidateRecord,
   mergeActuatorPollAttempt,
+  mergeReworkParkDetail,
   reduceMergeCandidates,
   runMergeActuatorCycle,
 } from "./merge-candidate.js";
@@ -4308,38 +4309,63 @@ export class OrchestratorCore {
       const stageForVerdict = exitedStageName;
       const reviewedHeadShaForVerdict =
         this.findCanonicalMergeCandidate(issueId)?.reviewedHeadSha ?? null;
-      void this.runSpecFidelityJudge({
-        issueId,
-        issueIdentifier: runningEntry.identifier,
-        issueTitle: runningEntry.issue.title,
-        acceptanceCriteria: this.state.issueAcSnapshots[issueId] ?? null,
-        // Pending-signal consumption sets lastCodexMessage to the terminal
-        // message before routing through the normal exit path.
-        reviewMessage: runningEntry.lastCodexMessage,
-      })
-        .catch((error) => {
-          console.warn(
-            `[orchestrator] spec-fidelity judge failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-          return null;
+      const stageSkippedReason = this.issueStageSkippedAcGateReason(issueId);
+      if (
+        this.state.issueAcSnapshots[issueId] === undefined &&
+        stageSkippedReason !== null
+      ) {
+        // SYMPH-765: this issue skipped the investigate AC gate and its ticket
+        // carried no AC section, so there is no canonical rubric to judge
+        // against. Running the judge on a null AC would force a generic
+        // `rework` ("no acceptance criteria recorded") that parks an otherwise
+        // healthy merge — the SYMPH-759 canary false positive. Record an
+        // explicit, operator-visible non-gating marker keyed to the reviewed
+        // head and skip the judge entirely (per the Hybrid decision: thin
+        // direct-to-implement issues with no canonical rubric are non-gating,
+        // never reworked).
+        scheduleDeferred(() =>
+          this.recordSpecFidelityNonGating({
+            issueId,
+            identifier: runningEntry.identifier,
+            stageName: stageForVerdict,
+            reason: stageSkippedReason,
+            reviewedHeadSha: reviewedHeadShaForVerdict,
+          }),
+        );
+      } else {
+        void this.runSpecFidelityJudge({
+          issueId,
+          issueIdentifier: runningEntry.identifier,
+          issueTitle: runningEntry.issue.title,
+          acceptanceCriteria: this.state.issueAcSnapshots[issueId] ?? null,
+          // Pending-signal consumption sets lastCodexMessage to the terminal
+          // message before routing through the normal exit path.
+          reviewMessage: runningEntry.lastCodexMessage,
         })
-        .then((verdict) => {
-          if (verdict === null) {
-            return;
-          }
-          scheduleDeferred(() =>
-            this.recordSpecFidelityVerdict({
-              issueId,
-              identifier: runningEntry.identifier,
-              stageName: stageForVerdict,
-              verdict,
-              reviewedHeadSha: reviewedHeadShaForVerdict,
-            }),
-          );
-        })
-        .catch(() => {
-          // Chain must never become an unhandled rejection.
-        });
+          .catch((error) => {
+            console.warn(
+              `[orchestrator] spec-fidelity judge failed for ${runningEntry.identifier}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+            return null;
+          })
+          .then((verdict) => {
+            if (verdict === null) {
+              return;
+            }
+            scheduleDeferred(() =>
+              this.recordSpecFidelityVerdict({
+                issueId,
+                identifier: runningEntry.identifier,
+                stageName: stageForVerdict,
+                verdict,
+                reviewedHeadSha: reviewedHeadShaForVerdict,
+              }),
+            );
+          })
+          .catch(() => {
+            // Chain must never become an unhandled rejection.
+          });
+      }
     }
 
     const transition = this.advanceStage(
@@ -4613,6 +4639,30 @@ export class OrchestratorCore {
     return sourceReview === undefined ? null : candidate;
   }
 
+  /**
+   * SYMPH-765: when an issue skips the investigate AC gate and its ticket
+   * carried no AC section, admission journals an `ac_gate` entry with
+   * `status: "skipped"`. Returns that entry's reason when the most recent
+   * `ac_gate` entry for the issue is such a skip, so spec-fidelity treats the
+   * missing rubric as a structural stage-skip (non-gating) rather than a worker
+   * AC failure. Returns null when the latest `ac_gate` entry is a frozen
+   * snapshot (Branch A) or a normal gate pass, or when there is none — the more
+   * recent entry always wins, so a re-dispatch that freezes or gates an AC
+   * supersedes an earlier skip.
+   */
+  private issueStageSkippedAcGateReason(issueId: string): string | null {
+    const entry = this.state.dispatcherRunJournal.findLast(
+      (e) => e.kind === "ac_gate" && e.issueId === issueId,
+    );
+    if (entry === undefined || entry.metadata.status !== "skipped") {
+      return null;
+    }
+    return (
+      readMetadataString(entry.metadata, "reason") ??
+      "no_canonical_ac_stage_skipped"
+    );
+  }
+
   private async parkMergeCandidateInvariantFailure(input: {
     issue: Issue;
     stageName: string | null;
@@ -4869,6 +4919,61 @@ export class OrchestratorCore {
       await this.postComment?.(
         input.issueId,
         `## Spec-fidelity verdict (independent judge): ${input.verdict.verdict}\n${sanitizeForLinear(input.verdict.findings, { maxLen: 6000 })}`,
+      );
+    } catch {
+      // Observability only.
+    }
+  }
+
+  /**
+   * SYMPH-765: record an explicit, operator-visible non-gating spec-fidelity
+   * outcome for a candidate with no canonical AC rubric because the issue
+   * skipped the investigate AC gate and its ticket had no AC section. This is
+   * deliberately NOT a `rework` verdict: {@link hasCurrentSpecFidelityRework}
+   * keys only on `verdict === "rework"`, so a `skipped`/`non_gating` row never
+   * blocks merge actuation. It distinguishes "no canonical AC because the stage
+   * was skipped" from "the worker failed to satisfy AC" (AC #3) without parking
+   * a healthy merge.
+   */
+  private async recordSpecFidelityNonGating(input: {
+    issueId: string;
+    identifier: string;
+    stageName: string;
+    reason: string;
+    reviewedHeadSha: string | null;
+  }): Promise<void> {
+    const reviewedHeadSha = input.reviewedHeadSha;
+    try {
+      await this.recordRunJournalEntry({
+        idempotencyKey: `spec_fidelity:${input.issueId}:${input.stageName}:${reviewedHeadSha ?? "no-head"}:non-gating:${this.now().toISOString()}`,
+        timestamp: this.now().toISOString(),
+        kind: "spec_fidelity",
+        issueId: input.issueId,
+        issueIdentifier: input.identifier,
+        operation: "dispatcher",
+        stage: input.stageName,
+        attempt: null,
+        ownerId: this.leaseOwnerId,
+        lease: null,
+        summary: `Spec-fidelity non-gating for ${input.identifier}: ${input.reason}.`,
+        metadata: {
+          status: "skipped",
+          verdict: "non_gating",
+          reason: input.reason,
+          findings:
+            "No canonical acceptance-criteria snapshot: the issue skipped the investigate AC gate and its ticket carried no AC section. Spec-fidelity is non-gating for this merge candidate.",
+          ...(reviewedHeadSha === null
+            ? {}
+            : { reviewed_head_sha: reviewedHeadSha }),
+        },
+      });
+    } catch {
+      // Audit best-effort.
+    }
+    try {
+      await this.postComment?.(
+        input.issueId,
+        `## Spec-fidelity: non-gating\nNo canonical acceptance-criteria snapshot for this merge candidate (\`${input.reason}\`): the issue skipped the investigate AC gate and its ticket has no \`## Acceptance Criteria\` section. The independent judge did not run; merge gating proceeds on the council review result alone.`,
       );
     } catch {
       // Observability only.
@@ -10669,7 +10774,15 @@ export class OrchestratorCore {
         issue,
         stageName,
         reasonCode: result.run.decision.reason,
-        detail: `merge actuator candidate ${candidate.candidateId} is not mergeable: ${result.run.decision.blockers.join(", ") || result.run.decision.reason}`,
+        // SYMPH-766: the late-rework reconciliation reasons get an accurate,
+        // operator-facing detail (never "not mergeable" for an already-merged
+        // PR); other blocked reasons keep the generic not-mergeable detail.
+        detail:
+          mergeReworkParkDetail(
+            result.run.decision.reason,
+            candidate.prNumber,
+          ) ??
+          `merge actuator candidate ${candidate.candidateId} is not mergeable: ${result.run.decision.blockers.join(", ") || result.run.decision.reason}`,
         reviewResultPath: candidate.reviewResultPath,
       });
       return true;
@@ -11127,6 +11240,99 @@ export class OrchestratorCore {
         },
       },
     });
+
+    // Freeze a canonical AC snapshot at admission for issues that skip the
+    // investigate AC gate (SYMPH-765). The AC gate (SYMPH-374) only freezes a
+    // snapshot when an issue EXITS the initial stage, so a first dispatch to any
+    // other stage (fast-track / direct-to-implement) never passes through it,
+    // leaving the spec-fidelity judge a null rubric it must score as `rework` —
+    // the SYMPH-759 canary false positive. The ticket author owns intent
+    // (SYMPH-374's authorship chain), so the ticket-description AC section is a
+    // tamper-safe canonical rubric: the implement worker cannot edit it the way
+    // it edits the workpad. When the ticket carries no AC section, journal an
+    // explicit `skipped` marker so spec-fidelity reports a precise stage-skipped
+    // reason and stays non-gating, instead of emitting a generic
+    // "no acceptance criteria" rework that parks a healthy merge.
+    const skipsAcGate =
+      this.config.acGate.enabled &&
+      this.config.stages !== null &&
+      stageName !== null &&
+      stageName !== this.config.stages.initialStage;
+    if (
+      isFirstDispatch &&
+      skipsAcGate &&
+      stageName !== null &&
+      this.state.issueAcSnapshots[issue.id] === undefined
+      // Intentionally NOT guarded on issueStageSkippedAcGateReason (council R1,
+      // Codex P1 / Opus): clearTerminalIssueRuntimeState clears
+      // issueFirstDispatchedAt + issueAcSnapshots on terminal, but the journal is
+      // append-only so a prior lifecycle's `ac_gate` skip row survives. Guarding
+      // on the latest-skip lookup would block a fresh first-dispatch (isFirstDispatch
+      // is true again) from freezing newly-added ticket AC, leaving review exit to
+      // go non-gating off the stale skip. The freeze runs once per lifecycle
+      // (isFirstDispatch), and its fresh `ac_gate` row supersedes any stale skip
+      // because issueStageSkippedAcGateReason reads the latest row.
+    ) {
+      const ticketAcceptanceCriteria = extractAcceptanceCriteria(
+        issue.description ?? null,
+      );
+      if (ticketAcceptanceCriteria !== null) {
+        this.state.issueAcSnapshots[issue.id] = ticketAcceptanceCriteria;
+      }
+      try {
+        await this.recordRunJournalEntry(
+          ticketAcceptanceCriteria !== null
+            ? {
+                idempotencyKey: `ac_gate:${issue.id}:${stageName}:admission:${this.now().toISOString()}`,
+                timestamp: this.now().toISOString(),
+                kind: "ac_gate",
+                issueId: issue.id,
+                issueIdentifier: issue.identifier,
+                operation: "dispatcher",
+                stage: stageName,
+                attempt,
+                ownerId: this.leaseOwnerId,
+                lease: null,
+                summary: `Froze ticket-description AC snapshot for ${issue.identifier} at admission (skips investigate gate).`,
+                metadata: {
+                  status: "completed",
+                  verdict: "pass",
+                  source: "ticket_admission",
+                  acceptanceCriteria: ticketAcceptanceCriteria,
+                  feedback: null,
+                },
+              }
+            : {
+                idempotencyKey: `ac_gate:${issue.id}:${stageName}:admission-skip:${this.now().toISOString()}`,
+                timestamp: this.now().toISOString(),
+                kind: "ac_gate",
+                issueId: issue.id,
+                issueIdentifier: issue.identifier,
+                operation: "dispatcher",
+                stage: stageName,
+                attempt,
+                ownerId: this.leaseOwnerId,
+                lease: null,
+                summary: `No canonical AC for ${issue.identifier}; spec-fidelity non-gating (skips investigate gate, ticket has no AC section).`,
+                metadata: {
+                  status: "skipped",
+                  verdict: "non_gating",
+                  source: "ticket_admission",
+                  reason: "no_canonical_ac_stage_skipped",
+                  acceptanceCriteria: null,
+                },
+              },
+        );
+      } catch (error) {
+        // Audit best-effort, mirroring the AC gate write: the live process keeps
+        // the in-state snapshot (judge correctness over audit purity) while a
+        // failed journal write only forfeits restart rehydration.
+        console.warn(
+          `[orchestrator] admission AC snapshot journal write failed for ${issue.identifier}; snapshot will not survive restart: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
     if (
       this.config.admissionCard.enabled &&
       isFirstDispatch &&
@@ -11148,6 +11354,7 @@ export class OrchestratorCore {
             budgetMultiplier: this.budgetMultiplierForIssue(issue.id),
             hasFrozenAcceptanceCriteria:
               this.state.issueAcSnapshots[issue.id] !== undefined,
+            skipsAcGate,
           }),
         ).catch((err) => {
           console.warn(
