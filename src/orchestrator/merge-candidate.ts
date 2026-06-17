@@ -1862,13 +1862,13 @@ function applyActuation(
     // A raw enqueue intent is recorded but must not advance the candidate into
     // the queue until completion evidence is journaled (SYMPH-746, path 4).
     record.lastActuation = action;
-  } else if (action === "disable_auto_merge") {
-    // Late-rework dequeue intent (SYMPH-766/769). Record the action so the
-    // candidate's operator-facing lastActuation reflects the in-flight dequeue
-    // rather than the prior enqueue/poll. Status is NOT advanced: the dequeue is
-    // a hold in flight; the candidate's terminal state is set when the
-    // coordinator parks it as `spec_fidelity_rework_dequeued` on the next cycle.
-    record.lastActuation = action;
+    // NOTE (SYMPH-769, council R1): a `disable_auto_merge` intent must NOT set
+    // lastActuation. Doing so overwrites the `"enqueue"` marker that
+    // isUnconfirmedEnqueueIntent reads, so a crash between the dequeue intent and
+    // its side effect would lose the unconfirmed-enqueue signal and drop the
+    // dequeue redrive — leaving a possibly-queued PR uncontained. The
+    // fall-through (no branch) is the correct, replay-stable behavior; the
+    // dequeue is visible via its journaled action/completion rows instead.
   } else if (action === "poll") {
     const reason = stringField(entry.metadata.reason);
     const preservesUnconfirmedEnqueue =
@@ -1923,13 +1923,7 @@ function applyRecoveredActuation(
     subjectAction === "completed" ||
     subjectAction === "recovered" ||
     subjectAction === "live_state_failed" ||
-    subjectAction === "parked" ||
-    // A confirmed dequeue (SYMPH-766/769) is a hold-in-flight, not a merge-state
-    // transition: it does not move the candidate to ready/queued/merged/stale.
-    // The coordinator parks it as `spec_fidelity_rework_dequeued` on the next
-    // cycle (which keeps mergeReworkParkDetail's accurate operator message), so
-    // do not clear blockedReason or rewrite status here.
-    subjectAction === "disable_auto_merge"
+    subjectAction === "parked"
   ) {
     return;
   }

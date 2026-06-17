@@ -2724,7 +2724,7 @@ describe("merge actuator late-rework dequeue + reconciliation (SYMPH-766)", () =
     }
   });
 
-  it("records the dequeue in the reducer without mis-transitioning the candidate, then reconciles dequeued (SYMPH-769, council Beta-1)", async () => {
+  it("journals the dequeue intent + completion and never mis-transitions the candidate, then reconciles dequeued (SYMPH-769, council Beta-1)", async () => {
     const { journal, candidate } = enqueuedCandidateJournal();
     const harness = makeJournalHarness(journal);
     // Cycle 1: dequeue. The disable_auto_merge intent + completion are journaled.
@@ -2747,13 +2747,22 @@ describe("merge actuator late-rework dequeue + reconciliation (SYMPH-766)", () =
         disableAutoMerge: async () => {},
       },
     });
-    // The reducer now handles disable_auto_merge: the dequeue is a hold in flight,
-    // so it must NOT mis-transition the candidate (no merged/ready_marked/stale) —
-    // it stays merge_queue_pending until the coordinator parks it next cycle.
+    // The dequeue is a hold in flight: the reducer must NOT mis-transition the
+    // candidate (no merged/ready_marked/stale) — it stays merge_queue_pending
+    // until the coordinator parks it next cycle.
     const afterDequeue = candidateFromJournal(harness.entries);
     expect(afterDequeue.status).toBe("merge_queue_pending");
+    // Both the dequeue intent AND its completion proof are journaled (council
+    // Beta-2/Pi-F3: a lost completion row would otherwise go undetected).
     expect(
       harness.entries.some((e) => e.metadata.action === "disable_auto_merge"),
+    ).toBe(true);
+    expect(
+      harness.entries.some(
+        (e) =>
+          e.metadata.action === "completed" &&
+          e.metadata.subject_action === "disable_auto_merge",
+      ),
     ).toBe(true);
 
     // Cycle 2: the confirmed dequeue yields the explicit dequeued reconciliation.
@@ -2851,6 +2860,50 @@ describe("merge actuator late-rework dequeue + reconciliation (SYMPH-766)", () =
       specFidelityRework: true,
     });
     expect(decision).toMatchObject({
+      action: "disable_auto_merge",
+      reason: "spec_fidelity_rework_dequeue",
+    });
+
+    // Crash-window replay lock (council R1, Codex P1 / Pi F1): after the dequeue
+    // INTENT is journaled but before its side effect/completion runs, a re-reduce
+    // must STILL classify the candidate as enqueued and re-attempt the dequeue.
+    // This regressed when a `disable_auto_merge` intent was recorded into
+    // lastActuation (overwriting the `"enqueue"` marker isUnconfirmedEnqueueIntent
+    // reads); the reducer's fall-through preserves it. A possibly-queued PR must
+    // never silently fall through to the never-enqueued hold.
+    const dequeueIntent: DispatcherRunJournalEntry = {
+      ...buildMergeActuationEntry({
+        candidate,
+        action: "disable_auto_merge",
+        timestamp: "2026-06-16T01:05:00.000Z",
+        ownerId: "owner-1",
+        lease: lease(),
+        live: liveState(),
+        reason: "spec_fidelity_rework_dequeue",
+      }),
+      sequence: 4,
+    };
+    const afterIntent = candidateFromJournal([
+      candidateEntry,
+      intent,
+      dequeueIntent,
+    ]);
+    expect(afterIntent.lastActuation).toBe("enqueue");
+    const replayDecision = decideMergeActuation({
+      candidate: afterIntent,
+      live: liveState(),
+      lease: lease(),
+      ownerId: "owner-1",
+      nowMs: 0,
+      enqueuedAtMs: Date.parse("2026-06-16T01:00:00.000Z"),
+      maxWaitMs: 30 * 60_000,
+      completedSideEffectKeys: new Set([
+        `merge_actuation:${afterIntent.candidateId}:disable_auto_merge`,
+      ]),
+      autoMergePermission: true,
+      specFidelityRework: true,
+    });
+    expect(replayDecision).toMatchObject({
       action: "disable_auto_merge",
       reason: "spec_fidelity_rework_dequeue",
     });
