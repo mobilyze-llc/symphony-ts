@@ -382,6 +382,28 @@ describe("prompt builder", () => {
     expect(prompt).toContain("zsh-safe");
     expect(prompt).toContain("cmd_status");
     expect(prompt).toContain("[STAGE_COMPLETE]");
+    // The disposition is recorded where it originates (SYMPH-767/377).
+    expect(prompt).toContain("Live-proof disposition (SYMPH-377)");
+  });
+
+  it("documents the live-proof disposition contract in the review-stage continuation prompt the judge reads (SYMPH-767)", () => {
+    const prompt = buildContinuationPrompt({
+      issue: ISSUE_FIXTURE,
+      attempt: null,
+      turnNumber: 2,
+      maxTurns: 5,
+      stageName: "review",
+    });
+
+    expect(prompt).toContain("Current stage: review.");
+    expect(prompt).toContain("REVIEW stage");
+    // The exact disposition syntax the spec-fidelity judge expects (SYMPH-377).
+    expect(prompt).toContain("live-proof: evidence — <citation>");
+    expect(prompt).toContain("live-proof: waived — <reason>");
+    expect(prompt).toContain("live-proof: n/a — <reason>");
+    // Docs/CI/tests-only changes use n/a (AC #2).
+    expect(prompt).toContain("docs-only, CI-only, or tests-only");
+    expect(prompt).toContain("[STAGE_COMPLETE]");
   });
 
   it("includes structured comment deltas in continuation prompts", () => {

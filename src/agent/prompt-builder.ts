@@ -9,6 +9,15 @@ import { withModePermissionEnvelope } from "../policy/hard-stops.js";
 export const DEFAULT_WORKFLOW_PROMPT =
   "You are working on an issue from Linear.";
 
+// Live-proof disposition contract (SYMPH-377 / SYMPH-767). The independent
+// spec-fidelity judge (src/agent/spec-fidelity.ts) checks the worker's
+// review-exit completion message for exactly one of these disposition lines.
+// The syntax here is judged against the same source the worker can update — it
+// must stay byte-aligned with the judge's prompt rule and
+// normalizeLiveProofDispositionSeparators tolerances.
+export const LIVE_PROOF_DISPOSITION_CONTRACT =
+  "Live-proof disposition (SYMPH-377): your final completion message MUST carry exactly one disposition line stating whether the changed user path was exercised against the real artifact/service — one of `live-proof: evidence — <citation>`, `live-proof: waived — <reason>`, or `live-proof: n/a — <reason>`. If the diff touches user-visible runtime behavior (UI, API responses, frontend assets), only `evidence` or an explicit `waived` is acceptable. Use `live-proof: n/a — <reason>` ONLY for changes with no runtime boundary (docs-only, CI-only, or tests-only). Carry forward the disposition recorded in the implement workpad/PR when present; never infer a waiver from merge permission, prior evidence, or confidence in mocks.";
+
 const DEFAULT_PARTIAL_ROOTS = [".", "pipeline-config"] as const;
 
 type RenderPromptWorkflow = Pick<WorkflowDefinition, "promptTemplate"> & {
@@ -265,6 +274,19 @@ export function buildContinuationPrompt(input: {
         lines.push(
           "You are in the IMPLEMENT stage. Focus on implementing the code changes and running tests. Open only a draft PR when the Mode Permission Envelope allows PR creation; keep it draft until review gates pass. Otherwise stop after verification and output [BLOCKED_NEEDS_HUMAN: pr_creation] as the last line if a PR is required. When the permitted implement work is complete and all verify commands pass, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
           "Headless output budget: do not stream high-volume searches, logs, JSON, lockfiles, validation commands, or generated output directly into the turn. Write full stdout/stderr to .symphony/validation/ and return only command metadata, exit code, log path, and a short tail/summary capped near 4 KB.",
+          LIVE_PROOF_DISPOSITION_CONTRACT,
+        );
+        break;
+      case "review":
+        // The spec-fidelity judge (SYMPH-343) reads this stage's completion
+        // message at review exit and checks it for the live-proof disposition
+        // line (SYMPH-377). Document the contract on the very prompt that
+        // produces the message the judge reads (SYMPH-767), carrying the
+        // implement-stage disposition forward.
+        lines.push(
+          "You are in the REVIEW stage. Relay the council review verdict per the global review contract. Your final completion message is also read by the independent spec-fidelity judge.",
+          LIVE_PROOF_DISPOSITION_CONTRACT,
+          "When the review stage is complete, output the exact text [STAGE_COMPLETE] as the last line of your final message.",
         );
         break;
       case "merge":
