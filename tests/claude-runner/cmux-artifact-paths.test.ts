@@ -230,4 +230,31 @@ describe("removeStaleCmuxMirror", () => {
       expect(prior).toEqual({ cleared: false });
     },
   );
+
+  // Council convergence Finding A: a regular-file mirror whose rm fails must also
+  // report uncleared (symmetric to the symlink unlink-failure case), so a survivor
+  // is treated as stale rather than crashing the lane. Skipped as root, where
+  // directory permissions do not block rm.
+  it.skipIf(isRoot)(
+    "reports uncleared when a stale mirror file survives cleanup",
+    async () => {
+      const artifactDir = await makeArtifactDir();
+      const mirrorPath = join(artifactDir, "opus.md");
+      await writeFile(mirrorPath, "stale\n");
+      // Make the parent dir non-writable so rm(mirrorPath) fails (EACCES).
+      await chmod(artifactDir, 0o500);
+
+      let prior: CmuxMirrorPriorState;
+      try {
+        prior = await removeStaleCmuxMirror({
+          artifactDir,
+          artifactName: "opus",
+        });
+      } finally {
+        await chmod(artifactDir, 0o700);
+      }
+
+      expect(prior).toEqual({ cleared: false });
+    },
+  );
 });
