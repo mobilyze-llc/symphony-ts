@@ -7919,6 +7919,52 @@ describe("live merge actuator (SYMPH-735)", () => {
     ).toBe("head-B");
   });
 
+  it("advances on the durable canonical when a resumed review re-exit's artifact is unreadable (SYMPH-764 council R1 P2)", async () => {
+    const round1Path = await writeReviewGateResultFixture();
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+    });
+
+    // Round 1: promote a canonical merge candidate (reviewed head "head-sha").
+    await stageMergeCandidate(orchestrator, round1Path);
+    const state = orchestrator.getState();
+    expect(
+      reduceMergeCandidates(state.dispatcherRunJournal)["1"]?.reviewedHeadSha,
+    ).toBe("head-sha");
+
+    // Re-arm a review round, then re-exit carrying a marker whose artifact file
+    // no longer exists (ephemeral /tmp cleanup after the canonical was already
+    // journaled — an idempotent re-exit). The durable journal canonical is the
+    // proof of a passing review; the run must advance on it, not park the
+    // already-reviewed issue for a missing ephemeral artifact.
+    state.issueStages["1"] = "review";
+    state.retryAttempts = {};
+    state.claimed.delete("1");
+    state.failed.delete("1");
+
+    await stageMergeCandidate(
+      orchestrator,
+      "/tmp/symphony-missing-review-result-SYMPH764-p2.json",
+    );
+
+    const after = orchestrator.getState();
+    expect(after.failed.has("1")).toBe(false);
+    expect(
+      after.dispatcherRunJournal.some(
+        (entry) =>
+          entry.kind === "failure_exhausted" &&
+          typeof entry.metadata.reason === "string" &&
+          entry.metadata.reason.includes(
+            "missing_canonical_review_gate_result",
+          ),
+      ),
+    ).toBe(false);
+  });
+
   it("completes the issue when the actuator writes tracker done", async () => {
     const reviewResultPath = await writeReviewGateResultFixture();
     const markReady = vi.fn(async () => {});

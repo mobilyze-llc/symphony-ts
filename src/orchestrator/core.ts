@@ -4432,6 +4432,18 @@ export class OrchestratorCore {
       issueIdentifier: input.runningEntry.identifier,
     });
     if (!artifactResult.ok) {
+      // SYMPH-764 (council R1 P2): the marker is present but its artifact is
+      // unreadable/missing — e.g. an idempotent re-exit after the ephemeral
+      // /tmp artifact was cleaned up once the canonical was already journaled.
+      // The durable journal is the source of truth: when a canonical candidate
+      // already exists (its passing source review_gate_result is journaled),
+      // advance on it rather than parking a review that already completed. This
+      // cannot revive the SYMPH-764 stale-candidate bug — that path has a
+      // READABLE new-head artifact and is resolved by the head-match check
+      // below; only a genuinely unreadable artifact reaches here.
+      if (existingCanonical !== null) {
+        return true;
+      }
       await this.parkMergeCandidateInvariantFailure({
         issue: input.runningEntry.issue,
         stageName: input.exitedStageName,
