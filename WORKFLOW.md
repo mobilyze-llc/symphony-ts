@@ -24,7 +24,7 @@ continuous_feedback:
   enabled: true
   events: [checkpoint]
   runner: pi
-  model: local-flash
+  model: ds4-studio2/deepseek-v4-flash
   role: continuous-feedback
   bounce_on_finding: true
 codex:

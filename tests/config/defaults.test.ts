@@ -10,6 +10,8 @@ import {
   DEFAULT_CODEX_MAX_HEALTHY_COMPACTIONS_PER_STAGE,
   DEFAULT_CODEX_MODEL_AUTO_COMPACT_TOKEN_LIMIT,
   DEFAULT_CODEX_TOOL_OUTPUT_TOKEN_LIMIT,
+  DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
+  DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
   DEFAULT_HOOK_TIMEOUT_MS,
   DEFAULT_MAX_CONCURRENT_AGENTS,
   DEFAULT_MAX_RETRY_BACKOFF_MS,
@@ -107,5 +109,19 @@ describe("SPEC_DEFAULTS", () => {
       SPEC_DEFAULTS.mergeActuator.maxUnknownMergeabilityWaitObservations,
     ).toBe(DEFAULT_MERGE_ACTUATOR_MAX_UNKNOWN_MERGEABILITY_WAIT_OBSERVATIONS);
     expect(Object.isFrozen(SPEC_DEFAULTS)).toBe(true);
+  });
+
+  it("pins continuous-feedback to an available local model, not a hallucinated name (SYMPH-757)", () => {
+    // SYMPH-757: the configured continuous-feedback model was "local-flash",
+    // which no Pi provider exposes ("Model 'local-flash' not found"), so the
+    // lane failed on every checkpoint. Guard against re-hallucination, and
+    // against a bare name that could resolve to the paid cloud `deepseek`
+    // provider instead of the local studio2 endpoint.
+    expect(DEFAULT_CONTINUOUS_FEEDBACK_RUNNER).toBe("pi");
+    expect(DEFAULT_CONTINUOUS_FEEDBACK_MODEL).not.toBe("local-flash");
+    expect(DEFAULT_CONTINUOUS_FEEDBACK_MODEL).toContain("deepseek-v4-flash");
+    // Provider-qualified ("provider/id") so Pi routes to the local studio2
+    // provider unambiguously, never the paid-cloud deepseek provider.
+    expect(DEFAULT_CONTINUOUS_FEEDBACK_MODEL).toContain("/");
   });
 });
