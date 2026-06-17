@@ -1521,6 +1521,8 @@ function parseHumanBlockersLine(line: string | null): string | null {
   }
 
   const trimmed = line.trim();
+  // Treat only the outer marker envelope as syntax; payload text is recorded
+  // verbatim and may contain bracket-like content.
   if (
     !trimmed.startsWith(HUMAN_BLOCKERS_PREFIX) ||
     !trimmed.endsWith(HUMAN_BLOCK_SUFFIX)
