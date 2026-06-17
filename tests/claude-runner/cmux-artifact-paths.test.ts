@@ -1,4 +1,11 @@
-import { mkdtemp, stat, utimes, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -10,6 +17,8 @@ import {
   resolveCmuxArtifactPath,
 } from "../../src/claude-runner/cmux-artifact-paths.js";
 
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
 async function makeArtifactDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "cmux-artifact-paths-"));
 }
@@ -20,22 +29,20 @@ function remoteCandidate(): string {
   return join(tmpdir(), "opus.md");
 }
 
+const CLEARED: CmuxMirrorPriorState = { cleared: true };
+const UNCLEARED: CmuxMirrorPriorState = { cleared: false };
+
 describe("resolveCmuxArtifactPath mirror freshness", () => {
-  it("accepts a mirror absent before the run and present after as fresh", async () => {
+  it("accepts a mirror as fresh when the path was cleared before the run", async () => {
     const artifactDir = await makeArtifactDir();
     const mirrorPath = join(artifactDir, "opus.md");
     await writeFile(mirrorPath, "## Verdict\nPASS\n");
-    const priorMirror: CmuxMirrorPriorState = {
-      existed: false,
-      ino: null,
-      mtimeMs: null,
-    };
 
     const resolution = await resolveCmuxArtifactPath({
       artifactDir,
       artifactName: "opus",
       candidatePath: remoteCandidate(),
-      priorMirror,
+      priorMirror: CLEARED,
     });
 
     expect(resolution.artifactPath).toBe(mirrorPath);
@@ -49,24 +56,16 @@ describe("resolveCmuxArtifactPath mirror freshness", () => {
     });
   });
 
-  it("rejects a mirror whose identity is unchanged from before the run as stale", async () => {
+  it("rejects a mirror that survived pre-run cleanup as stale", async () => {
     const artifactDir = await makeArtifactDir();
     const mirrorPath = join(artifactDir, "opus.md");
     await writeFile(mirrorPath, "## Verdict\nPASS\n");
-    const current = await stat(mirrorPath);
-    // The pre-run snapshot matches the on-disk file exactly: a lingering mirror
-    // removeStaleCmuxMirror could not clear and the lane never overwrote.
-    const priorMirror: CmuxMirrorPriorState = {
-      existed: true,
-      ino: current.ino,
-      mtimeMs: current.mtimeMs,
-    };
 
     const resolution = await resolveCmuxArtifactPath({
       artifactDir,
       artifactName: "opus",
       candidatePath: remoteCandidate(),
-      priorMirror,
+      priorMirror: UNCLEARED,
     });
 
     expect(resolution.mirrorFallback).toMatchObject({
@@ -81,34 +80,6 @@ describe("resolveCmuxArtifactPath mirror freshness", () => {
         expect.stringContaining("mirror fallback is stale"),
       ]),
     );
-  });
-
-  it("accepts a mirror whose mtime changed during the run as fresh", async () => {
-    const artifactDir = await makeArtifactDir();
-    const mirrorPath = join(artifactDir, "opus.md");
-    await writeFile(mirrorPath, "## Verdict\nPASS\n");
-    const before = await stat(mirrorPath);
-    const priorMirror: CmuxMirrorPriorState = {
-      existed: true,
-      ino: before.ino,
-      mtimeMs: before.mtimeMs,
-    };
-    // Simulate an in-place rewrite during the run: same inode, newer mtime.
-    const rewritten = new Date(before.mtimeMs + 5_000);
-    await utimes(mirrorPath, rewritten, rewritten);
-
-    const resolution = await resolveCmuxArtifactPath({
-      artifactDir,
-      artifactName: "opus",
-      candidatePath: remoteCandidate(),
-      priorMirror,
-    });
-
-    expect(resolution.mirrorFallback).toMatchObject({
-      used: true,
-      freshnessPassed: true,
-      failureKind: null,
-    });
   });
 
   it("does not assess freshness when no prior snapshot is supplied", async () => {
@@ -129,21 +100,21 @@ describe("resolveCmuxArtifactPath mirror freshness", () => {
     });
   });
 
-  it("clears a pre-existing mirror then accepts the rewritten mirror regardless of mtime", async () => {
+  // Regression for the council Alpha-1 finding: after a successful pre-run
+  // removal the path is cleared, so a replacement is fresh unconditionally —
+  // identity (inode/mtime) is never compared, so inode reuse + mtime coarsening
+  // cannot produce a false "stale".
+  it("accepts a replacement mirror after a successful cleanup regardless of identity", async () => {
     const artifactDir = await makeArtifactDir();
     const mirrorPath = join(artifactDir, "opus.md");
-    // A leftover mirror from a previous run, with a skewed (future) mtime.
     await writeFile(mirrorPath, "old\n");
-    const future = new Date(Date.now() + 86_400_000);
-    await utimes(mirrorPath, future, future);
 
     const priorMirror = await removeStaleCmuxMirror({
       artifactDir,
       artifactName: "opus",
     });
-    expect(priorMirror.existed).toBe(true);
+    expect(priorMirror).toEqual({ cleared: true });
 
-    // The lane writes a fresh mirror after the pre-run cleanup.
     await writeFile(mirrorPath, "## Verdict\nPASS\n");
     const resolution = await resolveCmuxArtifactPath({
       artifactDir,
@@ -159,10 +130,38 @@ describe("resolveCmuxArtifactPath mirror freshness", () => {
       selectedMirrorPath: mirrorPath,
     });
   });
+
+  // Council Beta-3 EXTEND: a pre-existing directory at the mirror path is cleared,
+  // then a real file written during the run is accepted as fresh.
+  it("accepts a file replacement after clearing a pre-existing directory mirror", async () => {
+    const artifactDir = await makeArtifactDir();
+    const mirrorPath = join(artifactDir, "opus.md");
+    await mkdir(mirrorPath);
+
+    const priorMirror = await removeStaleCmuxMirror({
+      artifactDir,
+      artifactName: "opus",
+    });
+    expect(priorMirror).toEqual({ cleared: true });
+
+    await writeFile(mirrorPath, "## Verdict\nPASS\n");
+    const resolution = await resolveCmuxArtifactPath({
+      artifactDir,
+      artifactName: "opus",
+      candidatePath: remoteCandidate(),
+      priorMirror,
+    });
+
+    expect(resolution.mirrorFallback).toMatchObject({
+      used: true,
+      freshnessPassed: true,
+      failureKind: null,
+    });
+  });
 });
 
 describe("removeStaleCmuxMirror", () => {
-  it("reports an absent mirror and leaves nothing behind", async () => {
+  it("reports a cleared path when no mirror exists", async () => {
     const artifactDir = await makeArtifactDir();
 
     const prior = await removeStaleCmuxMirror({
@@ -170,25 +169,65 @@ describe("removeStaleCmuxMirror", () => {
       artifactName: "opus",
     });
 
-    expect(prior).toEqual({ existed: false, ino: null, mtimeMs: null });
+    expect(prior).toEqual({ cleared: true });
   });
 
-  it("captures the prior identity and removes an existing mirror file", async () => {
+  it("removes an existing mirror file and reports cleared", async () => {
     const artifactDir = await makeArtifactDir();
     const mirrorPath = join(artifactDir, "opus.md");
     await writeFile(mirrorPath, "## Verdict\nPASS\n");
-    const before = await stat(mirrorPath);
 
     const prior = await removeStaleCmuxMirror({
       artifactDir,
       artifactName: "opus",
     });
 
-    expect(prior).toEqual({
-      existed: true,
-      ino: before.ino,
-      mtimeMs: before.mtimeMs,
-    });
+    expect(prior).toEqual({ cleared: true });
     await expect(stat(mirrorPath)).rejects.toThrow();
   });
+
+  it("unlinks a stale mirror symlink and reports cleared", async () => {
+    const artifactDir = await makeArtifactDir();
+    const mirrorPath = join(artifactDir, "opus.md");
+    const target = join(artifactDir, "target.md");
+    await writeFile(target, "stale\n");
+    await symlink(target, mirrorPath);
+
+    const prior = await removeStaleCmuxMirror({
+      artifactDir,
+      artifactName: "opus",
+    });
+
+    expect(prior).toEqual({ cleared: true });
+    await expect(stat(mirrorPath)).rejects.toThrow();
+  });
+
+  // Regression for the council Beta-1 finding: a symlink whose unlink fails must
+  // be reported as uncleared (not as an absent mirror), so resolveCmuxArtifactPath
+  // treats a surviving stale symlink as stale rather than fresh. Skipped as root,
+  // where directory permissions do not block unlink.
+  it.skipIf(isRoot)(
+    "reports uncleared when a stale mirror symlink survives cleanup",
+    async () => {
+      const artifactDir = await makeArtifactDir();
+      const mirrorPath = join(artifactDir, "opus.md");
+      const target = join(artifactDir, "target.md");
+      await writeFile(target, "stale\n");
+      await symlink(target, mirrorPath);
+      // Make the parent dir non-writable so unlink(mirrorPath) fails (EACCES).
+      await chmod(artifactDir, 0o500);
+
+      let prior: CmuxMirrorPriorState;
+      try {
+        prior = await removeStaleCmuxMirror({
+          artifactDir,
+          artifactName: "opus",
+        });
+      } finally {
+        await chmod(artifactDir, 0o700);
+      }
+
+      expect(prior).toEqual({ cleared: false });
+    },
+  );
 });

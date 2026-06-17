@@ -33,30 +33,23 @@ export interface CmuxArtifactPathResolution {
  * Mirror freshness is established by an absent-before -> present-after signal
  * rather than a wall-clock comparison: {@link removeStaleCmuxMirror} clears any
  * pre-existing mirror before launch, so a mirror present afterwards was written
- * during the run. Comparing the prior identity (inode + mtime) to the post-run
- * mirror also catches the edge case where the prior mirror could not be cleared.
- * The former `mtimeMs >= runStartedAtMs` check flaked on CI because filesystem
- * mtime granularity / clock skew could make a freshly written mirror look older
- * than a wall-clock start captured via `Date.now()`.
+ * during the run. The former `mtimeMs >= runStartedAtMs` check flaked on CI
+ * because filesystem mtime granularity / clock skew could make a freshly written
+ * mirror look older than a wall-clock start captured via `Date.now()`.
  */
 export interface CmuxMirrorPriorState {
-  /** Whether a mirror entry existed at the mirror path immediately before launch. */
-  existed: boolean;
   /**
-   * Inode of the pre-run mirror, captured before removal. Null when the mirror
-   * was absent or its identity could not be captured (e.g. an unlinked symlink),
-   * in which case a post-run mirror is treated as freshly written.
+   * Whether the mirror path was guaranteed clear (absent) when the lane
+   * launched: either nothing was there, or {@link removeStaleCmuxMirror}
+   * removed it. When `false`, a mirror survived pre-run cleanup (it could not be
+   * removed, or its path could not be validated), so a mirror present after the
+   * run cannot be assumed to be this run's output and is treated as stale.
    */
-  ino: number | null;
-  /** mtimeMs of the pre-run mirror, paired with {@link ino}; null when uncapturable. */
-  mtimeMs: number | null;
+  cleared: boolean;
 }
 
-const ABSENT_MIRROR_PRIOR_STATE: CmuxMirrorPriorState = {
-  existed: false,
-  ino: null,
-  mtimeMs: null,
-};
+const CLEARED_MIRROR_PRIOR_STATE: CmuxMirrorPriorState = { cleared: true };
+const UNCLEARED_MIRROR_PRIOR_STATE: CmuxMirrorPriorState = { cleared: false };
 
 const VALID_SHA256_HEX = /^[a-f0-9]{64}$/;
 
@@ -67,25 +60,27 @@ export async function removeStaleCmuxMirror(input: {
   const resolvedArtifactDir = resolve(input.artifactDir);
   const mirrorPath = resolve(resolvedArtifactDir, `${input.artifactName}.md`);
   if (!isInside(resolvedArtifactDir, mirrorPath)) {
-    return ABSENT_MIRROR_PRIOR_STATE;
+    return UNCLEARED_MIRROR_PRIOR_STATE;
   }
 
-  let priorState: CmuxMirrorPriorState;
+  let mirrorEntry: Awaited<ReturnType<typeof lstat>>;
   try {
-    const mirrorEntry = await lstat(mirrorPath);
-    if (mirrorEntry.isSymbolicLink()) {
-      await unlink(mirrorPath);
-      // The entry existed, but a cleared symlink has no identity to compare a
-      // subsequently written regular-file mirror against — treat it as fresh.
-      return { existed: true, ino: null, mtimeMs: null };
-    }
-    priorState = {
-      existed: true,
-      ino: mirrorEntry.ino,
-      mtimeMs: mirrorEntry.mtimeMs,
-    };
+    mirrorEntry = await lstat(mirrorPath);
   } catch {
-    return ABSENT_MIRROR_PRIOR_STATE;
+    // Nothing at the mirror path — already clear.
+    return CLEARED_MIRROR_PRIOR_STATE;
+  }
+
+  if (mirrorEntry.isSymbolicLink()) {
+    try {
+      await unlink(mirrorPath);
+    } catch {
+      // The symlink survived cleanup (e.g. unlink threw on a read-only parent),
+      // so a mirror present after the run cannot be assumed fresh. Scoped to its
+      // own try/catch so a failed unlink is never misread as an absent mirror.
+      return UNCLEARED_MIRROR_PRIOR_STATE;
+    }
+    return CLEARED_MIRROR_PRIOR_STATE;
   }
 
   const mirror = await validateArtifactPathWithinDir(
@@ -93,13 +88,21 @@ export async function removeStaleCmuxMirror(input: {
     mirrorPath,
   );
   if (mirror.validationErrors.length > 0) {
-    return priorState;
+    // Path could not be validated; resolveCmuxArtifactPath rejects it as a
+    // symlink_escape before freshness. Report uncleared rather than claim fresh.
+    return UNCLEARED_MIRROR_PRIOR_STATE;
   }
 
   // Recursive cleanup is intentional: stale same-stem mirrors may be files or
   // directories, but cleanup stays scoped to runner-managed artifact scratch.
-  await rm(mirror.artifactPath, { force: true, recursive: true });
-  return priorState;
+  try {
+    await rm(mirror.artifactPath, { force: true, recursive: true });
+  } catch {
+    // The mirror survived removal; treat it as a lingering (stale) mirror rather
+    // than letting the throw degrade the whole lane.
+    return UNCLEARED_MIRROR_PRIOR_STATE;
+  }
+  return CLEARED_MIRROR_PRIOR_STATE;
 }
 
 export async function validateArtifactPathWithinDir(
@@ -188,10 +191,7 @@ export async function resolveCmuxArtifactPath(input: {
       );
     }
 
-    const freshnessPassed = mirrorFreshnessFromPriorState(
-      input.priorMirror,
-      mirrorStats,
-    );
+    const freshnessPassed = mirrorFreshnessFromPriorState(input.priorMirror);
     if (freshnessPassed === false) {
       return fallbackFailure(
         primary,
@@ -269,29 +269,19 @@ async function validateRemoteArtifactSha256(
 /**
  * Decide whether the post-run mirror is fresh from the pre-run snapshot.
  *
- * Returns `null` when the caller did not supply a snapshot (freshness not
- * assessed). Otherwise the mirror is fresh when it was absent before launch, or
- * when its identity (inode/mtime) differs from the pre-run mirror. Only an
- * unchanged identity — a lingering mirror that {@link removeStaleCmuxMirror}
- * could not clear and the lane did not overwrite — reads as stale.
+ * Returns `null` when the caller supplied no snapshot (freshness not assessed).
+ * Otherwise a mirror present after the run is fresh iff the mirror path was
+ * cleared before the lane launched — so the lane itself must have written it. A
+ * mirror that survived pre-run cleanup cannot be assumed fresh and is treated as
+ * stale (fail closed).
  */
 function mirrorFreshnessFromPriorState(
   priorMirror: CmuxMirrorPriorState | undefined,
-  mirrorStats: { ino: number; mtimeMs: number },
 ): boolean | null {
   if (priorMirror === undefined) {
     return null;
   }
-  if (!priorMirror.existed) {
-    return true;
-  }
-  if (priorMirror.ino === null || priorMirror.mtimeMs === null) {
-    return true;
-  }
-  return (
-    mirrorStats.ino !== priorMirror.ino ||
-    mirrorStats.mtimeMs !== priorMirror.mtimeMs
-  );
+  return priorMirror.cleared;
 }
 
 function fallbackFailure(
