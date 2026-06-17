@@ -52,7 +52,6 @@ const cmuxSpawnSkillSource = resolve(
 );
 
 const skillNames = [
-  "session-orchestrator",
   "spec-review-lane",
   "claude-runner",
 ];

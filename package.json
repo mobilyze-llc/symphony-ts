@@ -51,7 +51,6 @@
     "test": "node scripts/test.mjs",
     "test:watch": "vitest",
     "validate:skill-installs": "node scripts/validate-skill-installs.mjs",
-    "validate:session-orchestrator-skill": "pnpm run validate:skill-installs",
     "probe:review-runtime": "node dist/src/cli/review-runtime-preflight.js",
     "probe:codex-skills": "node scripts/probe-codex-skills.mjs",
     "smoke:codex-headless": "node scripts/probe-codex-skills.mjs --ci-smoke",
