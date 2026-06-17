@@ -340,6 +340,52 @@ describe("parseHumanBlockSignal", () => {
     });
   });
 
+  it("accepts bracket-like blocker payload content verbatim", () => {
+    expect(
+      parseHumanBlockSignal(
+        [
+          "Readiness blocked.",
+          '[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":["needs [deploy] window"],"note":"keep [literal] brackets"}]',
+          "[BLOCKED_NEEDS_HUMAN: auto_merge]",
+        ].join("\n"),
+      ),
+    ).toEqual({
+      operation: "auto_merge",
+      blockers:
+        '{"readiness":["needs [deploy] window"],"note":"keep [literal] brackets"}',
+    });
+  });
+
+  it("accepts malformed JSON-shaped blocker payload text without parsing JSON", () => {
+    expect(
+      parseHumanBlockSignal(
+        [
+          "Readiness blocked.",
+          '[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":["behind_base",],"permission":oops}]',
+          "[BLOCKED_NEEDS_HUMAN: auto_merge]",
+        ].join("\n"),
+      ),
+    ).toEqual({
+      operation: "auto_merge",
+      blockers: '{"readiness":["behind_base",],"permission":oops}',
+    });
+  });
+
+  it("accepts unescaped closing brackets inside blocker payloads verbatim", () => {
+    expect(
+      parseHumanBlockSignal(
+        [
+          "Readiness blocked.",
+          "[BLOCKED_NEEDS_HUMAN_BLOCKERS: permission denied ] while queue was open]",
+          "[BLOCKED_NEEDS_HUMAN: auto_merge]",
+        ].join("\n"),
+      ),
+    ).toEqual({
+      operation: "auto_merge",
+      blockers: "permission denied ] while queue was open",
+    });
+  });
+
   it("uses the blocker context immediately adjacent to the terminal marker", () => {
     expect(
       parseHumanBlockSignal(
@@ -361,6 +407,18 @@ describe("parseHumanBlockSignal", () => {
       parseHumanBlockSignal(
         [
           '[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":["stale"]}]',
+          "Recomputed readiness after rebase.",
+          "[BLOCKED_NEEDS_HUMAN: auto_merge]",
+        ].join("\n"),
+      ),
+    ).toEqual({ operation: "auto_merge", blockers: null });
+  });
+
+  it("does not attach a stale malformed blocker summary to a later terminal marker", () => {
+    expect(
+      parseHumanBlockSignal(
+        [
+          '[BLOCKED_NEEDS_HUMAN_BLOCKERS: {"readiness":["stale"]}',
           "Recomputed readiness after rebase.",
           "[BLOCKED_NEEDS_HUMAN: auto_merge]",
         ].join("\n"),
