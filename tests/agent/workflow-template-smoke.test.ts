@@ -1114,6 +1114,9 @@ async function findFilesContaining(
     for (const entry of entries) {
       const entryPath = resolve(currentDirectoryPath, entry.name);
       if (entry.isDirectory()) {
+        if (PROMPT_SEARCH_SKIPPED_DIRECTORIES.has(entry.name)) {
+          continue;
+        }
         await visit(entryPath);
         continue;
       }
@@ -1133,6 +1136,18 @@ async function findFilesContaining(
   await visit(directoryPath);
   return matches.sort();
 }
+
+const PROMPT_SEARCH_SKIPPED_DIRECTORIES = new Set([
+  ".git",
+  ".symphony",
+  ".worktrees",
+  "coverage",
+  "design-refs",
+  "dist",
+  "node_modules",
+  "workspaces",
+  "worktrees",
+]);
 
 function isGitIgnored(path: string): boolean {
   try {
