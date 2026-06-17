@@ -26,14 +26,28 @@ import {
 } from "../../src/review/headless-council-gate.js";
 import { stableJsonStringify } from "../../src/review/stable-json.js";
 
+// Hermetic env for gate tests (SYMPH-768): the gate resolves reviewer lanes
+// from `input.env ?? process.env`, so a test that does not pass `env` inherits
+// the ambient shell/.env — and on the deploy host `SYMPHONY_COUNCIL_KIMI_SHADOW_ENABLED=0`
+// (kimi shadow intentionally off in production) leaked in and dropped the kimi
+// lane, failing the default-lane cases. Default `input.env` to an isolated empty
+// env so lane/routing resolution depends only on what each test sets explicitly,
+// never on the ambient environment. The harness mocks all command execution, so
+// the gate never needs real process.env. Tests that need specific env still pass
+// their own `env` and are left untouched.
+const HERMETIC_GATE_ENV: NodeJS.ProcessEnv = Object.freeze({});
 const runHeadlessCouncilGate: typeof runHeadlessCouncilGateImpl = (
   input,
   dependencies,
 ) =>
   runHeadlessCouncilGateImpl(
-    input.provenance === undefined
-      ? { ...input, provenance: [humanImplementerProvenance()] }
-      : input,
+    {
+      ...input,
+      ...(input.provenance === undefined
+        ? { provenance: [humanImplementerProvenance()] }
+        : {}),
+      ...(input.env === undefined ? { env: HERMETIC_GATE_ENV } : {}),
+    },
     dependencies,
   );
 const TEST_LANE_STALL_DEADLINE_MS = 500;
