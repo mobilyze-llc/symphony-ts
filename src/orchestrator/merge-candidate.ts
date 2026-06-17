@@ -342,6 +342,18 @@ export function decideMergeActuation(input: {
   enqueuedAtMs: number | null;
   maxWaitMs: number;
   completedSideEffectKeys: ReadonlySet<string>;
+  /**
+   * Actuator auto-merge/enqueue permission (SYMPH-754). The actuator — not the
+   * worker — is the SOLE auto-merge actor, so this per-workflow permission (from
+   * `mergeActuator.autoMerge`), not the worker's Mode Permission Envelope, is the
+   * coherent auto-merge envelope. DEFAULT-CLOSED: omitted or false gates the
+   * ENQUEUE specifically — a fresh, otherwise-enqueue-ready candidate returns a
+   * terminal `blocked` decision with reason `auto_merge_permission_denied` and NO
+   * side-effect key (so the pure actuator writes no enqueue row and runs no
+   * enqueue), which the coordinator parks for an operator. Static per workflow, so
+   * the decision stays a pure function of its inputs and remains replay-stable.
+   */
+  autoMergePermission?: boolean;
 }): MergeActuatorDecision {
   const leaseDecision = validateLease(
     input.lease,
@@ -496,6 +508,23 @@ export function decideMergeActuation(input: {
     if (mergeabilityDecision !== null) {
       return mergeabilityDecision;
     }
+    // Auto-merge permission gate (SYMPH-754). A fresh, green, ready candidate is
+    // about to be ENQUEUED — the actuator's one auto-merge act. Default-CLOSED:
+    // unless the per-workflow `mergeActuator.autoMerge` permission is granted,
+    // return a terminal `blocked` decision with NO side-effect key, so the pure
+    // actuator writes no enqueue row and never enqueues; the coordinator parks it
+    // with an operator-visible `auto_merge_permission_denied` blocker. Gated only
+    // here (the final enqueue), AFTER the real merge-state blockers above, so a
+    // denial never masks DIRTY/BEHIND/UNKNOWN/non-green state, and so mark_ready,
+    // poll, tracker_done, and already-enqueued/merged candidates are unaffected.
+    if (input.autoMergePermission !== true) {
+      return {
+        action: "blocked",
+        reason: "auto_merge_permission_denied",
+        blockers: ["auto_merge_permission_denied"],
+        sideEffectKey: null,
+      };
+    }
     return sideEffectDecision(
       input.candidate,
       "enqueue",
@@ -578,6 +607,8 @@ export async function runMergeActuator(input: {
   enqueuedAtMs: number | null;
   maxWaitMs: number;
   completedSideEffectKeys: ReadonlySet<string>;
+  /** Actuator auto-merge/enqueue permission (SYMPH-754); default-CLOSED. See {@link decideMergeActuation}. */
+  autoMergePermission?: boolean;
   appendActuation: (
     entry: MergeActuationJournalDraft,
   ) => Promise<DispatcherRunJournalEntry>;
@@ -592,6 +623,7 @@ export async function runMergeActuator(input: {
     enqueuedAtMs: input.enqueuedAtMs,
     maxWaitMs: input.maxWaitMs,
     completedSideEffectKeys: input.completedSideEffectKeys,
+    autoMergePermission: input.autoMergePermission ?? false,
   });
 
   if (decision.sideEffectKey === null || input.lease === null) {
@@ -760,6 +792,8 @@ export async function runMergeActuatorCycle(input: {
   enqueuedAtMs: number | null;
   maxWaitMs: number;
   limits: MergeActuatorRecoveryLimits;
+  /** Actuator auto-merge/enqueue permission (SYMPH-754); default-CLOSED. See {@link decideMergeActuation}. */
+  autoMergePermission?: boolean;
   fetchLiveState: () => Promise<MergeActuatorLiveState | null>;
   appendActuation: (
     entry: MergeActuationJournalDraft,
@@ -853,6 +887,7 @@ export async function runMergeActuatorCycle(input: {
     enqueuedAtMs: effectiveEnqueuedAtMs,
     maxWaitMs: input.maxWaitMs,
     completedSideEffectKeys: completedSideEffectKeysFromJournal(input.journal),
+    autoMergePermission: input.autoMergePermission ?? false,
     appendActuation: input.appendActuation,
     sideEffects: input.sideEffects,
   });

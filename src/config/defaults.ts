@@ -118,6 +118,13 @@ export const DEFAULT_CODE_GROUNDING_MATERIALIZATION_TIMEOUT_MS = 600_000;
 // product opts in. The remaining values bound the merge-queue wait and the
 // bounded recovery ceilings (SYMPH-746/748).
 export const DEFAULT_MERGE_ACTUATOR_ENABLED = false;
+// Actuator auto-merge permission (SYMPH-754). Distinct from `enabled`: `enabled`
+// lets the actuator run/observe; this permission lets it ENQUEUE (auto-merge).
+// Default-CLOSED so enabling the actuator for a new product cannot silently
+// start auto-merging without an explicit per-workflow grant — a denied
+// permission parks the candidate with `auto_merge_permission_denied` instead of
+// enqueuing. Granted only where the WORKFLOW frontmatter sets it.
+export const DEFAULT_MERGE_ACTUATOR_AUTO_MERGE = false;
 export const DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS = 3_600_000;
 export const DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES = 5;
 export const DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES = 3;
@@ -185,6 +192,7 @@ export const SPEC_DEFAULTS = Object.freeze({
   },
   mergeActuator: {
     enabled: DEFAULT_MERGE_ACTUATOR_ENABLED,
+    autoMerge: DEFAULT_MERGE_ACTUATOR_AUTO_MERGE,
     maxWaitMs: DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS,
     maxLiveStateFailures: DEFAULT_MERGE_ACTUATOR_MAX_LIVE_STATE_FAILURES,
     maxSideEffectFailures: DEFAULT_MERGE_ACTUATOR_MAX_SIDE_EFFECT_FAILURES,

@@ -7191,6 +7191,11 @@ describe("live merge actuator (SYMPH-735)", () => {
     const config = createReviewMergeConfig();
     config.mergeActuator = {
       enabled: true,
+      // SYMPH-754: these tests model the enabled-AND-granted product (symphony),
+      // so grant the actuator auto-merge permission by default. The deny path
+      // (enabled but auto_merge closed → park auto_merge_permission_denied) has
+      // its own test that overrides this to false.
+      autoMerge: true,
       maxWaitMs: 3_600_000,
       maxLiveStateFailures: 2,
       maxSideEffectFailures: 2,
@@ -7705,6 +7710,53 @@ describe("live merge actuator (SYMPH-735)", () => {
         (entry) => entry.kind === "failure_exhausted",
       )?.metadata.reason,
     ).toContain("failing_checks");
+  });
+
+  it("parks auto_merge_permission_denied instead of enqueuing when the actuator auto-merge permission is closed (SYMPH-754)", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const markReady = vi.fn(async () => {});
+    const enqueue = vi.fn(async () => {});
+    const writeTrackerDone = vi.fn(async () => {});
+    const orchestrator = createOrchestrator({
+      // Actuator ENABLED (runs/observes) but auto-merge permission CLOSED. The
+      // live PR is green, non-draft, no required checks → the decision would
+      // otherwise enqueue. The permission gate must produce a terminal
+      // auto_merge_permission_denied park with NO enqueue side effect.
+      config: createLiveMergeActuatorConfig({ autoMerge: false }),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      getMergeActuatorLiveState: async () => actuatorLiveState(),
+      mergeActuatorSideEffects: { markReady, enqueue, writeTrackerDone },
+    });
+
+    await stageMergeCandidate(orchestrator, reviewResultPath);
+    const retryResult = await orchestrator.onRetryTimer("1");
+
+    const state = orchestrator.getState();
+    // The defining guarantee: the actuator never enqueued.
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(writeTrackerDone).not.toHaveBeenCalled();
+    expect(state.failed.has("1")).toBe(true);
+    expect(state.resumeRequired.has("1")).toBe(true);
+    expect(state.completed.has("1")).toBe(false);
+    expect(retryResult.dispatched).toBe(false);
+    // Parked, not re-polled: no continuation retry scheduled.
+    expect(state.retryAttempts["1"]).toBeUndefined();
+    expect(
+      state.dispatcherRunJournal.findLast(
+        (entry) => entry.kind === "failure_exhausted",
+      )?.metadata.reason,
+    ).toContain("auto_merge_permission_denied");
+    // No enqueue actuation row was journaled either.
+    expect(
+      state.dispatcherRunJournal.some(
+        (entry) =>
+          entry.kind === "merge_actuation" &&
+          entry.metadata.action === "enqueue",
+      ),
+    ).toBe(false);
   });
 
   it("still parks with merge_actuator_unwired when the actuator is disabled", async () => {

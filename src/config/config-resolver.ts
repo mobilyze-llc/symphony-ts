@@ -283,6 +283,10 @@ export function resolveWorkflowConfig(
     },
     mergeActuator: {
       enabled: mergeActuator.enabled === true,
+      // Default-CLOSED (SYMPH-754): only a strictly boolean `true` grants the
+      // actuator the auto-merge/enqueue permission, mirroring `enabled` so a
+      // truthy-but-non-boolean value (e.g. "true") does not silently open it.
+      autoMerge: mergeActuator.auto_merge === true,
       maxWaitMs:
         readPositiveInteger(mergeActuator.max_wait_ms) ??
         DEFAULT_MERGE_ACTUATOR_MAX_WAIT_MS,

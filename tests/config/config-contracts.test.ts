@@ -200,4 +200,24 @@ describe("config-contracts", () => {
       ok: true,
     });
   });
+
+  it("shipped WORKFLOW-symphony.md grants the actuator auto-merge permission (SYMPH-754)", async () => {
+    // Deploy-safety guard: the symphony actuator is enabled and its whole purpose
+    // is to auto-merge. Since the permission defaults CLOSED, the WORKFLOW must
+    // grant it explicitly — otherwise every symphony PR would park as
+    // auto_merge_permission_denied instead of merging.
+    const workflowPath = join(
+      process.cwd(),
+      "pipeline-config",
+      "workflows",
+      "WORKFLOW-symphony.md",
+    );
+    const definition = await loadWorkflowDefinition(workflowPath);
+    const resolved = resolveWorkflowConfig(definition, {
+      LINEAR_API_KEY: "test-token",
+    });
+
+    expect(resolved.mergeActuator?.enabled).toBe(true);
+    expect(resolved.mergeActuator?.autoMerge).toBe(true);
+  });
 });
