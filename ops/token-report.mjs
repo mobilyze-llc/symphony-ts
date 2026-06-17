@@ -395,9 +395,14 @@ function snapshotConfigHashes() {
     }
   }
 
-  // Also gather SKILL.md files from pipeline-config and any subdirectories
+  // Also gather SKILL.md files from pipeline-config and any subdirectories.
+  // Keep this scoped to configuration inputs; ignored worktrees can be huge.
   const skillFiles = [];
-  gatherFilesByPattern(symphonyRoot, "SKILL.md", skillFiles);
+  gatherFilesByPattern(
+    join(symphonyRoot, "pipeline-config"),
+    "SKILL.md",
+    skillFiles,
+  );
 
   const hashes = {};
   for (const file of [...configFiles, ...skillFiles]) {
@@ -428,12 +433,7 @@ function gatherFiles(dir, out) {
     for (const entry of entries) {
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (
-          entry.name === "node_modules" ||
-          entry.name === ".git" ||
-          entry.name === "dist"
-        )
-          continue;
+        if (shouldSkipConfigHashDirectory(entry.name)) continue;
         gatherFiles(fullPath, out);
       } else {
         out.push(fullPath);
@@ -450,12 +450,7 @@ function gatherFilesByPattern(dir, pattern, out) {
     for (const entry of entries) {
       const fullPath = join(dir, entry.name);
       if (entry.isDirectory()) {
-        if (
-          entry.name === "node_modules" ||
-          entry.name === ".git" ||
-          entry.name === "dist"
-        )
-          continue;
+        if (shouldSkipConfigHashDirectory(entry.name)) continue;
         gatherFilesByPattern(fullPath, pattern, out);
       } else if (entry.name === pattern) {
         out.push(fullPath);
@@ -464,6 +459,19 @@ function gatherFilesByPattern(dir, pattern, out) {
   } catch {
     // Skip unreadable directories
   }
+}
+
+function shouldSkipConfigHashDirectory(name) {
+  return (
+    name === "node_modules" ||
+    name === ".git" ||
+    name === "dist" ||
+    name === ".worktrees" ||
+    name === "worktrees" ||
+    name === ".symphony" ||
+    name === "coverage" ||
+    name === "design-refs"
+  );
 }
 
 // ---------------------------------------------------------------------------
