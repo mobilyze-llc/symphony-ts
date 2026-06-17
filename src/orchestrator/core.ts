@@ -4432,16 +4432,15 @@ export class OrchestratorCore {
       issueIdentifier: input.runningEntry.identifier,
     });
     if (!artifactResult.ok) {
-      // SYMPH-764 (council R1 P2): the marker is present but its artifact is
-      // unreadable/missing — e.g. an idempotent re-exit after the ephemeral
-      // /tmp artifact was cleaned up once the canonical was already journaled.
-      // The durable journal is the source of truth: when a canonical candidate
-      // already exists (its passing source review_gate_result is journaled),
-      // advance on it rather than parking a review that already completed. This
-      // cannot revive the SYMPH-764 stale-candidate bug — that path has a
-      // READABLE new-head artifact and is resolved by the head-match check
-      // below; only a genuinely unreadable artifact reaches here.
-      if (existingCanonical !== null) {
+      // SYMPH-764 (council R1 P2 + R2): advance on the durable journal canonical
+      // ONLY when the artifact is genuinely UNREADABLE/missing (I/O failure) and
+      // a canonical already exists — the idempotent-re-exit replay where the
+      // ephemeral /tmp artifact was cleaned up after the canonical was journaled.
+      // A READABLE artifact that fails semantic validation (wrong issue, non-pass
+      // verdict, not merge-eligible, ...) means THIS round did NOT pass: it must
+      // park, never advance on a stale candidate (council R2 — that would revive
+      // the SYMPH-764 class through a different door).
+      if (existingCanonical !== null && artifactResult.unreadable === true) {
         return true;
       }
       await this.parkMergeCandidateInvariantFailure({
@@ -4535,7 +4534,7 @@ export class OrchestratorCore {
     issueIdentifier: string;
   }): Promise<
     | { ok: true; result: HeadlessCouncilGateResult }
-    | { ok: false; reason: string }
+    | { ok: false; reason: string; unreadable?: boolean }
   > {
     if (input.path.includes("\0")) {
       return { ok: false, reason: "review artifact path contains NUL byte" };
@@ -4545,9 +4544,16 @@ export class OrchestratorCore {
     try {
       parsed = JSON.parse(await readFile(resolvedPath, "utf8"));
     } catch {
+      // I/O failure (e.g. the ephemeral artifact was cleaned up before an
+      // idempotent re-exit), distinct from a readable artifact that fails the
+      // semantic validation below. Only this branch is "the input vanished" —
+      // the SYMPH-764 council-R2 fix may fall back to the durable journal
+      // canonical here, but NOT on a semantic failure (which means this round
+      // did not pass and must never advance on a stale candidate).
       return {
         ok: false,
         reason: "review artifact unreadable or malformed",
+        unreadable: true,
       };
     }
 

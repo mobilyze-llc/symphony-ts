@@ -7965,6 +7965,50 @@ describe("live merge actuator (SYMPH-735)", () => {
     ).toBe(false);
   });
 
+  it("parks a resumed review re-exit whose readable artifact fails validation, even with a stale canonical (SYMPH-764 council R2)", async () => {
+    const round1Path = await writeReviewGateResultFixture();
+    // Round 2 artifact is READABLE but not merge-eligible (non-pass verdict):
+    // the review did NOT pass, so it must park — never advance on the stale
+    // round-1 canonical (that would revive the SYMPH-764 class).
+    const round2InvalidPath = await writeReviewGateResultFixture({
+      verdict: "fail",
+    } as Partial<HeadlessCouncilGateResult>);
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+    });
+
+    await stageMergeCandidate(orchestrator, round1Path);
+    const state = orchestrator.getState();
+    expect(
+      reduceMergeCandidates(state.dispatcherRunJournal)["1"]?.reviewedHeadSha,
+    ).toBe("head-sha");
+
+    state.issueStages["1"] = "review";
+    state.retryAttempts = {};
+    state.claimed.delete("1");
+    state.failed.delete("1");
+
+    await stageMergeCandidate(orchestrator, round2InvalidPath);
+
+    // Readable-but-invalid artifact → park, do NOT advance on the stale canonical.
+    const after = orchestrator.getState();
+    expect(after.failed.has("1")).toBe(true);
+    expect(
+      after.dispatcherRunJournal.some(
+        (entry) =>
+          entry.kind === "failure_exhausted" &&
+          typeof entry.metadata.reason === "string" &&
+          entry.metadata.reason.includes(
+            "missing_canonical_review_gate_result",
+          ),
+      ),
+    ).toBe(true);
+  });
+
   it("completes the issue when the actuator writes tracker done", async () => {
     const reviewResultPath = await writeReviewGateResultFixture();
     const markReady = vi.fn(async () => {});
