@@ -310,6 +310,10 @@ export interface DispatchPageAlertEvent {
   kind: "page" | "recovery";
   eligibleCount: number;
   consecutiveTicks: number;
+  gate?: {
+    reasonCode: string;
+    remedy: string | null;
+  };
 }
 
 /**
@@ -1172,6 +1176,17 @@ export function formatNotification(
 
     case "dispatch_page_alert": {
       if (event.kind === "page") {
+        if (event.gate !== undefined) {
+          const parts = [
+            `:rotating_light: *Dispatch admission gated* — ${event.eligibleCount} eligible candidate(s), 0 dispatched for ${event.consecutiveTicks} consecutive ticks`,
+            `Active gate: ${event.gate.reasonCode}`,
+          ];
+          if (event.gate.remedy !== null) {
+            parts.push(`Remedy: ${event.gate.remedy}`);
+          }
+          parts.push(version);
+          return { text: parts.join("\n") };
+        }
         return {
           text: [
             `:rotating_light: *Dispatch starvation* — ${event.eligibleCount} eligible candidate(s), 0 dispatched for ${event.consecutiveTicks} consecutive ticks`,

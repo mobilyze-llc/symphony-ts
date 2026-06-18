@@ -200,7 +200,10 @@ import type {
   MergeActuatorLiveState,
   MergeCandidateRecord,
 } from "./merge-candidate.js";
-import type { PipelineNotificationSink } from "./pipeline-notifier.js";
+import type {
+  DispatchPageAlertEvent,
+  PipelineNotificationSink,
+} from "./pipeline-notifier.js";
 import {
   getRateLimitSnapshotPath,
   loadPersistedRateLimitSnapshot,
@@ -1198,13 +1201,22 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               kind: "page" | "recovery";
               eligibleCount: number;
               consecutiveTicks: number;
+              gate?: {
+                reasonCode: string;
+                remedy: string | null;
+              };
             }) => {
-              _notifier.notify({
+              const event = {
                 type: "dispatch_page_alert",
                 kind: input.kind,
                 eligibleCount: input.eligibleCount,
                 consecutiveTicks: input.consecutiveTicks,
-              });
+              } satisfies DispatchPageAlertEvent;
+              _notifier.notify(
+                input.gate === undefined
+                  ? event
+                  : { ...event, gate: input.gate },
+              );
             },
             onExistingActiveResumed: (input: {
               issueId: string;
