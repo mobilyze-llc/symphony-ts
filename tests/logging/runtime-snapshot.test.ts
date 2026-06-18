@@ -3102,6 +3102,7 @@ describe("state-document enrichment (SYMPH-407)", () => {
       evaluated_at: "2026-06-12T10:00:00.000Z",
       snapshot_observed_at: "2026-06-12T03:00:00.000Z",
       stale: true,
+      stale_bypass: false,
     });
   });
 

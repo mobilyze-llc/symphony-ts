@@ -85,6 +85,12 @@ export async function loadPersistedRateLimitSnapshot(
   if (typeof observedAt !== "string" || observedAt.length === 0) {
     return null;
   }
+  // Reject an unparseable observed_at: a snapshot whose age cannot be
+  // determined must degrade fail-open, not hydrate and block dispatch
+  // indefinitely (SYMPH-778).
+  if (Number.isNaN(Date.parse(observedAt))) {
+    return null;
+  }
   if (
     rateLimits === null ||
     typeof rateLimits !== "object" ||

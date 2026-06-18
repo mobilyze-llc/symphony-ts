@@ -7482,6 +7482,86 @@ describe("orchestrator core", () => {
     expect(reason).toContain("2026-03-04T00:00:00.000Z");
   });
 
+  it("admits exactly one probe (not every slot) when stale and idle with multiple candidates (SYMPH-778)", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1" }),
+          createIssue({ id: "2", identifier: "ISSUE-2" }),
+        ],
+        statesById: [
+          { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+          { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+        ],
+      }),
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+          snapshotMaxAgeMs: 21_600_000,
+        },
+      }),
+    });
+    const state = orchestrator.getState();
+    state.codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+    state.codexRateLimitsObservedAt = "2026-03-04T00:00:00.000Z";
+
+    const result = await orchestrator.pollTick();
+
+    // The bypass admits a SINGLE probe to refresh telemetry, even though
+    // concurrency (default 10) and two eligible candidates would otherwise
+    // fill multiple slots from the stale snapshot.
+    expect(result.dispatchedIssueIds).toHaveLength(1);
+    expect(orchestrator.getState().rateLimitAdmission?.staleBypass).toBe(true);
+  });
+
+  it("admits exactly one probe under defer-until-reset when stale and idle (SYMPH-778)", async () => {
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1" }),
+          createIssue({ id: "2", identifier: "ISSUE-2" }),
+        ],
+        statesById: [
+          { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+          { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+        ],
+      }),
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+          deferUntilReset: true,
+          expectedUnitBurnPct: 3,
+          deferJitterMs: 0,
+          snapshotMaxAgeMs: 21_600_000,
+        },
+      }),
+    });
+    const state = orchestrator.getState();
+    state.codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+    state.codexRateLimitsObservedAt = "2026-03-04T00:00:00.000Z";
+
+    const result = await orchestrator.pollTick();
+
+    // The stale snapshot's admission capacity (which can compute to 0 under
+    // defer-until-reset) must not block the probe; the bypass admits exactly one.
+    expect(result.dispatchedIssueIds).toHaveLength(1);
+    expect(orchestrator.getState().rateLimitAdmission?.staleBypass).toBe(true);
+  });
+
   it("records a next-admission ETA when defer-until-reset blocks on expected burn", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],

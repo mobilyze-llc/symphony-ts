@@ -443,6 +443,8 @@ export interface RuntimeSnapshotRateLimitGateView
   snapshot_observed_at: string | null;
   /** True when the evaluated telemetry is older than the configured freshness threshold. */
   stale: boolean;
+  /** True when a stale snapshot was bypassed (admitting a probe) rather than blocking (SYMPH-778). */
+  stale_bypass: boolean;
   blocked: boolean;
   reason: string | null;
   expected_unit_burn_pct: number | null;
@@ -1709,6 +1711,7 @@ function buildRateLimitViews(
           evaluated_at: admission.evaluatedAt,
           snapshot_observed_at: admission.snapshotObservedAt ?? null,
           stale: admission.snapshotStale ?? false,
+          stale_bypass: admission.staleBypass ?? false,
           blocked: admission.blocked,
           reason: admission.reason,
           primary_used_pct: admission.primaryUsedPercent,

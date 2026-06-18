@@ -1318,6 +1318,18 @@ describe("config-resolver fast_track", () => {
       config: {},
     });
     expect(unset.rateLimitAdmission.snapshotMaxAgeMs).toBe(21_600_000);
+
+    // Explicit null disables the staleness bypass (strict persisted blocking).
+    const disabled = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        rate_limit_admission: {
+          snapshot_max_age_ms: null,
+        },
+      },
+    });
+    expect(disabled.rateLimitAdmission.snapshotMaxAgeMs).toBeNull();
   });
 
   it("parses budget_escalation and defaults it off", () => {

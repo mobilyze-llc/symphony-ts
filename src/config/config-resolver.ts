@@ -263,8 +263,11 @@ export function resolveWorkflowConfig(
         readNonNegativeInteger(rateLimitAdmission.defer_jitter_ms) ??
         DEFAULT_RATE_LIMIT_DEFER_JITTER_MS,
       snapshotMaxAgeMs:
-        readNonNegativeInteger(rateLimitAdmission.snapshot_max_age_ms) ??
-        DEFAULT_RATE_LIMIT_SNAPSHOT_MAX_AGE_MS,
+        "snapshot_max_age_ms" in rateLimitAdmission &&
+        rateLimitAdmission.snapshot_max_age_ms === null
+          ? null
+          : (readNonNegativeInteger(rateLimitAdmission.snapshot_max_age_ms) ??
+            DEFAULT_RATE_LIMIT_SNAPSHOT_MAX_AGE_MS),
     },
     budgetEscalation: {
       maxSteps:

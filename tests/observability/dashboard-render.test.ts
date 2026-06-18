@@ -447,6 +447,7 @@ describe("Dashboard Pipeline column", () => {
           evaluated_at: "2026-06-12T10:00:00.000Z",
           snapshot_observed_at: "2026-06-12T09:58:00.000Z",
           stale: false,
+          stale_bypass: false,
           blocked: true,
           reason: "secondary window headroom 2.0% < 5% floor",
           primary_used_pct: 39,
