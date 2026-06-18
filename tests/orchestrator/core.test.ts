@@ -904,6 +904,46 @@ describe("orchestrator core", () => {
     expect(result.dispatchedIssueIds).toEqual(["2"]);
   });
 
+  it("appends a fresh intent across a compacted journal instead of colliding on a stale key (SYMPH-734)", async () => {
+    // Four distinct fences journal four intents whose idempotency keys are
+    // historically suffixed by journal length (seq-0..seq-3). Retaining only
+    // the tail simulates compaction: the retained length (2) now matches the
+    // length-based suffix a new intent would regenerate (seq-2), so a
+    // length-keyed intent dedups against the stale retained row.
+    const seed = createOrchestrator();
+    for (const id of ["A", "B", "C", "D"]) {
+      await seed.setDispatchFence({
+        issueIdentifiers: [`ISSUE-${id}`],
+        source: "symphonyctl",
+        actor: { kind: "operator", host: "pro14", session: "seed" },
+        reason: { class: "operator_dispatch_fence", human: `fence ${id}` },
+      });
+    }
+    const compacted = seed.getState().dispatcherRunJournal.slice(-2);
+    expect(compacted).toHaveLength(2);
+
+    const replayed = createOrchestrator({
+      runJournal: compacted,
+      tracker: createTracker({
+        candidates: [createIssue({ id: "9", identifier: "ISSUE-E" })],
+      }),
+    });
+
+    // A subsequent, different fence must append a fresh row and win, not dedup
+    // to the retained seq-2 entry left by compaction.
+    await replayed.setDispatchFence({
+      issueIdentifiers: ["ISSUE-E"],
+      source: "symphonyctl",
+      actor: { kind: "operator", host: "pro14", session: "seed" },
+      reason: { class: "operator_dispatch_fence", human: "fence E" },
+    });
+
+    expect(replayed.getState().dispatchFence).toMatchObject({
+      issueIdentifiers: ["ISSUE-E"],
+    });
+    expect(replayed.getState().dispatcherRunJournal).toHaveLength(3);
+  });
+
   it("keeps dispatch fence live when its journal write degrades", async () => {
     const orchestrator = createOrchestrator({
       writeRunJournalEntry: async (entry) => {
