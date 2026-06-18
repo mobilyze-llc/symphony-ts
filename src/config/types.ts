@@ -228,6 +228,14 @@ export interface WorkflowContinuousFeedbackConfig {
   model: string | null;
   role: string;
   bounceOnFinding: boolean;
+  /**
+   * Startup model-availability preflight policy (SYMPH-761). When false
+   * (default), an unavailable continuous-feedback model warns once at startup
+   * and the runtime proceeds — the lane degrades gracefully at runtime. When
+   * true, an unavailable model fails startup closed (RuntimeHostStartupError),
+   * for operators who require the inner-loop reviewer to be live before launch.
+   */
+  preflightFailClosed: boolean;
 }
 
 export interface WorkflowCodexConfig {

@@ -361,6 +361,11 @@ export interface RuntimeSnapshot {
   /** Running commit vs origin/main (SYMPH-407); null until captured. */
   deploy_drift: DeployDriftStatus | null;
   /**
+   * Continuous-feedback model-availability preflight (SYMPH-761); null when
+   * the lane is disabled, has no configured model, or the probe has not run.
+   */
+  continuous_feedback_preflight: RuntimeSnapshotContinuousFeedbackPreflight | null;
+  /**
    * Watchdog cluster/breaker summary (SYMPH-398 machinery) with journal
    * cursors pointing at the latest transition entries.
    */
@@ -629,6 +634,21 @@ export interface RuntimeSnapshotMergeCandidate {
 }
 
 /**
+ * Startup model-availability preflight result for the continuous-feedback
+ * lane (SYMPH-761). Surfaced once at startup so a misconfigured or down local
+ * reviewer model is visible in runtime state, not only via silent
+ * per-checkpoint degradation. Null until the preflight runs (or skipped when
+ * the lane is disabled / has no configured model).
+ */
+export interface RuntimeSnapshotContinuousFeedbackPreflight {
+  available: boolean;
+  model: string;
+  runner: string;
+  detail: string;
+  checked_at: string;
+}
+
+/**
  * Host-supplied enrichment for snapshot sections whose source of truth
  * lives outside OrchestratorState (registry internals, files, git, config).
  * Everything remains composed into the ONE snapshot document — enrichment
@@ -639,6 +659,7 @@ export interface RuntimeSnapshotEnrichment {
   asOfSequence?: number;
   components?: Record<string, ComponentStatus>;
   deployDrift?: DeployDriftStatus | null;
+  continuousFeedbackPreflight?: RuntimeSnapshotContinuousFeedbackPreflight | null;
   rateLimitFile?: {
     path: string;
     observedAt: string;
@@ -904,6 +925,8 @@ export function buildRuntimeSnapshot(
     counters: buildIssueCounters(state),
     rate_limit_views: buildRateLimitViews(state, enrichment),
     deploy_drift: enrichment?.deployDrift ?? null,
+    continuous_feedback_preflight:
+      enrichment?.continuousFeedbackPreflight ?? null,
     watchdog: buildWatchdogSection(state, enrichment?.watchdog ?? null),
     council_reviews: buildCouncilReviewSnapshots(state),
     spec_reviews: buildSpecReviewSnapshots(state),

@@ -16521,6 +16521,7 @@ function createConfig(overrides?: {
       model: "local-flash",
       role: "continuous-feedback",
       bounceOnFinding: true,
+      preflightFailClosed: false,
     },
     stages: null,
     escalationState: null,

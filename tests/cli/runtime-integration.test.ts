@@ -19,6 +19,7 @@ import { resolveWorkflowConfig } from "../../src/config/config-resolver.js";
 import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
 import { loadWorkflowDefinition } from "../../src/config/workflow-loader.js";
 import type { Issue } from "../../src/domain/model.js";
+import type { ContinuousFeedbackCommandExecutor } from "../../src/orchestrator/continuous-feedback-provider.js";
 import type { PollTickResult } from "../../src/orchestrator/core.js";
 import {
   OrchestratorRuntimeHost,
@@ -33,6 +34,15 @@ import type {
 
 const tempDirs: string[] = [];
 const services: RuntimeServiceHandle[] = [];
+// These lifecycle integration tests use the real default continuous-feedback
+// model, whose runner would otherwise be spawned by the SYMPH-761 startup
+// preflight and reach for a live local studio. Stub the runner command so the
+// preflight resolves instantly instead of spawning a real, hanging process.
+const probeStub: ContinuousFeedbackCommandExecutor = async () => ({
+  exitCode: 0,
+  stderr: "",
+  stdout: "OK",
+});
 const codexFixturePath = join(
   dirname(fileURLToPath(import.meta.url)),
   "../fixtures/codex-fake-server.mjs",
@@ -77,6 +87,7 @@ describe("runtime integration", () => {
     const stdout = new PassThrough();
     const service = await trackService(
       startRuntimeService({
+        runContinuousFeedbackCommand: probeStub,
         config: createConfig({
           workspace: {
             root: workspaceRoot,
@@ -158,12 +169,14 @@ Prompt body
         },
         startHost: async ({ runtime }) => {
           const runtimeHost = new ThrowingRuntimeHost({
+            runContinuousFeedbackCommand: probeStub,
             config: runtime.config,
             tracker,
           });
 
           return await trackService(
             startRuntimeService({
+              runContinuousFeedbackCommand: probeStub,
               config: runtime.config,
               logsRoot: runtime.logsRoot,
               tracker,
@@ -227,6 +240,7 @@ Prompt body
           observed.logsRoot = runtime.logsRoot;
           const host = await trackService(
             startRuntimeService({
+              runContinuousFeedbackCommand: probeStub,
               config: runtime.config,
               logsRoot: runtime.logsRoot,
               tracker: createTracker({
@@ -256,6 +270,7 @@ Prompt body
   it("surfaces real startup validation failures from startRuntimeService", async () => {
     await expect(
       startRuntimeService({
+        runContinuousFeedbackCommand: probeStub,
         config: createConfig({
           tracker: {
             kind: "linear",
@@ -286,6 +301,7 @@ Prompt body
 
     const service = await trackService(
       startRuntimeService({
+        runContinuousFeedbackCommand: probeStub,
         config: createConfig({
           polling: {
             intervalMs: 60_000,
@@ -331,6 +347,7 @@ Prompt v1
     const config = await resolveRuntimeConfig(workflowPath);
     const service = await trackService(
       startRuntimeService({
+        runContinuousFeedbackCommand: probeStub,
         config,
         logsRoot,
         tracker: createTracker({
@@ -427,6 +444,7 @@ Implement {{ issue.identifier }} attempt={{ attempt }}
     const config = await resolveRuntimeConfig(workflowPath);
     const service = await trackService(
       startRuntimeService({
+        runContinuousFeedbackCommand: probeStub,
         config,
         logsRoot,
         tracker,

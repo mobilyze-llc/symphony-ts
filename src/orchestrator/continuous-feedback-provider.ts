@@ -14,6 +14,19 @@ import { getDiff } from "./gate-handler.js";
 
 const DEFAULT_FEEDBACK_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_DIFF_CHARS = 12_000;
+// Startup preflight probe (SYMPH-761): a bounded availability check, not a
+// review. The probe is awaited at startup, so this timeout caps how long a
+// slow or wedged runner can delay launch — generous enough for a healthy
+// (even cold) local model to resolve, short enough to bound the startup wait;
+// a runner that does not answer in time reads as unavailable.
+const DEFAULT_FEEDBACK_PROBE_TIMEOUT_MS = 10_000;
+// Grace after SIGTERM before SIGKILL on timeout (SYMPH-761 council R2). Bounds
+// how long a SIGTERM-ignoring runner can delay the call before it is force-
+// killed and the call resolves; SIGKILL cannot be caught, so `close` always
+// follows and the child is guaranteed dead before the promise settles.
+const DEFAULT_FEEDBACK_KILL_GRACE_MS = 3_000;
+const CONTINUOUS_FEEDBACK_PROBE_PROMPT =
+  "Continuous-feedback startup preflight. Reply with the single token OK.";
 
 export interface ContinuousFeedbackProviderInput {
   issue: Issue;
@@ -29,6 +42,13 @@ export interface ContinuousFeedbackCommandInput {
   cwd: string;
   prompt: string;
   timeoutMs: number;
+  /**
+   * Grace period after SIGTERM before escalating to SIGKILL on timeout
+   * (SYMPH-761). The command resolves only once the child has actually exited,
+   * so a runner that ignores SIGTERM cannot outlive the call (and, for the
+   * awaited startup preflight, cannot be orphaned past startup).
+   */
+  killGraceMs?: number;
 }
 
 export interface ContinuousFeedbackCommandResult {
@@ -94,12 +114,54 @@ export async function runContinuousFeedbackCommand(
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let timedOut = false;
+    let exited = false;
+    let exitCode: number | null = null;
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // Timeout policy (SYMPH-761 R2/R3/R4). Three settlement paths cover every
+    // ordering of `exit`, `close`, and the timeout:
+    //   - normal completion: settle from `close` (full stdout/stderr drained);
+    //   - timeout while still running: SIGTERM then SIGKILL after a grace
+    //     period, and settle from the runner's `exit` (process dead) — NOT
+    //     `close`, which a descendant that inherited the pipes can hold open
+    //     indefinitely and hang the awaited startup preflight;
+    //   - runner already exited but `close` is stalled by such a descendant:
+    //     the timeout fires and settles with the runner's own result.
+    // `exit` always precedes `close`, so the runner we spawned is dead before
+    // any timeout-path settle.
     const timeout = setTimeout(() => {
       if (settled) {
         return;
       }
+      if (exited) {
+        // Runner finished before the timeout, but `close` is stalled; its
+        // output was already delivered, so settle with the captured result.
+        settleExited();
+        return;
+      }
+      timedOut = true;
       child.kill("SIGTERM");
+      killTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Child already exited between SIGTERM and the grace deadline.
+        }
+      }, input.killGraceMs ?? DEFAULT_FEEDBACK_KILL_GRACE_MS);
+    }, input.timeoutMs);
+
+    const clearTimers = (): void => {
+      clearTimeout(timeout);
+      if (killTimer !== null) {
+        clearTimeout(killTimer);
+      }
+    };
+    function settleTimedOut(): void {
+      if (settled) {
+        return;
+      }
+      clearTimers();
       settled = true;
       resolve({
         stdout,
@@ -109,7 +171,15 @@ export async function runContinuousFeedbackCommand(
             : stderr,
         exitCode: null,
       });
-    }, input.timeoutMs);
+    }
+    function settleExited(): void {
+      if (settled) {
+        return;
+      }
+      clearTimers();
+      settled = true;
+      resolve({ stdout, stderr, exitCode });
+    }
 
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
@@ -123,7 +193,7 @@ export async function runContinuousFeedbackCommand(
       if (settled) {
         return;
       }
-      clearTimeout(timeout);
+      clearTimers();
       settled = true;
       resolve({
         stdout,
@@ -131,15 +201,75 @@ export async function runContinuousFeedbackCommand(
         exitCode: 1,
       });
     });
-    child.on("close", (exitCode) => {
+    child.on("exit", (code) => {
+      exited = true;
+      exitCode = code;
+      // A timeout-initiated kill reports a timeout result; a normal exit waits
+      // for `close` (the timeout above breaks a stalled `close`).
+      if (timedOut) {
+        settleTimedOut();
+      }
+    });
+    child.on("close", () => {
       if (settled) {
         return;
       }
-      clearTimeout(timeout);
+      clearTimers();
       settled = true;
       resolve({ stdout, stderr, exitCode });
     });
   });
+}
+
+export interface ContinuousFeedbackProbeResult {
+  available: boolean;
+  detail: string;
+}
+
+export interface ContinuousFeedbackProbeOptions {
+  runCommand?: ContinuousFeedbackCommandExecutor;
+  cwd?: string;
+  timeoutMs?: number;
+}
+
+/**
+ * Startup model-availability preflight (SYMPH-761). Runs the configured
+ * continuous-feedback runner with the SAME `--model` arg path the live lane
+ * uses (continuous-feedback-provider) plus a minimal prompt and a short
+ * timeout. A zero exit means the model resolved on the runner; any non-zero
+ * exit or timeout means the configured model is unavailable on this host. The
+ * lane already degrades gracefully at runtime (status "unavailable"); this
+ * probe surfaces a misconfigured or down model ONCE at startup instead of
+ * leaving it to silent per-checkpoint degradation.
+ */
+export async function probeContinuousFeedbackModel(
+  lane: ContinuousFeedbackLane,
+  options: ContinuousFeedbackProbeOptions = {},
+): Promise<ContinuousFeedbackProbeResult> {
+  const runCommand = options.runCommand ?? runContinuousFeedbackCommand;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_FEEDBACK_PROBE_TIMEOUT_MS;
+  const args = buildContinuousFeedbackCommandArgs(
+    lane,
+    CONTINUOUS_FEEDBACK_PROBE_PROMPT,
+  );
+  const result = await runCommand({
+    command: lane.runner,
+    args,
+    cwd: options.cwd ?? process.cwd(),
+    prompt: CONTINUOUS_FEEDBACK_PROBE_PROMPT,
+    timeoutMs,
+  });
+
+  if (result.exitCode === 0) {
+    return {
+      available: true,
+      detail: `continuous-feedback model ${lane.model ?? "(runner default)"} resolved on ${lane.runner}`,
+    };
+  }
+  return {
+    available: false,
+    detail: summarizeProviderFailure(result),
+  };
 }
 
 function buildContinuousFeedbackCommandArgs(

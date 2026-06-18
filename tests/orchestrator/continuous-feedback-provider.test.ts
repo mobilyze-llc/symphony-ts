@@ -1,9 +1,15 @@
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { Issue } from "../../src/domain/model.js";
 import {
   type ContinuousFeedbackCommandInput,
   createContinuousFeedbackProvider,
+  probeContinuousFeedbackModel,
+  runContinuousFeedbackCommand,
 } from "../../src/orchestrator/continuous-feedback-provider.js";
 
 describe("continuous feedback provider", () => {
@@ -223,6 +229,199 @@ describe("continuous feedback provider", () => {
       findings: [],
     });
     expect(runCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("probes the continuous-feedback model as available on a zero-exit runner call (SYMPH-761)", async () => {
+    const commands: ContinuousFeedbackCommandInput[] = [];
+    const result = await probeContinuousFeedbackModel(
+      {
+        runner: "pi",
+        model: "ds4-studio2/deepseek-v4-flash",
+        role: "continuous-feedback",
+      },
+      {
+        cwd: "/tmp/symphony-workspace",
+        runCommand: async (input) => {
+          commands.push(input);
+          return { exitCode: 0, stderr: "", stdout: "OK" };
+        },
+      },
+    );
+
+    expect(result.available).toBe(true);
+    expect(result.detail).toContain("ds4-studio2/deepseek-v4-flash");
+    expect(result.detail).toContain("pi");
+    // The probe exercises the SAME runner + model-resolution arg path the live
+    // lane uses, so a model the runner cannot resolve fails the probe too.
+    expect(commands).toHaveLength(1);
+    expect(commands[0]?.command).toBe("pi");
+    expect(commands[0]?.args).toEqual(
+      expect.arrayContaining(["--model", "ds4-studio2/deepseek-v4-flash"]),
+    );
+  });
+
+  it("probes the continuous-feedback model as unavailable on a non-zero runner call (SYMPH-761)", async () => {
+    const result = await probeContinuousFeedbackModel(
+      {
+        runner: "pi",
+        model: "ds4-studio2/missing-model",
+        role: "continuous-feedback",
+      },
+      {
+        cwd: "/tmp/symphony-workspace",
+        runCommand: async () => ({
+          exitCode: 1,
+          stderr: "model not found: ds4-studio2/missing-model",
+          stdout: "",
+        }),
+      },
+    );
+
+    expect(result.available).toBe(false);
+    expect(result.detail).toContain("model not found");
+  });
+
+  it("treats a probe timeout (null exit code) as unavailable (SYMPH-761)", async () => {
+    const result = await probeContinuousFeedbackModel(
+      {
+        runner: "pi",
+        model: "ds4-studio2/deepseek-v4-flash",
+        role: "continuous-feedback",
+      },
+      {
+        runCommand: async () => ({
+          exitCode: null,
+          stderr: "Continuous feedback command timed out after 20000ms.",
+          stdout: "",
+        }),
+      },
+    );
+
+    expect(result.available).toBe(false);
+    expect(result.detail).toContain("timed out");
+  });
+
+  it("force-kills a SIGTERM-ignoring runner so a timed-out probe child cannot outlive the call (SYMPH-761)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "symphony-cf-probe-kill-"));
+    const pidFile = join(dir, "pid");
+    // A child that records its pid, ignores SIGTERM, and stays alive: only the
+    // SIGKILL escalation can stop it, and the call must not resolve until it
+    // actually exits (no orphaned runner past the awaited startup preflight).
+    const result = await runContinuousFeedbackCommand({
+      command: process.execPath,
+      args: [
+        "-e",
+        `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);`,
+      ],
+      cwd: process.cwd(),
+      prompt: "",
+      timeoutMs: 250,
+      killGraceMs: 250,
+    });
+
+    expect(result.exitCode).toBeNull();
+    const childPid = Number((await readFile(pidFile, "utf8")).trim());
+    expect(Number.isInteger(childPid)).toBe(true);
+    // The call resolved only from `close`, so the child must already be dead.
+    let alive = true;
+    try {
+      process.kill(childPid, 0);
+    } catch {
+      alive = false;
+    }
+    if (alive) {
+      // Safety net so a regression cannot leak the child into the suite.
+      try {
+        process.kill(childPid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+    expect(alive).toBe(false);
+  });
+
+  it("does not hang when a timed-out runner leaves a descendant holding the inherited pipes (SYMPH-761)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "symphony-cf-probe-desc-"));
+    const runnerPidFile = join(dir, "runner-pid");
+    const descPidFile = join(dir, "desc-pid");
+    const runnerScript = join(dir, "runner.mjs");
+    // The runner ignores SIGTERM and spawns a descendant that INHERITS its
+    // stdio (the pipes back to us) and never exits. `close` would wait for
+    // those pipes to drain (never), so resolving on `close` would hang the
+    // awaited preflight forever; resolving on the runner's `exit` does not.
+    const descInline = `require("fs").writeFileSync(${JSON.stringify(descPidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
+    const runnerSource = `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(runnerPidFile)}, String(process.pid));
+spawn(process.execPath, ["-e", ${JSON.stringify(descInline)}], { stdio: "inherit" });
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`;
+    await writeFile(runnerScript, runnerSource, "utf8");
+
+    const result = await runContinuousFeedbackCommand({
+      command: process.execPath,
+      args: [runnerScript],
+      cwd: process.cwd(),
+      prompt: "",
+      timeoutMs: 250,
+      killGraceMs: 250,
+    });
+
+    // It RESOLVED (did not hang on the descendant's held pipes).
+    expect(result.exitCode).toBeNull();
+
+    // Cleanup: the runner is force-killed; the orphaned descendant is not reaped
+    // by us (full process-tree reaping is out of scope — see follow-up), so kill
+    // it here to avoid leaking into the suite.
+    for (const file of [runnerPidFile, descPidFile]) {
+      try {
+        const pid = Number((await readFile(file, "utf8")).trim());
+        if (Number.isInteger(pid)) {
+          process.kill(pid, "SIGKILL");
+        }
+      } catch {
+        // not written yet, or already gone
+      }
+    }
+  });
+
+  it("settles a runner that exits before the timeout but leaves a descendant holding the pipes (SYMPH-761)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "symphony-cf-probe-exit-"));
+    const descPidFile = join(dir, "desc-pid");
+    const runnerScript = join(dir, "runner-exit.mjs");
+    // The runner spawns a long-lived stdio-inheriting descendant, then exits
+    // NORMALLY right away. Its `exit` fires before the timeout (so the timeout
+    // path's kill never runs), but `close` stays open on the descendant. The
+    // timeout must still settle — with the runner's own (success) result, not a
+    // false "timed out" — instead of hanging forever (R4 missed-settle).
+    const descInline = `require("fs").writeFileSync(${JSON.stringify(descPidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
+    const runnerSource = `import { spawn } from "node:child_process";
+spawn(process.execPath, ["-e", ${JSON.stringify(descInline)}], { stdio: "inherit" });
+process.exit(0);
+`;
+    await writeFile(runnerScript, runnerSource, "utf8");
+
+    const result = await runContinuousFeedbackCommand({
+      command: process.execPath,
+      args: [runnerScript],
+      cwd: process.cwd(),
+      prompt: "",
+      timeoutMs: 250,
+      killGraceMs: 250,
+    });
+
+    // Resolved (no hang) reporting the runner's own clean exit, not a timeout.
+    expect(result.exitCode).toBe(0);
+
+    try {
+      const pid = Number((await readFile(descPidFile, "utf8")).trim());
+      if (Number.isInteger(pid)) {
+        process.kill(pid, "SIGKILL");
+      }
+    } catch {
+      // not written yet, or already gone
+    }
   });
 });
 

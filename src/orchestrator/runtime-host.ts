@@ -91,6 +91,7 @@ import {
 } from "../logging/run-journal.js";
 import {
   type RuntimeSnapshot,
+  type RuntimeSnapshotContinuousFeedbackPreflight,
   type StateDeltaResponse,
   buildRuntimeSnapshot,
   buildStateDelta,
@@ -168,7 +169,9 @@ import { WorkspaceHookRunner } from "../workspace/hooks.js";
 import { WorkspaceManager } from "../workspace/workspace-manager.js";
 import {
   type ContinuousFeedbackCommandExecutor,
+  type ContinuousFeedbackProbeResult,
   createContinuousFeedbackProvider,
+  probeContinuousFeedbackModel,
   runContinuousFeedbackCommand,
 } from "./continuous-feedback-provider.js";
 import type {
@@ -383,6 +386,13 @@ export interface RuntimeServiceOptions {
   logger?: StructuredLogger;
   stdout?: Writable;
   shutdownTimeoutMs?: number;
+  /**
+   * Injectable continuous-feedback runner command (SYMPH-761), forwarded to the
+   * default-constructed host so the startup model-availability preflight can be
+   * stubbed in tests instead of spawning the real runner. Ignored when a
+   * pre-built `runtimeHost` is supplied (that host owns its own command).
+   */
+  runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
 }
 
 export interface RuntimeServiceHandle {
@@ -598,6 +608,15 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   /** Single-flight, captured once; see deploy-drift.ts staleness contract. */
   private deployDriftCapture: Promise<DeployDriftStatus | null> | null = null;
   private deployDrift: DeployDriftStatus | null = null;
+  /** Command executor shared by the continuous-feedback provider and the
+   * startup model-availability preflight (SYMPH-761), so the probe exercises
+   * the exact runner the live lane uses. */
+  private readonly continuousFeedbackCommand: ContinuousFeedbackCommandExecutor;
+  /** Continuous-feedback model preflight result (SYMPH-761); captured once at
+   * startup and surfaced in the runtime snapshot. Null until the preflight
+   * runs or when it is skipped. */
+  private continuousFeedbackPreflight: RuntimeSnapshotContinuousFeedbackPreflight | null =
+    null;
 
   constructor(options: RuntimeHostOptions) {
     this.config = options.config;
@@ -605,6 +624,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.notifier = options.notifier ?? null;
     this.now = options.now ?? (() => new Date());
     this.logger = options.logger ?? null;
+    this.continuousFeedbackCommand =
+      options.runContinuousFeedbackCommand ?? runContinuousFeedbackCommand;
     this.readWorkspaceChangedFiles =
       options.readWorkspaceChangedFiles ?? readGitChangedFiles;
     this.readWorkspaceBaseRevision =
@@ -706,8 +727,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       createContinuousFeedbackProvider({
         resolveWorkspacePath: (issueId) =>
           this.workspaceManager.resolveForIssue(issueId).workspacePath,
-        runCommand:
-          options.runContinuousFeedbackCommand ?? runContinuousFeedbackCommand,
+        runCommand: this.continuousFeedbackCommand,
       });
 
     const orchestratorOptions: OrchestratorCoreOptions = {
@@ -1407,6 +1427,81 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     await this.flushLoopTracePersistence();
   }
 
+  /**
+   * Continuous-feedback model-availability preflight (SYMPH-761). Probes ONCE
+   * at startup that the configured continuous_feedback.model resolves on its
+   * runner and records the result in runtime state (surfaced in the snapshot).
+   * Skips when the lane is disabled or has no configured model — the
+   * local-model gate: a null model means "runner default", with nothing
+   * specific to probe. An unavailable model surfaces a single startup warning;
+   * with continuous_feedback.preflight_fail_closed it instead fails startup
+   * closed (RuntimeHostStartupError) for operators who require the inner-loop
+   * reviewer to be live before launch. Warn-not-block is the default — the
+   * lane already degrades gracefully at runtime (status "unavailable").
+   */
+  async runContinuousFeedbackModelPreflight(): Promise<ContinuousFeedbackProbeResult | null> {
+    // Probe at most once (the "ONCE at startup" contract): a repeat call (e.g.
+    // a future config-reload path) is a no-op that returns the recorded result
+    // rather than re-spawning the runner and overwriting runtime state.
+    if (this.continuousFeedbackPreflight !== null) {
+      return null;
+    }
+    const feedback = this.config.continuousFeedback;
+    // Local-model gate: probe only an explicitly configured, non-blank model.
+    // null / absent collapses to the runner default (no `--model`), and a blank
+    // string would otherwise spawn `--model ""` and crash a fail-closed launch
+    // (council R1). Both mean "nothing specific to probe" — skip.
+    const model = feedback?.model ?? null;
+    if (
+      feedback === undefined ||
+      !feedback.enabled ||
+      model === null ||
+      model.trim() === ""
+    ) {
+      return null;
+    }
+    const result = await probeContinuousFeedbackModel(
+      {
+        runner: feedback.runner,
+        model,
+        role: feedback.role,
+      },
+      { runCommand: this.continuousFeedbackCommand },
+    );
+    this.continuousFeedbackPreflight = {
+      available: result.available,
+      model,
+      runner: feedback.runner,
+      detail: result.detail,
+      checked_at: this.now().toISOString(),
+    };
+    if (result.available) {
+      await this.logger?.info(
+        "continuous_feedback_preflight",
+        `Continuous-feedback model ${model} resolved on runner ${feedback.runner}.`,
+        { model, runner: feedback.runner },
+      );
+      return result;
+    }
+    await this.logger?.warn(
+      "continuous_feedback_preflight_unavailable",
+      `Continuous-feedback model ${model} is unavailable on runner ${feedback.runner}.`,
+      {
+        model,
+        runner: feedback.runner,
+        detail: result.detail,
+        fail_closed: feedback.preflightFailClosed,
+      },
+    );
+    if (feedback.preflightFailClosed) {
+      throw new RuntimeHostStartupError(
+        `continuous-feedback model ${model} unavailable on runner ${feedback.runner}: ${result.detail}`,
+        "continuous_feedback_model_unavailable",
+      );
+    }
+    return result;
+  }
+
   async getRuntimeSnapshot(): Promise<RuntimeSnapshot> {
     // The dashboard starts listening before the first poll cycle — hydrate
     // the durable dispatcher journal eagerly so early reads see persisted
@@ -1429,6 +1524,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           rateLimitTelemetryPresent: state.codexRateLimits !== null,
         }),
         deployDrift: this.readDeployDriftNonBlocking(),
+        continuousFeedbackPreflight: this.continuousFeedbackPreflight,
         codexCaps: {
           toolOutputTokenLimit:
             this.config.codex.toolOutputTokenLimit ??
@@ -4870,10 +4966,26 @@ export async function startRuntimeService(
       workspaceManager,
       notifier,
       ...(options.now === undefined ? {} : { now: options.now }),
+      ...(options.runContinuousFeedbackCommand === undefined
+        ? {}
+        : {
+            runContinuousFeedbackCommand: options.runContinuousFeedbackCommand,
+          }),
     });
   const usesManagedTracker = options.tracker === undefined;
   const usesManagedWorkspaceManager = options.workspaceManager === undefined;
   const startupTimestamp = Date.now();
+
+  // Continuous-feedback model preflight (SYMPH-761): surface a misconfigured or
+  // down local reviewer model at startup. Awaited so the bounded probe always
+  // completes before the poll loop starts and can never outlive shutdown
+  // (council R1: the prior fire-and-forget could orphan a runner child). The
+  // host decides policy from its OWN config: warn-not-block (default) records
+  // runtime state + a startup warning and proceeds; fail-closed throws
+  // RuntimeHostStartupError to abort launch (same contract as
+  // validateDispatchConfig). Deciding inside the host avoids downgrading a
+  // fail-closed prebuilt host through an options.config that disagrees.
+  await runtimeHost.runContinuousFeedbackModelPreflight();
 
   await cleanupTerminalIssueWorkspaces({
     tracker,
