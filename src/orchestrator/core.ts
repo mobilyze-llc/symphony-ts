@@ -5358,7 +5358,8 @@ export class OrchestratorCore {
               this.noteStaleRetryCandidateAbsence(issueId) >=
               STALE_RETRY_CANDIDATE_ABSENCE_DROP_THRESHOLD
             ) {
-              this.clearStaleRetryCandidateAbsence(issueId);
+              // dropDepartedRetryCandidate → clearTerminalIssueRuntimeState
+              // clears the absence counter, like every other per-issue field.
               this.dropDepartedRetryCandidate(
                 issueId,
                 retryEntry.identifier ?? issueId,
@@ -5447,7 +5448,8 @@ export class OrchestratorCore {
           }),
         };
       }
-      this.clearStaleRetryCandidateAbsence(issueId);
+      // dropDepartedRetryCandidate → clearTerminalIssueRuntimeState clears the
+      // absence counter, like every other per-issue field.
       this.dropDepartedRetryCandidate(
         issueId,
         retryEntry.identifier ?? issueId,

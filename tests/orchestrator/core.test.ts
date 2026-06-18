@@ -16582,17 +16582,21 @@ describe("stale-snapshot guard on retry candidate absence (SYMPH-775)", () => {
     });
 
     const first = await orchestrator.onRetryTimer("1");
-    // Single absence → re-deferred, NOT dropped.
+    // Single absence → re-deferred, NOT dropped, and the counter ticked to 1.
     expect(first.released).toBe(false);
     expect(orchestrator.getState().retryAttempts["1"]).toBeDefined();
     expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(orchestrator.getState().staleRetryCandidateAbsence["1"]).toBe(1);
     expect(dropped).toHaveLength(0);
 
     const second = await orchestrator.onRetryTimer("1");
-    // Issue reappeared → not dropped (absence streak reset).
+    // Issue reappeared → not dropped, and the absence streak reset to cleared.
     expect(second.released).toBe(false);
     expect(dropped).toHaveLength(0);
     expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(
+      orchestrator.getState().staleRetryCandidateAbsence["1"],
+    ).toBeUndefined();
   });
 
   it("drops a retry absent on two consecutive candidate fetches (post-gate path)", async () => {
@@ -16631,6 +16635,63 @@ describe("stale-snapshot guard on retry candidate absence (SYMPH-775)", () => {
     // No infinite re-defer: a genuinely-absent poll drops on the Nth absence.
     expect(second.released).toBe(true);
     expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(dropped).toHaveLength(1);
+  });
+
+  it("accumulates one shared absence streak across both drop paths (rate-gate then post-gate)", async () => {
+    const dropped: Array<{ issueId: string }> = [];
+    const timers = createFakeTimerScheduler();
+    const orchestrator = createOrchestrator({
+      timerScheduler: timers,
+      tracker: createTracker({
+        candidatesFn: () => [],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+        },
+      }),
+      onIssueDropped: (drop) => dropped.push(drop),
+    });
+    orchestrator.getState().claimed.add("1");
+    orchestrator.getState().retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+      timerHandle: timers.set(() => {}, 1000),
+      error: "previous failure",
+      delayType: "failure",
+    };
+
+    // Fire 1: rate gate BLOCKED (secondary headroom below the floor) + candidate
+    // absent → the rate-gate reconcile increments the shared counter and re-defers.
+    orchestrator.getState().codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+    const first = await orchestrator.onRetryTimer("1");
+    expect(first.released).toBe(false);
+    expect(orchestrator.getState().staleRetryCandidateAbsence["1"]).toBe(1);
+    expect(dropped).toHaveLength(0);
+
+    // Fire 2: rate gate OPEN (healthy headroom) + candidate still absent → the
+    // post-gate path increments the SAME counter to the threshold and drops.
+    orchestrator.getState().codexRateLimits = {
+      secondary: {
+        used_percent: 1,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+    const second = await orchestrator.onRetryTimer("1");
+    expect(second.released).toBe(true);
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
     expect(dropped).toHaveLength(1);
   });
 });
