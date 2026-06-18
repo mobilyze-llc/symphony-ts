@@ -1254,6 +1254,14 @@ export interface OrchestratorState {
   running: Record<string, RunningEntry>;
   claimed: Set<string>;
   retryAttempts: Record<string, RetryEntry>;
+  /**
+   * Consecutive-absence counter per issue for the onRetryTimer candidate-absence
+   * drop paths (SYMPH-775). A retrying issue missing from a *single* successful
+   * candidate fetch may be a transient stale/partial tracker snapshot, not a
+   * genuine departure; it is re-deferred until it is absent on N consecutive
+   * fetches. Reset when the issue reappears or the retry terminates.
+   */
+  staleRetryCandidateAbsence: Record<string, number>;
   completed: Set<string>;
   failed: Set<string>;
   resumeRequired: Set<string>;
@@ -1625,6 +1633,7 @@ export function createInitialOrchestratorState(input: {
     running: {},
     claimed: new Set<string>(),
     retryAttempts: {},
+    staleRetryCandidateAbsence: {},
     completed: new Set<string>(),
     failed: new Set<string>(),
     resumeRequired: new Set<string>(),

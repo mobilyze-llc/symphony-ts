@@ -12361,6 +12361,12 @@ describe("orchestrator core integration flows", () => {
     });
     harness.setCandidates([]);
 
+    // SYMPH-775: the first absent fetch re-defers (guards a stale snapshot); the
+    // genuinely-departed issue is released on the second consecutive absence.
+    const deferResult = await harness.orchestrator.onRetryTimer("1");
+    expect(deferResult.released).toBe(false);
+    expect(harness.orchestrator.getState().failed.has("1")).toBe(false);
+
     const retryResult = await harness.orchestrator.onRetryTimer("1");
 
     expect(retryResult).toEqual({
@@ -16453,10 +16459,16 @@ describe("retry reconciliation under rate gate (SYMPH-773)", () => {
       delayType: "failure",
     };
 
-    const result = await orchestrator.onRetryTimer("1");
+    // SYMPH-775: a single absent fetch is re-deferred (could be a stale
+    // snapshot), not dropped — the reconcile only releases after N consecutive
+    // absences.
+    const first = await orchestrator.onRetryTimer("1");
+    expect(first.released).toBe(false);
+    expect(orchestrator.getState().retryAttempts["1"]).toBeDefined();
+    expect(dropped).toHaveLength(0);
 
-    // The retry timer reconciles against a fresh candidate fetch before the
-    // rate-gate deferral, so the departed issue is released instead of pinned.
+    // Second consecutive absence confirms a genuine departure → released.
+    const result = await orchestrator.onRetryTimer("1");
     expect(result.released).toBe(true);
     expect(result.retryEntry).toBeNull();
     expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
@@ -16527,6 +16539,102 @@ describe("retry reconciliation under rate gate (SYMPH-773)", () => {
   });
 });
 
+describe("stale-snapshot guard on retry candidate absence (SYMPH-775)", () => {
+  function retryOrchestrator(input: {
+    candidatesFn: () => Issue[];
+    delayType?: "failure" | "continuation" | "merge_actuator_poll";
+    onIssueDropped?: (drop: { issueId: string; reason: string }) => void;
+  }) {
+    const timers = createFakeTimerScheduler();
+    const orchestrator = createOrchestrator({
+      timerScheduler: timers,
+      tracker: createTracker({
+        candidatesFn: input.candidatesFn,
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+      ...(input.onIssueDropped ? { onIssueDropped: input.onIssueDropped } : {}),
+    });
+    orchestrator.getState().claimed.add("1");
+    orchestrator.getState().retryAttempts["1"] = {
+      issueId: "1",
+      identifier: "ISSUE-1",
+      attempt: 1,
+      dueAtMs: Date.parse("2026-03-06T00:00:00.000Z"),
+      timerHandle: timers.set(() => {}, 1000),
+      error: "previous failure",
+      delayType: input.delayType ?? "failure",
+    };
+    return orchestrator;
+  }
+
+  it("re-defers (does not drop) a retry absent from a single stale candidate fetch, then recovers when it reappears", async () => {
+    let fetchCount = 0;
+    const dropped: Array<{ issueId: string }> = [];
+    const orchestrator = retryOrchestrator({
+      candidatesFn: () => {
+        fetchCount += 1;
+        // Absent on the first fetch (stale snapshot), present afterwards.
+        return fetchCount === 1
+          ? []
+          : [createIssue({ id: "1", identifier: "ISSUE-1" })];
+      },
+      onIssueDropped: (drop) => dropped.push(drop),
+    });
+
+    const first = await orchestrator.onRetryTimer("1");
+    // Single absence → re-deferred, NOT dropped.
+    expect(first.released).toBe(false);
+    expect(orchestrator.getState().retryAttempts["1"]).toBeDefined();
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+    expect(dropped).toHaveLength(0);
+
+    const second = await orchestrator.onRetryTimer("1");
+    // Issue reappeared → not dropped (absence streak reset).
+    expect(second.released).toBe(false);
+    expect(dropped).toHaveLength(0);
+    expect(orchestrator.getState().failed.has("1")).toBe(false);
+  });
+
+  it("drops a retry absent on two consecutive candidate fetches (post-gate path)", async () => {
+    const dropped: Array<{ issueId: string }> = [];
+    const orchestrator = retryOrchestrator({
+      candidatesFn: () => [],
+      onIssueDropped: (drop) => dropped.push(drop),
+    });
+
+    const first = await orchestrator.onRetryTimer("1");
+    expect(first.released).toBe(false);
+    expect(dropped).toHaveLength(0);
+    expect(orchestrator.getState().retryAttempts["1"]).toBeDefined();
+
+    const second = await orchestrator.onRetryTimer("1");
+    // Second consecutive absence → genuine departure → dropped.
+    expect(second.released).toBe(true);
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(orchestrator.getState().failed.has("1")).toBe(true);
+    expect(dropped).toHaveLength(1);
+  });
+
+  it("still terminates a permanently-absent merge_actuator_poll retry after N consecutive absences", async () => {
+    const dropped: Array<{ issueId: string }> = [];
+    const orchestrator = retryOrchestrator({
+      candidatesFn: () => [],
+      delayType: "merge_actuator_poll",
+      onIssueDropped: (drop) => dropped.push(drop),
+    });
+
+    const first = await orchestrator.onRetryTimer("1");
+    expect(first.released).toBe(false);
+    expect(dropped).toHaveLength(0);
+
+    const second = await orchestrator.onRetryTimer("1");
+    // No infinite re-defer: a genuinely-absent poll drops on the Nth absence.
+    expect(second.released).toBe(true);
+    expect(orchestrator.getState().retryAttempts["1"]).toBeUndefined();
+    expect(dropped).toHaveLength(1);
+  });
+});
+
 describe("onIssueDropped callback", () => {
   it("calls onIssueDropped when retry timer releases issue not in candidates", async () => {
     const timers = createFakeTimerScheduler();
@@ -16553,6 +16661,11 @@ describe("onIssueDropped callback", () => {
     // Set candidates to empty so issue won't be found
     const emptyTracker = createTracker({ candidates: [] });
     orchestrator.updateTracker(emptyTracker);
+
+    // SYMPH-775: first absence re-defers (possible stale snapshot); the drop
+    // fires only on the second consecutive absence.
+    await orchestrator.onRetryTimer("1");
+    expect(dropped).toHaveLength(0);
 
     await orchestrator.onRetryTimer("1");
 

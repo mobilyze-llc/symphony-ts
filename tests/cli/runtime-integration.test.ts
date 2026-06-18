@@ -450,6 +450,10 @@ Implement {{ issue.identifier }} attempt={{ attempt }}
       const state = await service.runtimeHost.getRuntimeSnapshot();
       expect(state.counts.retrying).toBe(1);
     });
+    // SYMPH-775: the candidate-absence drop now requires two consecutive absent
+    // fetches (a single one is re-deferred to absorb a stale snapshot), so fire
+    // the retry timer twice to release the genuinely-departed issue.
+    await service.runtimeHost.runRetryTimer("issue-1");
     await service.runtimeHost.runRetryTimer("issue-1");
     await waitFor(async () => {
       const state = await service.runtimeHost.getRuntimeSnapshot();
