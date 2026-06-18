@@ -43,13 +43,14 @@ export function ensureDecorrelatedFeedbackLane(
   if (!isSameLane(preferredLane, workerLane)) {
     return preferredLane;
   }
+  // Decorrelate by ROLE only (SYMPH-762). The prior `${model}-reviewer` mutation
+  // produced a model id no runner can resolve, so a same-lane worker/reviewer
+  // pair always failed with "model not found" and the lane silently degraded to
+  // unavailable. The model must stay a real, resolvable id; the `-decorrelated`
+  // role suffix carries the decorrelation (the reviewer prompt differs by role).
   return {
     ...preferredLane,
     role: `${preferredLane.role}-decorrelated`,
-    model:
-      preferredLane.model === null
-        ? "ds4-studio2/deepseek-v4-flash-reviewer"
-        : `${preferredLane.model}-reviewer`,
   };
 }
 

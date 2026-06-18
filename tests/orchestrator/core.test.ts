@@ -11933,8 +11933,10 @@ describe("continuous feedback lane", () => {
       {
         worker: { runner: "pi", model: "local-flash", role: "worker" },
         reviewer: {
+          // SYMPH-762: decorrelation is by role only; the reviewer keeps the
+          // worker's resolvable model rather than a synthetic `-reviewer` id.
           runner: "pi",
-          model: "local-flash-reviewer",
+          model: "local-flash",
           role: "continuous-feedback-decorrelated",
         },
       },
