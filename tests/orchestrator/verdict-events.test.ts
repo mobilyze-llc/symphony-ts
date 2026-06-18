@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
 import type {
+  DispatchGateInfo,
   DispatcherRunJournal,
   DispatcherRunJournalEntry,
   Issue,
@@ -733,7 +734,7 @@ describe("dispatch verdict events (SYMPH-405)", () => {
     const pages: Array<{
       kind: string;
       consecutiveTicks: number;
-      gate: { reasonCode: string; remedy: string | null } | undefined;
+      gate: DispatchGateInfo | undefined;
     }> = [];
     const config = createConfig({
       rateLimitAdmission: {
@@ -801,7 +802,7 @@ describe("dispatch verdict events (SYMPH-405)", () => {
     const pages: Array<{
       kind: string;
       consecutiveTicks: number;
-      gate: { reasonCode: string; remedy: string | null } | undefined;
+      gate: DispatchGateInfo | undefined;
     }> = [];
     const config = createConfig();
     config.verdicts = { pageAfterTicks: 1 };
@@ -827,6 +828,127 @@ describe("dispatch verdict events (SYMPH-405)", () => {
     expect(
       buildRuntimeSnapshot(orchestrator.getState(), { now: NOW }).dispatch_gate,
     ).toBeNull();
+  });
+
+  it("qualifies starvation pages for sibling pipeline-wide blockers", async () => {
+    const createPageConfig = (): ResolvedWorkflowConfig => {
+      const config = createConfig();
+      config.verdicts = { pageAfterTicks: 1 };
+      return config;
+    };
+    const expectPageGate = async (
+      setup: (
+        onDispatchPage: NonNullable<OrchestratorCoreOptions["onDispatchPage"]>,
+      ) => OrchestratorCore | Promise<OrchestratorCore>,
+      expected: DispatchGateInfo,
+    ): Promise<void> => {
+      const pages: Array<{ kind: string; gate: DispatchGateInfo | undefined }> =
+        [];
+      const orchestrator = await setup((input) => {
+        pages.push({ kind: input.kind, gate: input.gate });
+      });
+      await orchestrator.pollTick();
+      expect(pages).toEqual([{ kind: "page", gate: expected }]);
+    };
+
+    const haltIssue = createIssue({
+      id: "halt-1",
+      identifier: "OPS-HALT",
+      title: "Pause dispatch",
+      state: "Todo",
+    });
+    const haltTracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+    });
+    haltTracker.fetchIssuesByLabels = async () => [haltIssue];
+    await expectPageGate(
+      (onDispatchPage) =>
+        createOrchestrator({
+          config: createPageConfig(),
+          tracker: haltTracker,
+          onDispatchPage,
+        }),
+      {
+        reasonCode: "pipeline_halt",
+        remedy:
+          "Move the pipeline-halt issue OPS-HALT to a terminal state to resume dispatch.",
+      },
+    );
+
+    await expectPageGate(
+      async (onDispatchPage) => {
+        const orchestrator = createOrchestrator({
+          config: createPageConfig(),
+          onDispatchPage,
+        });
+        await orchestrator.setDispatchFence({
+          issueIdentifiers: ["SYMPH-999"],
+          source: "api",
+          actor: { kind: "operator", host: "pro14", session: "api" },
+          reason: {
+            class: "operator_dispatch_fence",
+            human: "single-issue canary",
+          },
+        });
+        return orchestrator;
+      },
+      {
+        reasonCode: "dispatch_fence_no_eligible_candidates",
+        remedy:
+          "Clear or update the dispatch fence, or make an allowlisted issue eligible.",
+      },
+    );
+
+    await expectPageGate(
+      (onDispatchPage) => {
+        const orchestrator = createOrchestrator({
+          config: createPageConfig(),
+          onDispatchPage,
+        });
+        orchestrator.getState().emergencyStop = {
+          active: true,
+          since: NOW.toISOString(),
+          reason: "operator stop",
+          actor: { kind: "operator", host: "pro14", session: "api" },
+          setBySequence: 1,
+          interruptedIssues: [],
+        };
+        return orchestrator;
+      },
+      {
+        reasonCode: "emergency_stop",
+        remedy:
+          "Run pipeline resume after triaging killed-mid-run tickets and clearing the halt issue.",
+      },
+    );
+
+    await expectPageGate(
+      (onDispatchPage) => {
+        const orchestrator = createOrchestrator({
+          config: createPageConfig(),
+          onDispatchPage,
+        });
+        orchestrator.getState().pipelinePause = {
+          active: true,
+          since: NOW.toISOString(),
+          reason: "operator pause",
+          actor: { kind: "operator", host: "pro14", session: "api" },
+          setBySequence: 2,
+          haltView: {
+            status: "uncertain",
+            issueIdentifier: null,
+            issueTitle: null,
+            errorMessage: null,
+          },
+        };
+        return orchestrator;
+      },
+      {
+        reasonCode: "runtime_pipeline_pause",
+        remedy:
+          "Run pipeline resume after verifying the halt view and clearing the pause.",
+      },
+    );
   });
 
   it("rehydrates the page latch from journaled page events: a restart mid-starvation neither double-pages nor drops the recovery alert", async () => {

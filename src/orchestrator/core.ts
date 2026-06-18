@@ -45,6 +45,7 @@ import {
   type DecorrelatedGateOutcome,
   type DispatchFenceSource,
   type DispatchFenceState,
+  type DispatchGateInfo,
   type DispatcherDecisionCategory,
   type DispatcherDecisionClassification,
   type DispatcherDecisionCostWeight,
@@ -771,10 +772,7 @@ export interface OrchestratorCoreOptions {
     kind: "page" | "recovery";
     eligibleCount: number;
     consecutiveTicks: number;
-    gate?: {
-      reasonCode: string;
-      remedy: string | null;
-    };
+    gate?: DispatchGateInfo;
   }) => void;
   /**
    * Called after a replayed active Pipeline issue successfully spawns work
@@ -2583,15 +2581,19 @@ export class OrchestratorCore {
       );
       // One journal-level halt verdict keyed on the halt issue; the
       // per-candidate skip is implied (SYMPH-405).
+      const gate = {
+        reasonCode: "pipeline_halt",
+        remedy: `Move the pipeline-halt issue ${haltIssue.identifier} to a terminal state to resume dispatch.`,
+      } satisfies DispatchGateInfo;
       this.recordDispatchVerdict({
         issueId: haltIssue.id,
         issueIdentifier: haltIssue.identifier,
         disposition: "halt",
-        reasonCode: "pipeline_halt",
-        remedy: `Move the pipeline-halt issue ${haltIssue.identifier} to a terminal state to resume dispatch.`,
+        reasonCode: gate.reasonCode,
+        remedy: gate.remedy,
         details: { haltIssueTitle: haltIssue.title },
       });
-      this.trackDispatchStarvation(issues.length, 0);
+      this.trackDispatchStarvation(issues.length, 0, gate);
       await this.recordQueueBaselineSample({
         consideredIssues: this.issuesFromComputedOrder(
           computedDispatchOrder,
@@ -2714,13 +2716,17 @@ export class OrchestratorCore {
         (exclusion) => exclusion.source === "dispatch_fence",
       )
     ) {
+      const gate = {
+        reasonCode: "dispatch_fence_no_eligible_candidates",
+        remedy:
+          "Clear or update the dispatch fence, or make an allowlisted issue eligible.",
+      } satisfies DispatchGateInfo;
       this.recordDispatchVerdict({
         issueId: PIPELINE_VERDICT_SCOPE_ID,
         issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
         disposition: "gate",
-        reasonCode: "dispatch_fence_no_eligible_candidates",
-        remedy:
-          "Clear or update the dispatch fence, or make an allowlisted issue eligible.",
+        reasonCode: gate.reasonCode,
+        remedy: gate.remedy,
         details: {
           fence_issue_identifiers: this.state.dispatchFence.issueIdentifiers,
           excluded_issue_identifiers: computedDispatchOrder.exclusions
@@ -2728,7 +2734,7 @@ export class OrchestratorCore {
             .map((exclusion) => exclusion.issue_identifier),
         },
       });
-      this.trackDispatchStarvation(issues.length, 0);
+      this.trackDispatchStarvation(issues.length, 0, gate);
       await this.recordQueueBaselineSample({
         consideredIssues: [],
         dispatchPicks: [],
@@ -3444,7 +3450,7 @@ export class OrchestratorCore {
    */
   private buildRateLimitGateVerdict(
     gate: ReturnType<OrchestratorCore["evaluateRateLimitAdmissionGate"]>,
-  ): { reasonCode: string; remedy: string; details: Record<string, unknown> } {
+  ): DispatchGateInfo & { details: Record<string, unknown> } {
     const violation = gate.floorViolations[0];
     const reasonCode =
       violation?.window === "secondary"
@@ -5135,6 +5141,34 @@ export class OrchestratorCore {
     reviewedHeadSha: string | null;
   }): Promise<void> {
     const reviewedHeadSha = input.reviewedHeadSha;
+    const postCompletionReason =
+      input.verdict.verdict === "rework"
+        ? this.specFidelityPostCompletionReason(input.issueId, reviewedHeadSha)
+        : null;
+    const metadata =
+      postCompletionReason === null
+        ? {
+            status: "completed",
+            verdict: input.verdict.verdict,
+            findings: input.verdict.findings,
+            ...(reviewedHeadSha === null
+              ? {}
+              : { reviewed_head_sha: reviewedHeadSha }),
+          }
+        : {
+            status: "completed",
+            verdict: "non_gating",
+            original_verdict: input.verdict.verdict,
+            reason: postCompletionReason,
+            findings: input.verdict.findings,
+            ...(reviewedHeadSha === null
+              ? {}
+              : { reviewed_head_sha: reviewedHeadSha }),
+          };
+    const summary =
+      postCompletionReason === null
+        ? `Spec-fidelity verdict for ${input.identifier}: ${input.verdict.verdict}.`
+        : `Spec-fidelity non-gating for ${input.identifier}: ${postCompletionReason}.`;
     try {
       await this.recordRunJournalEntry({
         // Include the reviewed head so distinct-head verdicts never collide and
@@ -5152,27 +5186,52 @@ export class OrchestratorCore {
         attempt: null,
         ownerId: this.leaseOwnerId,
         lease: null,
-        summary: `Spec-fidelity verdict for ${input.identifier}: ${input.verdict.verdict}.`,
-        metadata: {
-          status: "completed",
-          verdict: input.verdict.verdict,
-          findings: input.verdict.findings,
-          ...(reviewedHeadSha === null
-            ? {}
-            : { reviewed_head_sha: reviewedHeadSha }),
-        },
+        summary,
+        metadata,
       });
     } catch {
       // Audit best-effort.
     }
+    const sanitizedFindings = sanitizeForLinear(input.verdict.findings, {
+      maxLen: 6000,
+    });
     try {
-      await this.postComment?.(
-        input.issueId,
-        `## Spec-fidelity verdict (independent judge): ${input.verdict.verdict}\n${sanitizeForLinear(input.verdict.findings, { maxLen: 6000 })}`,
-      );
+      if (postCompletionReason === null) {
+        await this.postComment?.(
+          input.issueId,
+          `## Spec-fidelity verdict (independent judge): ${input.verdict.verdict}\n${sanitizedFindings}`,
+        );
+      } else {
+        await this.postComment?.(
+          input.issueId,
+          [
+            "## Spec-fidelity: non-gating post-completion",
+            `Independent judge returned \`${input.verdict.verdict}\`, but merge actuation had already completed \`tracker_done\` for reviewed head \`${reviewedHeadSha ?? "unknown"}\` before this verdict was recorded. The findings are preserved as advisory evidence, not a merge gate.`,
+            sanitizedFindings,
+          ].join("\n"),
+        );
+      }
     } catch {
       // Observability only.
     }
+  }
+
+  private specFidelityPostCompletionReason(
+    issueId: string,
+    reviewedHeadSha: string | null,
+  ): string | null {
+    if (reviewedHeadSha === null) {
+      return null;
+    }
+    const candidate = this.findCanonicalMergeCandidate(issueId);
+    if (
+      candidate === null ||
+      candidate.reviewedHeadSha !== reviewedHeadSha ||
+      candidate.status !== "merged"
+    ) {
+      return null;
+    }
+    return "post_completion_tracker_done";
   }
 
   /**
@@ -5313,12 +5372,16 @@ export class OrchestratorCore {
       );
       // Journal-level halt verdict keyed on the halt issue (SYMPH-405); the
       // per-candidate deferral is implied.
+      const gate = {
+        reasonCode: "pipeline_halt",
+        remedy: `Move the pipeline-halt issue ${haltIssue.identifier} to a terminal state to resume dispatch.`,
+      } satisfies DispatchGateInfo;
       this.recordDispatchVerdict({
         issueId: haltIssue.id,
         issueIdentifier: haltIssue.identifier,
         disposition: "halt",
-        reasonCode: "pipeline_halt",
-        remedy: `Move the pipeline-halt issue ${haltIssue.identifier} to a terminal state to resume dispatch.`,
+        reasonCode: gate.reasonCode,
+        remedy: gate.remedy,
         details: { haltIssueTitle: haltIssue.title },
       });
       // Don't consume the retry attempt — reschedule at the same attempt number
@@ -9479,13 +9542,17 @@ export class OrchestratorCore {
     if (emergencyStop === null) {
       return null;
     }
+    const gate = {
+      reasonCode: "emergency_stop",
+      remedy:
+        "Run pipeline resume after triaging killed-mid-run tickets and clearing the halt issue.",
+    } satisfies DispatchGateInfo;
     this.recordDispatchVerdict({
       issueId: PIPELINE_VERDICT_SCOPE_ID,
       issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
       disposition: "halt",
-      reasonCode: "emergency_stop",
-      remedy:
-        "Run pipeline resume after triaging killed-mid-run tickets and clearing the halt issue.",
+      reasonCode: gate.reasonCode,
+      remedy: gate.remedy,
       details: {
         since: emergencyStop.since,
         reason: emergencyStop.reason,
@@ -9493,7 +9560,7 @@ export class OrchestratorCore {
         interruptedIssues: emergencyStop.interruptedIssues,
       },
     });
-    this.trackDispatchStarvation(candidateCount, 0);
+    this.trackDispatchStarvation(candidateCount, 0, gate);
     return true;
   }
 
@@ -9502,13 +9569,17 @@ export class OrchestratorCore {
     if (pipelinePause === null) {
       return null;
     }
+    const gate = {
+      reasonCode: "runtime_pipeline_pause",
+      remedy:
+        "Run pipeline resume after verifying the halt view and clearing the pause.",
+    } satisfies DispatchGateInfo;
     this.recordDispatchVerdict({
       issueId: PIPELINE_VERDICT_SCOPE_ID,
       issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
       disposition: "halt",
-      reasonCode: "runtime_pipeline_pause",
-      remedy:
-        "Run pipeline resume after verifying the halt view and clearing the pause.",
+      reasonCode: gate.reasonCode,
+      remedy: gate.remedy,
       details: {
         since: pipelinePause.since,
         reason: pipelinePause.reason,
@@ -9516,7 +9587,7 @@ export class OrchestratorCore {
         haltView: pipelinePause.haltView,
       },
     });
-    this.trackDispatchStarvation(candidateCount, 0);
+    this.trackDispatchStarvation(candidateCount, 0, gate);
     return true;
   }
 
@@ -9946,10 +10017,7 @@ export class OrchestratorCore {
   private trackDispatchStarvation(
     eligibleCount: number,
     dispatchedCount: number,
-    gate?: {
-      reasonCode: string;
-      remedy: string | null;
-    },
+    gate?: DispatchGateInfo,
   ): void {
     const starved = eligibleCount > 0 && dispatchedCount === 0;
     if (starved) {

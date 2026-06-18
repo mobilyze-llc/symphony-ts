@@ -54,6 +54,7 @@ import { WorkflowWatcher } from "../config/workflow-watch.js";
 import type {
   CodexSessionLogEntry,
   ContinuousFeedbackEvent,
+  DispatchGateInfo,
   DispatcherRunJournal,
   DispatcherRunJournalEntry,
   DispatcherRunJournalEventKind,
@@ -1201,10 +1202,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
               kind: "page" | "recovery";
               eligibleCount: number;
               consecutiveTicks: number;
-              gate?: {
-                reasonCode: string;
-                remedy: string | null;
-              };
+              gate?: DispatchGateInfo;
             }) => {
               const event = {
                 type: "dispatch_page_alert",
