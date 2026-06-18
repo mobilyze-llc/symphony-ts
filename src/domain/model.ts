@@ -334,6 +334,11 @@ export interface IssueDispositionRecord {
   since: string;
 }
 
+export interface DispatchGateInfo {
+  reasonCode: string;
+  remedy: string;
+}
+
 export type DispatcherRunJournalEventKind =
   (typeof DISPATCHER_RUN_JOURNAL_EVENT_KINDS)[number];
 

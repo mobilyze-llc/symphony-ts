@@ -5,7 +5,11 @@
  * Failures are logged and swallowed — never affect pipeline correctness.
  */
 
-import type { ExecutionHistory, RightSizingDecision } from "../domain/model.js";
+import type {
+  DispatchGateInfo,
+  ExecutionHistory,
+  RightSizingDecision,
+} from "../domain/model.js";
 import { sanitizeForSlack } from "../shared/egress.js";
 import { getDisplayVersion } from "../version.js";
 
@@ -310,10 +314,7 @@ export interface DispatchPageAlertEvent {
   kind: "page" | "recovery";
   eligibleCount: number;
   consecutiveTicks: number;
-  gate?: {
-    reasonCode: string;
-    remedy: string | null;
-  };
+  gate?: DispatchGateInfo;
 }
 
 /**
@@ -1180,10 +1181,8 @@ export function formatNotification(
           const parts = [
             `:rotating_light: *Dispatch admission gated* — ${event.eligibleCount} eligible candidate(s), 0 dispatched for ${event.consecutiveTicks} consecutive ticks`,
             `Active gate: ${event.gate.reasonCode}`,
+            `Remedy: ${event.gate.remedy}`,
           ];
-          if (event.gate.remedy !== null) {
-            parts.push(`Remedy: ${event.gate.remedy}`);
-          }
           parts.push(version);
           return { text: parts.join("\n") };
         }

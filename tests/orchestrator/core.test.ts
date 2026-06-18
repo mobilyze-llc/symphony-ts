@@ -8365,6 +8365,92 @@ describe("live merge actuator (SYMPH-735)", () => {
     ).toBe(false);
   });
 
+  it("marks a delayed post-completion rework verdict as non-gating (SYMPH-758 recurrence)", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture();
+    const deferred: Array<() => Promise<void>> = [];
+    const comments: string[] = [];
+    let resolveJudge: (value: {
+      verdict: "pass" | "rework";
+      findings: string;
+    }) => void = () => {};
+    const judgePromise = new Promise<{
+      verdict: "pass" | "rework";
+      findings: string;
+    }>((resolve) => {
+      resolveJudge = resolve;
+    });
+    const writeTrackerDone = vi.fn(async () => {});
+
+    const config = createLiveMergeActuatorConfig();
+    config.specFidelity = { enabled: true };
+    const reviewStage = config.stages?.stages.review;
+    if (reviewStage === undefined) {
+      throw new Error("expected a review stage in the live-actuator config");
+    }
+    reviewStage.transitions.onRework = "review";
+
+    const orchestrator = createOrchestrator({
+      config,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      getMergeActuatorLiveState: async () => mergedLiveState(),
+      mergeActuatorSideEffects: {
+        markReady: async () => {},
+        enqueue: async () => {},
+        writeTrackerDone,
+      },
+      postComment: async (_issueId, body) => {
+        comments.push(body);
+      },
+      runSpecFidelityJudge: async () => judgePromise,
+      scheduleDeferred: (task) => {
+        deferred.push(task);
+      },
+    });
+
+    await stageMergeCandidate(orchestrator, reviewResultPath);
+
+    // The merge actuator completes before the asynchronous judge resolves, which
+    // is the PR #587 recurrence: the late verdict can no longer be a merge gate.
+    await orchestrator.onRetryTimer("1");
+    expect(writeTrackerDone).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().completed.has("1")).toBe(true);
+
+    resolveJudge({
+      verdict: "rework",
+      findings: "AC3 FAIL: focused verdict-events exit evidence absent.",
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (const task of deferred.splice(0)) {
+      await task();
+    }
+
+    const specEntries = orchestrator
+      .getState()
+      .dispatcherRunJournal.filter((entry) => entry.kind === "spec_fidelity");
+    expect(specEntries).toHaveLength(1);
+    expect(specEntries[0]?.metadata).toMatchObject({
+      status: "completed",
+      verdict: "non_gating",
+      original_verdict: "rework",
+      reason: "post_completion_tracker_done",
+      reviewed_head_sha: "head-sha",
+    });
+    expect(
+      specEntries.some((entry) => entry.metadata.verdict === "rework"),
+    ).toBe(false);
+    expect(
+      comments.some((body) => body.includes("non-gating post-completion")),
+    ).toBe(true);
+    expect(
+      comments.some((body) =>
+        body.includes("Spec-fidelity verdict (independent judge): rework"),
+      ),
+    ).toBe(false);
+  });
+
   it("completes (not re-polls) an already-merged candidate on the crash-recovery noop replay", async () => {
     // Regression for the crash-recovery infinite re-poll loop (council R1: Codex
     // P2 / Pi P1). A tracker_done merge_actuation row is journaled, but the
@@ -15245,6 +15331,8 @@ function createOrchestrator(overrides?: {
   requestTrackerIssueWrite?: OrchestratorCoreOptions["requestTrackerIssueWrite"];
   fileTrackFindings?: OrchestratorCoreOptions["fileTrackFindings"];
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
+  runSpecFidelityJudge?: OrchestratorCoreOptions["runSpecFidelityJudge"];
+  scheduleDeferred?: OrchestratorCoreOptions["scheduleDeferred"];
   postComment?: OrchestratorCoreOptions["postComment"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
   onGateFailed?: OrchestratorCoreOptions["onGateFailed"];
@@ -15312,6 +15400,14 @@ function createOrchestrator(overrides?: {
 
   if (overrides?.runContinuousFeedback !== undefined) {
     options.runContinuousFeedback = overrides.runContinuousFeedback;
+  }
+
+  if (overrides?.runSpecFidelityJudge !== undefined) {
+    options.runSpecFidelityJudge = overrides.runSpecFidelityJudge;
+  }
+
+  if (overrides?.scheduleDeferred !== undefined) {
+    options.scheduleDeferred = overrides.scheduleDeferred;
   }
 
   if (overrides?.postComment !== undefined) {
