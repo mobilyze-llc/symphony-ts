@@ -4766,7 +4766,7 @@ export class OrchestratorCore {
     // rounds never collide; the normal path uses the stable per-round key.
     const entryKey =
       roundKey ??
-      `track_finding_filing:${context.issueId}:nohead:${this.state.dispatcherRunJournal.length}`;
+      `track_finding_filing:${context.issueId}:nohead:${this.nextRunJournalSequence()}`;
     try {
       await this.recordRunJournalEntry({
         idempotencyKey: entryKey,
@@ -8986,7 +8986,7 @@ export class OrchestratorCore {
     const timestamp = this.now().toISOString();
     try {
       const entry = await this.recordRunJournalEntry({
-        idempotencyKey: `intent:${verb}:${actorKey}:seq-${this.state.dispatcherRunJournal.length}`,
+        idempotencyKey: `intent:${verb}:${actorKey}:seq-${this.nextRunJournalSequence()}`,
         timestamp,
         kind: "intent",
         issueId: PIPELINE_INTENT_ISSUE_ID,
