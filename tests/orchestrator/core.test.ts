@@ -5194,6 +5194,7 @@ describe("orchestrator core", () => {
       outcome: "normal",
       hardStop: budgetPause,
     });
+    expect(spawnWorker).toHaveBeenCalledTimes(2);
 
     const hardStops = orchestrator
       .getState()
@@ -5218,8 +5219,23 @@ describe("orchestrator core", () => {
     });
     expect(restarted.getState().resumeRequired.has("1")).toBe(true);
     expect(restarted.getState().resumeRequiredMarks["1"]).toMatchObject({
+      reason: "hard_stop:token_budget",
       setBySequence: hardStops[1]?.sequence,
     });
+    const staleReleaseAfterRestart = await restarted.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "test-host", session: null },
+      reason: { class: "operator_release", human: "stale replay fence" },
+      fence: { expectedParkSeq: 1 },
+    });
+    expect(staleReleaseAfterRestart.status).toBe("rejected_stale");
+    expect(staleReleaseAfterRestart.detail).toBe(
+      "stale fence: expected park generation 1, current 2",
+    );
+    expect(restarted.getState().resumeRequired.has("1")).toBe(true);
+
     const releaseAfterRestart = await restarted.writeIntent({
       verb: "release",
       issueId: "1",
@@ -5264,6 +5280,7 @@ describe("orchestrator core", () => {
     });
     await orchestrator.pollTick();
     await orchestrator.onWorkerExit(inputRequired);
+    expect(spawnWorker).toHaveBeenCalledTimes(2);
 
     const inputRequiredEntries = orchestrator
       .getState()
