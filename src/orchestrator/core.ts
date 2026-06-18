@@ -1329,7 +1329,14 @@ export class OrchestratorCore {
           entry.issueId,
           readMetadataString(entry.metadata, "issueState"),
           entry.timestamp,
-          { reason: "failure_exhausted", setBySequence: entry.sequence },
+          {
+            reason: "failure_exhausted",
+            setBySequence: entry.sequence,
+            parkGeneration: readMetadataNumber(
+              entry.metadata,
+              "parkGeneration",
+            ),
+          },
         );
       }
 
@@ -6837,7 +6844,12 @@ export class OrchestratorCore {
       triageContext?.stageName ?? this.state.issueStages[issueId] ?? null;
     try {
       await this.recordRunJournalEntry({
-        idempotencyKey: `failure_exhausted:${issueId}:${this.now().toISOString()}`,
+        // Suffix the park generation onto the key (symmetric with hard_stop and
+        // operator_input_required, PR #523) so two parks of the same issue under
+        // a colliding timestamp stay distinct journal rows instead of the second
+        // deduping against the first and stranding the journaled parkGeneration a
+        // generation behind live (SYMPH-655 council R1).
+        idempotencyKey: `failure_exhausted:${issueId}:${this.now().toISOString()}:gen-${parkSeq}`,
         timestamp: this.now().toISOString(),
         kind: "failure_exhausted",
         issueId,
@@ -6851,6 +6863,14 @@ export class OrchestratorCore {
         metadata: {
           status: "completed",
           reason,
+          // Journal the authoritative fence generation (the recordWatchdogPark
+          // value above) so replay restores it verbatim instead of re-deriving
+          // a fresh parkSequence+1 (SYMPH-655). Paths that mark the issue parked
+          // before recording exhaustion (parkMergeCandidateInvariantFailure)
+          // mint the generation twice live but journal only this row; without
+          // the recorded value a restart lands one generation behind live and
+          // every operator fence keyed to the live generation rejects as stale.
+          parkGeneration: parkSeq,
           ...(issueState === null ? {} : { issueState }),
           ...(signatureMeta ?? {}),
         },
