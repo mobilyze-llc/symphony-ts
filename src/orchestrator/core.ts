@@ -771,6 +771,10 @@ export interface OrchestratorCoreOptions {
     kind: "page" | "recovery";
     eligibleCount: number;
     consecutiveTicks: number;
+    gate?: {
+      reasonCode: string;
+      remedy: string | null;
+    };
   }) => void;
   /**
    * Called after a replayed active Pipeline issue successfully spawns work
@@ -2634,7 +2638,10 @@ export class OrchestratorCore {
         remedy: gateVerdict.remedy,
         details: gateVerdict.details,
       });
-      this.trackDispatchStarvation(issues.length, 0);
+      this.trackDispatchStarvation(issues.length, 0, {
+        reasonCode: gateVerdict.reasonCode,
+        remedy: gateVerdict.remedy,
+      });
       await this.recordQueueBaselineSample({
         consideredIssues: this.issuesFromComputedOrder(
           computedDispatchOrder,
@@ -9939,6 +9946,10 @@ export class OrchestratorCore {
   private trackDispatchStarvation(
     eligibleCount: number,
     dispatchedCount: number,
+    gate?: {
+      reasonCode: string;
+      remedy: string | null;
+    },
   ): void {
     const starved = eligibleCount > 0 && dispatchedCount === 0;
     if (starved) {
@@ -9950,11 +9961,14 @@ export class OrchestratorCore {
         this.pageAlertActive = true;
         this.recordDispatchPageEvent("page", eligibleCount);
         try {
-          this.onDispatchPage?.({
+          const event = {
             kind: "page",
             eligibleCount,
             consecutiveTicks: this.starvedTickCount,
-          });
+          } satisfies Parameters<NonNullable<typeof this.onDispatchPage>>[0];
+          this.onDispatchPage?.(
+            gate === undefined ? event : { ...event, gate },
+          );
         } catch {
           // Notification failures are always swallowed.
         }

@@ -729,8 +729,12 @@ describe("dispatch verdict events (SYMPH-405)", () => {
     ).toBeNull();
   });
 
-  it("fires one page alert after N consecutive starved ticks and one recovery alert when dispatch resumes", async () => {
-    const pages: Array<{ kind: string; consecutiveTicks: number }> = [];
+  it("qualifies a starvation page with the active rate gate when the secondary floor blocks admission", async () => {
+    const pages: Array<{
+      kind: string;
+      consecutiveTicks: number;
+      gate: { reasonCode: string; remedy: string | null } | undefined;
+    }> = [];
     const config = createConfig({
       rateLimitAdmission: {
         minPrimaryHeadroomPct: null,
@@ -744,6 +748,7 @@ describe("dispatch verdict events (SYMPH-405)", () => {
         pages.push({
           kind: input.kind,
           consecutiveTicks: input.consecutiveTicks,
+          gate: input.gate,
         });
       },
     });
@@ -759,7 +764,17 @@ describe("dispatch verdict events (SYMPH-405)", () => {
     await orchestrator.pollTick();
     expect(pages).toHaveLength(0);
     await orchestrator.pollTick();
-    expect(pages).toEqual([{ kind: "page", consecutiveTicks: 3 }]);
+    expect(pages).toEqual([
+      {
+        kind: "page",
+        consecutiveTicks: 3,
+        gate: {
+          reasonCode: "rate_window_secondary_floor",
+          remedy:
+            "Wait for the secondary rate-limit window to reset: floor 5% headroom, observed 2.0%.",
+        },
+      },
+    ]);
 
     // Latched: a fourth starved tick does not re-alert.
     await orchestrator.pollTick();
@@ -780,6 +795,38 @@ describe("dispatch verdict events (SYMPH-405)", () => {
 
     await orchestrator.pollTick();
     expect(pages).toHaveLength(2);
+  });
+
+  it("preserves generic starvation paging when no pipeline-wide gate is active", async () => {
+    const pages: Array<{
+      kind: string;
+      consecutiveTicks: number;
+      gate: { reasonCode: string; remedy: string | null } | undefined;
+    }> = [];
+    const config = createConfig();
+    config.verdicts = { pageAfterTicks: 1 };
+    const orchestrator = createOrchestrator({
+      config,
+      spawnWorker: async () => {
+        throw new Error("spawn unavailable");
+      },
+      onDispatchPage: (input) => {
+        pages.push({
+          kind: input.kind,
+          consecutiveTicks: input.consecutiveTicks,
+          gate: input.gate,
+        });
+      },
+    });
+
+    await orchestrator.pollTick();
+
+    expect(pages).toEqual([
+      { kind: "page", consecutiveTicks: 1, gate: undefined },
+    ]);
+    expect(
+      buildRuntimeSnapshot(orchestrator.getState(), { now: NOW }).dispatch_gate,
+    ).toBeNull();
   });
 
   it("rehydrates the page latch from journaled page events: a restart mid-starvation neither double-pages nor drops the recovery alert", async () => {
@@ -947,6 +994,23 @@ describe("dispatch verdict events (SYMPH-405)", () => {
     });
     expect(page.text).toContain("Dispatch starvation");
     expect(page.text).toContain("10 consecutive ticks");
+    expect(page.text).toContain("Check the dispositions map");
+
+    const gatedPage = formatNotification({
+      type: "dispatch_page_alert",
+      kind: "page",
+      eligibleCount: 1,
+      consecutiveTicks: 10,
+      gate: {
+        reasonCode: "rate_window_secondary_floor",
+        remedy:
+          "Wait for the secondary rate-limit window to reset: floor 5% headroom, observed 4.0%.",
+      },
+    });
+    expect(gatedPage.text).toContain("Dispatch admission gated");
+    expect(gatedPage.text).toContain("rate_window_secondary_floor");
+    expect(gatedPage.text).toContain("observed 4.0%");
+    expect(gatedPage.text).not.toContain("Check the dispositions map");
   });
 });
 
@@ -976,6 +1040,7 @@ function createOrchestrator(overrides?: {
   onVerdictTransition?: OrchestratorCoreOptions["onVerdictTransition"];
   onDispatchPage?: OrchestratorCoreOptions["onDispatchPage"];
   writeRunJournalEntry?: OrchestratorCoreOptions["writeRunJournalEntry"];
+  spawnWorker?: OrchestratorCoreOptions["spawnWorker"];
 }): OrchestratorCore {
   const tracker =
     overrides?.tracker ??
@@ -985,10 +1050,12 @@ function createOrchestrator(overrides?: {
   const options: OrchestratorCoreOptions = {
     config: overrides?.config ?? createConfig(),
     tracker,
-    spawnWorker: async () => ({
-      workerHandle: { pid: 1001 },
-      monitorHandle: { ref: "monitor-1" },
-    }),
+    spawnWorker:
+      overrides?.spawnWorker ??
+      (async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      })),
     now: () => NOW,
   };
   if (overrides?.runJournal !== undefined) {
