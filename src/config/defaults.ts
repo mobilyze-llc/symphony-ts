@@ -51,6 +51,12 @@ export const DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT: number | null =
 export const DEFAULT_RATE_LIMIT_DEFER_UNTIL_RESET = false;
 export const DEFAULT_RATE_LIMIT_EXPECTED_UNIT_BURN_PCT: number | null = null;
 export const DEFAULT_RATE_LIMIT_DEFER_JITTER_MS = 0;
+// SYMPH-778: a persisted rate-limit snapshot older than this (ms) can no longer
+// close dispatch by itself when no worker is running to refresh telemetry.
+// Defaults to 6h — longer than a primary window and any restart gap, so normal
+// restart-bridging (SYMPH-336) is unaffected; only a multi-hour idle/deadlock
+// trips the fail-open bypass. null disables the staleness bypass.
+export const DEFAULT_RATE_LIMIT_SNAPSHOT_MAX_AGE_MS: number | null = 21_600_000;
 // Budget-escalation ladder is opt-in (SYMPH-337): null max_steps keeps every
 // budget pause operator-gated as before.
 export const DEFAULT_BUDGET_ESCALATION_MAX_STEPS: number | null = null;

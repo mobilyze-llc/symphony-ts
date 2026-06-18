@@ -7306,6 +7306,182 @@ describe("orchestrator core", () => {
     );
   });
 
+  it("admits a probe dispatch when the persisted snapshot is stale and no workers are running (SYMPH-778)", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+          snapshotMaxAgeMs: 21_600_000,
+        },
+      }),
+    });
+    // Secondary window 98% used, resets far in the future (not expired), but
+    // observed ~48h before the poll clock (2026-03-06T00:00:05Z) — stale.
+    const state = orchestrator.getState();
+    state.codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+    state.codexRateLimitsObservedAt = "2026-03-04T00:00:00.000Z";
+
+    const result = await orchestrator.pollTick();
+
+    // Gate fails open with no worker able to refresh telemetry: a probe runs.
+    expect(result.dispatchedIssueIds).toEqual(["1"]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: false,
+      snapshotStale: true,
+      staleBypass: true,
+      snapshotObservedAt: "2026-03-04T00:00:00.000Z",
+    });
+  });
+
+  it("keeps blocking when the persisted snapshot is fresh (SYMPH-778)", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+          snapshotMaxAgeMs: 21_600_000,
+        },
+      }),
+    });
+    const state = orchestrator.getState();
+    state.codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+    // Observed 5s before the poll clock — well within the freshness threshold.
+    state.codexRateLimitsObservedAt = "2026-03-06T00:00:00.000Z";
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: true,
+      snapshotStale: false,
+      staleBypass: false,
+      snapshotObservedAt: "2026-03-06T00:00:00.000Z",
+    });
+    expect(orchestrator.getState().rateLimitAdmission?.reason).toContain(
+      "secondary window headroom 2.0% < 5% floor",
+    );
+  });
+
+  it("does not bypass a stale snapshot when snapshotMaxAgeMs is null (SYMPH-778)", async () => {
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+    });
+    const orchestrator = createOrchestrator({
+      tracker,
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+          snapshotMaxAgeMs: null,
+        },
+      }),
+    });
+    const state = orchestrator.getState();
+    state.codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+    state.codexRateLimitsObservedAt = "2026-03-04T00:00:00.000Z";
+
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: true,
+      snapshotStale: false,
+      staleBypass: false,
+    });
+  });
+
+  it("blocks with a stale-snapshot reason while a worker is still running (SYMPH-778)", async () => {
+    let phase = 1;
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidatesFn: () =>
+          phase === 1
+            ? [createIssue({ id: "1", identifier: "ISSUE-1" })]
+            : [
+                createIssue({ id: "1", identifier: "ISSUE-1" }),
+                createIssue({ id: "2", identifier: "ISSUE-2" }),
+              ],
+        statesById: [
+          { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+          { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+        ],
+      }),
+      getRunningSupervisionSnapshots: async () => [],
+      config: createConfig({
+        rateLimitAdmission: {
+          minPrimaryHeadroomPct: null,
+          minSecondaryHeadroomPct: 5,
+          snapshotMaxAgeMs: 21_600_000,
+        },
+      }),
+    });
+    const state = orchestrator.getState();
+
+    // Tick 1: fresh, high headroom -> dispatch ISSUE-1, leaving a live worker.
+    state.codexRateLimits = {
+      secondary: {
+        used_percent: 10,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+    state.codexRateLimitsObservedAt = "2026-03-06T00:00:00.000Z";
+    await orchestrator.pollTick();
+    expect(Object.keys(orchestrator.getState().running)).toContain("1");
+
+    // Tick 2: stale, low headroom, ISSUE-1 still running -> no bypass, blocks.
+    phase = 2;
+    state.codexRateLimits = {
+      secondary: {
+        used_percent: 98,
+        window_minutes: 10080,
+        resets_at: 1772800000,
+      },
+    };
+    state.codexRateLimitsObservedAt = "2026-03-04T00:00:00.000Z";
+    const result = await orchestrator.pollTick();
+
+    expect(result.dispatchedIssueIds).toEqual([]);
+    expect(orchestrator.getState().rateLimitAdmission).toMatchObject({
+      blocked: true,
+      snapshotStale: true,
+      staleBypass: false,
+    });
+    const reason = orchestrator.getState().rateLimitAdmission?.reason ?? "";
+    expect(reason).toContain("stale");
+    expect(reason).toContain("2026-03-04T00:00:00.000Z");
+  });
+
   it("records a next-admission ETA when defer-until-reset blocks on expected burn", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],

@@ -439,6 +439,10 @@ export interface RuntimeSnapshotRateLimitGateView
   /** Provenance: the dispatch admission gate's last evaluation. */
   source: string;
   evaluated_at: string;
+  /** Observation time of the telemetry the gate evaluated (distinct from evaluated_at; SYMPH-778). */
+  snapshot_observed_at: string | null;
+  /** True when the evaluated telemetry is older than the configured freshness threshold. */
+  stale: boolean;
   blocked: boolean;
   reason: string | null;
   expected_unit_burn_pct: number | null;
@@ -1703,6 +1707,8 @@ function buildRateLimitViews(
       : {
           source: "dispatch admission gate (rate_limit_admission evaluation)",
           evaluated_at: admission.evaluatedAt,
+          snapshot_observed_at: admission.snapshotObservedAt ?? null,
+          stale: admission.snapshotStale ?? false,
           blocked: admission.blocked,
           reason: admission.reason,
           primary_used_pct: admission.primaryUsedPercent,

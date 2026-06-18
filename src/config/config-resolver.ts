@@ -70,6 +70,7 @@ import {
   DEFAULT_RATE_LIMIT_EXPECTED_UNIT_BURN_PCT,
   DEFAULT_RATE_LIMIT_MIN_PRIMARY_HEADROOM_PCT,
   DEFAULT_RATE_LIMIT_MIN_SECONDARY_HEADROOM_PCT,
+  DEFAULT_RATE_LIMIT_SNAPSHOT_MAX_AGE_MS,
   DEFAULT_READ_TIMEOUT_MS,
   DEFAULT_RISK_PREDICATE_REASONING_EFFORT,
   DEFAULT_RUNNER_KIND,
@@ -261,6 +262,9 @@ export function resolveWorkflowConfig(
       deferJitterMs:
         readNonNegativeInteger(rateLimitAdmission.defer_jitter_ms) ??
         DEFAULT_RATE_LIMIT_DEFER_JITTER_MS,
+      snapshotMaxAgeMs:
+        readNonNegativeInteger(rateLimitAdmission.snapshot_max_age_ms) ??
+        DEFAULT_RATE_LIMIT_SNAPSHOT_MAX_AGE_MS,
     },
     budgetEscalation: {
       maxSteps:
