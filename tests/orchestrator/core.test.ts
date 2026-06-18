@@ -11261,6 +11261,216 @@ describe("dispatcher run journal restart recovery", () => {
     expect(spawnedStageNames).toEqual(["implement"]);
   });
 
+  it("reuses the standing park generation on a duplicate requestStop (SYMPH-654)", async () => {
+    const parkStateOf = (
+      core: OrchestratorCore,
+    ): { parkSequence: number; issueParkGenerations: Map<string, number> } =>
+      core as unknown as {
+        parkSequence: number;
+        issueParkGenerations: Map<string, number>;
+      };
+    const orchestrator = createOrchestrator({
+      tracker: createTracker({
+        candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+        statesById: [{ id: "1", identifier: "ISSUE-1", state: "In Progress" }],
+      }),
+    });
+
+    await orchestrator.pollTick();
+
+    const first = await orchestrator.requestStopByIdentifier("ISSUE-1");
+    expect(first).toMatchObject({ issueId: "1", reason: "manual_stop" });
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+
+    const parkSequenceAfterFirst = parkStateOf(orchestrator).parkSequence;
+    const generationAfterFirst =
+      parkStateOf(orchestrator).issueParkGenerations.get("1");
+    const hardStopsAfterFirst = orchestrator
+      .getState()
+      .dispatcherRunJournal.filter(
+        (e) => e.kind === "hard_stop_trigger",
+      ).length;
+    expect(generationAfterFirst).toBeGreaterThanOrEqual(1);
+
+    // Second stop against the SAME running entry must NOT mint a fresh park
+    // generation — recordIssueRequiresExplicitResume reuses the standing one
+    // (wasParked path). A fresh generation here would strand an operator
+    // release keyed to the original generation behind a stale fence
+    // (risk:message-loss). The lease-keyed journal rows also dedup, so no new
+    // hard_stop_trigger entry is appended.
+    const second = await orchestrator.requestStopByIdentifier("ISSUE-1");
+    expect(second).toMatchObject({ issueId: "1", reason: "manual_stop" });
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(true);
+    expect(parkStateOf(orchestrator).parkSequence).toBe(parkSequenceAfterFirst);
+    expect(parkStateOf(orchestrator).issueParkGenerations.get("1")).toBe(
+      generationAfterFirst,
+    );
+    expect(
+      orchestrator
+        .getState()
+        .dispatcherRunJournal.filter((e) => e.kind === "hard_stop_trigger")
+        .length,
+    ).toBe(hardStopsAfterFirst);
+
+    // Message-loss guard: an operator release fenced at the ORIGINAL park
+    // generation still applies after the duplicate stop.
+    const release = await orchestrator.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "test-host", session: null },
+      reason: {
+        class: "operator_release",
+        human: "release after duplicate stop",
+      },
+      fence: { expectedParkSeq: generationAfterFirst ?? 0 },
+    });
+    expect(release.status).toBe("applied");
+    expect(orchestrator.getState().resumeRequired.has("1")).toBe(false);
+  });
+
+  it("converges on the latest retry intent across replays when rework_with_hint supersedes retry_once (SYMPH-658)", async () => {
+    const retryGrantsOf = (core: OrchestratorCore): Map<string, unknown> =>
+      (core as unknown as { retryOnceGrants: Map<string, unknown> })
+        .retryOnceGrants;
+    const config = createReviewFailureReworkConfig();
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "Todo" }],
+    });
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    // Park, grant a retry_once on review, then re-park and supersede it with a
+    // rework_with_hint on the same stage. Both intents land in the journal in
+    // order; replay must converge on the latest (rework → implement), never the
+    // stale retry_once grant.
+    orchestrator.getState().failed.add("1");
+    orchestrator.getState().issueStages["1"] = "review";
+    const retryOnce = await orchestrator.writeIntent({
+      verb: "retry_once",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "watchdog-l2", host: "test-host", session: null },
+      reason: { class: "stuck_triage_retry_once", human: "retry once" },
+      stage: "review",
+      grantSignature: "transient:network",
+      renderComment: false,
+    });
+    expect(retryOnce.status).toBe("applied");
+
+    orchestrator.getState().failed.add("1");
+    const rework = await orchestrator.writeIntent({
+      verb: "rework_with_hint",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "watchdog-l2", host: "test-host", session: null },
+      reason: { class: "stuck_triage_rework", human: "apply feedback" },
+      stage: "review",
+      hint: "Tighten the failing assertion.",
+      renderComment: false,
+    });
+    expect(rework.status).toBe("applied");
+
+    const journal = orchestrator.getState().dispatcherRunJournal;
+
+    // Two restarts from the same journal both converge on the LATEST intent
+    // (rework → implement), and the superseded retry_once grant never survives.
+    for (const restartAt of [
+      "2026-03-06T01:00:00.000Z",
+      "2026-03-06T02:00:00.000Z",
+    ]) {
+      const restarted = new OrchestratorCore({
+        config,
+        tracker,
+        spawnWorker: async () => ({
+          workerHandle: { pid: 1002 },
+          monitorHandle: { ref: "monitor-2" },
+        }),
+        now: () => new Date(restartAt),
+        runJournal: journal,
+      });
+      expect(restarted.getState().issueStages["1"]).toBe("implement");
+      expect(restarted.getState().issueReworkCounts["1"]).toBe(1);
+      expect(retryGrantsOf(restarted).has("1")).toBe(false);
+      expect(restarted.getState().retryAttempts["1"]).toMatchObject({
+        delayType: "continuation",
+        attempt: 1,
+      });
+    }
+  });
+
+  it("clears the claim when replaying a rework admission from the post-dispatch journal (SYMPH-659)", async () => {
+    const config = createReviewFailureReworkConfig();
+    const tracker = createTracker({
+      candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
+      statesById: [{ id: "1", identifier: "ISSUE-1", state: "Todo" }],
+    });
+    const orchestrator = new OrchestratorCore({
+      config,
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+    orchestrator.getState().failed.add("1");
+    orchestrator.getState().issueStages["1"] = "review";
+
+    const rework = await orchestrator.writeIntent({
+      verb: "rework_with_hint",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "watchdog-l2", host: "test-host", session: null },
+      reason: { class: "stuck_triage_rework", human: "apply feedback" },
+      stage: "review",
+      hint: "Tighten the failing assertion.",
+      renderComment: false,
+    });
+    expect(rework.status).toBe("applied");
+
+    // Restart, replay the rework continuation, and admit it (dispatch).
+    const restarted = new OrchestratorCore({
+      config,
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1002 },
+        monitorHandle: { ref: "monitor-2" },
+      }),
+      now: () => new Date("2026-03-06T01:00:00.000Z"),
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+    expect(restarted.getState().issueStages["1"]).toBe("implement");
+    const retry = await restarted.onRetryTimer("1");
+    expect(retry.dispatched).toBe(true);
+
+    // Replay the POST-dispatch journal: the rework admission entry must clear
+    // the claim and consume the continuation so the issue is never stranded as
+    // claimed-but-not-running after a restart that lands past the admission.
+    const replayedAfterAdmission = new OrchestratorCore({
+      config,
+      tracker,
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1003 },
+        monitorHandle: { ref: "monitor-3" },
+      }),
+      now: () => new Date("2026-03-06T02:00:00.000Z"),
+      runJournal: restarted.getState().dispatcherRunJournal,
+    });
+    expect(
+      replayedAfterAdmission.getState().retryAttempts["1"],
+    ).toBeUndefined();
+    expect(replayedAfterAdmission.getState().claimed.has("1")).toBe(false);
+  });
+
   it("restart recovery preserves input-required pause until explicit Resume", async () => {
     const spawnWorker = vi.fn(async () => ({
       workerHandle: { pid: 1001 },
