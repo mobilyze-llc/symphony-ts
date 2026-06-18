@@ -211,6 +211,14 @@ import {
   formatWatchdogTicketBody,
 } from "./signature-cluster.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
+import {
+  type TrackFindingFilingRef,
+  type TrackFindingFilingRequest,
+  type TrackFindingFilingResult,
+  type TrackFindingIssueContext,
+  buildTrackFindingIssueBody,
+  buildTrackFindingIssueTitle,
+} from "./track-finding-filing.js";
 import { writeTrackerIssueFromBoundary } from "./tracker-write.js";
 
 const DEFAULT_RUNTIME_HARD_STOPS_CONFIG = {
@@ -990,6 +998,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           },
         });
       },
+      fileTrackFindings: async (request) =>
+        this.fileTrackFindingsBestEffort(request),
       runEnsembleGate: async ({ issue, stage }) => {
         const workspaceInfo = this.workspaceManager.resolveForIssue(issue.id);
         const gateOptions = {
@@ -1649,6 +1659,115 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         },
       );
     }
+  }
+
+  /**
+   * File the council's surviving Track findings to Linear (SYMPH-763). Wired
+   * into the orchestrator's review→merge closeout as the `fileTrackFindings`
+   * callback; mirrors {@link fileWatchdogTicketBestEffort} (team-context
+   * resolution + LinearTrackerClient dedup). Returns the durable refs the
+   * orchestrator journals plus an explicit per-finding reason for anything the
+   * tracker could not file — never throws, so the merge advance is never blocked
+   * and no finding is silently dropped (SYMPH-760 invariant).
+   */
+  private async fileTrackFindingsBestEffort(
+    request: TrackFindingFilingRequest,
+  ): Promise<TrackFindingFilingResult> {
+    const allUnfiled = (reason: string): TrackFindingFilingResult => ({
+      filed: [],
+      unfiled: request.findings.map((finding) => ({
+        fingerprint: finding.fingerprint,
+        reason,
+      })),
+    });
+
+    if (!(this.tracker instanceof LinearTrackerClient)) {
+      return allUnfiled(
+        "tracker is not Linear-backed; Track findings cannot be filed",
+      );
+    }
+    const tracker = this.tracker;
+
+    // Resolve team context: prefer config.tracker fields, fall back to the
+    // source issue lookup, then the identifier prefix (e.g. "SYMPH-1" → "SYMPH").
+    let teamId = this.config.tracker.teamId;
+    let teamKey = this.config.tracker.teamKey;
+    if (!teamId || !teamKey) {
+      try {
+        const refs = await tracker.fetchIssueReferencesByIds([request.issueId]);
+        const ref = refs[0];
+        if (ref?.teamId && ref.teamKey) {
+          teamId = ref.teamId;
+          teamKey = ref.teamKey;
+        }
+      } catch {
+        // Fall through to identifier-prefix derivation below.
+      }
+    }
+    teamKey ||= request.issueIdentifier.split("-")[0] ?? "";
+    if (!teamId || !teamKey) {
+      const reason = !teamId
+        ? "team context not resolvable: teamId unset and not derivable from the source issue"
+        : "team context not resolvable: teamKey unset";
+      await this.logger?.warn(
+        "track_finding_filing_skipped",
+        "Cannot file Track findings: team context not resolvable.",
+        { outcome: "degraded", issue_id: request.issueId, reason },
+      );
+      return allUnfiled(reason);
+    }
+
+    const context: TrackFindingIssueContext = {
+      sourceIssueIdentifier: request.issueIdentifier,
+      sourceIssueUrl: request.issueUrl,
+      repo: request.repo,
+      prNumber: request.prNumber,
+      reviewedHeadSha: request.reviewedHeadSha,
+    };
+
+    const filed: TrackFindingFilingRef[] = [];
+    const unfiled: Array<{ fingerprint: string; reason: string }> = [];
+    for (const finding of request.findings) {
+      try {
+        const result = await tracker.createTrackFindingIssue({
+          teamId,
+          teamKey,
+          fingerprint: finding.fingerprint,
+          title: buildTrackFindingIssueTitle(finding),
+          description: buildTrackFindingIssueBody(finding, context),
+        });
+        filed.push({
+          fingerprint: finding.fingerprint,
+          issueId: result.id,
+          identifier: result.identifier,
+          url: result.url,
+        });
+        await this.logger?.info(
+          "track_finding_filed",
+          `Track finding ${result.created ? "filed" : "deduped"}: ${result.identifier}`,
+          {
+            outcome: result.created ? "created" : "deduped",
+            issue_id: request.issueId,
+            identifier: result.identifier,
+            fingerprint: finding.fingerprint,
+          },
+        );
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        unfiled.push({ fingerprint: finding.fingerprint, reason });
+        await this.logger?.warn(
+          "track_finding_filing_failed",
+          "Failed to file a Track finding.",
+          {
+            outcome: "degraded",
+            issue_id: request.issueId,
+            fingerprint: finding.fingerprint,
+            reason,
+          },
+        );
+      }
+    }
+    return { filed, unfiled };
   }
 
   private findInMemoryLoopTraceByIssueKey(

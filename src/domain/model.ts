@@ -279,6 +279,13 @@ export const DISPATCHER_RUN_JOURNAL_EVENT_KINDS = [
   // spec-review watcher/runner so admission and dashboards can read current
   // ticket-review state without parsing Linear comments or raw Claude output.
   "spec_review_result",
+  // Autonomous headless-council Track-finding filing (SYMPH-763): records the
+  // durable Linear IDs the orchestrator filed/found for surviving Track findings
+  // at review→merge closeout, plus an explicit unfiled+reason when a tracker
+  // failure leaves a finding without a durable ID (preserves the SYMPH-760
+  // "never a silent clean closeout" invariant). Reconciles the
+  // track_filing_status carried on the review_gate_result entry.
+  "track_finding_filing",
   // Replay retention checkpoint (SYMPH-293): compacted journals keep one
   // covered-prefix state row plus a recent raw tail instead of replaying every
   // historical row on restart.

@@ -56,6 +56,10 @@ import {
   startRuntimeService,
 } from "../../src/orchestrator/runtime-host.js";
 import type {
+  TrackFindingFilingRequest,
+  TrackFindingFilingResult,
+} from "../../src/orchestrator/track-finding-filing.js";
+import type {
   ProcessIdentitySnapshot,
   ProcessTreeTerminationResult,
 } from "../../src/shared/process-tree.js";
@@ -8305,6 +8309,157 @@ class FakeAgentRunner {
     run.reject(error);
   }
 }
+
+describe("track-finding filer (SYMPH-763)", () => {
+  const sampleRequest = (): TrackFindingFilingRequest => ({
+    issueId: "1",
+    issueIdentifier: "ISSUE-1",
+    issueTitle: "Source issue",
+    issueUrl: "https://linear.app/x/issue/ISSUE-1",
+    stageName: "review",
+    reviewedHeadSha: "head-sha",
+    repo: "mobilyze-llc/symphony-ts",
+    prNumber: 812,
+    findings: [
+      {
+        fingerprint: "fp-1",
+        title: "Track A",
+        category: "correctness",
+        rationale: "rationale",
+        evidence: [],
+      },
+    ],
+  });
+
+  const invokeFiler = (
+    host: OrchestratorRuntimeHost,
+    request: TrackFindingFilingRequest,
+  ): Promise<TrackFindingFilingResult> =>
+    (
+      host as unknown as {
+        fileTrackFindingsBestEffort(
+          request: TrackFindingFilingRequest,
+        ): Promise<TrackFindingFilingResult>;
+      }
+    ).fileTrackFindingsBestEffort(request);
+
+  const linearTracker = (): LinearTrackerClient =>
+    new LinearTrackerClient({
+      endpoint: "https://api.linear.app/graphql",
+      apiKey: "token",
+      projectSlug: "project",
+      activeStates: ["Todo", "In Progress", "In Review", "Resume"],
+      fetchFn: vi.fn(),
+    });
+
+  const issueReference = () => ({
+    id: "1",
+    identifier: "ISSUE-1",
+    title: "Source issue",
+    description: null,
+    url: null,
+    teamId: "team-1",
+    teamKey: "SYMPH",
+    projectId: "project-1",
+    projectSlug: "symphony",
+    labels: [],
+    parent: null,
+  });
+
+  it("reports every finding unfiled when the tracker is not Linear-backed", async () => {
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker: createTracker(),
+      createAgentRunner: ({ onEvent }) => {
+        const runner = new FakeAgentRunner();
+        runner.onEvent = onEvent;
+        return runner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const result = await invokeFiler(host, sampleRequest());
+
+    expect(result.filed).toEqual([]);
+    expect(result.unfiled).toEqual([
+      {
+        fingerprint: "fp-1",
+        reason: expect.stringContaining("not Linear-backed"),
+      },
+    ]);
+  });
+
+  it("files findings via the Linear client and returns durable refs", async () => {
+    const tracker = linearTracker();
+    vi.spyOn(tracker, "fetchIssueReferencesByIds").mockResolvedValue([
+      issueReference(),
+    ]);
+    const createSpy = vi
+      .spyOn(tracker, "createTrackFindingIssue")
+      .mockResolvedValue({
+        id: "new-1",
+        identifier: "SYMPH-900",
+        title: "[track:fp-1] Track A",
+        url: "https://linear.app/x/issue/SYMPH-900",
+        created: true,
+      });
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        const runner = new FakeAgentRunner();
+        runner.onEvent = onEvent;
+        return runner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const result = await invokeFiler(host, sampleRequest());
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(createSpy.mock.calls[0]?.[0]).toMatchObject({
+      teamId: "team-1",
+      teamKey: "SYMPH",
+      fingerprint: "fp-1",
+    });
+    expect(result.filed).toEqual([
+      {
+        fingerprint: "fp-1",
+        issueId: "new-1",
+        identifier: "SYMPH-900",
+        url: "https://linear.app/x/issue/SYMPH-900",
+      },
+    ]);
+    expect(result.unfiled).toEqual([]);
+  });
+
+  it("records the exact reason for a finding the tracker fails to file", async () => {
+    const tracker = linearTracker();
+    vi.spyOn(tracker, "fetchIssueReferencesByIds").mockResolvedValue([
+      issueReference(),
+    ]);
+    vi.spyOn(tracker, "createTrackFindingIssue").mockRejectedValue(
+      new Error("Linear 500 Internal Server Error"),
+    );
+    const host = new OrchestratorRuntimeHost({
+      config: createConfig(),
+      tracker,
+      createAgentRunner: ({ onEvent }) => {
+        const runner = new FakeAgentRunner();
+        runner.onEvent = onEvent;
+        return runner;
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const result = await invokeFiler(host, sampleRequest());
+
+    expect(result.filed).toEqual([]);
+    expect(result.unfiled).toEqual([
+      { fingerprint: "fp-1", reason: "Linear 500 Internal Server Error" },
+    ]);
+  });
+});
 
 function createTracker(input?: {
   candidates?: Issue[];
