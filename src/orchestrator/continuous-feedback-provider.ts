@@ -15,10 +15,11 @@ import { getDiff } from "./gate-handler.js";
 const DEFAULT_FEEDBACK_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_DIFF_CHARS = 12_000;
 // Startup preflight probe (SYMPH-761): a bounded availability check, not a
-// review. Short timeout — the only signal we want is whether the configured
-// model resolves on the runner; a slow or wedged runner reads as unavailable
-// rather than stalling launch.
-const DEFAULT_FEEDBACK_PROBE_TIMEOUT_MS = 20_000;
+// review. The probe is awaited at startup, so this timeout caps how long a
+// slow or wedged runner can delay launch — generous enough for a healthy
+// (even cold) local model to resolve, short enough to bound the startup wait;
+// a runner that does not answer in time reads as unavailable.
+const DEFAULT_FEEDBACK_PROBE_TIMEOUT_MS = 10_000;
 const CONTINUOUS_FEEDBACK_PROBE_PROMPT =
   "Continuous-feedback startup preflight. Reply with the single token OK.";
 

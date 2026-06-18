@@ -1440,25 +1440,37 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
    * lane already degrades gracefully at runtime (status "unavailable").
    */
   async runContinuousFeedbackModelPreflight(): Promise<ContinuousFeedbackProbeResult | null> {
+    // Probe at most once (the "ONCE at startup" contract): a repeat call (e.g.
+    // a future config-reload path) is a no-op that returns the recorded result
+    // rather than re-spawning the runner and overwriting runtime state.
+    if (this.continuousFeedbackPreflight !== null) {
+      return null;
+    }
     const feedback = this.config.continuousFeedback;
+    // Local-model gate: probe only an explicitly configured, non-blank model.
+    // null / absent collapses to the runner default (no `--model`), and a blank
+    // string would otherwise spawn `--model ""` and crash a fail-closed launch
+    // (council R1). Both mean "nothing specific to probe" — skip.
+    const model = feedback?.model ?? null;
     if (
       feedback === undefined ||
       !feedback.enabled ||
-      feedback.model === null
+      model === null ||
+      model.trim() === ""
     ) {
       return null;
     }
     const result = await probeContinuousFeedbackModel(
       {
         runner: feedback.runner,
-        model: feedback.model,
+        model,
         role: feedback.role,
       },
       { runCommand: this.continuousFeedbackCommand },
     );
     this.continuousFeedbackPreflight = {
       available: result.available,
-      model: feedback.model,
+      model,
       runner: feedback.runner,
       detail: result.detail,
       checked_at: this.now().toISOString(),
@@ -1466,16 +1478,16 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     if (result.available) {
       await this.logger?.info(
         "continuous_feedback_preflight",
-        `Continuous-feedback model ${feedback.model} resolved on runner ${feedback.runner}.`,
-        { model: feedback.model, runner: feedback.runner },
+        `Continuous-feedback model ${model} resolved on runner ${feedback.runner}.`,
+        { model, runner: feedback.runner },
       );
       return result;
     }
     await this.logger?.warn(
       "continuous_feedback_preflight_unavailable",
-      `Continuous-feedback model ${feedback.model} is unavailable on runner ${feedback.runner}.`,
+      `Continuous-feedback model ${model} is unavailable on runner ${feedback.runner}.`,
       {
-        model: feedback.model,
+        model,
         runner: feedback.runner,
         detail: result.detail,
         fail_closed: feedback.preflightFailClosed,
@@ -1483,7 +1495,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     );
     if (feedback.preflightFailClosed) {
       throw new RuntimeHostStartupError(
-        `continuous-feedback model ${feedback.model} unavailable on runner ${feedback.runner}: ${result.detail}`,
+        `continuous-feedback model ${model} unavailable on runner ${feedback.runner}: ${result.detail}`,
         "continuous_feedback_model_unavailable",
       );
     }
@@ -4965,22 +4977,15 @@ export async function startRuntimeService(
   const startupTimestamp = Date.now();
 
   // Continuous-feedback model preflight (SYMPH-761): surface a misconfigured or
-  // down local reviewer model at startup. Fail-closed must gate launch, so it
-  // is awaited and throws RuntimeHostStartupError (same contract as
-  // validateDispatchConfig). Warn-not-block (the default) must NOT delay launch
-  // behind a runner probe — it is kicked off without blocking and records
-  // runtime state + a startup warning when it resolves (deploy-drift idiom).
-  if (currentConfig.continuousFeedback?.preflightFailClosed === true) {
-    await runtimeHost.runContinuousFeedbackModelPreflight();
-  } else {
-    void runtimeHost.runContinuousFeedbackModelPreflight().catch((error) => {
-      void logger.warn(
-        "continuous_feedback_preflight_error",
-        "Continuous-feedback model preflight probe errored.",
-        { detail: error instanceof Error ? error.message : String(error) },
-      );
-    });
-  }
+  // down local reviewer model at startup. Awaited so the bounded probe always
+  // completes before the poll loop starts and can never outlive shutdown
+  // (council R1: the prior fire-and-forget could orphan a runner child). The
+  // host decides policy from its OWN config: warn-not-block (default) records
+  // runtime state + a startup warning and proceeds; fail-closed throws
+  // RuntimeHostStartupError to abort launch (same contract as
+  // validateDispatchConfig). Deciding inside the host avoids downgrading a
+  // fail-closed prebuilt host through an options.config that disagrees.
+  await runtimeHost.runContinuousFeedbackModelPreflight();
 
   await cleanupTerminalIssueWorkspaces({
     tracker,
