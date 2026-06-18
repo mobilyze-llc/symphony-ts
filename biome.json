@@ -4,9 +4,12 @@
     "ignoreUnknown": true,
     "ignore": [
       "dist/**",
+      "**/dist/**",
       "node_modules/**",
+      "**/node_modules/**",
       "pipeline-config/**",
       ".symphony/**",
+      ".worktrees/**",
       ".claude/worktrees/**",
       "coverage/**"
     ]
