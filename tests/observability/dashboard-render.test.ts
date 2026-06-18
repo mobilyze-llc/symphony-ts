@@ -445,6 +445,9 @@ describe("Dashboard Pipeline column", () => {
         gate: {
           source: "dispatch admission gate (rate_limit_admission evaluation)",
           evaluated_at: "2026-06-12T10:00:00.000Z",
+          snapshot_observed_at: "2026-06-12T09:58:00.000Z",
+          stale: false,
+          stale_bypass: false,
           blocked: true,
           reason: "secondary window headroom 2.0% < 5% floor",
           primary_used_pct: 39,

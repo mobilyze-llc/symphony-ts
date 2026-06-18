@@ -115,5 +115,18 @@ describe("rate-limit snapshot persistence", () => {
       "utf8",
     );
     expect(await loadPersistedRateLimitSnapshot(workspaceRoot)).toBeNull();
+
+    await writeFile(
+      path,
+      JSON.stringify({
+        schema: "symphony.rate-limit-snapshot.v1",
+        observed_at: "not-a-date",
+        rate_limits: RATE_LIMITS,
+      }),
+      "utf8",
+    );
+    // SYMPH-778: an unparseable observed_at degrades fail-open (null) rather
+    // than hydrating a snapshot whose age cannot be determined.
+    expect(await loadPersistedRateLimitSnapshot(workspaceRoot)).toBeNull();
   });
 });

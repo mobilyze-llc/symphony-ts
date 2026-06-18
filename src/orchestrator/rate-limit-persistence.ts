@@ -7,9 +7,13 @@ import { dirname, join } from "node:path";
  * The dispatch admission floor (SYMPH-333) reads rate limits from in-memory
  * orchestrator state, which is empty after a restart — the floor failed open
  * until the first worker emitted telemetry. Persisting the last snapshot
- * lets the floor engage from the first poll tick after a restart. Loading a
- * stale snapshot is safe: the gate already ignores windows whose `resets_at`
- * has passed, so old data can never block dispatch past a window reset.
+ * lets the floor engage from the first poll tick after a restart.
+ *
+ * A window whose `resets_at` has passed is ignored by the gate, but a
+ * future-dated window (notably the weekly secondary window) is not — so a stale
+ * snapshot CAN keep closing admission long past its observation time. The gate
+ * applies a freshness threshold (SYMPH-778) so a stale snapshot cannot deadlock
+ * dispatch when no worker is running to refresh telemetry.
  */
 export interface PersistedRateLimitSnapshot {
   /** ISO timestamp of the observation that produced the snapshot. */
@@ -79,6 +83,12 @@ export async function loadPersistedRateLimitSnapshot(
   const observedAt = record.observed_at;
   const rateLimits = record.rate_limits;
   if (typeof observedAt !== "string" || observedAt.length === 0) {
+    return null;
+  }
+  // Reject an unparseable observed_at: a snapshot whose age cannot be
+  // determined must degrade fail-open, not hydrate and block dispatch
+  // indefinitely (SYMPH-778).
+  if (Number.isNaN(Date.parse(observedAt))) {
     return null;
   }
   if (

@@ -27,6 +27,7 @@ import {
   DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
   DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
   DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
+  DEFAULT_RATE_LIMIT_SNAPSHOT_MAX_AGE_MS,
   DEFAULT_VERDICTS_PAGE_AFTER_TICKS,
 } from "../config/defaults.js";
 import type {
@@ -2667,11 +2668,24 @@ export class OrchestratorCore {
     // Gate recovery: journal the flip back so the verdict stream shows when
     // the floor stopped blocking (SYMPH-405). Dedup map suppresses repeats.
     if (this.lastVerdictKeys.has(PIPELINE_VERDICT_SCOPE_ID)) {
+      // A stale-snapshot bypass is NOT a genuine window reset; label it
+      // distinctly so dashboards don't read "rate_window_clear" as the Codex
+      // limit having recovered when it is still exhausted (SYMPH-778).
       this.recordDispatchVerdict({
         issueId: PIPELINE_VERDICT_SCOPE_ID,
         issueIdentifier: PIPELINE_VERDICT_SCOPE_IDENTIFIER,
         disposition: "admit",
-        reasonCode: "rate_window_clear",
+        reasonCode: rateLimitGate.staleBypass
+          ? "rate_window_stale_bypass"
+          : "rate_window_clear",
+        ...(rateLimitGate.staleBypass
+          ? {
+              details: {
+                stale_bypass: true,
+                snapshot_observed_at: rateLimitGate.snapshotObservedAt,
+              },
+            }
+          : {}),
       });
     }
 
@@ -3285,6 +3299,12 @@ export class OrchestratorCore {
     expectedUnitBurnPct: number | null;
     deferredUntil: string | null;
     admissionCapacity: number | null;
+    /** Telemetry observation time the gate evaluated (SYMPH-778). */
+    snapshotObservedAt: string | null;
+    /** True when that snapshot is older than the configured freshness threshold (SYMPH-778). */
+    snapshotStale: boolean;
+    /** True when a stale snapshot was bypassed because no workers run to refresh it (SYMPH-778). */
+    staleBypass: boolean;
     /** Structured floor violations for verdict reason codes (SYMPH-405). */
     floorViolations: Array<{
       window: "primary" | "secondary";
@@ -3305,6 +3325,9 @@ export class OrchestratorCore {
         expectedUnitBurnPct: null,
         deferredUntil: null,
         admissionCapacity: null,
+        snapshotObservedAt: null,
+        snapshotStale: false,
+        staleBypass: false,
         floorViolations: [],
       };
     }
@@ -3381,8 +3404,31 @@ export class OrchestratorCore {
     }
 
     const blocked = violations.length > 0;
+    const snapshotObservedAt = this.state.codexRateLimitsObservedAt;
+    const snapshotObservedAtMs =
+      snapshotObservedAt === null ? Number.NaN : Date.parse(snapshotObservedAt);
+    const snapshotMaxAgeMs =
+      floors.snapshotMaxAgeMs === undefined
+        ? DEFAULT_RATE_LIMIT_SNAPSHOT_MAX_AGE_MS
+        : floors.snapshotMaxAgeMs;
+    // A malformed observed_at (Date.parse -> NaN) is treated as stale: we cannot
+    // trust the snapshot's age, so it must not be able to block forever
+    // (SYMPH-778; the persistence loader also rejects unparseable observed_at).
+    const snapshotStale =
+      snapshotMaxAgeMs !== null &&
+      snapshotObservedAt !== null &&
+      (Number.isNaN(snapshotObservedAtMs) ||
+        now.getTime() - snapshotObservedAtMs > snapshotMaxAgeMs);
+    // SYMPH-778 restart self-deadlock: a stale, future-reset window keeps
+    // closing admission, but no worker can run to emit superseding telemetry.
+    // When nothing is running, fail open so one probe dispatch can refresh the
+    // snapshot. An active worker refreshes telemetry on its own, so bypass only
+    // while the pipeline is idle.
+    const staleBypass =
+      blocked && snapshotStale && Object.keys(this.state.running).length === 0;
+    const effectiveBlocked = blocked && !staleBypass;
     const deferredUntil =
-      blocked && deferUntilReset
+      effectiveBlocked && deferUntilReset
         ? computeRateLimitDeferredUntil({
             violations: floorViolations,
             primary,
@@ -3390,7 +3436,7 @@ export class OrchestratorCore {
             jitterMs: floors.deferJitterMs ?? 0,
           })
         : null;
-    const admissionCapacity =
+    let admissionCapacity =
       deferUntilReset && usesExpectedUnitBurn
         ? computeRateLimitAdmissionCapacity({
             expectedUnitBurnPct,
@@ -3410,16 +3456,28 @@ export class OrchestratorCore {
                   },
           })
         : null;
+    if (staleBypass) {
+      // Admit exactly one probe to refresh telemetry, overriding any capacity
+      // derived from the stale snapshot (which can be 0 under defer-until-reset,
+      // re-blocking the probe, or null on the default path, admitting every
+      // slot). Reset the reservation so each bypass tick gets a fresh
+      // single-probe budget even if a prior probe exited without telemetry
+      // (SYMPH-778).
+      admissionCapacity = 1;
+      this.rateLimitAdmissionReservation = null;
+    }
     const reasonPrefix =
       deferUntilReset && usesExpectedUnitBurn
         ? "Codex rate-limit headroom below expected dispatch burn"
         : "Codex rate-limit headroom below dispatch floor";
-    const reason = blocked
-      ? `${reasonPrefix}: ${violations.join("; ")}. New dispatches refused${deferredUntil !== null ? ` until the window resets at ${deferredUntil}` : ""}.`
-      : null;
+    const reason = !effectiveBlocked
+      ? null
+      : snapshotStale
+        ? `${reasonPrefix}: ${violations.join("; ")}. Telemetry is stale (observed ${snapshotObservedAt ?? "unknown"}); awaiting refresh from an active worker before dispatch resumes.`
+        : `${reasonPrefix}: ${violations.join("; ")}. New dispatches refused${deferredUntil !== null ? ` until the window resets at ${deferredUntil}` : ""}.`;
 
     this.state.rateLimitAdmission = {
-      blocked,
+      blocked: effectiveBlocked,
       reason,
       evaluatedAt: now.toISOString(),
       minPrimaryHeadroomPct: floors.minPrimaryHeadroomPct,
@@ -3431,14 +3489,20 @@ export class OrchestratorCore {
       expectedUnitBurnPct,
       deferredUntil,
       admissionCapacity,
+      snapshotObservedAt,
+      snapshotStale,
+      staleBypass,
     };
 
     return {
-      blocked,
+      blocked: effectiveBlocked,
       reason,
       expectedUnitBurnPct,
       deferredUntil,
       admissionCapacity,
+      snapshotObservedAt,
+      snapshotStale,
+      staleBypass,
       floorViolations,
     };
   }
@@ -3452,12 +3516,14 @@ export class OrchestratorCore {
     gate: ReturnType<OrchestratorCore["evaluateRateLimitAdmissionGate"]>,
   ): DispatchGateInfo & { details: Record<string, unknown> } {
     const violation = gate.floorViolations[0];
-    const reasonCode =
-      violation?.window === "secondary"
+    const reasonCode = gate.snapshotStale
+      ? "rate_window_stale_snapshot"
+      : violation?.window === "secondary"
         ? "rate_window_secondary_floor"
         : "rate_window_primary_floor";
-    const remedy =
-      violation !== undefined
+    const remedy = gate.snapshotStale
+      ? `Rate-limit telemetry is stale (observed ${gate.snapshotObservedAt ?? "unknown"}). Refresh or clear the persisted snapshot, or wait for an active worker to emit fresh telemetry.`
+      : violation !== undefined
         ? `Wait for the ${violation.window} rate-limit window to reset: floor ${violation.floorPct}% headroom, observed ${violation.headroomPct.toFixed(1)}%.`
         : "Wait for the rate-limit window to reset.";
     return {

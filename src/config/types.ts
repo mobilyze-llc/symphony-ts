@@ -80,6 +80,16 @@ export interface WorkflowRateLimitAdmissionConfig {
   deferUntilReset?: boolean;
   expectedUnitBurnPct?: number | null;
   deferJitterMs?: number;
+  /**
+   * Maximum age (ms) a persisted rate-limit snapshot may reach before it can
+   * no longer block dispatch *by itself* when no worker is running to refresh
+   * telemetry (SYMPH-778). Once telemetry is older than this and the pipeline
+   * is idle, the gate fails open so a single probe dispatch can refresh the
+   * snapshot — breaking the restart self-deadlock where a stale, future-reset
+   * window closes admission and nothing can ever supersede it. null disables
+   * the staleness bypass (the gate then trusts any non-expired snapshot).
+   */
+  snapshotMaxAgeMs?: number | null;
 }
 
 /**

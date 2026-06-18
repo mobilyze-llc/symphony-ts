@@ -3075,6 +3075,37 @@ describe("state-document enrichment (SYMPH-407)", () => {
     expect(agreeing.rate_limit_views.disagreement).toBe(false);
   });
 
+  it("surfaces snapshot observation time and staleness on the gate view (SYMPH-778)", () => {
+    const state = makeState();
+    state.codexRateLimits = {
+      secondary: { used_percent: 98, window_minutes: 10080, resets_at: 2 },
+    };
+    state.codexRateLimitsObservedAt = "2026-06-12T03:00:00.000Z";
+    state.rateLimitAdmission = {
+      blocked: true,
+      reason: "stale telemetry observed 2026-06-12T03:00:00.000Z",
+      evaluatedAt: "2026-06-12T10:00:00.000Z",
+      minPrimaryHeadroomPct: null,
+      minSecondaryHeadroomPct: 5,
+      primaryUsedPercent: null,
+      secondaryUsedPercent: 98,
+      snapshotObservedAt: "2026-06-12T03:00:00.000Z",
+      snapshotStale: true,
+      staleBypass: false,
+    };
+
+    const snapshot = buildRuntimeSnapshot(state);
+
+    // The gate view distinguishes telemetry age (snapshot_observed_at) from the
+    // gate evaluation time (evaluated_at).
+    expect(snapshot.rate_limit_views.gate).toMatchObject({
+      evaluated_at: "2026-06-12T10:00:00.000Z",
+      snapshot_observed_at: "2026-06-12T03:00:00.000Z",
+      stale: true,
+      stale_bypass: false,
+    });
+  });
+
   it("summarizes watchdog clusters and breakers with journal cursors", () => {
     const state = makeState();
     state.dispatcherRunJournal = [

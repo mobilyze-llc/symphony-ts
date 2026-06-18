@@ -2156,6 +2156,61 @@ describe("OrchestratorRuntimeHost", () => {
     }
   });
 
+  it("fails open on cold-start when the persisted snapshot is stale and no worker can refresh it (SYMPH-778)", async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "symph-rl-stale-"));
+    try {
+      // Snapshot observed ~48h before the host clock (2026-03-06T00:00:05Z),
+      // secondary window 98% used and resets far in the future (not expired).
+      // With no worker able to emit fresh telemetry, this stale snapshot would
+      // otherwise deadlock admission forever (SYMPH-778).
+      await persistRateLimitSnapshot(workspaceRoot, {
+        observedAt: "2026-03-04T00:00:00.000Z",
+        rateLimits: {
+          limit_id: "codex",
+          secondary: {
+            used_percent: 98,
+            window_minutes: 10080,
+            resets_at: 1772800000,
+          },
+        },
+      });
+
+      const config = createConfig();
+      config.workspace.root = workspaceRoot;
+      config.rateLimitAdmission = {
+        minPrimaryHeadroomPct: 10,
+        minSecondaryHeadroomPct: 5,
+        snapshotMaxAgeMs: 21_600_000,
+      };
+      const tracker = createTracker();
+      const fakeRunner = new FakeAgentRunner();
+      const host = new OrchestratorRuntimeHost({
+        config,
+        tracker,
+        createAgentRunner: ({ onEvent }) => {
+          fakeRunner.onEvent = onEvent;
+          return fakeRunner;
+        },
+        writeDispatcherRunJournalEntry: ignoreDispatcherRunJournalEntry,
+        now: () => new Date("2026-03-06T00:00:05.000Z"),
+      });
+
+      const tick = await host.pollOnce();
+      await host.flushEvents();
+
+      // The stale snapshot no longer closes dispatch by itself: a probe runs.
+      expect(host.getState().rateLimitAdmission).toMatchObject({
+        blocked: false,
+        snapshotStale: true,
+        staleBypass: true,
+        snapshotObservedAt: "2026-03-04T00:00:00.000Z",
+      });
+      expect(tick.dispatchedIssueIds).toEqual(["1"]);
+    } finally {
+      removeWorkspaceWithRetry(workspaceRoot);
+    }
+  });
+
   it("preserves legacy Codex session log entries without byte metadata", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();

@@ -106,6 +106,7 @@ describe("config-resolver", () => {
       deferUntilReset: false,
       expectedUnitBurnPct: null,
       deferJitterMs: 0,
+      snapshotMaxAgeMs: 21_600_000,
     });
     expect(resolved.riskPredicateReasoning).toEqual({
       effort: DEFAULT_RISK_PREDICATE_REASONING_EFFORT,
@@ -1258,6 +1259,7 @@ describe("config-resolver fast_track", () => {
       deferUntilReset: false,
       expectedUnitBurnPct: null,
       deferJitterMs: 0,
+      snapshotMaxAgeMs: 21_600_000,
     });
 
     const unset = resolveWorkflowConfig({
@@ -1271,6 +1273,7 @@ describe("config-resolver fast_track", () => {
       deferUntilReset: false,
       expectedUnitBurnPct: null,
       deferJitterMs: 0,
+      snapshotMaxAgeMs: 21_600_000,
     });
   });
 
@@ -1293,7 +1296,40 @@ describe("config-resolver fast_track", () => {
       deferUntilReset: true,
       expectedUnitBurnPct: 1.5,
       deferJitterMs: 30000,
+      snapshotMaxAgeMs: 21_600_000,
     });
+  });
+
+  it("parses rate_limit_admission snapshot_max_age_ms and defaults it (SYMPH-778)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        rate_limit_admission: {
+          snapshot_max_age_ms: 3_600_000,
+        },
+      },
+    });
+    expect(resolved.rateLimitAdmission.snapshotMaxAgeMs).toBe(3_600_000);
+
+    const unset = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {},
+    });
+    expect(unset.rateLimitAdmission.snapshotMaxAgeMs).toBe(21_600_000);
+
+    // Explicit null disables the staleness bypass (strict persisted blocking).
+    const disabled = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        rate_limit_admission: {
+          snapshot_max_age_ms: null,
+        },
+      },
+    });
+    expect(disabled.rateLimitAdmission.snapshotMaxAgeMs).toBeNull();
   });
 
   it("parses budget_escalation and defaults it off", () => {

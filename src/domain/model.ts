@@ -1069,6 +1069,19 @@ export interface RateLimitAdmissionState {
   expectedUnitBurnPct?: number | null;
   deferredUntil?: string | null;
   admissionCapacity?: number | null;
+  /**
+   * Observation time of the telemetry the gate evaluated (SYMPH-778), distinct
+   * from `evaluatedAt` (the gate evaluation time). Surfaces snapshot age so an
+   * operator can tell live telemetry from a stale persisted snapshot.
+   */
+  snapshotObservedAt?: string | null;
+  /** True when the evaluated snapshot is older than the configured freshness threshold. */
+  snapshotStale?: boolean;
+  /**
+   * True when a stale snapshot would have blocked but the gate failed open
+   * (no active workers to refresh telemetry), admitting a probe dispatch.
+   */
+  staleBypass?: boolean;
 }
 
 export interface RunningEntry extends LiveSession {
