@@ -212,6 +212,11 @@ export const PIPELINE_VERDICT_SCOPE_ID = "__dispatch__";
 export const PIPELINE_VERDICT_SCOPE_IDENTIFIER = "PIPELINE";
 
 const CONTINUATION_RETRY_DELAY_MS = 1_000;
+// SYMPH-775: a retrying issue absent from this many CONSECUTIVE successful
+// candidate fetches is treated as a genuine departure and dropped; fewer
+// consecutive absences are re-deferred to absorb a transient stale/partial
+// tracker snapshot. N=2 means a single stale fetch never releases a retry.
+const STALE_RETRY_CANDIDATE_ABSENCE_DROP_THRESHOLD = 2;
 const HARD_STOP_COMMENT_UNTRUSTED_FIELD_MAX_LEN = 600;
 
 /**
@@ -5344,17 +5349,29 @@ export class OrchestratorCore {
           // normal gate deferral and reconcile again on the next timer fire.
           gateCandidates = null;
         }
-        if (
-          gateCandidates !== null &&
-          !gateCandidates.some((candidate) => candidate.id === issueId)
-        ) {
-          this.dropDepartedRetryCandidate(
-            issueId,
-            retryEntry.identifier ?? issueId,
-            null,
-            null,
-          );
-          return { dispatched: false, released: true, retryEntry: null };
+        if (gateCandidates !== null) {
+          if (!gateCandidates.some((candidate) => candidate.id === issueId)) {
+            // SYMPH-775: a single stale/partial snapshot must not release a
+            // healthy retry — drop only after N consecutive absences; below the
+            // threshold, fall through to the normal gate deferral (re-defer).
+            if (
+              this.noteStaleRetryCandidateAbsence(issueId) >=
+              STALE_RETRY_CANDIDATE_ABSENCE_DROP_THRESHOLD
+            ) {
+              // dropDepartedRetryCandidate → clearTerminalIssueRuntimeState
+              // clears the absence counter, like every other per-issue field.
+              this.dropDepartedRetryCandidate(
+                issueId,
+                retryEntry.identifier ?? issueId,
+                null,
+                null,
+              );
+              return { dispatched: false, released: true, retryEntry: null };
+            }
+          } else {
+            // Present in the candidate set — reset the absence streak.
+            this.clearStaleRetryCandidateAbsence(issueId);
+          }
         }
       }
       console.warn(
@@ -5411,6 +5428,28 @@ export class OrchestratorCore {
     const issue =
       candidates.find((candidate) => candidate.id === issueId) ?? null;
     if (issue === null) {
+      // SYMPH-775: a successful fetch that omits the issue may be a transient
+      // stale/partial snapshot, not a genuine departure. Re-defer on a single
+      // absence; drop only after N consecutive absences. This applies to every
+      // retry kind, including a merge_actuator_poll mid-merge-queue-wait, which
+      // still terminates (drops) once the issue is genuinely, persistently gone.
+      if (
+        this.noteStaleRetryCandidateAbsence(issueId) <
+        STALE_RETRY_CANDIDATE_ABSENCE_DROP_THRESHOLD
+      ) {
+        return {
+          dispatched: false,
+          released: false,
+          retryEntry: this.scheduleRetry(issueId, retryEntry.attempt, {
+            identifier: retryEntry.identifier,
+            error: "candidate absent from a single tracker snapshot; deferring",
+            delayType: retryEntry.delayType,
+            deferral: true,
+          }),
+        };
+      }
+      // dropDepartedRetryCandidate → clearTerminalIssueRuntimeState clears the
+      // absence counter, like every other per-issue field.
       this.dropDepartedRetryCandidate(
         issueId,
         retryEntry.identifier ?? issueId,
@@ -5423,6 +5462,8 @@ export class OrchestratorCore {
         retryEntry: null,
       };
     }
+    // Present in the candidate set — reset any prior absence streak.
+    this.clearStaleRetryCandidateAbsence(issueId);
 
     if (!this.admitRetryResumeRequirement(issue, retryEntry)) {
       this.releaseClaim(issueId);
@@ -7754,6 +7795,7 @@ export class OrchestratorCore {
     anchorCursorAtMs = this.now().getTime(),
   ): void {
     delete this.state.issueStages[issueId];
+    delete this.state.staleRetryCandidateAbsence[issueId];
     delete this.state.issuePendingStageSignals[issueId];
     delete this.state.issueReworkCounts[issueId];
     delete this.state.issuePassedStages[issueId];
@@ -12846,6 +12888,23 @@ export class OrchestratorCore {
     });
   }
 
+  /**
+   * Record that a retrying issue was absent from a successful candidate fetch and
+   * return the new consecutive-absence count (SYMPH-775). Callers drop only once
+   * the count reaches {@link STALE_RETRY_CANDIDATE_ABSENCE_DROP_THRESHOLD}; a
+   * lower count is re-deferred so a single stale snapshot cannot release a retry.
+   */
+  private noteStaleRetryCandidateAbsence(issueId: string): number {
+    const next = (this.state.staleRetryCandidateAbsence[issueId] ?? 0) + 1;
+    this.state.staleRetryCandidateAbsence[issueId] = next;
+    return next;
+  }
+
+  /** Reset the consecutive-absence counter (issue reappeared or terminated). */
+  private clearStaleRetryCandidateAbsence(issueId: string): void {
+    delete this.state.staleRetryCandidateAbsence[issueId];
+  }
+
   private intentIdempotencyContext(
     input: {
       verb: IntentVerb;
@@ -14279,6 +14338,7 @@ function cloneOrchestratorState(state: OrchestratorState): OrchestratorState {
     running: cloneRecord(state.running, cloneRunningEntry),
     claimed: new Set(state.claimed),
     retryAttempts: cloneRecord(state.retryAttempts, cloneRetryEntry),
+    staleRetryCandidateAbsence: clonePlain(state.staleRetryCandidateAbsence),
     completed: new Set(state.completed),
     failed: new Set(state.failed),
     resumeRequired: new Set(state.resumeRequired),
@@ -14328,6 +14388,7 @@ function restoreOrchestratorState(
   target.running = snapshot.running;
   target.claimed = snapshot.claimed;
   target.retryAttempts = snapshot.retryAttempts;
+  target.staleRetryCandidateAbsence = snapshot.staleRetryCandidateAbsence;
   target.completed = snapshot.completed;
   target.failed = snapshot.failed;
   target.resumeRequired = snapshot.resumeRequired;

@@ -1737,6 +1737,11 @@ describe("OrchestratorRuntimeHost", () => {
       expect(Object.keys(host.getState().retryAttempts)).toEqual(["1"]);
 
       tracker.setCandidates([]);
+      // SYMPH-775: a single absent fetch is re-deferred (possible stale
+      // snapshot); the genuinely-departed issue releases on the second.
+      const deferResult = await host.runRetryTimer("1");
+      expect(deferResult.released).toBe(false);
+
       const retryResult = await host.runRetryTimer("1");
 
       expect(retryResult).toEqual({
