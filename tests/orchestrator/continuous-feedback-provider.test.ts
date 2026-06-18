@@ -1,3 +1,7 @@
+import { mkdtemp, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import type { Issue } from "../../src/domain/model.js";
@@ -5,6 +9,7 @@ import {
   type ContinuousFeedbackCommandInput,
   createContinuousFeedbackProvider,
   probeContinuousFeedbackModel,
+  runContinuousFeedbackCommand,
 } from "../../src/orchestrator/continuous-feedback-provider.js";
 
 describe("continuous feedback provider", () => {
@@ -294,6 +299,45 @@ describe("continuous feedback provider", () => {
 
     expect(result.available).toBe(false);
     expect(result.detail).toContain("timed out");
+  });
+
+  it("force-kills a SIGTERM-ignoring runner so a timed-out probe child cannot outlive the call (SYMPH-761)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "symphony-cf-probe-kill-"));
+    const pidFile = join(dir, "pid");
+    // A child that records its pid, ignores SIGTERM, and stays alive: only the
+    // SIGKILL escalation can stop it, and the call must not resolve until it
+    // actually exits (no orphaned runner past the awaited startup preflight).
+    const result = await runContinuousFeedbackCommand({
+      command: process.execPath,
+      args: [
+        "-e",
+        `require("fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);`,
+      ],
+      cwd: process.cwd(),
+      prompt: "",
+      timeoutMs: 250,
+      killGraceMs: 250,
+    });
+
+    expect(result.exitCode).toBeNull();
+    const childPid = Number((await readFile(pidFile, "utf8")).trim());
+    expect(Number.isInteger(childPid)).toBe(true);
+    // The call resolved only from `close`, so the child must already be dead.
+    let alive = true;
+    try {
+      process.kill(childPid, 0);
+    } catch {
+      alive = false;
+    }
+    if (alive) {
+      // Safety net so a regression cannot leak the child into the suite.
+      try {
+        process.kill(childPid, "SIGKILL");
+      } catch {
+        // already gone
+      }
+    }
+    expect(alive).toBe(false);
   });
 });
 

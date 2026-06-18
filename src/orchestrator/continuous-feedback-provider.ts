@@ -20,6 +20,11 @@ const DEFAULT_MAX_DIFF_CHARS = 12_000;
 // (even cold) local model to resolve, short enough to bound the startup wait;
 // a runner that does not answer in time reads as unavailable.
 const DEFAULT_FEEDBACK_PROBE_TIMEOUT_MS = 10_000;
+// Grace after SIGTERM before SIGKILL on timeout (SYMPH-761 council R2). Bounds
+// how long a SIGTERM-ignoring runner can delay the call before it is force-
+// killed and the call resolves; SIGKILL cannot be caught, so `close` always
+// follows and the child is guaranteed dead before the promise settles.
+const DEFAULT_FEEDBACK_KILL_GRACE_MS = 3_000;
 const CONTINUOUS_FEEDBACK_PROBE_PROMPT =
   "Continuous-feedback startup preflight. Reply with the single token OK.";
 
@@ -37,6 +42,13 @@ export interface ContinuousFeedbackCommandInput {
   cwd: string;
   prompt: string;
   timeoutMs: number;
+  /**
+   * Grace period after SIGTERM before escalating to SIGKILL on timeout
+   * (SYMPH-761). The command resolves only once the child has actually exited,
+   * so a runner that ignores SIGTERM cannot outlive the call (and, for the
+   * awaited startup preflight, cannot be orphaned past startup).
+   */
+  killGraceMs?: number;
 }
 
 export interface ContinuousFeedbackCommandResult {
@@ -102,21 +114,25 @@ export async function runContinuousFeedbackCommand(
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let timedOut = false;
+    let killTimer: ReturnType<typeof setTimeout> | null = null;
 
+    // On timeout, SIGTERM then escalate to SIGKILL after a grace period, and
+    // settle only from the `close` handler — so the call never resolves while
+    // the child is still alive, even if the runner ignores SIGTERM (SYMPH-761).
     const timeout = setTimeout(() => {
       if (settled) {
         return;
       }
+      timedOut = true;
       child.kill("SIGTERM");
-      settled = true;
-      resolve({
-        stdout,
-        stderr:
-          stderr.trim() === ""
-            ? `Continuous feedback command timed out after ${input.timeoutMs}ms.`
-            : stderr,
-        exitCode: null,
-      });
+      killTimer = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // Child already exited between SIGTERM and the grace deadline.
+        }
+      }, input.killGraceMs ?? DEFAULT_FEEDBACK_KILL_GRACE_MS);
     }, input.timeoutMs);
 
     child.stdout?.setEncoding("utf8");
@@ -132,6 +148,9 @@ export async function runContinuousFeedbackCommand(
         return;
       }
       clearTimeout(timeout);
+      if (killTimer !== null) {
+        clearTimeout(killTimer);
+      }
       settled = true;
       resolve({
         stdout,
@@ -144,7 +163,21 @@ export async function runContinuousFeedbackCommand(
         return;
       }
       clearTimeout(timeout);
+      if (killTimer !== null) {
+        clearTimeout(killTimer);
+      }
       settled = true;
+      if (timedOut) {
+        resolve({
+          stdout,
+          stderr:
+            stderr.trim() === ""
+              ? `Continuous feedback command timed out after ${input.timeoutMs}ms.`
+              : stderr,
+          exitCode: null,
+        });
+        return;
+      }
       resolve({ stdout, stderr, exitCode });
     });
   });
