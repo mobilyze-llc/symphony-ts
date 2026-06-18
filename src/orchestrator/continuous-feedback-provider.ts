@@ -107,10 +107,40 @@ export async function runContinuousFeedbackCommand(
   input: ContinuousFeedbackCommandInput,
 ): Promise<ContinuousFeedbackCommandResult> {
   return await new Promise((resolve) => {
+    // `detached` makes the runner the leader of a new process group whose id
+    // equals its pid (SYMPH-783). A descendant the runner spawns joins that
+    // group and inherits its stdio, so signalling the GROUP — not just the
+    // immediate child — reaps the whole tree on timeout/kill. Without this, a
+    // long-lived descendant that inherited the pipes is orphaned when only the
+    // runner is killed. POSIX-only; `killRunnerTree` degrades to the immediate
+    // child where process groups are unavailable (Symphony runs macOS/Linux).
     const child = spawn(input.command, input.args, {
       cwd: input.cwd,
+      detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
+    // Reap the runner's whole process group. `process.kill(-pid, signal)`
+    // targets the group led by the detached runner (pgid === runner pid),
+    // reaching descendants that inherited it. If the group is unavailable —
+    // no process-group support on this platform, or the group is already gone
+    // (ESRCH) — fall back to signalling just the immediate child so the runner
+    // still terminates. All signalling errors are benign and swallowed.
+    const killRunnerTree = (signal: NodeJS.Signals): void => {
+      const pid = child.pid;
+      if (pid !== undefined) {
+        try {
+          process.kill(-pid, signal);
+          return;
+        } catch {
+          // Process group unavailable or already gone; fall back below.
+        }
+      }
+      try {
+        child.kill(signal);
+      } catch {
+        // Immediate child already exited.
+      }
+    };
     let stdout = "";
     let stderr = "";
     let settled = false;
@@ -119,35 +149,35 @@ export async function runContinuousFeedbackCommand(
     let exitCode: number | null = null;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
 
-    // Timeout policy (SYMPH-761 R2/R3/R4). Three settlement paths cover every
-    // ordering of `exit`, `close`, and the timeout:
+    // Timeout policy (SYMPH-761 R2/R3/R4, extended for SYMPH-783). Three
+    // settlement paths cover every ordering of `exit`, `close`, and the
+    // timeout:
     //   - normal completion: settle from `close` (full stdout/stderr drained);
-    //   - timeout while still running: SIGTERM then SIGKILL after a grace
-    //     period, and settle from the runner's `exit` (process dead) — NOT
-    //     `close`, which a descendant that inherited the pipes can hold open
-    //     indefinitely and hang the awaited startup preflight;
+    //   - timeout while still running: SIGTERM then SIGKILL the runner's whole
+    //     process group after a grace period, and settle from the runner's
+    //     `exit` (process dead) — NOT `close`, which a descendant that
+    //     inherited the pipes can hold open indefinitely and hang the awaited
+    //     startup preflight;
     //   - runner already exited but `close` is stalled by such a descendant:
     //     the timeout fires and settles with the runner's own result.
     // `exit` always precedes `close`, so the runner we spawned is dead before
-    // any timeout-path settle.
+    // any timeout-path settle. The group SIGTERM/SIGKILL here runs while the
+    // runner (the group leader) is still alive, so the group id is unambiguous.
     const timeout = setTimeout(() => {
       if (settled) {
         return;
       }
       if (exited) {
         // Runner finished before the timeout, but `close` is stalled; its
-        // output was already delivered, so settle with the captured result.
+        // output was already delivered (and `exit` already reaped its group),
+        // so settle with the captured result.
         settleExited();
         return;
       }
       timedOut = true;
-      child.kill("SIGTERM");
+      killRunnerTree("SIGTERM");
       killTimer = setTimeout(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          // Child already exited between SIGTERM and the grace deadline.
-        }
+        killRunnerTree("SIGKILL");
       }, input.killGraceMs ?? DEFAULT_FEEDBACK_KILL_GRACE_MS);
     }, input.timeoutMs);
 
@@ -204,6 +234,18 @@ export async function runContinuousFeedbackCommand(
     child.on("exit", (code) => {
       exited = true;
       exitCode = code;
+      // Reap any descendant still in the runner's group (SYMPH-783). The runner
+      // is reaped exactly as this fires, so its pid (the group id) is freed only
+      // now — but we signal synchronously, in the same turn, and macOS/Linux
+      // allocate pids sequentially, so the id cannot be reused yet and the kill
+      // cannot target an unrelated process. A descendant that inherited the
+      // runner's stdio and outlived it (holding `close` open) is force-killed
+      // here so the whole tree dies and `close` can then fire. This also covers
+      // a runner that exits gracefully on SIGTERM before the grace SIGKILL
+      // (whose timer is cleared on settle), which would otherwise strand a
+      // SIGTERM-ignoring descendant. When no descendant survives, the group is
+      // empty and this is a benign no-op (ESRCH, swallowed).
+      killRunnerTree("SIGKILL");
       // A timeout-initiated kill reports a timeout result; a normal exit waits
       // for `close` (the timeout above breaks a stalled `close`).
       if (timedOut) {

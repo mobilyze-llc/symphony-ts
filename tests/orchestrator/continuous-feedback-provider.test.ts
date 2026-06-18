@@ -340,16 +340,19 @@ describe("continuous feedback provider", () => {
     expect(alive).toBe(false);
   });
 
-  it("does not hang when a timed-out runner leaves a descendant holding the inherited pipes (SYMPH-761)", async () => {
+  it("reaps a timed-out runner AND its SIGTERM-ignoring descendant via the process group (SYMPH-783)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "symphony-cf-probe-desc-"));
     const runnerPidFile = join(dir, "runner-pid");
     const descPidFile = join(dir, "desc-pid");
     const runnerScript = join(dir, "runner.mjs");
     // The runner ignores SIGTERM and spawns a descendant that INHERITS its
-    // stdio (the pipes back to us) and never exits. `close` would wait for
-    // those pipes to drain (never), so resolving on `close` would hang the
-    // awaited preflight forever; resolving on the runner's `exit` does not.
-    const descInline = `require("fs").writeFileSync(${JSON.stringify(descPidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
+    // stdio (the pipes back to us), also ignores SIGTERM, and never exits.
+    // Signalling only the immediate runner (pre-SYMPH-783) leaves the
+    // descendant orphaned and holding the pipes; reaping the whole process
+    // group kills both. Because both ignore SIGTERM, only the group-scoped
+    // SIGKILL escalation can stop them — this is not SIGTERM's default
+    // termination doing the work.
+    const descInline = `require("fs").writeFileSync(${JSON.stringify(descPidFile)}, String(process.pid)); process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);`;
     const runnerSource = `import { spawn } from "node:child_process";
 import { writeFileSync } from "node:fs";
 writeFileSync(${JSON.stringify(runnerPidFile)}, String(process.pid));
@@ -368,36 +371,38 @@ setInterval(() => {}, 1000);
       killGraceMs: 250,
     });
 
-    // It RESOLVED (did not hang on the descendant's held pipes).
+    // It RESOLVED (did not hang on the descendant's held pipes)...
     expect(result.exitCode).toBeNull();
-
-    // Cleanup: the runner is force-killed; the orphaned descendant is not reaped
-    // by us (full process-tree reaping is out of scope — see follow-up), so kill
-    // it here to avoid leaking into the suite.
-    for (const file of [runnerPidFile, descPidFile]) {
-      try {
-        const pid = Number((await readFile(file, "utf8")).trim());
-        if (Number.isInteger(pid)) {
-          process.kill(pid, "SIGKILL");
-        }
-      } catch {
-        // not written yet, or already gone
-      }
-    }
+    // ...and the WHOLE tree is dead: the runner and the descendant it spawned.
+    // No manual descendant cleanup — the runner's process group is reaped.
+    const runnerPid = await readPid(runnerPidFile);
+    const descendantPid = await readPid(descPidFile);
+    await assertProcessReaped(runnerPid, "runner");
+    await assertProcessReaped(descendantPid, "descendant");
   });
 
-  it("settles a runner that exits before the timeout but leaves a descendant holding the pipes (SYMPH-761)", async () => {
+  it("reaps a descendant left holding the pipes when the runner exits before the timeout (SYMPH-783)", async () => {
     const dir = await mkdtemp(join(tmpdir(), "symphony-cf-probe-exit-"));
     const descPidFile = join(dir, "desc-pid");
     const runnerScript = join(dir, "runner-exit.mjs");
     // The runner spawns a long-lived stdio-inheriting descendant, then exits
     // NORMALLY right away. Its `exit` fires before the timeout (so the timeout
     // path's kill never runs), but `close` stays open on the descendant. The
-    // timeout must still settle — with the runner's own (success) result, not a
-    // false "timed out" — instead of hanging forever (R4 missed-settle).
-    const descInline = `require("fs").writeFileSync(${JSON.stringify(descPidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
+    // call must still settle — with the runner's own (success) result, not a
+    // false "timed out" — instead of hanging forever (SYMPH-761 R4). The
+    // descendant, orphaned via the inherited pipes, is reaped through the
+    // runner's process group rather than leaking (SYMPH-783).
+    //
+    // The runner records the descendant's pid synchronously (from `spawn().pid`,
+    // known before the runner exits) rather than having the descendant
+    // self-report: the group reap is prompt enough to kill the descendant
+    // during its own startup, before it could write its pid. The descendant
+    // joins the runner's process group at fork, so it is reaped regardless.
+    const descInline = "setInterval(() => {}, 1000);";
     const runnerSource = `import { spawn } from "node:child_process";
-spawn(process.execPath, ["-e", ${JSON.stringify(descInline)}], { stdio: "inherit" });
+import { writeFileSync } from "node:fs";
+const descendant = spawn(process.execPath, ["-e", ${JSON.stringify(descInline)}], { stdio: "inherit" });
+writeFileSync(${JSON.stringify(descPidFile)}, String(descendant.pid));
 process.exit(0);
 `;
     await writeFile(runnerScript, runnerSource, "utf8");
@@ -411,19 +416,71 @@ process.exit(0);
       killGraceMs: 250,
     });
 
-    // Resolved (no hang) reporting the runner's own clean exit, not a timeout.
+    // Resolved (no hang) reporting the runner's own clean exit, not a timeout...
     expect(result.exitCode).toBe(0);
-
-    try {
-      const pid = Number((await readFile(descPidFile, "utf8")).trim());
-      if (Number.isInteger(pid)) {
-        process.kill(pid, "SIGKILL");
-      }
-    } catch {
-      // not written yet, or already gone
-    }
+    // ...and the descendant was reaped, not leaked. No manual cleanup.
+    const descendantPid = await readPid(descPidFile);
+    await assertProcessReaped(descendantPid, "descendant");
   });
 });
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    // Signal 0 probes for existence/permission without delivering a signal.
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function readPid(file: string): Promise<number> {
+  // The pid is written synchronously at child startup, but the file may not be
+  // visible the instant the call resolves; poll briefly within a bounded window.
+  for (let attempt = 0; attempt < 200; attempt++) {
+    try {
+      const raw = (await readFile(file, "utf8")).trim();
+      if (raw !== "") {
+        const pid = Number(raw);
+        if (Number.isInteger(pid) && pid > 0) {
+          return pid;
+        }
+      }
+    } catch {
+      // pid file not written yet
+    }
+    await delay(10);
+  }
+  throw new Error(`pid file ${file} was never populated`);
+}
+
+async function assertProcessReaped(pid: number, label: string): Promise<void> {
+  // After the call resolves the target has been signalled; allow a brief,
+  // bounded window for the OS to actually reap it (a just-killed process can
+  // linger momentarily as a zombie before its reaper collects it).
+  let alive = isProcessAlive(pid);
+  for (let attempt = 0; alive && attempt < 200; attempt++) {
+    await delay(10);
+    alive = isProcessAlive(pid);
+  }
+  if (alive) {
+    // A regression leaked the process; force-kill it so it cannot poison the
+    // rest of the suite, then fail loudly below.
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      // already gone
+    }
+  }
+  expect(
+    alive,
+    `${label} (pid ${pid}) should be reaped after the call resolves`,
+  ).toBe(false);
+}
 
 function createProviderInput() {
   return {
