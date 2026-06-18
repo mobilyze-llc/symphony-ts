@@ -115,16 +115,29 @@ export async function runContinuousFeedbackCommand(
     let stderr = "";
     let settled = false;
     let timedOut = false;
+    let exited = false;
+    let exitCode: number | null = null;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
 
-    // On timeout, SIGTERM then escalate to SIGKILL after a grace period. The
-    // call settles from the runner's `exit` (process dead), NOT `close`:
-    // `close` additionally waits for the stdio streams to drain, which a
-    // descendant that inherited the pipes can delay indefinitely and hang the
-    // awaited startup preflight. `exit` after SIGKILL is bounded and guarantees
-    // the runner we spawned is gone before we resolve (SYMPH-761 R2/R3).
+    // Timeout policy (SYMPH-761 R2/R3/R4). Three settlement paths cover every
+    // ordering of `exit`, `close`, and the timeout:
+    //   - normal completion: settle from `close` (full stdout/stderr drained);
+    //   - timeout while still running: SIGTERM then SIGKILL after a grace
+    //     period, and settle from the runner's `exit` (process dead) — NOT
+    //     `close`, which a descendant that inherited the pipes can hold open
+    //     indefinitely and hang the awaited startup preflight;
+    //   - runner already exited but `close` is stalled by such a descendant:
+    //     the timeout fires and settles with the runner's own result.
+    // `exit` always precedes `close`, so the runner we spawned is dead before
+    // any timeout-path settle.
     const timeout = setTimeout(() => {
       if (settled) {
+        return;
+      }
+      if (exited) {
+        // Runner finished before the timeout, but `close` is stalled; its
+        // output was already delivered, so settle with the captured result.
+        settleExited();
         return;
       }
       timedOut = true;
@@ -144,7 +157,7 @@ export async function runContinuousFeedbackCommand(
         clearTimeout(killTimer);
       }
     };
-    const settleTimedOut = (): void => {
+    function settleTimedOut(): void {
       if (settled) {
         return;
       }
@@ -158,7 +171,15 @@ export async function runContinuousFeedbackCommand(
             : stderr,
         exitCode: null,
       });
-    };
+    }
+    function settleExited(): void {
+      if (settled) {
+        return;
+      }
+      clearTimers();
+      settled = true;
+      resolve({ stdout, stderr, exitCode });
+    }
 
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
@@ -180,16 +201,16 @@ export async function runContinuousFeedbackCommand(
         exitCode: 1,
       });
     });
-    // Timeout path: the runner process has terminated (SIGTERM/SIGKILL). Resolve
-    // now — `exit` precedes `close`, and waiting for `close` could hang on a
-    // descendant holding the inherited pipes (SYMPH-761 R3).
-    child.on("exit", () => {
+    child.on("exit", (code) => {
+      exited = true;
+      exitCode = code;
+      // A timeout-initiated kill reports a timeout result; a normal exit waits
+      // for `close` (the timeout above breaks a stalled `close`).
       if (timedOut) {
         settleTimedOut();
       }
     });
-    // Normal path: wait for `close` so the full stdout/stderr is captured.
-    child.on("close", (exitCode) => {
+    child.on("close", () => {
       if (settled) {
         return;
       }

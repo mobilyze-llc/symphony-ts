@@ -385,6 +385,44 @@ setInterval(() => {}, 1000);
       }
     }
   });
+
+  it("settles a runner that exits before the timeout but leaves a descendant holding the pipes (SYMPH-761)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "symphony-cf-probe-exit-"));
+    const descPidFile = join(dir, "desc-pid");
+    const runnerScript = join(dir, "runner-exit.mjs");
+    // The runner spawns a long-lived stdio-inheriting descendant, then exits
+    // NORMALLY right away. Its `exit` fires before the timeout (so the timeout
+    // path's kill never runs), but `close` stays open on the descendant. The
+    // timeout must still settle — with the runner's own (success) result, not a
+    // false "timed out" — instead of hanging forever (R4 missed-settle).
+    const descInline = `require("fs").writeFileSync(${JSON.stringify(descPidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
+    const runnerSource = `import { spawn } from "node:child_process";
+spawn(process.execPath, ["-e", ${JSON.stringify(descInline)}], { stdio: "inherit" });
+process.exit(0);
+`;
+    await writeFile(runnerScript, runnerSource, "utf8");
+
+    const result = await runContinuousFeedbackCommand({
+      command: process.execPath,
+      args: [runnerScript],
+      cwd: process.cwd(),
+      prompt: "",
+      timeoutMs: 250,
+      killGraceMs: 250,
+    });
+
+    // Resolved (no hang) reporting the runner's own clean exit, not a timeout.
+    expect(result.exitCode).toBe(0);
+
+    try {
+      const pid = Number((await readFile(descPidFile, "utf8")).trim());
+      if (Number.isInteger(pid)) {
+        process.kill(pid, "SIGKILL");
+      }
+    } catch {
+      // not written yet, or already gone
+    }
+  });
 });
 
 function createProviderInput() {
