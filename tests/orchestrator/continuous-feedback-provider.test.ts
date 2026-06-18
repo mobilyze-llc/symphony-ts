@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -338,6 +338,52 @@ describe("continuous feedback provider", () => {
       }
     }
     expect(alive).toBe(false);
+  });
+
+  it("does not hang when a timed-out runner leaves a descendant holding the inherited pipes (SYMPH-761)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "symphony-cf-probe-desc-"));
+    const runnerPidFile = join(dir, "runner-pid");
+    const descPidFile = join(dir, "desc-pid");
+    const runnerScript = join(dir, "runner.mjs");
+    // The runner ignores SIGTERM and spawns a descendant that INHERITS its
+    // stdio (the pipes back to us) and never exits. `close` would wait for
+    // those pipes to drain (never), so resolving on `close` would hang the
+    // awaited preflight forever; resolving on the runner's `exit` does not.
+    const descInline = `require("fs").writeFileSync(${JSON.stringify(descPidFile)}, String(process.pid)); setInterval(() => {}, 1000);`;
+    const runnerSource = `import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+writeFileSync(${JSON.stringify(runnerPidFile)}, String(process.pid));
+spawn(process.execPath, ["-e", ${JSON.stringify(descInline)}], { stdio: "inherit" });
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1000);
+`;
+    await writeFile(runnerScript, runnerSource, "utf8");
+
+    const result = await runContinuousFeedbackCommand({
+      command: process.execPath,
+      args: [runnerScript],
+      cwd: process.cwd(),
+      prompt: "",
+      timeoutMs: 250,
+      killGraceMs: 250,
+    });
+
+    // It RESOLVED (did not hang on the descendant's held pipes).
+    expect(result.exitCode).toBeNull();
+
+    // Cleanup: the runner is force-killed; the orphaned descendant is not reaped
+    // by us (full process-tree reaping is out of scope — see follow-up), so kill
+    // it here to avoid leaking into the suite.
+    for (const file of [runnerPidFile, descPidFile]) {
+      try {
+        const pid = Number((await readFile(file, "utf8")).trim());
+        if (Number.isInteger(pid)) {
+          process.kill(pid, "SIGKILL");
+        }
+      } catch {
+        // not written yet, or already gone
+      }
+    }
   });
 });
 

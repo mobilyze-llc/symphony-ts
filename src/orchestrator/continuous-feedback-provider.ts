@@ -117,9 +117,12 @@ export async function runContinuousFeedbackCommand(
     let timedOut = false;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
 
-    // On timeout, SIGTERM then escalate to SIGKILL after a grace period, and
-    // settle only from the `close` handler — so the call never resolves while
-    // the child is still alive, even if the runner ignores SIGTERM (SYMPH-761).
+    // On timeout, SIGTERM then escalate to SIGKILL after a grace period. The
+    // call settles from the runner's `exit` (process dead), NOT `close`:
+    // `close` additionally waits for the stdio streams to drain, which a
+    // descendant that inherited the pipes can delay indefinitely and hang the
+    // awaited startup preflight. `exit` after SIGKILL is bounded and guarantees
+    // the runner we spawned is gone before we resolve (SYMPH-761 R2/R3).
     const timeout = setTimeout(() => {
       if (settled) {
         return;
@@ -135,6 +138,28 @@ export async function runContinuousFeedbackCommand(
       }, input.killGraceMs ?? DEFAULT_FEEDBACK_KILL_GRACE_MS);
     }, input.timeoutMs);
 
+    const clearTimers = (): void => {
+      clearTimeout(timeout);
+      if (killTimer !== null) {
+        clearTimeout(killTimer);
+      }
+    };
+    const settleTimedOut = (): void => {
+      if (settled) {
+        return;
+      }
+      clearTimers();
+      settled = true;
+      resolve({
+        stdout,
+        stderr:
+          stderr.trim() === ""
+            ? `Continuous feedback command timed out after ${input.timeoutMs}ms.`
+            : stderr,
+        exitCode: null,
+      });
+    };
+
     child.stdout?.setEncoding("utf8");
     child.stderr?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
@@ -147,10 +172,7 @@ export async function runContinuousFeedbackCommand(
       if (settled) {
         return;
       }
-      clearTimeout(timeout);
-      if (killTimer !== null) {
-        clearTimeout(killTimer);
-      }
+      clearTimers();
       settled = true;
       resolve({
         stdout,
@@ -158,26 +180,21 @@ export async function runContinuousFeedbackCommand(
         exitCode: 1,
       });
     });
+    // Timeout path: the runner process has terminated (SIGTERM/SIGKILL). Resolve
+    // now — `exit` precedes `close`, and waiting for `close` could hang on a
+    // descendant holding the inherited pipes (SYMPH-761 R3).
+    child.on("exit", () => {
+      if (timedOut) {
+        settleTimedOut();
+      }
+    });
+    // Normal path: wait for `close` so the full stdout/stderr is captured.
     child.on("close", (exitCode) => {
       if (settled) {
         return;
       }
-      clearTimeout(timeout);
-      if (killTimer !== null) {
-        clearTimeout(killTimer);
-      }
+      clearTimers();
       settled = true;
-      if (timedOut) {
-        resolve({
-          stdout,
-          stderr:
-            stderr.trim() === ""
-              ? `Continuous feedback command timed out after ${input.timeoutMs}ms.`
-              : stderr,
-          exitCode: null,
-        });
-        return;
-      }
       resolve({ stdout, stderr, exitCode });
     });
   });
