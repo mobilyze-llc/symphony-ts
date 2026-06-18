@@ -44,6 +44,7 @@ import {
 } from "../../src/orchestrator/rate-limit-persistence.js";
 import {
   OrchestratorRuntimeHost,
+  RuntimeHostStartupError,
   createWorkspaceHookLogger,
   deliverTrackedWorkerStopSignal,
   extractProductName,
@@ -3581,6 +3582,7 @@ describe("OrchestratorRuntimeHost", () => {
       model: "local-flash",
       role: "continuous-feedback",
       bounceOnFinding: true,
+      preflightFailClosed: false,
     };
     const commands: Array<{
       command: string;
@@ -3677,6 +3679,132 @@ describe("OrchestratorRuntimeHost", () => {
     });
   });
 
+  it("surfaces an unavailable continuous-feedback model at startup without blocking by default (SYMPH-761)", async () => {
+    const config = createConfig();
+    config.continuousFeedback = {
+      enabled: true,
+      events: ["checkpoint"],
+      runner: "pi",
+      model: "ds4-studio2/missing-model",
+      role: "continuous-feedback",
+      bounceOnFinding: true,
+      preflightFailClosed: false,
+    };
+    const host = new OrchestratorRuntimeHost({
+      config,
+      tracker: createTracker(),
+      runContinuousFeedbackCommand: async () => ({
+        exitCode: 1,
+        stderr: "model not found: ds4-studio2/missing-model",
+        stdout: "",
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const result = await host.runContinuousFeedbackModelPreflight();
+    expect(result).toMatchObject({ available: false });
+
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.continuous_feedback_preflight).toMatchObject({
+      available: false,
+      model: "ds4-studio2/missing-model",
+      runner: "pi",
+    });
+    expect(snapshot.continuous_feedback_preflight?.detail).toContain(
+      "model not found",
+    );
+  });
+
+  it("fails startup closed when the continuous-feedback model is unavailable and fail-closed is opted in (SYMPH-761)", async () => {
+    const config = createConfig();
+    config.continuousFeedback = {
+      enabled: true,
+      events: ["checkpoint"],
+      runner: "pi",
+      model: "ds4-studio2/missing-model",
+      role: "continuous-feedback",
+      bounceOnFinding: true,
+      preflightFailClosed: true,
+    };
+    const host = new OrchestratorRuntimeHost({
+      config,
+      tracker: createTracker(),
+      runContinuousFeedbackCommand: async () => ({
+        exitCode: 1,
+        stderr: "model not found: ds4-studio2/missing-model",
+        stdout: "",
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await expect(
+      host.runContinuousFeedbackModelPreflight(),
+    ).rejects.toBeInstanceOf(RuntimeHostStartupError);
+  });
+
+  it("records an available continuous-feedback model and never blocks startup (SYMPH-761)", async () => {
+    const config = createConfig();
+    config.continuousFeedback = {
+      enabled: true,
+      events: ["checkpoint"],
+      runner: "pi",
+      model: "ds4-studio2/deepseek-v4-flash",
+      role: "continuous-feedback",
+      bounceOnFinding: true,
+      preflightFailClosed: true,
+    };
+    const host = new OrchestratorRuntimeHost({
+      config,
+      tracker: createTracker(),
+      runContinuousFeedbackCommand: async () => ({
+        exitCode: 0,
+        stderr: "",
+        stdout: "OK",
+      }),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const result = await host.runContinuousFeedbackModelPreflight();
+    expect(result).toMatchObject({ available: true });
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.continuous_feedback_preflight).toMatchObject({
+      available: true,
+      model: "ds4-studio2/deepseek-v4-flash",
+      runner: "pi",
+    });
+  });
+
+  it("skips the continuous-feedback preflight when no model is configured (SYMPH-761)", async () => {
+    const config = createConfig();
+    config.continuousFeedback = {
+      enabled: true,
+      events: ["checkpoint"],
+      runner: "pi",
+      model: null,
+      role: "continuous-feedback",
+      bounceOnFinding: true,
+      // Fail-closed opt-in must not trip when there is no configured model to
+      // probe — a null model means "runner default", nothing to preflight.
+      preflightFailClosed: true,
+    };
+    let probed = false;
+    const host = new OrchestratorRuntimeHost({
+      config,
+      tracker: createTracker(),
+      runContinuousFeedbackCommand: async () => {
+        probed = true;
+        return { exitCode: 0, stderr: "", stdout: "" };
+      },
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    const result = await host.runContinuousFeedbackModelPreflight();
+    expect(result).toBeNull();
+    expect(probed).toBe(false);
+    const snapshot = await host.getRuntimeSnapshot();
+    expect(snapshot.continuous_feedback_preflight).toBeNull();
+  });
+
   it("projects failed continuous-feedback provider runs as unavailable in snapshot and loop trace", async () => {
     const tracker = createTracker();
     const fakeRunner = new FakeAgentRunner();
@@ -3688,6 +3816,7 @@ describe("OrchestratorRuntimeHost", () => {
       model: "local-flash",
       role: "continuous-feedback",
       bounceOnFinding: true,
+      preflightFailClosed: false,
     };
     const host = new OrchestratorRuntimeHost({
       config,
@@ -8872,6 +9001,7 @@ function createConfig(): ResolvedWorkflowConfig {
       model: "local-flash",
       role: "continuous-feedback",
       bounceOnFinding: true,
+      preflightFailClosed: false,
     },
     stages: null,
     escalationState: null,

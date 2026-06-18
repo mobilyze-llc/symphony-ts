@@ -14,6 +14,13 @@ import { getDiff } from "./gate-handler.js";
 
 const DEFAULT_FEEDBACK_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_DIFF_CHARS = 12_000;
+// Startup preflight probe (SYMPH-761): a bounded availability check, not a
+// review. Short timeout — the only signal we want is whether the configured
+// model resolves on the runner; a slow or wedged runner reads as unavailable
+// rather than stalling launch.
+const DEFAULT_FEEDBACK_PROBE_TIMEOUT_MS = 20_000;
+const CONTINUOUS_FEEDBACK_PROBE_PROMPT =
+  "Continuous-feedback startup preflight. Reply with the single token OK.";
 
 export interface ContinuousFeedbackProviderInput {
   issue: Issue;
@@ -140,6 +147,57 @@ export async function runContinuousFeedbackCommand(
       resolve({ stdout, stderr, exitCode });
     });
   });
+}
+
+export interface ContinuousFeedbackProbeResult {
+  available: boolean;
+  detail: string;
+}
+
+export interface ContinuousFeedbackProbeOptions {
+  runCommand?: ContinuousFeedbackCommandExecutor;
+  cwd?: string;
+  timeoutMs?: number;
+}
+
+/**
+ * Startup model-availability preflight (SYMPH-761). Runs the configured
+ * continuous-feedback runner with the SAME `--model` arg path the live lane
+ * uses (continuous-feedback-provider) plus a minimal prompt and a short
+ * timeout. A zero exit means the model resolved on the runner; any non-zero
+ * exit or timeout means the configured model is unavailable on this host. The
+ * lane already degrades gracefully at runtime (status "unavailable"); this
+ * probe surfaces a misconfigured or down model ONCE at startup instead of
+ * leaving it to silent per-checkpoint degradation.
+ */
+export async function probeContinuousFeedbackModel(
+  lane: ContinuousFeedbackLane,
+  options: ContinuousFeedbackProbeOptions = {},
+): Promise<ContinuousFeedbackProbeResult> {
+  const runCommand = options.runCommand ?? runContinuousFeedbackCommand;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_FEEDBACK_PROBE_TIMEOUT_MS;
+  const args = buildContinuousFeedbackCommandArgs(
+    lane,
+    CONTINUOUS_FEEDBACK_PROBE_PROMPT,
+  );
+  const result = await runCommand({
+    command: lane.runner,
+    args,
+    cwd: options.cwd ?? process.cwd(),
+    prompt: CONTINUOUS_FEEDBACK_PROBE_PROMPT,
+    timeoutMs,
+  });
+
+  if (result.exitCode === 0) {
+    return {
+      available: true,
+      detail: `continuous-feedback model ${lane.model ?? "(runner default)"} resolved on ${lane.runner}`,
+    };
+  }
+  return {
+    available: false,
+    detail: summarizeProviderFailure(result),
+  };
 }
 
 function buildContinuousFeedbackCommandArgs(

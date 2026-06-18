@@ -33,6 +33,7 @@ import {
   DEFAULT_CONTINUOUS_FEEDBACK_ENABLED,
   DEFAULT_CONTINUOUS_FEEDBACK_EVENTS,
   DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
+  DEFAULT_CONTINUOUS_FEEDBACK_PREFLIGHT_FAIL_CLOSED,
   DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
   DEFAULT_CONTINUOUS_FEEDBACK_RUNNER,
   DEFAULT_HARD_STOP_CACHED_TOKEN_COST_RATIO,
@@ -387,6 +388,9 @@ export function resolveWorkflowConfig(
       bounceOnFinding:
         readBoolean(continuousFeedback.bounce_on_finding) ??
         DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
+      preflightFailClosed:
+        readBoolean(continuousFeedback.preflight_fail_closed) ??
+        DEFAULT_CONTINUOUS_FEEDBACK_PREFLIGHT_FAIL_CLOSED,
     },
     riskPredicateReasoning: {
       effort:

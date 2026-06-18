@@ -4,6 +4,7 @@ import type { Issue } from "../../src/domain/model.js";
 import {
   type ContinuousFeedbackCommandInput,
   createContinuousFeedbackProvider,
+  probeContinuousFeedbackModel,
 } from "../../src/orchestrator/continuous-feedback-provider.js";
 
 describe("continuous feedback provider", () => {
@@ -223,6 +224,76 @@ describe("continuous feedback provider", () => {
       findings: [],
     });
     expect(runCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("probes the continuous-feedback model as available on a zero-exit runner call (SYMPH-761)", async () => {
+    const commands: ContinuousFeedbackCommandInput[] = [];
+    const result = await probeContinuousFeedbackModel(
+      {
+        runner: "pi",
+        model: "ds4-studio2/deepseek-v4-flash",
+        role: "continuous-feedback",
+      },
+      {
+        cwd: "/tmp/symphony-workspace",
+        runCommand: async (input) => {
+          commands.push(input);
+          return { exitCode: 0, stderr: "", stdout: "OK" };
+        },
+      },
+    );
+
+    expect(result.available).toBe(true);
+    expect(result.detail).toContain("ds4-studio2/deepseek-v4-flash");
+    expect(result.detail).toContain("pi");
+    // The probe exercises the SAME runner + model-resolution arg path the live
+    // lane uses, so a model the runner cannot resolve fails the probe too.
+    expect(commands).toHaveLength(1);
+    expect(commands[0]?.command).toBe("pi");
+    expect(commands[0]?.args).toEqual(
+      expect.arrayContaining(["--model", "ds4-studio2/deepseek-v4-flash"]),
+    );
+  });
+
+  it("probes the continuous-feedback model as unavailable on a non-zero runner call (SYMPH-761)", async () => {
+    const result = await probeContinuousFeedbackModel(
+      {
+        runner: "pi",
+        model: "ds4-studio2/missing-model",
+        role: "continuous-feedback",
+      },
+      {
+        cwd: "/tmp/symphony-workspace",
+        runCommand: async () => ({
+          exitCode: 1,
+          stderr: "model not found: ds4-studio2/missing-model",
+          stdout: "",
+        }),
+      },
+    );
+
+    expect(result.available).toBe(false);
+    expect(result.detail).toContain("model not found");
+  });
+
+  it("treats a probe timeout (null exit code) as unavailable (SYMPH-761)", async () => {
+    const result = await probeContinuousFeedbackModel(
+      {
+        runner: "pi",
+        model: "ds4-studio2/deepseek-v4-flash",
+        role: "continuous-feedback",
+      },
+      {
+        runCommand: async () => ({
+          exitCode: null,
+          stderr: "Continuous feedback command timed out after 20000ms.",
+          stdout: "",
+        }),
+      },
+    );
+
+    expect(result.available).toBe(false);
+    expect(result.detail).toContain("timed out");
   });
 });
 

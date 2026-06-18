@@ -134,6 +134,7 @@ describe("config-resolver", () => {
       model: DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
       role: DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
       bounceOnFinding: DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
+      preflightFailClosed: false,
     });
     expect(resolved.observability.dashboardEnabled).toBe(
       DEFAULT_OBSERVABILITY_ENABLED,
@@ -594,6 +595,7 @@ describe("config-resolver", () => {
           model: "sonnet",
           role: "cheap-reviewer",
           bounce_on_finding: "false",
+          preflight_fail_closed: "true",
         },
       },
     });
@@ -605,6 +607,7 @@ describe("config-resolver", () => {
       model: "sonnet",
       role: "cheap-reviewer",
       bounceOnFinding: false,
+      preflightFailClosed: true,
     });
   });
 

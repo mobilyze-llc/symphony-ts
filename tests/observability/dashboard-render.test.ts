@@ -92,6 +92,7 @@ function buildSnapshot(
       disagreement: null,
     },
     deploy_drift: null,
+    continuous_feedback_preflight: null,
     watchdog: { clusters: [], open_breakers: [] },
     components: {},
   };

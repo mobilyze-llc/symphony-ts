@@ -74,6 +74,10 @@ export const DEFAULT_CONTINUOUS_FEEDBACK_MODEL =
   "ds4-studio2/deepseek-v4-flash";
 export const DEFAULT_CONTINUOUS_FEEDBACK_ROLE = "continuous-feedback";
 export const DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING = true;
+// Warn-not-block by default (SYMPH-761): an unavailable continuous-feedback
+// model is surfaced at startup but does not refuse launch; operators opt into
+// fail-closed via continuous_feedback.preflight_fail_closed.
+export const DEFAULT_CONTINUOUS_FEEDBACK_PREFLIGHT_FAIL_CLOSED = false;
 
 export const DEFAULT_CODEX_COMMAND = "codex app-server";
 export const DEFAULT_CODEX_EPHEMERAL_HOME = false;
@@ -233,6 +237,7 @@ export const SPEC_DEFAULTS = Object.freeze({
     model: DEFAULT_CONTINUOUS_FEEDBACK_MODEL,
     role: DEFAULT_CONTINUOUS_FEEDBACK_ROLE,
     bounceOnFinding: DEFAULT_CONTINUOUS_FEEDBACK_BOUNCE_ON_FINDING,
+    preflightFailClosed: DEFAULT_CONTINUOUS_FEEDBACK_PREFLIGHT_FAIL_CLOSED,
   },
   riskPredicateReasoning: {
     effort: DEFAULT_RISK_PREDICATE_REASONING_EFFORT,
