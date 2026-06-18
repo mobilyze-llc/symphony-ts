@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import type { DispatcherRunJournalEntry } from "../../src/domain/model.js";
 import {
+  type TrackFindingFilingResult,
   buildTrackFindingFilingMetadata,
   buildTrackFindingIssueBody,
   buildTrackFindingIssueTitle,
   collectTrackFindingsToFile,
+  reconcileFilingResult,
   reduceTrackFindingFilings,
   trackFindingMarker,
 } from "../../src/orchestrator/track-finding-filing.js";
@@ -233,6 +235,21 @@ describe("track-finding-filing pure helpers", () => {
     ).toEqual([]);
   });
 
+  it("treats an empty-string issueId as unfiled (defensive)", () => {
+    const trackFiling: CouncilTrackFindingFiling = {
+      status: "unfiled",
+      required: 1,
+      filed: 0,
+      reason: "track_findings_unfiled",
+      findings: [{ fingerprint: "fp-1", title: "t", issueId: "", url: null }],
+    };
+    expect(
+      collectTrackFindingsToFile(trackFiling, [], new Set()).map(
+        (f) => f.fingerprint,
+      ),
+    ).toEqual(["fp-1"]);
+  });
+
   it("falls back to title-only enrichment when a finding is absent from lanes", () => {
     const trackFiling: CouncilTrackFindingFiling = {
       status: "unfiled",
@@ -416,5 +433,107 @@ describe("track-finding-filing pure helpers", () => {
       { ...baseEntry("issue-1"), kind: "review_gate_result", metadata: {} },
     ];
     expect(reduceTrackFindingFilings(journal, "issue-1").size).toBe(0);
+  });
+});
+
+describe("reconcileFilingResult", () => {
+  const toFile = [
+    {
+      fingerprint: "fp-1",
+      title: "A",
+      category: null,
+      rationale: null,
+      evidence: [],
+    },
+    {
+      fingerprint: "fp-2",
+      title: "B",
+      category: null,
+      rationale: null,
+      evidence: [],
+    },
+  ];
+
+  it("synthesizes an unfiled entry for a requested fingerprint the filer omitted", () => {
+    const { filed, unfiled } = reconcileFilingResult(toFile, {
+      filed: [
+        { fingerprint: "fp-1", issueId: "ID-1", identifier: "S-1", url: "u" },
+      ],
+      unfiled: [],
+    });
+    expect(filed).toEqual([
+      { fingerprint: "fp-1", issueId: "ID-1", identifier: "S-1", url: "u" },
+    ]);
+    expect(unfiled).toEqual([
+      { fingerprint: "fp-2", reason: expect.any(String) },
+    ]);
+  });
+
+  it("drops a filed ref with an empty or non-string issueId and marks it unfiled", () => {
+    const { filed, unfiled } = reconcileFilingResult(toFile, {
+      filed: [
+        { fingerprint: "fp-1", issueId: "", identifier: "S-1", url: "u" },
+        { fingerprint: "fp-2", issueId: "ID-2", identifier: null, url: null },
+      ],
+      unfiled: [],
+    });
+    expect(filed).toEqual([
+      { fingerprint: "fp-2", issueId: "ID-2", identifier: null, url: null },
+    ]);
+    expect(unfiled.map((u) => u.fingerprint)).toEqual(["fp-1"]);
+  });
+
+  it("drops refs for fingerprints that were not requested", () => {
+    const { filed, unfiled } = reconcileFilingResult(toFile, {
+      filed: [
+        { fingerprint: "fp-1", issueId: "ID-1", identifier: null, url: null },
+        {
+          fingerprint: "fp-unknown",
+          issueId: "ID-X",
+          identifier: null,
+          url: null,
+        },
+      ],
+      unfiled: [],
+    });
+    expect(filed.map((f) => f.fingerprint)).toEqual(["fp-1"]);
+    expect(unfiled.map((u) => u.fingerprint)).toEqual(["fp-2"]);
+  });
+
+  it("preserves the filer's exact unfiled reason and defaults the rest", () => {
+    const { filed, unfiled } = reconcileFilingResult(toFile, {
+      filed: [],
+      unfiled: [{ fingerprint: "fp-1", reason: "Linear 500" }],
+    });
+    expect(filed).toEqual([]);
+    expect(unfiled).toContainEqual({
+      fingerprint: "fp-1",
+      reason: "Linear 500",
+    });
+    expect(unfiled.find((u) => u.fingerprint === "fp-2")?.reason).toBeTruthy();
+  });
+
+  it("ignores duplicate filed refs for the same fingerprint", () => {
+    const single = toFile[0];
+    if (single === undefined) throw new Error("fixture");
+    const { filed } = reconcileFilingResult([single], {
+      filed: [
+        { fingerprint: "fp-1", issueId: "ID-1", identifier: null, url: null },
+        { fingerprint: "fp-1", issueId: "ID-DUP", identifier: null, url: null },
+      ],
+      unfiled: [],
+    });
+    expect(filed).toEqual([
+      { fingerprint: "fp-1", issueId: "ID-1", identifier: null, url: null },
+    ]);
+  });
+
+  it("tolerates a malformed filer result by marking every requested finding unfiled", () => {
+    const { filed, unfiled } = reconcileFilingResult(toFile, {
+      filed: null,
+      unfiled: undefined,
+    } as unknown as TrackFindingFilingResult);
+    expect(filed).toEqual([]);
+    expect(unfiled.map((u) => u.fingerprint).sort()).toEqual(["fp-1", "fp-2"]);
   });
 });

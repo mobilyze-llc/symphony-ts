@@ -212,7 +212,12 @@ export function collectTrackFindingsToFile(
 
   const toFile: TrackFindingToFile[] = [];
   for (const entry of trackFiling.findings) {
-    if (entry.issueId !== null || alreadyFiled.has(entry.fingerprint)) {
+    // A present, non-empty issueId means the in-process seam already filed it;
+    // an empty string is treated as unfiled (defensive — the gate never emits
+    // one, but a malformed artifact must not silently drop the finding).
+    const alreadyHasDurableId =
+      entry.issueId !== null && entry.issueId.length > 0;
+    if (alreadyHasDurableId || alreadyFiled.has(entry.fingerprint)) {
       continue;
     }
     const full = byFingerprint.get(entry.fingerprint);
@@ -230,6 +235,92 @@ export function collectTrackFindingsToFile(
     });
   }
   return toFile;
+}
+
+/**
+ * Reconcile a filer's result against the exact set of findings it was asked to
+ * file (SYMPH-763, council R1 P1). The injected filer is an external contract:
+ * it may return fewer entries than requested, malformed/duplicate/unknown refs,
+ * or a ref with an empty issueId. Trusting it verbatim could journal a finding
+ * as `filed` (or omit it entirely) while it actually has no durable ID — a
+ * silent clean closeout (violates the SYMPH-760 invariant). This guarantees
+ * every requested fingerprint lands in exactly one of `filed` (with a validated,
+ * non-empty issueId) or `unfiled` (with the filer's exact reason, or a synthesized
+ * default), and drops any ref the caller did not request.
+ */
+export function reconcileFilingResult(
+  toFile: readonly TrackFindingToFile[],
+  result: { filed?: unknown; unfiled?: unknown },
+): {
+  filed: TrackFindingFilingRef[];
+  unfiled: Array<{ fingerprint: string; reason: string }>;
+} {
+  const requested = new Set(toFile.map((finding) => finding.fingerprint));
+  const filed: TrackFindingFilingRef[] = [];
+  const filedFingerprints = new Set<string>();
+  for (const raw of Array.isArray(result.filed) ? result.filed : []) {
+    const record =
+      typeof raw === "object" && raw !== null
+        ? (raw as Record<string, unknown>)
+        : null;
+    if (record === null) {
+      continue;
+    }
+    const fingerprint = record.fingerprint;
+    const issueId = record.issueId;
+    if (
+      typeof fingerprint === "string" &&
+      requested.has(fingerprint) &&
+      !filedFingerprints.has(fingerprint) &&
+      typeof issueId === "string" &&
+      issueId.length > 0
+    ) {
+      filed.push({
+        fingerprint,
+        issueId,
+        identifier:
+          typeof record.identifier === "string" ? record.identifier : null,
+        url: typeof record.url === "string" ? record.url : null,
+      });
+      filedFingerprints.add(fingerprint);
+    }
+  }
+
+  const unfiledReason = new Map<string, string>();
+  for (const raw of Array.isArray(result.unfiled) ? result.unfiled : []) {
+    const record =
+      typeof raw === "object" && raw !== null
+        ? (raw as Record<string, unknown>)
+        : null;
+    if (record === null) {
+      continue;
+    }
+    const fingerprint = record.fingerprint;
+    if (
+      typeof fingerprint === "string" &&
+      requested.has(fingerprint) &&
+      !filedFingerprints.has(fingerprint) &&
+      !unfiledReason.has(fingerprint)
+    ) {
+      unfiledReason.set(
+        fingerprint,
+        typeof record.reason === "string" && record.reason.length > 0
+          ? record.reason
+          : "filer reported the finding unfiled without a reason",
+      );
+    }
+  }
+
+  const unfiled = toFile
+    .filter((finding) => !filedFingerprints.has(finding.fingerprint))
+    .map((finding) => ({
+      fingerprint: finding.fingerprint,
+      reason:
+        unfiledReason.get(finding.fingerprint) ??
+        "filer returned no durable ref for this finding",
+    }));
+
+  return { filed, unfiled };
 }
 
 /**

@@ -1068,9 +1068,13 @@ export class LinearTrackerClient implements IssueTracker {
       ) {
         continue;
       }
-      // `containsIgnoreCase` is a substring match; require the exact marker so a
-      // longer fingerprint that contains this one as a prefix cannot alias.
-      if (!node.title.includes(marker)) {
+      // `containsIgnoreCase` is a loose substring match: it can surface an issue
+      // whose title merely embeds this marker somewhere in its human tail (e.g.
+      // a finding that references another finding's marker). We always prefix the
+      // marker, so anchor the dedup to the start of the title — that uniquely
+      // identifies the issue filed for THIS fingerprint and cannot alias on an
+      // embedded mention (council R1 P3-1).
+      if (!node.title.startsWith(marker)) {
         continue;
       }
       const stateType = node.state?.type;

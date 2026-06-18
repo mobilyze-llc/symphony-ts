@@ -380,6 +380,153 @@ describe("orchestrator core", () => {
     expect(filerCallCount).toBe(0);
   });
 
+  it("does not re-invoke the filer on a same-round replay (per-round idempotency key, SYMPH-763)", async () => {
+    let filerCallCount = 0;
+    const reviewResultPath = await writeReviewGateResultFixture({
+      termination: trackFilingTermination([
+        { fingerprint: "fp-1", title: "Track A", issueId: null, url: null },
+      ]),
+    });
+    // Pre-seed a track_finding_filing row whose key matches THIS round's
+    // reviewed head ("head-sha" from the fixture) but records the finding as
+    // unfiled (no durable ID), so per-fingerprint dedup would NOT skip it — only
+    // the per-round key short-circuit can.
+    const priorRound: DispatcherRunJournalEntry = {
+      sequence: 1,
+      idempotencyKey: "track_finding_filing:1:head-sha",
+      timestamp: "2026-03-05T00:00:00.000Z",
+      kind: "track_finding_filing",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      operation: "tracker_write",
+      stage: "review",
+      attempt: null,
+      ownerId: null,
+      lease: null,
+      summary: "prior same-round attempt",
+      metadata: {
+        track_filing_status: "unfiled",
+        track_filing_required: 1,
+        track_filing_filed_count: 0,
+        reviewed_head_sha: "head-sha",
+        filings: [
+          { fingerprint: "fp-1", status: "unfiled", reason: "Linear 503" },
+        ],
+      },
+    };
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      runJournal: [priorRound],
+      fileTrackFindings: async () => {
+        filerCallCount += 1;
+        return { filed: [], unfiled: [] };
+      },
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    expect(orchestrator.getState().issueStages["1"]).toBe("merge");
+    // The round was already attempted (same reviewed head) — do not re-fire.
+    expect(filerCallCount).toBe(0);
+  });
+
+  it("journals surviving Track findings as unfiled when no filer is wired (SYMPH-763/SYMPH-760)", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture({
+      termination: trackFilingTermination([
+        { fingerprint: "fp-1", title: "Track A", issueId: null, url: null },
+      ]),
+    });
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      // no fileTrackFindings wired
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const state = orchestrator.getState();
+    expect(state.issueStages["1"]).toBe("merge");
+    const entry = state.dispatcherRunJournal.findLast(
+      (e) => e.kind === "track_finding_filing",
+    );
+    expect(entry?.metadata.track_filing_status).toBe("unfiled");
+    const filings = entry?.metadata.filings as Array<Record<string, unknown>>;
+    expect(filings[0]).toMatchObject({
+      fingerprint: "fp-1",
+      status: "unfiled",
+      reason: "track finding filer not configured",
+    });
+  });
+
+  it("reconciles a partial filer result so an omitted finding is never journaled as filed (SYMPH-763)", async () => {
+    const reviewResultPath = await writeReviewGateResultFixture({
+      termination: trackFilingTermination([
+        { fingerprint: "fp-1", title: "Track A", issueId: null, url: null },
+        { fingerprint: "fp-2", title: "Track B", issueId: null, url: null },
+      ]),
+    });
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      // Buggy filer: returns one ref and an EMPTY unfiled list, omitting fp-2.
+      fileTrackFindings: async () => ({
+        filed: [
+          {
+            fingerprint: "fp-1",
+            issueId: "id-fp-1",
+            identifier: "SYMPH-901",
+            url: null,
+          },
+        ],
+        unfiled: [],
+      }),
+    });
+
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: [
+        "Council PASS.",
+        `[REVIEW_GATE_RESULT_PATH: ${reviewResultPath}]`,
+        "[STAGE_COMPLETE]",
+      ].join("\n"),
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const entry = orchestrator
+      .getState()
+      .dispatcherRunJournal.findLast((e) => e.kind === "track_finding_filing");
+    // fp-2 was omitted by the filer — reconciliation forces an unfiled status.
+    expect(entry?.metadata.track_filing_status).toBe("unfiled");
+    expect(entry?.metadata.track_filing_reason).toBe(
+      "track_findings_partially_filed",
+    );
+    const filings = entry?.metadata.filings as Array<Record<string, unknown>>;
+    expect(filings.find((f) => f.fingerprint === "fp-1")?.status).toBe("filed");
+    expect(filings.find((f) => f.fingerprint === "fp-2")).toMatchObject({
+      status: "unfiled",
+    });
+  });
+
   it("parks replayed merge-stage issues with passed review but no candidate before worker dispatch", async () => {
     const spawnedStages: Array<string | null> = [];
     const orchestrator = createOrchestrator({

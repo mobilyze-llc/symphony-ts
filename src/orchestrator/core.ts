@@ -198,6 +198,7 @@ import {
   type TrackFindingFilingResult,
   buildTrackFindingFilingMetadata,
   collectTrackFindingsToFile,
+  reconcileFilingResult,
   reduceTrackFindingFilings,
 } from "./track-finding-filing.js";
 import type { TrackerIssueWriteRequest } from "./tracker-write.js";
@@ -4582,26 +4583,33 @@ export class OrchestratorCore {
       reviewedHeadSha: string | null;
     },
   ): Promise<void> {
-    const filer = this.fileTrackFindings;
-    if (filer === undefined) {
-      return;
-    }
     const trackFiling = result.termination?.trackFiling;
     if (trackFiling === undefined) {
       return;
     }
+    const filer = this.fileTrackFindings;
 
-    const roundKey = `track_finding_filing:${context.issueId}:${
-      context.reviewedHeadSha ?? "unknown"
-    }`;
+    // Per-round filing is an OPTIMIZATION keyed on the reviewed head: it skips
+    // re-invoking the filer on a same-round replay/re-exit. The reviewed head is
+    // a validated non-null string at this call site (the review-artifact gate
+    // requires review_metadata.reviewed_head_sha), so when it is (defensively)
+    // null we skip the optimization (roundKey null) and rely solely on the
+    // per-fingerprint dedup below, writing under a unique key so the row is still
+    // recorded — distinct null-head rounds must not collide on one key and drop a
+    // later round's findings (council R1 P2). The per-fingerprint dedup is always
+    // the correctness guard; the round key only avoids redundant filer calls.
+    const roundKey =
+      context.reviewedHeadSha !== null
+        ? `track_finding_filing:${context.issueId}:${context.reviewedHeadSha}`
+        : null;
     if (
+      roundKey !== null &&
       this.state.dispatcherRunJournal.some(
         (entry) =>
           entry.kind === "track_finding_filing" &&
           entry.idempotencyKey === roundKey,
       )
     ) {
-      // This review round already attempted filing (replay / same-round re-exit).
       return;
     }
 
@@ -4620,40 +4628,64 @@ export class OrchestratorCore {
       return;
     }
 
-    let filingResult: TrackFindingFilingResult;
-    try {
-      filingResult = await filer({
-        issueId: context.issueId,
-        issueIdentifier: context.issueIdentifier,
-        issueTitle: context.issue.title,
-        issueUrl: context.issue.url ?? null,
-        stageName: context.stageName,
-        reviewedHeadSha: context.reviewedHeadSha,
-        repo: result.pr.repo,
-        prNumber: result.pr.number,
-        findings: toFile,
-      });
-    } catch (error) {
-      // A thrown filer must not block the merge advance: record every attempted
-      // finding as unfiled with the exact reason (SYMPH-760 invariant).
-      filingResult = {
+    let rawResult: TrackFindingFilingResult;
+    if (filer === undefined) {
+      // No autonomous filer wired: still journal an explicit unfiled row per
+      // finding so the new journal kind is self-describing (never a silent clean
+      // closeout — SYMPH-760). reduceTrackFindingFilings ignores these (no
+      // issueId), so a later round with a filer wired retries them.
+      rawResult = {
         filed: [],
         unfiled: toFile.map((finding) => ({
           fingerprint: finding.fingerprint,
-          reason: error instanceof Error ? error.message : String(error),
+          reason: "track finding filer not configured",
         })),
       };
+    } else {
+      try {
+        rawResult = await filer({
+          issueId: context.issueId,
+          issueIdentifier: context.issueIdentifier,
+          issueTitle: context.issue.title,
+          issueUrl: context.issue.url ?? null,
+          stageName: context.stageName,
+          reviewedHeadSha: context.reviewedHeadSha,
+          repo: result.pr.repo,
+          prNumber: result.pr.number,
+          findings: toFile,
+        });
+      } catch (error) {
+        // A thrown filer must not block the merge advance: record every attempted
+        // finding as unfiled with the exact reason (SYMPH-760 invariant).
+        rawResult = {
+          filed: [],
+          unfiled: toFile.map((finding) => ({
+            fingerprint: finding.fingerprint,
+            reason: error instanceof Error ? error.message : String(error),
+          })),
+        };
+      }
     }
 
+    // Reconcile the (external, untrusted) filer result against the exact
+    // requested set: validate filed refs and synthesize an unfiled+reason for any
+    // requested fingerprint the filer omitted, so a partial or malformed result
+    // can never be journaled as a clean closeout (council R1 P1).
+    const { filed, unfiled } = reconcileFilingResult(toFile, rawResult);
     const metadata = buildTrackFindingFilingMetadata({
       required: toFile.length,
       reviewedHeadSha: context.reviewedHeadSha,
-      filed: filingResult.filed,
-      unfiled: filingResult.unfiled,
+      filed,
+      unfiled,
     });
+    // A null-head row (head defensively absent) uses a unique key so distinct
+    // rounds never collide; the normal path uses the stable per-round key.
+    const entryKey =
+      roundKey ??
+      `track_finding_filing:${context.issueId}:nohead:${this.state.dispatcherRunJournal.length}`;
     try {
       await this.recordRunJournalEntry({
-        idempotencyKey: roundKey,
+        idempotencyKey: entryKey,
         timestamp: this.now().toISOString(),
         kind: "track_finding_filing",
         issueId: context.issueId,
@@ -4663,7 +4695,7 @@ export class OrchestratorCore {
         attempt: null,
         ownerId: this.leaseOwnerId,
         lease: null,
-        summary: `Filed ${filingResult.filed.length}/${toFile.length} council Track finding(s) to the tracker.`,
+        summary: `Filed ${filed.length}/${toFile.length} council Track finding(s) to the tracker.`,
         metadata,
       });
     } catch (error) {

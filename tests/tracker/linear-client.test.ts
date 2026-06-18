@@ -1191,6 +1191,68 @@ describe("createTrackFindingIssue", () => {
     expect(result.identifier).toBe("SYMPH-601");
     expect(fetchFn).toHaveBeenCalledTimes(3);
   });
+
+  it("does not dedup against an issue that only embeds the marker mid-title", async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issues: {
+              nodes: [
+                {
+                  id: "other-1",
+                  identifier: "SYMPH-410",
+                  // Marker appears in the human tail, not as the title prefix —
+                  // must NOT be treated as this fingerprint's issue.
+                  title: "[track:other] see also [track:fp-1] for context",
+                  url: "https://linear.app/x/issue/SYMPH-410",
+                  state: { name: "Backlog", type: "backlog" },
+                },
+              ],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            workflowStates: {
+              nodes: [{ id: "state-backlog", name: "Backlog" }],
+            },
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          data: {
+            issueCreate: {
+              success: true,
+              issue: {
+                id: "new-3",
+                identifier: "SYMPH-602",
+                title: "[track:fp-1] Fresh",
+                url: "https://linear.app/x/issue/SYMPH-602",
+                state: { name: "Backlog" },
+              },
+            },
+          },
+        }),
+      );
+    const client = createClient({ fetchFn });
+
+    const result = await client.createTrackFindingIssue({
+      teamId: "team-1",
+      teamKey: "SYMPH",
+      fingerprint: "fp-1",
+      title: "[track:fp-1] Fresh",
+      description: "body",
+    });
+
+    expect(result.created).toBe(true);
+    expect(result.identifier).toBe("SYMPH-602");
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  });
 });
 
 function createClient(
