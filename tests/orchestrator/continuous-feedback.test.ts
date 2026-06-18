@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ContinuousFeedbackLane } from "../../src/domain/model.js";
 import {
+  ensureDecorrelatedFeedbackLane,
   feedbackFindingCarriesNewSignal,
   getOpenContinuousFeedbackFindings,
   mergeContinuousFeedbackCheckpoint,
@@ -231,5 +232,53 @@ describe("feedback injection-hygiene policy (SYMPH-378)", () => {
     expect(second.findings[0]?.status).toBe("open");
     expect(second.status).toBe("finding");
     expect(second.findings[0]?.occurrences).toBe(2);
+  });
+});
+
+describe("ensureDecorrelatedFeedbackLane (SYMPH-762)", () => {
+  it("decorrelates a same-lane reviewer by role, keeping a resolvable model", () => {
+    const lane: ContinuousFeedbackLane = {
+      runner: "pi",
+      model: "ds4-studio2/deepseek-v4-flash",
+      role: "reviewer",
+    };
+
+    const decorrelated = ensureDecorrelatedFeedbackLane(lane, lane);
+
+    // Decorrelation is by role only; the model stays a real, resolvable id —
+    // never a synthetic `${model}-reviewer` that no runner can resolve.
+    expect(decorrelated.role).toBe("reviewer-decorrelated");
+    expect(decorrelated.model).toBe("ds4-studio2/deepseek-v4-flash");
+    expect(decorrelated.runner).toBe("pi");
+  });
+
+  it("keeps a model:null lane resolvable when decorrelating by role", () => {
+    const lane: ContinuousFeedbackLane = {
+      runner: "pi",
+      model: null,
+      role: "reviewer",
+    };
+
+    const decorrelated = ensureDecorrelatedFeedbackLane(lane, lane);
+
+    expect(decorrelated.role).toBe("reviewer-decorrelated");
+    expect(decorrelated.model).toBeNull();
+  });
+
+  it("returns the preferred lane unchanged when it already differs from the worker", () => {
+    const preferred: ContinuousFeedbackLane = {
+      runner: "pi",
+      model: "model-a",
+      role: "reviewer",
+    };
+    const worker: ContinuousFeedbackLane = {
+      runner: "codex",
+      model: "model-b",
+      role: "worker",
+    };
+
+    expect(ensureDecorrelatedFeedbackLane(preferred, worker)).toEqual(
+      preferred,
+    );
   });
 });
