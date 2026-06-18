@@ -1,8 +1,12 @@
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { describe, expect, it, vi } from "vitest";
+
+const execFileAsync = promisify(execFile);
 
 import type { Issue } from "../../src/domain/model.js";
 import {
@@ -434,6 +438,23 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+async function isZombie(pid: number): Promise<boolean> {
+  // Best-effort, cross-platform (macOS/Linux): `ps` reports process state code
+  // `Z` for a zombie. If `ps` is unavailable or the read fails, report "not a
+  // zombie" so the caller's force-kill + assertion still runs.
+  try {
+    const { stdout } = await execFileAsync("ps", [
+      "-o",
+      "stat=",
+      "-p",
+      String(pid),
+    ]);
+    return stdout.trim().startsWith("Z");
+  } catch {
+    return false;
+  }
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -466,6 +487,14 @@ async function assertProcessReaped(pid: number, label: string): Promise<void> {
   for (let attempt = 0; alive && attempt < 200; attempt++) {
     await delay(10);
     alive = isProcessAlive(pid);
+  }
+  // `process.kill(pid, 0)` also succeeds for a zombie — a process that has been
+  // killed but not yet collected by its init/launchd reaper. A zombie is not
+  // running, which is all this assertion cares about, so if the pid still
+  // "exists" after the poll, treat a confirmed zombie state as reaped rather
+  // than false-failing under a slow reaper (e.g. a heavily loaded CI host).
+  if (alive && (await isZombie(pid))) {
+    alive = false;
   }
   if (alive) {
     // A regression leaked the process; force-kill it so it cannot poison the

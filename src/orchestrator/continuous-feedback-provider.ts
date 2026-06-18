@@ -123,8 +123,11 @@ export async function runContinuousFeedbackCommand(
     // targets the group led by the detached runner (pgid === runner pid),
     // reaching descendants that inherited it. If the group is unavailable —
     // no process-group support on this platform, or the group is already gone
-    // (ESRCH) — fall back to signalling just the immediate child so the runner
-    // still terminates. All signalling errors are benign and swallowed.
+    // (ESRCH) — fall back to signalling just the immediate child. That fallback
+    // only does real work where the child is still live (e.g. a platform
+    // without process groups); in the post-reap `exit`-handler call it is
+    // intentionally inert, since Node's `child.kill` is a guarded no-op once the
+    // child has been reaped. All signalling errors are benign and swallowed.
     const killRunnerTree = (signal: NodeJS.Signals): void => {
       const pid = child.pid;
       if (pid !== undefined) {
@@ -234,17 +237,24 @@ export async function runContinuousFeedbackCommand(
     child.on("exit", (code) => {
       exited = true;
       exitCode = code;
-      // Reap any descendant still in the runner's group (SYMPH-783). The runner
-      // is reaped exactly as this fires, so its pid (the group id) is freed only
-      // now — but we signal synchronously, in the same turn, and macOS/Linux
-      // allocate pids sequentially, so the id cannot be reused yet and the kill
-      // cannot target an unrelated process. A descendant that inherited the
-      // runner's stdio and outlived it (holding `close` open) is force-killed
-      // here so the whole tree dies and `close` can then fire. This also covers
-      // a runner that exits gracefully on SIGTERM before the grace SIGKILL
-      // (whose timer is cleared on settle), which would otherwise strand a
-      // SIGTERM-ignoring descendant. When no descendant survives, the group is
-      // empty and this is a benign no-op (ESRCH, swallowed).
+      // Reap any descendant still in the runner's group (SYMPH-783). A
+      // descendant that inherited the runner's stdio and outlived it (holding
+      // `close` open) is force-killed here so the whole tree dies and `close`
+      // can then fire. This also covers a runner that exits gracefully on
+      // SIGTERM before the grace SIGKILL (whose timer is cleared on settle),
+      // which would otherwise strand a SIGTERM-ignoring descendant.
+      //
+      // Signalling the group by the just-reaped runner's pid is safe — not
+      // because pids are slow to recycle, but because of process-group
+      // semantics. `process.kill(-pid)` targets the GROUP, and a process group
+      // exists only while it has a live member. If a descendant survives, the
+      // group genuinely still exists and the signal reaps it. If none survives,
+      // the group is already gone the instant its only member (the leader) is
+      // reaped, so this is a benign ESRCH no-op (swallowed) — a recycled pid
+      // cannot resurrect the group, since a new process inherits its parent's
+      // pgid rather than becoming a leader at this id. The kill runs
+      // synchronously inside this libuv `exit` callback, so no other JS runs
+      // (and reallocates the id) mid-handler.
       killRunnerTree("SIGKILL");
       // A timeout-initiated kill reports a timeout result; a normal exit waits
       // for `close` (the timeout above breaks a stalled `close`).
