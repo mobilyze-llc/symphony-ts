@@ -1329,7 +1329,14 @@ export class OrchestratorCore {
           entry.issueId,
           readMetadataString(entry.metadata, "issueState"),
           entry.timestamp,
-          { reason: "failure_exhausted", setBySequence: entry.sequence },
+          {
+            reason: "failure_exhausted",
+            setBySequence: entry.sequence,
+            parkGeneration: readMetadataNumber(
+              entry.metadata,
+              "parkGeneration",
+            ),
+          },
         );
       }
 
@@ -6851,6 +6858,14 @@ export class OrchestratorCore {
         metadata: {
           status: "completed",
           reason,
+          // Journal the authoritative fence generation (the recordWatchdogPark
+          // value above) so replay restores it verbatim instead of re-deriving
+          // a fresh parkSequence+1 (SYMPH-655). Paths that mark the issue parked
+          // before recording exhaustion (parkMergeCandidateInvariantFailure)
+          // mint the generation twice live but journal only this row; without
+          // the recorded value a restart lands one generation behind live and
+          // every operator fence keyed to the live generation rejects as stale.
+          parkGeneration: parkSeq,
           ...(issueState === null ? {} : { issueState }),
           ...(signatureMeta ?? {}),
         },

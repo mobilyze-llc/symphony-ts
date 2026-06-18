@@ -5322,6 +5322,78 @@ describe("orchestrator core", () => {
     expect(restarted.getState().resumeRequired.has("1")).toBe(false);
   });
 
+  it("journals and restores the failure-exhausted park generation on replay (SYMPH-655)", async () => {
+    const parkGenerationsOf = (core: OrchestratorCore): Map<string, number> =>
+      (core as unknown as { issueParkGenerations: Map<string, number> })
+        .issueParkGenerations;
+
+    const orchestrator = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+    });
+
+    // A review completion with no canonical review-result artifact parks the
+    // issue through parkMergeCandidateInvariantFailure, which mints the fence
+    // generation TWICE live: once via markIssueRequiresExplicitResume and again
+    // via recordWatchdogPark inside recordFailureExhausted. Only the single
+    // failure_exhausted row is journaled, so a replay that re-derives the
+    // generation lands one generation behind the live value (>= 2 live vs the
+    // re-derived parkSequence+1 == 1). The fix journals the authoritative
+    // recordWatchdogPark generation and restores it verbatim on replay.
+    await orchestrator.pollTick();
+    await orchestrator.onWorkerExit({
+      issueId: "1",
+      outcome: "normal",
+      agentMessage: "Council PASS.\n[STAGE_COMPLETE]",
+      endedAt: new Date("2026-03-06T00:01:05.000Z"),
+    });
+
+    const liveGeneration = parkGenerationsOf(orchestrator).get("1");
+    expect(liveGeneration).toBeGreaterThanOrEqual(2);
+
+    const failureExhausted = orchestrator
+      .getState()
+      .dispatcherRunJournal.find((entry) => entry.kind === "failure_exhausted");
+    expect(failureExhausted?.metadata.reason).toContain(
+      "missing_canonical_review_gate_result",
+    );
+    expect(failureExhausted?.metadata.parkGeneration).toBe(liveGeneration);
+
+    const restarted = createOrchestrator({
+      config: createReviewMergeConfig(),
+      spawnWorker: async () => ({
+        workerHandle: { pid: 1001 },
+        monitorHandle: { ref: "monitor-1" },
+      }),
+      now: () => new Date("2026-03-06T01:00:00.000Z"),
+      runJournal: orchestrator.getState().dispatcherRunJournal,
+    });
+
+    expect(restarted.getState().resumeRequired.has("1")).toBe(true);
+    // The replayed park generation map matches the live one exactly — restored
+    // from the journaled metadata, not re-derived from a fresh parkSequence.
+    expect([...parkGenerationsOf(restarted).entries()]).toEqual([
+      ...parkGenerationsOf(orchestrator).entries(),
+    ]);
+
+    // Behavioral proof: a fenced release keyed to the live generation only
+    // resolves if replay restored that exact generation; a re-derived value
+    // would reject the release as stale.
+    const release = await restarted.writeIntent({
+      verb: "release",
+      issueId: "1",
+      issueIdentifier: "ISSUE-1",
+      actor: { kind: "operator", host: "test-host", session: null },
+      reason: { class: "operator_release", human: "verifying replay fence" },
+      fence: { expectedParkSeq: liveGeneration ?? 0 },
+    });
+    expect(release.status).toBe("applied");
+    expect(restarted.getState().resumeRequired.has("1")).toBe(false);
+  });
+
   it("parks with the verdict recorded on hold/split or triage failure", async () => {
     const tracker = createTracker({
       candidates: [createIssue({ id: "1", identifier: "ISSUE-1" })],
