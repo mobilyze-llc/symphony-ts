@@ -184,6 +184,7 @@ function triageConfig(
     shadowMode: true,
     plannerModel: "opus",
     heartbeatMs: 900_000,
+    autoReleaseFrontier: 1,
     envelope: ENVELOPE,
     ...over,
   };

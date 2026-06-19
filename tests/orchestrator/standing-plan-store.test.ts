@@ -13,6 +13,7 @@ import { appendStandingPlanJournalEntriesWithLock } from "../../src/logging/stan
 import {
   listHonoredDecisions,
   loadStandingPlan,
+  recordPlanControlDecision,
   recordPlanDecision,
   recordPlanRevision,
 } from "../../src/orchestrator/standing-plan-store.js";
@@ -317,6 +318,69 @@ describe("standing-plan store", () => {
       ]);
       // The last-written (sequence 2 → revision id 2) is current, not rev id 3.
       expect((await loadStandingPlan(root))?.revision).toBe(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recordPlanControlDecision resolves planId and records an approval (SYMPH-789)", async () => {
+    const root = tmpRoot();
+    try {
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      });
+      const result = await recordPlanControlDecision(root, {
+        kind: "approve",
+        revision: 1,
+        batchId: "b1",
+        actor: "operator@pro14",
+        note: "release it",
+        decisionId: "release_batch:b1:rev1:operator@pro14",
+        createdAt: "2026-06-18T00:00:30.000Z",
+      });
+      expect(result.recorded).toBe(true);
+      const honored = await listHonoredDecisions(root);
+      expect(honored[0]?.kind).toBe("approve");
+      expect(honored[0]?.planId).toBe("plan-1");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("recordPlanControlDecision rejects a stale-revision action and reports no_plan", async () => {
+    const root = tmpRoot();
+    try {
+      // no plan yet → no_plan
+      const noPlan = await recordPlanControlDecision(root, {
+        kind: "approve",
+        revision: 1,
+        batchId: "b1",
+        actor: "operator@pro14",
+        note: "x",
+        decisionId: "d0",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      });
+      expect(noPlan.reason).toBe("no_plan");
+
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      });
+      await recordPlanRevision(root, body([lookahead("b2", "SYMPH-2")]), {
+        createdAt: "2026-06-18T00:01:00.000Z",
+      });
+      const stale = await recordPlanControlDecision(root, {
+        kind: "approve",
+        revision: 1, // superseded by rev 2
+        batchId: "b1",
+        actor: "operator@pro14",
+        note: "x",
+        decisionId: "d-stale",
+        createdAt: "2026-06-18T00:02:00.000Z",
+      });
+      expect(stale.recorded).toBe(false);
+      expect(stale.reason).toBe("stale_revision");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

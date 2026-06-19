@@ -29,12 +29,12 @@ describe("config-resolver queue triage (SYMPH-784)", () => {
     );
     // concurrency ceiling defaults to the agent concurrency.
     expect(resolved.queueTriage?.envelope.concurrencyCeiling).toBe(4);
-    // shared-surface excluded by default (no execution path until Track 2).
+    // only parallel-isolated by default (other modes gated until execution ships).
     expect(resolved.queueTriage?.envelope.allowedModes).toEqual([
       "parallel-isolated",
-      "canary-chain",
     ]);
     expect(resolved.queueTriage?.envelope.version).toBe(1);
+    expect(resolved.queueTriage?.autoReleaseFrontier).toBe(1);
   });
 
   it("honors explicit queue_triage overrides", () => {

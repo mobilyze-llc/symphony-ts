@@ -72,6 +72,49 @@ describe("parseSymphonyctlArgs", () => {
     });
   });
 
+  it("parses a release_batch plan-control intent (SYMPH-789)", () => {
+    const parsed = parseSymphonyctlArgs(
+      [
+        "intent",
+        "release_batch",
+        "--batch-id",
+        "b-abc123",
+        "--revision",
+        "4",
+        "--reason",
+        "approved",
+      ],
+      {},
+    );
+    expect(parsed).toEqual({
+      command: "intent",
+      baseUrl: DEFAULT_BASE_URL,
+      verb: "release_batch",
+      reason: "approved",
+      revision: 4,
+      batchId: "b-abc123",
+    });
+  });
+
+  it("rejects release_batch without a --batch-id", () => {
+    expect(() =>
+      parseSymphonyctlArgs(
+        ["intent", "release_batch", "--revision", "4", "--reason", "x"],
+        {},
+      ),
+    ).toThrow(/batch-id/);
+  });
+
+  it("parses modify_plan with only a revision (plan-scoped)", () => {
+    const parsed = parseSymphonyctlArgs(
+      ["intent", "modify_plan", "--revision", "4", "--reason", "re-plan"],
+      {},
+    );
+    expect(parsed.verb).toBe("modify_plan");
+    expect(parsed.revision).toBe(4);
+    expect(parsed.batchId).toBeUndefined();
+  });
+
   it("parses anchor with placement and until-merged expiry", () => {
     const parsed = parseSymphonyctlArgs(
       [

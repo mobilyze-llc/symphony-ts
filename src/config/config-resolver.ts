@@ -71,6 +71,7 @@ import {
   DEFAULT_OBSERVABILITY_RENDER_INTERVAL_MS,
   DEFAULT_PAUSE_TRIAGE_MAX_RESUMES,
   DEFAULT_POLL_INTERVAL_MS,
+  DEFAULT_QUEUE_TRIAGE_AUTO_RELEASE_FRONTIER,
   DEFAULT_QUEUE_TRIAGE_ENABLED,
   DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
   DEFAULT_QUEUE_TRIAGE_PLANNER_MODEL,
@@ -493,6 +494,9 @@ function resolveQueueTriageConfig(
     heartbeatMs:
       readPositiveInteger(queueTriage.heartbeat_ms) ??
       DEFAULT_QUEUE_TRIAGE_HEARTBEAT_MS,
+    autoReleaseFrontier:
+      readPositiveInteger(queueTriage.auto_release_frontier) ??
+      DEFAULT_QUEUE_TRIAGE_AUTO_RELEASE_FRONTIER,
     envelope: resolveStandingPlanEnvelope({
       version: readPositiveInteger(envelope.version) ?? 1,
       concurrencyCeiling:

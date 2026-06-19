@@ -163,6 +163,11 @@ export interface StandingPlanShadowTickDeps {
     fields: Record<string, unknown>,
   ) => void | Promise<void>;
   now: () => Date;
+  /**
+   * Bypass the heartbeat cadence and re-plan now (SYMPH-787/789): a re-plan
+   * trigger predicate tripped, or an operator modify_plan intent landed.
+   */
+  force?: boolean;
 }
 
 /**
@@ -182,6 +187,7 @@ export async function runStandingPlanShadowTick(
   try {
     const plan = await loadStandingPlan(deps.workspaceRoot);
     if (
+      deps.force !== true &&
       !shouldRunShadowPlanCycle({
         plan,
         nowMs: deps.now().getTime(),

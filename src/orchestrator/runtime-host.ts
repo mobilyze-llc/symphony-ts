@@ -178,6 +178,8 @@ import {
 import type {
   ContinuousFeedbackCheckpointResult,
   OrchestratorCoreOptions,
+  PlanDrivenDispatchDecision,
+  PlanDrivenDispatchInput,
   StopReason,
   StopRequest,
   StopSignalDelivery,
@@ -198,7 +200,9 @@ import { getDiff, runEnsembleGate } from "./gate-handler.js";
 import {
   type IntentActor,
   type IntentReason,
+  type PlanControlVerb,
   isPipelineSentinelValue,
+  isPlanControlVerb,
 } from "./intent.js";
 import { reduceManagerRunJournal } from "./manager-run.js";
 import type {
@@ -218,7 +222,13 @@ import {
   type ClusterMember,
   formatWatchdogTicketBody,
 } from "./signature-cluster.js";
+import { decidePlanDrivenDispatch } from "./standing-plan-consumer.js";
 import { runStandingPlanShadowTick } from "./standing-plan-shadow.js";
+import {
+  listHonoredDecisions,
+  loadStandingPlan,
+  recordPlanControlDecision,
+} from "./standing-plan-store.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
 import {
   type TrackFindingFilingRef,
@@ -504,6 +514,9 @@ export class RuntimeHostStartupError extends Error {
 export class OrchestratorRuntimeHost implements DashboardServerHost {
   private config: ResolvedWorkflowConfig;
 
+  /** Queue Triage v2: a plan-control/predicate-driven re-plan request (SYMPH-787/789). */
+  private standingPlanReplanRequested = false;
+
   private tracker: IssueTracker;
 
   private workspaceManager: WorkspaceManager;
@@ -740,6 +753,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       writeRunJournalEntry: async (entry) => {
         await this.persistDispatcherRunJournalEntry(entry);
       },
+      planDrivenDispatch: (input) => this.computePlanDrivenDispatch(input),
       runContinuousFeedback,
       ...(this.tracker instanceof LinearTrackerClient
         ? {
@@ -3094,6 +3108,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   async requestIntent(input: IntentRequest): Promise<IntentRequestResult> {
     await this.ensureDispatcherRunJournalLoaded();
 
+    // Queue Triage v2 plan-control verbs (SYMPH-789) are plan/batch-scoped, not
+    // issue-scoped: handle them via the standing-plan store and skip the
+    // issue-resolution + writeIntent path entirely.
+    if (isPlanControlVerb(input.verb)) {
+      return this.handlePlanControlIntent(input.verb, input);
+    }
+
     // The pipeline sentinel is a reserved journal scope, never an
     // addressable issue. The HTTP schema rejects it too; this check covers
     // direct callers of requestIntent (defense in depth).
@@ -3158,6 +3179,145 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       issue_id: resolved.issueId,
       issue_identifier: resolved.issueIdentifier,
     };
+  }
+
+  /**
+   * Handle a Queue Triage v2 plan-control intent (SYMPH-789): record the
+   * operator action as a revision-bound PlanDecision in the standing-plan store.
+   * The actor is the authenticated operator (the dashboard/symphonyctl surface
+   * is operator-gated; the agent identity cannot reach here — the doc-comment
+   * path in PR3 enforces the allowlist for that channel). modify_plan also
+   * requests a re-plan on the next heartbeat.
+   */
+  private async handlePlanControlIntent(
+    verb: PlanControlVerb,
+    input: IntentRequest,
+  ): Promise<IntentRequestResult> {
+    const batch = input.batch;
+    if (batch === undefined) {
+      return {
+        status: "invalid_request",
+        detail:
+          "plan-control intents require a batch payload with the plan revision.",
+        sequence: null,
+        verb,
+        issue_id: null,
+        issue_identifier: null,
+      };
+    }
+    if (
+      (verb === "release_batch" || verb === "hold") &&
+      batch.batchId === undefined
+    ) {
+      return {
+        status: "invalid_request",
+        detail: `${verb} requires batch.batchId.`,
+        sequence: null,
+        verb,
+        issue_id: null,
+        issue_identifier: null,
+      };
+    }
+
+    const kind =
+      verb === "release_batch"
+        ? "approve"
+        : verb === "hold"
+          ? "hold"
+          : "modify";
+    const actorLabel = `${input.actor.kind}@${input.actor.host}${input.actor.session ? `#${input.actor.session}` : ""}`;
+    const decisionId = `${verb}:${batch.batchId ?? "plan"}:rev${batch.revision}:${actorLabel}`;
+    const result = await recordPlanControlDecision(this.workspaceManager.root, {
+      kind,
+      revision: batch.revision,
+      batchId: batch.batchId ?? null,
+      actor: actorLabel,
+      note: input.reason,
+      decisionId,
+      createdAt: this.now().toISOString(),
+    });
+
+    // modify_plan asks the Manager to re-plan on the next heartbeat.
+    if (verb === "modify_plan" && result.recorded) {
+      this.requestStandingPlanReplan();
+    }
+
+    const status: IntentRequestResult["status"] =
+      result.reason === "no_plan"
+        ? "no_plan"
+        : result.reason === "stale_revision"
+          ? "rejected_stale"
+          : result.recorded
+            ? "applied"
+            : "no_op";
+    return {
+      status,
+      detail:
+        result.reason === "no_plan"
+          ? "No standing plan exists yet."
+          : result.reason === "stale_revision"
+            ? `Revision ${batch.revision} is superseded; the action is void.`
+            : result.recorded
+              ? `${verb} recorded against revision ${batch.revision}.`
+              : `${verb} already recorded (idempotent).`,
+      sequence: null,
+      verb,
+      issue_id: null,
+      issue_identifier: null,
+    };
+  }
+
+  /** Request a standing-plan re-plan on the next heartbeat (SYMPH-787/789). */
+  requestStandingPlanReplan(): void {
+    this.standingPlanReplanRequested = true;
+  }
+
+  /** Consume the re-plan request flag (check-and-reset). */
+  consumeStandingPlanReplanRequest(): boolean {
+    const requested = this.standingPlanReplanRequested;
+    this.standingPlanReplanRequested = false;
+    return requested;
+  }
+
+  /**
+   * Queue Triage v2 consumer (SYMPH-787/789) — the dispatch-hot-path hook. ZERO
+   * model calls: it reads the persisted plan, runs the deterministic
+   * predicates, and selects the releasable batch members. Degrades to the
+   * comparator unless the feature is enabled, NOT in shadow mode, and a fresh,
+   * aligned plan exists. A tripped re-plan predicate degrades this tick and
+   * requests a re-plan on the next heartbeat (no stalling on a stale plan).
+   */
+  private async computePlanDrivenDispatch(
+    input: PlanDrivenDispatchInput,
+  ): Promise<PlanDrivenDispatchDecision> {
+    const cfg = this.config.queueTriage;
+    if (cfg === undefined || !cfg.enabled || cfg.shadowMode) {
+      return { mode: "degrade" };
+    }
+    const root = this.workspaceManager.root;
+    // These reads are disk-only; no model call on the dispatch hot path.
+    const plan = await loadStandingPlan(root);
+    const honoredApprovals =
+      plan === null ? [] : await listHonoredDecisions(root);
+    const decision = decidePlanDrivenDispatch({
+      config: cfg,
+      plan,
+      honoredApprovals,
+      candidateIdentifiers: new Set(
+        input.candidates.map((candidate) => candidate.identifier),
+      ),
+      runningIssueIdentifiers: input.runningIssueIdentifiers,
+      nowMs: this.now().getTime(),
+    });
+    if (decision.forceReplan) {
+      this.requestStandingPlanReplan();
+    }
+    return decision.action === "plan"
+      ? {
+          mode: "plan",
+          orderedIssueIdentifiers: decision.orderedIssueIdentifiers,
+        }
+      : { mode: "degrade" };
   }
 
   async requestAnchorFieldEdit(
@@ -5042,6 +5202,9 @@ export async function startRuntimeService(
       return;
     }
     standingPlanShadowTickInFlight = true;
+    // A re-plan predicate trip or an operator modify_plan intent forces a
+    // re-plan now, bypassing the heartbeat cadence (SYMPH-787/789).
+    const force = runtimeHost.consumeStandingPlanReplanRequest();
     void runStandingPlanShadowTick({
       config: currentConfig.queueTriage,
       workspaceRoot: workspaceManager.root,
@@ -5065,6 +5228,7 @@ export async function startRuntimeService(
         void logger.info(event, message, fields);
       },
       now: () => new Date(),
+      force,
     })
       .catch(() => {
         // The tick is already best-effort; guard the void promise itself.

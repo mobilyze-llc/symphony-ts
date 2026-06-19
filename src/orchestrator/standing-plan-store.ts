@@ -1,5 +1,6 @@
 import type {
   PlanDecision,
+  PlanDecisionKind,
   PlanRevision,
   StandingPlan,
   StandingPlanJournal,
@@ -163,6 +164,42 @@ export async function recordPlanDecision(
       await appendStandingPlanJournalEntryToDisk(workspaceRoot, appended.entry);
     }
     return { recorded: appended.appended };
+  });
+}
+
+/**
+ * Record an operator plan-control decision (release_batch / hold / modify_plan
+ * → approve / hold / modify) from an intent. Resolves the planId from the
+ * current plan, then delegates to recordPlanDecision (which validates the
+ * revision binding under the single-writer lock). Returns no_plan when nothing
+ * has been planned yet.
+ */
+export async function recordPlanControlDecision(
+  workspaceRoot: string,
+  input: {
+    kind: PlanDecisionKind;
+    revision: number;
+    batchId: string | null;
+    actor: string;
+    note: string | null;
+    decisionId: string;
+    createdAt: string;
+  },
+): Promise<RecordPlanDecisionResult> {
+  const current = await loadStandingPlan(workspaceRoot);
+  if (current === null) {
+    return { recorded: false, reason: "no_plan" };
+  }
+  return recordPlanDecision(workspaceRoot, {
+    decisionId: input.decisionId,
+    planId: current.planId,
+    revision: input.revision,
+    batchId: input.batchId,
+    kind: input.kind,
+    actor: input.actor,
+    optionMarker: null,
+    createdAt: input.createdAt,
+    note: input.note,
   });
 }
 
