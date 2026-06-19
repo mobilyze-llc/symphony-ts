@@ -16,6 +16,8 @@ import type {
 // cheap re-plan trigger predicates.
 // ---------------------------------------------------------------------------
 
+const EMPTY_IDENTIFIER_SET: ReadonlySet<string> = new Set<string>();
+
 export interface ConsumerInput {
   plan: StandingPlan;
   /** Decisions bound to the current revision (from listHonoredDecisions). */
@@ -28,6 +30,12 @@ export interface ConsumerInput {
    */
   autoReleaseFrontier: number;
   envelope: PlanEnvelope;
+  /**
+   * Issue identifiers with a recorded `merged` outcome (SYMPH-800). Drives
+   * canary-chain contingent-release (release the tail once every head member has
+   * merged) and prevents re-dispatching an already-merged member.
+   */
+  mergedIssueIdentifiers?: ReadonlySet<string>;
 }
 
 export interface ConsumerSelection {
@@ -93,16 +101,31 @@ export function selectDispatchableBatchMembers(
     }
     releasedBatchIds.push(batch.batchId);
 
-    // canary-chain dispatches only the head; the contingent tail stays held
-    // until the head validates (a future signal) or an operator releases it.
-    const members =
-      batch.mode === "canary-chain" && batch.canary !== null
-        ? batch.members.filter((member) =>
-            batch.canary?.headIssueIdentifiers.includes(member.issueIdentifier),
-          )
-        : batch.members;
+    // canary-chain dispatches only the head until EVERY head member has merged
+    // (SYMPH-800 contingent-release); then the contingent tail releases. The
+    // head/tail validation reads recorded `merged` outcomes (SYMPH-803).
+    const merged = input.mergedIssueIdentifiers ?? EMPTY_IDENTIFIER_SET;
+    let members = batch.members;
+    if (batch.mode === "canary-chain" && batch.canary !== null) {
+      const canary = batch.canary;
+      const headValidated =
+        canary.headIssueIdentifiers.length > 0 &&
+        canary.headIssueIdentifiers.every((identifier) =>
+          merged.has(identifier),
+        );
+      members = batch.members.filter((member) =>
+        (headValidated
+          ? canary.contingentIssueIdentifiers
+          : canary.headIssueIdentifiers
+        ).includes(member.issueIdentifier),
+      );
+    }
     for (const member of members) {
-      if (!input.runningIssueIdentifiers.has(member.issueIdentifier)) {
+      // Never re-dispatch a running OR already-merged member.
+      if (
+        !input.runningIssueIdentifiers.has(member.issueIdentifier) &&
+        !merged.has(member.issueIdentifier)
+      ) {
         dispatchIssueIdentifiers.push(member.issueIdentifier);
       }
     }
@@ -259,6 +282,8 @@ export interface PlanDispatchDecisionInput {
   candidatePriorityBands?: ReadonlyMap<string, number>;
   /** merged outcomes since the plan was computed; SYMPH-801 guard #4. */
   mergedSincePlanCount?: number;
+  /** issue identifiers with a recorded merged outcome; SYMPH-800 canary tail. */
+  mergedIssueIdentifiers?: ReadonlySet<string>;
 }
 
 export interface PlanDispatchDecision {
@@ -320,6 +345,9 @@ export function decidePlanDrivenDispatch(
     runningIssueIdentifiers: input.runningIssueIdentifiers,
     autoReleaseFrontier: cfg.autoReleaseFrontier,
     envelope: cfg.envelope,
+    ...(input.mergedIssueIdentifiers === undefined
+      ? {}
+      : { mergedIssueIdentifiers: input.mergedIssueIdentifiers }),
   });
   return {
     action: "plan",

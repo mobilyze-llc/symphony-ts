@@ -118,6 +118,59 @@ describe("selectDispatchableBatchMembers (posture-B)", () => {
     expect(result.dispatchIssueIdentifiers).toEqual(["SYMPH-1"]);
   });
 
+  it("releases the contingent tail once every canary head has merged (SYMPH-800)", () => {
+    const canaryBatch = batch("b1", ["SYMPH-1", "SYMPH-2", "SYMPH-3"], {
+      mode: "canary-chain",
+      canary: {
+        headIssueIdentifiers: ["SYMPH-1"],
+        contingentIssueIdentifiers: ["SYMPH-2", "SYMPH-3"],
+      },
+    });
+    const result = selectDispatchableBatchMembers({
+      plan: plan([canaryBatch]),
+      honoredApprovals: [],
+      runningIssueIdentifiers: new Set(),
+      autoReleaseFrontier: 1,
+      envelope: ENVELOPE,
+      mergedIssueIdentifiers: new Set(["SYMPH-1"]), // head merged
+    });
+    // head validated → tail releases; the merged head is not re-dispatched.
+    expect(result.dispatchIssueIdentifiers).toEqual(["SYMPH-2", "SYMPH-3"]);
+  });
+
+  it("holds the contingent tail while only SOME head members have merged", () => {
+    const canaryBatch = batch("b1", ["SYMPH-1", "SYMPH-2", "SYMPH-3"], {
+      mode: "canary-chain",
+      canary: {
+        headIssueIdentifiers: ["SYMPH-1", "SYMPH-2"],
+        contingentIssueIdentifiers: ["SYMPH-3"],
+      },
+    });
+    const result = selectDispatchableBatchMembers({
+      plan: plan([canaryBatch]),
+      honoredApprovals: [],
+      runningIssueIdentifiers: new Set(["SYMPH-1"]), // head member 1 running
+      autoReleaseFrontier: 1,
+      envelope: ENVELOPE,
+      mergedIssueIdentifiers: new Set(["SYMPH-1"]), // only 1 of 2 heads merged
+    });
+    // head not fully validated → still in the head phase; SYMPH-2 (head, not
+    // running/merged) dispatches, the tail stays held.
+    expect(result.dispatchIssueIdentifiers).toEqual(["SYMPH-2"]);
+  });
+
+  it("does not re-dispatch an already-merged member of a parallel batch", () => {
+    const result = selectDispatchableBatchMembers({
+      plan: plan([batch("b1", ["SYMPH-1", "SYMPH-2"])]),
+      honoredApprovals: [],
+      runningIssueIdentifiers: new Set(),
+      autoReleaseFrontier: 1,
+      envelope: ENVELOPE,
+      mergedIssueIdentifiers: new Set(["SYMPH-1"]),
+    });
+    expect(result.dispatchIssueIdentifiers).toEqual(["SYMPH-2"]);
+  });
+
   it("excludes already-running members", () => {
     const result = selectDispatchableBatchMembers({
       plan: plan([batch("b1", ["SYMPH-1", "SYMPH-2"])]),
