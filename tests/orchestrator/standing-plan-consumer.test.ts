@@ -197,6 +197,21 @@ describe("selectDispatchableBatchMembers (posture-B)", () => {
     expect(result.dispatchIssueIdentifiers).toEqual([]);
     expect(result.heldBatchIds).toEqual(["b1"]);
   });
+
+  it("a modify does NOT revoke an approved batch (only hold/reject revoke)", () => {
+    // modify is a re-plan signal, not a hold; an approved batch still releases
+    // (council R3, Pi P3 regression guard — parity with the admission guardrail).
+    const modify: PlanDecision = { ...approve("b1"), kind: "modify" };
+    const result = selectDispatchableBatchMembers({
+      plan: plan([batch("b1", ["SYMPH-1"])]),
+      honoredApprovals: [approve("b1"), modify],
+      runningIssueIdentifiers: new Set(),
+      autoReleaseFrontier: 0, // only the (unrevoked) approve can release it
+      envelope: ENVELOPE,
+    });
+    expect(result.dispatchIssueIdentifiers).toEqual(["SYMPH-1"]);
+    expect(result.releasedBatchIds).toEqual(["b1"]);
+  });
 });
 
 describe("shouldDegradeToComparator", () => {

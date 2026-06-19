@@ -146,6 +146,17 @@ describe("approvedAdmittedIdentifiers (SYMPH-794)", () => {
     });
     expect([...admitted].sort()).toEqual(["SYMPH-1", "SYMPH-2"]);
   });
+
+  it("a modify on an approved batch does NOT revoke it (only hold/reject revoke)", () => {
+    // modify is a re-plan signal, not a go/no-go — it must not un-admit an
+    // operator-approved batch (council R3, Pi P3 regression guard).
+    const modify: PlanDecision = { ...approve("b-app"), kind: "modify" };
+    const admitted = approvedAdmittedIdentifiers({
+      plan: plan(),
+      honoredApprovals: [approve("b-app"), modify],
+    });
+    expect([...admitted].sort()).toEqual(["SYMPH-1", "SYMPH-2"]);
+  });
 });
 
 describe("partitionByAdmission (SYMPH-794)", () => {
