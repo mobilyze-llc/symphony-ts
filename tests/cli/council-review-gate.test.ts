@@ -499,6 +499,66 @@ describe("parseCouncilReviewGateArgs", () => {
     });
   });
 
+  it("returns exit code 1 for stale freshness assertions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "symphony-council-cli-"));
+    const reviewResultPath = join(root, "review-result.json");
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+
+    const code = await runCouncilReviewGateCli(
+      [
+        "--issue-id",
+        "MOB-88",
+        "--artifact-dir",
+        join(root, "artifacts"),
+        "--workspace",
+        root,
+        "--assert-fresh-review",
+        reviewResultPath,
+      ],
+      {
+        stdout: (message) => {
+          stdout.push(message);
+          return true;
+        },
+        stderr: (message) => {
+          stderr.push(message);
+          return true;
+        },
+      },
+      {
+        assertFreshCouncilReview: async () => ({
+          schemaVersion: 1,
+          issueId: "MOB-88",
+          verdict: "error",
+          code: "stale_review",
+          reviewedHeadSha: "old-head",
+          currentHeadSha: "new-head",
+          baseSha: "base-sha",
+          reviewMode: "full",
+          reviewRound: 1,
+          materialChangedFiles: ["src/review/headless-council-gate.ts"],
+          allowlistedChangedFiles: [],
+          allowedChangePatterns: [],
+          guidance: "Rerun the council review against HEAD.",
+          artifactPaths: {
+            artifactDir: join(root, "artifacts"),
+            reviewResult: reviewResultPath,
+            freshnessResult: join(root, "artifacts", "freshness-result.json"),
+          },
+          summary: "Review artifact is stale for the current PR head.",
+        }),
+      },
+    );
+
+    expect(code).toBe(1);
+    expect(stderr).toEqual([]);
+    expect(JSON.parse(stdout.join(""))).toMatchObject({
+      verdict: "error",
+      code: "stale_review",
+    });
+  });
+
   it("appends sanitized journal events when the journal root flag is present", async () => {
     const root = await mkdtemp(join(tmpdir(), "symphony-council-cli-"));
     const stdout: string[] = [];
@@ -610,6 +670,62 @@ describe("parseCouncilReviewGateArgs", () => {
       verdict: "pass",
     });
   });
+
+  it.each([
+    ["pass", 0],
+    ["fail", 1],
+    ["error", 1],
+  ] as const)(
+    "maps review verdict %s to CLI exit code %i",
+    async (verdict, expectedCode) => {
+      const root = await mkdtemp(join(tmpdir(), "symphony-council-cli-"));
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+
+      const code = await runCouncilReviewGateCli(
+        [
+          "--issue-id",
+          "issue-symph-804",
+          "--artifact-dir",
+          join(root, "artifacts"),
+          "--workspace",
+          root,
+        ],
+        {
+          stdout: (message) => {
+            stdout.push(message);
+            return true;
+          },
+          stderr: (message) => {
+            stderr.push(message);
+            return true;
+          },
+        },
+        {
+          runHeadlessCouncilGate: async () => {
+            const result = cliReviewResult();
+            return {
+              ...result,
+              issueId: "issue-symph-804",
+              verdict,
+              review_metadata: {
+                ...result.review_metadata,
+                verdict,
+              },
+              summary: `Headless council review ended with ${verdict}.`,
+            };
+          },
+        },
+      );
+
+      expect(code).toBe(expectedCode);
+      expect(stderr).toEqual([]);
+      expect(JSON.parse(stdout.join(""))).toMatchObject({
+        issueId: "issue-symph-804",
+        verdict,
+      });
+    },
+  );
 
   it.each(["pipeline", "interactive"] as const)(
     "fails closed when %s review result journaling fails",
