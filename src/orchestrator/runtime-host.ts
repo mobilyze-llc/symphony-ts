@@ -1431,9 +1431,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         tracker: this.tracker,
         workspaceManager: this.workspaceManager,
       });
-      this.stageExecutionBackends = createCurrentRunnerStageExecutionBackends(
-        this.agentRunner,
-      );
+      if (this.customStageExecutionBackends === null) {
+        this.stageExecutionBackends = createCurrentRunnerStageExecutionBackends(
+          this.agentRunner,
+        );
+      }
       return;
     }
 
@@ -4567,8 +4569,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const stageKey = input.stageName ?? "worker";
     const stageAttempt = input.attempt ?? 0;
     const runGroupId =
-      execution?.runGroup.id ??
-      execution?.runGroup.key ??
+      execution?.runGroup?.id ??
+      execution?.runGroup?.key ??
       `${input.issue.id}:${stageKey}`;
     const profileId = execution?.profile ?? null;
     const baseRef = resolveStageExecutionBaseRef();

@@ -8547,6 +8547,48 @@ describe("stage execution backend boundary", () => {
     });
   });
 
+  it("defaults legacy stages without execution profiles to the current-runner backend", async () => {
+    const fakeRunner = new FakeAgentRunner();
+    const backend = new RecordingStageExecutionBackend(fakeRunner);
+    const host = new OrchestratorRuntimeHost({
+      config: createStagedConfig(),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "legacy-issue",
+            identifier: "LEGACY-1",
+            branchName: "codex/LEGACY-1",
+          }),
+        ],
+      }),
+      agentRunner: fakeRunner,
+      stageExecutionBackends: new Map([["current-runner", backend]]),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(backend.inputs).toHaveLength(1);
+    expect(backend.inputs[0]!.job).toMatchObject({
+      backend: "current-runner",
+      role: null,
+      phase: null,
+      identity: {
+        issueId: "legacy-issue",
+        issueIdentifier: "LEGACY-1",
+        stageName: "investigate",
+        stageAttempt: 0,
+        runGroupId: "legacy-issue:investigate",
+        profileId: null,
+        targetHeadRef: "codex/LEGACY-1",
+      },
+    });
+    expect(backend.inputs[0]!.job.identity.idempotencyKey).toContain(
+      "legacy-issue:investigate:0:current-runner:legacy-issue:investigate",
+    );
+    expect(fakeRunner.runInputs).toHaveLength(1);
+  });
+
   it("fails closed before runner launch when a stage selects an unregistered backend", async () => {
     const fakeRunner = new FakeAgentRunner();
     const config = createStagedConfig({
@@ -8596,6 +8638,31 @@ describe("stage execution backend boundary", () => {
     expect(host.getState().retryAttempts["1"]?.error).toContain(
       'Stage execution backend "crabrunner" is not registered for ISSUE-1.',
     );
+  });
+
+  it("preserves injected backends when managed runner reconfiguration recreates the default runner", async () => {
+    const fakeRunner = new FakeAgentRunner();
+    const backend = new RecordingStageExecutionBackend(fakeRunner);
+    const host = new OrchestratorRuntimeHost({
+      config: createStagedConfig(),
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "managed-issue",
+            identifier: "MANAGED-1",
+          }),
+        ],
+      }),
+      stageExecutionBackends: new Map([["current-runner", backend]]),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    host.updateConfig({ config: createStagedConfig() });
+    await host.pollOnce();
+
+    expect(backend.inputs).toHaveLength(1);
+    expect(fakeRunner.runInputs).toHaveLength(1);
+    expect(fakeRunner.runInputs[0]?.issue.identifier).toBe("MANAGED-1");
   });
 });
 
