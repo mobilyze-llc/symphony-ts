@@ -154,6 +154,37 @@ describe("resolveDocComment (6b)", () => {
     expect(result.kind).toBe("stale");
   });
 
+  it("does not let a current-revision body stamp rescue a superseded quoted stamp", () => {
+    // The operator quoted a SUPERSEDED option line ([opt-2:r3]); their free-typed
+    // body happens to contain a current stamp ([opt-1:r4]). quotedText is the
+    // authoritative action signal, so a stale quote must resolve to `stale` — the
+    // body stamp must NOT rescue it into a current intent (council R2, Codex P1).
+    const result = resolveDocComment({
+      comment: comment({
+        quotedText: "[opt-2:r3] Hold some-old-batch",
+        body: "go [opt-1:r4]",
+      }),
+      plan: plan(),
+      operatorAllowlist: ALLOWLIST,
+    });
+    expect(result.kind).toBe("stale");
+  });
+
+  it("falls back to body stamps only when the quoted line carries no stamp", () => {
+    const result = resolveDocComment({
+      comment: comment({
+        quotedText: "looks good to me", // no stamped marker
+        body: "approve [opt-1:r4]",
+      }),
+      plan: plan(),
+      operatorAllowlist: ALLOWLIST,
+    });
+    expect(result.kind).toBe("intent");
+    if (result.kind === "intent") {
+      expect(result.optionMarker).toBe("[opt-1]");
+    }
+  });
+
   it("prefers the quoted line's marker over a different marker in the body", () => {
     const result = resolveDocComment({
       comment: comment({

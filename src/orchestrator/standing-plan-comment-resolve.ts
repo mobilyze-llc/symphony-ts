@@ -60,11 +60,15 @@ export function resolveDocComment(input: {
   // as "[opt-N:rREV]" (see standing-plan-doc-render), so a comment quoting a
   // SUPERSEDED revision's line carries the old REV and cannot resolve against
   // the current revision's reused [opt-N] — closing the record→publish race
-  // (council R1, Codex P1).
-  const stamped = [
-    ...extractStampedMarkers(quoted),
-    ...extractStampedMarkers(body),
-  ];
+  // (council R1, Codex P1). The quoted line is the authoritative action signal,
+  // so consult its stamps FIRST: a stale quoted stamp must resolve to `stale`
+  // and must NOT be rescued by a current stamp the operator free-typed in the
+  // body (council R2, Codex P1). Body stamps are consulted only when the quoted
+  // line carries none — mirroring the bare-marker quoted-over-body preference
+  // below.
+  const quotedStamped = extractStampedMarkers(quoted);
+  const stamped =
+    quotedStamped.length > 0 ? quotedStamped : extractStampedMarkers(body);
   if (stamped.length > 0) {
     const current = stamped.filter((m) => m.revision === input.plan.revision);
     if (current.length === 0) {
