@@ -255,8 +255,9 @@ export type StandingPlanJournalEntryDraft = DistributiveOmit<
 // ---------------------------------------------------------------------------
 
 /**
- * Stable content hash of the meaningful plan body (batches + options +
- * envelope + rationale + source). Excludes revision/createdAt/contentHash so an
+ * Stable content hash of the meaningful structural plan body (batches +
+ * options + envelope + source). Excludes rationale, revision, createdAt, and
+ * contentHash so an
  * unchanged plan re-proposed later hashes identically (idempotency: no churn).
  */
 export function computePlanContentHash(
@@ -268,7 +269,6 @@ export function computePlanContentHash(
   const normalized = {
     planId: body.planId,
     source: body.source,
-    rationale: body.rationale,
     envelope: normalizeEnvelopeForHash(body.envelope),
     batches: body.batches.map(normalizeBatchForHash),
     options: body.options.map(normalizeOptionForHash),
@@ -290,7 +290,6 @@ function normalizeBatchForHash(batch: PlanBatch): unknown {
     batchId: batch.batchId,
     mode: batch.mode,
     status: batch.status,
-    rationale: batch.rationale,
     members: batch.members.map((member) => ({
       issueId: member.issueId,
       issueIdentifier: member.issueIdentifier,
@@ -309,7 +308,6 @@ function normalizeBatchForHash(batch: PlanBatch): unknown {
 function normalizeOptionForHash(option: PlanOptionLine): unknown {
   return {
     marker: option.marker,
-    label: option.label,
     intent: option.intent
       ? { verb: option.intent.verb, batchId: option.intent.batchId }
       : null,

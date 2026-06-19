@@ -171,9 +171,9 @@ export function buildPlannerPrompt(context: PlannerContext): string {
 export function parsePlannerOutput(
   markdown: string,
 ): { ok: true; value: RawPlan } | { ok: false; reason: string } {
-  const json = extractFencedJson(markdown);
+  const json = extractPlannerJson(markdown);
   if (json === null) {
-    return { ok: false, reason: "no fenced ```json plan block found" };
+    return { ok: false, reason: "no JSON plan object found" };
   }
   let parsed: unknown;
   try {
@@ -266,6 +266,20 @@ export async function runTriagePlanner(
   context: PlannerContext,
   deps: TriagePlannerDeps,
 ): Promise<PlannerResult> {
+  if (context.backlog.length === 0) {
+    return {
+      status: "ok",
+      body: {
+        batches: [],
+        options: [],
+        envelope: context.envelope,
+        rationale:
+          "Eligible backlog is empty; no standing-plan batches proposed.",
+        source: "planner",
+      },
+    };
+  }
+
   const prompt = buildPlannerPrompt(context);
   const run = await deps.runClaude(prompt);
   if (run.status === "unavailable") {
@@ -278,9 +292,85 @@ export async function runTriagePlanner(
   return { status: "ok", body: buildPlanBody(parsed.value, context) };
 }
 
+function extractPlannerJson(markdown: string): string | null {
+  const fenced = extractFencedJson(markdown);
+  if (fenced !== null) {
+    return fenced;
+  }
+  const trimmed = markdown.trim();
+  if (isParseableJson(trimmed)) {
+    return trimmed;
+  }
+  return extractLargestParseableJson(markdown);
+}
+
 function extractFencedJson(markdown: string): string | null {
   const match = markdown.match(/```json\s*\n([\s\S]*?)\n```/);
   return match?.[1] ?? null;
+}
+
+function extractLargestParseableJson(markdown: string): string | null {
+  const candidates: string[] = [];
+  for (let start = 0; start < markdown.length; start += 1) {
+    const char = markdown[start];
+    if (char !== "{" && char !== "[") {
+      continue;
+    }
+    const candidate = readBalancedJsonCandidate(markdown, start);
+    if (candidate !== null) {
+      candidates.push(candidate);
+    }
+  }
+  return (
+    candidates
+      .sort((left, right) => right.length - left.length)
+      .find(isParseableJson) ?? null
+  );
+}
+
+function readBalancedJsonCandidate(text: string, start: number): string | null {
+  const stack: string[] = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "{" || char === "[") {
+      stack.push(char === "{" ? "}" : "]");
+      continue;
+    }
+    if (char === "}" || char === "]") {
+      if (stack.pop() !== char) {
+        return null;
+      }
+      if (stack.length === 0) {
+        return text.slice(start, index + 1);
+      }
+    }
+  }
+  return null;
+}
+
+function isParseableJson(candidate: string): boolean {
+  try {
+    JSON.parse(candidate);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

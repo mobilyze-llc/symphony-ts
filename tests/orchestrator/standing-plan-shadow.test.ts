@@ -107,6 +107,30 @@ describe("shouldRunShadowPlanCycle", () => {
       true,
     );
   });
+
+  it("uses the last planner run time when a no-op plan leaves updatedAt unchanged", () => {
+    const plan = {
+      planId: "p",
+      revision: 1,
+      contentHash: "h",
+      envelope: ENVELOPE,
+      batches: [],
+      options: [],
+      rationale: "r",
+      createdAt: "2026-06-18T00:00:00.000Z",
+      updatedAt: "2026-06-18T00:00:00.000Z",
+    };
+    const nowMs = Date.parse("2026-06-18T00:20:00.000Z");
+    const lastRunAtMs = Date.parse("2026-06-18T00:19:30.000Z");
+    expect(
+      shouldRunShadowPlanCycle({
+        plan,
+        nowMs,
+        heartbeatMs: 60_000,
+        lastRunAtMs,
+      }),
+    ).toBe(false);
+  });
 });
 
 describe("runShadowPlanCycle", () => {
@@ -170,6 +194,64 @@ describe("runShadowPlanCycle", () => {
       expect(result.status).toBe("unavailable");
       expect(logs).toContain("queue_triage_planner_unavailable");
       expect(await loadStandingPlan(root)).toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("records one stable empty plan across empty-backlog heartbeats without planner degradation logs", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-"));
+    const logs: string[] = [];
+    const context = assembleShadowPlannerContext({
+      candidates: [],
+      inFlight: [],
+      envelope: ENVELOPE,
+    });
+    try {
+      const planner = {
+        runClaude: async (): Promise<PlannerRunResult> => {
+          throw new Error("empty backlog should not invoke the model runner");
+        },
+      };
+      const first = await runShadowPlanCycle({
+        workspaceRoot: root,
+        context,
+        planner,
+        log: (event) => {
+          logs.push(event);
+        },
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+        planId: "plan-1",
+      });
+      const second = await runShadowPlanCycle({
+        workspaceRoot: root,
+        context,
+        planner,
+        log: (event) => {
+          logs.push(event);
+        },
+        now: () => new Date("2026-06-18T01:15:00.000Z"),
+        planId: "plan-1",
+      });
+
+      expect(first).toMatchObject({
+        status: "ok",
+        recorded: true,
+        revision: 1,
+        batchCount: 0,
+      });
+      expect(second).toMatchObject({
+        status: "ok",
+        recorded: false,
+        revision: 1,
+        batchCount: 0,
+      });
+      expect(logs).not.toContain("queue_triage_planner_unavailable");
+      expect(logs).not.toContain("queue_triage_planner_invalid");
+      expect(await loadStandingPlan(root)).toMatchObject({
+        revision: 1,
+        batches: [],
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -270,6 +352,55 @@ describe("runStandingPlanShadowTick", () => {
       });
       expect(result.status).toBe("skipped");
       expect(plannerBuilt).toBe(false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("does not rerun every tick after an unchanged non-empty plan no-ops", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-shadow-tick-"));
+    let plannerCalls = 0;
+    try {
+      const createPlannerRunner = () => {
+        plannerCalls += 1;
+        return okPlanner().runClaude;
+      };
+
+      await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner,
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:00:00.000Z"),
+      });
+      const second = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner,
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:20:00.000Z"),
+      });
+      const third = await runStandingPlanShadowTick({
+        config: triageConfig(),
+        workspaceRoot: root,
+        fetchCandidates: async () => [issue("u1", "SYMPH-1")],
+        getInFlight: () => [],
+        createPlannerRunner,
+        log: () => undefined,
+        now: () => new Date("2026-06-18T01:21:00.000Z"),
+      });
+
+      expect(second.status).toBe("ok");
+      if (second.status === "ok") {
+        expect(second.recorded).toBe(false);
+        expect(second.revision).toBe(1);
+      }
+      expect(third).toEqual({ status: "skipped", reason: "heartbeat" });
+      expect(plannerCalls).toBe(2);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

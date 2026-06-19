@@ -104,6 +104,57 @@ describe("standing-plan store", () => {
     }
   });
 
+  it("is idempotent when only generated rationale text changes", async () => {
+    const root = tmpRoot();
+    try {
+      const firstBatch = lookahead("b1", "SYMPH-1");
+      firstBatch.rationale = "The highest-value eligible issue.";
+      await recordPlanRevision(
+        root,
+        {
+          ...body([firstBatch]),
+          options: [
+            {
+              marker: "[opt-1]",
+              label: "Release b1",
+              intent: { verb: "release_batch", batchId: "b1" },
+            },
+          ],
+          rationale: "The eligible backlog has one obvious next step.",
+        },
+        {
+          planId: "plan-1",
+          createdAt: "2026-06-18T00:00:00.000Z",
+        },
+      );
+
+      const secondBatch = lookahead("b1", "SYMPH-1");
+      secondBatch.rationale = "Different prose for the same batch.";
+      const again = await recordPlanRevision(
+        root,
+        {
+          ...body([secondBatch]),
+          options: [
+            {
+              marker: "[opt-1]",
+              label: "Different display label for the same release option",
+              intent: { verb: "release_batch", batchId: "b1" },
+            },
+          ],
+          rationale: "Backlog wording changed, structure did not.",
+        },
+        {
+          createdAt: "2026-06-18T00:10:00.000Z",
+        },
+      );
+
+      expect(again.recorded).toBe(false);
+      expect(again.plan.revision).toBe(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("rotates the revision when the plan body changes", async () => {
     const root = tmpRoot();
     try {
