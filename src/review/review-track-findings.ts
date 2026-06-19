@@ -1,4 +1,4 @@
-import { CODEX_LEAD_LANE_ID } from "./review-lanes.js";
+import { CODEX_LEAD_LANE_ID, isMergeAuthoritative } from "./review-lanes.js";
 import type { ReviewGateVerdict } from "./review-verdict.js";
 
 export interface ReviewTrackFinding {
@@ -242,5 +242,5 @@ function mergeAuthoritativeTrackLanes<
 >(
   lanes: readonly ReviewTrackLane<Finding, Artifact>[],
 ): Array<ReviewTrackLane<Finding, Artifact>> {
-  return lanes.filter((lane) => lane.mergeAuthoritative !== false);
+  return lanes.filter(isMergeAuthoritative);
 }

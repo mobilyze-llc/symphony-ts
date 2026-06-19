@@ -70,6 +70,32 @@ describe("review provenance contracts", () => {
     ).toContain("malformed Council v2 review_routing");
   });
 
+  it("rejects routing evidence with non-string routing modes", () => {
+    const result = validResult();
+    result.review_metadata = { routing_mode: null };
+    result.review_routing = {
+      schemaVersion: 1,
+      mode: null,
+      decorrelationBasis: {
+        authorFamilies: ["openai-codex"],
+        requiredNonAuthorFamilyReviewer: true,
+        requiredReviewerLaneIds: ["pi-deepseek"],
+        decorrelatedReviewerArtifacts: [
+          {
+            laneId: "pi-deepseek",
+            agent: "pi",
+            modelFamily: "deepseek",
+          },
+        ],
+        mergeEligible: true,
+      },
+    };
+
+    expect(councilRoutingEvidenceError(result)).toContain(
+      "malformed Council v2 review_routing",
+    );
+  });
+
   it("rejects routing evidence without a clean required lane proof", () => {
     const result = validResult();
     result.lanes = [];

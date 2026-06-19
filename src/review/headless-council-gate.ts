@@ -28,7 +28,7 @@ import {
   passArtifactTriageSectionIsNonBlocking,
   sectionFindingEntries,
 } from "./review-artifacts.js";
-import { CODEX_LEAD_LANE_ID } from "./review-lanes.js";
+import { CODEX_LEAD_LANE_ID, isMergeAuthoritative } from "./review-lanes.js";
 import { councilRoutingEvidenceError } from "./review-provenance.js";
 import {
   authoritativeTerminationArtifacts,
@@ -1726,13 +1726,13 @@ function requiredReviewerLaneModel(lane: HeadlessReviewerLaneConfig): string {
 function mergeAuthoritativeForLane(lane: {
   mergeAuthoritative?: boolean;
 }): boolean {
-  return lane.mergeAuthoritative ?? true;
+  return isMergeAuthoritative(lane);
 }
 
 function isMergeAuthoritativeArtifact(
   artifact: StructuredReviewerArtifact,
 ): boolean {
-  return artifact.lane.mergeAuthoritative !== false;
+  return isMergeAuthoritative(artifact.lane);
 }
 
 function mergeAuthoritativeArtifacts(
@@ -1744,7 +1744,7 @@ function mergeAuthoritativeArtifacts(
 function mergeAuthoritativeLanes(
   lanes: readonly HeadlessLaneResult[],
 ): HeadlessLaneResult[] {
-  return lanes.filter((lane) => lane.mergeAuthoritative !== false);
+  return lanes.filter(isMergeAuthoritative);
 }
 
 function buildInitialCouncilRouting(args: {

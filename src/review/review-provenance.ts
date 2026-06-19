@@ -1,3 +1,4 @@
+import { isMergeAuthoritative } from "./review-lanes.js";
 import type { ReviewGateVerdict } from "./review-verdict.js";
 
 export interface CouncilRoutingEvidenceResult {
@@ -57,6 +58,7 @@ export function councilRoutingEvidenceError(
   if (
     routingRecord === null ||
     decorrelationBasisRecord === null ||
+    typeof routingRecord.mode !== "string" ||
     !Array.isArray(decorrelationBasisRecord.authorFamilies) ||
     !decorrelationBasisRecord.authorFamilies.every(isStringValue) ||
     typeof decorrelationBasisRecord.requiredNonAuthorFamilyReviewer !==
@@ -72,7 +74,7 @@ export function councilRoutingEvidenceError(
     return "Council review artifact has malformed Council v2 review_routing evidence.";
   }
   if (
-    metadataRoutingMode === undefined ||
+    typeof metadataRoutingMode !== "string" ||
     metadataRoutingMode !== routingRecord.mode
   ) {
     return "Council review artifact routing metadata is missing or inconsistent with review_routing.mode.";
@@ -190,7 +192,7 @@ function isDecorrelatedReviewerArtifactRecord(
 function isMergeAuthoritativeArtifact(
   artifact: CouncilRoutingEvidenceArtifact,
 ): boolean {
-  return artifact.lane.mergeAuthoritative !== false;
+  return isMergeAuthoritative(artifact.lane);
 }
 
 function recordOrNull(value: unknown): Record<string, unknown> | null {

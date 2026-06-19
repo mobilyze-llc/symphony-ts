@@ -1,3 +1,5 @@
+import { isMergeAuthoritative } from "./review-lanes.js";
+
 export type ReviewGateVerdict = "pass" | "fail" | "error";
 
 export type ReviewLaneDegradedReason =
@@ -161,7 +163,7 @@ export function isRoutingGuaranteeDegradedCondition(
 function mergeAuthoritativeReviewLanes(
   lanes: readonly ReviewVerdictLane[],
 ): ReviewVerdictLane[] {
-  return lanes.filter((lane) => lane.mergeAuthoritative !== false);
+  return lanes.filter(isMergeAuthoritative);
 }
 
 function routingGuaranteeEscalationPredicate(
