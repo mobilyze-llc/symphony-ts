@@ -385,4 +385,28 @@ describe("standing-plan store", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("recordPlanControlDecision rejects an unknown batchId (no false-positive control state)", async () => {
+    const root = tmpRoot();
+    try {
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      });
+      const result = await recordPlanControlDecision(root, {
+        kind: "approve",
+        revision: 1,
+        batchId: "does-not-exist",
+        actor: "operator@pro14",
+        note: "x",
+        decisionId: "d-ghost",
+        createdAt: "2026-06-18T00:00:30.000Z",
+      });
+      expect(result.recorded).toBe(false);
+      expect(result.reason).toBe("batch_not_found");
+      expect((await listHonoredDecisions(root)).length).toBe(0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

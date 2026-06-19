@@ -197,17 +197,10 @@ export async function runStandingPlanShadowTick(
       return { status: "skipped", reason: "heartbeat" };
     }
 
-    if (!config.shadowMode) {
-      // shadow_mode:false is reserved for the PR2 dispatch consumer. Until it
-      // lands, the planner is shadow-only regardless — warn so an operator who
-      // set the flag expecting plan-driven dispatch is not silently misled
-      // (council R1, Pi P2).
-      await deps.log(
-        "queue_triage_shadow_mode_required",
-        "queue_triage shadow_mode=false is not yet supported; the planner remains shadow-only until the dispatch consumer (SYMPH-787) lands.",
-        { outcome: "degraded" },
-      );
-    }
+    // Note: shadow_mode=false is now functional — the consumer (SYMPH-787)
+    // drives dispatch from this plan. The planner heartbeat itself runs in both
+    // modes; shadowMode only gates whether the plan drives dispatch (in the
+    // consumer), so there is nothing to warn about here.
 
     const candidates = await deps.fetchCandidates();
     const context = assembleShadowPlannerContext({

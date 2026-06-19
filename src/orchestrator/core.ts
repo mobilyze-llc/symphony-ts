@@ -2803,21 +2803,32 @@ export class OrchestratorCore {
     // comparator order is used verbatim (graceful degradation / zero-diff).
     let dispatchList: readonly Issue[] = sortedIssues;
     if (this.planDrivenDispatch !== undefined) {
-      const decision = await this.planDrivenDispatch({
-        candidates: issues,
-        runningIssueIdentifiers: new Set(
-          Object.values(this.state.running).map(
-            (entry) => entry.issue.identifier,
+      // The plan may only REORDER/SUBSET the comparator-eligible frontier — it
+      // resolves identifiers from `sortedIssues` (post dispatch-fence,
+      // hard-edge, and computed-order exclusions), NOT the raw tracker fetch.
+      // A plan can never dispatch an issue the comparator excluded (e.g. behind
+      // an operator dispatch fence) — council R1 (Codex P1). Any hook failure
+      // degrades to the comparator and never breaks the poll (Pi P1).
+      try {
+        const decision = await this.planDrivenDispatch({
+          candidates: sortedIssues,
+          runningIssueIdentifiers: new Set(
+            Object.values(this.state.running).map(
+              (entry) => entry.issue.identifier,
+            ),
           ),
-        ),
-      });
-      if (decision.mode === "plan") {
-        const issueByIdentifier = new Map(
-          issues.map((candidate) => [candidate.identifier, candidate]),
-        );
-        dispatchList = decision.orderedIssueIdentifiers
-          .map((identifier) => issueByIdentifier.get(identifier))
-          .filter((candidate): candidate is Issue => candidate !== undefined);
+        });
+        if (decision.mode === "plan") {
+          const eligibleByIdentifier = new Map(
+            sortedIssues.map((candidate) => [candidate.identifier, candidate]),
+          );
+          dispatchList = decision.orderedIssueIdentifiers
+            .map((identifier) => eligibleByIdentifier.get(identifier))
+            .filter((candidate): candidate is Issue => candidate !== undefined);
+        }
+      } catch {
+        // Degrade to the comparator order already in `dispatchList`.
+        dispatchList = sortedIssues;
       }
     }
     for (const issue of dispatchList) {

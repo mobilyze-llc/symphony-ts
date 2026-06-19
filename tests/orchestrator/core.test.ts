@@ -16047,6 +16047,85 @@ describe("fast-track label-based stage routing", () => {
   });
 });
 
+describe("plan-driven dispatch hook (SYMPH-787/789)", () => {
+  function twoCandidateOrchestrator(
+    planDrivenDispatch: OrchestratorCoreOptions["planDrivenDispatch"],
+    dispatched: string[],
+  ) {
+    return createOrchestrator({
+      tracker: createTracker({
+        candidates: [
+          createIssue({ id: "1", identifier: "ISSUE-1" }),
+          createIssue({ id: "2", identifier: "ISSUE-2" }),
+        ],
+        statesById: [
+          { id: "1", identifier: "ISSUE-1", state: "In Progress" },
+          { id: "2", identifier: "ISSUE-2", state: "In Progress" },
+        ],
+      }),
+      ...(planDrivenDispatch === undefined ? {} : { planDrivenDispatch }),
+      spawnWorker: async ({ issue }) => {
+        dispatched.push(issue.identifier);
+        return {
+          workerHandle: { pid: 1001 },
+          monitorHandle: { ref: "monitor-1" },
+        };
+      },
+    });
+  }
+
+  it("dispatches the plan's subset/order when the hook returns plan mode", async () => {
+    const dispatched: string[] = [];
+    const orchestrator = twoCandidateOrchestrator(
+      async () => ({ mode: "plan", orderedIssueIdentifiers: ["ISSUE-2"] }),
+      dispatched,
+    );
+    await orchestrator.pollTick();
+    expect(dispatched).toEqual(["ISSUE-2"]); // plan subset, not the comparator's ISSUE-1 first
+  });
+
+  it("can never dispatch an identifier outside the comparator-eligible frontier", async () => {
+    const dispatched: string[] = [];
+    const orchestrator = twoCandidateOrchestrator(
+      // GHOST-9 is not an eligible candidate; the plan must not be able to add it.
+      async () => ({
+        mode: "plan",
+        orderedIssueIdentifiers: ["GHOST-9", "ISSUE-1"],
+      }),
+      dispatched,
+    );
+    await orchestrator.pollTick();
+    expect(dispatched).toEqual(["ISSUE-1"]); // GHOST-9 filtered out
+  });
+
+  it("degrades to the comparator order when the hook returns degrade", async () => {
+    const dispatched: string[] = [];
+    const orchestrator = twoCandidateOrchestrator(
+      async () => ({ mode: "degrade" }),
+      dispatched,
+    );
+    await orchestrator.pollTick();
+    // Comparator order (priority+FIFO): both, ISSUE-1 first.
+    expect(dispatched).toEqual(["ISSUE-1", "ISSUE-2"]);
+  });
+
+  it("degrades to the comparator when the hook throws (never breaks the poll)", async () => {
+    const dispatched: string[] = [];
+    const orchestrator = twoCandidateOrchestrator(async () => {
+      throw new Error("store I/O failure");
+    }, dispatched);
+    await orchestrator.pollTick();
+    expect(dispatched).toEqual(["ISSUE-1", "ISSUE-2"]);
+  });
+
+  it("uses the comparator order verbatim when no hook is configured (zero-diff)", async () => {
+    const dispatched: string[] = [];
+    const orchestrator = twoCandidateOrchestrator(undefined, dispatched);
+    await orchestrator.pollTick();
+    expect(dispatched).toEqual(["ISSUE-1", "ISSUE-2"]);
+  });
+});
+
 function createOrchestrator(overrides?: {
   config?: ResolvedWorkflowConfig;
   tracker?: IssueTracker;
@@ -16066,6 +16145,7 @@ function createOrchestrator(overrides?: {
   onGateFailed?: OrchestratorCoreOptions["onGateFailed"];
   onSystemicCluster?: OrchestratorCoreOptions["onSystemicCluster"];
   spawnWorker?: OrchestratorCoreOptions["spawnWorker"];
+  planDrivenDispatch?: OrchestratorCoreOptions["planDrivenDispatch"];
   getMergeActuatorLiveState?: OrchestratorCoreOptions["getMergeActuatorLiveState"];
   mergeActuatorSideEffects?: OrchestratorCoreOptions["mergeActuatorSideEffects"];
   now?: () => Date;
@@ -16160,6 +16240,10 @@ function createOrchestrator(overrides?: {
 
   if (overrides?.mergeActuatorSideEffects !== undefined) {
     options.mergeActuatorSideEffects = overrides.mergeActuatorSideEffects;
+  }
+
+  if (overrides?.planDrivenDispatch !== undefined) {
+    options.planDrivenDispatch = overrides.planDrivenDispatch;
   }
 
   return new OrchestratorCore(options);

@@ -3193,6 +3193,21 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     verb: PlanControlVerb,
     input: IntentRequest,
   ): Promise<IntentRequestResult> {
+    // Defense-in-depth (no ambient control surfaces): a high-consequence plan
+    // control signal must bind an operator actor. The dashboard route is
+    // already operator-authenticated, but gate the host method too so a direct
+    // caller (or a future non-dashboard surface) cannot self-approve with a
+    // watchdog/agent actor (council R1, Codex P2).
+    if (input.actor.kind !== "operator") {
+      return {
+        status: "invalid_request",
+        detail: `plan-control intents require an operator actor (got ${input.actor.kind}).`,
+        sequence: null,
+        verb,
+        issue_id: null,
+        issue_identifier: null,
+      };
+    }
     const batch = input.batch;
     if (batch === undefined) {
       return {
@@ -3247,9 +3262,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ? "no_plan"
         : result.reason === "stale_revision"
           ? "rejected_stale"
-          : result.recorded
-            ? "applied"
-            : "no_op";
+          : result.reason === "batch_not_found"
+            ? "invalid_request"
+            : result.recorded
+              ? "applied"
+              : "no_op";
     return {
       status,
       detail:
@@ -3257,9 +3274,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           ? "No standing plan exists yet."
           : result.reason === "stale_revision"
             ? `Revision ${batch.revision} is superseded; the action is void.`
-            : result.recorded
-              ? `${verb} recorded against revision ${batch.revision}.`
-              : `${verb} already recorded (idempotent).`,
+            : result.reason === "batch_not_found"
+              ? `Batch ${batch.batchId ?? ""} is not in revision ${batch.revision}.`
+              : result.recorded
+                ? `${verb} recorded against revision ${batch.revision}.`
+                : `${verb} already recorded (idempotent).`,
       sequence: null,
       verb,
       issue_id: null,
@@ -3294,30 +3313,41 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     if (cfg === undefined || !cfg.enabled || cfg.shadowMode) {
       return { mode: "degrade" };
     }
-    const root = this.workspaceManager.root;
-    // These reads are disk-only; no model call on the dispatch hot path.
-    const plan = await loadStandingPlan(root);
-    const honoredApprovals =
-      plan === null ? [] : await listHonoredDecisions(root);
-    const decision = decidePlanDrivenDispatch({
-      config: cfg,
-      plan,
-      honoredApprovals,
-      candidateIdentifiers: new Set(
-        input.candidates.map((candidate) => candidate.identifier),
-      ),
-      runningIssueIdentifiers: input.runningIssueIdentifiers,
-      nowMs: this.now().getTime(),
-    });
-    if (decision.forceReplan) {
-      this.requestStandingPlanReplan();
+    // The store reads are disk-only (no model call), but a disk/journal error
+    // must DEGRADE to the comparator — never propagate and crash the poll
+    // (council R1, Pi P1). Safety never depends on the standing-plan store.
+    try {
+      const root = this.workspaceManager.root;
+      const plan = await loadStandingPlan(root);
+      const honoredApprovals =
+        plan === null ? [] : await listHonoredDecisions(root);
+      const decision = decidePlanDrivenDispatch({
+        config: cfg,
+        plan,
+        honoredApprovals,
+        candidateIdentifiers: new Set(
+          input.candidates.map((candidate) => candidate.identifier),
+        ),
+        runningIssueIdentifiers: input.runningIssueIdentifiers,
+        nowMs: this.now().getTime(),
+      });
+      if (decision.forceReplan) {
+        this.requestStandingPlanReplan();
+      }
+      return decision.action === "plan"
+        ? {
+            mode: "plan",
+            orderedIssueIdentifiers: decision.orderedIssueIdentifiers,
+          }
+        : { mode: "degrade" };
+    } catch (error) {
+      await this.logger?.warn(
+        "queue_triage_consumer_degraded",
+        "Standing-plan consumer failed; falling back to the comparator.",
+        { outcome: "degraded", detail: toErrorMessage(error) },
+      );
+      return { mode: "degrade" };
     }
-    return decision.action === "plan"
-      ? {
-          mode: "plan",
-          orderedIssueIdentifiers: decision.orderedIssueIdentifiers,
-        }
-      : { mode: "degrade" };
   }
 
   async requestAnchorFieldEdit(
@@ -5230,8 +5260,19 @@ export async function startRuntimeService(
       now: () => new Date(),
       force,
     })
+      .then((result) => {
+        // Re-arm a forced re-plan that did not actually land (transient
+        // tracker/planner failure or a skip): the modify_plan / predicate
+        // request must not evaporate (council R1, Codex P2).
+        if (force && result.status !== "ok") {
+          runtimeHost.requestStandingPlanReplan();
+        }
+      })
       .catch(() => {
-        // The tick is already best-effort; guard the void promise itself.
+        // The tick threw: best-effort, but preserve a forced re-plan request.
+        if (force) {
+          runtimeHost.requestStandingPlanReplan();
+        }
       })
       .finally(() => {
         standingPlanShadowTickInFlight = false;

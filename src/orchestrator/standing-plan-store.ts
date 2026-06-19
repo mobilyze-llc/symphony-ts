@@ -35,7 +35,7 @@ export interface RecordPlanRevisionResult {
 
 export interface RecordPlanDecisionResult {
   recorded: boolean;
-  reason?: "no_plan" | "stale_revision";
+  reason?: "no_plan" | "stale_revision" | "batch_not_found";
 }
 
 /** Project the current plan from the journal (latest revision, decisions void on rotate). */
@@ -189,6 +189,18 @@ export async function recordPlanControlDecision(
   const current = await loadStandingPlan(workspaceRoot);
   if (current === null) {
     return { recorded: false, reason: "no_plan" };
+  }
+  // A batch-scoped decision against the CURRENT revision must target a batch
+  // that exists in it; otherwise it would record false-positive control state
+  // the consumer can never honor (council R1, Codex P3). Revision binding takes
+  // precedence: a stale revision falls through to recordPlanDecision, which
+  // returns stale_revision regardless of the (old) batch id.
+  if (
+    input.batchId !== null &&
+    input.revision === current.revision &&
+    !current.batches.some((batch) => batch.batchId === input.batchId)
+  ) {
+    return { recorded: false, reason: "batch_not_found" };
   }
   return recordPlanDecision(workspaceRoot, {
     decisionId: input.decisionId,
