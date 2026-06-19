@@ -178,4 +178,46 @@ describe("standing-plan journal", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("rejects a plan_revision row whose canary violates the head/member invariant", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-standing-plan-"));
+    try {
+      await appendStandingPlanJournalEntriesWithLock(root, [revisionDraft(1)]);
+      const base = createRevision(2);
+      const poison = {
+        sequence: 2,
+        idempotencyKey: "plan-1:rev:2",
+        timestamp: "2026-06-18T00:00:00.000Z",
+        kind: "plan_revision",
+        planId: "plan-1",
+        revision: {
+          ...base,
+          batches: [
+            {
+              batchId: "b1",
+              mode: "canary-chain",
+              status: "lookahead",
+              rationale: "deadlock",
+              members: [{ issueId: "i1", issueIdentifier: "SYMPH-1" }],
+              // empty head + out-of-member ref — must be rejected on read.
+              canary: {
+                headIssueIdentifiers: [],
+                contingentIssueIdentifiers: ["SYMPH-999"],
+              },
+            },
+          ],
+        },
+      };
+      await fs.appendFile(
+        getStandingPlanJournalPath(root),
+        `${JSON.stringify(poison)}\n`,
+        "utf8",
+      );
+
+      const journal = await readStandingPlanJournal(root);
+      expect(journal).toHaveLength(1);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

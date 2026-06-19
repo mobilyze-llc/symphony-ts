@@ -166,3 +166,40 @@ describe("honoredDecisions (approval-revision binding)", () => {
     expect(honored.map((decision) => decision.decisionId)).toEqual(["d2"]);
   });
 });
+
+describe("rotateRevision option filtering", () => {
+  it("drops options targeting committed/dropped batches, keeps lookahead + null-intent options", () => {
+    const committed = inFlightBatch("committed-1", "SYMPH-1");
+    const prior = planFrom(1, [committed]);
+    const bodyWithOptions: PlanBody = {
+      batches: [lookaheadBatch("look-1", "SYMPH-2")],
+      options: [
+        {
+          marker: "[opt-1]",
+          label: "release surviving lookahead",
+          intent: { verb: "release_batch", batchId: "look-1" },
+        },
+        {
+          marker: "[opt-2]",
+          label: "release committed (must drop)",
+          intent: { verb: "release_batch", batchId: "committed-1" },
+        },
+        {
+          marker: "[opt-3]",
+          label: "modify plan (no batch)",
+          intent: { verb: "modify_plan", batchId: null },
+        },
+      ],
+      envelope: ENVELOPE,
+      rationale: "r",
+      source: "planner",
+    };
+    const next = rotateRevision(prior, bodyWithOptions, {
+      createdAt: "2026-06-18T00:02:00.000Z",
+    });
+    expect(next.options.map((option) => option.marker)).toEqual([
+      "[opt-1]",
+      "[opt-3]",
+    ]);
+  });
+});

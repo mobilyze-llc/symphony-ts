@@ -282,4 +282,43 @@ describe("standing-plan store", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("projects the last-WRITTEN revision by sequence, not the largest revision id", async () => {
+    const root = tmpRoot();
+    try {
+      // rev id 3 written first (sequence 1), rev id 2 written second (seq 2).
+      const mkRevision = (revision: number, identifier: string) => ({
+        revision,
+        planId: "plan-1",
+        contentHash: `h${revision}`,
+        supersedes: null,
+        createdAt: "2026-06-18T00:00:00.000Z",
+        envelope: ENVELOPE,
+        batches: [lookahead(`b${revision}`, identifier)],
+        options: [],
+        rationale: "r",
+        source: "planner" as const,
+      });
+      await appendStandingPlanJournalEntriesWithLock(root, [
+        {
+          kind: "plan_revision",
+          idempotencyKey: "plan-1:rev:3",
+          timestamp: "2026-06-18T00:00:00.000Z",
+          planId: "plan-1",
+          revision: mkRevision(3, "SYMPH-3"),
+        },
+        {
+          kind: "plan_revision",
+          idempotencyKey: "plan-1:rev:2",
+          timestamp: "2026-06-18T00:01:00.000Z",
+          planId: "plan-1",
+          revision: mkRevision(2, "SYMPH-2"),
+        },
+      ]);
+      // The last-written (sequence 2 → revision id 2) is current, not rev id 3.
+      expect((await loadStandingPlan(root))?.revision).toBe(2);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

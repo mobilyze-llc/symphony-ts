@@ -458,15 +458,40 @@ function isPlanEnvelope(value: unknown): value is PlanEnvelope {
 }
 
 function isPlanBatch(value: unknown): value is PlanBatch {
+  if (
+    !isRecord(value) ||
+    typeof value.batchId !== "string" ||
+    !PLAN_BATCH_MODES.includes(value.mode as PlanBatchMode) ||
+    !PLAN_BATCH_STATUSES.includes(value.status as PlanBatchStatus) ||
+    typeof value.rationale !== "string" ||
+    !Array.isArray(value.members) ||
+    !value.members.every(isPlanBatchMember)
+  ) {
+    return false;
+  }
+  if (value.canary === null) {
+    return true;
+  }
+  if (!isPlanCanaryStructure(value.canary)) {
+    return false;
+  }
+  // Canary invariant on READ, mirroring the planner's normalizeCanary: a
+  // non-empty head whose head+contingent refs are all batch members. A
+  // corrupt/hand-edited row that violates it is dropped, so a deadlocking
+  // canary can never become store truth (council R2, Codex+Pi P2).
+  const memberIdentifiers = new Set(
+    (value.members as PlanBatchMember[]).map(
+      (member) => member.issueIdentifier,
+    ),
+  );
   return (
-    isRecord(value) &&
-    typeof value.batchId === "string" &&
-    PLAN_BATCH_MODES.includes(value.mode as PlanBatchMode) &&
-    PLAN_BATCH_STATUSES.includes(value.status as PlanBatchStatus) &&
-    typeof value.rationale === "string" &&
-    Array.isArray(value.members) &&
-    value.members.every(isPlanBatchMember) &&
-    (value.canary === null || isPlanCanaryStructure(value.canary))
+    value.canary.headIssueIdentifiers.length > 0 &&
+    value.canary.headIssueIdentifiers.every((id) =>
+      memberIdentifiers.has(id),
+    ) &&
+    value.canary.contingentIssueIdentifiers.every((id) =>
+      memberIdentifiers.has(id),
+    )
   );
 }
 
@@ -512,10 +537,11 @@ function isPlanDecision(value: unknown): value is PlanDecision {
     typeof value.planId === "string" &&
     typeof value.revision === "number" &&
     (value.batchId === null || typeof value.batchId === "string") &&
-    typeof value.kind === "string" &&
+    PLAN_DECISION_KINDS.includes(value.kind as PlanDecisionKind) &&
     typeof value.actor === "string" &&
     (value.optionMarker === null || typeof value.optionMarker === "string") &&
-    typeof value.createdAt === "string"
+    typeof value.createdAt === "string" &&
+    (value.note === null || typeof value.note === "string")
   );
 }
 
