@@ -149,21 +149,31 @@ export interface ReplanPredicateResult {
   reasons: string[];
 }
 
+/** Merges since the plan at/above which the base is presumed to have shifted. */
+export const DEFAULT_MERGE_WORLD_SHIFT_THRESHOLD = 3;
+
 /**
  * Cheap deterministic guards that decide WHETHER to request a re-plan — they
  * never call the model (zero-LLM-on-dispatch). The re-plan itself runs on the
- * off-hot-path heartbeat. v2 implements the highest-value guards; the broader
- * set (new-work-outranks-by-priority-band, merge-moved-the-world) is tracked as
- * a follow-up.
+ * off-hot-path heartbeat. Guards (SYMPH-787 + SYMPH-801):
+ *  #1 envelope changed · #2 no planned member still a candidate ·
+ *  #3 new-work-outranks-by-priority-band · #4 merge-moved-the-world.
+ * The richer inputs (priority bands, merges-since) are OPTIONAL so callers that
+ * cannot supply them keep the original two guards.
  */
 export function evaluateReplanPredicates(input: {
   plan: StandingPlan;
   currentEnvelope: PlanEnvelope;
   candidateIdentifiers: ReadonlySet<string>;
+  /** identifier → priority band (lower = more urgent); SYMPH-801 guard #3. */
+  candidatePriorityBands?: ReadonlyMap<string, number>;
+  /** merged outcomes recorded since the plan was computed; SYMPH-801 guard #4. */
+  mergedSincePlanCount?: number;
+  mergeWorldShiftThreshold?: number;
 }): ReplanPredicateResult {
   const reasons: string[] = [];
 
-  // Guard #4: the envelope changed (Governor clamp / widen) since the plan.
+  // Guard #1: the envelope changed (Governor clamp / widen) since the plan.
   if (input.plan.envelope.version !== input.currentEnvelope.version) {
     reasons.push(
       `envelope version changed (${input.plan.envelope.version} → ${input.currentEnvelope.version})`,
@@ -186,6 +196,55 @@ export function evaluateReplanPredicates(input: {
     }
   }
 
+  // Guard #3 (SYMPH-801): new work outranks the plan by a priority band. If an
+  // eligible candidate the plan did NOT include is strictly more urgent than the
+  // best planned lookahead member, re-plan so the Manager can reconsider.
+  if (input.candidatePriorityBands !== undefined && lookahead.length > 0) {
+    const plannedIdentifiers = new Set(
+      lookahead.flatMap((batch) =>
+        batch.members.map((member) => member.issueIdentifier),
+      ),
+    );
+    const bestBand = (identifiers: Iterable<string>): number | null => {
+      let best: number | null = null;
+      for (const identifier of identifiers) {
+        const band = input.candidatePriorityBands?.get(identifier);
+        if (band !== undefined && (best === null || band < best)) {
+          best = band;
+        }
+      }
+      return best;
+    };
+    const bestPlanned = bestBand(plannedIdentifiers);
+    const bestUnplanned = bestBand(
+      [...input.candidateIdentifiers].filter(
+        (identifier) => !plannedIdentifiers.has(identifier),
+      ),
+    );
+    if (
+      bestUnplanned !== null &&
+      bestPlanned !== null &&
+      bestUnplanned < bestPlanned
+    ) {
+      reasons.push(
+        `new work outranks the plan by a priority band (${bestUnplanned} < ${bestPlanned})`,
+      );
+    }
+  }
+
+  // Guard #4 (SYMPH-801): merge moved the world. Enough merges since the plan
+  // means the base/dependency landscape shifted — re-rank against the new base.
+  const threshold =
+    input.mergeWorldShiftThreshold ?? DEFAULT_MERGE_WORLD_SHIFT_THRESHOLD;
+  if (
+    input.mergedSincePlanCount !== undefined &&
+    input.mergedSincePlanCount >= threshold
+  ) {
+    reasons.push(
+      `${input.mergedSincePlanCount} merges landed since the plan (≥ ${threshold}); the base moved`,
+    );
+  }
+
   return { forceReplan: reasons.length > 0, reasons };
 }
 
@@ -196,6 +255,10 @@ export interface PlanDispatchDecisionInput {
   candidateIdentifiers: ReadonlySet<string>;
   runningIssueIdentifiers: ReadonlySet<string>;
   nowMs: number;
+  /** identifier → priority band (lower = more urgent); SYMPH-801 guard #3. */
+  candidatePriorityBands?: ReadonlyMap<string, number>;
+  /** merged outcomes since the plan was computed; SYMPH-801 guard #4. */
+  mergedSincePlanCount?: number;
 }
 
 export interface PlanDispatchDecision {
@@ -240,6 +303,12 @@ export function decidePlanDrivenDispatch(
     plan: input.plan,
     currentEnvelope: cfg.envelope,
     candidateIdentifiers: input.candidateIdentifiers,
+    ...(input.candidatePriorityBands === undefined
+      ? {}
+      : { candidatePriorityBands: input.candidatePriorityBands }),
+    ...(input.mergedSincePlanCount === undefined
+      ? {}
+      : { mergedSincePlanCount: input.mergedSincePlanCount }),
   });
   if (predicates.forceReplan) {
     // A misaligned plan: dispatch via the comparator this tick, re-plan next.
