@@ -62,11 +62,13 @@ export function parseStageExecutionProfile(
     `${path}.profile`,
     errors,
   );
+  const reasoningEffortSource =
+    record.reasoning_effort === undefined || record.reasoning_effort === null
+      ? { path: `${path}.thinking`, value: record.thinking }
+      : { path: `${path}.reasoning_effort`, value: record.reasoning_effort };
   const reasoningEffort = readOptionalReasoningEffort(
-    record.reasoning_effort ?? record.thinking,
-    "reasoning_effort" in record
-      ? `${path}.reasoning_effort`
-      : `${path}.thinking`,
+    reasoningEffortSource.value,
+    reasoningEffortSource.path,
     errors,
   );
 
@@ -119,10 +121,8 @@ function parseStageExecutionArtifactContract(
   executionPath: string,
   errors: StageExecutionValidationError[],
 ): StageExecutionProfile["artifacts"] {
-  const fieldName =
-    "artifact_contract" in execution ? "artifact_contract" : "artifacts";
-  const value = execution[fieldName];
-  const path = `${executionPath}.${fieldName}`;
+  const value = execution.artifact_contract;
+  const path = `${executionPath}.artifact_contract`;
   if (value === undefined || value === null) {
     return Object.freeze({
       requires: Object.freeze([]),

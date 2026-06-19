@@ -239,6 +239,103 @@ describe("resolveStagesConfig", () => {
     expect(validateStagesConfig(result).ok).toBe(true);
   });
 
+  it("parses thinking as the delegated execution reasoning_effort fallback", () => {
+    const result = resolveStagesConfig({
+      plan: {
+        type: "agent",
+        on_complete: "implement",
+        execution: {
+          role: "planner",
+          phase: "plan",
+          thinking: "high",
+        },
+      },
+      implement: {
+        type: "agent",
+        on_complete: "done",
+      },
+      done: {
+        type: "terminal",
+      },
+    });
+
+    const stage = result!.stages.plan!;
+    expect(stage.executionValidationErrors).toEqual([]);
+    expect(stage.execution!.reasoningEffort).toBe("high");
+  });
+
+  it("prefers delegated execution reasoning_effort over thinking", () => {
+    const result = resolveStagesConfig({
+      review: {
+        type: "agent",
+        on_complete: "done",
+        execution: {
+          role: "reviewer",
+          phase: "review",
+          reasoning_effort: "medium",
+          thinking: "high",
+        },
+      },
+      done: {
+        type: "terminal",
+      },
+    });
+
+    const stage = result!.stages.review!;
+    expect(stage.executionValidationErrors).toEqual([]);
+    expect(stage.execution!.reasoningEffort).toBe("medium");
+  });
+
+  it("attributes delegated execution thinking fallback errors to thinking", () => {
+    const result = resolveStagesConfig({
+      investigate: {
+        type: "agent",
+        on_complete: "done",
+        execution: {
+          role: "investigator",
+          phase: "investigate",
+          reasoning_effort: null,
+          thinking: "extreme",
+        },
+      },
+      done: {
+        type: "terminal",
+      },
+    });
+
+    const errors = result!.stages.investigate!.executionValidationErrors ?? [];
+    expect(errors.map((error) => error.path)).toEqual([
+      "stages.investigate.execution.thinking",
+    ]);
+  });
+
+  it("does not treat artifacts as a delegated execution artifact_contract alias", () => {
+    const result = resolveStagesConfig({
+      implement: {
+        type: "agent",
+        on_complete: "done",
+        execution: {
+          role: "implementer",
+          phase: "implement",
+          artifacts: {
+            requires: ["legacy-input"],
+            produces: ["legacy-output"],
+          },
+        },
+      },
+      done: {
+        type: "terminal",
+      },
+    });
+
+    const stage = result!.stages.implement!;
+    expect(stage.executionValidationErrors).toEqual([]);
+    expect(stage.execution!.artifacts).toEqual({
+      requires: [],
+      produces: [],
+    });
+  });
+
   it("surfaces path-specific errors for invalid delegated execution profiles", () => {
     const result = resolveStagesConfig({
       implement: {
