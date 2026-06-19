@@ -3440,16 +3440,24 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         },
         loadDocRef: () => this.loadControlDocRef(root),
         saveDocRef: (ref) => this.saveControlDocRef(root, ref),
+        lastPublishedContentHash: await this.loadControlDocLastHash(root),
         notify: (url) =>
           this.notifier?.notify({
             type: "info_alert",
             issueIdentifier: "PLAN",
-            message: `🚦 Ticket Triage Controls updated → ${url}`,
+            message: "🚦 Ticket Triage Controls updated",
+            linkUrl: url,
+            linkLabel: "open",
           }),
         log: (event, message, fields) => {
           void this.logger?.info(event, message, fields);
         },
       });
+      // Persist the content hash only when we actually published, so the next
+      // tick can throttle an unchanged re-render (SYMPH-820).
+      if (published.action !== "unchanged") {
+        await this.saveControlDocLastHash(root, published.contentHash);
+      }
       const operatorAllowlist = new Set(
         (this.config.operatorAnchors?.operatorAllowlist ?? []).map((email) =>
           email.trim().toLowerCase(),
@@ -3516,6 +3524,33 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     const path = this.controlDocRefPath(root);
     const tmp = `${path}.tmp`;
     await writeFile(tmp, `${JSON.stringify(ref)}\n`, "utf8");
+    await rename(tmp, path);
+  }
+
+  private controlDocHashPath(root: string): string {
+    return join(root, ".symphony", "standing-plan-doc.hash");
+  }
+
+  private async loadControlDocLastHash(root: string): Promise<string | null> {
+    try {
+      const hash = (
+        await readFile(this.controlDocHashPath(root), "utf8")
+      ).trim();
+      return hash === "" ? null : hash;
+    } catch {
+      return null;
+    }
+  }
+
+  private async saveControlDocLastHash(
+    root: string,
+    contentHash: string,
+  ): Promise<void> {
+    await mkdir(join(root, ".symphony"), { recursive: true });
+    // Atomic write (temp + rename), mirroring saveControlDocRef.
+    const path = this.controlDocHashPath(root);
+    const tmp = `${path}.tmp`;
+    await writeFile(tmp, `${contentHash}\n`, "utf8");
     await rename(tmp, path);
   }
 
