@@ -261,6 +261,43 @@ describe("admission guardrail (SYMPH-794)", () => {
     expect(result.dispatched).toBe(true);
     expect(spawned).toEqual(["SYMPH-1", "SYMPH-1"]); // unchanged legacy behavior
   });
+
+  // SYMPH-825: the chokepoint is the structural backstop. Drive it directly to
+  // prove that an unadmitted issue reaching it (the bug a forgotten per-path gate
+  // would cause) fails CLOSED — it never spawns and journals a gate verdict.
+  it("chokepoint backstop: admitAndDispatch fails closed for an unadmitted issue and never spawns (SYMPH-825)", async () => {
+    const { core, spawned } = createCore({
+      candidates: [issue("1", "SYMPH-1")],
+    });
+    const chokepoint = (
+      core as unknown as {
+        admitAndDispatch: (
+          issue: Issue,
+          attempt: number | null,
+          admitted: ReadonlySet<string> | null,
+        ) => Promise<{ dispatched: boolean; disposition: string }>;
+      }
+    ).admitAndDispatch.bind(core);
+
+    // Admitted set excludes SYMPH-1 → held, no spawn, observable gate verdict.
+    const gated = await chokepoint(
+      issue("1", "SYMPH-1"),
+      null,
+      new Set<string>(),
+    );
+    expect(gated.dispatched).toBe(false);
+    expect(gated.disposition).toBe("admission_gate");
+    expect(spawned).toEqual([]);
+    expect(core.getState().issueDispositions["1"]).toMatchObject({
+      disposition: "gate",
+      reasonCode: "admit_signal_required",
+    });
+
+    // A null admitted set is inert (gate off) → dispatch proceeds and spawns.
+    const dispatched = await chokepoint(issue("1", "SYMPH-1"), null, null);
+    expect(dispatched.dispatched).toBe(true);
+    expect(spawned).toEqual(["SYMPH-1"]);
+  });
 });
 
 function createFakeTimerScheduler() {

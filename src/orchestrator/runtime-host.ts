@@ -3692,8 +3692,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     return resolveAdmittedIdentifiersForTick({
       teamScoped: (this.config.tracker.teamKeys ?? []).length > 0,
       admissionGuardrailEnabled: cfg?.admissionGuardrail.enabled === true,
-      loadPlan: () => loadStandingPlan(root),
-      listHonoredDecisions: () => listHonoredDecisions(root),
+      // ONE journal read per tick — the helper projects the plan AND the honored
+      // decisions from the same snapshot (SYMPH-823), closing the TOCTOU where a
+      // re-plan between two reads paired plan revision N with decisions honored
+      // against N+1.
+      readJournal: () => readStandingPlanJournal(root),
       onError: async (error) => {
         // Awaited inside the helper so the degrade diagnostic flushes before the
         // empty-set (fail-closed) return; the helper swallows any logger error.

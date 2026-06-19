@@ -8,16 +8,19 @@ import type {
   PlanBatch,
   PlanDecision,
   PlanEnvelope,
+  PlanRevision,
   StandingPlan,
+  StandingPlanJournal,
+  StandingPlanJournalEntry,
 } from "../../src/domain/standing-plan.js";
+import { readStandingPlanJournal } from "../../src/logging/standing-plan-journal.js";
 import {
+  admittedIdentifiersFromJournal,
   approvedAdmittedIdentifiers,
   partitionByAdmission,
   resolveAdmittedIdentifiersForTick,
 } from "../../src/orchestrator/standing-plan-admission.js";
 import {
-  listHonoredDecisions,
-  loadStandingPlan,
   recordPlanControlDecision,
   recordPlanRevision,
 } from "../../src/orchestrator/standing-plan-store.js";
@@ -74,6 +77,50 @@ function approve(batchId: string | null): PlanDecision {
     createdAt: "2026-06-19T00:06:00.000Z",
     note: null,
   };
+}
+
+/**
+ * Build a journal that projects to `p` plus `decisions` — the in-memory snapshot
+ * the atomic gate reads ONCE (SYMPH-823). A single plan_revision entry carries the
+ * plan; the decisions follow as plan_decision entries.
+ */
+function journalOf(
+  p: StandingPlan,
+  decisions: readonly PlanDecision[],
+): StandingPlanJournal {
+  const revision: PlanRevision = {
+    revision: p.revision,
+    planId: p.planId,
+    contentHash: p.contentHash,
+    supersedes: null,
+    createdAt: p.createdAt,
+    envelope: p.envelope,
+    batches: p.batches,
+    options: p.options,
+    rationale: p.rationale,
+    source: "planner",
+  };
+  const entries: StandingPlanJournalEntry[] = [
+    {
+      sequence: 1,
+      idempotencyKey: `${p.planId}:rev:${p.revision}`,
+      timestamp: p.updatedAt,
+      kind: "plan_revision",
+      planId: p.planId,
+      revision,
+    },
+  ];
+  decisions.forEach((decision, index) => {
+    entries.push({
+      sequence: index + 2,
+      idempotencyKey: `${decision.planId}:decision:${decision.decisionId}`,
+      timestamp: decision.createdAt,
+      kind: "plan_decision",
+      planId: decision.planId,
+      decision,
+    });
+  });
+  return entries;
 }
 
 describe("approvedAdmittedIdentifiers (SYMPH-794)", () => {
@@ -234,21 +281,109 @@ describe("partitionByAdmission (SYMPH-794)", () => {
   });
 });
 
-describe("resolveAdmittedIdentifiersForTick (SYMPH-794 coupling)", () => {
-  it("is inert (returns null) when neither team-scoped nor guardrail-enabled — legacy zero-diff", async () => {
-    let loaded = false;
+// Shared real-store helpers (the atomic cross-revision suite and the integration
+// suite both build journals through the real store).
+const ENVELOPE: PlanEnvelope = {
+  version: 1,
+  concurrencyCeiling: 3,
+  allowedRisk: "medium",
+  allowedModes: ["parallel-isolated"],
+};
+const lookaheadBatch = (id: string, identifier: string): PlanBatch => ({
+  batchId: id,
+  mode: "parallel-isolated",
+  status: "lookahead",
+  members: [{ issueId: id, issueIdentifier: identifier }],
+  rationale: "r",
+  canary: null,
+});
+const bodyOf = (batches: PlanBatch[]): PlanBody => ({
+  batches,
+  options: [{ marker: "[opt-1]", label: "Release", intent: null }],
+  envelope: ENVELOPE,
+  rationale: "rationale",
+  source: "planner",
+});
+
+describe("admittedIdentifiersFromJournal (SYMPH-823 single projection)", () => {
+  it("admits the approved batch members projected from one journal snapshot", () => {
+    const admitted = admittedIdentifiersFromJournal(
+      journalOf(plan(), [approve("b-app")]),
+    );
+    expect([...admitted].sort()).toEqual(["SYMPH-1", "SYMPH-2"]);
+  });
+
+  it("admits nothing for an empty journal (no plan ⇒ the bare backlog never dispatches)", () => {
+    expect(admittedIdentifiersFromJournal([]).size).toBe(0);
+  });
+
+  it("projects plan AND decisions from the SAME revision — a rotation can't cross-pair (SYMPH-823)", async () => {
+    // A journal that has rotated rev 1 → rev 2: b1 was approved under rev 1, b2
+    // under rev 2. The pre-fix two-read path could pair rev 1's plan with rev 2's
+    // honored decisions (or vice-versa). Projecting both from the same entries
+    // admits ONLY the current revision's approved batch (b2 → SYMPH-2); the voided
+    // rev-1 approval never pairs with the rev-2 plan.
+    const root = mkdtempSync(join(tmpdir(), "symph-admission-atomic-"));
+    try {
+      await recordPlanRevision(
+        root,
+        bodyOf([lookaheadBatch("b1", "SYMPH-1")]),
+        {
+          planId: "plan-1",
+          createdAt: "2026-06-19T00:00:00.000Z",
+        },
+      );
+      await recordPlanControlDecision(root, {
+        kind: "approve",
+        revision: 1,
+        batchId: "b1",
+        actor: "operator@pro14",
+        note: null,
+        decisionId: "approve:b1:rev1",
+        createdAt: "2026-06-19T00:00:30.000Z",
+      });
+      // A re-plan rotates to revision 2; the operator approves a revision-2 batch.
+      await recordPlanRevision(
+        root,
+        bodyOf([lookaheadBatch("b2", "SYMPH-2")]),
+        {
+          createdAt: "2026-06-19T00:01:00.000Z",
+        },
+      );
+      await recordPlanControlDecision(root, {
+        kind: "approve",
+        revision: 2,
+        batchId: "b2",
+        actor: "operator@pro14",
+        note: null,
+        decisionId: "approve:b2:rev2",
+        createdAt: "2026-06-19T00:01:30.000Z",
+      });
+
+      const admitted = admittedIdentifiersFromJournal(
+        await readStandingPlanJournal(root),
+      );
+      expect([...admitted]).toEqual(["SYMPH-2"]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("resolveAdmittedIdentifiersForTick (SYMPH-794 coupling, SYMPH-823 atomic)", () => {
+  it("is inert (returns null) when neither team-scoped nor guardrail-enabled — legacy zero-diff; no journal read", async () => {
+    let reads = 0;
     const result = await resolveAdmittedIdentifiersForTick({
       teamScoped: false,
       admissionGuardrailEnabled: false,
-      loadPlan: async () => {
-        loaded = true;
-        return plan();
+      readJournal: async () => {
+        reads += 1;
+        return journalOf(plan(), [approve("b-app")]);
       },
-      listHonoredDecisions: async () => [],
     });
     expect(result).toBeNull();
-    // The store is never read on the inert path (no unneeded I/O).
-    expect(loaded).toBe(false);
+    // The journal is never read on the inert path (no unneeded I/O).
+    expect(reads).toBe(0);
   });
 
   it("forces the gate when team-scoped even with the guardrail flag OFF (the coupling)", async () => {
@@ -258,8 +393,7 @@ describe("resolveAdmittedIdentifiersForTick (SYMPH-794 coupling)", () => {
     const result = await resolveAdmittedIdentifiersForTick({
       teamScoped: true,
       admissionGuardrailEnabled: false,
-      loadPlan: async () => plan(),
-      listHonoredDecisions: async () => [approve("b-app")],
+      readJournal: async () => journalOf(plan(), [approve("b-app")]),
     });
     expect(result).not.toBeNull();
     expect([...(result ?? [])].sort()).toEqual(["SYMPH-1", "SYMPH-2"]);
@@ -269,39 +403,55 @@ describe("resolveAdmittedIdentifiersForTick (SYMPH-794 coupling)", () => {
     const result = await resolveAdmittedIdentifiersForTick({
       teamScoped: false,
       admissionGuardrailEnabled: true,
-      loadPlan: async () => plan(),
-      listHonoredDecisions: async () => [approve("b-other")],
+      readJournal: async () => journalOf(plan(), [approve("b-other")]),
     });
     expect([...(result ?? [])]).toEqual(["SYMPH-3"]);
   });
 
-  it("admits NOTHING when team-scoped with no plan — the bare backlog never dispatches; skips the decisions read", async () => {
-    let listed = false;
+  it("admits NOTHING when team-scoped with no plan — the bare backlog never dispatches (one read)", async () => {
+    let reads = 0;
     const result = await resolveAdmittedIdentifiersForTick({
       teamScoped: true,
       admissionGuardrailEnabled: false,
-      loadPlan: async () => null,
-      listHonoredDecisions: async () => {
-        listed = true;
-        return [approve("b-app")];
+      readJournal: async () => {
+        reads += 1;
+        return []; // empty journal ⇒ no plan
       },
     });
     expect(result).not.toBeNull();
     expect([...(result ?? [])]).toEqual([]);
-    // With no plan, admission is empty regardless of decisions — the second
-    // journal read is short-circuited (the optimization is locked, council Pi P3).
-    expect(listed).toBe(false);
+    expect(reads).toBe(1);
   });
 
-  it("fails closed (empty set) and reports when the plan store read throws", async () => {
+  it("reads the journal ONCE and projects plan+decisions from that snapshot — a re-plan can't cross-pair (SYMPH-823)", async () => {
+    // A readJournal that would return DIFFERENT snapshots on successive calls
+    // models a re-plan landing mid-tick. The pre-fix gate read the journal twice
+    // (loadPlan then listHonoredDecisions), opening a window to pair revision N's
+    // plan with revision N+1's decisions. The atomic gate reads ONCE, so the
+    // result reflects exactly one self-consistent revision.
+    let calls = 0;
+    const result = await resolveAdmittedIdentifiersForTick({
+      teamScoped: true,
+      admissionGuardrailEnabled: false,
+      readJournal: async () => {
+        calls += 1;
+        return calls === 1
+          ? journalOf(plan(), [approve("b-app")])
+          : journalOf({ ...plan(), revision: 99 }, []);
+      },
+    });
+    expect(calls).toBe(1);
+    expect([...(result ?? [])].sort()).toEqual(["SYMPH-1", "SYMPH-2"]);
+  });
+
+  it("fails closed (empty set) and reports when the journal read throws", async () => {
     let reported: unknown = null;
     const result = await resolveAdmittedIdentifiersForTick({
       teamScoped: true,
       admissionGuardrailEnabled: false,
-      loadPlan: async () => {
+      readJournal: async () => {
         throw new Error("journal read failed");
       },
-      listHonoredDecisions: async () => [],
       onError: (error) => {
         reported = error;
       },
@@ -317,10 +467,9 @@ describe("resolveAdmittedIdentifiersForTick (SYMPH-794 coupling)", () => {
     const result = await resolveAdmittedIdentifiersForTick({
       teamScoped: true,
       admissionGuardrailEnabled: false,
-      loadPlan: async () => {
+      readJournal: async () => {
         throw new Error("journal read failed");
       },
-      listHonoredDecisions: async () => [],
       onError: () => {
         throw new Error("logger down");
       },
@@ -330,33 +479,11 @@ describe("resolveAdmittedIdentifiersForTick (SYMPH-794 coupling)", () => {
   });
 });
 
-// Integration: the helper over the REAL standing-plan store loaders (not mocks),
-// closing the team-scoped-config → gate → admitted-set seam the unit tests
-// stubbed (council finding E). Proves a bare team backlog is held until an
-// operator approval is journaled, then only that batch's members are admitted.
+// Integration: the helper over the REAL standing-plan store (not mocks), closing
+// the team-scoped-config → gate → admitted-set seam the unit tests stubbed
+// (council finding E). Proves a bare team backlog is held until an operator
+// approval is journaled, then only that batch's members are admitted.
 describe("resolveAdmittedIdentifiersForTick — real store integration (SYMPH-794, council E)", () => {
-  const ENVELOPE: PlanEnvelope = {
-    version: 1,
-    concurrencyCeiling: 3,
-    allowedRisk: "medium",
-    allowedModes: ["parallel-isolated"],
-  };
-  const lookaheadBatch = (id: string, identifier: string): PlanBatch => ({
-    batchId: id,
-    mode: "parallel-isolated",
-    status: "lookahead",
-    members: [{ issueId: id, issueIdentifier: identifier }],
-    rationale: "r",
-    canary: null,
-  });
-  const bodyOf = (batches: PlanBatch[]): PlanBody => ({
-    batches,
-    options: [{ marker: "[opt-1]", label: "Release", intent: null }],
-    envelope: ENVELOPE,
-    rationale: "rationale",
-    source: "planner",
-  });
-
   it("holds the bare team backlog until an operator approval is journaled, then admits only that batch", async () => {
     const root = mkdtempSync(join(tmpdir(), "symph-admission-int-"));
     try {
@@ -371,8 +498,7 @@ describe("resolveAdmittedIdentifiersForTick — real store integration (SYMPH-79
       const loaders = {
         teamScoped: true,
         admissionGuardrailEnabled: false,
-        loadPlan: () => loadStandingPlan(root),
-        listHonoredDecisions: () => listHonoredDecisions(root),
+        readJournal: () => readStandingPlanJournal(root),
       };
 
       // No approval yet: a plan exists but the bare backlog is held (fail-closed).
