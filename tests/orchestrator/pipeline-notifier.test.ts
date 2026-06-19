@@ -107,6 +107,37 @@ describe("formatNotification", () => {
     expect(result.text).not.toContain("Dashboard");
   });
 
+  it("info_alert renders the URL as a structured Slack link and never redacts it (SYMPH-821)", () => {
+    const url =
+      "https://linear.app/mobilyze-llc/document/ticket-triage-controls-4f3e440e3df0";
+    const result = formatNotification({
+      type: "info_alert",
+      issueIdentifier: "PLAN",
+      message: "🚦 Ticket Triage Controls updated",
+      linkUrl: url,
+      linkLabel: "open",
+    });
+    // The URL rides a structured <url|label> link, so egress redaction never
+    // sees it (regression guard for the BASE64_RUN_REGEX false positive).
+    expect(result.text).toContain(`<${url}|open>`);
+    expect(result.text).not.toContain("[REDACTED");
+    expect(result.text).toContain("Ticket Triage Controls updated");
+  });
+
+  it("info_alert escapes Slack control chars in the link so a crafted label cannot smuggle a mention (codex-review P2)", () => {
+    const result = formatNotification({
+      type: "info_alert",
+      issueIdentifier: "PLAN",
+      message: "x",
+      linkUrl: "https://linear.app/doc",
+      linkLabel: "open> <!channel",
+    });
+    // The injected ">" must be escaped so it cannot close the <url|label> link
+    // and emit an active <!channel> mention.
+    expect(result.text).not.toContain("<!channel>");
+    expect(result.text).toContain("&gt;");
+  });
+
   it("formats pipeline_stopped", () => {
     const result = formatNotification({
       type: "pipeline_stopped",

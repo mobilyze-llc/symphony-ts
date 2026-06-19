@@ -10,7 +10,7 @@ import type {
   ExecutionHistory,
   RightSizingDecision,
 } from "../domain/model.js";
-import { sanitizeForSlack } from "../shared/egress.js";
+import { escapeSlackControlChars, sanitizeForSlack } from "../shared/egress.js";
 import { getDisplayVersion } from "../version.js";
 
 // ---------------------------------------------------------------------------
@@ -233,6 +233,14 @@ export interface InfoAlertEvent {
   type: "info_alert";
   issueIdentifier: string;
   message: string;
+  /**
+   * Optional URL rendered as a structured Slack `<url|label>` link. It is
+   * emitted OUTSIDE the sanitized free-text body so egress redaction never
+   * sees it — a raw URL interpolated into `message` is shredded by
+   * BASE64_RUN_REGEX when its path is long enough (SYMPH-821).
+   */
+  linkUrl?: string | null;
+  linkLabel?: string | null;
 }
 
 /**
@@ -1072,8 +1080,16 @@ export function formatNotification(
     }
 
     case "info_alert": {
+      // The link rides a structured <url|label> form (like triage_escalation),
+      // so the URL bypasses sanitizeForSlack and is never redacted (SYMPH-821).
+      const link =
+        event.linkUrl != null && event.linkUrl !== ""
+          ? ` <${escapeSlackControlChars(event.linkUrl)}|${escapeSlackControlChars(
+              event.linkLabel ?? "open",
+            )}>`
+          : "";
       return {
-        text: `:information_source: *${event.issueIdentifier}* — ${sanitizeForSlack(event.message)}\n${version}`,
+        text: `:information_source: *${event.issueIdentifier}* — ${sanitizeForSlack(event.message)}${link}\n${version}`,
       };
     }
 

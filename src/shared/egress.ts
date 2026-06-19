@@ -256,6 +256,20 @@ export function sanitizeForReworkChannel(text: string): string {
 }
 
 /**
+ * Escape the three Slack mrkdwn control characters (`& < >`) so display text
+ * is preserved but link/mention syntax (`<url|label>`, `<!channel>`) is inert.
+ * Shared by sanitizeForSlack and by callers that build a structured link from
+ * fields that must NOT pass through secret redaction (e.g. a trusted URL whose
+ * long path would otherwise be shredded by BASE64_RUN_REGEX).
+ */
+export function escapeSlackControlChars(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/**
  * Sanitize model/worker text bound for Slack (plain text or mrkdwn).
  *
  * Slack mrkdwn treats `<...>` as link/mention syntax (`<url|label>`,
@@ -267,9 +281,6 @@ export function sanitizeForSlack(
   options?: SanitizeOptions,
 ): string {
   const maxLen = options?.maxLen ?? DEFAULT_SLACK_MAX_LEN;
-  const cleaned = redactSecrets(text)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  const cleaned = escapeSlackControlChars(redactSecrets(text));
   return capLength(cleaned, maxLen);
 }

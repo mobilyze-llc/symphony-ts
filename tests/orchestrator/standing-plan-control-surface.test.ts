@@ -102,6 +102,73 @@ describe("publishControlDoc (6a)", () => {
     expect(result.action).toBe("updated");
     expect(updated).toHaveLength(1);
   });
+
+  it("skips the in-place update and Slack ping when content is unchanged since last publish (SYMPH-820)", async () => {
+    const updates: unknown[] = [];
+    const pings: string[] = [];
+    const base = {
+      plan: plan(),
+      context: { recentlyShipped: [], inFlight: [], changelog: [] },
+      teamId: "team-1",
+      docClient: {
+        create: async () => {
+          throw new Error("should not create");
+        },
+        update: async (input: { documentId: string; content: string }) => {
+          updates.push(input);
+          return { id: "doc-1" };
+        },
+      },
+      loadDocRef: async () => ({
+        id: "doc-1",
+        slugId: "s1",
+        url: "https://x/doc",
+      }),
+      saveDocRef: async () => undefined,
+      notify: (url: string) => pings.push(url),
+      log: () => undefined,
+    };
+    const first = await publishControlDoc(base);
+    expect(first.action).toBe("updated");
+    expect(updates).toHaveLength(1);
+    expect(pings).toHaveLength(1);
+
+    // Same plan + same context, replayed with the hash the first publish
+    // returned → no Linear write, no Slack ping (the throttle).
+    const second = await publishControlDoc({
+      ...base,
+      lastPublishedContentHash: first.contentHash,
+    });
+    expect(second.action).toBe("unchanged");
+    expect(updates).toHaveLength(1);
+    expect(pings).toHaveLength(1);
+  });
+
+  it("republishes + pings when content changed since the last publish (SYMPH-820)", async () => {
+    const pings: string[] = [];
+    const result = await publishControlDoc({
+      plan: plan(),
+      context: { recentlyShipped: [], inFlight: [], changelog: [] },
+      teamId: "team-1",
+      docClient: {
+        create: async () => {
+          throw new Error("should not create");
+        },
+        update: async () => ({ id: "doc-1" }),
+      },
+      loadDocRef: async () => ({
+        id: "doc-1",
+        slugId: "s1",
+        url: "https://x/doc",
+      }),
+      saveDocRef: async () => undefined,
+      notify: (url: string) => pings.push(url),
+      log: () => undefined,
+      lastPublishedContentHash: "stale-hash-does-not-match",
+    });
+    expect(result.action).toBe("updated");
+    expect(pings).toEqual(["https://x/doc"]);
+  });
 });
 
 describe("ingestControlDocComments (6b)", () => {
