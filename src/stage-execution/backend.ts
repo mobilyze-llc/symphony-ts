@@ -38,16 +38,17 @@ export interface StageExecutionBackendInput {
   runnerInput: AgentRunInput;
 }
 
-export interface StageExecutionBackendResult {
+export interface StageExecutionBackendResult<Evidence = unknown> {
   job: StageExecutionJobSpec;
   result: AgentRunResult;
+  evidence?: Evidence;
 }
 
-export interface StageExecutionBackendRunner {
+export interface StageExecutionBackendRunner<Evidence = unknown> {
   readonly backend: StageExecutionBackendKind;
   execute(
     input: StageExecutionBackendInput,
-  ): Promise<StageExecutionBackendResult>;
+  ): Promise<StageExecutionBackendResult<Evidence>>;
 }
 
 export interface CurrentRunnerStageExecutionRunner {

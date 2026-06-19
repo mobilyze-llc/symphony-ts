@@ -173,6 +173,7 @@ import {
   type StageExecutionJobSpec,
   UnsupportedStageExecutionBackendError,
 } from "../stage-execution/backend.js";
+import { createStageExecutionJobSpec } from "../stage-execution/job-spec.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import {
   type LinearIssueComment,
@@ -411,6 +412,11 @@ export interface RuntimeHostOptions {
   terminateDetachedProcessGroupTree?: typeof terminateDetachedProcessGroupTreeDefault;
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
+  /**
+   * Additional stage execution backends. The host always keeps a default
+   * current-runner backend; pass a "current-runner" entry here only to replace
+   * that default implementation.
+   */
   stageExecutionBackends?: ReadonlyMap<
     StageExecutionBackendKind,
     StageExecutionBackendRunner
@@ -531,11 +537,17 @@ function mergeDispatcherRunJournals(
   });
 }
 
-function createCurrentRunnerStageExecutionBackends(
+function createMergedStageExecutionBackends(
   runner: AgentRunnerLike,
+  customBackends: ReadonlyMap<
+    StageExecutionBackendKind,
+    StageExecutionBackendRunner
+  > | null,
 ): ReadonlyMap<StageExecutionBackendKind, StageExecutionBackendRunner> {
+  // Custom entries come last so callers can replace "current-runner" explicitly.
   return new Map<StageExecutionBackendKind, StageExecutionBackendRunner>([
     ["current-runner", new CurrentRunnerStageExecutionBackend(runner)],
+    ...(customBackends?.entries() ?? []),
   ]);
 }
 
@@ -793,9 +805,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         tracker: options.tracker,
         workspaceManager: this.workspaceManager,
       });
-    this.stageExecutionBackends =
-      this.customStageExecutionBackends ??
-      createCurrentRunnerStageExecutionBackends(this.agentRunner);
+    this.stageExecutionBackends = createMergedStageExecutionBackends(
+      this.agentRunner,
+      this.customStageExecutionBackends,
+    );
 
     const timerScheduler = createQueuedTimerScheduler({
       run: (callback) => {
@@ -1431,11 +1444,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         tracker: this.tracker,
         workspaceManager: this.workspaceManager,
       });
-      if (this.customStageExecutionBackends === null) {
-        this.stageExecutionBackends = createCurrentRunnerStageExecutionBackends(
-          this.agentRunner,
-        );
-      }
+      this.stageExecutionBackends = createMergedStageExecutionBackends(
+        this.agentRunner,
+        this.customStageExecutionBackends,
+      );
       return;
     }
 
@@ -1448,11 +1460,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           : { workspaceManager: this.workspaceManager }),
       });
     }
-    if (this.customStageExecutionBackends === null) {
-      this.stageExecutionBackends = createCurrentRunnerStageExecutionBackends(
-        this.agentRunner,
-      );
-    }
+    this.stageExecutionBackends = createMergedStageExecutionBackends(
+      this.agentRunner,
+      this.customStageExecutionBackends,
+    );
 
     this.notifySnapshotListeners();
   }
@@ -4562,55 +4573,16 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     stage: StageDefinition | null;
     stageName: string | null;
   }): StageExecutionJobSpec {
-    const execution = input.stage?.execution ?? null;
-    const backend = execution?.backend ?? "current-runner";
-    const runnerKind = input.stage?.runner ?? this.config.runner.kind;
-    const runnerModel = input.stage?.model ?? this.config.runner.model;
-    const stageKey = input.stageName ?? "worker";
-    const stageAttempt = input.attempt ?? 0;
-    const runGroupId =
-      execution?.runGroup?.id ??
-      execution?.runGroup?.key ??
-      `${input.issue.id}:${stageKey}`;
-    const profileId = execution?.profile ?? null;
-    const baseRef = resolveStageExecutionBaseRef();
-    const targetHeadRef = input.issue.branchName ?? null;
-    const idempotencyKey = [
-      input.issue.id,
-      stageKey,
-      String(stageAttempt),
-      backend,
-      runGroupId,
-      targetHeadRef ?? "no-target-head",
-    ].join(":");
-
-    return {
-      backend,
-      role: execution?.role ?? null,
-      phase: execution?.phase ?? null,
-      identity: {
-        issueId: input.issue.id,
-        issueIdentifier: input.issue.identifier,
-        stageName: input.stageName,
-        stageAttempt,
-        runGroupId,
-        profileId,
-        baseRef,
-        targetHeadRef,
-        artifactRoot: getDurableCodexSessionArtifactDirectory(
-          this.config.workspace.root,
-          input.issue.id,
-        ),
-        idempotencyKey,
-      },
-      runner: {
-        runnerKind,
-        model: runnerModel,
-        provider: execution?.provider ?? runnerKind,
-        reasoningEffort:
-          execution?.reasoningEffort ?? input.stage?.reasoningEffort ?? null,
-      },
-    };
+    return createStageExecutionJobSpec({
+      ...input,
+      defaultRunnerKind: this.config.runner.kind,
+      defaultRunnerModel: this.config.runner.model,
+      baseRef: resolveStageExecutionBaseRef(),
+      artifactRoot: getDurableCodexSessionArtifactDirectory(
+        this.config.workspace.root,
+        input.issue.id,
+      ),
+    });
   }
 
   private resolveStageExecutionBackend(
