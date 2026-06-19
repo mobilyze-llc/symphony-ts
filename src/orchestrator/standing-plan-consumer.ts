@@ -52,9 +52,19 @@ export function selectDispatchableBatchMembers(
       .filter((decision) => decision.kind === "approve" && decision.batchId)
       .map((decision) => decision.batchId as string),
   );
+  // A `hold` OR a `reject` holds the batch (a reject revokes an approve and
+  // blocks auto-release). Treating only `hold` as sticky let a rejected batch
+  // dispatch on the plan path — the admission guardrail skips the plan path
+  // precisely because release is supposed to be the admit authority, so the
+  // consumer's revocation must be complete (council R2, Codex P1). Parity with
+  // approvedAdmittedIdentifiers, which revokes on hold/reject.
   const heldByOperator = new Set(
     input.honoredApprovals
-      .filter((decision) => decision.kind === "hold" && decision.batchId)
+      .filter(
+        (decision) =>
+          (decision.kind === "hold" || decision.kind === "reject") &&
+          decision.batchId,
+      )
       .map((decision) => decision.batchId as string),
   );
 

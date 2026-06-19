@@ -168,6 +168,35 @@ describe("selectDispatchableBatchMembers (posture-B)", () => {
     expect(result.dispatchIssueIdentifiers).toEqual([]);
     expect(result.heldBatchIds).toEqual(["b1"]);
   });
+
+  it("an operator reject revokes an approve and holds the batch (council R2, Codex P1)", () => {
+    // [approve(b1), reject(b1)] must NOT release b1 — a reject revokes the
+    // approve, parity with the admission guardrail (a rejected batch dispatching
+    // on the plan path would bypass the no-ambient-control-surfaces invariant).
+    const reject: PlanDecision = { ...approve("b1"), kind: "reject" };
+    const result = selectDispatchableBatchMembers({
+      plan: plan([batch("b1", ["SYMPH-1"])]),
+      honoredApprovals: [approve("b1"), reject],
+      runningIssueIdentifiers: new Set(),
+      autoReleaseFrontier: 0, // no auto-release; only an (unrevoked) approve releases
+      envelope: ENVELOPE,
+    });
+    expect(result.dispatchIssueIdentifiers).toEqual([]);
+    expect(result.heldBatchIds).toEqual(["b1"]);
+  });
+
+  it("an operator reject also blocks auto-release within the frontier", () => {
+    const reject: PlanDecision = { ...approve("b1"), kind: "reject" };
+    const result = selectDispatchableBatchMembers({
+      plan: plan([batch("b1", ["SYMPH-1"])]),
+      honoredApprovals: [reject],
+      runningIssueIdentifiers: new Set(),
+      autoReleaseFrontier: 1, // would auto-release, but the reject holds it
+      envelope: ENVELOPE,
+    });
+    expect(result.dispatchIssueIdentifiers).toEqual([]);
+    expect(result.heldBatchIds).toEqual(["b1"]);
+  });
 });
 
 describe("shouldDegradeToComparator", () => {
