@@ -130,6 +130,63 @@ describe("resolveDocComment (6b)", () => {
     expect(result.kind).toBe("ambiguous");
   });
 
+  it("resolves a revision-stamped marker for the current revision", () => {
+    const result = resolveDocComment({
+      comment: comment({ quotedText: "[opt-1:r4] Release b-aaa" }),
+      plan: plan(),
+      operatorAllowlist: ALLOWLIST,
+    });
+    expect(result.kind).toBe("intent");
+    if (result.kind === "intent") {
+      expect(result.optionMarker).toBe("[opt-1]");
+    }
+  });
+
+  it("treats a stamped marker from a superseded revision as stale (closes the publish race)", () => {
+    const result = resolveDocComment({
+      comment: comment({
+        // current plan is revision 4; this quotes revision 3's reused [opt-1]
+        quotedText: "[opt-1:r3] Release some-other-batch",
+      }),
+      plan: plan(),
+      operatorAllowlist: ALLOWLIST,
+    });
+    expect(result.kind).toBe("stale");
+  });
+
+  it("prefers the quoted line's marker over a different marker in the body", () => {
+    const result = resolveDocComment({
+      comment: comment({
+        quotedText: "[opt-2] Hold b-bbb",
+        body: "though [opt-1] should go first too",
+      }),
+      plan: plan(),
+      operatorAllowlist: ALLOWLIST,
+    });
+    expect(result.kind).toBe("intent");
+    if (result.kind === "intent") {
+      expect(result.verb).toBe("hold"); // opt-2 (quoted), not opt-1 (body)
+    }
+  });
+
+  it("does not match opt-1 inside opt-10", () => {
+    const p = plan();
+    p.options = [
+      {
+        marker: "[opt-10]",
+        label: "Release b-ten",
+        intent: { verb: "release_batch", batchId: "b-ten" },
+      },
+    ];
+    const result = resolveDocComment({
+      comment: comment({ body: "approve [opt-1]" }),
+      plan: p,
+      operatorAllowlist: ALLOWLIST,
+    });
+    // opt-1 must NOT match the only option opt-10.
+    expect(result.kind).toBe("free_text");
+  });
+
   it("normalizes markdown so backtick-stripped quotedText still matches", () => {
     const result = resolveDocComment({
       comment: comment({

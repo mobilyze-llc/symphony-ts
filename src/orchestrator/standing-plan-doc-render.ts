@@ -98,7 +98,11 @@ export function renderStandingPlanControlDoc(
     lines.push("- (none)");
   } else {
     for (const option of plan.options) {
-      lines.push(`- ${option.marker} ${option.label}`);
+      // Revision-stamp the marker so a comment quoting this exact line binds to
+      // THIS revision; a superseded line's stamp won't resolve against a later
+      // revision's reused [opt-N] (SYMPH-791 revision binding).
+      const stampedMarker = option.marker.replace(/\]$/, `:r${plan.revision}]`);
+      lines.push(`- ${stampedMarker} ${option.label}`);
     }
   }
 

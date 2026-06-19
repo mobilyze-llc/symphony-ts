@@ -150,6 +150,41 @@ describe("computeStandingPlanCalibration (SYMPH-792)", () => {
     expect(row?.approveMergeRate).toBeCloseTo(0.5);
   });
 
+  it("does not cross-join: a reused batchId in another plan keeps outcomes separate", () => {
+    seq = 0;
+    // plan-A decides b1 (no outcome). plan-B reuses b1 and merges it.
+    const planADecision: PlanDecision = {
+      ...decision("b1", "approve", "dA"),
+      planId: "plan-A",
+    };
+    const planBDecision: PlanDecision = {
+      ...decision("b1", "approve", "dB"),
+      planId: "plan-B",
+    };
+    const planBOutcome: PlanOutcome = {
+      ...outcome("b1", "merged", "oB"),
+      planId: "plan-B",
+    };
+    const journal: StandingPlanJournal = [
+      revisionEntry({
+        ...revision("b1", "parallel-isolated"),
+        planId: "plan-A",
+      }),
+      decisionEntry(planADecision),
+      revisionEntry({
+        ...revision("b1", "parallel-isolated"),
+        planId: "plan-B",
+      }),
+      decisionEntry(planBDecision),
+      outcomeEntry(planBOutcome),
+    ];
+    const report = computeStandingPlanCalibration(journal);
+    const aRow = report.rows.find((r) => r.planId === "plan-A");
+    const bRow = report.rows.find((r) => r.planId === "plan-B");
+    expect(aRow?.outcome).toBe("pending"); // plan-A's b1 has no outcome
+    expect(bRow?.outcome).toBe("merged");
+  });
+
   it("uses the latest outcome for a batch when several exist", () => {
     seq = 0;
     const journal: StandingPlanJournal = [

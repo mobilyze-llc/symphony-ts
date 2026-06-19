@@ -13,6 +13,7 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   writeFile,
 } from "node:fs/promises";
 import { hostname } from "node:os";
@@ -28,7 +29,7 @@ import type {
   ImplementationCommentDeltaContext,
   WorkpadRetryContext,
 } from "../agent/prompt-builder.js";
-import { fenceBacklogAuditBoundaryTags } from "../agent/prompt-fence.js";
+import { fenceJudgeBoundaryTags } from "../agent/prompt-fence.js";
 import type {
   AgentRunInput,
   AgentRunResult,
@@ -539,6 +540,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
   /** Per-process de-dup for unresolved control-doc comments (SYMPH-791). */
   private readonly controlDocSeen = new Set<string>();
+
+  /** Serializes control-surface ticks so overlapping first-publishes can't
+   * create two docs (council R1, Codex P3). */
+  private controlSurfaceInFlight = false;
 
   private tracker: IssueTracker;
 
@@ -3330,6 +3335,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     if (apiKey === null) {
       return;
     }
+    if (this.controlSurfaceInFlight) {
+      return; // serialize: never two concurrent first-publishes (Codex P3)
+    }
+    this.controlSurfaceInFlight = true;
     const root = this.workspaceManager.root;
     try {
       const plan = await loadStandingPlan(root);
@@ -3383,7 +3392,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         docClient: {
           fetchComments: (input) => fetchLinearDocumentComments(docDeps, input),
         },
-        fence: (text) => fenceBacklogAuditBoundaryTags(text),
+        fence: (text) => fenceJudgeBoundaryTags(text),
         recordDecision: (input) => recordPlanControlDecision(root, input),
         requestReplan: () => this.requestStandingPlanReplan(),
         log: (event, message, fields) => {
@@ -3398,6 +3407,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         "Control-surface tick failed (best-effort; dispatch unaffected).",
         { outcome: "degraded", detail: toErrorMessage(error) },
       );
+    } finally {
+      this.controlSurfaceInFlight = false;
     }
   }
 
@@ -3430,11 +3441,12 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     ref: LinearDocumentRef,
   ): Promise<void> {
     await mkdir(join(root, ".symphony"), { recursive: true });
-    await writeFile(
-      this.controlDocRefPath(root),
-      `${JSON.stringify(ref)}\n`,
-      "utf8",
-    );
+    // Atomic write (temp + rename): a crash mid-write must not truncate the
+    // ref and orphan the living doc on the next load (council R1, Pi P1).
+    const path = this.controlDocRefPath(root);
+    const tmp = `${path}.tmp`;
+    await writeFile(tmp, `${JSON.stringify(ref)}\n`, "utf8");
+    await rename(tmp, path);
   }
 
   private async buildControlDocChangelog(

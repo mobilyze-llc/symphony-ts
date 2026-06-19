@@ -189,4 +189,92 @@ describe("ingestControlDocComments (6b)", () => {
     expect(d.decisions).toHaveLength(0);
     expect(d.logs).toContain("queue_triage_doc_comment_unresolved");
   });
+
+  it("does not re-plan when a modify_plan decision is not recorded (council R1, Pi P1)", async () => {
+    const modifyPlan: StandingPlan = {
+      ...plan(),
+      options: [
+        {
+          marker: "[opt-1]",
+          label: "Re-plan",
+          intent: { verb: "modify_plan", batchId: null },
+        },
+      ],
+    };
+    let replans = 0;
+    await ingestControlDocComments({
+      documentId: "doc-1",
+      plan: modifyPlan,
+      operatorAllowlist: new Set(["eric@litman.org"]),
+      docClient: {
+        fetchComments: async () =>
+          [
+            {
+              id: "c1",
+              body: "go",
+              quotedText: "[opt-1:r2] Re-plan",
+              createdAt: "2026-06-18T00:10:00.000Z",
+              authorEmail: "eric@litman.org",
+              botActorId: null,
+            },
+          ] as unknown as LinearDocumentComment[],
+      },
+      fence: (t) => t,
+      recordDecision: async () => ({
+        recorded: false,
+        reason: "stale_revision",
+      }),
+      requestReplan: () => {
+        replans += 1;
+      },
+      log: () => undefined,
+      seen: new Set<string>(),
+    });
+    expect(replans).toBe(0); // recordDecision said not recorded → no spin
+  });
+
+  it("ignores an option carrying an unrecognized verb (council R1, Pi P1)", async () => {
+    const weird: StandingPlan = {
+      ...plan(),
+      options: [
+        {
+          marker: "[opt-1]",
+          label: "Weird",
+          intent: { verb: "obliterate", batchId: "b-aaa" },
+        },
+      ],
+    };
+    const decisions: unknown[] = [];
+    const logs: string[] = [];
+    await ingestControlDocComments({
+      documentId: "doc-1",
+      plan: weird,
+      operatorAllowlist: new Set(["eric@litman.org"]),
+      docClient: {
+        fetchComments: async () =>
+          [
+            {
+              id: "c1",
+              body: "",
+              quotedText: "[opt-1:r2] Weird",
+              createdAt: "2026-06-18T00:10:00.000Z",
+              authorEmail: "eric@litman.org",
+              botActorId: null,
+            },
+          ] as unknown as LinearDocumentComment[],
+      },
+      fence: (t) => t,
+      recordDecision: async (input) => {
+        decisions.push(input);
+        return { recorded: true };
+      },
+      requestReplan: () => undefined,
+      log: (event) => {
+        logs.push(event);
+      },
+      seen: new Set<string>(),
+    });
+    expect(decisions).toHaveLength(0); // unknown verb → no decision
+    expect(logs).toContain("queue_triage_doc_comment_unexpected_verb");
+  });
 });

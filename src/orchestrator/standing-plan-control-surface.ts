@@ -156,23 +156,36 @@ export async function ingestControlDocComments(
     });
 
     if (resolution.kind === "intent") {
-      const kind: PlanDecisionKind =
-        resolution.verb === "release_batch"
-          ? "approve"
-          : resolution.verb === "hold"
-            ? "hold"
-            : "modify";
-      // Idempotent on (verb, batch, revision, comment) — safe to re-run.
-      await deps.recordDecision({
+      // Map ONLY the known plan-control verbs; reject anything else rather than
+      // silently treating it as "modify" (council R1, Pi P1). The note is
+      // fenced before it is recorded into the durable journal (council R1,
+      // Codex+Pi).
+      const kind = planControlVerbToDecisionKind(resolution.verb);
+      if (kind === null) {
+        await deps.log(
+          "queue_triage_doc_comment_unexpected_verb",
+          "Doc-comment option carried an unrecognized verb; ignored.",
+          {
+            outcome: "degraded",
+            verb: resolution.verb,
+            comment_id: comment.id,
+          },
+        );
+        continue;
+      }
+      // Idempotent on (comment, marker) — safe to re-run.
+      const result = await deps.recordDecision({
         kind,
         revision: deps.plan.revision,
         batchId: resolution.batchId,
         actor: `operator:doc-comment:${comment.id}`,
-        note: comment.body,
+        note: deps.fence(comment.body),
         decisionId: `doccomment:${comment.id}:${resolution.optionMarker}`,
         createdAt: now().toISOString(),
       });
-      if (resolution.verb === "modify_plan") {
+      // Only a recorded modify_plan triggers a re-plan (don't spin on a
+      // stale/rejected decision) — parity with the dashboard path (Pi P1).
+      if (resolution.verb === "modify_plan" && result.recorded) {
         deps.requestReplan();
       }
       processed += 1;
@@ -202,4 +215,18 @@ export async function ingestControlDocComments(
   }
 
   return { processed };
+}
+
+/** Map a plan-control verb to its decision kind; null for an unknown verb. */
+function planControlVerbToDecisionKind(verb: string): PlanDecisionKind | null {
+  switch (verb) {
+    case "release_batch":
+      return "approve";
+    case "hold":
+      return "hold";
+    case "modify_plan":
+      return "modify";
+    default:
+      return null;
+  }
 }

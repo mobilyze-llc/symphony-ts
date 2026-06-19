@@ -76,9 +76,9 @@ describe("renderStandingPlanControlDoc", () => {
     expect(md).toContain("Proposed next batch");
     expect(md).toContain("parallel-isolated");
     expect(md).toContain("highest-priority independent work");
-    // options block: unique [opt-N] markers + the revision binding
-    expect(md).toContain("[opt-1]");
-    expect(md).toMatch(/Options[\s\S]*\[opt-1\]/);
+    // options block: revision-stamped [opt-N:rREV] markers (revision binding)
+    expect(md).toContain("[opt-1:r4]");
+    expect(md).toMatch(/Options[\s\S]*\[opt-1:r4\]/);
     // in-body revision changelog
     expect(md).toContain("re-plan after merge");
   });

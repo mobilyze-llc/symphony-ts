@@ -53,45 +53,106 @@ export function resolveDocComment(input: {
     return { kind: "stale", reason: "comment predates the current revision" };
   }
 
-  // Marker match across quotedText + body, tolerant of backtick/format stripping.
-  const haystack = normalize(
-    `${input.comment.quotedText ?? ""}\n${input.comment.body}`,
-  );
-  const matched = input.plan.options.filter((option) =>
-    markerMatches(option.marker, haystack),
-  );
+  const quoted = normalize(input.comment.quotedText ?? "");
+  const body = normalize(input.comment.body);
+
+  // Revision-stamped markers are the strong binding. The doc renders each option
+  // as "[opt-N:rREV]" (see standing-plan-doc-render), so a comment quoting a
+  // SUPERSEDED revision's line carries the old REV and cannot resolve against
+  // the current revision's reused [opt-N] — closing the record→publish race
+  // (council R1, Codex P1).
+  const stamped = [
+    ...extractStampedMarkers(quoted),
+    ...extractStampedMarkers(body),
+  ];
+  if (stamped.length > 0) {
+    const current = stamped.filter((m) => m.revision === input.plan.revision);
+    if (current.length === 0) {
+      return {
+        kind: "stale",
+        reason: "comment references a superseded revision's options",
+      };
+    }
+    const cores = new Set(current.map((m) => m.optionCore));
+    if (cores.size > 1) {
+      return {
+        kind: "ambiguous",
+        reason: "multiple current-revision markers matched",
+      };
+    }
+    return resolveByCore([...cores][0] ?? "", input.plan, input.comment.body);
+  }
+
+  // No revision stamp → a bare "opt-N" the operator typed. Prefer the quoted
+  // line (the specific option replied to) over the body (council R1, Pi P2).
+  const quotedMatches = matchOptionCores(input.plan.options, quoted);
+  const bodyMatches = matchOptionCores(input.plan.options, body);
+  const matched = quotedMatches.length > 0 ? quotedMatches : bodyMatches;
   if (matched.length > 1) {
     return { kind: "ambiguous", reason: "multiple option markers matched" };
   }
   if (matched.length === 1) {
-    const option = matched[0];
-    if (option?.intent) {
-      return {
-        kind: "intent",
-        optionMarker: option.marker,
-        verb: option.intent.verb,
-        batchId: option.intent.batchId,
-      };
-    }
-    // An option with no typed intent → treat as free text (guarded confirm).
-    return { kind: "free_text", text: input.comment.body };
+    return resolveByCore(matched[0] ?? "", input.plan, input.comment.body);
   }
-
-  // No marker → free text → interpret-then-confirm upstream.
   return { kind: "free_text", text: input.comment.body };
+}
+
+function resolveByCore(
+  core: string,
+  plan: StandingPlan,
+  body: string,
+): DocCommentResolution {
+  const option = plan.options.find((o) => markerCore(o.marker) === core);
+  if (option?.intent) {
+    return {
+      kind: "intent",
+      optionMarker: option.marker,
+      verb: option.intent.verb,
+      batchId: option.intent.batchId,
+    };
+  }
+  // An option with no typed intent → treat as free text (guarded confirm).
+  return { kind: "free_text", text: body };
 }
 
 function normalize(text: string): string {
   return text.toLowerCase().replace(/`/g, "");
 }
 
-/** Match a marker like "[opt-1]" by its core token ("opt-1"), bracket-agnostic. */
+/** The bracket-free core of a marker, e.g. "[opt-1]" → "opt-1". */
+function markerCore(marker: string): string {
+  return marker.toLowerCase().replace(/[[\]]/g, "");
+}
+
+/** Revision-stamped markers ("opt-1:r4") in normalized text. */
+function extractStampedMarkers(
+  normalizedText: string,
+): Array<{ optionCore: string; revision: number }> {
+  const out: Array<{ optionCore: string; revision: number }> = [];
+  const regex = /(opt-\d+):r(\d+)/g;
+  let match: RegExpExecArray | null = regex.exec(normalizedText);
+  while (match !== null) {
+    out.push({ optionCore: match[1] ?? "", revision: Number(match[2]) });
+    match = regex.exec(normalizedText);
+  }
+  return out;
+}
+
+function matchOptionCores(
+  options: StandingPlan["options"],
+  normalizedText: string,
+): string[] {
+  return options
+    .filter((option) => markerMatches(option.marker, normalizedText))
+    .map((option) => markerCore(option.marker));
+}
+
+/** Match a bare marker core ("opt-1") with boundaries so "opt-1" ≠ "opt-10". */
 function markerMatches(marker: string, normalizedHaystack: string): boolean {
-  const core = marker.toLowerCase().replace(/[[\]]/g, "");
+  const core = markerCore(marker);
   if (core.length === 0) {
     return false;
   }
   const escaped = core.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // Boundaries that are not word chars or hyphens, so "opt-1" ≠ "opt-10".
   return new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`).test(normalizedHaystack);
 }
