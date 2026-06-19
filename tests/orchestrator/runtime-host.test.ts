@@ -64,6 +64,11 @@ import type {
   ProcessIdentitySnapshot,
   ProcessTreeTerminationResult,
 } from "../../src/shared/process-tree.js";
+import type {
+  StageExecutionBackendInput,
+  StageExecutionBackendResult,
+  StageExecutionBackendRunner,
+} from "../../src/stage-execution/backend.js";
 import { TrackerError } from "../../src/tracker/errors.js";
 import { LinearTrackerClient } from "../../src/tracker/linear-client.js";
 import type {
@@ -8452,6 +8457,148 @@ describe("extractProductName", () => {
   });
 });
 
+describe("stage execution backend boundary", () => {
+  it("routes staged worker execution through the configured current-runner backend with stage identity", async () => {
+    const fakeRunner = new FakeAgentRunner();
+    const backend = new RecordingStageExecutionBackend(fakeRunner);
+    const config = createStagedConfig({
+      stages: {
+        initialStage: "investigate",
+        fastTrack: null,
+        stages: {
+          investigate: {
+            ...createStagedConfig().stages!.stages.investigate!,
+            type: "agent",
+            runner: "codex",
+            model: "gpt-5.3-codex",
+            execution: {
+              role: "investigator",
+              phase: "investigate",
+              backend: "current-runner",
+              provider: "openai",
+              model: "gpt-5.3-codex",
+              reasoningEffort: "medium",
+              profile: "readonly.pro16",
+              artifacts: { requires: [], produces: ["workpad"] },
+              timeoutMs: null,
+              budget: { maxTokens: null, maxUsd: null },
+              dependencies: {
+                stages: [],
+                capsules: [],
+                missingCapsule: "fail",
+              },
+              runGroup: { id: "rg-806", key: null },
+              capsules: { consume: [], produce: ["plan"] },
+            },
+          },
+        },
+      },
+    });
+    const host = new OrchestratorRuntimeHost({
+      config,
+      tracker: createTracker({
+        candidates: [
+          createIssue({
+            id: "issue-806",
+            identifier: "SYMPH-806",
+            branchName: "codex/SYMPH-806-stage-execution-backend",
+          }),
+        ],
+      }),
+      agentRunner: fakeRunner,
+      stageExecutionBackends: new Map([["current-runner", backend]]),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(backend.inputs).toHaveLength(1);
+    expect(backend.inputs[0]!.job).toMatchObject({
+      backend: "current-runner",
+      role: "investigator",
+      phase: "investigate",
+      identity: {
+        issueId: "issue-806",
+        issueIdentifier: "SYMPH-806",
+        stageName: "investigate",
+        stageAttempt: 0,
+        runGroupId: "rg-806",
+        profileId: "readonly.pro16",
+        baseRef: expect.any(String),
+        targetHeadRef: "codex/SYMPH-806-stage-execution-backend",
+        artifactRoot: "/tmp/workspaces/.symphony/codex-sessions/issue-806",
+      },
+      runner: {
+        runnerKind: "codex",
+        model: "gpt-5.3-codex",
+        provider: "openai",
+        reasoningEffort: "medium",
+      },
+    });
+    expect(backend.inputs[0]!.job.identity.idempotencyKey).toContain(
+      "issue-806:investigate:0:current-runner:rg-806",
+    );
+    expect(backend.inputs[0]!.job.identity.baseRef?.length).toBeGreaterThan(0);
+    expect(fakeRunner.runInputs).toHaveLength(1);
+    expect(fakeRunner.runInputs[0]).toMatchObject({
+      issue: expect.objectContaining({ identifier: "SYMPH-806" }),
+      attempt: null,
+      stageName: "investigate",
+    });
+  });
+
+  it("fails closed before runner launch when a stage selects an unregistered backend", async () => {
+    const fakeRunner = new FakeAgentRunner();
+    const config = createStagedConfig({
+      stages: {
+        initialStage: "investigate",
+        fastTrack: null,
+        stages: {
+          investigate: {
+            ...createStagedConfig().stages!.stages.investigate!,
+            type: "agent",
+            execution: {
+              role: "investigator",
+              phase: "investigate",
+              backend: "crabrunner",
+              provider: null,
+              model: null,
+              reasoningEffort: null,
+              profile: null,
+              artifacts: { requires: [], produces: [] },
+              timeoutMs: null,
+              budget: { maxTokens: null, maxUsd: null },
+              dependencies: {
+                stages: [],
+                capsules: [],
+                missingCapsule: "fail",
+              },
+              runGroup: { id: null, key: null },
+              capsules: { consume: [], produce: [] },
+            },
+          },
+        },
+      },
+    });
+    const host = new OrchestratorRuntimeHost({
+      config,
+      tracker: createTracker(),
+      agentRunner: fakeRunner,
+      stageExecutionBackends: new Map(),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+    await host.flushEvents();
+
+    expect(fakeRunner.runInputs).toEqual([]);
+    expect(host.getState().running["1"]).toBeUndefined();
+    expect(host.getState().retryAttempts["1"]?.error).toContain(
+      'Stage execution backend "crabrunner" is not registered for ISSUE-1.',
+    );
+  });
+});
+
 describe("createWorkspaceHookLogger", () => {
   it("includes stdout and stderr in structured log entries when non-empty", async () => {
     const entries: StructuredLogEntry[] = [];
@@ -8610,6 +8757,23 @@ class FakeAgentRunner {
     }
     this.runs.delete(issueId);
     run.reject(error);
+  }
+}
+
+class RecordingStageExecutionBackend implements StageExecutionBackendRunner {
+  readonly backend = "current-runner";
+  readonly inputs: StageExecutionBackendInput[] = [];
+
+  constructor(private readonly runner: FakeAgentRunner) {}
+
+  async execute(
+    input: StageExecutionBackendInput,
+  ): Promise<StageExecutionBackendResult> {
+    this.inputs.push(input);
+    return {
+      job: input.job,
+      result: await this.runner.run(input.runnerInput),
+    };
   }
 }
 
