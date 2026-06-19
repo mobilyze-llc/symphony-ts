@@ -97,6 +97,85 @@ describe("LinearTrackerClient", () => {
     });
   });
 
+  it("fetches candidate issues by team key (eligible backlog, no project filter) when team_keys is set (SYMPH-794)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [
+              issueNode({
+                id: "1",
+                identifier: "SYMPH-900",
+                title: "Backlog ticket",
+                createdAt: "2026-06-01T00:00:00.000Z",
+              }),
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+
+    const client = createClient({ fetchFn, teamKeys: ["SYMPH"] });
+    const issues = await client.fetchCandidateIssues();
+
+    expect(issues.map((issue) => issue.identifier)).toEqual(["SYMPH-900"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    // The dispatch trigger is the team backlog, NOT project membership: the
+    // candidate query must filter by team key and must NOT carry a project
+    // filter (setting/clearing `project` can never arm or disarm dispatch).
+    expect(request.query).toContain("team: { key: { in: $teamKeys } }");
+    expect(request.query).not.toContain("slugId");
+    expect(request.query).not.toContain("project:");
+    expect(request.variables).toEqual({
+      teamKeys: ["SYMPH"],
+      activeStates: ["Todo", "In Progress"],
+      first: 50,
+      relationFirst: 50,
+      after: null,
+    });
+  });
+
+  it("supports multiple team keys via the `in` filter (multi-team-ready, SYMPH-819)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+
+    const client = createClient({ fetchFn, teamKeys: ["SYMPH", "MOB"] });
+    await client.fetchCandidateIssues();
+
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.variables.teamKeys).toEqual(["SYMPH", "MOB"]);
+  });
+
+  it("team-scoped candidate fetch does not require a project slug (SYMPH-794)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+
+    const client = createClient({
+      fetchFn,
+      projectSlug: null,
+      teamKeys: ["SYMPH"],
+    });
+
+    await expect(client.fetchCandidateIssues()).resolves.toEqual([]);
+  });
+
   it("returns empty immediately when fetchIssuesByStates receives no states", async () => {
     const fetchFn = vi.fn<typeof fetch>();
     const client = createClient({ fetchFn });

@@ -175,6 +175,7 @@ export function resolveWorkflowConfig(
         readString(tracker.project_slug),
         environment,
       ),
+      teamKeys: readStringList(tracker.team_keys, []),
       activeStates: readStringList(
         tracker.active_states,
         DEFAULT_ACTIVE_STATES,

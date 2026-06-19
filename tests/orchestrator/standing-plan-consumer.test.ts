@@ -476,4 +476,53 @@ describe("decidePlanDrivenDispatch (hot-path composition)", () => {
     expect(d.action).toBe("degrade");
     expect(d.forceReplan).toBe(false);
   });
+
+  it("team-scoped: auto-release is disabled — no batch dispatches without an operator approval (SYMPH-794)", () => {
+    // On the team-scoped candidate source the plan-driven path is the ONLY path
+    // that skips the admission guardrail, so "plan-released" must mean
+    // "operator-approved", never the posture-B auto-release frontier — otherwise
+    // the raw team backlog dispatches a canary head with no explicit go. The
+    // operator cannot express this via config (auto_release_frontier is parsed
+    // by readPositiveInteger, so YAML 0 falls back to 1), so the coupling is
+    // enforced here (council finding B).
+    const d = decidePlanDrivenDispatch({
+      config: config(), // autoReleaseFrontier: 1
+      plan: freshPlan(),
+      honoredApprovals: [],
+      candidateIdentifiers: new Set(["SYMPH-1", "SYMPH-2"]),
+      runningIssueIdentifiers: new Set(),
+      nowMs,
+      teamScoped: true,
+    });
+    expect(d.action).toBe("plan");
+    expect(d.orderedIssueIdentifiers).toEqual([]); // nothing released without a go
+  });
+
+  it("team-scoped: an explicit operator approval still releases its batch (SYMPH-794)", () => {
+    const d = decidePlanDrivenDispatch({
+      config: config(),
+      plan: freshPlan(),
+      honoredApprovals: [approve("b2")],
+      candidateIdentifiers: new Set(["SYMPH-1", "SYMPH-2"]),
+      runningIssueIdentifiers: new Set(),
+      nowMs,
+      teamScoped: true,
+    });
+    expect(d.action).toBe("plan");
+    expect(d.orderedIssueIdentifiers).toEqual(["SYMPH-2"]); // approved batch releases
+  });
+
+  it("project-scoped posture-B is unchanged: the frontier still auto-releases the head (zero-diff)", () => {
+    const d = decidePlanDrivenDispatch({
+      config: config(), // autoReleaseFrontier: 1
+      plan: freshPlan(),
+      honoredApprovals: [],
+      candidateIdentifiers: new Set(["SYMPH-1", "SYMPH-2"]),
+      runningIssueIdentifiers: new Set(),
+      nowMs,
+      teamScoped: false,
+    });
+    expect(d.action).toBe("plan");
+    expect(d.orderedIssueIdentifiers).toEqual(["SYMPH-1"]); // auto-release intact
+  });
 });

@@ -109,3 +109,51 @@ export function partitionByAdmission<T extends { identifier: string }>(
   }
   return { admit, held };
 }
+
+/**
+ * Resolve the per-tick admitted set for the dispatch gate, deciding first
+ * WHETHER the gate enforces at all.
+ *
+ * The gate is mandatory whenever the candidate source is **team-scoped**
+ * (SYMPH-794 / SYMPH-819): the eligible team backlog must never dispatch raw, so
+ * a bare team-scoped candidate is held until an explicit operator go — the
+ * `project` field is removed as the dispatch trigger, not bolted over. The gate
+ * is ALSO active when an operator explicitly opts the guardrail on for a still
+ * project-scoped pool. When neither holds, the gate is inert (returns `null`) so
+ * legacy project-scoped workflows keep their zero-diff dispatch.
+ *
+ * When active, admission derives ONLY from the standing plan's honored `approve`
+ * decisions (operator-gated + revision-bound at recording time); any store-read
+ * failure fails CLOSED to the empty set (admit nothing this tick) rather than
+ * fall open to bare backlog/project dispatch. A pure function over injected
+ * loaders so the coupling + fail-closed posture is unit-testable without a host.
+ */
+export async function resolveAdmittedIdentifiersForTick(input: {
+  teamScoped: boolean;
+  admissionGuardrailEnabled: boolean;
+  loadPlan: () => Promise<StandingPlan | null>;
+  listHonoredDecisions: () => Promise<readonly PlanDecision[]>;
+  onError?: (error: unknown) => void | Promise<void>;
+}): Promise<ReadonlySet<string> | null> {
+  if (!input.teamScoped && !input.admissionGuardrailEnabled) {
+    return null; // inert: legacy project-scoped dispatch (zero-diff)
+  }
+  try {
+    const plan = await input.loadPlan();
+    const honoredApprovals =
+      plan === null ? [] : await input.listHonoredDecisions();
+    return approvedAdmittedIdentifiers({ plan, honoredApprovals });
+  } catch (error) {
+    // Fail closed: admit nothing this tick. The diagnostic must never change
+    // that outcome — a throwing or rejecting `onError` observer is swallowed so
+    // it can't reopen the gate (council Pi P1). Awaited so a host can flush the
+    // log before the empty-set return (restores the pre-refactor ordering;
+    // council Pi P2).
+    try {
+      await input.onError?.(error);
+    } catch {
+      // a logging failure cannot reopen the gate
+    }
+    return new Set<string>();
+  }
+}

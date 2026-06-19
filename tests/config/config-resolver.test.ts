@@ -433,6 +433,37 @@ describe("config-resolver", () => {
     expect(resolved.observability.renderIntervalMs).toBe(33);
   });
 
+  it("resolves tracker.team_keys into the team-scoped candidate source (SYMPH-794)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        tracker: {
+          api_key: "token",
+          project_slug: "ENG",
+          team_keys: ["SYMPH", "MOB"],
+        },
+      },
+    });
+
+    expect(resolved.tracker.teamKeys).toEqual(["SYMPH", "MOB"]);
+  });
+
+  it("defaults tracker.teamKeys to an empty list (project-scoped backward compat)", () => {
+    const resolved = resolveWorkflowConfig({
+      workflowPath: "/repo/WORKFLOW.md",
+      promptTemplate: "Prompt",
+      config: {
+        tracker: {
+          api_key: "token",
+          project_slug: "ENG",
+        },
+      },
+    });
+
+    expect(resolved.tracker.teamKeys).toEqual([]);
+  });
+
   it("resolves path-like hook scripts relative to the workflow file", () => {
     const resolved = resolveWorkflowConfig(
       {

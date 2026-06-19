@@ -247,7 +247,7 @@ import {
   type ClusterMember,
   formatWatchdogTicketBody,
 } from "./signature-cluster.js";
-import { approvedAdmittedIdentifiers } from "./standing-plan-admission.js";
+import { resolveAdmittedIdentifiersForTick } from "./standing-plan-admission.js";
 import { decidePlanDrivenDispatch } from "./standing-plan-consumer.js";
 import {
   ingestControlDocComments,
@@ -3645,6 +3645,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ),
         runningIssueIdentifiers: input.runningIssueIdentifiers,
         nowMs: this.now().getTime(),
+        // Team-scoped candidate source ⇒ the plan path releases only
+        // operator-approved batches, never the posture-B auto-release frontier
+        // (SYMPH-794: the team backlog must never dispatch without an explicit go).
+        teamScoped: (this.config.tracker.teamKeys ?? []).length > 0,
         candidatePriorityBands,
         mergedSincePlanCount: mergedOutcomes.sinceCount,
         mergedIssueIdentifiers: mergedOutcomes.identifiers,
@@ -3679,23 +3683,27 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
    */
   private async computeAdmittedIdentifiers(): Promise<ReadonlySet<string> | null> {
     const cfg = this.config.queueTriage;
-    if (cfg === undefined || !cfg.admissionGuardrail.enabled) {
-      return null; // guardrail disabled → inert
-    }
-    try {
-      const root = this.workspaceManager.root;
-      const plan = await loadStandingPlan(root);
-      const honoredApprovals =
-        plan === null ? [] : await listHonoredDecisions(root);
-      return approvedAdmittedIdentifiers({ plan, honoredApprovals });
-    } catch (error) {
-      await this.logger?.warn(
-        "queue_triage_admission_degraded",
-        "Admission guardrail store read failed; failing closed (no admissions this tick).",
-        { outcome: "degraded", detail: toErrorMessage(error) },
-      );
-      return new Set<string>(); // fail closed
-    }
+    const root = this.workspaceManager.root;
+    // The admitted-set gate is MANDATORY whenever the candidate source is
+    // team-scoped (SYMPH-794): the eligible backlog must never dispatch raw, so
+    // a bare team-scoped candidate is held until an explicit operator go —
+    // independent of the admission_guardrail opt-in, which still arms the gate
+    // for a legacy project-scoped pool. Fail-closed on any store-read error.
+    return resolveAdmittedIdentifiersForTick({
+      teamScoped: (this.config.tracker.teamKeys ?? []).length > 0,
+      admissionGuardrailEnabled: cfg?.admissionGuardrail.enabled === true,
+      loadPlan: () => loadStandingPlan(root),
+      listHonoredDecisions: () => listHonoredDecisions(root),
+      onError: async (error) => {
+        // Awaited inside the helper so the degrade diagnostic flushes before the
+        // empty-set (fail-closed) return; the helper swallows any logger error.
+        await this.logger?.warn(
+          "queue_triage_admission_degraded",
+          "Admission gate store read failed; failing closed (no admissions this tick).",
+          { outcome: "degraded", detail: toErrorMessage(error) },
+        );
+      },
+    });
   }
 
   /**
@@ -6126,6 +6134,7 @@ function createLinearTrackerFromConfig(
     endpoint: config.tracker.endpoint,
     apiKey: config.tracker.apiKey,
     projectSlug: config.tracker.projectSlug,
+    teamKeys: config.tracker.teamKeys ?? [],
     activeStates: config.tracker.activeStates,
   });
 }

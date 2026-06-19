@@ -1,13 +1,27 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import type {
+  PlanBatch,
   PlanDecision,
+  PlanEnvelope,
   StandingPlan,
 } from "../../src/domain/standing-plan.js";
 import {
   approvedAdmittedIdentifiers,
   partitionByAdmission,
+  resolveAdmittedIdentifiersForTick,
 } from "../../src/orchestrator/standing-plan-admission.js";
+import {
+  listHonoredDecisions,
+  loadStandingPlan,
+  recordPlanControlDecision,
+  recordPlanRevision,
+} from "../../src/orchestrator/standing-plan-store.js";
+import type { PlanBody } from "../../src/orchestrator/standing-plan-supersession.js";
 
 function plan(): StandingPlan {
   return {
@@ -217,5 +231,169 @@ describe("partitionByAdmission (SYMPH-794)", () => {
     );
     expect(admit).toHaveLength(3);
     expect(held).toHaveLength(0);
+  });
+});
+
+describe("resolveAdmittedIdentifiersForTick (SYMPH-794 coupling)", () => {
+  it("is inert (returns null) when neither team-scoped nor guardrail-enabled — legacy zero-diff", async () => {
+    let loaded = false;
+    const result = await resolveAdmittedIdentifiersForTick({
+      teamScoped: false,
+      admissionGuardrailEnabled: false,
+      loadPlan: async () => {
+        loaded = true;
+        return plan();
+      },
+      listHonoredDecisions: async () => [],
+    });
+    expect(result).toBeNull();
+    // The store is never read on the inert path (no unneeded I/O).
+    expect(loaded).toBe(false);
+  });
+
+  it("forces the gate when team-scoped even with the guardrail flag OFF (the coupling)", async () => {
+    // A team-scoped candidate source must NEVER dispatch the raw backlog: the
+    // gate is mandatory regardless of the admission_guardrail flag. Only the
+    // operator-approved batch members are admitted; the rest are held downstream.
+    const result = await resolveAdmittedIdentifiersForTick({
+      teamScoped: true,
+      admissionGuardrailEnabled: false,
+      loadPlan: async () => plan(),
+      listHonoredDecisions: async () => [approve("b-app")],
+    });
+    expect(result).not.toBeNull();
+    expect([...(result ?? [])].sort()).toEqual(["SYMPH-1", "SYMPH-2"]);
+  });
+
+  it("activates the gate when the guardrail is explicitly enabled (project-scoped opt-in)", async () => {
+    const result = await resolveAdmittedIdentifiersForTick({
+      teamScoped: false,
+      admissionGuardrailEnabled: true,
+      loadPlan: async () => plan(),
+      listHonoredDecisions: async () => [approve("b-other")],
+    });
+    expect([...(result ?? [])]).toEqual(["SYMPH-3"]);
+  });
+
+  it("admits NOTHING when team-scoped with no plan — the bare backlog never dispatches; skips the decisions read", async () => {
+    let listed = false;
+    const result = await resolveAdmittedIdentifiersForTick({
+      teamScoped: true,
+      admissionGuardrailEnabled: false,
+      loadPlan: async () => null,
+      listHonoredDecisions: async () => {
+        listed = true;
+        return [approve("b-app")];
+      },
+    });
+    expect(result).not.toBeNull();
+    expect([...(result ?? [])]).toEqual([]);
+    // With no plan, admission is empty regardless of decisions — the second
+    // journal read is short-circuited (the optimization is locked, council Pi P3).
+    expect(listed).toBe(false);
+  });
+
+  it("fails closed (empty set) and reports when the plan store read throws", async () => {
+    let reported: unknown = null;
+    const result = await resolveAdmittedIdentifiersForTick({
+      teamScoped: true,
+      admissionGuardrailEnabled: false,
+      loadPlan: async () => {
+        throw new Error("journal read failed");
+      },
+      listHonoredDecisions: async () => [],
+      onError: (error) => {
+        reported = error;
+      },
+    });
+    expect(result).not.toBeNull();
+    expect([...(result ?? [])]).toEqual([]);
+    expect((reported as Error).message).toBe("journal read failed");
+  });
+
+  it("stays fail-closed even when the onError observer itself throws (council Pi P1)", async () => {
+    // The fail-closed guarantee must not depend on the diagnostic succeeding: a
+    // throwing logger callback cannot turn "admit nothing" into a thrown error.
+    const result = await resolveAdmittedIdentifiersForTick({
+      teamScoped: true,
+      admissionGuardrailEnabled: false,
+      loadPlan: async () => {
+        throw new Error("journal read failed");
+      },
+      listHonoredDecisions: async () => [],
+      onError: () => {
+        throw new Error("logger down");
+      },
+    });
+    expect(result).not.toBeNull();
+    expect([...(result ?? [])]).toEqual([]);
+  });
+});
+
+// Integration: the helper over the REAL standing-plan store loaders (not mocks),
+// closing the team-scoped-config → gate → admitted-set seam the unit tests
+// stubbed (council finding E). Proves a bare team backlog is held until an
+// operator approval is journaled, then only that batch's members are admitted.
+describe("resolveAdmittedIdentifiersForTick — real store integration (SYMPH-794, council E)", () => {
+  const ENVELOPE: PlanEnvelope = {
+    version: 1,
+    concurrencyCeiling: 3,
+    allowedRisk: "medium",
+    allowedModes: ["parallel-isolated"],
+  };
+  const lookaheadBatch = (id: string, identifier: string): PlanBatch => ({
+    batchId: id,
+    mode: "parallel-isolated",
+    status: "lookahead",
+    members: [{ issueId: id, issueIdentifier: identifier }],
+    rationale: "r",
+    canary: null,
+  });
+  const bodyOf = (batches: PlanBatch[]): PlanBody => ({
+    batches,
+    options: [{ marker: "[opt-1]", label: "Release", intent: null }],
+    envelope: ENVELOPE,
+    rationale: "rationale",
+    source: "planner",
+  });
+
+  it("holds the bare team backlog until an operator approval is journaled, then admits only that batch", async () => {
+    const root = mkdtempSync(join(tmpdir(), "symph-admission-int-"));
+    try {
+      await recordPlanRevision(
+        root,
+        bodyOf([
+          lookaheadBatch("b1", "SYMPH-1"),
+          lookaheadBatch("b2", "SYMPH-2"),
+        ]),
+        { planId: "plan-1", createdAt: "2026-06-19T00:00:00.000Z" },
+      );
+      const loaders = {
+        teamScoped: true,
+        admissionGuardrailEnabled: false,
+        loadPlan: () => loadStandingPlan(root),
+        listHonoredDecisions: () => listHonoredDecisions(root),
+      };
+
+      // No approval yet: a plan exists but the bare backlog is held (fail-closed).
+      const before = await resolveAdmittedIdentifiersForTick(loaders);
+      expect([...(before ?? [])]).toEqual([]);
+
+      // Operator approves b1 via the control surface (revision-bound, journaled).
+      await recordPlanControlDecision(root, {
+        kind: "approve",
+        revision: 1,
+        batchId: "b1",
+        actor: "operator@pro14",
+        note: null,
+        decisionId: "release_batch:b1:rev1:operator@pro14",
+        createdAt: "2026-06-19T00:00:30.000Z",
+      });
+
+      const after = await resolveAdmittedIdentifiersForTick(loaders);
+      expect([...(after ?? [])]).toEqual(["SYMPH-1"]); // only the approved batch
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
