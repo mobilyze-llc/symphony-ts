@@ -133,7 +133,11 @@ function extractStampedMarkers(
   normalizedText: string,
 ): Array<{ optionCore: string; revision: number }> {
   const out: Array<{ optionCore: string; revision: number }> = [];
-  const regex = /(opt-\d+):r(\d+)/g;
+  // Word-boundary fenced so "adopt-1:r4" does not false-extract "opt-1:r4" —
+  // the same boundary discipline markerMatches uses for bare markers, applied to
+  // the stamped path too (council R3, Pi P3). The rendered "[opt-N:rREV]" still
+  // matches: "[" / "]" are non-word, non-"-" delimiters.
+  const regex = /(?<![\w-])(opt-\d+):r(\d+)(?![\w-])/g;
   let match: RegExpExecArray | null = regex.exec(normalizedText);
   while (match !== null) {
     out.push({ optionCore: match[1] ?? "", revision: Number(match[2]) });

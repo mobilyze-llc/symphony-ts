@@ -200,6 +200,18 @@ describe("resolveDocComment (6b)", () => {
     }
   });
 
+  it("does not extract a stamped marker embedded inside a longer word", () => {
+    // The stamped extractor must apply the same word-boundary discipline as the
+    // bare-marker path: "adopt-1:r4" contains the substring "opt-1:r4" but is not
+    // an option reference, so it must NOT resolve to opt-1 (council R3, Pi P3).
+    const result = resolveDocComment({
+      comment: comment({ quotedText: "adopt-1:r4 sounds fine", body: "" }),
+      plan: plan(),
+      operatorAllowlist: ALLOWLIST,
+    });
+    expect(result.kind).toBe("free_text");
+  });
+
   it("does not match opt-1 inside opt-10", () => {
     const p = plan();
     p.options = [
