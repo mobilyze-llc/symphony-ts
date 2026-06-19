@@ -409,4 +409,31 @@ describe("standing-plan store", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("recordPlanControlDecision: a stale revision wins over an unknown batchId (precedence)", async () => {
+    const root = tmpRoot();
+    try {
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      });
+      await recordPlanRevision(root, body([lookahead("b2", "SYMPH-2")]), {
+        createdAt: "2026-06-18T00:01:00.000Z",
+      });
+      // Revision 1 is superseded AND "b1" is not in the current (rev 2) plan;
+      // the revision binding must take precedence over batch_not_found.
+      const result = await recordPlanControlDecision(root, {
+        kind: "approve",
+        revision: 1,
+        batchId: "b1",
+        actor: "operator@pro14",
+        note: "x",
+        decisionId: "d-stale-unknown",
+        createdAt: "2026-06-18T00:02:00.000Z",
+      });
+      expect(result.reason).toBe("stale_revision");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

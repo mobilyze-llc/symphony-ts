@@ -16098,6 +16098,26 @@ describe("plan-driven dispatch hook (SYMPH-787/789)", () => {
     expect(dispatched).toEqual(["ISSUE-1"]); // GHOST-9 filtered out
   });
 
+  it("cannot dispatch a dispatch-fence-excluded issue even if the plan names it (P1)", async () => {
+    const dispatched: string[] = [];
+    const orchestrator = twoCandidateOrchestrator(
+      // Plan names both, but the operator fence allows only ISSUE-2.
+      async () => ({
+        mode: "plan",
+        orderedIssueIdentifiers: ["ISSUE-1", "ISSUE-2"],
+      }),
+      dispatched,
+    );
+    await orchestrator.setDispatchFence({
+      issueIdentifiers: ["ISSUE-2"],
+      source: "symphonyctl",
+      actor: { kind: "operator", host: "pro14" },
+      reason: { class: "operator_dispatch_fence", human: "only ISSUE-2" },
+    });
+    await orchestrator.pollTick();
+    expect(dispatched).toEqual(["ISSUE-2"]); // ISSUE-1 fenced out of the frontier
+  });
+
   it("degrades to the comparator order when the hook returns degrade", async () => {
     const dispatched: string[] = [];
     const orchestrator = twoCandidateOrchestrator(
