@@ -256,11 +256,17 @@ export async function recordBatchOutcome(
   return { recorded: appended.appendedEntries.length > 0 };
 }
 
-/** Decisions bound to the current revision (the only ones still in force). */
-export async function listHonoredDecisions(
-  workspaceRoot: string,
-): Promise<PlanDecision[]> {
-  const journal = await readStandingPlanJournal(workspaceRoot);
+/**
+ * Decisions bound to the journal's current revision, projected PURELY from
+ * already-read entries (no disk read). The in-memory sibling of
+ * projectStandingPlan: the admission gate projects the plan AND the honored
+ * decisions from ONE journal snapshot via these two helpers, so a re-plan landing
+ * mid-tick can never pair plan revision N with decisions honored against N+1
+ * (SYMPH-823).
+ */
+export function projectHonoredDecisions(
+  journal: StandingPlanJournal,
+): PlanDecision[] {
   const current = projectStandingPlan(journal);
   if (current === null) {
     return [];
@@ -269,4 +275,11 @@ export async function listHonoredDecisions(
     .filter((entry) => entry.kind === "plan_decision")
     .map((entry) => (entry as { decision: PlanDecision }).decision);
   return honoredDecisions(decisions, current.revision);
+}
+
+/** Decisions bound to the current revision (the only ones still in force). */
+export async function listHonoredDecisions(
+  workspaceRoot: string,
+): Promise<PlanDecision[]> {
+  return projectHonoredDecisions(await readStandingPlanJournal(workspaceRoot));
 }

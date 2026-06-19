@@ -1,4 +1,12 @@
-import type { PlanDecision, StandingPlan } from "../domain/standing-plan.js";
+import type {
+  PlanDecision,
+  StandingPlan,
+  StandingPlanJournal,
+} from "../domain/standing-plan.js";
+import {
+  projectHonoredDecisions,
+  projectStandingPlan,
+} from "./standing-plan-store.js";
 
 // ---------------------------------------------------------------------------
 // No ambient control surfaces — admission guardrail (SYMPH-794).
@@ -111,6 +119,22 @@ export function partitionByAdmission<T extends { identifier: string }>(
 }
 
 /**
+ * The admitted identifiers projected from a SINGLE journal snapshot (SYMPH-823):
+ * the plan and the honored decisions are projected from the SAME in-memory
+ * entries, so the gate can never pair plan revision N with decisions honored
+ * against N+1. Empty when the journal has no plan — admission never falls back to
+ * bare project membership.
+ */
+export function admittedIdentifiersFromJournal(
+  journal: StandingPlanJournal,
+): Set<string> {
+  return approvedAdmittedIdentifiers({
+    plan: projectStandingPlan(journal),
+    honoredApprovals: projectHonoredDecisions(journal),
+  });
+}
+
+/**
  * Resolve the per-tick admitted set for the dispatch gate, deciding first
  * WHETHER the gate enforces at all.
  *
@@ -125,24 +149,24 @@ export function partitionByAdmission<T extends { identifier: string }>(
  * When active, admission derives ONLY from the standing plan's honored `approve`
  * decisions (operator-gated + revision-bound at recording time); any store-read
  * failure fails CLOSED to the empty set (admit nothing this tick) rather than
- * fall open to bare backlog/project dispatch. A pure function over injected
- * loaders so the coupling + fail-closed posture is unit-testable without a host.
+ * fall open to bare backlog/project dispatch. Projects plan + decisions from ONE
+ * injected journal read so the coupling + fail-closed posture (and the atomic
+ * single-projection of SYMPH-823) is unit-testable without a host.
  */
 export async function resolveAdmittedIdentifiersForTick(input: {
   teamScoped: boolean;
   admissionGuardrailEnabled: boolean;
-  loadPlan: () => Promise<StandingPlan | null>;
-  listHonoredDecisions: () => Promise<readonly PlanDecision[]>;
+  readJournal: () => Promise<StandingPlanJournal>;
   onError?: (error: unknown) => void | Promise<void>;
 }): Promise<ReadonlySet<string> | null> {
   if (!input.teamScoped && !input.admissionGuardrailEnabled) {
     return null; // inert: legacy project-scoped dispatch (zero-diff)
   }
   try {
-    const plan = await input.loadPlan();
-    const honoredApprovals =
-      plan === null ? [] : await input.listHonoredDecisions();
-    return approvedAdmittedIdentifiers({ plan, honoredApprovals });
+    // ONE journal read; the plan and the honored decisions are projected from the
+    // SAME snapshot, so a re-plan landing mid-tick can never pair plan revision N
+    // with decisions honored against N+1 (SYMPH-823).
+    return admittedIdentifiersFromJournal(await input.readJournal());
   } catch (error) {
     // Fail closed: admit nothing this tick. The diagnostic must never change
     // that outcome — a throwing or rejecting `onError` observer is swallowed so

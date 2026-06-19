@@ -15,6 +15,7 @@ import { readStandingPlanJournal } from "../../src/logging/standing-plan-journal
 import {
   listHonoredDecisions,
   loadStandingPlan,
+  projectHonoredDecisions,
   recordBatchOutcome,
   recordPlanControlDecision,
   recordPlanDecision,
@@ -523,6 +524,81 @@ describe("standing-plan store", () => {
       );
       expect(report.rows[0]?.outcome).toBe("merged");
       expect(report.rows[0]?.mode).toBe("parallel-isolated");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// SYMPH-823: the PURE honored-decisions projection over already-read journal
+// entries — the sibling of projectStandingPlan. The admission gate projects BOTH
+// the plan and the honored decisions from ONE journal snapshot via this helper, so
+// a re-plan can never pair plan revision N with decisions honored against N+1.
+describe("projectHonoredDecisions (SYMPH-823 pure projection)", () => {
+  it("returns [] for an empty journal (no plan)", () => {
+    expect(projectHonoredDecisions([])).toEqual([]);
+  });
+
+  it("projects the current-revision honored decisions from one snapshot, matching the disk-reading listHonoredDecisions", async () => {
+    const root = tmpRoot();
+    try {
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      });
+      await recordPlanControlDecision(root, {
+        kind: "approve",
+        revision: 1,
+        batchId: "b1",
+        actor: "operator@pro14",
+        note: null,
+        decisionId: "d1",
+        createdAt: "2026-06-18T00:00:30.000Z",
+      });
+      const journal = await readStandingPlanJournal(root);
+      const honored = projectHonoredDecisions(journal);
+      expect(honored.map((decision) => decision.batchId)).toEqual(["b1"]);
+      // The pure projection is the exact in-memory equivalent of the disk-reading
+      // store function — listHonoredDecisions now delegates to it.
+      expect(honored).toEqual(await listHonoredDecisions(root));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("voids a superseded-revision approval after a rotation — honors the CURRENT revision only", async () => {
+    const root = tmpRoot();
+    try {
+      await recordPlanRevision(root, body([lookahead("b1", "SYMPH-1")]), {
+        planId: "plan-1",
+        createdAt: "2026-06-18T00:00:00.000Z",
+      });
+      await recordPlanControlDecision(root, {
+        kind: "approve",
+        revision: 1,
+        batchId: "b1",
+        actor: "operator@pro14",
+        note: null,
+        decisionId: "d1",
+        createdAt: "2026-06-18T00:00:30.000Z",
+      });
+      // A re-plan rotates to revision 2; the operator approves a revision-2 batch.
+      await recordPlanRevision(root, body([lookahead("b2", "SYMPH-2")]), {
+        createdAt: "2026-06-18T00:01:00.000Z",
+      });
+      await recordPlanControlDecision(root, {
+        kind: "approve",
+        revision: 2,
+        batchId: "b2",
+        actor: "operator@pro14",
+        note: null,
+        decisionId: "d2",
+        createdAt: "2026-06-18T00:01:30.000Z",
+      });
+      const journal = await readStandingPlanJournal(root);
+      const honored = projectHonoredDecisions(journal);
+      // Only the revision-2 approval survives; the revision-1 approval is voided.
+      expect(honored.map((decision) => decision.batchId)).toEqual(["b2"]);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
