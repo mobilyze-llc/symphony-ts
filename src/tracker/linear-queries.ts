@@ -454,6 +454,39 @@ export const LINEAR_ISSUES_BY_LABELS_QUERY = `
   }
 `.trim();
 
+// Team-scoped variant of LINEAR_ISSUES_BY_LABELS_QUERY (SYMPH-824). Backs the
+// fail-open fallback lane of the pipeline-halt check (checkPipelineHalt) so the
+// kill-switch fallback stays functional in team-scope mode — without it, the
+// fallback would throw on a missing project slug whenever the primary
+// team-scoped halt query errored.
+export const LINEAR_ISSUES_BY_LABELS_BY_TEAMS_QUERY = `
+  query SymphonyIssuesByLabelsByTeams(
+    $teamKeys: [String!]!
+    $labelNames: [String!]!
+    $first: Int!
+    $relationFirst: Int!
+    $after: String
+  ) {
+    issues(
+      first: $first
+      after: $after
+      filter: {
+        team: { key: { in: $teamKeys } }
+        labels: { name: { in: $labelNames } }
+      }
+      orderBy: createdAt
+    ) {
+      nodes {
+        ${ISSUE_FIELDS}
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`.trim();
+
 export const LINEAR_ISSUE_PARENT_AND_SIBLINGS_QUERY = `
   query SymphonyIssueParentAndSiblings($issueId: String!) {
     issue(id: $issueId) {

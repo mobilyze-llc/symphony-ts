@@ -452,6 +452,92 @@ describe("LinearTrackerClient", () => {
     });
   });
 
+  it("fetches issues by labels scoped to team keys (no project filter) when team_keys is set (SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [
+              issueNode({
+                id: "halt-1",
+                identifier: "SYMPH-999",
+                title: "pipeline-halt",
+                createdAt: "2026-06-01T00:00:00.000Z",
+              }),
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+
+    const client = createClient({
+      fetchFn,
+      projectSlug: null,
+      teamKeys: ["SYMPH"],
+    });
+    const issues = await client.fetchIssuesByLabels(["pipeline-halt"]);
+
+    expect(issues.map((issue) => issue.identifier)).toEqual(["SYMPH-999"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toContain("team: { key: { in: $teamKeys } }");
+    expect(request.query).not.toContain("slugId");
+    expect(request.query).not.toContain("project:");
+    expect(request.variables).toEqual({
+      teamKeys: ["SYMPH"],
+      labelNames: ["pipeline-halt"],
+      first: 50,
+      relationFirst: 50,
+      after: null,
+    });
+  });
+
+  it("fetchIssuesByLabels supports multiple team keys via the `in` filter (SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+    const client = createClient({
+      fetchFn,
+      projectSlug: null,
+      teamKeys: ["SYMPH", "MOB"],
+    });
+    await client.fetchIssuesByLabels(["pipeline-halt"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.variables.teamKeys).toEqual(["SYMPH", "MOB"]);
+  });
+
+  it("keeps fetchIssuesByLabels project-scoped when team_keys is unset (backward compat, SYMPH-824)", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          issues: {
+            nodes: [],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      }),
+    );
+    const client = createClient({ fetchFn });
+    await client.fetchIssuesByLabels(["pipeline-halt"]);
+    const request = parseRequestBody(fetchFn.mock.calls[0]?.[1]);
+    expect(request.query).toContain("slugId");
+    expect(request.query).not.toContain("team: { key: { in: $teamKeys } }");
+    expect(request.variables).toEqual({
+      projectSlug: "ENG",
+      labelNames: ["pipeline-halt"],
+      first: 50,
+      relationFirst: 50,
+      after: null,
+    });
+  });
+
   it("fetches a full issue by identifier without constraining to project", async () => {
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({

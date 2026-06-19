@@ -868,6 +868,32 @@ describe("config-resolver", () => {
     });
   });
 
+  it("treats an explicitly empty team_keys list the same as absent (rejects without project_slug, SYMPH-824)", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          tracker: {
+            api_key: "token",
+            team_keys: [],
+          },
+        },
+      },
+      {},
+    );
+
+    expect(resolved.tracker.teamKeys).toEqual([]);
+    expect(validateDispatchConfig(resolved)).toEqual({
+      ok: false,
+      error: {
+        code: ERROR_CODES.configInvalid,
+        message:
+          "tracker.project_slug or tracker.team_keys must be configured before dispatch.",
+      },
+    });
+  });
+
   it("resolves owner_host and defaults it to null when absent", () => {
     const withOwner = resolveWorkflowConfig(
       {

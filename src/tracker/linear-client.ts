@@ -16,6 +16,7 @@ import {
   LINEAR_CREATE_ISSUE_MUTATION,
   LINEAR_CREATE_ISSUE_WITH_STATE_MUTATION,
   LINEAR_CREATE_TRACK_FINDING_ISSUE_MUTATION,
+  LINEAR_ISSUES_BY_LABELS_BY_TEAMS_QUERY,
   LINEAR_ISSUES_BY_LABELS_QUERY,
   LINEAR_ISSUES_BY_STATES_BY_TEAMS_QUERY,
   LINEAR_ISSUES_BY_STATES_QUERY,
@@ -421,6 +422,17 @@ export class LinearTrackerClient implements IssueTracker {
   async fetchIssuesByLabels(labelNames: string[]): Promise<Issue[]> {
     if (labelNames.length === 0) {
       return [];
+    }
+
+    // Team-scoped read when configured (SYMPH-824): keeps the pipeline-halt
+    // fallback lane (checkPipelineHalt) functional without a project slug.
+    if (this.teamKeys.length > 0) {
+      return this.fetchIssuePages(LINEAR_ISSUES_BY_LABELS_BY_TEAMS_QUERY, {
+        teamKeys: this.teamKeys,
+        labelNames,
+        first: this.pageSize,
+        relationFirst: this.pageSize,
+      });
     }
 
     return this.fetchIssuePages(LINEAR_ISSUES_BY_LABELS_QUERY, {
