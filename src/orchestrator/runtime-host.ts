@@ -245,10 +245,16 @@ import {
   ingestControlDocComments,
   publishControlDoc,
 } from "./standing-plan-control-surface.js";
+import { computeRecentlyShipped } from "./standing-plan-doc-render.js";
+import {
+  type TerminalOutcomeResult,
+  resolveBatchOutcome,
+} from "./standing-plan-outcome.js";
 import { runStandingPlanShadowTick } from "./standing-plan-shadow.js";
 import {
   listHonoredDecisions,
   loadStandingPlan,
+  recordBatchOutcome,
   recordPlanControlDecision,
 } from "./standing-plan-store.js";
 import { createIssueSupervisionSnapshot } from "./supervision.js";
@@ -3362,12 +3368,16 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           stage: entry.issue.state,
         }),
       );
+      // Read the journal once for both the "Recently shipped" rollup (merged
+      // outcomes, SYMPH-803) and the revision changelog.
+      const controlDocJournal = await readStandingPlanJournal(root);
       const published = await publishControlDoc({
         plan,
         context: {
-          recentlyShipped: [],
+          recentlyShipped: computeRecentlyShipped(controlDocJournal, 10),
           inFlight,
-          changelog: await this.buildControlDocChangelog(root),
+          changelog:
+            this.buildControlDocChangelogFromJournal(controlDocJournal),
         },
         teamId: cfg.controlDoc.teamId,
         docClient: {
@@ -3455,12 +3465,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     await rename(tmp, path);
   }
 
-  private async buildControlDocChangelog(
-    root: string,
-  ): Promise<
-    Array<{ revision: number; createdAt: string; rationale: string }>
-  > {
-    const journal = await readStandingPlanJournal(root);
+  private buildControlDocChangelogFromJournal(
+    journal: Awaited<ReturnType<typeof readStandingPlanJournal>>,
+  ): Array<{ revision: number; createdAt: string; rationale: string }> {
     return journal
       .filter((entry) => entry.kind === "plan_revision")
       .map(
@@ -3519,6 +3526,20 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       const plan = await loadStandingPlan(root);
       const honoredApprovals =
         plan === null ? [] : await listHonoredDecisions(root);
+      // SYMPH-801 re-plan predicate inputs: candidate priority bands (Linear
+      // priority, with "no priority" sorted last) and how many merges landed
+      // since the plan was computed.
+      const candidatePriorityBands = new Map<string, number>(
+        input.candidates.map((candidate) => [
+          candidate.identifier,
+          // Linear: 1=urgent…4=low; 0/none → least urgent (band 5).
+          candidate.priority === null || candidate.priority === 0
+            ? 5
+            : candidate.priority,
+        ]),
+      );
+      const mergedSincePlanCount =
+        plan === null ? 0 : await this.countMergesSince(root, plan.createdAt);
       const decision = decidePlanDrivenDispatch({
         config: cfg,
         plan,
@@ -3528,6 +3549,8 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         ),
         runningIssueIdentifiers: input.runningIssueIdentifiers,
         nowMs: this.now().getTime(),
+        candidatePriorityBands,
+        mergedSincePlanCount,
       });
       if (decision.forceReplan) {
         this.requestStandingPlanReplan();
@@ -3576,6 +3599,70 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       );
       return new Set<string>(); // fail closed
     }
+  }
+
+  /**
+   * Persist a planned issue's terminal pipeline result as a batch outcome
+   * (SYMPH-803) — the calibration substrate. Gated on queueTriage.enabled (no
+   * point recording when the Manager is off; records in shadow too, so a shadow
+   * window accrues real recommendation→outcome data). The disk read/write is
+   * best-effort: a failure is logged and swallowed so it can never disturb the
+   * worker-exit notification path.
+   */
+  private async recordTerminalBatchOutcome(
+    issueIdentifier: string,
+    result: TerminalOutcomeResult,
+  ): Promise<void> {
+    const cfg = this.config.queueTriage;
+    if (cfg === undefined || !cfg.enabled) {
+      return;
+    }
+    try {
+      const root = this.workspaceManager.root;
+      const outcome = resolveBatchOutcome({
+        plan: await loadStandingPlan(root),
+        issueIdentifier,
+        result,
+        createdAt: this.now().toISOString(),
+      });
+      if (outcome === null) {
+        return; // no plan, or a bare/comparator issue — nothing to attribute
+      }
+      await recordBatchOutcome(root, outcome);
+    } catch (error) {
+      await this.logger?.warn(
+        "queue_triage_outcome_record_failed",
+        "Failed to record a batch outcome; calibration may miss this result.",
+        { outcome: "degraded", detail: toErrorMessage(error) },
+      );
+    }
+  }
+
+  /**
+   * How many issues merged since `sinceIso` — the merge-moved-the-world re-plan
+   * predicate input (SYMPH-801). Counts plan_outcome "merged" entries newer than
+   * the plan. Only called on the plan-driven path (not shadow), so the extra
+   * journal read is off the shadow hot path.
+   */
+  private async countMergesSince(
+    root: string,
+    sinceIso: string,
+  ): Promise<number> {
+    const sinceMs = Date.parse(sinceIso);
+    if (Number.isNaN(sinceMs)) {
+      return 0;
+    }
+    const journal = await readStandingPlanJournal(root);
+    let count = 0;
+    for (const entry of journal) {
+      if (entry.kind === "plan_outcome" && entry.outcome.result === "merged") {
+        const outcomeMs = Date.parse(entry.outcome.createdAt);
+        if (!Number.isNaN(outcomeMs) && outcomeMs > sinceMs) {
+          count += 1;
+        }
+      }
+    }
+    return count;
   }
 
   async requestAnchorFieldEdit(
@@ -4913,7 +5000,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
 
     // Fire notifications after state update
     if (this.notifier !== null) {
-      this.fireWorkerNotification(execution, input, {
+      await this.fireWorkerNotification(execution, input, {
         preHistory: postHistory,
         preReworkCount,
         capturedTitle,
@@ -5162,7 +5249,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
   }
 
-  private fireWorkerNotification(
+  private async fireWorkerNotification(
     execution: WorkerExecution,
     input: {
       outcome: "normal" | "abnormal";
@@ -5181,10 +5268,33 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       capturedFirstDispatchedAt: string | null;
       durationMs: number;
     },
-  ): void {
+  ): Promise<void> {
     // biome-ignore lint/style/noNonNullAssertion: caller guards notifier !== null
     const notifier = this.notifier!;
     const state = this.orchestrator.getState();
+
+    // Queue Triage v2 (SYMPH-803): record this issue's terminal pipeline result
+    // as a batch outcome so the calibration digest can close the recommendation →
+    // decision → outcome loop. Single classification (failed > merged > parked
+    // precedence): an exhausted failure is terminal-failed even if it is also
+    // parked; a continuation-retry exit is non-terminal and records nothing.
+    // Best-effort + gated inside recordTerminalBatchOutcome (never affects the
+    // notification path). Does not early-return — notifications still fire below.
+    const terminalOutcome: TerminalOutcomeResult | null =
+      state.failureExhaustedIds.has(execution.issueId)
+        ? "failed"
+        : state.completed.has(execution.issueId) &&
+            state.retryAttempts[execution.issueId] === undefined
+          ? "merged"
+          : state.resumeRequired.has(execution.issueId)
+            ? "parked"
+            : null;
+    if (terminalOutcome !== null) {
+      await this.recordTerminalBatchOutcome(
+        execution.issueIdentifier,
+        terminalOutcome,
+      );
+    }
 
     // Terminal failure — issue newly entered failed set (check first; supersedes infra_error)
     const nowFailed =

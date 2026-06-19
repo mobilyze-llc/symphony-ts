@@ -1,4 +1,8 @@
-import type { PlanBatch, StandingPlan } from "../domain/standing-plan.js";
+import type {
+  PlanBatch,
+  StandingPlan,
+  StandingPlanJournal,
+} from "../domain/standing-plan.js";
 
 // ---------------------------------------------------------------------------
 // 6a — Living control doc render (SYMPH-790)
@@ -15,7 +19,8 @@ export const STANDING_PLAN_DOC_TITLE = "🚦Ticket Triage Controls";
 
 export interface DocShippedEntry {
   issueIdentifier: string;
-  title: string;
+  /** Optional — batch outcomes carry identifiers, not titles (SYMPH-803). */
+  title?: string;
 }
 
 export interface DocInFlightEntry {
@@ -55,7 +60,11 @@ export function renderStandingPlanControlDoc(
     input.recentlyShipped.length === 0
       ? "- (none)"
       : input.recentlyShipped
-          .map((entry) => `- ${entry.issueIdentifier} — ${entry.title}`)
+          .map((entry) =>
+            entry.title === undefined || entry.title.length === 0
+              ? `- ${entry.issueIdentifier}`
+              : `- ${entry.issueIdentifier} — ${entry.title}`,
+          )
           .join("\n"),
   );
 
@@ -128,4 +137,38 @@ function renderCanaryLine(batch: PlanBatch): string | null {
   return `Canary: head [${batch.canary.headIssueIdentifiers.join(
     ", ",
   )}] → contingent [${batch.canary.contingentIssueIdentifiers.join(", ")}]`;
+}
+
+/**
+ * The most recently SHIPPED (merged) issues, newest first, for the doc's
+ * "Recently shipped" section (SYMPH-803). Sourced from the standing-plan journal
+ * outcomes — the single source of truth — and de-duped by identifier (a re-run
+ * that re-merges shows once, at its latest sequence). Bounded by `limit`.
+ */
+export function computeRecentlyShipped(
+  journal: StandingPlanJournal,
+  limit: number,
+): DocShippedEntry[] {
+  const merged: Array<{ identifier: string; sequence: number }> = [];
+  for (const entry of journal) {
+    if (entry.kind === "plan_outcome" && entry.outcome.result === "merged") {
+      for (const identifier of entry.outcome.issueIdentifiers) {
+        merged.push({ identifier, sequence: entry.sequence });
+      }
+    }
+  }
+  merged.sort((a, b) => b.sequence - a.sequence);
+  const seen = new Set<string>();
+  const shipped: DocShippedEntry[] = [];
+  for (const candidate of merged) {
+    if (seen.has(candidate.identifier)) {
+      continue;
+    }
+    seen.add(candidate.identifier);
+    shipped.push({ issueIdentifier: candidate.identifier });
+    if (shipped.length >= limit) {
+      break;
+    }
+  }
+  return shipped;
 }

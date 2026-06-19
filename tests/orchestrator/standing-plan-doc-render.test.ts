@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import type {
   PlanEnvelope,
   StandingPlan,
+  StandingPlanJournal,
 } from "../../src/domain/standing-plan.js";
 import {
   STANDING_PLAN_DOC_TITLE,
+  computeRecentlyShipped,
   renderStandingPlanControlDoc,
 } from "../../src/orchestrator/standing-plan-doc-render.js";
 
@@ -122,5 +124,86 @@ describe("renderStandingPlanControlDoc", () => {
     expect(md).toContain("canary-chain");
     expect(md.toLowerCase()).toContain("head");
     expect(md).toContain("SYMPH-1");
+  });
+});
+
+describe("computeRecentlyShipped (SYMPH-803)", () => {
+  function outcomeEntry(
+    sequence: number,
+    result: string,
+    issueIdentifiers: string[],
+  ): StandingPlanJournal[number] {
+    return {
+      sequence,
+      idempotencyKey: `o${sequence}`,
+      timestamp: "2026-06-19T00:00:00.000Z",
+      kind: "plan_outcome",
+      planId: "plan-1",
+      outcome: {
+        outcomeId: `o${sequence}`,
+        planId: "plan-1",
+        revision: 1,
+        batchId: "b1",
+        result,
+        issueIdentifiers,
+        createdAt: "2026-06-19T00:00:00.000Z",
+      },
+    };
+  }
+
+  it("lists merged issues newest-first, ignoring parked/failed", () => {
+    const journal: StandingPlanJournal = [
+      outcomeEntry(1, "merged", ["SYMPH-1"]),
+      outcomeEntry(2, "failed", ["SYMPH-2"]),
+      outcomeEntry(3, "merged", ["SYMPH-3"]),
+      outcomeEntry(4, "parked", ["SYMPH-4"]),
+    ];
+    expect(computeRecentlyShipped(journal, 10)).toEqual([
+      { issueIdentifier: "SYMPH-3" },
+      { issueIdentifier: "SYMPH-1" },
+    ]);
+  });
+
+  it("de-dupes a re-merged identifier to its latest occurrence and caps at the limit", () => {
+    const journal: StandingPlanJournal = [
+      outcomeEntry(1, "merged", ["SYMPH-1"]),
+      outcomeEntry(2, "merged", ["SYMPH-2"]),
+      outcomeEntry(3, "merged", ["SYMPH-1"]), // re-merge of SYMPH-1
+      outcomeEntry(4, "merged", ["SYMPH-3"]),
+    ];
+    expect(computeRecentlyShipped(journal, 2)).toEqual([
+      { issueIdentifier: "SYMPH-3" },
+      { issueIdentifier: "SYMPH-1" },
+    ]);
+  });
+
+  it("returns an empty list when nothing has merged", () => {
+    expect(
+      computeRecentlyShipped([outcomeEntry(1, "failed", ["SYMPH-1"])], 10),
+    ).toEqual([]);
+  });
+});
+
+describe("renderStandingPlanControlDoc — recently shipped (SYMPH-803)", () => {
+  it("renders shipped identifiers without a title when none is present", () => {
+    const md = renderStandingPlanControlDoc({
+      plan: {
+        planId: "plan-1",
+        revision: 1,
+        contentHash: "h",
+        envelope: ENVELOPE,
+        batches: [],
+        options: [],
+        rationale: "r",
+        createdAt: "2026-06-19T00:00:00.000Z",
+        updatedAt: "2026-06-19T00:00:00.000Z",
+      },
+      recentlyShipped: [{ issueIdentifier: "SYMPH-7" }],
+      inFlight: [],
+      changelog: [],
+    });
+    expect(md).toContain("## Recently shipped");
+    expect(md).toContain("- SYMPH-7");
+    expect(md).not.toContain("SYMPH-7 — "); // no dangling em-dash without a title
   });
 });

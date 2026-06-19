@@ -270,6 +270,56 @@ describe("evaluateReplanPredicates", () => {
     });
     expect(result.forceReplan).toBe(false);
   });
+
+  // SYMPH-801 — new-work-outranks-by-priority-band
+  it("forces a re-plan when un-planned new work outranks the plan by a priority band", () => {
+    const result = evaluateReplanPredicates({
+      plan: plan([batch("b1", ["SYMPH-1"])]),
+      currentEnvelope: ENVELOPE,
+      candidateIdentifiers: new Set(["SYMPH-1", "SYMPH-2"]),
+      candidatePriorityBands: new Map([
+        ["SYMPH-1", 3], // planned: medium
+        ["SYMPH-2", 1], // un-planned: urgent → outranks
+      ]),
+    });
+    expect(result.forceReplan).toBe(true);
+    expect(result.reasons.join(" ")).toMatch(/outranks|priority/i);
+  });
+
+  it("does NOT re-plan when un-planned work is the same or lower band than the plan", () => {
+    const result = evaluateReplanPredicates({
+      plan: plan([batch("b1", ["SYMPH-1"])]),
+      currentEnvelope: ENVELOPE,
+      candidateIdentifiers: new Set(["SYMPH-1", "SYMPH-2"]),
+      candidatePriorityBands: new Map([
+        ["SYMPH-1", 1], // planned: urgent
+        ["SYMPH-2", 2], // un-planned: high, does not outrank urgent
+      ]),
+    });
+    expect(result.forceReplan).toBe(false);
+  });
+
+  // SYMPH-801 — merge-moved-the-world
+  it("forces a re-plan when enough merges landed since the plan (the base moved)", () => {
+    const result = evaluateReplanPredicates({
+      plan: plan([batch("b1", ["SYMPH-1"])]),
+      currentEnvelope: ENVELOPE,
+      candidateIdentifiers: new Set(["SYMPH-1"]),
+      mergedSincePlanCount: 3,
+    });
+    expect(result.forceReplan).toBe(true);
+    expect(result.reasons.join(" ")).toMatch(/merge/i);
+  });
+
+  it("does NOT re-plan for a sub-threshold number of merges since the plan", () => {
+    const result = evaluateReplanPredicates({
+      plan: plan([batch("b1", ["SYMPH-1"])]),
+      currentEnvelope: ENVELOPE,
+      candidateIdentifiers: new Set(["SYMPH-1"]),
+      mergedSincePlanCount: 1,
+    });
+    expect(result.forceReplan).toBe(false);
+  });
 });
 
 describe("decidePlanDrivenDispatch (hot-path composition)", () => {
