@@ -156,6 +156,42 @@ export const LINEAR_CANDIDATE_ISSUES_QUERY = `
   }
 `.trim();
 
+// No-ambient-control-surfaces candidate source (SYMPH-794 / SYMPH-819). The
+// dispatch trigger is the team's eligible backlog, NOT Linear `project`
+// membership: setting or clearing a ticket's `project` field can never arm or
+// disarm dispatch. `team: { key: { in: $teamKeys } }` is a list (an `in`
+// filter) so the scope is multi-team-ready by construction — one team per
+// invocation today, N teams later, with no code change. Eligibility (which
+// states count, blocked/parked/needs-spec exclusions) is unchanged: the
+// configurable `activeStates` filter plus the downstream comparator edges.
+export const LINEAR_CANDIDATE_ISSUES_BY_TEAMS_QUERY = `
+  query SymphonyCandidateIssuesByTeams(
+    $teamKeys: [String!]!
+    $activeStates: [String!]!
+    $first: Int!
+    $relationFirst: Int!
+    $after: String
+  ) {
+    issues(
+      first: $first
+      after: $after
+      filter: {
+        team: { key: { in: $teamKeys } }
+        state: { name: { in: $activeStates } }
+      }
+      orderBy: createdAt
+    ) {
+      nodes {
+        ${ISSUE_FIELDS}
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+`.trim();
+
 export const LINEAR_ISSUES_BY_STATES_QUERY = `
   query SymphonyIssuesByStates(
     $projectSlug: String!

@@ -10,6 +10,7 @@ import {
   normalizeLinearIssueState,
 } from "./linear-normalize.js";
 import {
+  LINEAR_CANDIDATE_ISSUES_BY_TEAMS_QUERY,
   LINEAR_CANDIDATE_ISSUES_QUERY,
   LINEAR_CREATE_COMMENT_MUTATION,
   LINEAR_CREATE_ISSUE_MUTATION,
@@ -280,6 +281,14 @@ export interface LinearTrackerClientOptions {
   apiKey: string | null;
   projectSlug: string | null;
   activeStates: string[];
+  /**
+   * Team keys that scope the dispatch candidate source (SYMPH-794 / SYMPH-819).
+   * When non-empty, `fetchCandidateIssues` reads the team's eligible backlog
+   * instead of `project` membership, so a bare `project` field no longer arms
+   * dispatch. A list ⇒ multi-team-ready. Empty ⇒ the legacy project-scoped
+   * source (backward-compatible default for every other product).
+   */
+  teamKeys?: string[];
   pageSize?: number;
   networkTimeoutMs?: number;
   fetchFn?: typeof fetch;
@@ -289,6 +298,7 @@ export class LinearTrackerClient implements IssueTracker {
   private readonly endpoint: string;
   private readonly apiKey: string | null;
   private readonly projectSlug: string | null;
+  private readonly teamKeys: string[];
   private readonly activeStates: string[];
   private readonly pageSize: number;
   private readonly networkTimeoutMs: number;
@@ -303,6 +313,7 @@ export class LinearTrackerClient implements IssueTracker {
     this.endpoint = options.endpoint;
     this.apiKey = options.apiKey;
     this.projectSlug = options.projectSlug;
+    this.teamKeys = [...(options.teamKeys ?? [])];
     this.activeStates = [...options.activeStates];
     this.pageSize = options.pageSize ?? DEFAULT_LINEAR_PAGE_SIZE;
     this.networkTimeoutMs =
@@ -311,6 +322,16 @@ export class LinearTrackerClient implements IssueTracker {
   }
 
   async fetchCandidateIssues(): Promise<Issue[]> {
+    // Team-scoped backlog is the dispatch trigger when configured (SYMPH-794):
+    // a bare `project` field no longer admits, and no project slug is required.
+    if (this.teamKeys.length > 0) {
+      return this.fetchIssuePages(LINEAR_CANDIDATE_ISSUES_BY_TEAMS_QUERY, {
+        teamKeys: this.teamKeys,
+        activeStates: this.activeStates,
+        first: this.pageSize,
+        relationFirst: this.pageSize,
+      });
+    }
     return this.fetchIssuePages(LINEAR_CANDIDATE_ISSUES_QUERY, {
       projectSlug: this.requireProjectSlug(),
       activeStates: this.activeStates,

@@ -15,6 +15,15 @@ export interface WorkflowTrackerConfig {
   endpoint: string;
   apiKey: string | null;
   projectSlug: string | null;
+  /**
+   * Team keys scoping the dispatch candidate source (SYMPH-794 / SYMPH-819).
+   * When non-empty, candidates are the team's eligible backlog rather than
+   * `project` members, so a bare `project` field no longer arms dispatch; the
+   * admitted-set gate is then mandatory (see runtime-host.computeAdmittedIdentifiers).
+   * A list ⇒ multi-team-ready. Empty/absent ⇒ the legacy project-scoped source.
+   * Always populated by resolveWorkflowConfig (defaults to `[]`).
+   */
+  teamKeys?: string[];
   activeStates: string[];
   terminalStates: string[];
   /** Linear team ID for issue creation (pipeline-halt). Resolved from project context. */

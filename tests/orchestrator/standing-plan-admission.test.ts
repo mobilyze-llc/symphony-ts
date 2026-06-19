@@ -7,6 +7,7 @@ import type {
 import {
   approvedAdmittedIdentifiers,
   partitionByAdmission,
+  resolveAdmittedIdentifiersForTick,
 } from "../../src/orchestrator/standing-plan-admission.js";
 
 function plan(): StandingPlan {
@@ -217,5 +218,76 @@ describe("partitionByAdmission (SYMPH-794)", () => {
     );
     expect(admit).toHaveLength(3);
     expect(held).toHaveLength(0);
+  });
+});
+
+describe("resolveAdmittedIdentifiersForTick (SYMPH-794 coupling)", () => {
+  it("is inert (returns null) when neither team-scoped nor guardrail-enabled — legacy zero-diff", async () => {
+    let loaded = false;
+    const result = await resolveAdmittedIdentifiersForTick({
+      teamScoped: false,
+      admissionGuardrailEnabled: false,
+      loadPlan: async () => {
+        loaded = true;
+        return plan();
+      },
+      listHonoredDecisions: async () => [],
+    });
+    expect(result).toBeNull();
+    // The store is never read on the inert path (no unneeded I/O).
+    expect(loaded).toBe(false);
+  });
+
+  it("forces the gate when team-scoped even with the guardrail flag OFF (the coupling)", async () => {
+    // A team-scoped candidate source must NEVER dispatch the raw backlog: the
+    // gate is mandatory regardless of the admission_guardrail flag. Only the
+    // operator-approved batch members are admitted; the rest are held downstream.
+    const result = await resolveAdmittedIdentifiersForTick({
+      teamScoped: true,
+      admissionGuardrailEnabled: false,
+      loadPlan: async () => plan(),
+      listHonoredDecisions: async () => [approve("b-app")],
+    });
+    expect(result).not.toBeNull();
+    expect([...(result ?? [])].sort()).toEqual(["SYMPH-1", "SYMPH-2"]);
+  });
+
+  it("activates the gate when the guardrail is explicitly enabled (project-scoped opt-in)", async () => {
+    const result = await resolveAdmittedIdentifiersForTick({
+      teamScoped: false,
+      admissionGuardrailEnabled: true,
+      loadPlan: async () => plan(),
+      listHonoredDecisions: async () => [approve("b-other")],
+    });
+    expect([...(result ?? [])]).toEqual(["SYMPH-3"]);
+  });
+
+  it("admits NOTHING when team-scoped with no plan — the bare backlog never dispatches", async () => {
+    const result = await resolveAdmittedIdentifiersForTick({
+      teamScoped: true,
+      admissionGuardrailEnabled: false,
+      loadPlan: async () => null,
+      listHonoredDecisions: async () => [approve("b-app")],
+    });
+    expect(result).not.toBeNull();
+    expect([...(result ?? [])]).toEqual([]);
+  });
+
+  it("fails closed (empty set) and reports when the plan store read throws", async () => {
+    let reported: unknown = null;
+    const result = await resolveAdmittedIdentifiersForTick({
+      teamScoped: true,
+      admissionGuardrailEnabled: false,
+      loadPlan: async () => {
+        throw new Error("journal read failed");
+      },
+      listHonoredDecisions: async () => [],
+      onError: (error) => {
+        reported = error;
+      },
+    });
+    expect(result).not.toBeNull();
+    expect([...(result ?? [])]).toEqual([]);
+    expect((reported as Error).message).toBe("journal read failed");
   });
 });
