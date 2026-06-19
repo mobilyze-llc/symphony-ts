@@ -3275,7 +3275,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       revision: batch.revision,
       batchId: batch.batchId ?? null,
       actor: actorLabel,
-      note: input.reason,
+      // `reason` is a user-controlled HTTP field; fence prompt-boundary tags
+      // before it enters the durable journal, exactly as the doc-comment ingest
+      // path does — keep PlanDecision.note fenced on BOTH paths so a future
+      // consumer can never read a raw-text injection (council R2, Pi P2).
+      note: fenceJudgeBoundaryTags(input.reason),
       decisionId,
       createdAt: this.now().toISOString(),
     });
