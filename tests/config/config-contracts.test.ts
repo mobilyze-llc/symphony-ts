@@ -145,6 +145,43 @@ describe("config-contracts", () => {
     expect(validation.error.message).toContain("missing-stage");
   });
 
+  it("fails dispatch validation when a delegated execution profile is invalid", () => {
+    const resolved = stagedConfig({
+      stages: {
+        work: {
+          type: "agent",
+          linear_state: "In Progress",
+          on_complete: "done",
+          execution: {
+            role: "old-review-lane",
+            phase: "shellout",
+            profile: "bad profile",
+            artifact_contract: "review-result.json",
+            timeout_ms: -1,
+            dependencies: {
+              missing_capsule: "ignore",
+            },
+          },
+        },
+        done: { type: "terminal" },
+      },
+    });
+
+    const validation = validateDispatchConfig(resolved);
+    expect(validation.ok).toBe(false);
+    if (validation.ok) {
+      throw new Error("expected contract violation");
+    }
+    expect(validation.error.code).toBe(ERROR_CODES.configContractViolation);
+    expect(validation.error.message).toContain("stages.work.execution.role");
+    expect(validation.error.message).toContain(
+      "stages.work.execution.artifact_contract",
+    );
+    expect(validation.error.message).toContain(
+      "stages.work.execution.dependencies.missing_capsule",
+    );
+  });
+
   it("reports no contract violations for a stage-less config", () => {
     const resolved = resolveConfig({});
 

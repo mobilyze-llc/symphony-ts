@@ -99,6 +99,7 @@ import {
   DEFAULT_WATCHDOG_SYSTEMIC_THRESHOLD,
   DEFAULT_WORKSPACE_ROOT,
 } from "./defaults.js";
+import { parseStageExecutionProfile } from "./stage-execution-profile.js";
 import type {
   DispatchValidationResult,
   FastTrackConfig,
@@ -1023,6 +1024,11 @@ export function resolveStagesConfig(value: unknown): StagesConfig | null {
       firstStageName = name;
     }
 
+    const execution = parseStageExecutionProfile(
+      stageRecord.execution,
+      `stages.${name}.execution`,
+    );
+
     stageEntries[name] = {
       type: stageType,
       runner: readString(stageRecord.runner),
@@ -1042,6 +1048,8 @@ export function resolveStagesConfig(value: unknown): StagesConfig | null {
         onRework: readString(stageRecord.on_rework),
       },
       linearState: readString(stageRecord.linear_state),
+      execution: execution.profile,
+      executionValidationErrors: execution.errors,
     };
   }
 

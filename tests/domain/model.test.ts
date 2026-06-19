@@ -1,15 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  type DelegatedStageAttemptRecord,
   type ExecutionHistory,
   FAILURE_CLASSES,
   ORCHESTRATOR_EVENTS,
   ORCHESTRATOR_ISSUE_STATUSES,
   RUN_ATTEMPT_PHASES,
   type StageRecord,
+  type StageRunGroupRecord,
   containsStageCompleteSignal,
   createEmptyLiveSession,
   createInitialOrchestratorState,
+  evaluateDelegatedStageCapsuleReadiness,
   normalizeIssueState,
   parseFailureSignal,
   parseHumanBlockSignal,
@@ -135,6 +138,136 @@ describe("domain model", () => {
     expect(state.issueExecutionHistory).toEqual({});
     expect(state.managerRunJournal).toEqual([]);
     expect(state.managerRuns).toEqual({});
+  });
+});
+
+describe("delegated stage execution records", () => {
+  it("carry replay-safe run group identity and capsule paths", () => {
+    const runGroup: StageRunGroupRecord = {
+      runGroupId: "rg-SYMPH-805-1",
+      issueId: "issue-805",
+      issueIdentifier: "SYMPH-805",
+      baseSha: "base-sha",
+      targetHeadSha: "head-sha",
+      workspacePath: "/repo/.worktrees/SYMPH-805-stage-profiles",
+      profileId: "readonly.pro16",
+      artifactRoot: "/artifacts/rg-SYMPH-805-1",
+      capsuleRoot: "/capsules/rg-SYMPH-805-1",
+      promptPaths: ["/prompts/investigate.md", "/prompts/implement.md"],
+      capsulePaths: ["/capsules/plan.json"],
+      artifactPaths: ["/artifacts/investigation.md"],
+      usageRefs: [
+        {
+          kind: "usage-ledger",
+          path: "/artifacts/usage.jsonl",
+          sha256: "usage-sha",
+        },
+      ],
+      createdAt: "2026-06-19T12:00:00.000Z",
+    };
+
+    const attempt: DelegatedStageAttemptRecord = {
+      issueId: runGroup.issueId,
+      issueIdentifier: runGroup.issueIdentifier,
+      stageName: "implement",
+      stageAttempt: 2,
+      runGroupId: runGroup.runGroupId,
+      profileId: runGroup.profileId,
+      baseSha: runGroup.baseSha,
+      targetHeadSha: runGroup.targetHeadSha,
+      workspacePath: runGroup.workspacePath,
+      executionRole: "implementer",
+      executionPhase: "implement",
+      backend: "crabrunner",
+      provider: "openai",
+      model: "gpt-5.3-codex",
+      reasoningEffort: "medium",
+      promptPath: runGroup.promptPaths[1]!,
+      capsules: [
+        {
+          id: "plan",
+          path: runGroup.capsulePaths[0]!,
+          sha256: "plan-sha",
+          required: true,
+          producedByStage: "plan",
+          consumedByStage: "implement",
+        },
+      ],
+      artifactPaths: [
+        {
+          kind: "implementation-closeout",
+          path: "/artifacts/implement-closeout.json",
+          sha256: "artifact-sha",
+        },
+      ],
+      usageRefs: runGroup.usageRefs,
+      status: "pending",
+      idempotencyKey: "SYMPH-805:implement:2:head-sha",
+    };
+
+    expect(attempt).toMatchObject({
+      runGroupId: "rg-SYMPH-805-1",
+      baseSha: "base-sha",
+      targetHeadSha: "head-sha",
+      profileId: "readonly.pro16",
+      promptPath: "/prompts/implement.md",
+    });
+    expect(attempt.capsules.map((capsule) => capsule.path)).toEqual([
+      "/capsules/plan.json",
+    ]);
+    expect(evaluateDelegatedStageCapsuleReadiness(attempt)).toEqual({
+      ok: true,
+      status: "ready",
+      missingCapsules: [],
+    });
+  });
+
+  it("turns missing required capsule refs into explicit failed or degraded state", () => {
+    const attempt: DelegatedStageAttemptRecord = {
+      issueId: "issue-805",
+      issueIdentifier: "SYMPH-805",
+      stageName: "implement",
+      stageAttempt: 1,
+      runGroupId: "rg-SYMPH-805-1",
+      profileId: "write.local",
+      baseSha: "base-sha",
+      targetHeadSha: "head-sha",
+      workspacePath: "/repo",
+      executionRole: "implementer",
+      executionPhase: "implement",
+      backend: "current-runner",
+      provider: "openai",
+      model: "gpt-5.3-codex",
+      reasoningEffort: null,
+      promptPath: "/prompts/implement.md",
+      capsules: [
+        {
+          id: "plan",
+          path: "",
+          sha256: null,
+          required: true,
+          producedByStage: "plan",
+          consumedByStage: "implement",
+        },
+      ],
+      artifactPaths: [],
+      usageRefs: [],
+      status: "pending",
+      idempotencyKey: "SYMPH-805:implement:1:head-sha",
+    };
+
+    expect(evaluateDelegatedStageCapsuleReadiness(attempt, "fail")).toEqual({
+      ok: false,
+      status: "failed",
+      missingCapsules: ["plan"],
+      reason: "missing_required_capsule_ref",
+    });
+    expect(evaluateDelegatedStageCapsuleReadiness(attempt, "degrade")).toEqual({
+      ok: false,
+      status: "degraded",
+      missingCapsules: ["plan"],
+      reason: "missing_required_capsule_ref",
+    });
   });
 });
 

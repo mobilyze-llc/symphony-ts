@@ -152,6 +152,257 @@ describe("resolveStagesConfig", () => {
     expect(result!.stages.investigate!.reasoningEffort).toBe("medium");
   });
 
+  it("parses behavior-neutral delegated execution profiles", () => {
+    const result = resolveStagesConfig({
+      investigate: {
+        type: "agent",
+        runner: "codex",
+        model: "gpt-5.3-codex",
+        on_complete: "implement",
+        execution: {
+          role: "investigator",
+          phase: "investigate",
+          backend: "crabrunner",
+          provider: "openai",
+          model: "gpt-5.3-codex",
+          reasoning_effort: "medium",
+          profile: "readonly.pro16",
+          timeout_ms: 600000,
+          artifact_contract: {
+            requires: ["issue-snapshot"],
+            produces: ["investigation-brief"],
+          },
+          budget: {
+            max_tokens: 12000,
+            max_usd: 2.5,
+          },
+          dependencies: {
+            stages: ["intake"],
+            capsules: ["issue-snapshot"],
+            missing_capsule: "fail",
+          },
+          run_group: {
+            id: "rg-SYMPH-805",
+            key: "stage-exec-v1",
+          },
+          capsules: {
+            consume: ["capsules/issue-snapshot.json"],
+            produce: ["capsules/investigation.json"],
+          },
+        },
+      },
+      implement: {
+        type: "agent",
+        on_complete: "done",
+      },
+      done: {
+        type: "terminal",
+      },
+    });
+
+    const stage = result!.stages.investigate!;
+    expect(stage.runner).toBe("codex");
+    expect(stage.model).toBe("gpt-5.3-codex");
+    expect(stage.executionValidationErrors).toEqual([]);
+    expect(stage.execution).toEqual({
+      role: "investigator",
+      phase: "investigate",
+      backend: "crabrunner",
+      provider: "openai",
+      model: "gpt-5.3-codex",
+      reasoningEffort: "medium",
+      profile: "readonly.pro16",
+      artifacts: {
+        requires: ["issue-snapshot"],
+        produces: ["investigation-brief"],
+      },
+      timeoutMs: 600000,
+      budget: {
+        maxTokens: 12000,
+        maxUsd: 2.5,
+      },
+      dependencies: {
+        stages: ["intake"],
+        capsules: ["issue-snapshot"],
+        missingCapsule: "fail",
+      },
+      runGroup: {
+        id: "rg-SYMPH-805",
+        key: "stage-exec-v1",
+      },
+      capsules: {
+        consume: ["capsules/issue-snapshot.json"],
+        produce: ["capsules/investigation.json"],
+      },
+    });
+
+    expect(validateStagesConfig(result).ok).toBe(true);
+  });
+
+  it("parses thinking as the delegated execution reasoning_effort fallback", () => {
+    const result = resolveStagesConfig({
+      plan: {
+        type: "agent",
+        on_complete: "implement",
+        execution: {
+          role: "planner",
+          phase: "plan",
+          thinking: "high",
+        },
+      },
+      implement: {
+        type: "agent",
+        on_complete: "done",
+      },
+      done: {
+        type: "terminal",
+      },
+    });
+
+    const stage = result!.stages.plan!;
+    expect(stage.executionValidationErrors).toEqual([]);
+    expect(stage.execution!.reasoningEffort).toBe("high");
+  });
+
+  it("prefers delegated execution reasoning_effort over thinking", () => {
+    const result = resolveStagesConfig({
+      review: {
+        type: "agent",
+        on_complete: "done",
+        execution: {
+          role: "reviewer",
+          phase: "review",
+          reasoning_effort: "medium",
+          thinking: "high",
+        },
+      },
+      done: {
+        type: "terminal",
+      },
+    });
+
+    const stage = result!.stages.review!;
+    expect(stage.executionValidationErrors).toEqual([]);
+    expect(stage.execution!.reasoningEffort).toBe("medium");
+  });
+
+  it("attributes delegated execution thinking fallback errors to thinking", () => {
+    const result = resolveStagesConfig({
+      investigate: {
+        type: "agent",
+        on_complete: "done",
+        execution: {
+          role: "investigator",
+          phase: "investigate",
+          reasoning_effort: null,
+          thinking: "extreme",
+        },
+      },
+      done: {
+        type: "terminal",
+      },
+    });
+
+    const errors = result!.stages.investigate!.executionValidationErrors ?? [];
+    expect(errors.map((error) => error.path)).toEqual([
+      "stages.investigate.execution.thinking",
+    ]);
+  });
+
+  it("does not treat artifacts as a delegated execution artifact_contract alias", () => {
+    const result = resolveStagesConfig({
+      implement: {
+        type: "agent",
+        on_complete: "done",
+        execution: {
+          role: "implementer",
+          phase: "implement",
+          artifacts: {
+            requires: ["legacy-input"],
+            produces: ["legacy-output"],
+          },
+        },
+      },
+      done: {
+        type: "terminal",
+      },
+    });
+
+    const stage = result!.stages.implement!;
+    expect(stage.executionValidationErrors).toEqual([]);
+    expect(stage.execution!.artifacts).toEqual({
+      requires: [],
+      produces: [],
+    });
+  });
+
+  it("surfaces path-specific errors for invalid delegated execution profiles", () => {
+    const result = resolveStagesConfig({
+      implement: {
+        type: "agent",
+        on_complete: "done",
+        execution: {
+          role: "worker",
+          phase: "execute",
+          backend: "codex-crabrunner",
+          profile: "bad profile",
+          artifact_contract: {
+            requires: [123],
+            produces: "",
+          },
+          timeout_ms: 0,
+          budget: {
+            max_tokens: "many",
+            max_usd: 0,
+          },
+          dependencies: {
+            stages: [""],
+            capsules: [false],
+            missing_capsule: "ignore",
+          },
+          capsules: {
+            consume: [null],
+          },
+        },
+      },
+      done: {
+        type: "terminal",
+      },
+    });
+
+    const errors = result!.stages.implement!.executionValidationErrors ?? [];
+    expect(errors.map((error) => error.path)).toEqual(
+      expect.arrayContaining([
+        "stages.implement.execution.role",
+        "stages.implement.execution.phase",
+        "stages.implement.execution.backend",
+        "stages.implement.execution.profile",
+        "stages.implement.execution.artifact_contract.requires.0",
+        "stages.implement.execution.artifact_contract.produces",
+        "stages.implement.execution.timeout_ms",
+        "stages.implement.execution.budget.max_tokens",
+        "stages.implement.execution.budget.max_usd",
+        "stages.implement.execution.dependencies.stages.0",
+        "stages.implement.execution.dependencies.capsules.0",
+        "stages.implement.execution.dependencies.missing_capsule",
+        "stages.implement.execution.capsules.consume.0",
+      ]),
+    );
+
+    const validation = validateStagesConfig(result);
+    expect(validation.ok).toBe(false);
+    expect(validation.errors).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("stages.implement.execution.role"),
+        expect.stringContaining("stages.implement.execution.profile"),
+        expect.stringContaining("stages.implement.execution.timeout_ms"),
+        expect.stringContaining(
+          "stages.implement.execution.dependencies.missing_capsule",
+        ),
+      ]),
+    );
+  });
+
   it("parses linear_state from stage definition", () => {
     const result = resolveStagesConfig({
       investigate: {
