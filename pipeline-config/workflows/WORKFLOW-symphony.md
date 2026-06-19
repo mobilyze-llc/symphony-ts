@@ -25,29 +25,6 @@ server:
 merge_actuator:
   enabled: true
   auto_merge: true
-# SYMPH-784: Queue Triage v2 Manager — armed to SHADOW (Stage 1–2 of the go-live
-# runbook). enabled + shadow_mode means the Opus planner computes/journals a
-# standing plan every heartbeat AND the living "🚦Ticket Triage Controls" doc
-# publishes/ingests, but dispatch STAYS on the comparator (shadow_mode does not
-# drive dispatch). This is a calibration window: compare the plan vs. what the
-# comparator actually dispatched before exiting shadow. Stages 3–4 (shadow_mode:
-# false → plan drives dispatch; admission_guardrail.enabled: true → bare project
-# no longer admits) are a deliberate, separate operator go-live — see the
-# "Queue Triage v2 — Go-Live Runbook" Linear doc. admission_guardrail stays
-# default-OFF here.
-queue_triage:
-  enabled: true
-  shadow_mode: true
-  control_doc:
-    enabled: true
-    team_id: 955e3adf-13d3-4691-a09a-c66d2420580b
-# Operator allowlist for the 🚦 control-doc comment surface (SYMPH-486/791): only
-# these author emails can drive plan-control actions via doc comments; the agent
-# service account is deliberately excluded so it cannot self-approve. In shadow,
-# recorded decisions are inert (the consumer does not drive dispatch).
-operator_anchors:
-  operator_allowlist:
-    - eric@litman.org
 ---
 
 You are working on the Symphony orchestrator (symphony-ts). This is the pipeline orchestration layer that schedules and coordinates autonomous development agents.
