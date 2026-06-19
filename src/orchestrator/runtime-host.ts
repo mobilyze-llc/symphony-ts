@@ -3528,16 +3528,21 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         plan === null ? [] : await listHonoredDecisions(root);
       // SYMPH-801 re-plan predicate inputs: candidate priority bands (Linear
       // priority, with "no priority" sorted last) and how many merges landed
-      // since the plan was computed.
-      const candidatePriorityBands = new Map<string, number>(
-        input.candidates.map((candidate) => [
-          candidate.identifier,
-          // Linear: 1=urgent…4=low; 0/none → least urgent (band 5).
-          candidate.priority === null || candidate.priority === 0
-            ? 5
-            : candidate.priority,
-        ]),
-      );
+      // since the plan was computed. Only assembled when a plan exists — with no
+      // plan the decision degrades immediately and never reads them (council R1,
+      // Pi P3).
+      const candidatePriorityBands =
+        plan === null
+          ? new Map<string, number>()
+          : new Map<string, number>(
+              input.candidates.map((candidate) => [
+                candidate.identifier,
+                // Linear: 1=urgent…4=low; 0/none → least urgent (band 5).
+                candidate.priority === null || candidate.priority === 0
+                  ? 5
+                  : candidate.priority,
+              ]),
+            );
       const mergedSincePlanCount =
         plan === null ? 0 : await this.countMergesSince(root, plan.createdAt);
       const decision = decidePlanDrivenDispatch({
@@ -3619,6 +3624,13 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
     try {
       const root = this.workspaceManager.root;
+      // Attribution is against the CURRENT plan at exit time. If a re-plan moved
+      // this issue to a different batch (or dropped it) between dispatch and
+      // exit, the outcome attaches to its current batch (a true fact) or is
+      // skipped — it is never attributed to a batch the issue isn't in. Durable
+      // dispatch-time attribution (so the outcome always joins the dispatching
+      // revision's decision) is a tracked follow-up (SYMPH-813); it only affects
+      // calibration accuracy on the plan-driven path (Stage 3+), not shadow.
       const outcome = resolveBatchOutcome({
         plan: await loadStandingPlan(root),
         issueIdentifier,
@@ -4998,9 +5010,34 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         preHistory),
     ];
 
+    // Queue Triage v2 (SYMPH-803): record this issue's terminal pipeline result
+    // as a batch outcome. Gated on queueTriage.enabled, NOT on the notifier, so
+    // it runs even with Slack disabled (council R1, Codex P2). Single
+    // classification (failed > merged > parked; a continuation-retry exit records
+    // nothing). Best-effort inside recordTerminalBatchOutcome — never disturbs
+    // the worker-exit path.
+    {
+      const outcomeState = this.orchestrator.getState();
+      const terminalOutcome: TerminalOutcomeResult | null =
+        outcomeState.failureExhaustedIds.has(execution.issueId)
+          ? "failed"
+          : outcomeState.completed.has(execution.issueId) &&
+              outcomeState.retryAttempts[execution.issueId] === undefined
+            ? "merged"
+            : outcomeState.resumeRequired.has(execution.issueId)
+              ? "parked"
+              : null;
+      if (terminalOutcome !== null) {
+        await this.recordTerminalBatchOutcome(
+          execution.issueIdentifier,
+          terminalOutcome,
+        );
+      }
+    }
+
     // Fire notifications after state update
     if (this.notifier !== null) {
-      await this.fireWorkerNotification(execution, input, {
+      this.fireWorkerNotification(execution, input, {
         preHistory: postHistory,
         preReworkCount,
         capturedTitle,
@@ -5249,7 +5286,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     }
   }
 
-  private async fireWorkerNotification(
+  private fireWorkerNotification(
     execution: WorkerExecution,
     input: {
       outcome: "normal" | "abnormal";
@@ -5268,33 +5305,10 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       capturedFirstDispatchedAt: string | null;
       durationMs: number;
     },
-  ): Promise<void> {
+  ): void {
     // biome-ignore lint/style/noNonNullAssertion: caller guards notifier !== null
     const notifier = this.notifier!;
     const state = this.orchestrator.getState();
-
-    // Queue Triage v2 (SYMPH-803): record this issue's terminal pipeline result
-    // as a batch outcome so the calibration digest can close the recommendation →
-    // decision → outcome loop. Single classification (failed > merged > parked
-    // precedence): an exhausted failure is terminal-failed even if it is also
-    // parked; a continuation-retry exit is non-terminal and records nothing.
-    // Best-effort + gated inside recordTerminalBatchOutcome (never affects the
-    // notification path). Does not early-return — notifications still fire below.
-    const terminalOutcome: TerminalOutcomeResult | null =
-      state.failureExhaustedIds.has(execution.issueId)
-        ? "failed"
-        : state.completed.has(execution.issueId) &&
-            state.retryAttempts[execution.issueId] === undefined
-          ? "merged"
-          : state.resumeRequired.has(execution.issueId)
-            ? "parked"
-            : null;
-    if (terminalOutcome !== null) {
-      await this.recordTerminalBatchOutcome(
-        execution.issueIdentifier,
-        terminalOutcome,
-      );
-    }
 
     // Terminal failure — issue newly entered failed set (check first; supersedes infra_error)
     const nowFailed =

@@ -84,5 +84,14 @@ describe("resolveBatchOutcome (SYMPH-803)", () => {
     });
     expect(parked?.result).toBe("parked");
     expect(parked?.outcomeId).toBe("b-app:SYMPH-1:parked");
+
+    const failed = resolveBatchOutcome({
+      plan: plan(),
+      issueIdentifier: "SYMPH-1",
+      result: "failed",
+      createdAt: "2026-06-19T02:00:00.000Z",
+    });
+    expect(failed?.result).toBe("failed");
+    expect(failed?.outcomeId).toBe("b-app:SYMPH-1:failed");
   });
 });
