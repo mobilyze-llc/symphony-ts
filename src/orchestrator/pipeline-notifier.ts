@@ -10,7 +10,7 @@ import type {
   ExecutionHistory,
   RightSizingDecision,
 } from "../domain/model.js";
-import { sanitizeForSlack } from "../shared/egress.js";
+import { escapeSlackControlChars, sanitizeForSlack } from "../shared/egress.js";
 import { getDisplayVersion } from "../version.js";
 
 // ---------------------------------------------------------------------------
@@ -1084,7 +1084,9 @@ export function formatNotification(
       // so the URL bypasses sanitizeForSlack and is never redacted (SYMPH-821).
       const link =
         event.linkUrl != null && event.linkUrl !== ""
-          ? ` <${event.linkUrl}|${event.linkLabel ?? "open"}>`
+          ? ` <${escapeSlackControlChars(event.linkUrl)}|${escapeSlackControlChars(
+              event.linkLabel ?? "open",
+            )}>`
           : "";
       return {
         text: `:information_source: *${event.issueIdentifier}* — ${sanitizeForSlack(event.message)}${link}\n${version}`,

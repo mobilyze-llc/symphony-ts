@@ -124,6 +124,20 @@ describe("formatNotification", () => {
     expect(result.text).toContain("Ticket Triage Controls updated");
   });
 
+  it("info_alert escapes Slack control chars in the link so a crafted label cannot smuggle a mention (codex-review P2)", () => {
+    const result = formatNotification({
+      type: "info_alert",
+      issueIdentifier: "PLAN",
+      message: "x",
+      linkUrl: "https://linear.app/doc",
+      linkLabel: "open> <!channel",
+    });
+    // The injected ">" must be escaped so it cannot close the <url|label> link
+    // and emit an active <!channel> mention.
+    expect(result.text).not.toContain("<!channel>");
+    expect(result.text).toContain("&gt;");
+  });
+
   it("formats pipeline_stopped", () => {
     const result = formatNotification({
       type: "pipeline_stopped",
