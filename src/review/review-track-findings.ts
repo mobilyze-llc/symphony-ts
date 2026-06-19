@@ -1,6 +1,5 @@
+import { CODEX_LEAD_LANE_ID } from "./review-lanes.js";
 import type { ReviewGateVerdict } from "./review-verdict.js";
-
-const CODEX_LEAD_LANE_ID = "codex-high-lead";
 
 export interface ReviewTrackFinding {
   fingerprint: string;

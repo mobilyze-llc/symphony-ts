@@ -28,6 +28,7 @@ import {
   passArtifactTriageSectionIsNonBlocking,
   sectionFindingEntries,
 } from "./review-artifacts.js";
+import { CODEX_LEAD_LANE_ID } from "./review-lanes.js";
 import { councilRoutingEvidenceError } from "./review-provenance.js";
 import {
   authoritativeTerminationArtifacts,
@@ -57,7 +58,6 @@ const DEFAULT_COMMAND_TIMEOUT_GRACE_SECONDS = 60;
 const STALLED_LANE_CLEANUP_TIMEOUT_MS = 5_000;
 const MAX_DIFF_BYTES = 5 * 1024 * 1024;
 const MAX_COMMAND_BUFFER_BYTES = 20 * 1024 * 1024;
-const CODEX_LEAD_LANE_ID = "codex-high-lead";
 const CODEX_LEAD_ROLE = "codex-lead-triage";
 const CODEX_LEAD_MODEL = "codex-high";
 const CODEX_EXCAVATION_LANE_ID = "codex-excavation";
