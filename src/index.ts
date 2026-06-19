@@ -41,4 +41,5 @@ export * from "./spec-review/spec-review.js";
 export * from "./workspace/path-safety.js";
 export * from "./workspace/workspace-manager.js";
 export * from "./slack-bot/index.js";
+export * from "./stage-execution/backend.js";
 export * from "./version.js";

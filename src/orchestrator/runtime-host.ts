@@ -60,6 +60,7 @@ import type {
   DispatchValidationResult,
   ResolvedWorkflowConfig,
   StageDefinition,
+  StageExecutionBackend as StageExecutionBackendKind,
 } from "../config/types.js";
 import { WorkflowWatcher } from "../config/workflow-watch.js";
 import type {
@@ -166,6 +167,12 @@ import {
   DEFAULT_SPEC_REVIEW_COMMENT_CONFIG,
   type SpecReviewCommentDisposition,
 } from "../spec-review/spec-review.js";
+import {
+  CurrentRunnerStageExecutionBackend,
+  type StageExecutionBackendRunner,
+  type StageExecutionJobSpec,
+  UnsupportedStageExecutionBackendError,
+} from "../stage-execution/backend.js";
 import { serializeTrackerErrorDetails } from "../tracker/errors.js";
 import {
   type LinearIssueComment,
@@ -404,6 +411,10 @@ export interface RuntimeHostOptions {
   terminateDetachedProcessGroupTree?: typeof terminateDetachedProcessGroupTreeDefault;
   runContinuousFeedback?: OrchestratorCoreOptions["runContinuousFeedback"];
   runContinuousFeedbackCommand?: ContinuousFeedbackCommandExecutor;
+  stageExecutionBackends?: ReadonlyMap<
+    StageExecutionBackendKind,
+    StageExecutionBackendRunner
+  >;
   deliverWorkerStopSignal?: DeliverWorkerStopSignal;
   /**
    * Injectable deploy-drift capture (SYMPH-407). Default runs git rev-parse
@@ -520,6 +531,14 @@ function mergeDispatcherRunJournals(
   });
 }
 
+function createCurrentRunnerStageExecutionBackends(
+  runner: AgentRunnerLike,
+): ReadonlyMap<StageExecutionBackendKind, StageExecutionBackendRunner> {
+  return new Map<StageExecutionBackendKind, StageExecutionBackendRunner>([
+    ["current-runner", new CurrentRunnerStageExecutionBackend(runner)],
+  ]);
+}
+
 function isSnapshotRefreshExternalJournalEntry(
   entry: DispatcherRunJournalEntry,
 ): boolean {
@@ -557,6 +576,16 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
   private workspaceManager: WorkspaceManager;
 
   private agentRunner: AgentRunnerLike;
+
+  private stageExecutionBackends: ReadonlyMap<
+    StageExecutionBackendKind,
+    StageExecutionBackendRunner
+  >;
+
+  private readonly customStageExecutionBackends: ReadonlyMap<
+    StageExecutionBackendKind,
+    StageExecutionBackendRunner
+  > | null;
 
   private readonly now: () => Date;
 
@@ -676,6 +705,7 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
     this.logger = options.logger ?? null;
     this.continuousFeedbackCommand =
       options.runContinuousFeedbackCommand ?? runContinuousFeedbackCommand;
+    this.customStageExecutionBackends = options.stageExecutionBackends ?? null;
     this.readWorkspaceChangedFiles =
       options.readWorkspaceChangedFiles ?? readGitChangedFiles;
     this.readWorkspaceBaseRevision =
@@ -763,6 +793,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         tracker: options.tracker,
         workspaceManager: this.workspaceManager,
       });
+    this.stageExecutionBackends =
+      this.customStageExecutionBackends ??
+      createCurrentRunnerStageExecutionBackends(this.agentRunner);
 
     const timerScheduler = createQueuedTimerScheduler({
       run: (callback) => {
@@ -1398,6 +1431,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         tracker: this.tracker,
         workspaceManager: this.workspaceManager,
       });
+      if (this.customStageExecutionBackends === null) {
+        this.stageExecutionBackends = createCurrentRunnerStageExecutionBackends(
+          this.agentRunner,
+        );
+      }
       return;
     }
 
@@ -1409,6 +1447,11 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
           ? {}
           : { workspaceManager: this.workspaceManager }),
       });
+    }
+    if (this.customStageExecutionBackends === null) {
+      this.stageExecutionBackends = createCurrentRunnerStageExecutionBackends(
+        this.agentRunner,
+      );
     }
 
     this.notifySnapshotListeners();
@@ -4410,6 +4453,14 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       lastResult: null,
       completion: Promise.resolve(),
     };
+    const executionJob = this.createStageExecutionJobSpec({
+      issue,
+      attempt,
+      stage,
+      stageName,
+    });
+    const stageExecutionBackend =
+      this.resolveStageExecutionBackend(executionJob);
 
     await this.logger?.info(
       "agent_runner_starting",
@@ -4419,6 +4470,9 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
         issue_id: issue.id,
         issue_identifier: issue.identifier,
         ...(stageName !== null ? { stage: stageName } : {}),
+        stage_execution_backend: executionJob.backend,
+        stage_execution_run_group_id: executionJob.identity.runGroupId,
+        stage_execution_idempotency_key: executionJob.identity.idempotencyKey,
       },
     );
 
@@ -4431,39 +4485,42 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       globalHardStops,
     );
 
-    const completion = this.agentRunner
-      .run({
+    const runnerInput: AgentRunInput = {
+      issue,
+      attempt,
+      signal: controller.signal,
+      stage,
+      stageName,
+      reworkCount,
+      acceptanceCriteria,
+      implementationCommentDeltas:
+        await this.buildImplementationCommentDeltaContext(issue, stageName),
+      workpadContext: await this.buildWorkpadRetryContext(
         issue,
-        attempt,
-        signal: controller.signal,
-        stage,
         stageName,
-        reworkCount,
-        acceptanceCriteria,
-        implementationCommentDeltas:
-          await this.buildImplementationCommentDeltaContext(issue, stageName),
-        workpadContext: await this.buildWorkpadRetryContext(
-          issue,
-          stageName,
-          attempt,
-        ),
-        budgetMultiplier: Math.max(1, budgetMultiplier),
-        reasoningEffort,
-        modePolicy: createModeScopedPermissionPolicy({
-          mode: rightSizingDecision.mode,
-          stageName,
-          configuredApprovalPolicy: this.config.codex.approvalPolicy,
-          configuredThreadSandbox: this.config.codex.threadSandbox,
-          configuredTurnSandboxPolicy: this.config.codex.turnSandboxPolicy,
-          // Mode ceilings (prototype $5 / thin $20) intentionally still cap
-          // the scaled budget: right-sizing promises bound escalations, so a
-          // prototype unit cannot ladder past its mode's hard ceiling.
-          maxBudgetUsd:
-            effectiveHardStops.maxDollarBudgetUsd *
-            Math.max(1, budgetMultiplier),
-        }),
+        attempt,
+      ),
+      budgetMultiplier: Math.max(1, budgetMultiplier),
+      reasoningEffort,
+      modePolicy: createModeScopedPermissionPolicy({
+        mode: rightSizingDecision.mode,
+        stageName,
+        configuredApprovalPolicy: this.config.codex.approvalPolicy,
+        configuredThreadSandbox: this.config.codex.threadSandbox,
+        configuredTurnSandboxPolicy: this.config.codex.turnSandboxPolicy,
+        // Mode ceilings (prototype $5 / thin $20) intentionally still cap
+        // the scaled budget: right-sizing promises bound escalations, so a
+        // prototype unit cannot ladder past its mode's hard ceiling.
+        maxBudgetUsd:
+          effectiveHardStops.maxDollarBudgetUsd * Math.max(1, budgetMultiplier),
+      }),
+    };
+    const completion = stageExecutionBackend
+      .execute({
+        job: executionJob,
+        runnerInput,
       })
-      .then(async (result) => {
+      .then(async ({ result }) => {
         execution.lastResult = result;
         await this.enqueue(async () => {
           await this.finalizeWorkerExecution(execution, {
@@ -4497,6 +4554,73 @@ export class OrchestratorRuntimeHost implements DashboardServerHost {
       workerHandle: execution,
       monitorHandle: completion,
     };
+  }
+
+  private createStageExecutionJobSpec(input: {
+    issue: Issue;
+    attempt: number | null;
+    stage: StageDefinition | null;
+    stageName: string | null;
+  }): StageExecutionJobSpec {
+    const execution = input.stage?.execution ?? null;
+    const backend = execution?.backend ?? "current-runner";
+    const runnerKind = input.stage?.runner ?? this.config.runner.kind;
+    const runnerModel = input.stage?.model ?? this.config.runner.model;
+    const stageKey = input.stageName ?? "worker";
+    const stageAttempt = input.attempt ?? 0;
+    const runGroupId =
+      execution?.runGroup?.id ??
+      execution?.runGroup?.key ??
+      `${input.issue.id}:${stageKey}`;
+    const profileId = execution?.profile ?? null;
+    const baseRef = resolveStageExecutionBaseRef();
+    const targetHeadRef = input.issue.branchName ?? null;
+    const idempotencyKey = [
+      input.issue.id,
+      stageKey,
+      String(stageAttempt),
+      backend,
+      runGroupId,
+      targetHeadRef ?? "no-target-head",
+    ].join(":");
+
+    return {
+      backend,
+      role: execution?.role ?? null,
+      phase: execution?.phase ?? null,
+      identity: {
+        issueId: input.issue.id,
+        issueIdentifier: input.issue.identifier,
+        stageName: input.stageName,
+        stageAttempt,
+        runGroupId,
+        profileId,
+        baseRef,
+        targetHeadRef,
+        artifactRoot: getDurableCodexSessionArtifactDirectory(
+          this.config.workspace.root,
+          input.issue.id,
+        ),
+        idempotencyKey,
+      },
+      runner: {
+        runnerKind,
+        model: runnerModel,
+        provider: execution?.provider ?? runnerKind,
+        reasoningEffort:
+          execution?.reasoningEffort ?? input.stage?.reasoningEffort ?? null,
+      },
+    };
+  }
+
+  private resolveStageExecutionBackend(
+    job: StageExecutionJobSpec,
+  ): StageExecutionBackendRunner {
+    const backend = this.stageExecutionBackends.get(job.backend);
+    if (backend === undefined) {
+      throw new UnsupportedStageExecutionBackendError(job);
+    }
+    return backend;
   }
 
   private async buildImplementationCommentDeltaContext(
@@ -6171,6 +6295,15 @@ function createGitBaseRefCandidates(input: {
 
   candidates.push("origin/main", "main", "origin/master", "master");
   return [...new Set(candidates)];
+}
+
+function resolveStageExecutionBaseRef(): string {
+  const configuredBaseBranch = normalizeGitBranchName(
+    process.env.SYMPHONY_BASE_BRANCH,
+  );
+  return configuredBaseBranch === null
+    ? "origin/main"
+    : `origin/${configuredBaseBranch}`;
 }
 
 function normalizeGitBranchName(value: string | undefined): string | null {
