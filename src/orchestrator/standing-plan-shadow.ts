@@ -60,6 +60,7 @@ export function shouldRunShadowPlanCycle(input: {
   plan: StandingPlan | null;
   nowMs: number;
   heartbeatMs: number;
+  lastRunAtMs?: number;
 }): boolean {
   if (input.plan === null) {
     return true;
@@ -68,7 +69,8 @@ export function shouldRunShadowPlanCycle(input: {
   if (Number.isNaN(updatedMs)) {
     return true;
   }
-  return input.nowMs - updatedMs >= input.heartbeatMs;
+  const lastRunAtMs = input.lastRunAtMs ?? updatedMs;
+  return input.nowMs - Math.max(updatedMs, lastRunAtMs) >= input.heartbeatMs;
 }
 
 export type ShadowPlanCycleResult =
@@ -170,6 +172,8 @@ export interface StandingPlanShadowTickDeps {
   force?: boolean;
 }
 
+const shadowPlanLastRunAtByWorkspace = new Map<string, number>();
+
 /**
  * One heartbeat-gated, best-effort shadow tick wired into the poll loop. It is
  * inert unless explicitly enabled, runs entirely AFTER the dispatch decision,
@@ -186,12 +190,16 @@ export async function runStandingPlanShadowTick(
   }
   try {
     const plan = await loadStandingPlan(deps.workspaceRoot);
+    const now = deps.now();
+    const nowMs = now.getTime();
+    const lastRunAtMs = shadowPlanLastRunAtByWorkspace.get(deps.workspaceRoot);
     if (
       deps.force !== true &&
       !shouldRunShadowPlanCycle({
         plan,
-        nowMs: deps.now().getTime(),
+        nowMs,
         heartbeatMs: config.heartbeatMs,
+        ...(lastRunAtMs === undefined ? {} : { lastRunAtMs }),
       })
     ) {
       return { status: "skipped", reason: "heartbeat" };
@@ -209,13 +217,15 @@ export async function runStandingPlanShadowTick(
       envelope: config.envelope,
     });
     const runClaude = deps.createPlannerRunner(config.plannerModel);
-    return await runShadowPlanCycle({
+    const result = await runShadowPlanCycle({
       workspaceRoot: deps.workspaceRoot,
       context,
       planner: { runClaude },
       log: deps.log,
-      now: deps.now,
+      now: () => now,
     });
+    shadowPlanLastRunAtByWorkspace.set(deps.workspaceRoot, nowMs);
+    return result;
   } catch (error) {
     await deps.log(
       "queue_triage_shadow_failed",

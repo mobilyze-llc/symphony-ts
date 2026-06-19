@@ -90,7 +90,34 @@ describe("parsePlannerOutput", () => {
     }
   });
 
-  it("fails when there is no fenced JSON block", () => {
+  it("extracts an unfenced JSON plan embedded in prose", () => {
+    const plan = {
+      rationale: "top first",
+      batches: [
+        {
+          mode: "parallel-isolated",
+          issueIdentifiers: ["SYMPH-1"],
+          rationale: "highest priority",
+        },
+      ],
+    };
+    const fenced = parsePlannerOutput(artifact(plan));
+    const prose = parsePlannerOutput(
+      `# Portfolio thesis\n\nA smaller aside: {"note":"not the plan"}\n\n${JSON.stringify(
+        plan,
+        null,
+        2,
+      )}\n\nDeferred: none.`,
+    );
+
+    expect(fenced.ok).toBe(true);
+    expect(prose.ok).toBe(true);
+    if (fenced.ok && prose.ok) {
+      expect(prose.value).toEqual(fenced.value);
+    }
+  });
+
+  it("fails when there is no JSON plan object", () => {
     const result = parsePlannerOutput("# Plan\n\nNo json here.\n");
     expect(result.ok).toBe(false);
   });
@@ -284,6 +311,33 @@ describe("buildPlanBody", () => {
 });
 
 describe("runTriagePlanner", () => {
+  it("returns a valid empty plan without invoking the model when the backlog is empty", async () => {
+    let invoked = false;
+    const result = await runTriagePlanner(
+      {
+        ...context(),
+        backlog: [],
+      },
+      {
+        runClaude: async (): Promise<PlannerRunResult> => {
+          invoked = true;
+          return {
+            status: "ok",
+            markdown: artifact({ rationale: "unused", batches: [] }),
+          };
+        },
+      },
+    );
+
+    expect(invoked).toBe(false);
+    expect(result.status).toBe("ok");
+    if (result.status === "ok") {
+      expect(result.body.batches).toEqual([]);
+      expect(result.body.options).toEqual([]);
+      expect(result.body.source).toBe("planner");
+    }
+  });
+
   it("returns a plan body on a good model artifact", async () => {
     const deps = {
       runClaude: async (): Promise<PlannerRunResult> => ({
