@@ -17,7 +17,10 @@ import type {
   AgentRunResult,
   AgentRunnerEvent,
 } from "../../src/agent/runner.js";
-import type { ResolvedWorkflowConfig } from "../../src/config/types.js";
+import type {
+  ResolvedWorkflowConfig,
+  StageExecutionBackend as StageExecutionBackendKind,
+} from "../../src/config/types.js";
 import type {
   DispatcherRunJournal,
   DispatcherRunJournalEntry,
@@ -8535,8 +8538,8 @@ describe("stage execution backend boundary", () => {
         reasoningEffort: "medium",
       },
     });
-    expect(backend.inputs[0]!.job.identity.idempotencyKey).toContain(
-      "issue-806:investigate:0:current-runner:rg-806",
+    expect(backend.inputs[0]!.job.identity.idempotencyKey).toBe(
+      "issue-806:investigate:0:current-runner:rg-806:codex/SYMPH-806-stage-execution-backend",
     );
     expect(backend.inputs[0]!.job.identity.baseRef?.length).toBeGreaterThan(0);
     expect(fakeRunner.runInputs).toHaveLength(1);
@@ -8583,45 +8586,15 @@ describe("stage execution backend boundary", () => {
         targetHeadRef: "codex/LEGACY-1",
       },
     });
-    expect(backend.inputs[0]!.job.identity.idempotencyKey).toContain(
-      "legacy-issue:investigate:0:current-runner:legacy-issue:investigate",
+    expect(backend.inputs[0]!.job.identity.idempotencyKey).toBe(
+      "legacy-issue:investigate:0:current-runner:legacy-issue:investigate:codex/LEGACY-1",
     );
     expect(fakeRunner.runInputs).toHaveLength(1);
   });
 
   it("fails closed before runner launch when a stage selects an unregistered backend", async () => {
     const fakeRunner = new FakeAgentRunner();
-    const config = createStagedConfig({
-      stages: {
-        initialStage: "investigate",
-        fastTrack: null,
-        stages: {
-          investigate: {
-            ...createStagedConfig().stages!.stages.investigate!,
-            type: "agent",
-            execution: {
-              role: "investigator",
-              phase: "investigate",
-              backend: "crabrunner",
-              provider: null,
-              model: null,
-              reasoningEffort: null,
-              profile: null,
-              artifacts: { requires: [], produces: [] },
-              timeoutMs: null,
-              budget: { maxTokens: null, maxUsd: null },
-              dependencies: {
-                stages: [],
-                capsules: [],
-                missingCapsule: "fail",
-              },
-              runGroup: { id: null, key: null },
-              capsules: { consume: [], produce: [] },
-            },
-          },
-        },
-      },
-    });
+    const config = createCrabrunnerStagedConfig();
     const host = new OrchestratorRuntimeHost({
       config,
       tracker: createTracker(),
@@ -8638,6 +8611,51 @@ describe("stage execution backend boundary", () => {
     expect(host.getState().retryAttempts["1"]?.error).toContain(
       'Stage execution backend "crabrunner" is not registered for ISSUE-1.',
     );
+  });
+
+  it("routes crabrunner stages through an injected scheduler backend", async () => {
+    const fakeRunner = new FakeAgentRunner();
+    const backend = new RecordingStageExecutionBackend(
+      fakeRunner,
+      "crabrunner",
+    );
+    const host = new OrchestratorRuntimeHost({
+      config: createCrabrunnerStagedConfig(),
+      tracker: createTracker(),
+      agentRunner: fakeRunner,
+      stageExecutionBackends: new Map([["crabrunner", backend]]),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(backend.inputs).toHaveLength(1);
+    expect(backend.inputs[0]!.job.backend).toBe("crabrunner");
+    expect(backend.inputs[0]!.job.identity.idempotencyKey).toMatch(
+      /^stage-execution:ISSUE-1:investigate:0:crabrunner:[a-f0-9]{20}$/,
+    );
+    expect(fakeRunner.runInputs).toHaveLength(1);
+  });
+
+  it("keeps the built-in current-runner backend when custom backends are injected", async () => {
+    const fakeRunner = new FakeAgentRunner();
+    const crabrunnerBackend = new RecordingStageExecutionBackend(
+      fakeRunner,
+      "crabrunner",
+    );
+    const host = new OrchestratorRuntimeHost({
+      config: createStagedConfig(),
+      tracker: createTracker(),
+      agentRunner: fakeRunner,
+      stageExecutionBackends: new Map([["crabrunner", crabrunnerBackend]]),
+      now: () => new Date("2026-03-06T00:00:05.000Z"),
+    });
+
+    await host.pollOnce();
+
+    expect(crabrunnerBackend.inputs).toHaveLength(0);
+    expect(fakeRunner.runInputs).toHaveLength(1);
+    expect(fakeRunner.runInputs[0]?.issue.identifier).toBe("ISSUE-1");
   });
 
   it("preserves injected backends when managed runner reconfiguration recreates the default runner", async () => {
@@ -8665,6 +8683,40 @@ describe("stage execution backend boundary", () => {
     expect(fakeRunner.runInputs[0]?.issue.identifier).toBe("MANAGED-1");
   });
 });
+
+function createCrabrunnerStagedConfig(): ResolvedWorkflowConfig {
+  return createStagedConfig({
+    stages: {
+      initialStage: "investigate",
+      fastTrack: null,
+      stages: {
+        investigate: {
+          ...createStagedConfig().stages!.stages.investigate!,
+          type: "agent",
+          execution: {
+            role: "investigator",
+            phase: "investigate",
+            backend: "crabrunner",
+            provider: null,
+            model: null,
+            reasoningEffort: null,
+            profile: null,
+            artifacts: { requires: [], produces: [] },
+            timeoutMs: null,
+            budget: { maxTokens: null, maxUsd: null },
+            dependencies: {
+              stages: [],
+              capsules: [],
+              missingCapsule: "fail",
+            },
+            runGroup: { id: null, key: null },
+            capsules: { consume: [], produce: [] },
+          },
+        },
+      },
+    },
+  });
+}
 
 describe("createWorkspaceHookLogger", () => {
   it("includes stdout and stderr in structured log entries when non-empty", async () => {
@@ -8828,10 +8880,12 @@ class FakeAgentRunner {
 }
 
 class RecordingStageExecutionBackend implements StageExecutionBackendRunner {
-  readonly backend = "current-runner";
   readonly inputs: StageExecutionBackendInput[] = [];
 
-  constructor(private readonly runner: FakeAgentRunner) {}
+  constructor(
+    private readonly runner: FakeAgentRunner,
+    readonly backend: StageExecutionBackendKind = "current-runner",
+  ) {}
 
   async execute(
     input: StageExecutionBackendInput,

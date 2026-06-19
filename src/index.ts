@@ -42,4 +42,6 @@ export * from "./workspace/path-safety.js";
 export * from "./workspace/workspace-manager.js";
 export * from "./slack-bot/index.js";
 export * from "./stage-execution/backend.js";
+export * from "./stage-execution/crabrunner-backend.js";
+export * from "./stage-execution/job-spec.js";
 export * from "./version.js";
