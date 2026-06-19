@@ -17,6 +17,7 @@ import {
   LINEAR_CREATE_ISSUE_WITH_STATE_MUTATION,
   LINEAR_CREATE_TRACK_FINDING_ISSUE_MUTATION,
   LINEAR_ISSUES_BY_LABELS_QUERY,
+  LINEAR_ISSUES_BY_STATES_BY_TEAMS_QUERY,
   LINEAR_ISSUES_BY_STATES_QUERY,
   LINEAR_ISSUE_BY_IDENTIFIER_QUERY,
   LINEAR_ISSUE_COMMENTS_QUERY,
@@ -28,10 +29,12 @@ import {
   LINEAR_ISSUE_STATES_BY_IDS_QUERY,
   LINEAR_ISSUE_STATE_TRANSITIONS_QUERY,
   LINEAR_ISSUE_UPDATE_MUTATION,
+  LINEAR_OPEN_ISSUES_BY_LABELS_BY_TEAMS_QUERY,
   LINEAR_OPEN_ISSUES_BY_LABELS_QUERY,
   LINEAR_OPEN_ISSUES_BY_TITLE_QUERY,
   LINEAR_SEARCH_ISSUES_BY_TITLE_AND_TEAM_QUERY,
   LINEAR_SEARCH_ISSUES_BY_TITLE_MARKER_AND_TEAM_QUERY,
+  LINEAR_TICKET_FEATURE_ISSUES_BY_TEAMS_QUERY,
   LINEAR_TICKET_FEATURE_ISSUES_QUERY,
   LINEAR_UPDATE_ISSUE_DESCRIPTION_MUTATION,
   LINEAR_WORKFLOW_STATES_QUERY,
@@ -345,6 +348,16 @@ export class LinearTrackerClient implements IssueTracker {
       return [];
     }
 
+    // Team-scoped read when configured (SYMPH-824): no project slug required.
+    if (this.teamKeys.length > 0) {
+      return this.fetchIssuePages(LINEAR_ISSUES_BY_STATES_BY_TEAMS_QUERY, {
+        teamKeys: this.teamKeys,
+        stateNames,
+        first: this.pageSize,
+        relationFirst: this.pageSize,
+      });
+    }
+
     return this.fetchIssuePages(LINEAR_ISSUES_BY_STATES_QUERY, {
       projectSlug: this.requireProjectSlug(),
       stateNames,
@@ -375,6 +388,22 @@ export class LinearTrackerClient implements IssueTracker {
   ): Promise<TicketFeatureSourceIssue[]> {
     if (stateNames.length === 0) {
       return [];
+    }
+
+    // Team-scoped provenance when configured (SYMPH-824): off-project team
+    // tickets get the SAME full TicketFeature edge set (advisory /
+    // operator-confirmed), not just native blockedBy, with no project slug.
+    if (this.teamKeys.length > 0) {
+      return this.fetchTicketFeatureIssuePages(
+        LINEAR_TICKET_FEATURE_ISSUES_BY_TEAMS_QUERY,
+        {
+          teamKeys: this.teamKeys,
+          stateNames,
+          first: this.pageSize,
+          relationFirst: TICKET_FEATURE_NESTED_CONNECTION_FIRST,
+          historyFirst: TICKET_FEATURE_NESTED_CONNECTION_FIRST,
+        },
+      );
     }
 
     return this.fetchTicketFeatureIssuePages(
@@ -411,11 +440,17 @@ export class LinearTrackerClient implements IssueTracker {
     }
 
     // Single GraphQL call — we only need to know if any non-terminal halt issue
-    // exists, so fetch at most 1 result. No pagination needed.
+    // exists, so fetch at most 1 result. No pagination needed. Team-scoped when
+    // configured (SYMPH-824): the halt label is honoured across the team(s)
+    // without requiring a project slug.
     const response = await this.postGraphql<LinearCandidateData>(
-      LINEAR_OPEN_ISSUES_BY_LABELS_QUERY,
+      this.teamKeys.length > 0
+        ? LINEAR_OPEN_ISSUES_BY_LABELS_BY_TEAMS_QUERY
+        : LINEAR_OPEN_ISSUES_BY_LABELS_QUERY,
       {
-        projectSlug: this.requireProjectSlug(),
+        ...(this.teamKeys.length > 0
+          ? { teamKeys: this.teamKeys }
+          : { projectSlug: this.requireProjectSlug() }),
         labelNames,
         excludeStateNames,
         first: 1,

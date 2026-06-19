@@ -798,7 +798,72 @@ describe("config-resolver", () => {
       ok: false,
       error: {
         code: ERROR_CODES.configInvalid,
-        message: "tracker.project_slug must be configured before dispatch.",
+        message:
+          "tracker.project_slug or tracker.team_keys must be configured before dispatch.",
+      },
+    });
+  });
+
+  it("accepts team_keys as an alternative to project_slug for dispatch (team-scoped, SYMPH-824)", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          tracker: {
+            api_key: "token",
+            team_keys: ["SYMPH"],
+          },
+        },
+      },
+      {},
+    );
+
+    expect(resolved.tracker.projectSlug).toBeNull();
+    expect(resolved.tracker.teamKeys).toEqual(["SYMPH"]);
+    expect(validateDispatchConfig(resolved)).toEqual({ ok: true });
+  });
+
+  it("accepts multiple team_keys with no project_slug (multi-team-ready, SYMPH-824)", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          tracker: {
+            api_key: "token",
+            team_keys: ["SYMPH", "MOB"],
+          },
+        },
+      },
+      {},
+    );
+
+    expect(validateDispatchConfig(resolved)).toEqual({ ok: true });
+  });
+
+  it("rejects dispatch config with neither project_slug nor team_keys (SYMPH-824)", () => {
+    const resolved = resolveWorkflowConfig(
+      {
+        workflowPath: "/repo/WORKFLOW.md",
+        promptTemplate: "Prompt",
+        config: {
+          tracker: {
+            api_key: "token",
+          },
+        },
+      },
+      {},
+    );
+
+    expect(resolved.tracker.projectSlug).toBeNull();
+    expect(resolved.tracker.teamKeys).toEqual([]);
+    expect(validateDispatchConfig(resolved)).toEqual({
+      ok: false,
+      error: {
+        code: ERROR_CODES.configInvalid,
+        message:
+          "tracker.project_slug or tracker.team_keys must be configured before dispatch.",
       },
     });
   });
